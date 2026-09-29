@@ -8,7 +8,7 @@ use super::modeline::spinner_frame;
 use super::tool_view::{
     AgentEnd, BodyLine, EditDiff, LineKind, ShellExit, ToolBody, ToolLabel, ToolPhase,
     agent_output, arg_rows, describe, edit_diff, format_elapsed, format_seconds, group_summary,
-    shell_output,
+    plan_document, shell_output,
 };
 
 /// Output lines a folded row shows for shell, errors and unknown tools.
@@ -110,14 +110,18 @@ pub(crate) fn tool_row_lines(
     } else {
         wrapped_header(bullet, verb, &label.full_target, stats, right, max)
     };
-    let body = if row.folded && row.name == "agent" {
+    let plan = label.body == ToolBody::Plan;
+    let body = if plan {
+        plan_body(row.input)
+    } else if row.folded && row.name == "agent" {
         folded_agent_body(row.phase, end, output)
     } else if row.folded {
         folded_body(row, &label, output)
     } else {
         unfolded_body(row, &label, output, row_budget)
     };
-    let clip = row.folded.then_some(max.saturating_sub(BODY_INDENT.len()));
+    // The plan is read in full, so it wraps instead of being cut.
+    let clip = (row.folded && !plan).then_some(max.saturating_sub(BODY_INDENT.len()));
     content.extend(body.into_iter().map(|line| indent_body(line, clip)));
     let (rule, bg) = match look {
         ToolPhase::Failed => (theme.tool_error_rule, theme.tool_error_bg),
@@ -200,6 +204,15 @@ fn phase_bullet(phase: ToolPhase, theme: &crate::theme::Theme) -> (&'static str,
 /// the other views of an agent, and a queued agent's card says so in
 /// its body.
 fn right_text(row: &ToolRow<'_>, exit: Option<ShellExit>, end: Option<AgentEnd>) -> String {
+    if row.name == kage_core::protocol::EXIT_PLAN_TOOL {
+        return match row.phase {
+            ToolPhase::Waiting => "awaiting review",
+            ToolPhase::Approved | ToolPhase::Running | ToolPhase::Done => "approved",
+            ToolPhase::Denied | ToolPhase::Failed => "not approved",
+            ToolPhase::Streaming | ToolPhase::Queued | ToolPhase::Interrupted => "",
+        }
+        .to_owned();
+    }
     let agent = row.name == "agent";
     let format = if agent {
         format_seconds
@@ -384,6 +397,13 @@ fn folded_body(row: &ToolRow<'_>, label: &ToolLabel, output: Vec<BodyLine>) -> V
         (ToolPhase::Done, ToolBody::Head) => head(output, FOLDED_BODY_LINES, tool_result_style()),
         _ => Vec::new(),
     }
+}
+
+/// The body of an `exit_plan` row: its plan as Markdown, shown folded
+/// or not, and while the model still writes it.
+fn plan_body(input: &Value) -> Vec<Line<'static>> {
+    let style = Style::default().fg(crate::theme::current().assistant_fg);
+    crate::markdown::render_streaming(plan_document(input), style)
 }
 
 /// The body of a folded `agent` row: the live card the App writes as

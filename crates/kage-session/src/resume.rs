@@ -60,6 +60,9 @@ pub struct ReplayResult {
     /// resumed session keeps the mode without injecting the block
     /// again.
     pub swarm_mode: Option<bool>,
+    /// Latest plan mode recorded by a `kage:plan_mode` custom entry, or
+    /// `None` if the session never toggled it.
+    pub plan_mode: Option<bool>,
     /// Counts of the last [`SessionEntry::Compaction`], whose summary
     /// opens `history`, or `None` if the session never compacted.
     pub compaction: Option<CompactionCounts>,
@@ -107,6 +110,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
     let mut thinking_level: Option<String> = None;
     let mut title: Option<String> = None;
     let mut swarm_mode: Option<bool> = None;
+    let mut plan_mode: Option<bool> = None;
     let mut history: Vec<Message> = Vec::new();
     // `call_starts` tracks the wall-clock time each ToolCall was
     // appended; on a matching ToolResult we compute the elapsed
@@ -169,11 +173,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
             SessionEntry::ModelChange(mc) => model = mc.model,
             SessionEntry::ThinkingLevelChange(t) => thinking_level = Some(t.level),
             SessionEntry::Title(t) => title = Some(t.title),
-            SessionEntry::Custom(c) => {
-                if c.kind == crate::list::SWARM_MODE_ENTRY_KIND {
-                    swarm_mode = c.data.get("on").and_then(serde_json::Value::as_bool);
-                }
-            }
+            SessionEntry::Custom(c) => read_mode(&c, &mut swarm_mode, &mut plan_mode),
             SessionEntry::Label(_) => {}
         }
     }
@@ -186,8 +186,20 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
         thinking_level,
         title,
         swarm_mode,
+        plan_mode,
         compaction,
     })
+}
+
+/// Read a swarm or plan mode toggle from a custom entry into the
+/// latest value of that mode.
+fn read_mode(c: &crate::Custom, swarm: &mut Option<bool>, plan: &mut Option<bool>) {
+    let on = c.data.get("on").and_then(serde_json::Value::as_bool);
+    match c.kind.as_str() {
+        crate::list::SWARM_MODE_ENTRY_KIND => *swarm = on,
+        crate::list::PLAN_MODE_ENTRY_KIND => *plan = on,
+        _ => {}
+    }
 }
 
 /// Replace the messages `compaction` summarized at the front of
@@ -579,6 +591,31 @@ mod tests {
         let path = dir.path().join("never.jsonl");
         write(&path, fresh_header(), &[message_entry(Role::User, "hello")]);
         assert_eq!(replay(&path).unwrap().swarm_mode, None);
+    }
+
+    #[test]
+    fn replay_reads_the_latest_plan_mode_entry() {
+        let dir = tempdir().unwrap();
+        let custom = |kind: &str, on: bool| {
+            SessionEntry::Custom(Custom {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                kind: kind.to_owned(),
+                data: serde_json::json!({ "on": on }),
+            })
+        };
+        let path = dir.path().join("plan.jsonl");
+        write(
+            &path,
+            fresh_header(),
+            &[
+                custom(crate::list::PLAN_MODE_ENTRY_KIND, true),
+                custom(crate::list::SWARM_MODE_ENTRY_KIND, false),
+            ],
+        );
+        let replayed = replay(&path).unwrap();
+        assert_eq!(replayed.plan_mode, Some(true));
+        assert_eq!(replayed.swarm_mode, Some(false));
     }
 
     #[test]

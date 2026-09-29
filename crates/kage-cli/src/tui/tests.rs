@@ -68,6 +68,7 @@ fn render_session_markdown_covers_roles_and_blocks() {
         thinking_level: None,
         title: None,
         swarm_mode: None,
+        plan_mode: None,
         compaction: None,
     };
     let md = render_session_markdown(&replay);

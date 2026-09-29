@@ -40,6 +40,7 @@ The table lists every built-in command.
 | `/new`                    | Start a fresh empty session, keeping the current model |
 | `/compact`                | Run a compaction pass right now                 |
 | `/agents`                 | Open the agents overlay: every agent of the session, live or finished (see [agents](/guide/agents#the-agents-overlay)) |
+| `/plan [on\|off\|<task>]` | Turn plan mode on or off (a bare `/plan` toggles it), or plan one task now (see [plan mode](/guide/plan-mode)) |
 | `/swarm [on\|off\|<task>]` | Turn swarm mode on or off, or hand one task to a swarm now (see [swarms](/guide/agents#the-swarm-command)) |
 | `/permission [mode]` / `/perm` | Without a mode, show the session permission mode. `allow`, `ask` or `deny` override the configured rules for this session (`allow` runs everything; configured denies still deny), and `default` returns to them (see [permissions](/guide/permissions)) |
 | `/login [provider]`       | Add or update a provider credential: suspends the TUI, runs the interactive login, then refreshes the model list in place |

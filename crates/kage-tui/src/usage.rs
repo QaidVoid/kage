@@ -21,6 +21,10 @@ use kage_core::{Inputs, ThinkingLevel};
 /// `usage.input` as the entire prompt (including all prior history),
 /// so summing across turns triple-counts.
 #[derive(Clone, Debug, Default, PartialEq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent session flags mirrored from the engine"
+)]
 pub struct SessionUsage {
     /// Provider-qualified model id (`anthropic:claude-sonnet-4-6`).
     pub model: String,
@@ -65,6 +69,8 @@ pub struct SessionUsage {
     pub permission_mode: Option<kage_core::permissions::PermissionAction>,
     /// Whether the session's swarm mode is on.
     pub swarm: bool,
+    /// Whether the session's plan mode is on.
+    pub plan: bool,
     /// Background shell commands still running.
     pub shells: u32,
 }

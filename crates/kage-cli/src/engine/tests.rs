@@ -4,7 +4,7 @@ use std::time::Duration;
 use kage_core::Content;
 use kage_core::agents::AgentDefs;
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
-use kage_core::protocol::{Envelope, Event, RunOutcome};
+use kage_core::protocol::{EXIT_PLAN_TOOL, Envelope, Event, RunOutcome};
 use kage_core::{LoopEvent, StopReason, TokenUsage, ToolCallId, ToolOutput};
 use kage_provider::testing::MockProvider;
 use kage_provider::{ProviderError, ProviderEvent};
@@ -3283,4 +3283,285 @@ fn run_cost_comes_from_the_declared_model_price() {
         _ => None,
     });
     assert!((usage.unwrap().cost - 0.003).abs() < 1e-12);
+}
+
+/// A tool of a given risk that reports it ran.
+#[derive(Debug)]
+struct Stub {
+    name: &'static str,
+    risk: kage_core::Risk,
+}
+
+impl Tool for Stub {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &'static str {
+        "a stub"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn risk(&self) -> kage_core::Risk {
+        self.risk
+    }
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        _cx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput {
+            text: format!("ran {}", self.name),
+            ..ToolOutput::default()
+        })
+    }
+}
+
+fn plan_turn(plan: &str) -> Vec<Result<ProviderEvent, ProviderError>> {
+    let id = ToolCallId::new("call_plan");
+    vec![
+        Ok(ProviderEvent::MessageStart),
+        Ok(ProviderEvent::ToolCallStart {
+            id: id.clone(),
+            name: EXIT_PLAN_TOOL.into(),
+        }),
+        Ok(ProviderEvent::ToolCallEnd {
+            id,
+            input: serde_json::json!({ "plan": plan }),
+        }),
+        Ok(ProviderEvent::MessageEnd {
+            stop_reason: StopReason::ToolUse,
+            usage: TokenUsage::default(),
+        }),
+    ]
+}
+
+/// Open `id` with a write stub and a command stub next to the harness
+/// tools, and turn plan mode on.
+fn open_planning(h: &Harness, id: SessionId, recorder: Option<Recorder>) {
+    let mut tools = h.tools.clone();
+    tools.register(Arc::new(Stub {
+        name: "write_stub",
+        risk: kage_core::Risk::Write,
+    }));
+    tools.register(Arc::new(Stub {
+        name: "exec_stub",
+        risk: kage_core::Risk::Exec,
+    }));
+    h.engine.open(SessionSpec {
+        recorder,
+        tools,
+        ..h.spec(id)
+    });
+    h.engine
+        .send(Command::to(id, CommandKind::PlanMode { on: true }));
+}
+
+fn tool_outputs(events: &[Envelope]) -> Vec<ToolOutput> {
+    events
+        .iter()
+        .filter_map(|e| match &e.event {
+            Event::Loop(LoopEvent::ToolCallEnd { output, .. }) => Some(output.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn last_plan_state(events: &[Envelope]) -> Option<bool> {
+    host_events(events).into_iter().rev().find_map(|e| match e {
+        HostEvent::StateChanged { state } => Some(state.plan),
+        _ => None,
+    })
+}
+
+fn texts_starting(req: &kage_provider::StreamRequest, prefix: &str) -> usize {
+    req.messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter(|c| matches!(c, Content::Text { text } if text.starts_with(prefix)))
+        .count()
+}
+
+#[test]
+fn plan_mode_refuses_writes_and_asks_before_commands() {
+    let mock = MockProvider::sequence(vec![
+        tool_turn("write_stub"),
+        tool_turn("exec_stub"),
+        tool_turn("gate"),
+        text_turn("done"),
+    ]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let id = SessionId::new();
+    open_planning(&h, id, None);
+    h.engine.send(Command::to(
+        id,
+        CommandKind::SetPermissionMode {
+            mode: Some(PermissionAction::Allow),
+        },
+    ));
+    h.engine
+        .send(Command::to(id, CommandKind::PlanMode { on: true }));
+    prompt(&h.engine, id, "plan it", Delivery::Steer);
+
+    let seen = wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::PermissionRequested { .. }))
+    });
+    let asked = host_events(&seen).into_iter().find_map(|e| match e {
+        HostEvent::PermissionRequested {
+            request_id, tool, ..
+        } => Some((*request_id, tool.clone())),
+        _ => None,
+    });
+    let (request_id, tool) = asked.unwrap();
+    assert_eq!(tool, "exec_stub", "commands ask even in allow mode");
+    h.engine.send(Command::to(
+        id,
+        CommandKind::ResolvePermission {
+            request_id,
+            decision: PermissionDecision::AllowOnce,
+        },
+    ));
+    h.release.send(()).unwrap();
+    let mut events = seen;
+    events.extend(until_runs_end(&h.events, 1));
+
+    let outputs = tool_outputs(&events);
+    assert!(outputs[0].is_error);
+    assert!(
+        outputs[0].text.contains("plan mode is on"),
+        "{}",
+        outputs[0].text
+    );
+    assert_eq!(outputs[1].text, "ran exec_stub");
+    assert_eq!(outputs[2].text, "released", "read tools follow the rules");
+    assert_eq!(last_plan_state(&events), Some(true));
+
+    let requests = mock.requests();
+    assert_eq!(
+        texts_starting(&requests[0], "[plan mode on]"),
+        1,
+        "injected once"
+    );
+    assert!(
+        requests[0].tools.iter().any(|t| t.name == EXIT_PLAN_TOOL),
+        "exit_plan is offered in plan mode"
+    );
+}
+
+#[test]
+fn an_approved_plan_turns_plan_mode_off_and_the_run_goes_on() {
+    let mock = MockProvider::sequence(vec![
+        plan_turn("# Fix\n\n1. Edit a.rs"),
+        tool_turn("write_stub"),
+        text_turn("built"),
+    ]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let id = SessionId::new();
+    open_planning(&h, id, None);
+    prompt(&h.engine, id, "plan it", Delivery::Steer);
+
+    let seen = wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::PermissionRequested { .. }))
+    });
+    let (request_id, tool, input) = host_events(&seen)
+        .into_iter()
+        .find_map(|e| match e {
+            HostEvent::PermissionRequested {
+                request_id,
+                tool,
+                input,
+                ..
+            } => Some((*request_id, tool.clone(), input.clone())),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(tool, EXIT_PLAN_TOOL);
+    assert_eq!(input["plan"], "# Fix\n\n1. Edit a.rs");
+    // An allow for the session must not outlive this one review.
+    h.engine.send(Command::to(
+        id,
+        CommandKind::ResolvePermission {
+            request_id,
+            decision: PermissionDecision::AllowSession,
+        },
+    ));
+    let mut events = seen;
+    events.extend(until_runs_end(&h.events, 1));
+
+    let outputs = tool_outputs(&events);
+    assert!(outputs[0].text.contains("approved"), "{}", outputs[0].text);
+    assert_eq!(
+        outputs[1].text, "ran write_stub",
+        "writes run once approved"
+    );
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(last_plan_state(&events), Some(false));
+    assert!(
+        notices(&events)
+            .iter()
+            .any(|n| n == "plan approved; plan mode off"),
+        "{:?}",
+        notices(&events)
+    );
+    assert_eq!(mock.requests().len(), 3);
+}
+
+#[test]
+fn a_plan_that_is_not_approved_ends_the_run_and_keeps_plan_mode() {
+    let mock = MockProvider::sequence(vec![plan_turn("# Fix"), text_turn("never")]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let id = SessionId::new();
+    open_planning(&h, id, None);
+    prompt(&h.engine, id, "plan it", Delivery::Steer);
+
+    let (request_id, _) = permission_request(&h.events);
+    h.engine.send(Command::to(
+        id,
+        CommandKind::ResolvePermission {
+            request_id,
+            decision: PermissionDecision::Deny,
+        },
+    ));
+    let events = until_runs_end(&h.events, 1);
+
+    let outputs = tool_outputs(&events);
+    assert!(outputs[0].is_error);
+    assert!(
+        outputs[0].text.contains("did not approve"),
+        "{}",
+        outputs[0].text
+    );
+    assert_eq!(mock.requests().len(), 1, "the run ends at the refusal");
+    assert!(matches!(outcomes(&events)[..], [RunOutcome::Completed]));
+
+    h.engine
+        .send(Command::to(id, CommandKind::PlanMode { on: false }));
+    let seen = wait_for(
+        &h.events,
+        |e| matches!(&e.event, Event::Host(HostEvent::Notice { text, .. }) if text == "plan mode off"),
+    );
+    assert_eq!(last_plan_state(&seen), Some(false));
+}
+
+#[test]
+fn plan_mode_survives_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = SessionId::new();
+    let (recorder, path) = recorder_in(dir.path(), id);
+    let h = harness(MockProvider::sequence(vec![text_turn("ok")]));
+    open_planning(&h, id, Some(recorder));
+    prompt(&h.engine, id, "go", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+    h.engine.shutdown();
+
+    let h = harness(MockProvider::sequence(vec![]));
+    let fresh = SessionId::new();
+    h.open(fresh, None);
+    h.engine
+        .send(Command::to(fresh, CommandKind::LoadSession { path }));
+    let seen = wait_for(
+        &h.events,
+        |e| matches!(&e.event, Event::Host(HostEvent::StateChanged { state }) if state.plan),
+    );
+    assert_eq!(last_plan_state(&seen), Some(true));
 }

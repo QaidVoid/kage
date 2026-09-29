@@ -285,6 +285,10 @@ pub enum RunOutcome {
     },
 }
 
+/// Name of the tool the agent calls in plan mode to present its plan
+/// for review. Hosts render its `plan` argument as the plan document.
+pub const EXIT_PLAN_TOOL: &str = "exit_plan";
+
 /// Snapshot of the settings that shape a session's next run.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionState {
@@ -315,6 +319,12 @@ pub struct SessionState {
     /// `swarm` segment while it is.
     #[serde(default)]
     pub swarm: bool,
+    /// Whether the session's plan mode is on: write tools are refused,
+    /// command tools always ask, and the agent ends by presenting a
+    /// plan for review. The statusline shows a `plan` segment while it
+    /// is.
+    #[serde(default)]
+    pub plan: bool,
     /// Background shell commands still running.
     #[serde(default)]
     pub shells: u32,
@@ -515,6 +525,13 @@ pub enum CommandKind {
     /// nothing.
     SwarmMode {
         /// Whether the session delegates repeated work through `swarm`.
+        on: bool,
+    },
+    /// Turn the session's plan mode on or off. Like
+    /// [`CommandKind::SwarmMode`], a change injects a short note into
+    /// the context once and a set that changes nothing injects nothing.
+    PlanMode {
+        /// Whether the session plans before it changes anything.
         on: bool,
     },
     /// Cancel every run and stop the engine.

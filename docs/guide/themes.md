@@ -156,12 +156,13 @@ has two. An entry takes `fg`, `bg`, `bold`, `italic`, `underline`,
 `dim`, `reverse` and `link`. A `link` follows another group and wins
 over the other fields.
 
-Four chrome groups are not theme roles. Every theme links them to
+Five chrome groups are not theme roles. Every theme links them to
 another group, and `[groups]` can replace them like any other:
 
 | Group | Default link | Colors |
 | --- | --- | --- |
 | `KageWorking` | `KageMuted` | the working row above the input |
+| `KagePlan` | `KageInputBorderInsert` | the `plan` footer chip while [plan mode](/guide/plan-mode) is on |
 | `KageApproval` | `KageWarning` | approval panel rules, title and selected option, and the bullet of a tool call waiting for approval |
 | `KageDiffAdd` | `KageSuccess` | `+` lines in edit rows and approvals |
 | `KageDiffDelete` | `KageToolErrorRule` | `-` lines in edit rows and approvals |

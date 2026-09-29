@@ -14,7 +14,7 @@ fn swarm_item(node: &kage_core::protocol::AgentNode) -> String {
         return item.to_owned();
     }
     let cut: String = item.chars().take(ITEM_CAP - 1).collect();
-    format!("{cut}…")
+    format!("{cut}\u{2026}")
 }
 
 impl App {
@@ -373,7 +373,7 @@ impl App {
         let mut text = format!("Swarm {done}/{total} done");
         if running > 0 {
             use std::fmt::Write as _;
-            let _ = write!(text, " · {running} running");
+            let _ = write!(text, " \u{b7} {running} running");
         }
         Some(text)
     }

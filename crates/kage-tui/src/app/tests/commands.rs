@@ -670,3 +670,42 @@ fn a_disabled_skill_takes_no_command() {
     assert!(rx.try_recv().is_err());
     assert_eq!(app.input.text(), "/review");
 }
+
+#[test]
+fn plan_command_toggles_sets_and_plans_one_task() {
+    let (mut app, rx, _events) = app_with_events();
+    let args = crate::command::ParsedArgs::new();
+
+    app.dispatch_builtin("plan", "", &args);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(RunRequest::PlanMode { on: true })
+    ));
+    if let Some(usage) = &app.session_usage {
+        lock(usage).plan = true;
+    }
+    app.dispatch_builtin("plan", "", &args);
+    assert!(
+        matches!(rx.try_recv(), Ok(RunRequest::PlanMode { on: false })),
+        "a bare /plan toggles from the engine's state"
+    );
+    app.dispatch_builtin("plan", "on", &args);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(RunRequest::PlanMode { on: true })
+    ));
+
+    app.dispatch_builtin("plan", "map the auth flow", &args);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(RunRequest::PlanMode { on: true })
+    ));
+    match rx.try_recv() {
+        Ok(RunRequest::Submit {
+            text, queue: false, ..
+        }) => {
+            assert_eq!(text, "map the auth flow");
+        }
+        other => panic!("expected the task prompt, got {other:?}"),
+    }
+}

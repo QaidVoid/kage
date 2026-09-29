@@ -216,7 +216,7 @@ fn key_label_follows_a_remap_of_the_model_picker() {
     assert_eq!(app.key_label("OpenModelPicker").as_deref(), Some("ctrl+p"));
     assert_eq!(
         app.key_label("CycleThinkingLevel").as_deref(),
-        Some("shift+tab")
+        Some("alt+t")
     );
     let (mut app, _rx, _buffer) = app_with_config(
         "kage.keymap.set('g', '<M-m>', kage.action.OpenModelPicker)",

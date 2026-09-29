@@ -207,6 +207,10 @@ impl App {
             InputAction::CycleThinkingLevel => {
                 let _ = self.send_request(RunRequest::CycleThinkingLevel);
             }
+            InputAction::TogglePlanMode => {
+                let on = !self.plan_mode();
+                let _ = self.send_request(RunRequest::PlanMode { on });
+            }
             InputAction::OpenHelp => self.open_help(),
             InputAction::OpenJumpPicker => self.open_jump_picker(),
             InputAction::OpenAgents => self.open_agents(),

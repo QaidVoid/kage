@@ -114,6 +114,7 @@ pub fn action(name: &str, arg: Option<i64>) -> Option<InputAction> {
         "SearchPrev" => InputAction::SearchPrev,
         "YankFocusedBlock" => InputAction::YankFocusedBlock,
         "CycleThinkingLevel" => InputAction::CycleThinkingLevel,
+        "TogglePlanMode" => InputAction::TogglePlanMode,
         "CyclePane" => InputAction::CyclePane,
         "FocusPrev" => InputAction::FocusPrev,
         "FocusNext" => InputAction::FocusNext,

@@ -40,6 +40,7 @@ export default defineConfig({
           { text: "mcp", link: "/guide/mcp" },
           { text: "permissions", link: "/guide/permissions" },
           { text: "agents", link: "/guide/agents" },
+          { text: "plan mode", link: "/guide/plan-mode" },
         ],
       },
       {

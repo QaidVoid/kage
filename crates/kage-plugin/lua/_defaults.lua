@@ -8,7 +8,7 @@ kage.ui.set_slot("header", { left = { "breadcrumb", "title" }, right = { "widget
 kage.ui.set_slot("activity", { left = { "activity" } })
 kage.ui.set_slot("input_pill", { left = { "mode" }, right = { "thinking" } })
 kage.ui.set_slot("footer", {
-  left = { "permission", "swarm", "tasks" },
+  left = { "permission", "plan", "swarm", "tasks" },
   -- Drop order for a tight row: the model name yields first, the
   -- context share survives longest.
   right = { "model", "tokens", "context" },
@@ -41,7 +41,8 @@ map("g", "<C-p>", act.OpenModelPicker, { desc = "model picker", group = "general
 map("g", "<C-s>", act.OpenSessionPicker, { desc = "session picker", group = "general" })
 map("g", "<F3>", act.OpenJumpPicker, { desc = "jump to a message", group = "general" })
 map("g", "<C-t>", act.OpenAgents, { desc = "agents", group = "general" })
-map("g", "<S-Tab>", act.CycleThinkingLevel, { desc = "cycle thinking level", group = "general" })
+map("g", "<S-Tab>", act.TogglePlanMode, { desc = "toggle plan mode", group = "general" })
+map("g", "<M-t>", act.CycleThinkingLevel, { desc = "cycle thinking level", group = "general" })
 map("g", "<C-v>", act.AttachClipboardImage, { desc = "attach image from clipboard", group = "general" })
 map("i", "<Tab>", act.QueuePrompt, { desc = "queue the prompt until the run ends", group = "general" })
 map("i", "<M-Up>", act.RecallPrompt, { desc = "pull the last queued prompt back to edit", group = "general" })

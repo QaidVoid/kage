@@ -11,6 +11,11 @@
 //! pointing at the config. A session mode short-circuits the rules, but
 //! a configured deny still denies. Tools approved for the session skip the
 //! ask, but never a deny mode or a configured deny.
+//!
+//! Plan mode comes first: write tools are refused, command tools and
+//! tools of unknown risk always ask, and `exit_plan` always asks without
+//! ever becoming a session or config grant. A denied `exit_plan` ends
+//! the run.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -19,9 +24,9 @@ use crossbeam_channel::{Receiver, select_biased};
 use kage_core::config::Config;
 use kage_core::options::OptionValue;
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
-use kage_core::protocol::PermissionDecision;
+use kage_core::protocol::{EXIT_PLAN_TOOL, PermissionDecision};
 use kage_core::sync::lock;
-use kage_core::{CancelFlag, ToolCallId, ToolOutput};
+use kage_core::{CancelFlag, Risk, ToolCallId, ToolOutput};
 use kage_loop::Hooks;
 
 /// A tool call waiting for an interactive decision.
@@ -72,6 +77,13 @@ pub(crate) struct PermissionGate {
     /// MCP servers the user allowed for this session (an "allow" answer
     /// on one of the server's tools). Same limits as `session_allowed`.
     session_allowed_servers: Arc<Mutex<BTreeSet<String>>>,
+    /// Whether the session's plan mode is on. Shared so `exit_plan`
+    /// can turn it off in the middle of a run.
+    plan: Arc<Mutex<bool>>,
+    /// Risk of each tool the run may call, by canonical name, set at
+    /// each run start. Plan mode judges calls by it; a name missing
+    /// from it counts as a command.
+    risks: Arc<Mutex<BTreeMap<String, Risk>>>,
     /// Where "always allow" decisions are written. `None` (every
     /// production construction) resolves [`Config::default_path`] at
     /// write time; tests point it at a tempdir.
@@ -95,8 +107,26 @@ impl PermissionGate {
             mode: Arc::new(Mutex::new(None)),
             session_allowed: Arc::new(Mutex::new(BTreeSet::new())),
             session_allowed_servers: Arc::new(Mutex::new(BTreeSet::new())),
+            plan: Arc::new(Mutex::new(false)),
+            risks: Arc::new(Mutex::new(BTreeMap::new())),
             config_path: None,
         }
+    }
+
+    /// Turn plan mode on or off. Shared across every clone.
+    pub(crate) fn set_plan(&self, on: bool) {
+        *lock(&self.plan) = on;
+    }
+
+    /// Whether plan mode is on.
+    #[must_use]
+    pub(crate) fn plan(&self) -> bool {
+        *lock(&self.plan)
+    }
+
+    /// Record the risk of each tool the next run may call.
+    pub(crate) fn set_risks(&self, risks: BTreeMap<String, Risk>) {
+        *lock(&self.risks) = risks;
     }
 
     /// Set the session mode override. `None` clears it, restoring
@@ -209,6 +239,7 @@ impl PermissionGate {
     /// it answers, the channel dies, or the run is cancelled. Returns
     /// `None` to run the tool or `Some(output)` to short-circuit.
     fn ask_user(&self, prompt: PermissionPrompt, rule: &Rule) -> Option<ToolOutput> {
+        let grants = !matches!(rule, Rule::Review);
         let Some(ask) = self.ask.as_ref() else {
             return Some(non_interactive_output(&prompt.tool, rule));
         };
@@ -225,12 +256,16 @@ impl PermissionGate {
             recv(reply_rx) -> decision => match decision {
                 Ok(PermissionDecision::AllowOnce) => None,
                 Ok(PermissionDecision::AllowSession) => {
-                    self.allow_for_session(tool);
+                    if grants {
+                        self.allow_for_session(tool);
+                    }
                     None
                 }
                 Ok(PermissionDecision::AllowAlways) => {
-                    self.allow_for_session(tool);
-                    self.persist_allow_always(tool);
+                    if grants {
+                        self.allow_for_session(tool);
+                        self.persist_allow_always(tool);
+                    }
                     None
                 }
                 Ok(PermissionDecision::Deny) => Some(error_output(tool, "denied by user")),
@@ -363,6 +398,32 @@ impl Hooks for PermissionGate {
         let mode = self.mode();
         let subject = PermissionsConfig::subject_for(input);
         let configured = self.configured_action(name, &subject);
+        let denied = mode == Some(PermissionAction::Deny) || configured.0 == PermissionAction::Deny;
+        if self.plan() && !denied {
+            let risk = lock(&self.risks).get(name).copied();
+            let rule = if name == EXIT_PLAN_TOOL {
+                Rule::Review
+            } else {
+                match risk {
+                    Some(Risk::Write) => return Some(plan_refusal(name)),
+                    Some(Risk::Read | Risk::Network) => Rule::Tool,
+                    Some(Risk::Exec) | None => Rule::Plan,
+                }
+            };
+            if !matches!(rule, Rule::Tool) {
+                let prompt = PermissionPrompt {
+                    call_id: id.clone(),
+                    tool: name.to_owned(),
+                    subject,
+                    input: input.clone(),
+                };
+                let answer = self.ask_user(prompt, &rule);
+                return match rule {
+                    Rule::Review => answer.map(plan_not_approved),
+                    _ => answer,
+                };
+            }
+        }
         if mode != Some(PermissionAction::Deny)
             && configured.0 != PermissionAction::Deny
             && self.session_allows(name)
@@ -387,7 +448,7 @@ impl Hooks for PermissionGate {
                 name,
                 &format!("permission denied by [permissions.mcp] {server}"),
             )),
-            (PermissionAction::Deny, Rule::Tool) => Some(error_output(
+            (PermissionAction::Deny, Rule::Tool | Rule::Plan | Rule::Review) => Some(error_output(
                 name,
                 &format!("permission denied by [permissions.tools.{name}]"),
             )),
@@ -412,6 +473,33 @@ enum Rule {
     Tool,
     /// The `[permissions.mcp]` action for this server.
     Mcp(String),
+    /// Plan mode, which asks before any command.
+    Plan,
+    /// Plan mode's review of the plan `exit_plan` presents.
+    Review,
+}
+
+/// The refusal of a write tool while plan mode is on.
+fn plan_refusal(tool: &str) -> ToolOutput {
+    error_output(
+        tool,
+        "plan mode is on, so nothing may change yet; investigate with read-only tools and \
+         present the plan with `exit_plan`",
+    )
+}
+
+/// What the model sees when the user did not approve its plan: the run
+/// ends here and the user's next message says what to change.
+fn plan_not_approved(refusal: ToolOutput) -> ToolOutput {
+    ToolOutput {
+        text: format!(
+            "{}\nThe user did not approve this plan. Plan mode stays on until they do; \
+             their next message says what to change.",
+            refusal.text
+        ),
+        terminate: true,
+        ..refusal
+    }
 }
 
 /// Synthesized `is_error` output for a refused call. The text is what
@@ -434,6 +522,10 @@ fn non_interactive_output(tool: &str, rule: &Rule) -> ToolOutput {
              allow the server with `{server} = \"allow\"` under [permissions.mcp], \
              allow the tool with `default = \"allow\"` under [permissions.tools.{tool}], \
              or run the interactive TUI"
+        ),
+        Rule::Plan | Rule::Review => format!(
+            "plan mode asks before `{tool}` and this mode is non-interactive; \
+             turn plan mode off or run the interactive TUI"
         ),
         Rule::Mode | Rule::Tool => format!(
             "permission is `ask` ([permissions.tools.{tool}]) and this mode is non-interactive; \
@@ -511,6 +603,64 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn plan_mode_keeps_a_configured_deny() {
+        let mut gate = PermissionGate::new(rules_for(PermissionAction::Deny));
+        gate.set_plan(true);
+        gate.set_risks([("shell".to_owned(), Risk::Exec)].into_iter().collect());
+        let out = gate
+            .before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
+            .unwrap();
+        assert_eq!(
+            out.text,
+            "`shell`: permission denied by [permissions.tools.shell]"
+        );
+    }
+
+    #[test]
+    fn plan_mode_asks_before_a_tool_of_unknown_risk() {
+        let (ask_tx, ask_rx) = channel_asker();
+        let gate = PermissionGate::new(PermissionsConfig::default()).with_asker(ask_tx);
+        gate.set_plan(true);
+        gate.allow_for_session("mystery");
+        let handle = std::thread::spawn(move || {
+            let mut gate = gate;
+            gate.before_tool_call(
+                &kage_core::ToolCallId::new("call"),
+                "mystery",
+                &serde_json::json!({}),
+            )
+        });
+        let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(ask.tool, "mystery", "a session approval does not skip it");
+        ask.reply.send(PermissionDecision::AllowOnce).unwrap();
+        assert!(handle.join().unwrap().is_none());
+    }
+
+    #[test]
+    fn plan_review_answers_never_become_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ask_tx, ask_rx) = channel_asker();
+        let gate = PermissionGate::new(PermissionsConfig::default())
+            .with_asker(ask_tx)
+            .with_persist_path(dir.path().join("config.toml"));
+        gate.set_plan(true);
+        let probe = gate.clone();
+        let handle = std::thread::spawn(move || {
+            let mut gate = gate;
+            gate.before_tool_call(
+                &kage_core::ToolCallId::new("call"),
+                EXIT_PLAN_TOOL,
+                &serde_json::json!({"plan": "# P"}),
+            )
+        });
+        let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        ask.reply.send(PermissionDecision::AllowAlways).unwrap();
+        assert!(handle.join().unwrap().is_none());
+        assert!(!probe.session_allows(EXIT_PLAN_TOOL));
+        assert!(!dir.path().join("config.toml").exists());
     }
 
     #[test]

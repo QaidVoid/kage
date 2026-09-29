@@ -14,6 +14,7 @@ mod agents;
 mod bus;
 mod mailbox_tool;
 mod mcp;
+mod plan_tool;
 mod plugin_tools;
 mod recorder;
 mod runner;
@@ -58,6 +59,7 @@ use agents::{AgentLink, depth_of};
 use bus::Bus;
 use mailbox_tool::MailboxTool;
 use mcp::{McpDone, restart_failed};
+use plan_tool::ExitPlanTool;
 use plugin_tools::PluginTools;
 use runner::{Finished, McpLease, Run, Steering, Work};
 use shell::ShellDone;
@@ -195,6 +197,9 @@ enum Input {
     Publish(HostEvent),
     SetRegistry(Arc<ProviderRegistry>),
     ReloadPluginTools,
+    /// The user approved a session's plan and `exit_plan` turned plan
+    /// mode off in the gate. The engine records and announces it.
+    PlanApproved(SessionId),
 }
 
 /// One verified resume target, from its session marker.
@@ -346,10 +351,12 @@ struct Session {
 }
 
 impl Session {
-    /// Copy the swarm mode and background shell count into the state
-    /// snapshot clients see, right before one is published.
+    /// Copy the swarm and plan modes and the background shell count
+    /// into the state snapshot clients see, right before one is
+    /// published.
     fn sync_state(&mut self) {
         self.state.swarm = self.swarm_mode;
+        self.state.plan = self.gate.plan();
         self.state.shells = u32::try_from(self.shells).unwrap_or(u32::MAX);
     }
 }
@@ -423,6 +430,7 @@ impl Dispatcher {
                         self.apply_plugin_tools(id);
                     }
                 }
+                Input::PlanApproved(id) => self.plan_mode_changed(id, false, false),
             }
             if self.shutting_down
                 && self
@@ -598,6 +606,13 @@ impl Dispatcher {
             }),
             CommandKind::RestartMcp { server } => self.restart_mcp(id, server),
             CommandKind::SwarmMode { on } => self.set_swarm_mode(id, on),
+            CommandKind::PlanMode { on } => {
+                let session = self.sessions.get_mut(&id).expect("session checked");
+                if session.gate.plan() != on {
+                    session.gate.set_plan(on);
+                    self.plan_mode_changed(id, on, true);
+                }
+            }
             CommandKind::Shutdown | CommandKind::ResolvePermission { .. } => {}
         }
     }
@@ -662,36 +677,59 @@ impl Dispatcher {
         session
             .pending_history
             .push(Message::new(Role::User, vec![Content::Text { text }], None));
-        let entry = kage_session::Custom {
-            id: kage_session::EntryId::new(),
-            ts: chrono::Utc::now(),
-            kind: kage_session::list::SWARM_MODE_ENTRY_KIND.to_owned(),
-            data: serde_json::json!({ "on": on }),
-        };
-        match session
-            .idle
-            .as_mut()
-            .and_then(|idle| idle.recorder.as_mut())
-        {
-            Some(recorder) => {
-                let append = recorder.append(&kage_session::SessionEntry::Custom(entry));
-                if let Err(err) = append {
-                    notice(
-                        &self.bus,
-                        id,
-                        NoticeLevel::Error,
-                        format!("session write failed: {err}"),
-                    );
-                }
-            }
-            None => session.pending_entries.push(entry),
-        }
+        record_mode(
+            &self.bus,
+            id,
+            session,
+            kage_session::list::SWARM_MODE_ENTRY_KIND,
+            on,
+        );
         notice(
             &self.bus,
             id,
             NoticeLevel::Info,
             format!("swarm mode {}", if on { "on" } else { "off" }),
         );
+    }
+
+    /// Announce and persist a plan mode change the gate already holds.
+    /// `remind` injects the reminder for the model as a user message;
+    /// an approved plan skips it, since `exit_plan`'s result tells the
+    /// model instead.
+    fn plan_mode_changed(&mut self, id: SessionId, on: bool, remind: bool) {
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        session.sync_state();
+        let state = session.state.clone();
+        self.bus.publish(id, HostEvent::StateChanged { state });
+        if remind {
+            let text = if on {
+                plan_tool::PLAN_MODE_ON
+            } else {
+                plan_tool::PLAN_MODE_OFF
+            };
+            session.pending_history.push(Message::new(
+                Role::User,
+                vec![Content::Text {
+                    text: text.to_owned(),
+                }],
+                None,
+            ));
+        }
+        record_mode(
+            &self.bus,
+            id,
+            session,
+            kage_session::list::PLAN_MODE_ENTRY_KIND,
+            on,
+        );
+        let text = match (on, remind) {
+            (true, _) => "plan mode on: nothing changes until you approve a plan",
+            (false, true) => "plan mode off",
+            (false, false) => "plan approved; plan mode off",
+        };
+        notice(&self.bus, id, NoticeLevel::Info, text.to_owned());
     }
 
     fn record_title(&mut self, id: SessionId, title: String) {
@@ -849,15 +887,7 @@ impl Dispatcher {
             }),
             Work::Compact => Work::Compact,
         };
-        let mut tools = session.tools.clone();
-        if let Some(setup) = &session.agents {
-            if depth_of(session) < setup.max_depth {
-                register_delegation_tools(&mut tools, id, &self.tx, setup);
-            }
-            // Mailboxing does not nest, so every agent-enabled session
-            // gets it whatever its depth.
-            tools.register(Arc::new(MailboxTool::new(id, self.tx.clone())));
-        }
+        let tools = run_tools(session, id, &self.tx);
         let run = Run {
             session: id,
             work,
@@ -1160,8 +1190,35 @@ impl Dispatcher {
     }
 }
 
-/// Route a run's permission questions onto the bus. The answer arrives
-/// through [`CommandKind::ResolvePermission`].
+/// The tools one run of `session` may call: its own, the delegation
+/// and mailbox tools its agent setup allows, and `exit_plan` in plan
+/// mode. Records their risks in the gate for plan mode to judge.
+fn run_tools(session: &Session, id: SessionId, tx: &mpsc::Sender<Input>) -> ToolRegistry {
+    let mut tools = session.tools.clone();
+    if let Some(setup) = &session.agents {
+        if depth_of(session) < setup.max_depth {
+            register_delegation_tools(&mut tools, id, tx, setup);
+        }
+        // Mailboxing does not nest, so every agent-enabled session
+        // gets it whatever its depth.
+        tools.register(Arc::new(MailboxTool::new(id, tx.clone())));
+    }
+    if session.gate.plan() {
+        tools.register(Arc::new(ExitPlanTool::new(
+            id,
+            tx.clone(),
+            session.gate.clone(),
+        )));
+    }
+    session.gate.set_risks(
+        tools
+            .names()
+            .filter_map(|name| Some((name.to_owned(), tools.get(name)?.risk())))
+            .collect(),
+    );
+    tools
+}
+
 /// Register the delegation tools a session may call while its depth
 /// is under the limit: the single `agent` tool and the `swarm` tool.
 fn register_delegation_tools(
@@ -1180,6 +1237,8 @@ fn register_delegation_tools(
     )));
 }
 
+/// Route a run's permission questions onto the bus. The answer arrives
+/// through [`CommandKind::ResolvePermission`].
 fn asker(bus: &Arc<Bus>, asks: &Asks, next: &Arc<AtomicU64>, session: SessionId) -> Asker {
     let bus = Arc::clone(bus);
     let asks = Arc::clone(asks);
@@ -1311,6 +1370,35 @@ fn flush_entries(
 
 /// Move the messages that arrived while `session` was busy into its
 /// history, once it is idle.
+/// Persist a session mode toggle as a `kind` custom entry: now when
+/// the recorder is idle, else once the run hands it back.
+fn record_mode(bus: &Bus, id: SessionId, session: &mut Session, kind: &str, on: bool) {
+    let entry = kage_session::Custom {
+        id: kage_session::EntryId::new(),
+        ts: chrono::Utc::now(),
+        kind: kind.to_owned(),
+        data: serde_json::json!({ "on": on }),
+    };
+    match session
+        .idle
+        .as_mut()
+        .and_then(|idle| idle.recorder.as_mut())
+    {
+        Some(recorder) => {
+            let append = recorder.append(&kage_session::SessionEntry::Custom(entry));
+            if let Err(err) = append {
+                notice(
+                    bus,
+                    id,
+                    NoticeLevel::Error,
+                    format!("session write failed: {err}"),
+                );
+            }
+        }
+        None => session.pending_entries.push(entry),
+    }
+}
+
 fn flush_pending(bus: &Bus, id: SessionId, session: &mut Session) {
     if let Some(Idle { cx, recorder }) = session.idle.as_mut() {
         append_history(

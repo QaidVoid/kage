@@ -465,6 +465,7 @@ pub const ACTIONS: &[ActionDef] = &[
     action("SearchPrev", "Focus the previous search match."),
     action("YankFocusedBlock", "Copy the focused block."),
     action("CycleThinkingLevel", "Cycle the thinking level."),
+    action("TogglePlanMode", "Turn plan mode on or off."),
     action(
         "CyclePane",
         "Toggle focus between the input and the conversation.",
@@ -947,7 +948,7 @@ mod tests {
 
     #[test]
     fn actions_hold_the_rebindable_names() {
-        assert_eq!(ACTIONS.len(), 27);
+        assert_eq!(ACTIONS.len(), 28);
         for (i, a) in ACTIONS.iter().enumerate() {
             assert!(
                 ACTIONS[..i].iter().all(|b| b.name != a.name),

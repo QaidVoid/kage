@@ -11,6 +11,7 @@
 //! model-facing labels and wrapper from a copy for painting only.
 
 use kage_core::event::AGENT_NO_REPLY_TEXT as NO_REPLY;
+use kage_core::protocol::EXIT_PLAN_TOOL;
 use serde_json::Value;
 
 use super::modeline::format_token_count;
@@ -51,6 +52,8 @@ pub enum ToolBody {
     Diff,
     /// The first lines of the output.
     Head,
+    /// The plan document of an `exit_plan` call as Markdown.
+    Plan,
 }
 
 /// Verb-first description of one tool call.
@@ -303,6 +306,12 @@ pub fn describe(name: &str, input: &Value) -> ToolLabel {
             )
             .full(description.to_owned())
         }
+        EXIT_PLAN_TOOL => label(
+            ["Plan", "Planning", "Plan"],
+            plan_title(input),
+            String::new(),
+        )
+        .body(ToolBody::Plan),
         _ => label(
             ["Call", "Calling", "Called"],
             display_name(name),
@@ -483,6 +492,9 @@ pub fn question(name: &str, input: &Value) -> String {
     if name == "shell" {
         return "Run this command?".to_owned();
     }
+    if name == EXIT_PLAN_TOOL {
+        return "Ready to build with this plan?".to_owned();
+    }
     if name == "agent" {
         return format!("Start agent {}?", agent_name(input));
     }
@@ -613,6 +625,29 @@ impl ToolLabel {
             }
             _ => &self.stats,
         }
+    }
+}
+
+/// The title of an `exit_plan` call: its plan's first `#` heading.
+#[must_use]
+pub fn plan_title(input: &Value) -> String {
+    field(input, "plan")
+        .lines()
+        .find_map(|line| line.strip_prefix("# "))
+        .map_or_else(|| "for review".to_owned(), |title| title.trim().to_owned())
+}
+
+/// The plan document of an `exit_plan` call without the `#` heading
+/// its row header already shows.
+#[must_use]
+pub fn plan_document(input: &Value) -> &str {
+    let plan = field(input, "plan").trim_start();
+    match plan.strip_prefix("# ") {
+        Some(rest) => rest
+            .split_once('\n')
+            .map_or("", |(_, body)| body)
+            .trim_start(),
+        None => plan,
     }
 }
 

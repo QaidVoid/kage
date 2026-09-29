@@ -2560,3 +2560,22 @@ fn the_todo_box_sits_below_the_working_row() {
         rows.join("\n")
     );
 }
+
+#[test]
+fn an_exit_plan_row_shows_the_plan_under_its_title() {
+    let mut buffer = Buffer::new();
+    let plan = "# Remote rollout\n\n## Steps\n\n1. Add the transport\n2. Wire the host";
+    buffer.push_tool_call("p1", "exit_plan", json!({ "plan": plan }));
+    buffer.set_tool_phase("p1", tool_view::ToolPhase::Waiting);
+    let input = InputState::new();
+    let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 80, 14));
+    let header = lines
+        .iter()
+        .position(|l| l.contains("Plan Remote rollout"))
+        .unwrap_or_else(|| panic!("{lines:#?}"));
+    assert!(lines[header].contains("awaiting review"), "{lines:#?}");
+    let body = lines[header + 1..].join("\n");
+    assert!(body.contains("Steps"), "{lines:#?}");
+    assert!(body.contains("Wire the host"), "{lines:#?}");
+    assert!(!body.contains("# Remote rollout"), "the title shows once");
+}

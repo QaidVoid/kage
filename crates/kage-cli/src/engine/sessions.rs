@@ -217,6 +217,7 @@ impl super::Dispatcher {
                 }
             };
         header.cwd.clone_from(&session.workdir);
+        session.gate.set_plan(false);
         let new_id = header.session;
         let mut cx = idle.cx.clone();
         cx.history.clear();
@@ -271,6 +272,7 @@ impl super::Dispatcher {
         }
         cx.history = replay.history;
         session.swarm_mode = replay.swarm_mode.unwrap_or(false);
+        session.gate.set_plan(replay.plan_mode.unwrap_or(false));
         cx.budget = kage_loop::TokenBudget {
             used_input: replay.usage_total.input,
             used_output: replay.usage_total.output,

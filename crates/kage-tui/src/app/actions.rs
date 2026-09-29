@@ -225,6 +225,10 @@ impl App {
                 self.run_swarm_command(rest);
                 None
             }
+            "plan" => {
+                self.run_plan_command(rest);
+                None
+            }
             "todo_list" => {
                 self.open_todo_list();
                 None
@@ -404,6 +408,38 @@ impl App {
                 });
             }
         }
+    }
+
+    /// Handle `/plan [on|off|task]`: flip the session's plan mode, or
+    /// turn it on and submit a task to plan. A bare `/plan` toggles it.
+    pub(crate) fn run_plan_command(&mut self, rest: &str) {
+        match rest.trim() {
+            "" => {
+                let on = !self.plan_mode();
+                let _ = self.send_request(RunRequest::PlanMode { on });
+            }
+            arg @ ("on" | "off") => {
+                let _ = self.send_request(RunRequest::PlanMode { on: arg == "on" });
+            }
+            task => {
+                if self.session_running(None) {
+                    self.push_error("plan: stop the current run first");
+                    return;
+                }
+                let _ = self.send_request(RunRequest::PlanMode { on: true });
+                let _ = self.send_request(RunRequest::Submit {
+                    text: task.to_owned(),
+                    images: Vec::new(),
+                    queue: false,
+                    session: None,
+                });
+            }
+        }
+    }
+
+    /// Whether the session's plan mode is on, as the engine last said.
+    pub(crate) fn plan_mode(&self) -> bool {
+        self.session_usage.as_ref().is_some_and(|u| lock(u).plan)
     }
 
     /// Turn swarm mode back off after a one-shot `/swarm <task>` run.

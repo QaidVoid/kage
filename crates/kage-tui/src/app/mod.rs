@@ -286,6 +286,13 @@ pub enum RunRequest {
         /// The mode to switch to.
         on: bool,
     },
+    /// Turn the session's plan mode on or off, from `/plan` or the
+    /// toggle key. While on, the agent investigates without changing
+    /// anything and presents a plan for review.
+    PlanMode {
+        /// The mode to switch to.
+        on: bool,
+    },
 }
 
 /// Outcome of [`App::run`].

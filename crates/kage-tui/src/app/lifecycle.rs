@@ -373,6 +373,12 @@ impl App {
         let model_label = self.model_label(model_id.as_deref());
         let start_keys = self.start_keys();
         let agents_key = self.key_label("OpenAgents");
+        let plan_placeholder = self
+            .plan_mode()
+            .then(|| match self.key_label("TogglePlanMode") {
+                Some(key) => format!("Describe what to plan ({key} leaves plan mode)"),
+                None => "Describe what to plan".to_owned(),
+            });
         if self.agents_overlay.is_some() {
             let rows = self.agents_overlay_rows();
             if let Some(overlay) = self.agents_overlay.as_mut() {
@@ -398,7 +404,7 @@ impl App {
             .map(|(_, p)| p.clone())
             .collect();
         let breadcrumb = self.breadcrumb();
-        let placeholder = self.agent_placeholder();
+        let placeholder = self.agent_placeholder().or(plan_placeholder);
         let agents_total = self.agents_under_view();
         let status = view::StatusCtx {
             model: model_label.as_deref(),

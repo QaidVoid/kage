@@ -708,7 +708,8 @@ pub(super) fn push_builtin(
                 out.push(Span::styled(text.to_owned(), styles.text));
             }
         }
-        "working" | "context" | "tokens" | "thinking" | "permission" | "swarm" | "tasks" => {
+        "working" | "context" | "tokens" | "thinking" | "permission" | "plan" | "swarm"
+        | "tasks" => {
             if let Some(u) = src.usage {
                 push_usage(name, u, styles, out);
             }
@@ -889,14 +890,7 @@ fn push_usage(name: &str, u: &SessionUsage, styles: &Styles, out: &mut Vec<Span<
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ));
         }
-        "swarm" if u.swarm => {
-            out.push(Span::styled(
-                "swarm".to_owned(),
-                Style::default()
-                    .fg(crate::theme::current().success_fg)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
+        "plan" | "swarm" => push_session_mode(name, u, out),
         "tasks" if u.shells > 0 => {
             out.push(Span::styled(
                 format!("{} bg", u.shells),
@@ -907,6 +901,21 @@ fn push_usage(name: &str, u: &SessionUsage, styles: &Styles, out: &mut Vec<Span<
         }
         _ => {}
     }
+}
+
+/// The chip of a session mode that is on: `plan` in the plan group,
+/// `swarm` in the success color.
+fn push_session_mode(name: &str, u: &SessionUsage, out: &mut Vec<Span<'static>>) {
+    let theme = crate::theme::current();
+    let style = match name {
+        "plan" if u.plan => theme.group_style("KagePlan"),
+        "swarm" if u.swarm => Style::default().fg(theme.success_fg),
+        _ => return,
+    };
+    out.push(Span::styled(
+        name.to_owned(),
+        style.add_modifier(Modifier::BOLD),
+    ));
 }
 
 #[cfg(test)]
@@ -923,6 +932,7 @@ mod tests {
             thinking_level: Some(kage_core::ThinkingLevel::High),
             permission_mode: Some(kage_core::permissions::PermissionAction::Ask),
             swarm: true,
+            plan: true,
             shells: 1,
             ..SessionUsage::default()
         };
@@ -971,6 +981,18 @@ mod tests {
         let mut out = Vec::new();
         push_builtin(name, &src, &Styles::uniform(Style::default()), &mut out);
         out.iter().map(|span| span.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn the_plan_chip_shows_only_in_plan_mode() {
+        let input = InputState::new();
+        let off = SessionUsage {
+            model: "m".into(),
+            ..SessionUsage::default()
+        };
+        assert_eq!(painted("plan", &off, &input), "");
+        let planning = SessionUsage { plan: true, ..off };
+        assert_eq!(painted("plan", &planning, &input), "plan");
     }
 
     #[test]

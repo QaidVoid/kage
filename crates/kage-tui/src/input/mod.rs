@@ -150,10 +150,13 @@ pub enum InputAction {
     /// Force focus to a specific pane (e.g. mouse click in a
     /// particular region).
     FocusPane(Pane),
-    /// Cycle the active thinking level one step forward (`Shift+Tab`
-    /// in any mode). The host advances its tracked level and forwards
-    /// the new value on the next provider request.
+    /// Cycle the active thinking level one step forward (`Alt+T` in
+    /// any mode). The host advances its tracked level and forwards the
+    /// new value on the next provider request.
     CycleThinkingLevel,
+    /// Turn the session's plan mode on or off (`Shift+Tab` in any
+    /// mode).
+    TogglePlanMode,
     /// Open the `?` keyboard reference.
     OpenHelp,
     /// Open the message jump picker.

@@ -787,6 +787,10 @@ impl App {
             ApprovalOutcome::Stay => {}
             ApprovalOutcome::Decide(decision) => self.answer_permission(decision),
             ApprovalOutcome::Feedback(text) => self.answer_with_feedback(text),
+            ApprovalOutcome::RejectPlan => {
+                self.answer_permission(PermissionDecision::Deny);
+                let _ = self.send_request(RunRequest::PlanMode { on: false });
+            }
         }
     }
 }

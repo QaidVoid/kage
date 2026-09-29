@@ -193,6 +193,7 @@ impl App {
                     usage.input = state.input;
                     usage.permission_mode = state.permission_mode;
                     usage.swarm = state.swarm;
+                    usage.plan = state.plan;
                     usage.shells = state.shells;
                     usage.working = state.working;
                 }

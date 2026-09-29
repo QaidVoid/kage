@@ -8,12 +8,16 @@
 //! request from an agent carries the agent's name and task in the title
 //! and its name in option 5, since the text goes to that agent.
 //!
+//! An `exit_plan` call is plan mode's review instead: approve and
+//! build, revise (the same feedback field), or reject and leave plan
+//! mode. Esc keeps planning.
+//!
 //! Keys typed in the first [`TYPE_AHEAD_GUARD`] after the panel opens
 //! are dropped, so type-ahead meant for the prompt cannot answer it.
 
 use std::time::{Duration, Instant};
 
-use kage_core::protocol::PermissionDecision;
+use kage_core::protocol::{EXIT_PLAN_TOOL, PermissionDecision};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
@@ -41,6 +45,9 @@ const WRITE_LINES: usize = 6;
 const OPTIONS: usize = 5;
 const NO: usize = 3;
 const TELL: usize = 4;
+const PLAN_OPTIONS: usize = 3;
+const PLAN_REVISE: usize = 1;
+const PLAN_REJECT: usize = 2;
 const SEP: &str = " \u{B7} ";
 /// Fewest cells of an agent's task the title shows before dropping it.
 const MIN_TASK_WIDTH: usize = 8;
@@ -54,6 +61,8 @@ pub enum ApprovalOutcome {
     Decide(PermissionDecision),
     /// Deny the request, then send this text to the model.
     Feedback(String),
+    /// Deny the plan under review and turn plan mode off.
+    RejectPlan,
 }
 
 /// The approval prompt for one gated tool call, painted into the input
@@ -104,6 +113,11 @@ impl ApprovalPanel {
         self
     }
 
+    /// Whether the panel reviews a plan instead of gating a call.
+    fn is_plan(&self) -> bool {
+        self.tool == EXIT_PLAN_TOOL
+    }
+
     /// Who reads option 5's text: the asking agent, else `kage`.
     fn asker(&self) -> &str {
         self.agent.as_ref().map_or("kage", |(name, _)| name)
@@ -136,6 +150,8 @@ impl ApprovalPanel {
     pub fn hint(&self) -> String {
         let parts: &[&str] = if self.in_feedback() {
             &["enter to send", "esc to go back"]
+        } else if self.is_plan() {
+            &["y/r/n or 1-3", "enter", "esc keep planning"]
         } else {
             &["y/s/a/n/t or 1-5", "enter", "esc no"]
         };
@@ -162,6 +178,9 @@ impl ApprovalPanel {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return ApprovalOutcome::Stay;
+        }
+        if self.is_plan() {
+            return self.plan_key(key.code);
         }
         let choice = match key.code {
             KeyCode::Esc => NO,
@@ -194,6 +213,39 @@ impl ApprovalPanel {
                 ApprovalOutcome::Stay
             }
             _ => ApprovalOutcome::Decide(PermissionDecision::Deny),
+        }
+    }
+
+    /// A key on the plan review: 1 approves, 2 opens the feedback
+    /// field, 3 rejects and Esc denies while plan mode stays on.
+    fn plan_key(&mut self, code: KeyCode) -> ApprovalOutcome {
+        let choice = match code {
+            KeyCode::Esc => return ApprovalOutcome::Decide(PermissionDecision::Deny),
+            KeyCode::Up => {
+                self.selected = (self.selected + PLAN_OPTIONS - 1) % PLAN_OPTIONS;
+                return ApprovalOutcome::Stay;
+            }
+            KeyCode::Down => {
+                self.selected = (self.selected + 1) % PLAN_OPTIONS;
+                return ApprovalOutcome::Stay;
+            }
+            KeyCode::Enter => self.selected,
+            KeyCode::Char(c) => match c.to_ascii_lowercase() {
+                '1' | 'y' => 0,
+                '2' | 'r' => PLAN_REVISE,
+                '3' | 'n' => PLAN_REJECT,
+                _ => return ApprovalOutcome::Stay,
+            },
+            _ => return ApprovalOutcome::Stay,
+        };
+        self.selected = choice;
+        match choice {
+            0 => ApprovalOutcome::Decide(PermissionDecision::AllowOnce),
+            PLAN_REVISE => {
+                self.feedback = Some(self.parked.take().unwrap_or_default());
+                ApprovalOutcome::Stay
+            }
+            _ => ApprovalOutcome::RejectPlan,
         }
     }
 
@@ -252,6 +304,13 @@ impl ApprovalPanel {
         let field = |key| self.input.get(key).and_then(Value::as_str).unwrap_or("");
         let plain = |s: String| Line::from(Span::styled(s, text));
         let lines = match self.tool.as_str() {
+            EXIT_PLAN_TOOL => vec![Line::from(vec![
+                Span::styled(
+                    tool_view::plan_title(&self.input),
+                    text.add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("   the whole plan is in the conversation above", muted),
+            ])],
             "shell" => {
                 let wrap = width.saturating_sub(INDENT_WIDTH + 2);
                 let rows = field("command")
@@ -335,10 +394,17 @@ impl ApprovalPanel {
             } else {
                 "call"
             };
-            let help = format!(
-                "Tell {} what to do instead. Press enter to send it and deny the {what}, or esc to go back.",
-                self.asker()
-            );
+            let help = if self.is_plan() {
+                format!(
+                    "Tell {} what to change in the plan. Press enter to send it, or esc to go back.",
+                    self.asker()
+                )
+            } else {
+                format!(
+                    "Tell {} what to do instead. Press enter to send it and deny the {what}, or esc to go back.",
+                    self.asker()
+                )
+            };
             let muted = theme.group_style("KageMuted");
             let wrap = width.saturating_sub(INDENT_WIDTH);
             lines.extend(
@@ -368,13 +434,21 @@ impl ApprovalPanel {
                 format!("Yes, and always allow {tool} (saved to config.toml)"),
             ),
         };
-        let labels = [
-            "Yes".to_owned(),
-            session_label,
-            always_label,
-            "No".to_owned(),
-            format!("No, and tell {} what to do instead", self.asker()),
-        ];
+        let labels = if self.is_plan() {
+            vec![
+                "Yes, approve and build it".to_owned(),
+                format!("No, tell {} what to change", self.asker()),
+                "No, and leave plan mode".to_owned(),
+            ]
+        } else {
+            vec![
+                "Yes".to_owned(),
+                session_label,
+                always_label,
+                "No".to_owned(),
+                format!("No, and tell {} what to do instead", self.asker()),
+            ]
+        };
         lines.extend(labels.into_iter().enumerate().map(|(idx, label)| {
             let label = format!("{}. {label}", idx + 1);
             if idx == self.selected {
@@ -764,6 +838,70 @@ mod tests {
         assert!(row(2).starts_with("     s1"));
         assert!(row(4).starts_with(" > 1. Yes"));
         assert!(row(8).starts_with("   5. No"));
+    }
+
+    fn plan_panel() -> (ApprovalPanel, Instant) {
+        let at = Instant::now();
+        let input = json!({"plan": "# Remote rollout\n\n1. Add the transport"});
+        (
+            ApprovalPanel::new(EXIT_PLAN_TOOL, &input, None, at),
+            at + Duration::from_millis(500),
+        )
+    }
+
+    #[test]
+    fn a_plan_review_offers_three_answers() {
+        let (panel, _) = plan_panel();
+        let rows = rows(&panel, 80, 0);
+        assert!(
+            rows[0].contains("Ready to build with this plan?"),
+            "{rows:#?}"
+        );
+        assert!(rows[1].starts_with("   Remote rollout"), "{rows:#?}");
+        assert_eq!(rows[3], " > 1. Yes, approve and build it");
+        assert_eq!(rows[4], "   2. No, tell kage what to change");
+        assert_eq!(rows[5], "   3. No, and leave plan mode");
+        assert!(rows[6].chars().all(|c| c == '\u{2500}'), "{rows:#?}");
+        assert_eq!(
+            panel.hint(),
+            "y/r/n or 1-3 \u{B7} enter \u{B7} esc keep planning"
+        );
+    }
+
+    #[test]
+    fn plan_review_keys_map_to_outcomes() {
+        let (mut panel, now) = plan_panel();
+        assert_eq!(
+            panel.handle_key_at(key(KeyCode::Char('y')), now),
+            ApprovalOutcome::Decide(PermissionDecision::AllowOnce)
+        );
+        let (mut panel, now) = plan_panel();
+        assert_eq!(
+            panel.handle_key_at(key(KeyCode::Char('3')), now),
+            ApprovalOutcome::RejectPlan
+        );
+        let (mut panel, now) = plan_panel();
+        assert_eq!(
+            panel.handle_key_at(key(KeyCode::Esc), now),
+            ApprovalOutcome::Decide(PermissionDecision::Deny),
+            "esc keeps planning"
+        );
+        let (mut panel, now) = plan_panel();
+        panel.handle_key_at(key(KeyCode::Down), now);
+        panel.handle_key_at(key(KeyCode::Enter), now);
+        assert!(panel.in_feedback());
+        let rows = rows(&panel, 100, 0);
+        assert!(
+            rows[3].starts_with("   Tell kage what to change in the plan."),
+            "{rows:#?}"
+        );
+        for c in "split step 1".chars() {
+            panel.handle_key_at(key(KeyCode::Char(c)), now);
+        }
+        assert_eq!(
+            panel.handle_key_at(key(KeyCode::Enter), now),
+            ApprovalOutcome::Feedback("split step 1".to_owned())
+        );
     }
 
     #[test]

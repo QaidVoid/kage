@@ -654,26 +654,41 @@ fn normal_mode_command_keys_in_both_panes() {
 }
 
 #[test]
-fn shift_tab_cycles_thinking_in_every_editing_state() {
+fn shift_tab_toggles_plan_mode_in_every_editing_state() {
     let backtab = code(KeyCode::BackTab);
     let shift_tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
     let mut app = defaults_app();
     assert_eq!(
         routes(&mut app, backtab),
-        input(InputAction::CycleThinkingLevel)
+        input(InputAction::TogglePlanMode)
     );
     normal(&mut app, Pane::Input);
     assert_eq!(
         routes(&mut app, shift_tab),
-        input(InputAction::CycleThinkingLevel)
+        input(InputAction::TogglePlanMode)
     );
     app.input.set_modeless(true);
     assert_eq!(
         routes(&mut app, backtab),
-        input(InputAction::CycleThinkingLevel)
+        input(InputAction::TogglePlanMode)
     );
     let tab = routes(&mut app, code(KeyCode::Tab));
-    assert!(!tab.contains(&Routed::Input(InputAction::CycleThinkingLevel)));
+    assert!(!tab.contains(&Routed::Input(InputAction::TogglePlanMode)));
+}
+
+#[test]
+fn alt_t_cycles_thinking_in_every_editing_state() {
+    let alt_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT);
+    let mut app = defaults_app();
+    assert_eq!(
+        routes(&mut app, alt_t),
+        input(InputAction::CycleThinkingLevel)
+    );
+    normal(&mut app, Pane::Input);
+    assert_eq!(
+        routes(&mut app, alt_t),
+        input(InputAction::CycleThinkingLevel)
+    );
 }
 
 #[test]

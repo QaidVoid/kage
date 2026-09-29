@@ -120,7 +120,10 @@ prompt queued; a child no longer hosted is reopened from its session
 file with its history, model and definition intact. Swarm mode
 (`/swarm`) injects a workflow block into the session's pending
 history on the way up and an exit note on the way down, once per
-switch.
+switch. Plan mode (`/plan`) works the same way and also lives in the
+permission gate: while it is on, the gate refuses write tools, asks
+before command tools, and asks about every `exit_plan` call, whose
+approval turns the mode off mid-run.
 
 **The mailbox.** Every agent-enabled session also gets a
 `send_message` tool, whatever its depth, because sending does not

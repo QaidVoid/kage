@@ -361,6 +361,18 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         subcommands: &[],
     },
     CommandSpec {
+        name: "plan",
+        aliases: &[],
+        description: "turn plan mode on or off, or plan one task now",
+        category: CommandCategory::Both,
+        args: &[ArgSpec::Rest {
+            name: "state",
+            optional: true,
+            hint: "[on|off|<task>]",
+        }],
+        subcommands: &[],
+    },
+    CommandSpec {
         name: "todo_list",
         aliases: &["todos"],
         description: "show every task of the session's todo list",
@@ -724,7 +736,7 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 27);
+        assert_eq!(BUILTIN_COMMANDS.len(), 28);
     }
 
     #[test]

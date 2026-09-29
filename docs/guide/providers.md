@@ -243,10 +243,10 @@ A session's thinking level is one of `off`, `minimal`, `low`,
 `medium`, `high` and `xhigh`, or automatic. Automatic is the default:
 it sends `high`, or the nearest level the model accepts when it has no
 `high` (the higher one on a tie). A level you choose with
-`shift+tab`, the settings dialog or `[ui] thinking_level` is fitted the
+`alt+t`, the settings dialog or `[ui] thinking_level` is fitted the
 same way, and only an explicit `off` turns thinking off. On a model
 that cannot switch thinking off, `off` becomes its lowest level.
-`shift+tab` only visits levels the model accepts. The start card shows an
+`alt+t` only visits levels the model accepts. The start card shows an
 automatic level as `high (auto)`, and the settings dialog and editors
 name it `auto`.
 

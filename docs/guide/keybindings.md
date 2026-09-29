@@ -31,7 +31,8 @@ switch modes or panes.
 | `alt+p` / `alt+n` | Jump to the previous / next block          |
 | `ctrl+n`         | Jump to the next block                      |
 | `ctrl+o`         | Toggle fold on the focused block            |
-| `shift+tab`      | Cycle the thinking level                    |
+| `shift+tab`      | Toggle [plan mode](/guide/plan-mode)        |
+| `alt+t`          | Cycle the thinking level                    |
 | `ctrl+v`         | Attach an image from the clipboard          |
 | `ctrl+g`         | Edit the prompt draft in `$VISUAL`/`$EDITOR` |
 | `!`              | Shell escape: `!` on an empty prompt, then `enter` runs the line |
@@ -73,7 +74,8 @@ the buffer navigation keys above work without any mode switching.
 | `pageup` / `pagedown` | Scroll the conversation buffer 10 lines |
 | `ctrl+w` | Kill the previous word |
 | `ctrl+g` | Edit the prompt draft in `$VISUAL`/`$EDITOR` |
-| `shift+tab` | Cycle the thinking level |
+| `shift+tab` | Toggle [plan mode](/guide/plan-mode) |
+| `alt+t` | Cycle the thinking level |
 | `!`   | Switch to shell mode (empty prompt only) |
 | `?`   | Open the keyboard reference (empty prompt only) |
 | `ctrl+q` | Quit |
@@ -491,13 +493,14 @@ These action names work after `action:`:
 | misc       | `EnterVisual`          | start a visual selection          |
 | misc       | `AttachClipboardImage` | attach an image from the clipboard |
 | misc       | `CycleThinkingLevel`   | step the thinking level           |
+| misc       | `TogglePlanMode`       | turn [plan mode](/guide/plan-mode) on or off |
 | misc       | `QueuePrompt`          | queue the prompt until the run ends (does nothing while idle) |
 | misc       | `RecallPrompt`         | pull the newest pending prompt back into the editor to edit (does nothing while idle) |
 
 Scrolling by a line count needs an argument, so it is only available
 from Lua as `kage.action.scroll(n)`.
 
-`CycleThinkingLevel` steps the thinking level (also `shift+tab`),
+`CycleThinkingLevel` steps the thinking level (also `alt+t`),
 visiting only the levels the model accepts. The level a new TUI
 session starts on comes from `[ui] thinking_level` (one of `off`,
 `minimal`, `low`, `medium`, `high`, `xhigh`). Left unset, it is

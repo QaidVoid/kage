@@ -460,6 +460,7 @@ every theme links them to another group until you set them:
 | Group | Default link | Colors |
 | --- | --- | --- |
 | `KageWorking` | `KageMuted` | the working row |
+| `KagePlan` | `KageInputBorderInsert` | the `plan` footer chip while [plan mode](/guide/plan-mode) is on |
 | `KageApproval` | `KageWarning` | approval panel rules, title and selected option, and the bullet of a tool call waiting for approval |
 | `KageDiffAdd` | `KageSuccess` | `+` lines in edit rows and approvals |
 | `KageDiffDelete` | `KageToolErrorRule` | `-` lines in edit rows and approvals |

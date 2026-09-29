@@ -78,7 +78,10 @@ work (`ctrl+a`/`ctrl+e` line start/end, `ctrl+u`/`ctrl+k` kill,
 `ctrl+/` undo), and `up`/`down` walk your prompt history. `esc` clears
 the draft, and `up` brings it back. `ctrl+g` opens the whole draft in
 an external editor (`$VISUAL` or `$EDITOR`) for longer prompts.
-`shift+tab` cycles through the thinking levels the model accepts.
+`alt+t` cycles through the thinking levels the model accepts, and
+`shift+tab` toggles [plan mode](/guide/plan-mode): the agent
+investigates and presents a plan, and nothing changes until you
+approve it.
 
 Prefer vim? Set `editor = "vim"` under `[ui]` in config.toml (or
 toggle it in `/settings`) to get normal/insert/visual modes with

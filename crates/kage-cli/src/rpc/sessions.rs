@@ -6,8 +6,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use kage_acp::acp::{
-    ContentBlock, ListSessionsRequest, ListSessionsResponse, McpServer, MessageChunk,
-    SessionConfigOption, SessionInfo, SessionInfoUpdate, SessionUpdate,
+    ContentBlock, ListSessionsRequest, ListSessionsResponse, McpServer, SessionConfigOption,
+    SessionInfo, SessionInfoUpdate, SessionUpdate,
 };
 use kage_acp::agent::PromptContext;
 use kage_core::sync::lock;
@@ -17,9 +17,10 @@ use kage_loop::TokenBudget;
 use kage_session::SessionWriter;
 
 use super::bridge::to_update;
+use super::bridge::user_chunk;
 use super::content::image_block;
 use super::mcp::editor_servers;
-use super::options::config_options;
+use super::options::{Shown, config_options};
 use crate::engine::Recorder;
 
 /// Sessions per `session/list` page.
@@ -39,7 +40,7 @@ impl super::CliAcpAgent {
         ctx: Option<&PromptContext>,
     ) -> Result<Vec<SessionConfigOption>, RpcError> {
         let servers = editor_servers(servers)?;
-        let path = kage_session::find_by_prefix(&self.sessions, client_id)
+        let path = kage_session::find_by_prefix(&self.host.sessions, client_id)
             .map_err(|e| RpcError::internal(e.to_string()))?
             .ok_or_else(|| RpcError::new(-32602, format!("unknown session {client_id}")))?;
         let id = crate::engine::session_id_of(&path).ok_or_else(|| {
@@ -62,20 +63,32 @@ impl super::CliAcpAgent {
             let shown = lock(&self.shown);
             return Ok(shown
                 .get(&id)
-                .map(|shown| config_options(&self.models, &shown.settings))
+                .map(|shown| config_options(&self.host.models, &shown.settings))
                 .unwrap_or_default());
         }
+        if let Some(settings) = self.host.open_settings(id) {
+            lock(&self.shown).insert(
+                id,
+                Shown {
+                    settings: settings.clone(),
+                    catching_up: false,
+                },
+            );
+            lock(&self.held).insert(id, Vec::new());
+            lock(&self.ids).insert(client_id.to_owned(), id);
+            return Ok(config_options(&self.host.models, &settings));
+        }
         let writer = SessionWriter::open(&path).map_err(|e| RpcError::internal(e.to_string()))?;
-        let model = if self.registry.resolve(&replay.model).is_ok() {
+        let model = if self.host.registry.resolve(&replay.model).is_ok() {
             replay.model
         } else {
             eprintln!(
                 "kage: rpc: session model {} unavailable; using {} instead",
-                replay.model, self.default_model
+                replay.model, self.host.default_model
             );
-            self.default_model.clone()
+            self.host.default_model.clone()
         };
-        let mut spec = (self.spec)(id, cwd, &model, servers)?;
+        let mut spec = (self.host.spec)(id, cwd, &model, servers)?;
         spec.cx.history = replay.history.into_iter().map(Arc::new).collect();
         spec.cx.budget = TokenBudget {
             used_input: replay.usage_total.input,
@@ -149,10 +162,6 @@ fn replay_event(id: MessageId, block: &Content) -> Option<LoopEvent> {
         }),
         Content::Image { .. } | Content::Custom { .. } => None,
     }
-}
-
-fn user_chunk(content: ContentBlock) -> SessionUpdate {
-    SessionUpdate::UserMessageChunk(MessageChunk { content })
 }
 
 /// One `session/list` page of the client sessions recorded in `dir`,

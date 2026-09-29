@@ -1,10 +1,13 @@
 //! `kage rpc`: a spec-conformant Agent Client Protocol agent.
 //!
 //! Speaks ACP (newline-delimited JSON-RPC 2.0 over stdio, protocol
-//! version 1) so editors that speak ACP can drive kage. Every ACP session
-//! is an engine session: prompts become engine commands, and a bus
-//! subscriber turns engine events into `session/update` notifications and
-//! `session/request_permission` requests. Recorded sessions can be
+//! version 1) so editors that speak ACP can drive kage. Every connection
+//! is served on one [`Host`], whose engine it shares with the other
+//! connections, and every ACP session is an engine session: prompts
+//! become engine commands, and a per-connection bridge turns engine
+//! events into `session/update` notifications and
+//! `session/request_permission` requests. A session another connection
+//! has open is attached to instead of reopened. Recorded sessions can be
 //! listed, loaded with a replay of their transcript, or resumed. Each
 //! session offers its model, thinking level and permission mode as config
 //! options, and the prompts of its live MCP servers as slash commands
@@ -23,13 +26,13 @@
 
 mod bridge;
 mod content;
+mod host;
 mod mcp;
 mod options;
 mod sessions;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -39,85 +42,34 @@ use kage_acp::acp::{
     ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpCapabilities,
     NewSessionRequest, NewSessionResponse, PROTOCOL_VERSION, PromptCapabilities, PromptRequest,
     PromptResponse, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
-    SessionConfigOption, SessionConfigSelectOption, SessionUpdate, SetSessionConfigOptionRequest,
+    SessionConfigOption, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, StopReason, Supported,
 };
-use kage_acp::agent::{Agent, PromptContext, send_update, serve_agent};
-use kage_core::config::McpServer as McpSpec;
-use kage_core::permissions::PermissionAction;
+use kage_acp::agent::{Agent, PromptContext, send_update};
 use kage_core::protocol::{AgentTree, Command, CommandKind, Delivery, RunOutcome};
 use kage_core::sync::lock;
 use kage_core::{LoopError, SessionId, StopReason as CoreStopReason};
 use kage_jsonrpc::{Peer, RpcError};
-use kage_loop::{AgentContext, LoopConfig};
-use kage_provider::ProviderRegistry;
-use kage_tools::builtin_registry;
 
-use bridge::Bridge;
+use bridge::{Ask, AskSet, Bridge};
 use content::prompt_content;
-use mcp::{editor_servers, without_login};
-use options::{Settings, Shown, choice, config_options};
+use host::Host;
+use mcp::editor_servers;
+use options::{Settings, Shown, config_options};
 use sessions::list_page;
 
-use crate::engine::{AgentSetup, Engine, Recorder, SessionSpec};
-use crate::permissions::PermissionGate;
-use crate::runtime_env;
+use crate::engine::{Recorder, SessionSpec, SubscriptionId};
 
 /// Entry point for the `Rpc` subcommand.
 pub(crate) fn run(model_override: Option<&str>, system_role: &str) -> ExitCode {
-    let registry = match crate::build_provider_registry() {
-        Ok(registry) => registry,
-        Err(e) => {
-            eprintln!("kage: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    if !crate::has_usable_provider(&registry) && model_override.is_none() {
-        eprintln!(
-            "kage: rpc: no provider credentials found; run `kage auth login` or set an API-key env var"
-        );
-        return ExitCode::from(1);
-    }
-    let default_model =
-        model_override.map_or_else(|| crate::default_model(&registry), str::to_owned);
-    if let Err(e) = registry.resolve(&default_model) {
-        eprintln!("kage: rpc: cannot resolve model {default_model}: {e}");
-        return ExitCode::from(1);
-    }
-    let sessions = match crate::sessions_dir() {
-        Ok(dir) => dir,
-        Err(e) => {
-            eprintln!("kage: rpc: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let registry = Arc::new(registry);
-    // Tool names the model sees renamed, for the bridge's card titles
-    // and kind hints. Loaded once at startup, like the TUI does.
-    let aliases = {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let renames = kage_core::config::Config::load_layered(&cwd)
-            .map(|config| config.tools.rename)
-            .unwrap_or_default();
-        kage_tools::ToolRegistry::new()
-            .with_renames(&renames)
-            .alias_map()
-    };
-    let spec = {
-        let registry = Arc::clone(&registry);
-        let system_role = system_role.to_owned();
-        Box::new(move |id, cwd: &str, model: &str, servers| {
-            session_spec(&registry, &system_role, id, cwd, model, servers)
-        })
-    };
-    let reader = BufReader::new(std::io::stdin());
-    let result = serve_agent(reader, std::io::stdout(), |peer| {
-        CliAcpAgent::new(registry, default_model, sessions, spec, peer, aliases)
+    let served = Host::start(model_override, system_role).and_then(|host| {
+        host.serve(BufReader::new(std::io::stdin()), std::io::stdout())
+            .map_err(|e| format!("rpc: {e}"))
     });
-    match result {
+    match served {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("kage: rpc: {e}");
+            eprintln!("kage: {e}");
             ExitCode::from(1)
         }
     }
@@ -156,62 +108,46 @@ type ShownBySession = Arc<Mutex<HashMap<SessionId, Shown>>>;
 /// are dropped.
 type Held = Arc<Mutex<HashMap<SessionId, Vec<SessionUpdate>>>>;
 
-/// Builds the engine session for a client session from its id, working
-/// directory, model and the MCP servers the client passed. The caller
-/// fills in the history and recorder.
-type SpecBuilder = Box<
-    dyn Fn(SessionId, &str, &str, BTreeMap<String, McpSpec>) -> Result<SessionSpec, RpcError>
-        + Send
-        + Sync,
->;
-
-/// The ACP agent `kage rpc` exposes.
+/// The ACP agent one connection on the host is served through. Holds the
+/// per-connection maps; the engine and the session setup live in the
+/// host every connection shares.
 struct CliAcpAgent {
-    engine: Engine,
-    registry: Arc<ProviderRegistry>,
-    default_model: String,
-    sessions: PathBuf,
-    spec: SpecBuilder,
+    host: Arc<Host>,
+    /// This connection's id on the host.
+    connection: u64,
     ids: Arc<Mutex<Ids>>,
     waiters: Waiters,
-    models: Arc<[SessionConfigSelectOption]>,
     shown: ShownBySession,
     subagents: Arc<AtomicBool>,
     peer: Peer,
     held: Held,
+    asks: AskSet,
+    subscription: SubscriptionId,
 }
 
 impl CliAcpAgent {
-    fn new(
-        registry: Arc<ProviderRegistry>,
-        default_model: String,
-        sessions: PathBuf,
-        spec: SpecBuilder,
-        peer: Peer,
-        aliases: BTreeMap<String, String>,
-    ) -> Self {
-        let engine = Engine::start(Arc::clone(&registry));
+    /// The agent for one connection on `host`.
+    fn new(host: Arc<Host>, peer: Peer) -> Self {
+        let connection = host.next_connection();
         let ids = Arc::new(Mutex::new(Ids::default()));
         let waiters = Waiters::default();
-        let models: Arc<[SessionConfigSelectOption]> =
-            crate::tui::available_model_items(&registry, "")
-                .into_iter()
-                .map(|item| choice(&item.value, &item.label, item.group.as_deref()))
-                .collect();
         let shown = ShownBySession::default();
         let subagents = Arc::new(AtomicBool::new(false));
         let held = Held::default();
+        let asks = AskSet::default();
         let mut bridge = Bridge {
             peer: peer.clone(),
-            commander: engine.commander(),
+            commander: host.engine.commander(),
+            connection,
+            owners: Arc::clone(&host.owners),
             ids: Arc::clone(&ids),
             waiters: Arc::clone(&waiters),
-            models: Arc::clone(&models),
+            models: Arc::clone(&host.models),
             shown: Arc::clone(&shown),
-            aliases,
+            aliases: host.aliases.clone(),
             seen: HashMap::new(),
             stops: HashMap::new(),
-            asks: HashMap::new(),
+            asks: Arc::clone(&asks),
             tree: AgentTree::default(),
             subagents: Arc::clone(&subagents),
             live: HashSet::new(),
@@ -220,20 +156,20 @@ impl CliAcpAgent {
             held: Arc::clone(&held),
             approving: HashMap::new(),
         };
-        engine.subscribe(Box::new(move |envelope| bridge.handle(envelope)));
+        let subscription = host
+            .engine
+            .subscribe(Box::new(move |envelope| bridge.handle(envelope)));
         Self {
-            engine,
-            registry,
-            default_model,
-            sessions,
-            spec,
+            host,
+            connection,
             ids,
             waiters,
-            models,
             shown,
             subagents,
             peer,
             held,
+            asks,
+            subscription,
         }
     }
 
@@ -241,16 +177,16 @@ impl CliAcpAgent {
     /// config options. Updates for it wait for
     /// [`Agent::session_announced`].
     fn open(&self, client_id: String, spec: SessionSpec) -> Vec<SessionConfigOption> {
-        let settings = Settings::of(&spec, &self.registry);
-        let options = config_options(&self.models, &settings);
+        let settings = Settings::of(&spec, &self.host.registry);
+        let options = config_options(&self.host.models, &settings);
         let shown = Shown {
-            settings,
+            settings: settings.clone(),
             catching_up: false,
         };
         lock(&self.shown).insert(spec.id, shown);
         lock(&self.held).insert(spec.id, Vec::new());
         lock(&self.ids).insert(client_id, spec.id);
-        self.engine.open(spec);
+        self.host.launch(spec, settings);
         options
     }
 
@@ -261,101 +197,23 @@ impl CliAcpAgent {
             .copied()
             .ok_or_else(|| RpcError::new(-32602, format!("unknown session {client_id}")))
     }
-}
 
-/// Everything an engine session for `cwd` on `model` runs with, including
-/// the client's MCP `servers`. The caller fills in the history and
-/// recorder.
-fn session_spec(
-    registry: &ProviderRegistry,
-    system_role: &str,
-    id: SessionId,
-    cwd: &str,
-    model: &str,
-    servers: BTreeMap<String, McpSpec>,
-) -> Result<SessionSpec, RpcError> {
-    let workdir = if cwd.is_empty() {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    } else {
-        PathBuf::from(cwd)
-    };
-    crate::trust::warn_if_untrusted(&workdir);
-    let config = kage_core::config::Config::load_layered(&workdir)
-        .map_err(|e| RpcError::internal(e.to_string()))?;
-    let model = model.to_owned();
-    let bare = runtime_env::build_system_prompt(system_role, &workdir, &model, &[], None);
-    let plugins = match crate::plugins_dir() {
-        Ok(dir) => {
-            crate::plugins::setup_runtime(&dir, &workdir, &model, &bare).unwrap_or_else(|e| {
-                eprintln!("kage: {e}");
-                None
-            })
+    /// The connection ended: stop delivering engine events to it, free
+    /// what its prompts wait on, and withdraw its open asks without
+    /// answering them. The engine and its runs keep going for the
+    /// connections that stay.
+    fn detach(&self) {
+        self.host.engine.unsubscribe(self.subscription);
+        self.host.release_prompts_of(self.connection);
+        lock(&self.waiters).clear();
+        let asks: Vec<Ask> = lock(&self.asks)
+            .drain()
+            .flat_map(|(_, asks)| asks)
+            .collect();
+        for ask in asks {
+            ask.stop();
         }
-        Err(e) => {
-            eprintln!("kage: {e}");
-            None
-        }
-    };
-    let skills = crate::load_skills(&workdir, plugins.as_deref());
-    let system_prompt = runtime_env::build_system_prompt(
-        system_role,
-        &workdir,
-        &model,
-        &skills,
-        config.shell.program.as_deref(),
-    );
-    let mut tools = builtin_registry()
-        .with_shell_config(&config.shell)
-        .with_renames(&config.tools.rename);
-    let aliases = tools.alias_map();
-    let editor: Vec<String> = servers.keys().cloned().collect();
-    let (mcp, mcp_errors) =
-        crate::mcp::spawn_and_register_with(&mut tools, &workdir, plugins.as_deref(), servers);
-    for (server, err) in mcp_errors {
-        eprintln!("kage: mcp `{server}`: {}", without_login(err, &editor));
     }
-    let (defs, agent_errors) = crate::agents::load(&workdir);
-    for err in agent_errors {
-        eprintln!("kage: {err}");
-    }
-    let agents = AgentSetup::from_config(defs, &config);
-    config
-        .permissions
-        .validate()
-        .map_err(|e| RpcError::internal(format!("permissions: {e}")))?;
-    config
-        .shell
-        .validate()
-        .map_err(|e| RpcError::internal(format!("shell: {e}")))?;
-    let mut cx = AgentContext::new(model.clone(), &system_prompt).with_workdir(&workdir);
-    if config.permissions.confine_paths {
-        cx = cx.with_confine_paths();
-    }
-    if let Some(window) = runtime_env::context_window_for(registry, &model) {
-        cx = cx.with_context_window(window);
-    }
-    Ok(SessionSpec {
-        id,
-        model,
-        cx,
-        recorder: None,
-        tools,
-        gate: PermissionGate::new(config.permissions)
-            .with_fallback(PermissionAction::Ask)
-            .with_aliases(aliases)
-            .with_mcp_servers(mcp.server_names().map(str::to_owned).collect()),
-        loop_cfg: LoopConfig {
-            compaction_threshold: config.loop_settings.compaction_threshold,
-            parallel_tools: false,
-            ..LoopConfig::default()
-        },
-        plugins,
-        mcp: Some(mcp),
-        interactive: true,
-        title: true,
-        agents: Some(agents),
-        shell: config.shell.program.clone(),
-    })
 }
 
 impl Agent for CliAcpAgent {
@@ -394,9 +252,9 @@ impl Agent for CliAcpAgent {
     fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
         let servers = editor_servers(&req.mcp_servers)?;
         let (path, mut header) =
-            crate::plan_session(&self.default_model, "").map_err(RpcError::internal)?;
+            crate::plan_session(&self.host.default_model, "").map_err(RpcError::internal)?;
         let id = header.session;
-        let mut spec = (self.spec)(id, &req.cwd, &self.default_model, servers)?;
+        let mut spec = (self.host.spec)(id, &req.cwd, &self.host.default_model, servers)?;
         header.cwd.clone_from(&spec.cx.workdir);
         header.system_prompt.clone_from(&spec.cx.system_prompt);
         spec.recorder = Some(Recorder::planned(path, header, spec.plugins.clone()));
@@ -418,7 +276,7 @@ impl Agent for CliAcpAgent {
     }
 
     fn list_sessions(&self, req: ListSessionsRequest) -> Result<ListSessionsResponse, RpcError> {
-        list_page(&self.sessions, &req)
+        list_page(&self.host.sessions, &req)
     }
 
     fn resume_session(&self, req: ResumeSessionRequest) -> Result<ResumeSessionResponse, RpcError> {
@@ -439,20 +297,26 @@ impl Agent for CliAcpAgent {
             })?;
             let command = shown
                 .settings
-                .apply(&self.models, &req.config_id, &req.value)?;
+                .apply(&self.host.models, &req.config_id, &req.value)?;
             shown.catching_up = true;
-            (command, config_options(&self.models, &shown.settings))
+            (command, config_options(&self.host.models, &shown.settings))
         };
-        self.engine.send(Command::to(id, command));
+        self.host.engine.send(Command::to(id, command));
         Ok(SetSessionConfigOptionResponse { config_options })
     }
 
     fn prompt(&self, req: PromptRequest, _ctx: &PromptContext) -> Result<PromptResponse, RpcError> {
         let id = self.engine_id(&req.session_id)?;
+        if !self.host.claim_prompt(id, self.connection) {
+            return Err(RpcError::new(
+                -32603,
+                "session is busy; wait for the running prompt to finish",
+            ));
+        }
         let content = req.prompt.into_iter().map(prompt_content).collect();
         let (done, end) = mpsc::channel();
         lock(&self.waiters).insert(id, done);
-        self.engine.send(Command::to(
+        self.host.engine.send(Command::to(
             id,
             CommandKind::Prompt {
                 content,
@@ -485,7 +349,7 @@ impl Agent for CliAcpAgent {
                 .copied()
         };
         if let Some(id) = id {
-            self.engine.send(Command::to(id, CommandKind::Cancel));
+            self.host.engine.send(Command::to(id, CommandKind::Cancel));
         }
     }
 
@@ -497,6 +361,10 @@ impl Agent for CliAcpAgent {
         for update in held.remove(&id).unwrap_or_default() {
             send_update(&self.peer, session_id, update);
         }
+    }
+
+    fn detached(&self) {
+        self.detach();
     }
 }
 

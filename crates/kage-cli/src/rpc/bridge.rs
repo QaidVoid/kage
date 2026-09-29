@@ -16,9 +16,14 @@ use kage_core::protocol::{
     PermissionDecision as Decision, RequestId, RunOutcome, Usage, with_canonical_tool_names,
 };
 use kage_core::sync::lock;
-use kage_core::{CancelFlag, LoopEvent, SessionId, StopReason as CoreStopReason, ToolCallId};
+use kage_core::{
+    CancelFlag, Content, LoopEvent, Message, Role, SessionId, StopReason as CoreStopReason,
+    ToolCallId,
+};
 use kage_jsonrpc::Peer;
 
+use super::content::image_block;
+use super::host::Owners;
 use super::mcp::prompt_commands;
 use super::options::{Settings, config_options};
 use super::{Held, Ids, PromptEnd, ShownBySession, Waiters};
@@ -35,6 +40,10 @@ pub(super) const HELD_CAP: usize = 4096;
 pub(super) struct Bridge {
     pub(super) peer: Peer,
     pub(super) commander: Commander,
+    /// This connection's id on the host.
+    pub(super) connection: u64,
+    /// The connection each session's running prompt came from.
+    pub(super) owners: Owners,
     pub(super) ids: Arc<Mutex<Ids>>,
     pub(super) waiters: Waiters,
     pub(super) models: Arc<[SessionConfigSelectOption]>,
@@ -45,7 +54,6 @@ pub(super) struct Bridge {
     pub(super) aliases: BTreeMap<String, String>,
     pub(super) seen: HashMap<SessionId, HashMap<String, serde_json::Value>>,
     pub(super) stops: HashMap<SessionId, CoreStopReason>,
-    pub(super) asks: HashMap<SessionId, Vec<Ask>>,
     pub(super) tree: AgentTree,
     /// Whether the client advertised the subagents capability.
     pub(super) subagents: Arc<AtomicBool>,
@@ -59,17 +67,37 @@ pub(super) struct Bridge {
     /// Agent calls waiting for approval, by session and call id, with the
     /// line their card shows again once they run.
     pub(super) approving: HashMap<(SessionId, String), String>,
+    /// This connection's open asks, shared with its agent so a detach
+    /// can withdraw them.
+    pub(super) asks: AskSet,
 }
 
 /// A permission question in flight on its own thread.
 pub(super) struct Ask {
+    /// The engine request the ask came from.
+    request_id: RequestId,
     withdraw: CancelFlag,
     thread: std::thread::JoinHandle<()>,
 }
 
+impl Ask {
+    /// Stops the ask and waits until its thread is done. A withdrawn ask
+    /// sends no decision.
+    pub(super) fn stop(self) {
+        self.withdraw.cancel();
+        let _ = self.thread.join();
+    }
+}
+
+/// The open asks of one connection, keyed by the session that asked.
+pub(super) type AskSet = Arc<Mutex<HashMap<SessionId, Vec<Ask>>>>;
+
 impl Bridge {
     pub(super) fn handle(&mut self, envelope: &Envelope) {
         let envelope = &with_canonical_tool_names(envelope.clone(), &self.aliases);
+        if let Event::Host(HostEvent::PermissionResolved { request_id }) = &envelope.event {
+            self.withdraw(*request_id);
+        }
         let session = envelope.session;
         let is_agent = self.tree.apply(envelope);
         let client_id = lock(&self.ids).by_engine.get(&session).cloned();
@@ -88,6 +116,9 @@ impl Bridge {
             Event::Loop(event) => {
                 if let LoopEvent::MessageEnd { stop_reason, .. } = event {
                     self.stops.insert(session, *stop_reason);
+                }
+                if let LoopEvent::MessageAppended { message } = event {
+                    self.echo(session, &client_id, message);
                 }
                 let seen = self.seen.entry(session).or_default();
                 if let Some(update) = to_update(seen, event) {
@@ -151,6 +182,7 @@ impl Bridge {
                 }
             }
             Event::Host(HostEvent::RunEnded { outcome }) => {
+                lock(&self.owners).remove(&session);
                 self.end_asks(session);
                 self.seen.remove(&session);
                 let stop = self.stops.remove(&session);
@@ -357,7 +389,9 @@ impl Bridge {
 
     /// Asks the client on `client_id` and resolves `request_id` of
     /// `session` with the answer. The ask is withdrawn when that
-    /// session's run ends first.
+    /// session's run ends first, when another client's answer resolves
+    /// it, or when the connection detaches; a withdrawn ask sends no
+    /// decision.
     fn ask(
         &mut self,
         session: SessionId,
@@ -374,6 +408,7 @@ impl Bridge {
             let decision =
                 kage_acp::agent::request_permission(&peer, &client_id, tool_call, &title, &flag);
             let decision = match decision {
+                PermissionDecision::Unanswered => return,
                 PermissionDecision::Allow => Decision::AllowOnce,
                 PermissionDecision::AllowSession => Decision::AllowSession,
                 PermissionDecision::Deny(_) => Decision::Deny,
@@ -386,27 +421,73 @@ impl Bridge {
                 },
             ));
         });
-        self.asks
-            .entry(session)
-            .or_default()
-            .push(Ask { withdraw, thread });
+        lock(&self.asks).entry(session).or_default().push(Ask {
+            request_id,
+            withdraw,
+            thread,
+        });
     }
 
     /// Withdraws the open asks of `session` and waits until each is
     /// answered or withdrawn, so no update that follows overtakes them.
     fn end_asks(&mut self, session: SessionId) {
-        let asks = self.asks.remove(&session).unwrap_or_default();
-        for ask in &asks {
-            ask.withdraw.cancel();
-        }
+        let asks = lock(&self.asks).remove(&session).unwrap_or_default();
         for ask in asks {
-            let _ = ask.thread.join();
+            ask.stop();
+        }
+    }
+
+    /// Withdraws this connection's open ask for `request_id`: another
+    /// client's answer resolved it, so the dialog closes here and a late
+    /// answer sends nothing.
+    fn withdraw(&mut self, request_id: RequestId) {
+        let mut matched = Vec::new();
+        let mut asks = lock(&self.asks);
+        for session_asks in asks.values_mut() {
+            let (taken, kept): (Vec<_>, Vec<_>) = session_asks
+                .drain(..)
+                .partition(|ask| ask.request_id == request_id);
+            *session_asks = kept;
+            matched.extend(taken);
+        }
+        asks.retain(|_, session_asks| !session_asks.is_empty());
+        drop(asks);
+        for ask in matched {
+            ask.stop();
+        }
+    }
+
+    /// Shows the user message a run opened with to the attached clients
+    /// that did not send it, so their reply does not arrive without its
+    /// question. The client that owns the run sees nothing.
+    fn echo(&self, session: SessionId, client_id: &str, message: &Message) {
+        if message.role != Role::User {
+            return;
+        }
+        let owner = lock(&self.owners).get(&session).copied();
+        if owner.is_none_or(|owner| owner == self.connection) {
+            return;
+        }
+        for block in &message.content {
+            let block = match block {
+                Content::Text { text } if !text.is_empty() => {
+                    kage_acp::acp::ContentBlock::text(text.clone())
+                }
+                Content::Image { source, mime } => image_block(source, mime),
+                _ => continue,
+            };
+            self.send(session, client_id, user_chunk(block));
         }
     }
 }
 
-/// Buffers `update` for an unannounced session, keeping the first
-/// [`HELD_CAP`] and dropping later ones. The early updates are the
+/// The `user_message_chunk` showing `content` to a client that did not
+/// send it.
+pub(super) fn user_chunk(content: kage_acp::acp::ContentBlock) -> SessionUpdate {
+    SessionUpdate::UserMessageChunk(kage_acp::acp::MessageChunk { content })
+}
+
+/// Buffers `update` for an unannounced session, keeping the first/// [`HELD_CAP`] and dropping later ones. The early updates are the
 /// ones a client replays first; nothing here is worth an unbounded
 /// buffer on a session that never announces.
 pub(super) fn hold(updates: &mut Vec<SessionUpdate>, update: SessionUpdate) -> bool {

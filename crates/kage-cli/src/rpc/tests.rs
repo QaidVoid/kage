@@ -1,24 +1,31 @@
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::io::{BufRead as _, BufReader, Write as _};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use kage_acp::acp::{McpServer, ToolCallStatus, ToolKind};
 use kage_core::agents::AgentDefs;
-use kage_core::permissions::{PermissionsConfig, ToolPermissionRules};
+use kage_core::config::McpServer as McpSpec;
+use kage_core::permissions::{PermissionAction, PermissionsConfig, ToolPermissionRules};
 use kage_core::protocol::{McpServerInfo, McpServerStatus, Usage};
 use kage_core::{
     Content, ImageSource, Input, Inputs, LoopEvent, Message, MessageId, Role, ThinkingLevel,
     TokenUsage, ToolCallId, ToolOutput, ToolUpdate,
 };
-use kage_jsonrpc::Inbound;
+use kage_jsonrpc::{Inbound, Peer};
+use kage_loop::{AgentContext, LoopConfig};
 use kage_mcp::McpError;
 use kage_provider::testing::MockProvider;
-use kage_provider::{ProviderError, ProviderEvent};
+use kage_provider::{ProviderError, ProviderEvent, ProviderRegistry};
 use kage_session::{EntryId, FORMAT_VERSION, Header, MessageEntry, SessionEntry, SessionWriter};
+use kage_tools::builtin_registry;
 
-use crate::engine::Commander;
+use crate::engine::{AgentSetup, Commander};
+use crate::permissions::PermissionGate;
 
 use super::bridge::{to_update, tool_kind, usage_update};
-use super::mcp::prompt_commands;
+use super::host::Host;
+use super::mcp::{prompt_commands, without_login};
 use super::*;
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -57,6 +64,7 @@ const WINDOW: u64 = 1000;
 /// The client side of a served `kage rpc`, the provider its sessions
 /// call, and the id of the session open from the start.
 struct Harness {
+    host: Arc<Host>,
     client: Peer,
     inbox: mpsc::Receiver<Inbound>,
     mock: MockProvider,
@@ -65,11 +73,27 @@ struct Harness {
     session: String,
 }
 
+/// A second client on a harness host.
+struct Connection {
+    client: Peer,
+    inbox: mpsc::Receiver<Inbound>,
+}
+
 impl Harness {
     /// Sends `kind` to the open session the way a non-client change
     /// would reach the engine.
     fn command(&self, kind: CommandKind) {
         self.commander.send(Command::to(self.id, kind));
+    }
+
+    /// Opens a second connection on the same host.
+    fn connect(&self) -> Connection {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let host = Arc::clone(&self.host);
+        std::thread::spawn(move || host.serve(BufReader::new(srv_r), srv_w).unwrap());
+        let (client, inbox, _reader) = kage_jsonrpc::connect(BufReader::new(cli_r), cli_w);
+        Connection { client, inbox }
     }
 }
 
@@ -136,43 +160,41 @@ fn serve_with(
     let (srv_r, cli_w) = std::io::pipe().unwrap();
     let (cli_r, srv_w) = std::io::pipe().unwrap();
     let id = SessionId::new();
-    let workdir = workdir.to_path_buf();
-    let sessions = sessions.to_path_buf();
     let mock = MockProvider::sequence(scripts);
     let provider = Listed {
         mock: mock.clone(),
         input,
     };
-    let (commander_tx, commander) = mpsc::channel();
+    let host = test_host(provider, workdir.to_path_buf(), sessions.to_path_buf(), mcp);
+    let commander = host.engine.commander();
+    let standing = Arc::clone(&host);
+    let (opened_tx, opened_rx) = mpsc::channel();
     std::thread::spawn(move || {
-        serve_agent(BufReader::new(srv_r), srv_w, |peer| {
-            let agent = test_agent(peer, provider, workdir, sessions, mcp);
-            let spec = (agent.spec)(id, "", "mock:m", BTreeMap::new()).unwrap();
-            agent.open(id.to_string(), spec);
-            agent.session_announced(&id.to_string());
-            let _ = commander_tx.send(agent.engine.commander());
-            agent
-        })
+        standing
+            .serve_with(BufReader::new(srv_r), srv_w, move |agent| {
+                let spec = (agent.host.spec)(id, "", "mock:m", BTreeMap::new()).unwrap();
+                agent.open(id.to_string(), spec);
+                agent.session_announced(&id.to_string());
+                let _ = opened_tx.send(());
+            })
+            .unwrap();
     });
     let (client, inbox, _reader) = kage_jsonrpc::connect(BufReader::new(cli_r), cli_w);
+    opened_rx.recv_timeout(WAIT).unwrap();
     Harness {
+        host,
         client,
         inbox,
         mock,
-        commander: commander.recv_timeout(WAIT).unwrap(),
+        commander,
         id,
         session: id.to_string(),
     }
 }
 
-/// The agent [`serve_with`] serves, on `provider`.
-fn test_agent(
-    peer: Peer,
-    provider: Listed,
-    workdir: PathBuf,
-    sessions: PathBuf,
-    mcp: bool,
-) -> CliAcpAgent {
+/// A host on `provider` whose sessions run in `workdir`, ask before
+/// `ls` calls and generate a title.
+fn test_host(provider: Listed, workdir: PathBuf, sessions: PathBuf, mcp: bool) -> Arc<Host> {
     let registry = Arc::new(ProviderRegistry::new().with(Arc::new(provider)));
     let spec = Box::new(move |id, _cwd: &str, model: &str, servers| {
         let mut rules = PermissionsConfig::default();
@@ -212,14 +234,7 @@ fn test_agent(
             }),
         })
     });
-    CliAcpAgent::new(
-        registry,
-        "mock:m".into(),
-        sessions,
-        spec,
-        peer,
-        BTreeMap::new(),
-    )
+    Host::new(registry, "mock:m".into(), sessions, spec, BTreeMap::new())
 }
 
 /// An in-process MCP server with the prompt `p(a, b?)`, which answers
@@ -1449,8 +1464,6 @@ fn a_tool_of_an_editor_server_asks_and_sees_its_env() {
 
 #[test]
 fn a_new_session_is_answered_before_its_updates_as_the_input_ends() {
-    use std::io::{BufRead as _, Write as _};
-
     let dir = tempfile::tempdir().unwrap();
     let (srv_r, mut cli_w) = std::io::pipe().unwrap();
     let (cli_r, srv_w) = std::io::pipe().unwrap();
@@ -1460,11 +1473,13 @@ fn a_new_session_is_answered_before_its_updates_as_the_input_ends() {
     writeln!(cli_w, "{request}").unwrap();
     drop(cli_w);
     let provider = Listed::of(MockProvider::sequence(Vec::new()));
-    let (workdir, sessions) = (dir.path().to_path_buf(), dir.path().to_path_buf());
-    serve_agent(BufReader::new(srv_r), srv_w, |peer| {
-        test_agent(peer, provider, workdir, sessions, true)
-    })
-    .unwrap();
+    let host = test_host(
+        provider,
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+        true,
+    );
+    std::thread::spawn(move || host.serve(BufReader::new(srv_r), srv_w).unwrap());
 
     let lines: Vec<serde_json::Value> = BufReader::new(cli_r)
         .lines()
@@ -1693,4 +1708,411 @@ fn built_in_tools_get_kind_hints() {
     assert_eq!(tool_kind("shell"), ToolKind::Execute);
     assert_eq!(tool_kind("grep"), ToolKind::Search);
     assert_eq!(tool_kind("github__create_issue"), ToolKind::Other);
+}
+
+fn chunk_texts(updates: &[serde_json::Value]) -> Vec<String> {
+    updates
+        .iter()
+        .filter(|p| p["update"]["sessionUpdate"] == "agent_message_chunk")
+        .filter_map(|p| p["update"]["content"]["text"].as_str())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Waits until `call` holds, so an async side effect (a generated title
+/// taking the next provider script) settles before the test moves on.
+fn until(call: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + WAIT;
+    while !call() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "condition not reached"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Attaches the harness client and a second connection to the recorded
+/// `session`, one connection each on the same host.
+fn attach_both(h: &Harness, c2: &Connection, session: &str, cwd: &str) {
+    let params = serde_json::json!({"sessionId": session, "cwd": cwd, "mcpServers": []});
+    h.client.request("session/resume", params.clone()).unwrap();
+    c2.client.request("session/load", params).unwrap();
+}
+
+/// Waits for the `$/cancel_request` withdrawing `ask`.
+fn wait_cancel(inbox: &mpsc::Receiver<Inbound>, ask: &serde_json::Value) {
+    loop {
+        match inbox.recv_timeout(WAIT).expect("no cancel") {
+            Inbound::Notification { method, params }
+                if method == "$/cancel_request" && params["requestId"] == *ask =>
+            {
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A connection driven by hand, so the test can close it while a
+/// request is still out.
+struct RawClient {
+    writer: std::io::PipeWriter,
+    reader: BufReader<std::io::PipeReader>,
+}
+
+impl RawClient {
+    fn send(&mut self, id: u64, method: &str, params: &serde_json::Value) {
+        let request =
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        writeln!(self.writer, "{request}").unwrap();
+    }
+
+    /// The next message, or `None` when the connection closed.
+    fn recv(&mut self) -> Option<serde_json::Value> {
+        let mut line = String::new();
+        self.reader.read_line(&mut line).ok().filter(|n| *n > 0)?;
+        Some(serde_json::from_str(&line).unwrap())
+    }
+
+    /// Reads until the `session/request_permission` request arrives.
+    fn until_ask(&mut self) -> serde_json::Value {
+        loop {
+            let message = self.recv().expect("no permission request");
+            if message["method"] == "session/request_permission" {
+                return message["id"].clone();
+            }
+        }
+    }
+}
+
+impl Harness {
+    /// Opens a second connection on the same host, driven by hand.
+    fn connect_raw(&self) -> RawClient {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let host = Arc::clone(&self.host);
+        std::thread::spawn(move || host.serve(BufReader::new(srv_r), srv_w).unwrap());
+        RawClient {
+            writer: cli_w,
+            reader: BufReader::new(cli_r),
+        }
+    }
+}
+
+#[test]
+fn the_first_answer_wins_and_the_other_ask_is_cancelled() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let path = dir.path().display().to_string();
+    let session = record(dir.path(), &cwd, "mock:m", 0, &[]);
+    let h = serve(
+        vec![
+            tool_turn("call_1", "ls", serde_json::json!({ "path": path })),
+            text_turn("done"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    let c2 = h.connect();
+    attach_both(&h, &c2, &session, &cwd);
+    let prompt_end = prompt_async(&h.client, &session, "go");
+
+    let mut first = Vec::new();
+    let (ask_1, params_1) = until_ask(&h.inbox, &mut first);
+    let mut second = Vec::new();
+    let (ask_2, params_2) = until_ask(&c2.inbox, &mut second);
+    assert_eq!(params_1["sessionId"], session);
+    assert_eq!(params_2["sessionId"], session);
+    assert_eq!(params_1["toolCall"]["toolCallId"], "call_1");
+    assert_eq!(params_2["toolCall"]["toolCallId"], "call_1");
+
+    allow(&h.client, &ask_1);
+    wait_cancel(&c2.inbox, &ask_2);
+    allow(&c2.client, &ask_2);
+
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    let mut all = first;
+    all.extend(drain(&h.inbox));
+    let announced = all
+        .iter()
+        .filter(|p| {
+            p["update"]["sessionUpdate"] == "tool_call" && p["update"]["toolCallId"] == "call_1"
+        })
+        .count();
+    assert_eq!(announced, 1, "the tool ran more than once");
+}
+
+#[test]
+fn a_connection_that_closes_while_asked_sends_no_decision() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let path = dir.path().display().to_string();
+    let session = record(dir.path(), &cwd, "mock:m", 0, &[]);
+    let h = serve(
+        vec![
+            tool_turn("call_1", "ls", serde_json::json!({ "path": path })),
+            text_turn("done"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    let c2 = h.connect();
+    let mut raw = h.connect_raw();
+
+    let params = serde_json::json!({"sessionId": session, "cwd": cwd, "mcpServers": []});
+    raw.send(1, "session/resume", &params);
+    while raw.recv().is_some_and(|m| m["id"] != 1) {}
+    let params = serde_json::json!({"sessionId": session, "cwd": cwd, "mcpServers": []});
+    c2.client.request("session/load", params).unwrap();
+
+    let params = serde_json::json!({
+        "sessionId": session,
+        "prompt": [{"type": "text", "text": "go"}],
+    });
+    raw.send(2, "session/prompt", &params);
+    raw.until_ask();
+    let (ask_2, _) = until_ask(&c2.inbox, &mut Vec::new());
+
+    drop(raw);
+
+    // The closed connection sent no decision: the engine request is
+    // still open, so the bystander's answer is what runs the tool.
+    assert!(c2.inbox.recv_timeout(Duration::from_millis(300)).is_err());
+    allow(&c2.client, &ask_2);
+    let seen = updates_until(&c2.inbox, &session, "agent_message_chunk");
+    assert_eq!(chunk_texts(&seen).last().unwrap(), "done");
+}
+
+#[test]
+fn a_prompt_from_another_client_is_refused_while_a_run_is_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let path = dir.path().display().to_string();
+    let session = record(dir.path(), &cwd, "mock:m", 0, &[]);
+    let h = serve(
+        vec![
+            tool_turn("call_1", "ls", serde_json::json!({ "path": path })),
+            text_turn("done"),
+            text_turn("run title"),
+            text_turn("again"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    let c2 = h.connect();
+    attach_both(&h, &c2, &session, &cwd);
+    let prompt_end = prompt_async(&h.client, &session, "go");
+
+    let (ask_1, _) = until_ask(&h.inbox, &mut Vec::new());
+    let params = serde_json::json!({
+        "sessionId": session,
+        "prompt": [{"type": "text", "text": "me too"}],
+    });
+    let refused = c2.client.request("session/prompt", params).unwrap_err();
+    assert_eq!(refused.code, -32603);
+    assert!(refused.message.contains("busy"), "{}", refused.message);
+
+    allow(&h.client, &ask_1);
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    until(|| h.mock.call_count() >= 3);
+
+    assert_eq!(
+        prompt(&c2.client, &session, "again")["stopReason"],
+        "end_turn"
+    );
+}
+
+#[test]
+fn the_non_owner_sees_the_prompt_and_the_owner_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let session = record(dir.path(), &cwd, "mock:m", 0, &[]);
+    let h = serve(
+        vec![
+            text_turn("hi there"),
+            text_turn("first title"),
+            text_turn("look reply"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    let c2 = h.connect();
+    attach_both(&h, &c2, &session, &cwd);
+
+    let params = serde_json::json!({
+        "sessionId": session,
+        "prompt": [{"type": "text", "text": "hello"}],
+    });
+    let response = h.client.request("session/prompt", params).unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    until(|| h.mock.call_count() >= 2);
+
+    let owner = drain(&h.inbox);
+    assert!(
+        !owner
+            .iter()
+            .any(|p| p["update"]["sessionUpdate"] == "user_message_chunk")
+    );
+    let other = updates_until(&c2.inbox, &session, "agent_message_chunk");
+    let echo = other
+        .iter()
+        .position(|p| p["update"]["sessionUpdate"] == "user_message_chunk")
+        .expect("no echo");
+    let reply = other
+        .iter()
+        .position(|p| p["update"]["sessionUpdate"] == "agent_message_chunk")
+        .expect("no reply");
+    assert!(echo < reply);
+    assert_eq!(other[echo]["update"]["content"]["text"], "hello");
+
+    let params = serde_json::json!({
+        "sessionId": session,
+        "prompt": [
+            {"type": "text", "text": "look"},
+            {"type": "image", "data": "aGk=", "mimeType": "image/png"},
+        ],
+    });
+    let response = h.client.request("session/prompt", params).unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    until(|| h.mock.call_count() >= 3);
+
+    let other = drain(&c2.inbox);
+    let echoed: Vec<_> = other
+        .iter()
+        .filter(|p| p["update"]["sessionUpdate"] == "user_message_chunk")
+        .map(|p| p["update"]["content"].clone())
+        .collect();
+    assert_eq!(echoed.len(), 2, "{other:?}");
+    assert_eq!(echoed[0]["text"], "look");
+    assert_eq!(echoed[1]["type"], "image");
+    assert_eq!(echoed[1]["data"], "aGk=");
+}
+
+#[test]
+fn a_cancel_from_the_second_client_ends_the_owners_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let path = dir.path().display().to_string();
+    let session = record(dir.path(), &cwd, "mock:m", 0, &[]);
+    let h = serve(
+        vec![
+            tool_turn("call_1", "ls", serde_json::json!({ "path": path })),
+            text_turn("done"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    let c2 = h.connect();
+    attach_both(&h, &c2, &session, &cwd);
+    let prompt_end = prompt_async(&h.client, &session, "go");
+
+    let (_ask, _) = until_ask(&h.inbox, &mut Vec::new());
+    c2.client
+        .notify("session/cancel", serde_json::json!({"sessionId": session}))
+        .unwrap();
+
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "cancelled");
+}
+
+#[test]
+fn two_connections_prompt_their_own_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(
+        vec![
+            text_turn("one"),
+            text_turn("one title"),
+            text_turn("two"),
+            text_turn("two title"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    let c2 = h.connect();
+    let params = serde_json::json!({"cwd": dir.path(), "mcpServers": []});
+    let mine = h.client.request("session/new", params.clone()).unwrap();
+    let theirs = c2.client.request("session/new", params).unwrap();
+    let mine = mine["sessionId"].as_str().unwrap().to_owned();
+    let theirs = theirs["sessionId"].as_str().unwrap().to_owned();
+    assert_ne!(mine, theirs);
+
+    assert_eq!(prompt(&h.client, &mine, "hi")["stopReason"], "end_turn");
+    until(|| h.mock.call_count() >= 2);
+    assert_eq!(prompt(&c2.client, &theirs, "hi")["stopReason"], "end_turn");
+    until(|| h.mock.call_count() >= 4);
+    assert_eq!(chunk_texts(&drain(&h.inbox)), ["one"]);
+    assert_eq!(chunk_texts(&drain(&c2.inbox)), ["two"]);
+}
+
+#[test]
+fn a_second_connection_attaches_to_an_open_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let session = record(dir.path(), &cwd, "mock:m", 0, &[]);
+    let h = serve(vec![text_turn("attached reply")], dir.path(), dir.path());
+    let c2 = h.connect();
+
+    let params = serde_json::json!({"sessionId": session, "cwd": cwd, "mcpServers": []});
+    h.client.request("session/resume", params.clone()).unwrap();
+    let loaded = c2.client.request("session/load", params).unwrap();
+    assert_eq!(current_values(&loaded), ["mock:m", "default", "default"]);
+
+    let prompt_end = prompt_async(&h.client, &session, "hello");
+    updates_until(&h.inbox, &session, "agent_message_chunk");
+    updates_until(&c2.inbox, &session, "agent_message_chunk");
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+
+    let hosted = h.host.engine.hosted_sessions();
+    assert_eq!(
+        hosted
+            .iter()
+            .filter(|(id, _)| id.to_string() == session)
+            .count(),
+        1,
+        "{hosted:?}"
+    );
+}
+
+#[test]
+fn a_connection_that_ends_leaves_its_run_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let path = dir.path().display().to_string();
+    let session = record(dir.path(), &cwd, "mock:m", 0, &[]);
+    let h = serve(
+        vec![
+            tool_turn("call_1", "ls", serde_json::json!({ "path": path })),
+            text_turn("done"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    let c2 = h.connect();
+    let params = serde_json::json!({"sessionId": session, "cwd": cwd, "mcpServers": []});
+    h.client.request("session/resume", params.clone()).unwrap();
+    c2.client.request("session/load", params).unwrap();
+    let prompt_end = prompt_async(&h.client, &session, "go");
+
+    let mut updates = Vec::new();
+    let (_, params) = until_ask(&h.inbox, &mut updates);
+    assert_eq!(params["sessionId"], session);
+    let (ask_2, _) = until_ask(&c2.inbox, &mut Vec::new());
+
+    let Harness { client, inbox, .. } = h;
+    drop(client);
+    drop(inbox);
+
+    // The run outlives its client: the bystander answers the still open
+    // ask and sees the rest of the turn.
+    allow(&c2.client, &ask_2);
+    let seen = updates_until(&c2.inbox, &session, "agent_message_chunk");
+    assert_eq!(chunk_texts(&seen).last().unwrap(), "done");
+    // The prompt's client is gone, so its request fails even though the
+    // run it started completed.
+    let response = prompt_end.recv_timeout(WAIT).unwrap();
+    assert!(response.is_err(), "{response:?}");
 }

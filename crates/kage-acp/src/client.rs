@@ -773,6 +773,7 @@ mod tests {
                 crate::agent::PermissionDecision::Allow
                 | crate::agent::PermissionDecision::AllowSession => "allowed",
                 crate::agent::PermissionDecision::Deny(_) => "denied",
+                crate::agent::PermissionDecision::Unanswered => "unanswered",
             };
             ctx.update(SessionUpdate::AgentMessageChunk(MessageChunk {
                 content: ContentBlock::text(verdict),

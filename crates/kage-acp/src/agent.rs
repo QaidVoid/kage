@@ -41,12 +41,18 @@ pub enum PermissionDecision {
     AllowSession,
     /// Block it, with an optional reason for the model.
     Deny(Option<String>),
+    /// The ask was withdrawn or the connection closed before an answer
+    /// arrived. No decision is sent, so the request the ask came from
+    /// stays open for another client to answer.
+    Unanswered,
 }
 
 /// Ask the client to allow `tool_call` once or for the session, or to
-/// deny it. Blocks until the client answers or `cancel` is cancelled,
-/// and withdraws the ask on a cancel. Never auto-approves: any error,
-/// cancel, or rejection resolves to [`PermissionDecision::Deny`].
+/// deny it. Blocks until the client answers, `cancel` withdraws the ask,
+/// or the connection closes. A rejection and a decode failure resolve to
+/// [`PermissionDecision::Deny`]. A withdrawn ask and a closed connection
+/// resolve to [`PermissionDecision::Unanswered`], which sends no
+/// decision. Never auto-approves.
 #[must_use]
 pub fn request_permission(
     peer: &Peer,
@@ -93,6 +99,9 @@ pub fn request_permission(
             },
             Err(e) => PermissionDecision::Deny(Some(format!("decode outcome: {e}"))),
         },
+        Err(e) if e.code == -32800 || e.message == "connection closed" => {
+            PermissionDecision::Unanswered
+        }
         Err(e) => PermissionDecision::Deny(Some(e.message)),
     }
 }
@@ -222,6 +231,10 @@ pub trait Agent: Send + Sync + 'static {
     /// the session sent from now on cannot overtake it. The default does
     /// nothing.
     fn session_announced(&self, _session_id: &str) {}
+
+    /// The connection ended and every request but a prompt that is
+    /// still running is answered. The default does nothing.
+    fn detached(&self) {}
 }
 
 /// The `$/cancel_request` notice ACP expects for an abandoned request.
@@ -278,6 +291,7 @@ where
     for op in ops {
         let _ = op.join();
     }
+    agent.detached();
     Ok(())
 }
 
@@ -796,7 +810,7 @@ mod tests {
                 "shell",
                 &self.cancel,
             );
-            assert!(matches!(decision, PermissionDecision::Deny(_)));
+            assert!(matches!(decision, PermissionDecision::Unanswered));
             Ok(PromptResponse {
                 stop_reason: StopReason::Cancelled,
             })
@@ -844,6 +858,92 @@ mod tests {
         drop(client);
         drop(inbox);
         server.join().unwrap().unwrap();
+    }
+
+    /// Asks once and records the decision the ask came back with.
+    #[derive(Default)]
+    struct UnansweredAgent {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<PermissionDecision>>>,
+    }
+
+    impl Agent for UnansweredAgent {
+        fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
+            MockAgent.initialize(req)
+        }
+
+        fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+            MockAgent.new_session(req)
+        }
+
+        fn prompt(
+            &self,
+            req: PromptRequest,
+            ctx: &PromptContext,
+        ) -> Result<PromptResponse, RpcError> {
+            let tool_call = ToolCallUpdate {
+                tool_call_id: "call-1".into(),
+                ..ToolCallUpdate::default()
+            };
+            let decision = request_permission(
+                ctx.peer(),
+                &req.session_id,
+                tool_call,
+                "shell",
+                &CancelFlag::new(),
+            );
+            kage_core::sync::lock(&self.seen).push(decision);
+            Ok(PromptResponse {
+                stop_reason: StopReason::Cancelled,
+            })
+        }
+
+        fn cancel(&self, _session_id: &str) {}
+    }
+    #[test]
+    fn a_connection_that_closes_while_asked_answers_unanswered() {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let agent = UnansweredAgent::default();
+        let seen = std::sync::Arc::clone(&agent.seen);
+        let server = thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, |_| agent));
+        let (client, inbox, _h) = connect(BufReader::new(cli_r), cli_w);
+        let prompt = {
+            let client = client.clone();
+            thread::spawn(move || {
+                client.request(
+                    "session/prompt",
+                    serde_json::json!({"sessionId": "sess-1", "prompt": []}),
+                )
+            })
+        };
+        let timeout = std::time::Duration::from_secs(5);
+        let Ok(Inbound::Request { .. }) = inbox.recv_timeout(timeout) else {
+            panic!("expected the permission request");
+        };
+        // One line over the input cap ends the connection even though
+        // the prompt request still pins the write half. The write may
+        // fail with EPIPE once the server stops reading; the cap was
+        // passed by then.
+        let _ = client.notify(
+            "flood",
+            serde_json::Value::String("x".repeat(9 * 1024 * 1024)),
+        );
+        drop(client);
+        drop(inbox);
+        server.join().unwrap().unwrap();
+        let deadline = std::time::Instant::now() + timeout;
+        while kage_core::sync::lock(&seen).is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the ask never resolved"
+            );
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            *kage_core::sync::lock(&seen),
+            [PermissionDecision::Unanswered]
+        );
+        let _ = prompt.join();
     }
 
     #[test]

@@ -267,12 +267,8 @@ impl Engine {
     }
 
     /// Stop delivering events to the subscription `id`. Must not be
-    /// called from inside a subscriber: publishing holds the bus lock
+    /// called from inside a subscriber: `publish` holds the bus lock
     /// while it runs subscribers, so that deadlocks.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the serve host unsubscribes detached connections")
-    )]
     pub(crate) fn unsubscribe(&self, id: SubscriptionId) {
         self.bus.unsubscribe(id);
     }

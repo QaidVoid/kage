@@ -7,9 +7,13 @@
 //! become engine commands, and a per-connection bridge turns engine
 //! events into `session/update` notifications and
 //! `session/request_permission` requests. A session another connection
-//! has open is attached to instead of reopened. Recorded sessions can be
-//! listed, loaded with a replay of their transcript, or resumed. Each
-//! session offers its model, thinking level and permission mode as config
+//! has open is attached to instead of reopened: the attaching client
+//! gets the recorded transcript plus the turn in flight, the title and
+//! the open permission asks, all under one bus lock so nothing arrives
+//! twice. A session no connection holds any more is closed once idle.
+//! Recorded sessions can be listed, loaded with a replay of their
+//! transcript, released with `session/close`, or resumed. Each session
+//! offers its model, thinking level and permission mode as config
 //! options, and the prompts of its live MCP servers as slash commands
 //! named `<server>:<prompt>`, which the engine expands when they come back
 //! as prompt text. The MCP servers a client passes when it opens a session
@@ -27,6 +31,7 @@
 mod bridge;
 mod content;
 mod host;
+mod live;
 mod mcp;
 mod options;
 mod sessions;
@@ -38,12 +43,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use kage_acp::acp::{
-    AgentCapabilities, Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpCapabilities,
-    NewSessionRequest, NewSessionResponse, PROTOCOL_VERSION, PromptCapabilities, PromptRequest,
-    PromptResponse, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
-    SessionConfigOption, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, StopReason, Supported,
+    AgentCapabilities, CloseSessionRequest, CloseSessionResponse, Implementation,
+    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, LoadSessionResponse, McpCapabilities, NewSessionRequest,
+    NewSessionResponse, PROTOCOL_VERSION, PromptCapabilities, PromptRequest, PromptResponse,
+    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionConfigOption,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
+    Supported,
 };
 use kage_acp::agent::{Agent, PromptContext, send_update};
 use kage_core::protocol::{AgentTree, Command, CommandKind, Delivery, RunOutcome};
@@ -54,6 +60,7 @@ use kage_jsonrpc::{Peer, RpcError};
 use bridge::{Ask, AskSet, Bridge};
 use content::prompt_content;
 use host::Host;
+use live::Seed;
 use mcp::editor_servers;
 use options::{Settings, Shown, config_options};
 use sessions::list_page;
@@ -90,6 +97,13 @@ impl Ids {
         self.by_engine.insert(engine, client.clone());
         self.by_client.insert(client, engine);
     }
+
+    /// Forgets a client session, after the connection released it.
+    fn remove_client(&mut self, client: &str) {
+        if let Some(engine) = self.by_client.remove(client) {
+            self.by_engine.remove(&engine);
+        }
+    }
 }
 
 /// How a prompt's run ended, handed from the bridge to the waiting prompt.
@@ -123,6 +137,8 @@ struct CliAcpAgent {
     held: Held,
     asks: AskSet,
     subscription: SubscriptionId,
+    /// Attaches waiting to be applied by the bridge.
+    seeds: Arc<Mutex<Vec<Seed>>>,
 }
 
 impl CliAcpAgent {
@@ -135,11 +151,12 @@ impl CliAcpAgent {
         let subagents = Arc::new(AtomicBool::new(false));
         let held = Held::default();
         let asks = AskSet::default();
+        let seeds = Arc::default();
         let mut bridge = Bridge {
             peer: peer.clone(),
             commander: host.engine.commander(),
             connection,
-            owners: Arc::clone(&host.owners),
+            live: Arc::clone(&host.live),
             ids: Arc::clone(&ids),
             waiters: Arc::clone(&waiters),
             models: Arc::clone(&host.models),
@@ -150,11 +167,12 @@ impl CliAcpAgent {
             asks: Arc::clone(&asks),
             tree: AgentTree::default(),
             subagents: Arc::clone(&subagents),
-            live: HashSet::new(),
+            streaming: HashSet::new(),
             ended: HashMap::new(),
             commands: HashMap::new(),
             held: Arc::clone(&held),
             approving: HashMap::new(),
+            seeds: Arc::clone(&seeds),
         };
         let subscription = host
             .engine
@@ -170,6 +188,7 @@ impl CliAcpAgent {
             held,
             asks,
             subscription,
+            seeds,
         }
     }
 
@@ -199,9 +218,9 @@ impl CliAcpAgent {
     }
 
     /// The connection ended: stop delivering engine events to it, free
-    /// what its prompts wait on, and withdraw its open asks without
-    /// answering them. The engine and its runs keep going for the
-    /// connections that stay.
+    /// what its prompts wait on, withdraw its open asks without
+    /// answering them, and release every session it held. The engine
+    /// and its runs keep going for the connections that stay.
     fn detach(&self) {
         self.host.engine.unsubscribe(self.subscription);
         self.host.release_prompts_of(self.connection);
@@ -212,6 +231,10 @@ impl CliAcpAgent {
             .collect();
         for ask in asks {
             ask.stop();
+        }
+        let sessions: Vec<SessionId> = lock(&self.ids).by_engine.keys().copied().collect();
+        for id in sessions {
+            self.host.release(id);
         }
     }
 }
@@ -238,6 +261,7 @@ impl Agent for CliAcpAgent {
                 session_capabilities: SessionCapabilities {
                     list: Some(Supported {}),
                     resume: Some(Supported {}),
+                    close: Some(Supported {}),
                 },
             },
             agent_info: Some(Implementation {
@@ -271,7 +295,7 @@ impl Agent for CliAcpAgent {
         ctx: &PromptContext,
     ) -> Result<LoadSessionResponse, RpcError> {
         let config_options =
-            self.open_recorded(&req.session_id, &req.cwd, &req.mcp_servers, Some(ctx))?;
+            self.open_recorded(&req.session_id, &req.cwd, &req.mcp_servers, Some(ctx), true)?;
         Ok(LoadSessionResponse { config_options })
     }
 
@@ -279,10 +303,51 @@ impl Agent for CliAcpAgent {
         list_page(&self.host.sessions, &req)
     }
 
-    fn resume_session(&self, req: ResumeSessionRequest) -> Result<ResumeSessionResponse, RpcError> {
-        let config_options =
-            self.open_recorded(&req.session_id, &req.cwd, &req.mcp_servers, None)?;
+    fn resume_session(
+        &self,
+        req: ResumeSessionRequest,
+        ctx: &PromptContext,
+    ) -> Result<ResumeSessionResponse, RpcError> {
+        let config_options = self.open_recorded(
+            &req.session_id,
+            &req.cwd,
+            &req.mcp_servers,
+            Some(ctx),
+            false,
+        )?;
         Ok(ResumeSessionResponse { config_options })
+    }
+
+    /// Releases the caller's attachment to `req.session_id`, closing
+    /// the session when it was the last one and the session is idle.
+    /// A subagent session is not attachable, so closing one answers
+    /// invalid params.
+    fn close_session(&self, req: CloseSessionRequest) -> Result<CloseSessionResponse, RpcError> {
+        let id = {
+            let ids = lock(&self.ids);
+            if ids.subagents.contains_key(&req.session_id) {
+                return Err(RpcError::new(
+                    -32602,
+                    format!("{} is a subagent session", req.session_id),
+                ));
+            }
+            ids.by_client.get(&req.session_id).copied()
+        };
+        let Some(id) = id else {
+            return Err(RpcError::new(
+                -32602,
+                format!("unknown session {}", req.session_id),
+            ));
+        };
+        let asks = lock(&self.asks).remove(&id).unwrap_or_default();
+        for ask in asks {
+            ask.stop();
+        }
+        lock(&self.ids).remove_client(&req.session_id);
+        lock(&self.shown).remove(&id);
+        lock(&self.held).remove(&id);
+        self.host.release(id);
+        Ok(CloseSessionResponse {})
     }
 
     fn set_config_option(

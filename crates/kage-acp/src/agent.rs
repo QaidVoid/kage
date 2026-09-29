@@ -3,8 +3,8 @@
 //! Drives an injected [`Agent`] over the [`kage_jsonrpc`] peer, conformant
 //! with the published ACP spec: it answers `initialize`, `session/new`,
 //! `session/load`, `session/list`, `session/resume`,
-//! `session/set_config_option` and `session/prompt`, forwards the
-//! `session/cancel`
+//! `session/set_config_option`, `session/prompt` and `session/close`,
+//! forwards the `session/cancel`
 //! notification, and lets the agent stream `session/update`
 //! notifications and issue `session/request_permission` requests. A
 //! request the agent abandons (a permission ask outlived by its run) is
@@ -24,12 +24,12 @@ use kage_core::CancelFlag;
 use kage_jsonrpc::{CancelNotice, Inbound, Peer, RpcError, connect_with};
 
 use crate::acp::{
-    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
-    PermissionOption, PermissionOptionKind, PermissionOutcome, PromptRequest, PromptResponse,
-    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
-    ResumeSessionResponse, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, ToolCallUpdate,
+    CloseSessionRequest, CloseSessionResponse, InitializeRequest, InitializeResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
+    NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind,
+    PermissionOutcome, PromptRequest, PromptResponse, RequestPermissionRequest,
+    RequestPermissionResponse, ResumeSessionRequest, ResumeSessionResponse, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, ToolCallUpdate,
 };
 
 /// The client's answer to a `session/request_permission`.
@@ -185,9 +185,10 @@ pub trait Agent: Send + Sync + 'static {
         Err(RpcError::method_not_found("session/list"))
     }
 
-    /// Reopen a recorded session without replaying its history. The
-    /// default rejects: only agents that advertise
-    /// `sessionCapabilities.resume` override it.
+    /// Reopen a recorded session without replaying its history. `ctx`
+    /// streams updates for the session, such as the turn in flight
+    /// when the agent still hosts it. The default rejects: only agents
+    /// that advertise `sessionCapabilities.resume` override it.
     ///
     /// # Errors
     ///
@@ -196,8 +197,22 @@ pub trait Agent: Send + Sync + 'static {
     fn resume_session(
         &self,
         _req: ResumeSessionRequest,
+        _ctx: &PromptContext,
     ) -> Result<ResumeSessionResponse, RpcError> {
         Err(RpcError::method_not_found("session/resume"))
+    }
+
+    /// Release a session the connection loaded, created or resumed: it
+    /// no longer watches it, and the agent may stop hosting it once no
+    /// other connection does. The default rejects: only agents that
+    /// advertise `sessionCapabilities.close` override it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session id is unknown or cannot
+    /// be released.
+    fn close_session(&self, _req: CloseSessionRequest) -> Result<CloseSessionResponse, RpcError> {
+        Err(RpcError::method_not_found("session/close"))
     }
 
     /// Change one config option of a session. The default rejects:
@@ -412,10 +427,17 @@ fn handle_request<A: Agent>(
                 let _ = peer.respond(&id, Err(e));
                 return None;
             }
-            Ok(req) => spawn_open(peer, agent, id, move |a| {
-                let session = req.session_id.clone();
-                a.resume_session(req).map(|resp| (session, jval(resp)))
-            }),
+            Ok(req) => {
+                let ctx = PromptContext {
+                    peer: peer.clone(),
+                    session_id: req.session_id.clone(),
+                };
+                spawn_open(peer, agent, id, move |a| {
+                    let session = req.session_id.clone();
+                    a.resume_session(req, &ctx)
+                        .map(|resp| (session, jval(resp)))
+                })
+            }
         },
         "session/set_config_option" => match parse::<SetSessionConfigOptionRequest>(params) {
             Err(e) => {
@@ -423,6 +445,13 @@ fn handle_request<A: Agent>(
                 return None;
             }
             Ok(req) => spawn_op(peer, agent, id, move |a| a.set_config_option(req).map(jval)),
+        },
+        "session/close" => match parse::<CloseSessionRequest>(params) {
+            Err(e) => {
+                let _ = peer.respond(&id, Err(e));
+                return None;
+            }
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.close_session(req).map(jval)),
         },
         other => {
             let _ = peer.respond(&id, Err(RpcError::method_not_found(other)));
@@ -659,8 +688,23 @@ mod tests {
         fn resume_session(
             &self,
             _req: ResumeSessionRequest,
+            _ctx: &PromptContext,
         ) -> Result<ResumeSessionResponse, RpcError> {
             Ok(ResumeSessionResponse::default())
+        }
+
+        fn close_session(
+            &self,
+            req: CloseSessionRequest,
+        ) -> Result<CloseSessionResponse, RpcError> {
+            if req.session_id == "s1" {
+                Ok(CloseSessionResponse {})
+            } else {
+                Err(RpcError::new(
+                    -32602,
+                    format!("unknown session {}", req.session_id),
+                ))
+            }
         }
 
         fn set_config_option(
@@ -724,6 +768,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(resume, serde_json::json!({}));
+        let close = client
+            .request("session/close", serde_json::json!({"sessionId": "s1"}))
+            .unwrap();
+        assert_eq!(close, serde_json::json!({}));
+        let err = client
+            .request("session/close", serde_json::json!({"sessionId": "x"}))
+            .unwrap_err();
+        assert_eq!(err.code, -32602);
         let err = client
             .request(
                 "session/set_config_option",

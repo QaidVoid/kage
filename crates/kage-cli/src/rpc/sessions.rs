@@ -20,7 +20,7 @@ use super::bridge::to_update;
 use super::bridge::user_chunk;
 use super::content::image_block;
 use super::mcp::editor_servers;
-use super::options::{Shown, config_options};
+use super::options::config_options;
 use crate::engine::Recorder;
 
 /// Sessions per `session/list` page.
@@ -30,14 +30,17 @@ impl super::CliAcpAgent {
     /// Opens the recorded session `client_id` names the way the TUI resumes
     /// one: on its recorded model when that resolves, with its thinking
     /// level and token totals, and with the client's MCP `servers`. With
-    /// `ctx`, first replays its history and title to the client. Returns
-    /// the session's config options.
+    /// `ctx`, streams the turn in flight, the title, the live subagents
+    /// and the open asks of a session the host already runs, and with
+    /// `replay_file` also its recorded history. Returns the session's
+    /// config options.
     pub(super) fn open_recorded(
         &self,
         client_id: &str,
         cwd: &str,
         servers: &[McpServer],
         ctx: Option<&PromptContext>,
+        replay_file: bool,
     ) -> Result<Vec<SessionConfigOption>, RpcError> {
         let servers = editor_servers(servers)?;
         let path = kage_session::find_by_prefix(&self.host.sessions, client_id)
@@ -46,8 +49,32 @@ impl super::CliAcpAgent {
         let id = crate::engine::session_id_of(&path).ok_or_else(|| {
             RpcError::internal(format!("bad session file name {}", path.display()))
         })?;
+        if lock(&self.ids).by_engine.contains_key(&id) {
+            if replay_file && let Some(ctx) = ctx {
+                let replay =
+                    kage_session::replay(&path).map_err(|e| RpcError::internal(e.to_string()))?;
+                for update in replay_updates(&replay.history) {
+                    ctx.update(update);
+                }
+                if let Some(title) = replay.title {
+                    ctx.update(SessionUpdate::SessionInfoUpdate(SessionInfoUpdate {
+                        title: Some(title),
+                        updated_at: None,
+                    }));
+                }
+            }
+            lock(&self.ids).insert(client_id.to_owned(), id);
+            let shown = lock(&self.shown);
+            return Ok(shown
+                .get(&id)
+                .map(|shown| config_options(&self.host.models, &shown.settings))
+                .unwrap_or_default());
+        }
+        if let Some(settings) = self.host.open_settings(id) {
+            return self.attach_live(id, client_id, &path, &settings, replay_file, ctx);
+        }
         let replay = kage_session::replay(&path).map_err(|e| RpcError::internal(e.to_string()))?;
-        if let Some(ctx) = ctx {
+        if replay_file && let Some(ctx) = ctx {
             for update in replay_updates(&replay.history) {
                 ctx.update(update);
             }
@@ -57,26 +84,6 @@ impl super::CliAcpAgent {
                     updated_at: None,
                 }));
             }
-        }
-        if lock(&self.ids).by_engine.contains_key(&id) {
-            lock(&self.ids).insert(client_id.to_owned(), id);
-            let shown = lock(&self.shown);
-            return Ok(shown
-                .get(&id)
-                .map(|shown| config_options(&self.host.models, &shown.settings))
-                .unwrap_or_default());
-        }
-        if let Some(settings) = self.host.open_settings(id) {
-            lock(&self.shown).insert(
-                id,
-                Shown {
-                    settings: settings.clone(),
-                    catching_up: false,
-                },
-            );
-            lock(&self.held).insert(id, Vec::new());
-            lock(&self.ids).insert(client_id.to_owned(), id);
-            return Ok(config_options(&self.host.models, &settings));
         }
         let writer = SessionWriter::open(&path).map_err(|e| RpcError::internal(e.to_string()))?;
         let model = if self.host.registry.resolve(&replay.model).is_ok() {
@@ -109,7 +116,7 @@ impl super::CliAcpAgent {
 /// The `session/update`s that show `history` as the live bridge showed
 /// it: user chunks, then each assistant block and tool result mapped
 /// through [`to_update`].
-fn replay_updates(history: &[Message]) -> Vec<SessionUpdate> {
+pub(super) fn replay_updates(history: &[Message]) -> Vec<SessionUpdate> {
     let mut seen = HashMap::new();
     let mut updates = Vec::new();
     for message in history {

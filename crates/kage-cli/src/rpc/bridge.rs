@@ -23,7 +23,7 @@ use kage_core::{
 use kage_jsonrpc::Peer;
 
 use super::content::image_block;
-use super::host::Owners;
+use super::live::{Live, Seed};
 use super::mcp::prompt_commands;
 use super::options::{Settings, config_options};
 use super::{Held, Ids, PromptEnd, ShownBySession, Waiters};
@@ -42,8 +42,8 @@ pub(super) struct Bridge {
     pub(super) commander: Commander,
     /// This connection's id on the host.
     pub(super) connection: u64,
-    /// The connection each session's running prompt came from.
-    pub(super) owners: Owners,
+    /// The host's live engine state, for the prompt owner of a session.
+    pub(super) live: Arc<Mutex<Live>>,
     pub(super) ids: Arc<Mutex<Ids>>,
     pub(super) waiters: Waiters,
     pub(super) models: Arc<[SessionConfigSelectOption]>,
@@ -58,7 +58,7 @@ pub(super) struct Bridge {
     /// Whether the client advertised the subagents capability.
     pub(super) subagents: Arc<AtomicBool>,
     /// Announced subagents whose terminal state is not sent yet.
-    pub(super) live: HashSet<SessionId>,
+    pub(super) streaming: HashSet<SessionId>,
     /// Ended runs held back until their live subagents end.
     pub(super) ended: HashMap<SessionId, PromptEnd>,
     /// The commands last sent to each client session.
@@ -70,6 +70,9 @@ pub(super) struct Bridge {
     /// This connection's open asks, shared with its agent so a detach
     /// can withdraw them.
     pub(super) asks: AskSet,
+    /// Attaches waiting to be applied: what a connection that loaded a
+    /// hosted session needs before its next envelope routes.
+    pub(super) seeds: Arc<Mutex<Vec<Seed>>>,
 }
 
 /// A permission question in flight on its own thread.
@@ -92,8 +95,51 @@ impl Ask {
 /// The open asks of one connection, keyed by the session that asked.
 pub(super) type AskSet = Arc<Mutex<HashMap<SessionId, Vec<Ask>>>>;
 
+/// Spawns the thread that asks the client on `client_id` about
+/// `tool_call` and resolves `request_id` of `session` with the answer,
+/// recording the ask under `asks` so a withdraw can stop it. Used by
+/// the bridge for events and by an attach for asks already open.
+pub(super) fn spawn_ask(
+    peer: &Peer,
+    commander: &Commander,
+    asks: &AskSet,
+    session: SessionId,
+    client_id: String,
+    request_id: RequestId,
+    tool_call: ToolCallUpdate,
+) {
+    let withdraw = CancelFlag::new();
+    let flag = withdraw.clone();
+    let peer = peer.clone();
+    let commander = commander.clone();
+    let thread = std::thread::spawn(move || {
+        let title = tool_call.title.clone().unwrap_or_default();
+        let decision =
+            kage_acp::agent::request_permission(&peer, &client_id, tool_call, &title, &flag);
+        let decision = match decision {
+            PermissionDecision::Unanswered => return,
+            PermissionDecision::Allow => Decision::AllowOnce,
+            PermissionDecision::AllowSession => Decision::AllowSession,
+            PermissionDecision::Deny(_) => Decision::Deny,
+        };
+        commander.send(Command::to(
+            session,
+            CommandKind::ResolvePermission {
+                request_id,
+                decision,
+            },
+        ));
+    });
+    lock(asks).entry(session).or_default().push(Ask {
+        request_id,
+        withdraw,
+        thread,
+    });
+}
+
 impl Bridge {
     pub(super) fn handle(&mut self, envelope: &Envelope) {
+        self.apply_seeds();
         let envelope = &with_canonical_tool_names(envelope.clone(), &self.aliases);
         if let Event::Host(HostEvent::PermissionResolved { request_id }) = &envelope.event {
             self.withdraw(*request_id);
@@ -167,7 +213,9 @@ impl Bridge {
                     SessionUpdate::SessionInfoUpdate(update),
                 );
             }
-            Event::Host(HostEvent::McpServers { servers }) if !self.live.contains(&session) => {
+            Event::Host(HostEvent::McpServers { servers })
+                if !self.streaming.contains(&session) =>
+            {
                 let commands = prompt_commands(servers);
                 let last = self.commands.insert(session, commands.clone());
                 if last.unwrap_or_default() != commands {
@@ -182,7 +230,6 @@ impl Bridge {
                 }
             }
             Event::Host(HostEvent::RunEnded { outcome }) => {
-                lock(&self.owners).remove(&session);
                 self.end_asks(session);
                 self.seen.remove(&session);
                 let stop = self.stops.remove(&session);
@@ -194,6 +241,21 @@ impl Bridge {
                 self.settle(session);
             }
             Event::Host(_) => {}
+        }
+    }
+
+    /// Applies the seeds of finished attaches: the `agent` calls the
+    /// attached session's tree was built from, the tool inputs the
+    /// attach replay already showed, and the subagents this connection
+    /// streams from now on.
+    fn apply_seeds(&mut self) {
+        let seeds = lock(&self.seeds).drain(..).collect::<Vec<_>>();
+        for seed in seeds {
+            for spawn in &seed.spawns {
+                self.tree.apply(&spawn.envelope());
+            }
+            self.seen.insert(seed.session, seed.seen);
+            self.streaming.extend(seed.running);
         }
     }
 
@@ -222,7 +284,7 @@ impl Bridge {
             let Some(parent_id) = self.client_of(*parent) else {
                 return;
             };
-            self.live.insert(session);
+            self.streaming.insert(session);
             lock(&self.ids)
                 .subagents
                 .insert(session.to_string(), session);
@@ -238,7 +300,7 @@ impl Bridge {
                 &parent_id,
                 SessionUpdate::SubagentUpdate(update),
             );
-        } else if self.live.contains(&session) {
+        } else if self.streaming.contains(&session) {
             self.handle_client(session, session.to_string(), event);
         }
     }
@@ -247,7 +309,11 @@ impl Bridge {
     /// live subagent's engine id.
     fn client_of(&self, session: SessionId) -> Option<String> {
         let client_id = lock(&self.ids).by_engine.get(&session).cloned();
-        client_id.or_else(|| self.live.contains(&session).then(|| session.to_string()))
+        client_id.or_else(|| {
+            self.streaming
+                .contains(&session)
+                .then(|| session.to_string())
+        })
     }
 
     /// Finishes the ended run of `session` once none of its subagents is
@@ -256,7 +322,7 @@ impl Bridge {
     /// subagent to end before its parent does.
     fn settle(&mut self, session: SessionId) {
         let waits = self
-            .live
+            .streaming
             .iter()
             .any(|s| self.tree.get(*s).is_some_and(|node| node.parent == session));
         if waits {
@@ -265,7 +331,7 @@ impl Bridge {
         let Some(end) = self.ended.remove(&session) else {
             return;
         };
-        if !self.live.remove(&session) {
+        if !self.streaming.remove(&session) {
             if let Some(waiter) = lock(&self.waiters).remove(&session) {
                 let _ = waiter.send(end);
             }
@@ -399,33 +465,15 @@ impl Bridge {
         client_id: String,
         tool_call: ToolCallUpdate,
     ) {
-        let withdraw = CancelFlag::new();
-        let flag = withdraw.clone();
-        let peer = self.peer.clone();
-        let commander = self.commander.clone();
-        let thread = std::thread::spawn(move || {
-            let title = tool_call.title.clone().unwrap_or_default();
-            let decision =
-                kage_acp::agent::request_permission(&peer, &client_id, tool_call, &title, &flag);
-            let decision = match decision {
-                PermissionDecision::Unanswered => return,
-                PermissionDecision::Allow => Decision::AllowOnce,
-                PermissionDecision::AllowSession => Decision::AllowSession,
-                PermissionDecision::Deny(_) => Decision::Deny,
-            };
-            commander.send(Command::to(
-                session,
-                CommandKind::ResolvePermission {
-                    request_id,
-                    decision,
-                },
-            ));
-        });
-        lock(&self.asks).entry(session).or_default().push(Ask {
+        spawn_ask(
+            &self.peer,
+            &self.commander,
+            &self.asks,
+            session,
+            client_id,
             request_id,
-            withdraw,
-            thread,
-        });
+            tool_call,
+        );
     }
 
     /// Withdraws the open asks of `session` and waits until each is
@@ -464,7 +512,7 @@ impl Bridge {
         if message.role != Role::User {
             return;
         }
-        let owner = lock(&self.owners).get(&session).copied();
+        let owner = lock(&self.live).owner_of(session);
         if owner.is_none_or(|owner| owner == self.connection) {
             return;
         }
@@ -499,7 +547,7 @@ pub(super) fn hold(updates: &mut Vec<SessionUpdate>, update: SessionUpdate) -> b
 }
 
 /// The tool call a permission request for `tool` shows.
-fn permission_call(
+pub(super) fn permission_call(
     tool_call_id: Option<&ToolCallId>,
     tool: &str,
     input: &serde_json::Value,
@@ -516,7 +564,7 @@ fn permission_call(
 
 /// The agent that a client session's own `agent` call started, at the top
 /// of `session`'s branch.
-fn top_agent(tree: &AgentTree, session: SessionId) -> Option<&AgentNode> {
+pub(super) fn top_agent(tree: &AgentTree, session: SessionId) -> Option<&AgentNode> {
     let mut node = tree.get(session)?;
     while let Some(parent) = tree.get(node.parent) {
         node = parent;
@@ -635,7 +683,7 @@ fn text_content(text: String) -> ToolCallContent {
 
 /// The title a client shows for tool `name`: `server.tool` for an MCP
 /// tool, as the TUI shows it, else the name.
-fn tool_title(name: &str) -> String {
+pub(super) fn tool_title(name: &str) -> String {
     match name.split_once("__") {
         Some((server, tool)) if !server.is_empty() && !tool.is_empty() => {
             format!("{server}.{tool}")

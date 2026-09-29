@@ -277,13 +277,6 @@ impl Engine {
     /// during it: a publish from another thread waits until `f`
     /// returns. Like a subscriber, `f` must not publish, subscribe, or
     /// unsubscribe, or it deadlocks on the same lock.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the serve host attaches clients inside this guard"
-        )
-    )]
     pub(crate) fn hold_events<R>(&self, f: impl FnOnce() -> R) -> R {
         self.bus.hold(f)
     }

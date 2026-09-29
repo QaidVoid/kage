@@ -123,6 +123,9 @@ pub struct SessionCapabilities {
     /// Agent implements `session/resume`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<Supported>,
+    /// Agent implements `session/close`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close: Option<Supported>,
 }
 
 /// An empty capability object whose presence means supported.
@@ -224,6 +227,18 @@ pub struct ResumeSessionResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_options: Vec<SessionConfigOption>,
 }
+
+/// `session/close` request params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseSessionRequest {
+    /// Session the connection releases.
+    pub session_id: String,
+}
+
+/// `session/close` result.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloseSessionResponse {}
 
 /// `session/list` request params.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -913,6 +928,7 @@ mod tests {
                     session_capabilities: SessionCapabilities {
                         list: Some(Supported {}),
                         resume: Some(Supported {}),
+                        close: Some(Supported {}),
                     },
                 },
                 agent_info: Some(Implementation {
@@ -930,7 +946,7 @@ mod tests {
                         "image": false, "audio": false, "embeddedContext": true
                     },
                     "mcpCapabilities": {"http": true, "sse": false},
-                    "sessionCapabilities": {"list": {}, "resume": {}}
+                    "sessionCapabilities": {"list": {}, "resume": {}, "close": {}}
                 },
                 "agentInfo": {"name": "kage", "version": "0.1.0"},
                 "authMethods": []
@@ -1121,6 +1137,13 @@ mod tests {
             serde_json::json!({"sessionId": "s1", "cwd": "/w", "mcpServers": []}),
         );
         roundtrip(&ResumeSessionResponse::default(), serde_json::json!({}));
+        roundtrip(
+            &CloseSessionRequest {
+                session_id: "s1".into(),
+            },
+            serde_json::json!({"sessionId": "s1"}),
+        );
+        roundtrip(&CloseSessionResponse {}, serde_json::json!({}));
     }
 
     #[test]

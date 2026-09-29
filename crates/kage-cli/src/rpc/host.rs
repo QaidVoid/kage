@@ -19,7 +19,7 @@ use kage_provider::ProviderRegistry;
 use kage_tools::{ToolRegistry, builtin_registry};
 
 use super::options::{Settings, choice};
-use super::{CliAcpAgent, mcp};
+use super::{CliAcpAgent, live::Live, mcp};
 use crate::engine::{AgentSetup, Engine, SessionSpec};
 use crate::permissions::PermissionGate;
 
@@ -39,9 +39,6 @@ pub(super) struct Open {
     pub(super) settings: Settings,
 }
 
-/// The connection a session's running prompt came from.
-pub(super) type Owners = Arc<Mutex<HashMap<SessionId, u64>>>;
-
 /// One engine with the shared setup of [`CliAcpAgent`], behind every
 /// connection served on the host.
 pub(super) struct Host {
@@ -55,13 +52,13 @@ pub(super) struct Host {
     /// bridges' card titles and kind hints. Loaded once at startup, like
     /// the TUI does.
     pub(super) aliases: BTreeMap<String, String>,
+    /// Live engine state one subscriber folds envelopes into: the turn
+    /// in flight, open asks, the agent tree, prompt owners, and what a
+    /// session's attachments allow closing.
+    pub(super) live: Arc<Mutex<Live>>,
     /// Sessions open in the engine, so a load from another connection
     /// attaches to the live session instead of reopening its file.
     open: Arc<Mutex<HashMap<SessionId, Open>>>,
-    /// The connection each session's running prompt came from, recorded
-    /// before the prompt is sent. Another connection's prompt is
-    /// refused while one is out.
-    pub(super) owners: Owners,
     /// The id the next connection gets.
     next_connection: AtomicU64,
 }
@@ -120,6 +117,7 @@ impl Host {
                 .map(|item| choice(&item.value, &item.label, item.group.as_deref()))
                 .collect();
         let engine = Engine::start(Arc::clone(&registry));
+        let live = Arc::new(Mutex::new(Live::new(engine.commander())));
         let host = Arc::new(Self {
             engine,
             registry,
@@ -128,8 +126,8 @@ impl Host {
             spec,
             models,
             aliases,
+            live,
             open: Arc::default(),
-            owners: Arc::default(),
             next_connection: AtomicU64::new(0),
         });
         let open = Arc::clone(&host.open);
@@ -140,6 +138,9 @@ impl Host {
                 open.settings = Settings::from(state);
             }
         }));
+        let live = Arc::clone(&host.live);
+        host.engine
+            .subscribe(Box::new(move |envelope| lock(&live).observe(envelope)));
         host
     }
 
@@ -175,16 +176,34 @@ impl Host {
     }
 
     /// Hosts `spec` in the engine and records it open with `settings`,
-    /// so a later load from another connection attaches to it.
+    /// so a later load from another connection attaches to it. The
+    /// opening connection counts as the session's first attachment.
     pub(super) fn launch(&self, spec: SessionSpec, settings: Settings) {
+        lock(&self.live).attach(spec.id, true);
         lock(&self.open).insert(spec.id, Open { settings });
         self.engine.open(spec);
     }
 
     /// The settings of a session another connection has open, so the
-    /// caller attaches to it instead of reopening its file.
+    /// caller attaches to it instead of reopening its file. A session
+    /// a close was just sent for reads as unopened.
     pub(super) fn open_settings(&self, id: SessionId) -> Option<Settings> {
+        if lock(&self.live).is_closing(id) {
+            return None;
+        }
         lock(&self.open).get(&id).map(|open| open.settings.clone())
+    }
+
+    /// Counts a connection's attachment to `id`. A fresh open follows
+    /// a close of the same session file, so Live drops stale state.
+    pub(super) fn attach(&self, id: SessionId, fresh: bool) {
+        lock(&self.live).attach(id, fresh);
+    }
+
+    /// Records that a connection released `id`, closing the session
+    /// when it was the last attachment and the session is idle.
+    pub(super) fn release(&self, id: SessionId) {
+        lock(&self.live).release(id);
     }
 
     /// The next connection's id on this host.
@@ -195,19 +214,12 @@ impl Host {
     /// Records `connection` as the owner of `id`'s running prompt, or
     /// returns false when another connection owns it.
     pub(super) fn claim_prompt(&self, id: SessionId, connection: u64) -> bool {
-        let mut owners = lock(&self.owners);
-        match owners.get(&id) {
-            Some(owner) if *owner != connection => false,
-            _ => {
-                owners.insert(id, connection);
-                true
-            }
-        }
+        lock(&self.live).claim_prompt(id, connection)
     }
 
     /// Forgets every prompt `connection` owns, after it disconnected.
     pub(super) fn release_prompts_of(&self, connection: u64) {
-        lock(&self.owners).retain(|_, owner| *owner != connection);
+        lock(&self.live).release_prompts_of(connection);
     }
 }
 

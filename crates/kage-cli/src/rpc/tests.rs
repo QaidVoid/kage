@@ -88,13 +88,18 @@ impl Harness {
 
     /// Opens a second connection on the same host.
     fn connect(&self) -> Connection {
-        let (srv_r, cli_w) = std::io::pipe().unwrap();
-        let (cli_r, srv_w) = std::io::pipe().unwrap();
-        let host = Arc::clone(&self.host);
-        std::thread::spawn(move || host.serve(BufReader::new(srv_r), srv_w).unwrap());
-        let (client, inbox, _reader) = kage_jsonrpc::connect(BufReader::new(cli_r), cli_w);
-        Connection { client, inbox }
+        connect(&self.host)
     }
+}
+
+/// Opens a second connection on `host`.
+fn connect(host: &Arc<Host>) -> Connection {
+    let (srv_r, cli_w) = std::io::pipe().unwrap();
+    let (cli_r, srv_w) = std::io::pipe().unwrap();
+    let host = Arc::clone(host);
+    std::thread::spawn(move || host.serve(BufReader::new(srv_r), srv_w).unwrap());
+    let (client, inbox, _reader) = kage_jsonrpc::connect(BufReader::new(cli_r), cli_w);
+    Connection { client, inbox }
 }
 
 /// The mock provider, offering `mock:m` and `mock:other` to pickers.
@@ -165,7 +170,12 @@ fn serve_with(
         mock: mock.clone(),
         input,
     };
-    let host = test_host(provider, workdir.to_path_buf(), sessions.to_path_buf(), mcp);
+    let host = test_host(
+        Arc::new(provider),
+        workdir.to_path_buf(),
+        sessions.to_path_buf(),
+        mcp,
+    );
     let commander = host.engine.commander();
     let standing = Arc::clone(&host);
     let (opened_tx, opened_rx) = mpsc::channel();
@@ -194,8 +204,13 @@ fn serve_with(
 
 /// A host on `provider` whose sessions run in `workdir`, ask before
 /// `ls` calls and generate a title.
-fn test_host(provider: Listed, workdir: PathBuf, sessions: PathBuf, mcp: bool) -> Arc<Host> {
-    let registry = Arc::new(ProviderRegistry::new().with(Arc::new(provider)));
+fn test_host(
+    provider: Arc<dyn kage_provider::Provider>,
+    workdir: PathBuf,
+    sessions: PathBuf,
+    mcp: bool,
+) -> Arc<Host> {
+    let registry = Arc::new(ProviderRegistry::new().with(provider));
     let spec = Box::new(move |id, _cwd: &str, model: &str, servers| {
         let mut rules = PermissionsConfig::default();
         rules.tools.insert(
@@ -800,7 +815,19 @@ fn text(text: &str) -> Content {
 /// Records a session in `dir` created in `cwd` on `model`, `age`
 /// minutes ago, and returns its id.
 fn record(dir: &Path, cwd: &str, model: &str, age: i64, entries: &[SessionEntry]) -> String {
-    let session = kage_session::SessionId::new();
+    record_as(dir, SessionId::new(), cwd, model, age, entries)
+}
+
+/// [`record`] under the fixed `session` id, so a test can host the
+/// same session in the engine its file was recorded for.
+fn record_as(
+    dir: &Path,
+    session: SessionId,
+    cwd: &str,
+    model: &str,
+    age: i64,
+    entries: &[SessionEntry],
+) -> String {
     let header = Header {
         version: FORMAT_VERSION,
         session,
@@ -1474,7 +1501,7 @@ fn a_new_session_is_answered_before_its_updates_as_the_input_ends() {
     drop(cli_w);
     let provider = Listed::of(MockProvider::sequence(Vec::new()));
     let host = test_host(
-        provider,
+        Arc::new(provider),
         dir.path().to_path_buf(),
         dir.path().to_path_buf(),
         true,
@@ -2115,4 +2142,645 @@ fn a_connection_that_ends_leaves_its_run_running() {
     // run it started completed.
     let response = prompt_end.recv_timeout(WAIT).unwrap();
     assert!(response.is_err(), "{response:?}");
+}
+
+/// A provider whose first stream parks on a channel between `head` and
+/// `tail`, so a test can attach a second connection while the turn is
+/// still streaming. Every later stream takes one script from `rest`,
+/// and every request is recorded.
+struct Paused {
+    metadata: kage_provider::ProviderMetadata,
+    requests: Mutex<Vec<kage_provider::StreamRequest>>,
+    head: Script,
+    tail: Script,
+    rest: Mutex<Vec<Script>>,
+    gate: Mutex<Option<mpsc::Receiver<()>>>,
+    parked: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for Paused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Paused").finish_non_exhaustive()
+    }
+}
+
+impl Paused {
+    fn new(head: Script, tail: Script, rest: Vec<Script>, gate: mpsc::Receiver<()>) -> Self {
+        Self {
+            metadata: kage_provider::ProviderMetadata {
+                id: "mock".into(),
+                display_name: "Mock".into(),
+                supports_caching: false,
+                supports_thinking: true,
+                supports_tool_use: true,
+            },
+            requests: Mutex::new(Vec::new()),
+            head,
+            tail,
+            rest: Mutex::new(rest),
+            gate: Mutex::new(Some(gate)),
+            parked: Arc::default(),
+        }
+    }
+
+    /// Whether the first stream is waiting on the gate.
+    fn is_parked(&self) -> bool {
+        self.parked.load(Ordering::SeqCst)
+    }
+}
+
+impl kage_provider::Provider for Paused {
+    fn metadata(&self) -> &kage_provider::ProviderMetadata {
+        &self.metadata
+    }
+
+    fn stream(
+        &self,
+        req: kage_provider::StreamRequest,
+        _cancel: &kage_core::CancelFlag,
+    ) -> Result<kage_provider::EventStream, ProviderError> {
+        lock(&self.requests).push(req);
+        let first = lock(&self.requests).len() == 1;
+        let (head, tail, gate) = if first {
+            (
+                self.head.clone(),
+                self.tail.clone(),
+                lock(&self.gate).take(),
+            )
+        } else {
+            let mut rest = lock(&self.rest);
+            let script = if rest.is_empty() {
+                Vec::new()
+            } else {
+                rest.remove(0)
+            };
+            (Vec::new(), script, None)
+        };
+        Ok(Box::new(PausedStream {
+            head: head.into_iter(),
+            tail: tail.into_iter(),
+            gate,
+            parked: Arc::clone(&self.parked),
+        }))
+    }
+
+    fn models(&self) -> Vec<kage_provider::ProviderModel> {
+        ["m", "other"]
+            .map(|id| kage_provider::ProviderModel {
+                id: id.into(),
+                name: format!("Mock {id}"),
+                input: Inputs::default(),
+                ..kage_provider::ProviderModel::default()
+            })
+            .into()
+    }
+}
+
+/// The stream that parks between its head and its tail.
+struct PausedStream {
+    head: std::vec::IntoIter<Result<ProviderEvent, ProviderError>>,
+    tail: std::vec::IntoIter<Result<ProviderEvent, ProviderError>>,
+    gate: Option<mpsc::Receiver<()>>,
+    parked: Arc<AtomicBool>,
+}
+
+impl Iterator for PausedStream {
+    type Item = Result<ProviderEvent, ProviderError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(event) = self.head.next() {
+            return Some(event);
+        }
+        if let Some(gate) = self.gate.take() {
+            self.parked.store(true, Ordering::SeqCst);
+            let _ = gate.recv();
+        }
+        self.tail.next()
+    }
+}
+
+/// The client side of a served `kage rpc` on a [`Paused`] provider,
+/// with the standing session recorded in `sessions` under its own id,
+/// so a second connection can load it. `release` lets the parked
+/// stream finish its `tail`.
+struct PausedHarness {
+    host: Arc<Host>,
+    client: Peer,
+    inbox: mpsc::Receiver<Inbound>,
+    paused: Arc<Paused>,
+    release: mpsc::Sender<()>,
+    id: SessionId,
+    session: String,
+    /// The `session/load` and `session/resume` params for the standing
+    /// session.
+    resume: serde_json::Value,
+}
+
+/// [`serve`] on a [`Paused`] provider, with the standing session's
+/// file holding one recorded user message so loads find it.
+fn serve_paused(
+    head: Script,
+    tail: Script,
+    rest: Vec<Script>,
+    workdir: &Path,
+    sessions: &Path,
+) -> PausedHarness {
+    let (srv_r, cli_w) = std::io::pipe().unwrap();
+    let (cli_r, srv_w) = std::io::pipe().unwrap();
+    let id = SessionId::new();
+    let cwd = workdir.display().to_string();
+    record_as(
+        sessions,
+        id,
+        &cwd,
+        "mock:m",
+        0,
+        &[message(Role::User, vec![text("hello")], None)],
+    );
+    let (release, gate) = mpsc::channel();
+    let paused = Arc::new(Paused::new(head, tail, rest, gate));
+    let host = test_host(
+        paused.clone(),
+        workdir.to_path_buf(),
+        sessions.to_path_buf(),
+        false,
+    );
+    let standing = Arc::clone(&host);
+    let (opened_tx, opened_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        standing
+            .serve_with(BufReader::new(srv_r), srv_w, move |agent| {
+                let spec = (agent.host.spec)(id, "", "mock:m", BTreeMap::new()).unwrap();
+                agent.open(id.to_string(), spec);
+                agent.session_announced(&id.to_string());
+                let _ = opened_tx.send(());
+            })
+            .unwrap();
+    });
+    let (client, inbox, _reader) = kage_jsonrpc::connect(BufReader::new(cli_r), cli_w);
+    opened_rx.recv_timeout(WAIT).unwrap();
+    PausedHarness {
+        host,
+        client,
+        inbox,
+        paused,
+        release,
+        id,
+        session: id.to_string(),
+        resume: serde_json::json!({"sessionId": id.to_string(), "cwd": cwd, "mcpServers": []}),
+    }
+}
+
+#[test]
+fn attaching_mid_turn_shows_the_file_then_the_flight_then_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let h = serve_paused(
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::TextDelta {
+                delta: "Hel".into(),
+            }),
+            Ok(ProviderEvent::ToolCallStart {
+                id: ToolCallId::new("call_1"),
+                name: "ls".into(),
+            }),
+        ],
+        vec![
+            Ok(ProviderEvent::ToolCallEnd {
+                id: ToolCallId::new("call_1"),
+                input: serde_json::json!({ "path": cwd }),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: CoreStopReason::ToolUse,
+                usage: TokenUsage::default(),
+            }),
+        ],
+        vec![text_turn("done"), text_turn("titled")],
+        dir.path(),
+        dir.path(),
+    );
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+    until(|| h.paused.is_parked());
+
+    let c2 = connect(&h.host);
+    c2.client.request("session/load", h.resume.clone()).unwrap();
+    let updates = updates_until(&c2.inbox, &h.session, "tool_call");
+    assert_eq!(
+        update_kinds(&updates),
+        ["user_message_chunk", "agent_message_chunk", "tool_call"]
+    );
+    assert_eq!(chunk_texts(&updates), ["Hel"]);
+    assert_eq!(updates[2]["update"]["toolCallId"], "call_1");
+    assert_eq!(updates[2]["update"]["status"], "pending");
+
+    h.release.send(()).unwrap();
+    let mut asked = Vec::new();
+    let (ask_1, params) = until_ask(&h.inbox, &mut asked);
+    assert_eq!(params["toolCall"]["toolCallId"], "call_1");
+    let (ask_2, _) = until_ask(&c2.inbox, &mut Vec::new());
+    allow(&h.client, &ask_1);
+    wait_cancel(&c2.inbox, &ask_2);
+
+    let rest = updates_until(&c2.inbox, &h.session, "agent_message_chunk");
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    let mut all = updates;
+    all.extend(rest);
+    all.extend(drain(&c2.inbox));
+    assert_eq!(chunk_texts(&all), ["Hel", "done"]);
+    let statuses: Vec<&str> = all
+        .iter()
+        .filter(|p| p["update"]["toolCallId"] == "call_1")
+        .filter_map(|p| p["update"]["status"].as_str())
+        .collect();
+    assert_eq!(statuses, ["pending", "in_progress", "completed"]);
+    let announced = all
+        .iter()
+        .filter(|p| {
+            p["update"]["sessionUpdate"] == "tool_call" && p["update"]["toolCallId"] == "call_1"
+        })
+        .count();
+    assert_eq!(announced, 1, "the tool call was announced twice");
+}
+
+#[test]
+fn an_ask_opened_before_attach_is_re_asked_of_a_late_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let h = serve_paused(
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::ToolCallStart {
+                id: ToolCallId::new("call_1"),
+                name: "ls".into(),
+            }),
+        ],
+        vec![
+            Ok(ProviderEvent::ToolCallEnd {
+                id: ToolCallId::new("call_1"),
+                input: serde_json::json!({ "path": cwd }),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: CoreStopReason::ToolUse,
+                usage: TokenUsage::default(),
+            }),
+        ],
+        vec![text_turn("done"), text_turn("titled")],
+        dir.path(),
+        dir.path(),
+    );
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+    until(|| h.paused.is_parked());
+    h.release.send(()).unwrap();
+
+    let mut asked = Vec::new();
+    let (ask_1, params) = until_ask(&h.inbox, &mut asked);
+    assert_eq!(params["toolCall"]["toolCallId"], "call_1");
+
+    let c2 = connect(&h.host);
+    c2.client.request("session/load", h.resume.clone()).unwrap();
+    let mut updates = Vec::new();
+    let (ask_2, params) = until_ask(&c2.inbox, &mut updates);
+    assert_eq!(update_kinds(&updates), ["user_message_chunk"]);
+    assert_eq!(params["sessionId"], h.session);
+    assert_eq!(params["toolCall"]["toolCallId"], "call_1");
+    assert_eq!(params["toolCall"]["status"], "pending");
+
+    allow(&c2.client, &ask_2);
+    wait_cancel(&h.inbox, &ask_1);
+    let seen = updates_until(&c2.inbox, &h.session, "agent_message_chunk");
+    assert_eq!(chunk_texts(&seen).last().unwrap(), "done");
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    let request = lock(&h.paused.requests)[1].clone();
+    let results: Vec<_> = request
+        .messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|c| match c {
+            Content::ToolResultBlock { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results, [ToolCallId::new("call_1")]);
+}
+
+#[test]
+fn a_connection_that_drops_during_an_ask_gets_the_ask_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let h = serve_paused(
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::ToolCallStart {
+                id: ToolCallId::new("call_1"),
+                name: "ls".into(),
+            }),
+        ],
+        vec![
+            Ok(ProviderEvent::ToolCallEnd {
+                id: ToolCallId::new("call_1"),
+                input: serde_json::json!({ "path": cwd }),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: CoreStopReason::ToolUse,
+                usage: TokenUsage::default(),
+            }),
+        ],
+        vec![text_turn("done"), text_turn("titled")],
+        dir.path(),
+        dir.path(),
+    );
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+    until(|| h.paused.is_parked());
+    h.release.send(()).unwrap();
+    until_ask(&h.inbox, &mut Vec::new());
+
+    let PausedHarness {
+        client,
+        inbox,
+        host,
+        id,
+        session,
+        resume,
+        ..
+    } = h;
+    drop(client);
+    drop(inbox);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        host.engine
+            .hosted_sessions()
+            .iter()
+            .any(|(sid, _)| *sid == id),
+        "the session with an open ask stays hosted"
+    );
+
+    let c2 = connect(&host);
+    c2.client.request("session/load", resume).unwrap();
+    let (ask_2, params) = until_ask(&c2.inbox, &mut Vec::new());
+    assert_eq!(params["sessionId"], session);
+    assert_eq!(params["toolCall"]["toolCallId"], "call_1");
+    allow(&c2.client, &ask_2);
+    let seen = updates_until(&c2.inbox, &session, "agent_message_chunk");
+    assert_eq!(chunk_texts(&seen).last().unwrap(), "done");
+    let response = prompt_end.recv_timeout(WAIT).unwrap();
+    assert!(response.is_err(), "the dropped client got an answer");
+}
+
+#[test]
+fn a_late_subagent_client_hears_of_a_running_agent_and_its_ask() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().display().to_string();
+    let task = serde_json::json!({"description": "list files", "prompt": "list"});
+    let h = serve_paused(
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::ToolCallStart {
+                id: ToolCallId::new("call_agent"),
+                name: "agent".into(),
+            }),
+        ],
+        vec![
+            Ok(ProviderEvent::ToolCallEnd {
+                id: ToolCallId::new("call_agent"),
+                input: task,
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: CoreStopReason::ToolUse,
+                usage: TokenUsage::default(),
+            }),
+        ],
+        vec![
+            tool_turn("call_child", "ls", serde_json::json!({ "path": path })),
+            text_turn("child done"),
+            text_turn("parent done"),
+            text_turn("titled"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    initialize(&h.client);
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+    until(|| h.paused.is_parked());
+    h.release.send(()).unwrap();
+    let (root_ask, params) = until_ask(&h.inbox, &mut Vec::new());
+    let child = params["sessionId"].clone();
+    assert_ne!(child, h.session);
+    assert_eq!(params["toolCall"]["toolCallId"], "call_child");
+
+    let c2 = connect(&h.host);
+    initialize(&c2.client);
+    c2.client.request("session/load", h.resume.clone()).unwrap();
+    let updates = updates_until(&c2.inbox, &h.session, "subagent_update");
+    let announced = updates.last().unwrap();
+    assert_eq!(announced["update"]["subagentSessionId"], child);
+    assert_eq!(announced["update"]["name"], "general");
+    assert_eq!(announced["update"]["task"], "list files");
+    assert_eq!(announced["update"]["capabilities"]["cancel"], true);
+    assert!(announced["update"].get("state").is_none());
+    let (re_asked, params) = until_ask(&c2.inbox, &mut Vec::new());
+    assert_eq!(params["sessionId"], child);
+    assert_eq!(params["toolCall"]["toolCallId"], "call_agent");
+    assert_eq!(params["toolCall"]["title"], "general: ls");
+
+    let refused = c2
+        .client
+        .request("session/close", serde_json::json!({"sessionId": child}))
+        .unwrap_err();
+    assert_eq!(refused.code, -32602);
+
+    allow(&c2.client, &re_asked);
+    wait_cancel(&h.inbox, &root_ask);
+    let notes = until_terminal(&c2.inbox);
+    let (_, terminal) = notes.last().unwrap();
+    assert_eq!(terminal["update"]["subagentSessionId"], child);
+    assert_eq!(terminal["update"]["state"], "completed");
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+}
+
+#[test]
+fn session_close_releases_only_the_callers_attachment() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve_paused(
+        vec![Ok(ProviderEvent::MessageStart)],
+        vec![
+            Ok(ProviderEvent::TextDelta {
+                delta: "one".into(),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: CoreStopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        ],
+        vec![text_turn("one title")],
+        dir.path(),
+        dir.path(),
+    );
+    let c2 = connect(&h.host);
+    c2.client.request("session/load", h.resume.clone()).unwrap();
+    let hosted = || {
+        h.host
+            .engine
+            .hosted_sessions()
+            .iter()
+            .any(|(id, _)| *id == h.id)
+    };
+    assert!(hosted());
+
+    let closed = h
+        .client
+        .request("session/close", serde_json::json!({"sessionId": h.session}))
+        .unwrap();
+    assert_eq!(closed, serde_json::json!({}));
+    assert!(hosted(), "the other connection still holds the session");
+    let refused = h
+        .client
+        .request("session/close", serde_json::json!({"sessionId": h.session}))
+        .unwrap_err();
+    assert_eq!(refused.code, -32602);
+    let stale = drain(&h.inbox);
+
+    let prompt_end = prompt_async(&c2.client, &h.session, "hi");
+    until(|| h.paused.is_parked());
+    h.release.send(()).unwrap();
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    assert_eq!(chunk_texts(&drain(&c2.inbox)), ["one"]);
+    assert!(
+        h.inbox.recv_timeout(Duration::from_millis(300)).is_err(),
+        "the closed connection still receives updates after {stale:?}"
+    );
+
+    c2.client
+        .request("session/close", serde_json::json!({"sessionId": h.session}))
+        .unwrap();
+    until(|| {
+        !h.host
+            .engine
+            .hosted_sessions()
+            .iter()
+            .any(|(id, _)| *id == h.id)
+    });
+}
+
+#[test]
+fn the_last_detach_of_an_idle_session_closes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve_paused(
+        vec![Ok(ProviderEvent::MessageStart)],
+        vec![
+            Ok(ProviderEvent::TextDelta {
+                delta: "sure".into(),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: CoreStopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        ],
+        vec![text_turn("titled")],
+        dir.path(),
+        dir.path(),
+    );
+    let hosted = || {
+        h.host
+            .engine
+            .hosted_sessions()
+            .iter()
+            .any(|(id, _)| *id == h.id)
+    };
+    assert!(hosted());
+    let PausedHarness {
+        client,
+        inbox,
+        host,
+        paused,
+        release,
+        id,
+        session,
+        resume,
+    } = h;
+    drop(client);
+    drop(inbox);
+    until(|| {
+        !host
+            .engine
+            .hosted_sessions()
+            .iter()
+            .any(|(sid, _)| *sid == id)
+    });
+
+    let c2 = connect(&host);
+    c2.client.request("session/resume", resume).unwrap();
+    let prompt_end = prompt_async(&c2.client, &session, "next");
+    until(|| paused.is_parked());
+    release.send(()).unwrap();
+    let seen = updates_until(&c2.inbox, &session, "agent_message_chunk");
+    assert_eq!(chunk_texts(&seen), ["sure"]);
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+}
+
+#[test]
+fn an_unattached_working_session_closes_after_its_run_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve_paused(
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::TextDelta {
+                delta: "Hel".into(),
+            }),
+        ],
+        vec![
+            Ok(ProviderEvent::TextDelta { delta: "lo".into() }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: CoreStopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        ],
+        vec![text_turn("titled"), text_turn("sure")],
+        dir.path(),
+        dir.path(),
+    );
+    let _prompt_end = prompt_async(&h.client, &h.session, "go");
+    until(|| h.paused.is_parked());
+
+    let PausedHarness {
+        client,
+        inbox,
+        host,
+        release,
+        id,
+        session,
+        resume,
+        ..
+    } = h;
+    drop(client);
+    drop(inbox);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        host.engine
+            .hosted_sessions()
+            .iter()
+            .any(|(sid, _)| *sid == id),
+        "the working session stays hosted"
+    );
+
+    release.send(()).unwrap();
+    until(|| {
+        !host
+            .engine
+            .hosted_sessions()
+            .iter()
+            .any(|(sid, _)| *sid == id)
+    });
+
+    let c2 = connect(&host);
+    c2.client.request("session/resume", resume).unwrap();
+    assert_eq!(
+        prompt(&c2.client, &session, "next")["stopReason"],
+        "end_turn"
+    );
 }

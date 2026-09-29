@@ -9,6 +9,7 @@
 //! gets a usable title and the picker never has to show a raw prompt.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use kage_core::{CancelFlag, Content, Message, Role};
 use kage_provider::{Provider, ProviderEvent, StreamRequest};
@@ -88,11 +89,11 @@ fn model_title(
     prompt.push_str("Title:");
     let mut req = StreamRequest::new(
         model,
-        vec![Message::new(
+        vec![Arc::new(Message::new(
             Role::User,
             vec![Content::Text { text: prompt }],
             None,
-        )],
+        ))],
     );
     req.system = Some(TITLE_SYSTEM.to_owned());
     let stream = provider.stream(req, cancel).ok()?;

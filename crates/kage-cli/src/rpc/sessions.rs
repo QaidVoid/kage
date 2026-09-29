@@ -3,6 +3,7 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use kage_acp::acp::{
     ContentBlock, ListSessionsRequest, ListSessionsResponse, McpServer, MessageChunk,
@@ -75,7 +76,7 @@ impl super::CliAcpAgent {
             self.default_model.clone()
         };
         let mut spec = (self.spec)(id, cwd, &model, servers)?;
-        spec.cx.history = replay.history;
+        spec.cx.history = replay.history.into_iter().map(Arc::new).collect();
         spec.cx.budget = TokenBudget {
             used_input: replay.usage_total.input,
             used_output: replay.usage_total.output,

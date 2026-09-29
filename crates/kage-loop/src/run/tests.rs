@@ -1,5 +1,7 @@
 //! Tests for the agent loop.
 
+use std::sync::Arc;
+
 use kage_core::{CancelFlag, Content, Message, Role, TokenUsage};
 use kage_provider::testing::{MockProvider, user_msg};
 use kage_provider::{ProviderEvent, StopReason};
@@ -12,7 +14,7 @@ use crate::test_support::{Meet, MeetTool};
 #[test]
 fn build_request_forwards_max_output_tokens_from_context() {
     let mut cx = AgentContext::new("m", "");
-    cx.history.push(user_msg("hi"));
+    cx.history.push(Arc::new(user_msg("hi")));
     cx = cx.with_max_output_tokens(32_000);
     let tools = ToolRegistry::new();
     let provider = MockProvider::sequence(vec![]);
@@ -23,7 +25,7 @@ fn build_request_forwards_max_output_tokens_from_context() {
 #[test]
 fn build_request_leaves_max_output_tokens_unset_when_context_default() {
     let mut cx = AgentContext::new("m", "");
-    cx.history.push(user_msg("hi"));
+    cx.history.push(Arc::new(user_msg("hi")));
     let tools = ToolRegistry::new();
     let provider = MockProvider::sequence(vec![]);
     let req = build_request(&cx, &tools, &provider);
@@ -36,7 +38,7 @@ fn assistant_msg(content: Vec<Content>) -> Message {
 
 #[test]
 fn flatten_thinking_rewrites_thinking_to_tagged_text() {
-    let history = vec![assistant_msg(vec![
+    let history = vec![Arc::new(assistant_msg(vec![
         Content::Thinking {
             text: "weigh the options".to_owned(),
             signature: None,
@@ -45,7 +47,7 @@ fn flatten_thinking_rewrites_thinking_to_tagged_text() {
         Content::Text {
             text: "the answer is 42".to_owned(),
         },
-    ])];
+    ]))];
     let flat = flatten_thinking(&history);
     assert_eq!(
         flat[0].content,
@@ -62,7 +64,7 @@ fn flatten_thinking_rewrites_thinking_to_tagged_text() {
 
 #[test]
 fn flatten_thinking_drops_empty_thinking_blocks() {
-    let history = vec![assistant_msg(vec![
+    let history = vec![Arc::new(assistant_msg(vec![
         Content::Thinking {
             text: "   ".to_owned(),
             signature: None,
@@ -71,7 +73,7 @@ fn flatten_thinking_drops_empty_thinking_blocks() {
         Content::Text {
             text: "done".to_owned(),
         },
-    ])];
+    ]))];
     let flat = flatten_thinking(&history);
     assert_eq!(
         flat[0].content,
@@ -84,23 +86,53 @@ fn flatten_thinking_drops_empty_thinking_blocks() {
 #[test]
 fn flatten_thinking_leaves_non_thinking_messages_unchanged() {
     let history = vec![
-        user_msg("hi"),
-        assistant_msg(vec![Content::Text {
+        Arc::new(user_msg("hi")),
+        Arc::new(assistant_msg(vec![Content::Text {
             text: "hello".to_owned(),
-        }]),
+        }])),
     ];
     assert_eq!(flatten_thinking(&history), history);
 }
 
 #[test]
+fn build_request_shares_history_arcs_without_cloning_text() {
+    let mut cx = AgentContext::new("m", "");
+    cx.history.push(Arc::new(user_msg("hi")));
+    cx.history
+        .push(Arc::new(assistant_msg(vec![Content::Thinking {
+            text: "reason".to_owned(),
+            signature: None,
+            duration_ms: None,
+        }])));
+    cx.history.push(Arc::new(assistant_msg(vec![Content::Text {
+        text: "done".to_owned(),
+    }])));
+    let tools = ToolRegistry::new();
+    let provider = MockProvider::sequence(vec![]);
+    let req = build_request(&cx, &tools, &provider);
+
+    // Messages without thinking blocks are shared, not copied: the
+    // request holds the same allocation as the history and nothing else.
+    assert!(Arc::ptr_eq(&req.messages[0], &cx.history[0]));
+    assert!(Arc::ptr_eq(&req.messages[2], &cx.history[2]));
+    assert_eq!(Arc::strong_count(&req.messages[0]), 2);
+
+    // A thinking message is rewritten into a fresh allocation held only
+    // by the request.
+    assert!(!Arc::ptr_eq(&req.messages[1], &cx.history[1]));
+    assert_eq!(Arc::strong_count(&req.messages[1]), 1);
+}
+
+#[test]
 fn build_request_flattens_history_thinking() {
     let mut cx = AgentContext::new("m", "");
-    cx.history.push(user_msg("question"));
-    cx.history.push(assistant_msg(vec![Content::Thinking {
-        text: "reason".to_owned(),
-        signature: None,
-        duration_ms: None,
-    }]));
+    cx.history.push(Arc::new(user_msg("question")));
+    cx.history
+        .push(Arc::new(assistant_msg(vec![Content::Thinking {
+            text: "reason".to_owned(),
+            signature: None,
+            duration_ms: None,
+        }])));
     let tools = ToolRegistry::new();
     let provider = MockProvider::sequence(vec![]);
     let req = build_request(&cx, &tools, &provider);
@@ -172,7 +204,7 @@ fn shell_returns_after_provider_emits_text_only_turn() {
         }),
     ]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hello"));
+    cx.history.push(Arc::new(user_msg("hello")));
     let cfg = LoopConfig::default();
     let mut hooks = NoopHooks;
     let cancel = CancelFlag::new();
@@ -200,7 +232,7 @@ fn shell_re_enters_inner_loop_on_followup() {
     ]);
 
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hi"));
+    cx.history.push(Arc::new(user_msg("hi")));
     let cfg = LoopConfig::default();
     let mut hooks = OneFollowup(true);
     let cancel = CancelFlag::new();
@@ -219,7 +251,7 @@ fn shell_emits_steering_message_before_first_turn() {
     })]);
 
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hi"));
+    cx.history.push(Arc::new(user_msg("hi")));
     let cfg = LoopConfig::default();
     let mut hooks = Steering(true);
     let cancel = CancelFlag::new();
@@ -258,7 +290,7 @@ fn turn_boundaries_fire_once_for_text_only_turn() {
         }),
     ]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hello"));
+    cx.history.push(Arc::new(user_msg("hello")));
     let cfg = LoopConfig::default();
     let cancel = CancelFlag::new();
     let registry = ToolRegistry::new();
@@ -293,7 +325,7 @@ fn turn_index_advances_across_followup_rounds() {
     ]);
 
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hi"));
+    cx.history.push(Arc::new(user_msg("hi")));
     let cfg = LoopConfig::default();
     let mut hooks = OneFollowup(true);
     let cancel = CancelFlag::new();
@@ -315,15 +347,18 @@ struct StaticTransform {
     calls: u32,
 }
 impl Hooks for StaticTransform {
-    fn transform_context(&mut self, messages: &mut Vec<kage_core::Message>) -> Result<(), String> {
+    fn transform_context(
+        &mut self,
+        messages: &mut Vec<std::sync::Arc<kage_core::Message>>,
+    ) -> Result<(), String> {
         self.calls = self.calls.saturating_add(1);
-        messages.push(kage_core::Message::new(
+        messages.push(Arc::new(kage_core::Message::new(
             kage_core::Role::User,
             vec![Content::Text {
                 text: self.injection.clone(),
             }],
             messages.last().map(|m| m.id),
-        ));
+        )));
         Ok(())
     }
 }
@@ -335,7 +370,7 @@ fn transform_context_runs_before_each_provider_call() {
         usage: TokenUsage::default(),
     })]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hello"));
+    cx.history.push(Arc::new(user_msg("hello")));
     let cfg = LoopConfig::default();
     let mut hooks = StaticTransform {
         injection: "from-hook".into(),
@@ -356,7 +391,10 @@ fn transform_context_runs_before_each_provider_call() {
 
 struct FailingTransform;
 impl Hooks for FailingTransform {
-    fn transform_context(&mut self, _messages: &mut Vec<kage_core::Message>) -> Result<(), String> {
+    fn transform_context(
+        &mut self,
+        _messages: &mut Vec<std::sync::Arc<kage_core::Message>>,
+    ) -> Result<(), String> {
         Err("transform exploded".into())
     }
 }
@@ -365,7 +403,7 @@ impl Hooks for FailingTransform {
 fn transform_context_error_aborts_with_hook_failed() {
     let mock = MockProvider::replaying(vec![]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hi"));
+    cx.history.push(Arc::new(user_msg("hi")));
     let cfg = LoopConfig::default();
     let mut hooks = FailingTransform;
     let cancel = CancelFlag::new();
@@ -408,7 +446,7 @@ fn should_stop_after_turn_suppresses_followup_and_returns_ok() {
         usage: TokenUsage::default(),
     })]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hi"));
+    cx.history.push(Arc::new(user_msg("hi")));
     let cfg = LoopConfig::default();
     let mut hooks = StopAfterFirstTurn { polls: 0 };
     let cancel = CancelFlag::new();
@@ -475,7 +513,7 @@ fn should_stop_after_turn_short_circuits_pending_tool_calls() {
         }),
     ]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("plan it"));
+    cx.history.push(Arc::new(user_msg("plan it")));
     let cfg = LoopConfig::default();
     let mut hooks = StopAfterFirstTurn { polls: 0 };
     let cancel = CancelFlag::new();
@@ -543,7 +581,7 @@ fn steering_one_at_a_time_drains_one_per_turn() {
     ]);
 
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hi"));
+    cx.history.push(Arc::new(user_msg("hi")));
     let cfg = LoopConfig::default();
     let mut hooks = CombinedSteering {
         queued: QueuedSteering(["one".into(), "two".into()].into_iter().collect()),
@@ -574,7 +612,7 @@ fn steering_all_mode_concatenates_in_one_turn() {
     })]);
 
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hi"));
+    cx.history.push(Arc::new(user_msg("hi")));
     let cfg = LoopConfig {
         steering_mode: SteeringMode::All,
         ..LoopConfig::default()
@@ -621,7 +659,7 @@ fn transform_provider_request_observes_and_can_rewrite() {
         usage: TokenUsage::default(),
     })]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hi"));
+    cx.history.push(Arc::new(user_msg("hi")));
     let cfg = LoopConfig::default();
     let mut hooks = RequestSpy {
         seen_model: None,
@@ -672,7 +710,7 @@ fn run_meet_batch(tools: Vec<MeetTool>, parallel_tools: bool) -> Vec<String> {
         })],
     ]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("go"));
+    cx.history.push(Arc::new(user_msg("go")));
     let cfg = LoopConfig {
         parallel_tools,
         ..LoopConfig::default()
@@ -839,7 +877,7 @@ fn terminate_flag_short_circuits_run_with_no_followup() {
         })],
     ]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("do it"));
+    cx.history.push(Arc::new(user_msg("do it")));
     let cfg = LoopConfig::default();
     let mut hooks = AlwaysFollowup;
     let cancel = CancelFlag::new();
@@ -860,7 +898,7 @@ fn terminate_flag_short_circuits_run_with_no_followup() {
 fn shell_returns_cancelled_when_cancel_flagged_up_front() {
     let mock = MockProvider::replaying(vec![]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hi"));
+    cx.history.push(Arc::new(user_msg("hi")));
     let cfg = LoopConfig::default();
     let mut hooks = NoopHooks;
     let cancel = CancelFlag::new();
@@ -921,7 +959,7 @@ fn followup_text_appears_in_next_provider_request() {
     ]);
 
     let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
-    cx.history.push(user_msg("first ask"));
+    cx.history.push(Arc::new(user_msg("first ask")));
     let cfg = LoopConfig::default();
     let mut hooks = OneShotFollowup {
         text: Some("now also do this".into()),
@@ -969,7 +1007,7 @@ fn steering_is_polled_before_every_inner_turn() {
     ]);
 
     let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
-    cx.history.push(user_msg("go"));
+    cx.history.push(Arc::new(user_msg("go")));
     let cfg = LoopConfig::default();
     let mut hooks = CountingSteering::default();
     let cancel = CancelFlag::new();
@@ -1032,7 +1070,7 @@ fn cancellation_triggered_inside_tool_terminates_run_before_next_turn() {
     ]]);
 
     let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
-    cx.history.push(user_msg("go"));
+    cx.history.push(Arc::new(user_msg("go")));
     let cfg = LoopConfig::default();
     let mut hooks = NoopHooks;
     let cancel = CancelFlag::new();
@@ -1117,7 +1155,7 @@ fn doom_loop_steers_after_three_repeat_failures() {
     ]);
 
     let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
-    cx.history.push(user_msg("try the thing"));
+    cx.history.push(Arc::new(user_msg("try the thing")));
     let cfg = LoopConfig::default();
     let mut hooks = NoopHooks;
     let cancel = CancelFlag::new();
@@ -1179,7 +1217,7 @@ fn on_doom_loop_hook_can_suppress_steering() {
     ]);
 
     let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
-    cx.history.push(user_msg("try the thing"));
+    cx.history.push(Arc::new(user_msg("try the thing")));
     let mut hooks = SuppressDoom;
     let cancel = CancelFlag::new();
     let registry = ToolRegistry::new().with(std::sync::Arc::new(AlwaysFailTool));
@@ -1306,7 +1344,7 @@ fn end_to_end_event_ordering_and_hook_callbacks() {
     let registry = ToolRegistry::new().with(counting.clone());
 
     let mut cx = AgentContext::new("mock:m", "be helpful").with_workdir("/tmp");
-    cx.history.push(user_msg("kick off"));
+    cx.history.push(Arc::new(user_msg("kick off")));
     let mut hooks = OrderRecording::default();
     let log = std::rc::Rc::clone(&hooks.order);
     let cancel = CancelFlag::new();
@@ -1416,7 +1454,7 @@ fn message_appended_events_mirror_history() {
     ]);
     let registry = ToolRegistry::new().with(std::sync::Arc::new(StaticTool));
     let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
-    cx.history.push(user_msg("go"));
+    cx.history.push(Arc::new(user_msg("go")));
     let mut appended = Vec::new();
 
     run(
@@ -1482,7 +1520,7 @@ fn end_to_end_tool_call_loop() {
     ]);
 
     let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
-    cx.history.push(user_msg("do the thing"));
+    cx.history.push(Arc::new(user_msg("do the thing")));
     let cfg = LoopConfig::default();
     let mut hooks = NoopHooks;
     let cancel = CancelFlag::new();
@@ -1564,7 +1602,7 @@ fn good_turn() -> Vec<Result<ProviderEvent, kage_provider::ProviderError>> {
 fn transient_provider_failure_is_retried_then_succeeds() {
     let mock = MockProvider::sequence(vec![transient_turn(), good_turn()]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hello"));
+    cx.history.push(Arc::new(user_msg("hello")));
     let cfg = LoopConfig::default();
     let log = EventLog::default();
     let cancel = CancelFlag::new();
@@ -1591,7 +1629,7 @@ fn non_transient_failure_is_not_retried() {
         "bad frame".into(),
     ))]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hello"));
+    cx.history.push(Arc::new(user_msg("hello")));
     let cfg = LoopConfig::default();
     let log = EventLog::default();
     let cancel = CancelFlag::new();
@@ -1617,7 +1655,7 @@ fn auth_failure_ends_the_run_with_auth_and_no_retry() {
         "token expired".into(),
     ))]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hello"));
+    cx.history.push(Arc::new(user_msg("hello")));
     let cfg = LoopConfig::default();
     let log = EventLog::default();
     let cancel = CancelFlag::new();
@@ -1646,7 +1684,7 @@ fn auth_failure_ends_the_run_with_auth_and_no_retry() {
 fn retries_are_bounded_then_surface_the_error() {
     let mock = MockProvider::sequence(vec![transient_turn(), transient_turn()]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hello"));
+    cx.history.push(Arc::new(user_msg("hello")));
     let cfg = LoopConfig {
         max_provider_retries: 1,
         ..LoopConfig::default()
@@ -1693,7 +1731,7 @@ fn steering_message_is_announced_then_lands_in_history() {
 
     let mock = MockProvider::sequence(vec![good_turn(), good_turn()]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("first"));
+    cx.history.push(Arc::new(user_msg("first")));
     let cfg = LoopConfig::default();
     let mut hooks = Steerer {
         queued: vec!["mid-run nudge".into()],
@@ -1743,7 +1781,7 @@ fn provider_retry_event_surfaces_server_retry_after() {
     })];
     let mock = MockProvider::sequence(vec![rate_limited, good_turn()]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hello"));
+    cx.history.push(Arc::new(user_msg("hello")));
     // Cancel during the (capped) backoff so the test does not actually
     // sleep 60s while still letting the ProviderRetry event fire.
     let cancel = CancelFlag::new();
@@ -1790,7 +1828,7 @@ fn provider_retry_event_surfaces_server_retry_after() {
 fn cancel_during_backoff_aborts_cleanly() {
     let mock = MockProvider::sequence(vec![transient_turn(), good_turn()]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hello"));
+    cx.history.push(Arc::new(user_msg("hello")));
     let cfg = LoopConfig::default();
     let cancel = CancelFlag::new();
     let log = EventLog {
@@ -1819,7 +1857,7 @@ fn provider_error_after_cancel_ends_the_run_as_cancelled() {
         Err(kage_provider::ProviderError::Transport("cancelled".into())),
     ]]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("hello"));
+    cx.history.push(Arc::new(user_msg("hello")));
     let cancel = CancelFlag::new();
     let res = run(
         &mock,
@@ -1882,7 +1920,7 @@ fn cancel_mid_dispatch_answers_every_tool_call_in_history() {
         }),
     ]);
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("go"));
+    cx.history.push(Arc::new(user_msg("go")));
     let cfg = LoopConfig::default();
     let mut hooks = NoopHooks;
     let cancel = CancelFlag::new();

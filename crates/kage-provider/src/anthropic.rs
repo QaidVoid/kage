@@ -703,13 +703,15 @@ mod tests;
 
 #[cfg(test)]
 mod thinking_tests {
+    use std::sync::Arc;
+
     use kage_core::{Effort, Efforts, ThinkingLevel};
 
     use super::*;
 
     fn request(reasoning: Reasoning, level: ThinkingLevel) -> StreamRequest {
         let user = Message::new(Role::User, vec![Content::Text { text: "hi".into() }], None);
-        let mut req = StreamRequest::new("m", vec![user]);
+        let mut req = StreamRequest::new("m", vec![Arc::new(user)]);
         req.reasoning = reasoning;
         req.level = Some(level);
         req
@@ -754,7 +756,7 @@ mod thinking_tests {
     fn adaptive_thinking_stays_on_for_an_unsigned_continuation() {
         let r = effort(&[Effort::Low, Effort::High], false);
         let mut req = request(r, ThinkingLevel::High);
-        req.messages.push(Message::new(
+        req.messages.push(Arc::new(Message::new(
             Role::Assistant,
             vec![Content::ToolCall {
                 id: ToolCallId::new("call_1"),
@@ -762,8 +764,8 @@ mod thinking_tests {
                 input: serde_json::json!({}),
             }],
             None,
-        ));
-        req.messages.push(Message::new(
+        )));
+        req.messages.push(Arc::new(Message::new(
             Role::ToolResult,
             vec![Content::ToolResultBlock {
                 call_id: ToolCallId::new("call_1"),
@@ -771,7 +773,7 @@ mod thinking_tests {
                 is_error: false,
             }],
             None,
-        ));
+        )));
         let body = build_request_body(&req, true);
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["output_config"]["effort"], "high");

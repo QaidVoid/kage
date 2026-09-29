@@ -220,7 +220,10 @@ mod tests {
             .send(Envelope {
                 session,
                 seq: 1,
-                event: LoopEvent::MessageAppended { message }.into(),
+                event: LoopEvent::MessageAppended {
+                    message: Arc::new(message),
+                }
+                .into(),
             })
             .unwrap();
         let publisher: Arc<OnceLock<LogPublisher>> = Arc::default();

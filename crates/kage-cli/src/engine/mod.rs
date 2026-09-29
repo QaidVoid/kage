@@ -1249,7 +1249,7 @@ impl Dispatcher {
             cx.history
                 .iter()
                 .find(|m| m.role == role)
-                .map(crate::cli_loop_run::first_user_text)
+                .map(|m| crate::cli_loop_run::first_user_text(m))
                 .unwrap_or_default()
         };
         let (user, reply) = (first_text(Role::User), first_text(Role::Assistant));
@@ -1345,7 +1345,7 @@ fn asker(bus: &Arc<Bus>, asks: &Asks, next: &Arc<AtomicU64>, session: SessionId)
 fn apply_forked_snapshot(bus: &Bus, id: SessionId, path: &Path, cx: &mut AgentContext) {
     match kage_session::replay(path) {
         Ok(replay) => {
-            cx.history = replay.history;
+            cx.history = replay.history.into_iter().map(Arc::new).collect();
             cx.budget = kage_loop::TokenBudget {
                 used_input: replay.usage_total.input,
                 used_output: replay.usage_total.output,
@@ -1406,6 +1406,23 @@ fn has_reply(cx: &AgentContext) -> bool {
     cx.history.iter().any(|m| m.role == Role::Assistant)
 }
 
+/// Clone `cx` with an empty history, for commands that replace the
+/// conversation wholesale right after.
+fn clone_shallow(cx: &AgentContext) -> AgentContext {
+    AgentContext {
+        history: Vec::new(),
+        model: cx.model.clone(),
+        system_prompt: cx.system_prompt.clone(),
+        workdir: cx.workdir.clone(),
+        context_window: cx.context_window,
+        max_output_tokens: cx.max_output_tokens,
+        thinking_level: cx.thinking_level,
+        reasoning: cx.reasoning,
+        confine_paths: cx.confine_paths,
+        budget: cx.budget,
+    }
+}
+
 fn title_entry(title: String) -> kage_session::SessionEntry {
     kage_session::SessionEntry::Title(kage_session::SessionTitle {
         id: kage_session::EntryId::new(),
@@ -1442,7 +1459,7 @@ fn append_history(
         if let Some(recorder) = recorder.as_deref_mut() {
             report_write(bus, id, recorder.message(&message));
         }
-        cx.history.push(message);
+        cx.history.push(Arc::new(message));
     }
 }
 

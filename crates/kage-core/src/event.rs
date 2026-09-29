@@ -4,6 +4,8 @@
 //! TUI, CLI, plugins, and editor integrations each subscribe to the same
 //! event alphabet.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::message::{Message, MessageId, ToolCallId};
@@ -354,8 +356,10 @@ pub enum LoopEvent {
     /// tool result. Recording these in order reproduces the history
     /// exactly. Durable.
     MessageAppended {
-        /// The appended message, with its parent link set.
-        message: Message,
+        /// The appended message, with its parent link set. Shared with
+        /// the loop's history buffer; serializes identically to
+        /// [`Message`].
+        message: Arc<Message>,
     },
     /// A turn (one provider round trip plus its tool calls) began. Durable.
     TurnStarted {

@@ -647,12 +647,14 @@ impl Iterator for ResponsesStream {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::testing::{collect_ok, user_msg};
 
     #[test]
     fn body_uses_input_array_and_instructions_field() {
-        let mut req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
+        let mut req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
         req.system = Some("you are kage".into());
         let body = build_request_body(&req, true);
         assert_eq!(body["model"], "gpt-5");
@@ -669,14 +671,14 @@ mod tests {
     /// requests are not retained at `OpenAI`.
     #[test]
     fn requests_opt_out_of_server_side_storage() {
-        let req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
+        let req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
         let body = build_request_body(&req, true);
         assert_eq!(body["store"], false);
     }
 
     #[test]
     fn body_uses_flat_function_tool_shape() {
-        let mut req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
+        let mut req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
         req.tools = vec![ToolSpec {
             name: "read".into(),
             description: "read a file".into(),
@@ -694,7 +696,7 @@ mod tests {
 
     #[test]
     fn body_includes_reasoning_block_when_level_set() {
-        let mut req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
+        let mut req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
         req.level = Some(crate::ThinkingLevel::High);
         let body = build_request_body(&req, true);
         assert_eq!(body["reasoning"]["effort"], "high");
@@ -702,7 +704,7 @@ mod tests {
 
     #[test]
     fn body_omits_reasoning_when_level_off() {
-        let mut req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
+        let mut req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
         req.level = Some(crate::ThinkingLevel::Off);
         let body = build_request_body(&req, true);
         assert!(body.get("reasoning").is_none());
@@ -719,7 +721,10 @@ mod tests {
             }],
             None,
         );
-        let req = StreamRequest::new("gpt-5", vec![user_msg("read"), assistant]);
+        let req = StreamRequest::new(
+            "gpt-5",
+            vec![Arc::new(user_msg("read")), Arc::new(assistant)],
+        );
         let body = build_request_body(&req, true);
         let input = body["input"].as_array().unwrap();
         let last = &input[input.len() - 1];
@@ -747,7 +752,10 @@ mod tests {
             ],
             None,
         );
-        let req = StreamRequest::new("gpt-5", vec![user_msg("read"), assistant]);
+        let req = StreamRequest::new(
+            "gpt-5",
+            vec![Arc::new(user_msg("read")), Arc::new(assistant)],
+        );
         let body = build_request_body(&req, true);
         let input = body["input"].as_array().unwrap();
         // user, then assistant message, then function_call.
@@ -769,7 +777,7 @@ mod tests {
             }],
             None,
         );
-        let req = StreamRequest::new("gpt-5", vec![result]);
+        let req = StreamRequest::new("gpt-5", vec![Arc::new(result)]);
         let body = build_request_body(&req, true);
         let input = body["input"].as_array().unwrap();
         assert_eq!(input[0]["type"], "function_call_output");
@@ -795,7 +803,10 @@ mod tests {
             ],
             None,
         );
-        let req = StreamRequest::new("gpt-5", vec![user_msg("read"), assistant]);
+        let req = StreamRequest::new(
+            "gpt-5",
+            vec![Arc::new(user_msg("read")), Arc::new(assistant)],
+        );
         let body = build_request_body(&req, true);
         let input = body["input"].as_array().unwrap();
         assert_eq!(input.len(), 3);
@@ -827,7 +838,7 @@ mod tests {
             ],
             None,
         );
-        let history = vec![user_msg("read"), assistant];
+        let history = vec![Arc::new(user_msg("read")), Arc::new(assistant)];
         let body = build_request_body(&StreamRequest::new("gpt-5", history.clone()), true);
         assert_eq!(
             body["input"][1],
@@ -839,7 +850,7 @@ mod tests {
 
     #[test]
     fn reasoning_requests_ask_for_encrypted_reasoning() {
-        let mut req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
+        let mut req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
         assert!(build_request_body(&req, true).get("include").is_none());
         req.level = Some(crate::ThinkingLevel::High);
         let body = build_request_body(&req, true);
@@ -878,7 +889,7 @@ mod tests {
             ],
             None,
         );
-        let req = StreamRequest::new("gpt-5", vec![user_msg("hi"), assistant]);
+        let req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi")), Arc::new(assistant)]);
         let body = build_request_body(&req, true);
         let input = body["input"].as_array().unwrap();
         assert_eq!(input.len(), 2);
@@ -907,7 +918,10 @@ mod tests {
             ],
             None,
         );
-        let req = StreamRequest::new("gpt-5", vec![user_msg("read"), assistant]);
+        let req = StreamRequest::new(
+            "gpt-5",
+            vec![Arc::new(user_msg("read")), Arc::new(assistant)],
+        );
         let body = build_request_body(&req, true);
         let input = body["input"].as_array().unwrap();
         let kinds: Vec<&str> = input[1..]
@@ -1127,13 +1141,15 @@ mod tests {
 
 #[cfg(test)]
 mod thinking_tests {
+    use std::sync::Arc;
+
     use kage_core::{Effort, Efforts, ThinkingLevel};
 
     use super::*;
 
     fn request(reasoning: Reasoning, level: ThinkingLevel) -> StreamRequest {
         let user = Message::new(Role::User, vec![Content::Text { text: "hi".into() }], None);
-        let mut req = StreamRequest::new("m", vec![user]);
+        let mut req = StreamRequest::new("m", vec![Arc::new(user)]);
         req.reasoning = reasoning;
         req.level = Some(level);
         req

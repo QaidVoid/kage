@@ -320,6 +320,7 @@ fn summary_from_header(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use chrono::Utc;
     use kage_core::{Content, Message, Role};
@@ -349,13 +350,13 @@ mod tests {
             .append(&SessionEntry::Message(MessageEntry {
                 id: EntryId::new(),
                 ts: Utc::now(),
-                message: Message::new(
+                message: Arc::new(Message::new(
                     Role::User,
                     vec![Content::Text {
                         text: prompt.to_owned(),
                     }],
                     None,
-                ),
+                )),
                 usage: None,
             }))
             .unwrap();
@@ -588,7 +589,7 @@ mod tests {
         SessionEntry::Message(MessageEntry {
             id: EntryId::new(),
             ts: Utc::now(),
-            message: Message::new(role, content, None),
+            message: Arc::new(Message::new(role, content, None)),
             usage: None,
         })
     }

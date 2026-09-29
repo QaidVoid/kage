@@ -901,7 +901,7 @@ fn shell_output_reaches_the_next_request() {
     let texts: Vec<String> = request
         .messages
         .iter()
-        .map(crate::cli_loop_run::first_user_text)
+        .map(|m| crate::cli_loop_run::first_user_text(m))
         .collect();
     assert!(
         texts
@@ -973,7 +973,7 @@ fn a_prompt_waits_for_the_shell_command_before_it() {
     let texts: Vec<String> = mock.requests()[0]
         .messages
         .iter()
-        .map(crate::cli_loop_run::first_user_text)
+        .map(|m| crate::cli_loop_run::first_user_text(m))
         .collect();
     assert!(texts[0].starts_with("[shell] ran `sleep 0.2; echo late`"));
     assert_eq!(texts[1], "go");
@@ -1051,9 +1051,10 @@ fn a_compacted_session_replays_the_live_history() {
     let live = mock.requests().pop().unwrap().messages;
     let replayed = kage_session::replay(&path).unwrap().history;
     let shape = |m: &Message| (m.role, m.content.clone());
+    let live_shape = |m: &Arc<Message>| (m.role, m.content.clone());
     assert_eq!(
         replayed[..live.len()].iter().map(shape).collect::<Vec<_>>(),
-        live.iter().map(shape).collect::<Vec<_>>()
+        live.iter().map(live_shape).collect::<Vec<_>>()
     );
     let mut calls = std::collections::HashSet::new();
     for block in replayed.iter().flat_map(|m| &m.content) {

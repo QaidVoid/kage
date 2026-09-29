@@ -27,6 +27,7 @@
 //! - `KAGE_PROMPT` to send a custom prompt.
 
 use std::io::Write;
+use std::sync::Arc;
 
 use kage_core::{CancelFlag, Content, Message, Role};
 use kage_provider::{
@@ -66,11 +67,11 @@ fn main() {
 
     let req = StreamRequest::new(
         &model,
-        vec![Message::new(
+        vec![Arc::new(Message::new(
             Role::User,
             vec![Content::Text { text: prompt }],
             None,
-        )],
+        ))],
     );
 
     let cancel = CancelFlag::new();

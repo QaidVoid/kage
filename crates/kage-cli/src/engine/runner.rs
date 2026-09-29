@@ -115,6 +115,10 @@ impl Run {
         });
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one run reads top to bottom: setup, prompt, loop, finish"
+    )]
     fn execute(self, done: &mpsc::Sender<Input>) -> Finished {
         let Self {
             session,
@@ -169,8 +173,9 @@ impl Run {
             Work::Prompt(prompt) => {
                 expand(&bus, session, prompt, &clients, &catalog).and_then(|prompt| {
                     let first_text = crate::cli_loop_run::first_user_text(&prompt);
-                    cx.history.push(prompt.clone());
-                    emit(LoopEvent::MessageAppended { message: prompt });
+                    let message = Arc::new(prompt);
+                    cx.history.push(Arc::clone(&message));
+                    emit(LoopEvent::MessageAppended { message });
                     if let Some(rt) = &plugins {
                         crate::plugins::dispatch_run_start(rt, &cx.system_prompt, &first_text);
                     }

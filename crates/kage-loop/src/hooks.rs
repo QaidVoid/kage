@@ -5,6 +5,8 @@
 //! make the trait noop-by-default: a host overrides only the methods it cares
 //! about.
 
+use std::sync::Arc;
+
 use kage_core::{Message, TokenUsage, ToolOutput};
 use kage_provider::StreamRequest;
 
@@ -165,7 +167,7 @@ pub trait Hooks {
 
     /// Fired immediately before each provider turn, with the full message
     /// history in scope. Hosts can prune, redact, or rewrite messages in
-    /// place; the loop sends the resulting `Vec<Message>` to the provider.
+    /// place; the loop sends the resulting history to the provider.
     ///
     /// Returning an error aborts the turn with
     /// [`kage_core::LoopError::HookFailed`]; the loop emits the terminal
@@ -175,7 +177,7 @@ pub trait Hooks {
     /// outputs that have rotted, inject a per-turn system reminder. Avoid
     /// expensive work here: this runs on every turn including compaction
     /// follow-ups.
-    fn transform_context(&mut self, messages: &mut Vec<Message>) -> Result<(), String> {
+    fn transform_context(&mut self, messages: &mut Vec<Arc<Message>>) -> Result<(), String> {
         let _ = messages;
         Ok(())
     }

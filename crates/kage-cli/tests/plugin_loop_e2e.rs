@@ -7,6 +7,8 @@
 //! Lua-registered provider driving an actual turn. This asserts the
 //! registration -> registry -> loop path the production wiring relies on.
 
+use std::sync::Arc;
+
 use kage_core::{CancelFlag, Content, Message, Role, TokenUsage, ToolCallId};
 use kage_loop::{AgentContext, LoopConfig, NoopHooks, run};
 use kage_plugin::PluginRuntime;
@@ -78,7 +80,7 @@ fn model_invokes_a_lua_registered_tool_through_the_loop() {
     ]);
 
     let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("please echo"));
+    cx.history.push(Arc::new(user_msg("please echo")));
     let mut hooks = NoopHooks;
     let cancel = CancelFlag::new();
 
@@ -140,7 +142,7 @@ fn loop_streams_from_a_lua_registered_provider() {
 
     let tools = ToolRegistry::new();
     let mut cx = AgentContext::new("fakeprov:m", "");
-    cx.history.push(user_msg("hello"));
+    cx.history.push(Arc::new(user_msg("hello")));
     let mut hooks = NoopHooks;
     let cancel = CancelFlag::new();
 

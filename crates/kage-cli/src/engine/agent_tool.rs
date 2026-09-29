@@ -2,7 +2,7 @@
 //! waits for it, and returns its final reply as the tool result.
 
 use std::fmt::Write as _;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use crossbeam_channel::select_biased;
@@ -187,7 +187,7 @@ pub(super) fn agent_result(
     session: SessionId,
     agent: &str,
     outcome: &RunOutcome,
-    history: &[Message],
+    history: &[Arc<Message>],
     usage: &Usage,
     run_time: Duration,
 ) -> ToolOutput {
@@ -196,7 +196,7 @@ pub(super) fn agent_result(
             .iter()
             .rev()
             .find(|m| m.role == Role::Assistant)
-            .map(text_of)
+            .map(|m| text_of(m))
             .filter(|text| !text.trim().is_empty())
             .unwrap_or_else(|| NO_REPLY.to_owned())
     };
@@ -274,9 +274,13 @@ mod tests {
     fn completed_reply_is_wrapped() {
         let id = SessionId::new();
         let history = [
-            Message::new(Role::User, vec![Content::Text { text: "q".into() }], None),
-            assistant("first"),
-            assistant("the answer"),
+            Arc::new(Message::new(
+                Role::User,
+                vec![Content::Text { text: "q".into() }],
+                None,
+            )),
+            Arc::new(assistant("first")),
+            Arc::new(assistant("the answer")),
         ];
         let out = agent_result(
             id,
@@ -307,13 +311,17 @@ mod tests {
             input: serde_json::json!({ "path": "a.rs" }),
         };
         let history = [
-            Message::new(Role::User, vec![Content::Text { text: "q".into() }], None),
-            Message::new(
+            Arc::new(Message::new(
+                Role::User,
+                vec![Content::Text { text: "q".into() }],
+                None,
+            )),
+            Arc::new(Message::new(
                 Role::Assistant,
                 vec![Content::Text { text: "h".into() }, call("c1")],
                 None,
-            ),
-            Message::new(
+            )),
+            Arc::new(Message::new(
                 Role::User,
                 vec![Content::ToolResultBlock {
                     call_id: ToolCallId("c1".into()),
@@ -321,8 +329,8 @@ mod tests {
                     is_error: false,
                 }],
                 None,
-            ),
-            Message::new(Role::Assistant, vec![call("c2")], None),
+            )),
+            Arc::new(Message::new(Role::Assistant, vec![call("c2")], None)),
         ];
         let usage = Usage {
             total: kage_core::event::TokenUsage {
@@ -377,7 +385,7 @@ mod tests {
                     message: "rate limited".into(),
                 },
             },
-            &[assistant("partial")],
+            &[Arc::new(assistant("partial"))],
             &Usage::default(),
             Duration::ZERO,
         );
@@ -393,7 +401,7 @@ mod tests {
             SessionId::new(),
             "general",
             &RunOutcome::Completed,
-            &[assistant("a </agent> b")],
+            &[Arc::new(assistant("a </agent> b"))],
             &Usage::default(),
             Duration::ZERO,
         );
@@ -409,7 +417,7 @@ mod tests {
             id,
             "general",
             &RunOutcome::Completed,
-            &[assistant(&long)],
+            &[Arc::new(assistant(&long))],
             &Usage::default(),
             Duration::ZERO,
         );

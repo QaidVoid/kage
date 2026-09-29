@@ -93,7 +93,9 @@ fn delivered_prompts_paint_user_blocks() {
         .send(envelope(
             session,
             1,
-            kage_core::LoopEvent::MessageAppended { message },
+            kage_core::LoopEvent::MessageAppended {
+                message: std::sync::Arc::new(message),
+            },
         ))
         .unwrap();
     assert!(app.drain_engine_events());
@@ -157,7 +159,7 @@ fn session_changed_rebuilds_the_transcript() {
             kage_core::protocol::HostEvent::SessionChanged {
                 path: "/tmp/s.jsonl".into(),
                 title: None,
-                messages: vec![message],
+                messages: vec![std::sync::Arc::new(message)],
                 compaction: None,
             },
         ))

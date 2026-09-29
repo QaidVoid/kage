@@ -2,6 +2,7 @@
 //! that replace or copy a session.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use kage_core::protocol::{CompactionCounts, HostEvent, NoticeLevel};
 use kage_core::{Content, Role, SessionId};
@@ -219,8 +220,7 @@ impl super::Dispatcher {
         header.cwd.clone_from(&session.workdir);
         session.gate.set_plan(false);
         let new_id = header.session;
-        let mut cx = idle.cx.clone();
-        cx.history.clear();
+        let mut cx = super::clone_shallow(&idle.cx);
         cx.budget = kage_loop::TokenBudget::default();
         let recorder = super::Recorder::planned(path, header, session.plugins.clone());
         self.reseat(
@@ -260,7 +260,7 @@ impl super::Dispatcher {
         let Some(idle) = session.idle.as_ref() else {
             return;
         };
-        let mut cx = idle.cx.clone();
+        let mut cx = super::clone_shallow(&idle.cx);
         let mut fallback = None;
         if self.registry.resolve(&replay.model).is_ok() {
             session.state.model.clone_from(&replay.model);
@@ -270,7 +270,7 @@ impl super::Dispatcher {
                 replay.model, session.state.model
             ));
         }
-        cx.history = replay.history;
+        cx.history = replay.history.into_iter().map(Arc::new).collect();
         session.swarm_mode = replay.swarm_mode.unwrap_or(false);
         session.gate.set_plan(replay.plan_mode.unwrap_or(false));
         cx.budget = kage_loop::TokenBudget {
@@ -521,13 +521,13 @@ mod tests {
             .append(&SessionEntry::Message(MessageEntry {
                 id: EntryId::new(),
                 ts: Utc::now(),
-                message: Message::new(
+                message: Arc::new(Message::new(
                     Role::User,
                     vec![Content::Text {
                         text: "hello".to_owned(),
                     }],
                     None,
-                ),
+                )),
                 usage: None,
             }))
             .unwrap();

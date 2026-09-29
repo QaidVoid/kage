@@ -4,6 +4,7 @@
 //! `log`) and verify the host can drive each one.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use kage_core::{CancelFlag, Content, Message, Role};
 use kage_plugin::{HostLog, LogLevel, PluginRuntime, SharedHostLog};
@@ -176,11 +177,11 @@ fn fixture_plugin_drives_every_surface() {
         .stream(
             kage_provider::StreamRequest::new(
                 "real-model",
-                vec![Message::new(
+                vec![Arc::new(Message::new(
                     Role::User,
                     vec![Content::Text { text: "x".into() }],
                     None,
-                )],
+                ))],
             ),
             &cancel,
         )

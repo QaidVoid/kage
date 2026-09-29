@@ -127,7 +127,7 @@ pub(crate) fn run_resume(
     if let Some(out) = runtime_env::max_output_tokens_for(&registry, &model) {
         cx = cx.with_max_output_tokens(out);
     }
-    cx.history = replay.history;
+    cx.history = replay.history.into_iter().map(Arc::new).collect();
     cx.budget.used_input = replay.usage_total.input;
     cx.budget.used_output = replay.usage_total.output;
     cx.budget.used_cache_read = replay.usage_total.cache_read;

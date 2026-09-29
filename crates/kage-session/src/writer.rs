@@ -246,6 +246,7 @@ fn acquire_lock(file: File, path: &Path) -> Result<Option<nix::fcntl::Flock<File
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use chrono::Utc;
     use kage_core::{Content, Message, Role};
@@ -278,7 +279,11 @@ mod tests {
         w.append(&SessionEntry::Message(MessageEntry {
             id: EntryId::new(),
             ts: Utc::now(),
-            message: Message::new(Role::User, vec![Content::Text { text: "hi".into() }], None),
+            message: Arc::new(Message::new(
+                Role::User,
+                vec![Content::Text { text: "hi".into() }],
+                None,
+            )),
             usage: None,
         }))
         .unwrap();

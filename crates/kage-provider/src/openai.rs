@@ -797,12 +797,14 @@ fn parse_finish_reason(value: &str) -> StopReason {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::testing::{collect_ok, user_msg};
 
     #[test]
     fn body_includes_model_and_messages() {
-        let req = StreamRequest::new("gpt-4o", vec![user_msg("hi")]);
+        let req = StreamRequest::new("gpt-4o", vec![Arc::new(user_msg("hi"))]);
         let body = build_request_body(&req, false, None, Dialect::OpenAi);
         assert_eq!(body["model"], "gpt-4o");
         // max_tokens is deprecated on Chat Completions (and rejected for
@@ -816,7 +818,7 @@ mod tests {
 
     #[test]
     fn body_prepends_system_message() {
-        let mut req = StreamRequest::new("m", vec![user_msg("hi")]);
+        let mut req = StreamRequest::new("m", vec![Arc::new(user_msg("hi"))]);
         req.system = Some("you are kage".into());
         let body = build_request_body(&req, false, None, Dialect::OpenAi);
         let messages = body["messages"].as_array().unwrap();
@@ -827,7 +829,7 @@ mod tests {
 
     #[test]
     fn body_wraps_tools_in_function_envelope() {
-        let mut req = StreamRequest::new("m", vec![user_msg("hi")]);
+        let mut req = StreamRequest::new("m", vec![Arc::new(user_msg("hi"))]);
         req.tools = vec![ToolSpec {
             name: "read".into(),
             description: "read a file".into(),
@@ -842,7 +844,7 @@ mod tests {
 
     #[test]
     fn body_translates_thinking_level_to_reasoning_effort() {
-        let mut req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
+        let mut req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
         req.level = Some(crate::ThinkingLevel::Medium);
         let body = build_request_body(&req, false, None, Dialect::OpenAi);
         assert_eq!(body["reasoning_effort"], "medium");
@@ -850,7 +852,7 @@ mod tests {
 
     #[test]
     fn body_caps_xhigh_at_high_for_openai() {
-        let mut req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
+        let mut req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
         req.level = Some(crate::ThinkingLevel::XHigh);
         let body = build_request_body(&req, false, None, Dialect::OpenAi);
         assert_eq!(body["reasoning_effort"], "high");
@@ -858,7 +860,7 @@ mod tests {
 
     #[test]
     fn body_omits_reasoning_effort_when_level_off() {
-        let mut req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
+        let mut req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
         req.level = Some(crate::ThinkingLevel::Off);
         let body = build_request_body(&req, false, None, Dialect::OpenAi);
         assert!(body.get("reasoning_effort").is_none());
@@ -866,7 +868,7 @@ mod tests {
 
     #[test]
     fn body_includes_stream_options_only_when_streaming() {
-        let req = StreamRequest::new("m", vec![user_msg("hi")]);
+        let req = StreamRequest::new("m", vec![Arc::new(user_msg("hi"))]);
         let body = build_request_body(&req, false, None, Dialect::OpenAi);
         assert!(body.get("stream_options").is_none());
         let body = build_request_body(&req, true, None, Dialect::OpenAi);
@@ -884,7 +886,7 @@ mod tests {
             }],
             None,
         );
-        let req = StreamRequest::new("m", vec![user_msg("read"), assistant]);
+        let req = StreamRequest::new("m", vec![Arc::new(user_msg("read")), Arc::new(assistant)]);
         let body = build_request_body(&req, false, None, Dialect::OpenAi);
         let messages = body["messages"].as_array().unwrap();
         let last = &messages[messages.len() - 1];
@@ -909,7 +911,7 @@ mod tests {
             }],
             None,
         );
-        let req = StreamRequest::new("m", vec![result]);
+        let req = StreamRequest::new("m", vec![Arc::new(result)]);
         let body = build_request_body(&req, false, None, Dialect::OpenAi);
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["role"], "tool");
@@ -1156,7 +1158,7 @@ mod tests {
         }
     }
 
-    fn tool_loop_history() -> Vec<Message> {
+    fn tool_loop_history() -> Vec<std::sync::Arc<Message>> {
         vec![
             user_msg("first"),
             Message::new(
@@ -1192,6 +1194,9 @@ mod tests {
                 None,
             ),
         ]
+        .into_iter()
+        .map(Arc::new)
+        .collect()
     }
 
     #[test]
@@ -1241,7 +1246,7 @@ mod tests {
             redacted: false,
         });
         let mut history = tool_loop_history();
-        history[3].content[0] = thinking("need a file", signed);
+        Arc::make_mut(&mut history[3]).content[0] = thinking("need a file", signed);
         let req = StreamRequest::new("gemini-3", history.clone());
         let body = build_request_body(
             &req,
@@ -1352,7 +1357,7 @@ mod tests {
 
     #[test]
     fn zai_body_uses_max_tokens_and_a_system_role() {
-        let mut req = StreamRequest::new("glm-5.3", vec![user_msg("hi")]);
+        let mut req = StreamRequest::new("glm-5.3", vec![Arc::new(user_msg("hi"))]);
         req.system = Some("you are kage".into());
         let body = build_request_body(&req, true, None, Dialect::Zai);
         assert_eq!(body["max_tokens"], 4_096);
@@ -1376,7 +1381,7 @@ mod tests {
             schema: serde_json::json!({"type":"object"}),
         }];
         let body_for = |model: &str, tools: &[ToolSpec], dialect| {
-            let mut req = StreamRequest::new(model, vec![user_msg("hi")]);
+            let mut req = StreamRequest::new(model, vec![Arc::new(user_msg("hi"))]);
             req.tools = tools.to_vec();
             build_request_body(&req, true, None, dialect)
         };
@@ -1462,13 +1467,15 @@ data: [DONE]\n\n";
 
 #[cfg(test)]
 mod thinking_tests {
+    use std::sync::Arc;
+
     use kage_core::{Effort, Efforts, ThinkingLevel};
 
     use super::*;
 
     fn request(reasoning: Reasoning, level: ThinkingLevel) -> StreamRequest {
         let user = Message::new(Role::User, vec![Content::Text { text: "hi".into() }], None);
-        let mut req = StreamRequest::new("m", vec![user]);
+        let mut req = StreamRequest::new("m", vec![Arc::new(user)]);
         req.reasoning = reasoning;
         req.level = Some(level);
         req

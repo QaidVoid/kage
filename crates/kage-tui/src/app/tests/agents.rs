@@ -1452,13 +1452,13 @@ fn resumed_app() -> (
     result.ts = call.ts + chrono::Duration::milliseconds(8_800);
     app.set_agent_loader(Box::new(move |session| {
         (session == child).then(|| {
-            vec![kage_core::Message::new(
+            vec![std::sync::Arc::new(kage_core::Message::new(
                 kage_core::Role::User,
                 vec![kage_core::Content::Text {
                     text: "map everything under src".into(),
                 }],
                 None,
-            )]
+            ))]
         })
     }));
     feed(
@@ -1468,7 +1468,7 @@ fn resumed_app() -> (
             kage_core::protocol::HostEvent::SessionChanged {
                 path: std::path::PathBuf::from("/tmp/s.jsonl"),
                 title: None,
-                messages: vec![call, result],
+                messages: vec![std::sync::Arc::new(call), std::sync::Arc::new(result)],
                 compaction: None,
             }
             .into(),

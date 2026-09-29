@@ -98,6 +98,7 @@ fn a_resumed_session_shows_line_diffs_and_no_diff_for_a_failed_edit() {
     let messages = turn("c1", "let y = 2;", false)
         .into_iter()
         .chain(turn("c2", "let q = 9;", true))
+        .map(std::sync::Arc::new)
         .collect();
     let changed = kage_core::protocol::HostEvent::SessionChanged {
         path: dir.path().join("s.jsonl"),

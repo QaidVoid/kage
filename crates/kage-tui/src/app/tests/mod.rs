@@ -201,7 +201,10 @@ fn user_message(text: &str) -> kage_core::protocol::Event {
         vec![kage_core::Content::Text { text: text.into() }],
         None,
     );
-    kage_core::LoopEvent::MessageAppended { message }.into()
+    kage_core::LoopEvent::MessageAppended {
+        message: std::sync::Arc::new(message),
+    }
+    .into()
 }
 
 fn pending_rows(app: &mut App) -> Vec<String> {

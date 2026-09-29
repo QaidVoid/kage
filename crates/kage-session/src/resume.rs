@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use kage_core::protocol::CompactionCounts;
@@ -161,7 +162,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
                         _ => {}
                     }
                 }
-                history.push(m.message);
+                history.push(Arc::unwrap_or_clone(m.message));
             }
             SessionEntry::Compaction(c) => {
                 compaction = Some(CompactionCounts {
@@ -305,13 +306,13 @@ mod tests {
         SessionEntry::Message(MessageEntry {
             id: EntryId::new(),
             ts: Utc::now(),
-            message: Message::new(
+            message: Arc::new(Message::new(
                 role,
                 vec![Content::Text {
                     text: text.to_owned(),
                 }],
                 None,
-            ),
+            )),
             usage: None,
         })
     }
@@ -337,7 +338,7 @@ mod tests {
                 SessionEntry::Message(MessageEntry {
                     id: EntryId::new(),
                     ts: Utc::now(),
-                    message: Message::new(
+                    message: Arc::new(Message::new(
                         Role::ToolResult,
                         vec![Content::ToolResultBlock {
                             call_id: ToolCallId::new("c1"),
@@ -345,7 +346,7 @@ mod tests {
                             is_error: false,
                         }],
                         None,
-                    ),
+                    )),
                     usage: None,
                 }),
                 message_entry(Role::Assistant, "4"),
@@ -416,7 +417,7 @@ mod tests {
         let result = SessionEntry::Message(MessageEntry {
             id: EntryId::new(),
             ts: Utc::now(),
-            message: Message::new(
+            message: Arc::new(Message::new(
                 Role::ToolResult,
                 vec![Content::ToolResultBlock {
                     call_id: ToolCallId::new("c1"),
@@ -424,7 +425,7 @@ mod tests {
                     is_error: false,
                 }],
                 None,
-            ),
+            )),
             usage: None,
         });
         write(

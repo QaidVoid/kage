@@ -1,6 +1,7 @@
 //! Agent sessions an `agent` call starts.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use kage_core::agents::AgentDef;
@@ -361,7 +362,7 @@ impl super::Dispatcher {
         &mut self,
         id: SessionId,
         outcome: &RunOutcome,
-        history: &[Message],
+        history: &[Arc<Message>],
         usage: Usage,
         run_time: Duration,
     ) {
@@ -376,7 +377,7 @@ impl super::Dispatcher {
         &mut self,
         id: SessionId,
         outcome: &RunOutcome,
-        history: &[Message],
+        history: &[Arc<Message>],
         usage: Usage,
         run_time: Duration,
     ) -> Option<(crossbeam_channel::Sender<ToolOutput>, ToolOutput)> {
@@ -626,13 +627,13 @@ fn forked_spec(
         let notice = kage_session::SessionEntry::Message(kage_session::MessageEntry {
             id: kage_session::EntryId::new(),
             ts: chrono::Utc::now(),
-            message: Message::new(
+            message: Arc::new(Message::new(
                 Role::User,
                 vec![Content::Text {
                     text: FORK_CONTEXT_NOTICE.to_owned(),
                 }],
                 None,
-            ),
+            )),
             usage: None,
         });
         writer

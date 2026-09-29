@@ -75,7 +75,7 @@ impl Recorder {
         self.writer()?.append(&SessionEntry::Message(MessageEntry {
             id: EntryId::new(),
             ts: Utc::now(),
-            message: message.clone(),
+            message: Arc::new(message.clone()),
             usage: None,
         }))
     }
@@ -214,7 +214,11 @@ mod tests {
 
     fn appended(role: Role, text: &str) -> LoopEvent {
         LoopEvent::MessageAppended {
-            message: Message::new(role, vec![Content::Text { text: text.into() }], None),
+            message: Arc::new(Message::new(
+                role,
+                vec![Content::Text { text: text.into() }],
+                None,
+            )),
         }
     }
 

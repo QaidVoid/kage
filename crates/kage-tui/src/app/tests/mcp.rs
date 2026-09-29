@@ -285,7 +285,12 @@ fn a_resource_block_renders_one_attached_line_at_80_columns() {
     feed(
         &mut app,
         &events,
-        vec![kage_core::LoopEvent::MessageAppended { message }.into()],
+        vec![
+            kage_core::LoopEvent::MessageAppended {
+                message: std::sync::Arc::new(message),
+            }
+            .into(),
+        ],
     );
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     app.render_into(&mut terminal).unwrap();

@@ -166,7 +166,7 @@ pub type ToolDurations = HashMap<(MessageId, String), u64>;
 /// assistant message that made the call and the message carrying its
 /// result.
 #[must_use]
-pub fn tool_durations(messages: &[Message]) -> ToolDurations {
+pub fn tool_durations(messages: &[Arc<Message>]) -> ToolDurations {
     let mut started = HashMap::new();
     let mut durations = HashMap::new();
     for message in messages {
@@ -248,7 +248,7 @@ pub(crate) fn is_shell_status(line: &str) -> bool {
 /// of the compaction whose summary opens `messages`, when recorded.
 pub fn populate_from_history(
     buf: &mut Buffer,
-    messages: &[Message],
+    messages: &[Arc<Message>],
     tool_durations: &ToolDurations,
     compaction: Option<CompactionCounts>,
 ) {
@@ -749,13 +749,13 @@ mod tests {
             output: shell_output("stdout:\nfirst\nexit: 0", false),
         });
         hooks.on_event(&LoopEvent::MessageAppended {
-            message: Message::new(
+            message: Arc::new(Message::new(
                 Role::User,
                 vec![Content::Text {
                     text: "again".into(),
                 }],
                 None,
-            ),
+            )),
         });
         hooks.on_event(&LoopEvent::ToolCallArgsDelta {
             id: ToolCallId::new("call_0"),
@@ -921,7 +921,7 @@ mod tests {
     #[test]
     fn replayed_thinking_keeps_its_stored_timing_and_orphan_calls_are_interrupted() {
         let mut buf = Buffer::new();
-        let history = vec![Message::new(
+        let history = vec![Arc::new(Message::new(
             Role::Assistant,
             vec![
                 Content::Thinking {
@@ -941,7 +941,7 @@ mod tests {
                 },
             ],
             None,
-        )];
+        ))];
         populate_from_history(&mut buf, &history, &HashMap::new(), None);
         assert!(matches!(
             buf.blocks()[0].as_ref(),
@@ -1055,14 +1055,14 @@ mod tests {
         use kage_core::ToolCallId;
         let mut buf = Buffer::new();
         let history = vec![
-            Message::new(
+            Arc::new(Message::new(
                 Role::User,
                 vec![Content::Text {
                     text: "list files".into(),
                 }],
                 None,
-            ),
-            Message::new(
+            )),
+            Arc::new(Message::new(
                 Role::Assistant,
                 vec![
                     Content::Thinking {
@@ -1080,8 +1080,8 @@ mod tests {
                     },
                 ],
                 None,
-            ),
-            Message::new(
+            )),
+            Arc::new(Message::new(
                 Role::ToolResult,
                 vec![Content::ToolResultBlock {
                     call_id: ToolCallId::new("c1"),
@@ -1089,7 +1089,7 @@ mod tests {
                     is_error: false,
                 }],
                 None,
-            ),
+            )),
         ];
         populate_from_history(&mut buf, &history, &std::collections::HashMap::new(), None);
         let blocks = buf.blocks();
@@ -1115,11 +1115,11 @@ mod tests {
             kage_core::message::COMPACTION_SUMMARY_SUFFIX
         );
         let mut buf = Buffer::new();
-        let history = vec![Message::new(
+        let history = vec![Arc::new(Message::new(
             Role::User,
             vec![Content::Text { text: framed }],
             None,
-        )];
+        ))];
         populate_from_history(&mut buf, &history, &std::collections::HashMap::new(), None);
         let blocks = buf.blocks();
         assert_eq!(blocks.len(), 1);
@@ -1136,11 +1136,11 @@ mod tests {
             kage_core::message::COMPACTION_SUMMARY_PREFIX,
             kage_core::message::COMPACTION_SUMMARY_SUFFIX
         );
-        let history = vec![Message::new(
+        let history = vec![Arc::new(Message::new(
             Role::User,
             vec![Content::Text { text: framed }],
             None,
-        )];
+        ))];
         let header = |counts| {
             let mut buf = Buffer::new();
             populate_from_history(&mut buf, &history, &HashMap::new(), counts);
@@ -1163,13 +1163,13 @@ mod tests {
     #[test]
     fn populate_keeps_regular_user_message_as_user_block() {
         let mut buf = Buffer::new();
-        let history = vec![Message::new(
+        let history = vec![Arc::new(Message::new(
             Role::User,
             vec![Content::Text {
                 text: "just a normal message".into(),
             }],
             None,
-        )];
+        ))];
         populate_from_history(&mut buf, &history, &std::collections::HashMap::new(), None);
         let blocks = buf.blocks();
         assert_eq!(blocks.len(), 1);
@@ -1198,11 +1198,11 @@ mod tests {
                     attached file:///b.rs (0 B)";
         let (buf, mut hooks) = fresh();
         hooks.on_event(&LoopEvent::MessageAppended {
-            message: message.clone(),
+            message: Arc::new(message.clone()),
         });
         assert!(matches!(lock(&buf).blocks()[0].as_ref(), Block::User { text } if text == want));
         let mut replayed = Buffer::new();
-        populate_from_history(&mut replayed, &[message], &HashMap::new(), None);
+        populate_from_history(&mut replayed, &[Arc::new(message)], &HashMap::new(), None);
         assert!(matches!(replayed.blocks()[0].as_ref(), Block::User { text } if text == want));
     }
 
@@ -1237,13 +1237,13 @@ mod tests {
                     attached fix:test://bin (2 KB)";
         let (buf, mut hooks) = fresh();
         hooks.on_event(&LoopEvent::MessageAppended {
-            message: message.clone(),
+            message: Arc::new(message.clone()),
         });
         let blocks = lock(&buf).blocks().to_vec();
         assert_eq!(blocks.len(), 1, "{blocks:?}");
         assert!(matches!(blocks[0].as_ref(), Block::User { text } if text == want));
         let mut replayed = Buffer::new();
-        populate_from_history(&mut replayed, &[message], &HashMap::new(), None);
+        populate_from_history(&mut replayed, &[Arc::new(message)], &HashMap::new(), None);
         assert!(matches!(replayed.blocks()[0].as_ref(), Block::User { text } if text == want));
     }
 
@@ -1251,7 +1251,7 @@ mod tests {
     fn appended_user_messages_paint_text_then_images() {
         let (buf, mut hooks) = fresh();
         hooks.on_event(&LoopEvent::MessageAppended {
-            message: Message::new(
+            message: Arc::new(Message::new(
                 Role::User,
                 vec![
                     Content::Text {
@@ -1263,10 +1263,10 @@ mod tests {
                     },
                 ],
                 None,
-            ),
+            )),
         });
         hooks.on_event(&LoopEvent::MessageAppended {
-            message: Message::new(Role::Assistant, Vec::new(), None),
+            message: Arc::new(Message::new(Role::Assistant, Vec::new(), None)),
         });
         let buf = buf.lock().unwrap();
         assert_eq!(buf.blocks().len(), 2);
@@ -1295,7 +1295,10 @@ mod tests {
         );
         result.ts = call.ts + chrono::Duration::milliseconds(250);
         let key = (result.id, "c1".to_owned());
-        assert_eq!(tool_durations(&[call, result])[&key], 250);
+        assert_eq!(
+            tool_durations(&[Arc::new(call), Arc::new(result)])[&key],
+            250
+        );
     }
 
     #[test]
@@ -1322,7 +1325,11 @@ mod tests {
             result.ts = call.ts + chrono::Duration::milliseconds(ms);
             [call, result]
         };
-        let history: Vec<Message> = turn(8_000).into_iter().chain(turn(2_000)).collect();
+        let history: Vec<_> = turn(8_000)
+            .into_iter()
+            .chain(turn(2_000))
+            .map(Arc::new)
+            .collect();
         let mut buf = Buffer::new();
         populate_from_history(&mut buf, &history, &tool_durations(&history), None);
         let durations: Vec<Option<u64>> = buf

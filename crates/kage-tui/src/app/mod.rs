@@ -482,7 +482,7 @@ pub type SessionLister = Box<dyn Fn(bool) -> Vec<PickItem> + Send + 'static>;
 /// from a resumed session's history. `None` when the file is missing
 /// or unreadable.
 pub type AgentLoader =
-    Box<dyn Fn(kage_core::SessionId) -> Option<Vec<kage_core::Message>> + Send + 'static>;
+    Box<dyn Fn(kage_core::SessionId) -> Option<Vec<Arc<kage_core::Message>>> + Send + 'static>;
 
 /// Sets an option with source `runtime` on behalf of a command or the
 /// settings dialog. The host routes it through the plugin runtime so

@@ -1,5 +1,7 @@
 //! Tests for the Anthropic provider and SSE stream.
 
+use std::sync::Arc;
+
 use super::*;
 use crate::testing::{collect_ok, user_msg};
 use kage_core::{Content, Message, Role, ThinkingSignature};
@@ -59,9 +61,9 @@ fn continuation(assistant: Message) -> StreamRequest {
     let mut req = StreamRequest::new(
         "claude-x",
         vec![
-            user_msg("run it"),
-            assistant,
-            tool_result("call_1", "file.rs"),
+            Arc::new(user_msg("run it")),
+            Arc::new(assistant),
+            Arc::new(tool_result("call_1", "file.rs")),
         ],
     );
     req.thinking = Some(crate::ThinkingConfig {
@@ -122,17 +124,17 @@ fn earlier_turns_keep_their_signed_thinking() {
     let mut req = StreamRequest::new(
         "claude-x",
         vec![
-            user_msg("run it"),
-            thinking_tool_call("first", signed("claude-x", "s1", false)),
-            tool_result("call_1", "ok"),
-            Message::new(
+            Arc::new(user_msg("run it")),
+            Arc::new(thinking_tool_call("first", signed("claude-x", "s1", false))),
+            Arc::new(tool_result("call_1", "ok")),
+            Arc::new(Message::new(
                 Role::Assistant,
                 vec![Content::Text {
                     text: "done".into(),
                 }],
                 None,
-            ),
-            user_msg("next"),
+            )),
+            Arc::new(user_msg("next")),
         ],
     );
     req.thinking = Some(crate::ThinkingConfig {
@@ -167,7 +169,7 @@ fn add_beta_joins_a_configured_beta_header() {
 
 #[test]
 fn body_sets_model_and_messages() {
-    let req = StreamRequest::new("claude-sonnet-4-6", vec![user_msg("hi")]);
+    let req = StreamRequest::new("claude-sonnet-4-6", vec![Arc::new(user_msg("hi"))]);
     let body = build_request_body(&req, false);
     assert_eq!(body["model"], "claude-sonnet-4-6");
     assert_eq!(body["stream"], false);
@@ -181,7 +183,7 @@ fn body_sets_model_and_messages() {
 
 #[test]
 fn body_promotes_system_to_cached_array() {
-    let mut req = StreamRequest::new("m", vec![user_msg("hi")]);
+    let mut req = StreamRequest::new("m", vec![Arc::new(user_msg("hi"))]);
     req.system = Some("you are kage".into());
     let body = build_request_body(&req, false);
     let system = body["system"].as_array().expect("system is array");
@@ -193,7 +195,10 @@ fn body_promotes_system_to_cached_array() {
 
 #[test]
 fn body_marks_last_message_block_for_caching() {
-    let req = StreamRequest::new("m", vec![user_msg("hello"), user_msg("again")]);
+    let req = StreamRequest::new(
+        "m",
+        vec![Arc::new(user_msg("hello")), Arc::new(user_msg("again"))],
+    );
     let body = build_request_body(&req, false);
     let messages = body["messages"].as_array().unwrap();
     let last = &messages[messages.len() - 1];
@@ -204,7 +209,10 @@ fn body_marks_last_message_block_for_caching() {
 
 #[test]
 fn body_does_not_mark_earlier_messages() {
-    let req = StreamRequest::new("m", vec![user_msg("first"), user_msg("second")]);
+    let req = StreamRequest::new(
+        "m",
+        vec![Arc::new(user_msg("first")), Arc::new(user_msg("second"))],
+    );
     let body = build_request_body(&req, false);
     let messages = body["messages"].as_array().unwrap();
     let first = &messages[0];
@@ -217,14 +225,14 @@ fn body_drops_system_role_messages() {
     let mut req = StreamRequest::new(
         "m",
         vec![
-            Message::new(
+            Arc::new(Message::new(
                 Role::System,
                 vec![Content::Text {
                     text: "ignored".into(),
                 }],
                 None,
-            ),
-            user_msg("hi"),
+            )),
+            Arc::new(user_msg("hi")),
         ],
     );
     req.system = Some("the real system prompt".into());
@@ -236,7 +244,7 @@ fn body_drops_system_role_messages() {
 
 #[test]
 fn body_includes_tools_when_present() {
-    let mut req = StreamRequest::new("m", vec![user_msg("hi")]);
+    let mut req = StreamRequest::new("m", vec![Arc::new(user_msg("hi"))]);
     req.tools = vec![ToolSpec {
         name: "read".into(),
         description: "read a file".into(),
@@ -255,7 +263,7 @@ fn body_includes_tools_when_present() {
 
 #[test]
 fn body_includes_thinking_when_configured() {
-    let mut req = StreamRequest::new("m", vec![user_msg("hi")]);
+    let mut req = StreamRequest::new("m", vec![Arc::new(user_msg("hi"))]);
     req.thinking = Some(crate::ThinkingConfig {
         budget_tokens: 12_000,
     });
@@ -266,7 +274,7 @@ fn body_includes_thinking_when_configured() {
 
 #[test]
 fn body_resolves_thinking_level_to_default_budget() {
-    let mut req = StreamRequest::new("unknown-model", vec![user_msg("hi")]);
+    let mut req = StreamRequest::new("unknown-model", vec![Arc::new(user_msg("hi"))]);
     req.level = Some(crate::ThinkingLevel::High);
     let body = build_request_body(&req, false);
     assert_eq!(body["thinking"]["type"], "enabled");
@@ -278,7 +286,7 @@ fn body_resolves_thinking_level_to_default_budget() {
 
 #[test]
 fn body_omits_thinking_when_level_off() {
-    let mut req = StreamRequest::new("m", vec![user_msg("hi")]);
+    let mut req = StreamRequest::new("m", vec![Arc::new(user_msg("hi"))]);
     req.level = Some(crate::ThinkingLevel::Off);
     let body = build_request_body(&req, false);
     assert!(body.get("thinking").is_none());
@@ -286,7 +294,7 @@ fn body_omits_thinking_when_level_off() {
 
 #[test]
 fn explicit_thinking_config_wins_over_level() {
-    let mut req = StreamRequest::new("m", vec![user_msg("hi")]);
+    let mut req = StreamRequest::new("m", vec![Arc::new(user_msg("hi"))]);
     req.thinking = Some(crate::ThinkingConfig { budget_tokens: 999 });
     req.level = Some(crate::ThinkingLevel::XHigh);
     let body = build_request_body(&req, false);
@@ -298,9 +306,9 @@ fn continuation_request_drops_thinking() {
     let mut req = StreamRequest::new(
         "m",
         vec![
-            user_msg("run it"),
-            assistant_tool_call("call_1", "shell"),
-            tool_result("call_1", "file.rs"),
+            Arc::new(user_msg("run it")),
+            Arc::new(assistant_tool_call("call_1", "shell")),
+            Arc::new(tool_result("call_1", "file.rs")),
         ],
     );
     req.thinking = Some(crate::ThinkingConfig {
@@ -315,17 +323,17 @@ fn completed_tool_turn_keeps_thinking_on_next_request() {
     let mut req = StreamRequest::new(
         "m",
         vec![
-            user_msg("run it"),
-            assistant_tool_call("call_1", "shell"),
-            tool_result("call_1", "file.rs"),
-            Message::new(
+            Arc::new(user_msg("run it")),
+            Arc::new(assistant_tool_call("call_1", "shell")),
+            Arc::new(tool_result("call_1", "file.rs")),
+            Arc::new(Message::new(
                 Role::Assistant,
                 vec![Content::Text {
                     text: "done".into(),
                 }],
                 None,
-            ),
-            user_msg("thanks"),
+            )),
+            Arc::new(user_msg("thanks")),
         ],
     );
     req.thinking = Some(crate::ThinkingConfig {
@@ -340,10 +348,10 @@ fn steering_after_tool_results_drops_thinking() {
     let mut req = StreamRequest::new(
         "m",
         vec![
-            user_msg("run it"),
-            assistant_tool_call("call_1", "shell"),
-            tool_result("call_1", "file.rs"),
-            user_msg("also check the logs"),
+            Arc::new(user_msg("run it")),
+            Arc::new(assistant_tool_call("call_1", "shell")),
+            Arc::new(tool_result("call_1", "file.rs")),
+            Arc::new(user_msg("also check the logs")),
         ],
     );
     req.thinking = Some(crate::ThinkingConfig {
@@ -355,7 +363,7 @@ fn steering_after_tool_results_drops_thinking() {
 
 #[test]
 fn body_uses_default_max_tokens_when_unset() {
-    let req = StreamRequest::new("m", vec![user_msg("hi")]);
+    let req = StreamRequest::new("m", vec![Arc::new(user_msg("hi"))]);
     let body = build_request_body(&req, false);
     assert_eq!(body["max_tokens"], 4_096);
 }
@@ -371,7 +379,10 @@ fn assistant_message_with_tool_call_serializes() {
         }],
         None,
     );
-    let req = StreamRequest::new("m", vec![user_msg("read hosts"), assistant]);
+    let req = StreamRequest::new(
+        "m",
+        vec![Arc::new(user_msg("read hosts")), Arc::new(assistant)],
+    );
     let body = build_request_body(&req, false);
     let messages = body["messages"].as_array().unwrap();
     assert_eq!(messages[1]["role"], "assistant");
@@ -393,7 +404,7 @@ fn tool_result_message_uses_user_role() {
         }],
         None,
     );
-    let req = StreamRequest::new("m", vec![result]);
+    let req = StreamRequest::new("m", vec![Arc::new(result)]);
     let body = build_request_body(&req, false);
     let messages = body["messages"].as_array().unwrap();
     assert_eq!(messages[0]["role"], "user");
@@ -417,13 +428,13 @@ fn anthropic_live_smoke() {
     let provider = AnthropicProvider::new(key);
     let req = StreamRequest::new(
         "claude-haiku-4-5-20251001",
-        vec![Message::new(
+        vec![Arc::new(Message::new(
             Role::User,
             vec![Content::Text {
                 text: "Reply with exactly the word: pong".into(),
             }],
             None,
-        )],
+        ))],
     );
     let stream = provider
         .stream(req, &CancelFlag::new())

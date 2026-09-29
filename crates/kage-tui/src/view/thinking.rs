@@ -191,11 +191,11 @@ mod tests {
             signature: None,
             duration_ms,
         };
-        let history = [kage_core::Message::new(
+        let history = [std::sync::Arc::new(kage_core::Message::new(
             kage_core::Role::Assistant,
             vec![thinking(Some(11_400)), thinking(None)],
             None,
-        )];
+        ))];
         let mut buf = Buffer::new();
         crate::populate_from_history(&mut buf, &history, &std::collections::HashMap::new(), None);
         assert_eq!(rows_at(&buf, 0), ["Thought for 11s"]);

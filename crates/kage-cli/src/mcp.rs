@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use kage_core::config::{Config, McpConfig, McpServer, ShellConfig};
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
@@ -275,7 +276,11 @@ impl SamplingHandler {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
-                history.push(Message::new(role, vec![Content::Text { text }], None));
+                history.push(Arc::new(Message::new(
+                    role,
+                    vec![Content::Text { text }],
+                    None,
+                )));
             }
         }
 

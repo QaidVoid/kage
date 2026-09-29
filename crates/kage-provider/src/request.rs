@@ -1,5 +1,7 @@
 //! Streaming request shape passed to [`Provider::stream`](crate::Provider::stream).
 
+use std::sync::Arc;
+
 pub use kage_core::ThinkingLevel;
 use kage_core::{Message, Reasoning, ToolSpec};
 use serde::{Deserialize, Serialize};
@@ -22,7 +24,9 @@ pub struct StreamRequest {
     /// Model id, the part after `provider:` in the registry resolver.
     pub model: String,
     /// Conversation history, ending with the most recent user turn.
-    pub messages: Vec<Message>,
+    /// Shared with the caller's history buffer, so cloning a request
+    /// bumps refcounts instead of copying message bodies.
+    pub messages: Vec<Arc<Message>>,
     /// System prompt, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
@@ -60,7 +64,7 @@ fn is_unknown(reasoning: &Reasoning) -> bool {
 
 impl StreamRequest {
     /// Construct a minimal request with just a model id and message history.
-    pub fn new(model: impl Into<String>, messages: Vec<Message>) -> Self {
+    pub fn new(model: impl Into<String>, messages: Vec<Arc<Message>>) -> Self {
         Self {
             model: model.into(),
             messages,
@@ -109,7 +113,7 @@ mod tests {
     fn populated_request_roundtrips() {
         let mut req = StreamRequest::new(
             "openai:gpt-4o",
-            vec![Message::new(Role::User, vec![], None)],
+            vec![Arc::new(Message::new(Role::User, vec![], None))],
         );
         req.system = Some("you are helpful".into());
         req.tools = vec![ToolSpec {

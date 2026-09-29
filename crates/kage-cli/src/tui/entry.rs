@@ -438,7 +438,7 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
     app.set_agent_loader(Box::new(move |session| {
         let dir = lock(&loader_mirror).path()?.parent()?.to_path_buf();
         let replay = kage_session::replay(&dir.join(format!("{session}.jsonl"))).ok()?;
-        Some(replay.history)
+        Some(replay.history.into_iter().map(Arc::new).collect())
     }));
     let result = app.run(&mut tui);
     let width = tui.terminal().size().map_or(80, |size| size.width);

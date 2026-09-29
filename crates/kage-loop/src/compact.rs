@@ -13,6 +13,7 @@
 //! the synthetic user message.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use kage_core::{CancelFlag, Content, LoopError, LoopEvent, Message, MessageId, Role};
 use kage_provider::{Provider, ProviderEvent, StreamRequest};
@@ -109,13 +110,15 @@ fn run_compaction<F: FnMut(LoopEvent)>(
         None => summarize(
             provider,
             &prep.model,
-            &prep.prompt,
-            &prep.instruction,
+            std::mem::take(&mut prep.prompt),
+            std::mem::take(&mut prep.instruction),
             cancel,
         )?,
     };
-    let summary_body =
-        format!("{COMPACTION_SUMMARY_PREFIX}{summary_text}{COMPACTION_SUMMARY_SUFFIX}");
+    // Frame the returned text in place rather than formatting a copy.
+    let mut summary_body = summary_text;
+    summary_body.insert_str(0, COMPACTION_SUMMARY_PREFIX);
+    summary_body.push_str(COMPACTION_SUMMARY_SUFFIX);
 
     let summary_msg = Message {
         role: Role::User,
@@ -126,7 +129,8 @@ fn run_compaction<F: FnMut(LoopEvent)>(
         parent: None,
         ts: chrono::Utc::now(),
     };
-    cx.history.splice(..split, std::iter::once(summary_msg));
+    cx.history
+        .splice(..split, std::iter::once(Arc::new(summary_msg)));
     cx.budget = TokenBudget::default();
 
     emit(LoopEvent::Compaction {
@@ -175,7 +179,7 @@ const SUMMARIZE_INSTRUCTION: &str = "Summarize the conversation above into a con
 /// summarize instruction), which providers like ZAI/GLM reject with
 /// `"messages parameter is illegal"`. Folding everything into a single
 /// User message sidesteps the ordering rules entirely.
-fn serialize_conversation(messages: &[Message]) -> String {
+fn serialize_conversation(messages: &[Arc<Message>]) -> String {
     let mut out = String::new();
     for msg in messages {
         let role = match msg.role {
@@ -222,19 +226,17 @@ fn serialize_conversation(messages: &[Message]) -> String {
 fn summarize(
     provider: &dyn Provider,
     model: &str,
-    prompt: &str,
-    instruction: &str,
+    prompt: String,
+    instruction: String,
     cancel: &CancelFlag,
 ) -> Result<String, LoopError> {
-    let payload = vec![Message::new(
+    let payload = vec![Arc::new(Message::new(
         Role::User,
-        vec![Content::Text {
-            text: prompt.to_owned(),
-        }],
+        vec![Content::Text { text: prompt }],
         None,
-    )];
+    ))];
     let mut req = StreamRequest::new(model, payload);
-    req.system = Some(instruction.to_owned());
+    req.system = Some(instruction);
     let stream = provider
         .stream(req, cancel)
         .map_err(|e| LoopError::Provider {
@@ -315,11 +317,12 @@ mod tests {
             ..Default::default()
         };
         for i in 0..history_len {
-            cx.history.push(if i % 2 == 0 {
+            let msg = if i % 2 == 0 {
                 user_msg(&format!("turn {i}"))
             } else {
                 assistant_msg(&format!("reply {i}"))
-            });
+            };
+            cx.history.push(Arc::new(msg));
         }
         cx
     }
@@ -423,14 +426,14 @@ mod tests {
             ..Default::default()
         };
         cx.context_window = 200_000;
-        cx.history.push(user_msg("turn 0"));
-        cx.history.push(assistant_msg("reply 1"));
-        cx.history.push(user_msg("turn 2"));
-        cx.history.push(assistant_tool_call("call_1"));
-        cx.history.push(tool_result("call_1"));
-        cx.history.push(user_msg("turn 5"));
-        cx.history.push(assistant_msg("reply 6"));
-        cx.history.push(user_msg("turn 7"));
+        cx.history.push(Arc::new(user_msg("turn 0")));
+        cx.history.push(Arc::new(assistant_msg("reply 1")));
+        cx.history.push(Arc::new(user_msg("turn 2")));
+        cx.history.push(Arc::new(assistant_tool_call("call_1")));
+        cx.history.push(Arc::new(tool_result("call_1")));
+        cx.history.push(Arc::new(user_msg("turn 5")));
+        cx.history.push(Arc::new(assistant_msg("reply 6")));
+        cx.history.push(Arc::new(user_msg("turn 7")));
 
         let mut events = Vec::new();
         let ran = maybe_compact(&mut cx, cfg, &provider, &cancel, &mut hooks, &mut |ev| {
@@ -472,9 +475,9 @@ mod tests {
             ..Default::default()
         };
         cx.context_window = 200_000;
-        cx.history.push(assistant_tool_call("call_1"));
+        cx.history.push(Arc::new(assistant_tool_call("call_1")));
         for _ in 0..4 {
-            cx.history.push(tool_result("call_1"));
+            cx.history.push(Arc::new(tool_result("call_1")));
         }
 
         let ran = maybe_compact(&mut cx, cfg, &provider, &cancel, &mut hooks, &mut |_| {}).unwrap();
@@ -636,7 +639,10 @@ mod tests {
 
     #[test]
     fn serialize_conversation_keeps_role_markers_and_text() {
-        let msgs = vec![user_msg("hello"), assistant_msg("hi back")];
+        let msgs: Vec<_> = vec![user_msg("hello"), assistant_msg("hi back")]
+            .into_iter()
+            .map(Arc::new)
+            .collect();
         let out = serialize_conversation(&msgs);
         assert!(out.contains("=== user ==="));
         assert!(out.contains("=== assistant ==="));

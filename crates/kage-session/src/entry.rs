@@ -6,6 +6,7 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 pub use kage_core::SessionId;
@@ -146,7 +147,9 @@ pub struct MessageEntry {
     /// Append time.
     pub ts: DateTime<Utc>,
     /// The full message including role, content blocks, and message id.
-    pub message: Message,
+    /// Shared with the loop's history buffer; serializes identically to
+    /// [`Message`].
+    pub message: Arc<Message>,
     /// Provider-reported token usage for this turn, when available.
     /// Optional and defaulted to `None` so old sessions still parse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -278,7 +281,11 @@ mod tests {
         let entry = SessionEntry::Message(MessageEntry {
             id: EntryId::new(),
             ts: Utc::now(),
-            message: Message::new(Role::User, vec![Content::Text { text: "hi".into() }], None),
+            message: Arc::new(Message::new(
+                Role::User,
+                vec![Content::Text { text: "hi".into() }],
+                None,
+            )),
             usage: None,
         });
         let line = serde_json::to_string(&entry).unwrap();

@@ -726,7 +726,7 @@ fn message(role: Role, content: Vec<Content>, usage: Option<TokenUsage>) -> Sess
     SessionEntry::Message(MessageEntry {
         id: EntryId::new(),
         ts: chrono::Utc::now(),
-        message: Message::new(role, content, None),
+        message: Arc::new(Message::new(role, content, None)),
         usage,
     })
 }
@@ -1013,7 +1013,7 @@ fn session_resume_skips_the_replay_and_continues_the_history() {
         .unwrap()
         .messages
         .iter()
-        .map(crate::cli_loop_run::first_user_text)
+        .map(|m| crate::cli_loop_run::first_user_text(m))
         .collect();
     assert_eq!(texts, ["hello", "hi", "next"]);
 }

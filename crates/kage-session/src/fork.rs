@@ -155,6 +155,7 @@ pub fn resolve_entry_prefix(src: &Path, prefix: &str) -> Result<EntryId, Session
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use chrono::Utc;
     use kage_core::{Content, Message, Role};
@@ -183,13 +184,13 @@ mod tests {
         SessionEntry::Message(MessageEntry {
             id: EntryId::new(),
             ts: Utc::now(),
-            message: Message::new(
+            message: Arc::new(Message::new(
                 role,
                 vec![Content::Text {
                     text: text.to_owned(),
                 }],
                 None,
-            ),
+            )),
             usage: None,
         })
     }

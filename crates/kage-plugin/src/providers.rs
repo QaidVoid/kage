@@ -235,9 +235,26 @@ impl Provider for LuaProvider {
         mut req: StreamRequest,
         cancel: &CancelFlag,
     ) -> Result<EventStream, ProviderError> {
-        for block in req.messages.iter_mut().flat_map(|m| &mut m.content) {
-            if let Content::Thinking { duration_ms, .. } = block {
-                *duration_ms = None;
+        // Display-only timing never goes to a plugin provider. Messages
+        // are shared with the caller's history, so only ones that
+        // actually carry a timed thinking block are cloned out of the
+        // `Arc`.
+        for msg in &mut req.messages {
+            let timed = msg.content.iter().any(|c| {
+                matches!(
+                    c,
+                    Content::Thinking {
+                        duration_ms: Some(_),
+                        ..
+                    }
+                )
+            });
+            if timed {
+                for block in &mut Arc::make_mut(msg).content {
+                    if let Content::Thinking { duration_ms, .. } = block {
+                        *duration_ms = None;
+                    }
+                }
             }
         }
         let req_value = serde_json::to_value(&req)
@@ -518,6 +535,8 @@ pub(crate) fn register(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use kage_core::{CancelFlag, Message, Role};
     use kage_provider::{Provider, StopReason};
 
@@ -570,11 +589,11 @@ mod tests {
 
         let req = kage_provider::StreamRequest::new(
             "model-x",
-            vec![Message::new(
+            vec![Arc::new(Message::new(
                 Role::User,
                 vec![kage_core::Content::Text { text: "hi".into() }],
                 None,
-            )],
+            ))],
         );
         let cancel = CancelFlag::new();
         let stream = provider.stream(req, &cancel).unwrap();
@@ -623,7 +642,7 @@ mod tests {
         let provider = rt.registered_providers().pop().unwrap();
         let req = kage_provider::StreamRequest::new(
             "m",
-            vec![Message::new(
+            vec![Arc::new(Message::new(
                 Role::Assistant,
                 vec![kage_core::Content::Thinking {
                     text: "plan".into(),
@@ -631,7 +650,7 @@ mod tests {
                     duration_ms: Some(2_000),
                 }],
                 None,
-            )],
+            ))],
         );
         let events: Vec<_> = provider
             .stream(req, &CancelFlag::new())

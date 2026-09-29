@@ -426,7 +426,7 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
         self.inner.after_tool_call(name, output)
     }
 
-    fn transform_context(&mut self, messages: &mut Vec<Message>) -> Result<(), String> {
+    fn transform_context(&mut self, messages: &mut Vec<Arc<Message>>) -> Result<(), String> {
         self.inner.transform_context(messages)?;
         if self.runtime.handler_count("transform_context") == 0 {
             return Ok(());
@@ -437,7 +437,7 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
             .runtime
             .dispatch_transform("transform_context", payload)
             .map_err(|e| format!("transform_context: lua dispatch: {e}"))?;
-        let next: Vec<Message> = serde_json::from_value(result)
+        let next: Vec<Arc<Message>> = serde_json::from_value(result)
             .map_err(|e| format!("transform_context: plugin returned invalid history: {e}"))?;
         *messages = next;
         Ok(())

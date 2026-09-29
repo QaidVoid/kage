@@ -474,11 +474,11 @@ mod tests {
         let resolved = registry.resolve("zhipuai-coding-plan:glm-5.3").unwrap();
         let req = kage_provider::StreamRequest::new(
             resolved.model.clone(),
-            vec![kage_core::Message::new(
+            vec![Arc::new(kage_core::Message::new(
                 kage_core::Role::User,
                 vec![kage_core::Content::Text { text: "hi".into() }],
                 None,
-            )],
+            ))],
         );
         let events: Vec<_> = resolved
             .provider

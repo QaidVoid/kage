@@ -20,6 +20,7 @@ pub use mcp::{
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
@@ -190,8 +191,10 @@ pub enum HostEvent {
         /// Stored title, if any.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
-        /// Conversation history, oldest first.
-        messages: Vec<Message>,
+        /// Conversation history, oldest first. Shared with the
+        /// engine's session state; serializes identically to
+        /// `Vec<Message>`.
+        messages: Vec<Arc<Message>>,
         /// Counts of the compaction whose summary opens `messages`,
         /// when the session file records one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -589,7 +592,7 @@ mod tests {
             }
             .into(),
             LoopEvent::MessageAppended {
-                message: message.clone(),
+                message: Arc::new(message.clone()),
             }
             .into(),
             LoopEvent::TurnStarted { index: 0 }.into(),
@@ -640,7 +643,7 @@ mod tests {
             HostEvent::SessionChanged {
                 path: PathBuf::from("/tmp/s.jsonl"),
                 title: Some("t".into()),
-                messages: vec![message],
+                messages: vec![Arc::new(message.clone())],
                 compaction: None,
             }
             .into(),

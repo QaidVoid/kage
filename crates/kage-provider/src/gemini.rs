@@ -655,12 +655,14 @@ fn parse_finish_reason(value: &str) -> StopReason {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::testing::{collect_ok, user_msg};
 
     #[test]
     fn body_has_contents_and_generation_config() {
-        let req = StreamRequest::new("gemini-2.0-flash", vec![user_msg("hi")]);
+        let req = StreamRequest::new("gemini-2.0-flash", vec![Arc::new(user_msg("hi"))]);
         let body = build_request_body(&req);
         let contents = body["contents"].as_array().unwrap();
         assert_eq!(contents.len(), 1);
@@ -671,7 +673,7 @@ mod tests {
 
     #[test]
     fn body_promotes_system_to_system_instruction() {
-        let mut req = StreamRequest::new("m", vec![user_msg("hi")]);
+        let mut req = StreamRequest::new("m", vec![Arc::new(user_msg("hi"))]);
         req.system = Some("you are kage".into());
         let body = build_request_body(&req);
         assert_eq!(
@@ -682,7 +684,7 @@ mod tests {
 
     #[test]
     fn body_translates_thinking_level_to_budget() {
-        let mut req = StreamRequest::new("gemini-2.5-pro", vec![user_msg("hi")]);
+        let mut req = StreamRequest::new("gemini-2.5-pro", vec![Arc::new(user_msg("hi"))]);
         req.level = Some(crate::ThinkingLevel::High);
         let body = build_request_body(&req);
         assert_eq!(
@@ -693,7 +695,7 @@ mod tests {
 
     #[test]
     fn body_omits_thinking_config_when_level_off() {
-        let mut req = StreamRequest::new("gemini-2.5-pro", vec![user_msg("hi")]);
+        let mut req = StreamRequest::new("gemini-2.5-pro", vec![Arc::new(user_msg("hi"))]);
         req.level = Some(crate::ThinkingLevel::Off);
         let body = build_request_body(&req);
         assert!(body["generationConfig"].get("thinkingConfig").is_none());
@@ -701,7 +703,7 @@ mod tests {
 
     #[test]
     fn body_wraps_tools_in_function_declarations() {
-        let mut req = StreamRequest::new("m", vec![user_msg("hi")]);
+        let mut req = StreamRequest::new("m", vec![Arc::new(user_msg("hi"))]);
         req.tools = vec![ToolSpec {
             name: "read".into(),
             description: "read a file".into(),
@@ -739,7 +741,7 @@ mod tests {
             "required": ["path"],
             "type": "object"
         });
-        let mut req = StreamRequest::new("m", vec![user_msg("hi")]);
+        let mut req = StreamRequest::new("m", vec![Arc::new(user_msg("hi"))]);
         req.tools = vec![ToolSpec {
             name: "edit".into(),
             description: "edit a file".into(),
@@ -770,7 +772,7 @@ mod tests {
             }],
             None,
         );
-        let req = StreamRequest::new("m", vec![user_msg("read"), assistant]);
+        let req = StreamRequest::new("m", vec![Arc::new(user_msg("read")), Arc::new(assistant)]);
         let body = build_request_body(&req);
         let contents = body["contents"].as_array().unwrap();
         assert_eq!(contents[1]["role"], "model");
@@ -814,7 +816,10 @@ mod tests {
             ],
             None,
         );
-        let req = StreamRequest::new("gemini-3", vec![user_msg("read"), assistant]);
+        let req = StreamRequest::new(
+            "gemini-3",
+            vec![Arc::new(user_msg("read")), Arc::new(assistant)],
+        );
         let body = build_request_body(&req);
         let parts = body["contents"][1]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 4);
@@ -825,7 +830,7 @@ mod tests {
         assert!(parts[3].get("thoughtSignature").is_none());
     }
 
-    fn unsigned_loop() -> Vec<Message> {
+    fn unsigned_loop() -> Vec<std::sync::Arc<Message>> {
         let call = |id: &str| Content::ToolCall {
             id: ToolCallId::new(id),
             name: "read".into(),
@@ -871,6 +876,9 @@ mod tests {
                 text: "all read".into(),
             }]),
         ]
+        .into_iter()
+        .map(Arc::new)
+        .collect()
     }
 
     #[test]
@@ -943,7 +951,7 @@ mod tests {
             }],
             None,
         );
-        let req = StreamRequest::new("m", vec![result]);
+        let req = StreamRequest::new("m", vec![Arc::new(result)]);
         let body = build_request_body(&req);
         let contents = body["contents"].as_array().unwrap();
         assert_eq!(contents[0]["role"], "user");
@@ -1070,7 +1078,14 @@ mod tests {
             }],
             None,
         );
-        let req = StreamRequest::new("m", vec![user_msg("go"), assistant, result]);
+        let req = StreamRequest::new(
+            "m",
+            vec![
+                Arc::new(user_msg("go")),
+                Arc::new(assistant),
+                Arc::new(result),
+            ],
+        );
         let body = build_request_body(&req);
         let contents = body["contents"].as_array().unwrap();
         let fr = &contents[2]["parts"][0]["functionResponse"];
@@ -1158,13 +1173,15 @@ mod tests {
 
 #[cfg(test)]
 mod thinking_tests {
+    use std::sync::Arc;
+
     use kage_core::{Effort, Efforts, ThinkingLevel};
 
     use super::*;
 
     fn request(reasoning: Reasoning, level: ThinkingLevel) -> StreamRequest {
         let user = Message::new(Role::User, vec![Content::Text { text: "hi".into() }], None);
-        let mut req = StreamRequest::new("m", vec![user]);
+        let mut req = StreamRequest::new("m", vec![Arc::new(user)]);
         req.reasoning = reasoning;
         req.level = Some(level);
         req

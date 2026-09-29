@@ -135,7 +135,7 @@ impl AcpProvider {
     }
 }
 
-fn last_user_text(messages: &[Message]) -> Option<String> {
+fn last_user_text(messages: &[Arc<Message>]) -> Option<String> {
     let msg = messages.iter().rev().find(|m| m.role == Role::User)?;
     Some(
         msg.content

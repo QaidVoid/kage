@@ -1,6 +1,7 @@
 //! Conversation state carried through one [`run`](crate::run()) invocation.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use kage_core::{Message, TokenUsage};
 use serde::{Deserialize, Serialize};
@@ -65,8 +66,10 @@ impl TokenBudget {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentContext {
     /// Ordered conversation history. Last entry is typically the most recent
-    /// user turn before [`run`](crate::run()) is invoked.
-    pub history: Vec<Message>,
+    /// user turn before [`run`](crate::run()) is invoked. Messages are
+    /// shared, so building a request or announcing an append costs
+    /// refcounts instead of deep copies.
+    pub history: Vec<Arc<Message>>,
     /// Provider-qualified model id, for example `anthropic:claude-sonnet-4-6`.
     pub model: String,
     /// System prompt prepended to every model call.

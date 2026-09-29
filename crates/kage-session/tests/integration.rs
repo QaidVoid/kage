@@ -1,6 +1,7 @@
 //! End-to-end checks that exercise multiple kage-session APIs together.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use chrono::Utc;
 use kage_core::{Content, Message, Role, ThinkingSignature, ToolCallId};
@@ -35,7 +36,11 @@ fn header_always_carries_explicit_version() {
     w.append(&SessionEntry::Message(MessageEntry {
         id: EntryId::new(),
         ts: Utc::now(),
-        message: Message::new(Role::User, vec![Content::Text { text: "hi".into() }], None),
+        message: Arc::new(Message::new(
+            Role::User,
+            vec![Content::Text { text: "hi".into() }],
+            None,
+        )),
         usage: None,
     }))
     .unwrap();
@@ -72,13 +77,17 @@ fn full_round_trip_preserves_every_entry_kind() {
     let user = MessageEntry {
         id: EntryId::new(),
         ts: Utc::now(),
-        message: Message::new(Role::User, vec![Content::Text { text: "go".into() }], None),
+        message: Arc::new(Message::new(
+            Role::User,
+            vec![Content::Text { text: "go".into() }],
+            None,
+        )),
         usage: None,
     };
     let assistant = MessageEntry {
         id: EntryId::new(),
         ts: Utc::now(),
-        message: Message::new(
+        message: Arc::new(Message::new(
             Role::Assistant,
             vec![
                 Content::Thinking {
@@ -109,13 +118,13 @@ fn full_round_trip_preserves_every_entry_kind() {
                 },
             ],
             None,
-        ),
+        )),
         usage: None,
     };
     let tool_result = MessageEntry {
         id: EntryId::new(),
         ts: Utc::now(),
-        message: Message::new(
+        message: Arc::new(Message::new(
             Role::ToolResult,
             vec![Content::ToolResultBlock {
                 call_id: ToolCallId::new("c1"),
@@ -123,7 +132,7 @@ fn full_round_trip_preserves_every_entry_kind() {
                 is_error: false,
             }],
             None,
-        ),
+        )),
         usage: None,
     };
     let label = Label {
@@ -169,7 +178,7 @@ fn thinking_from_older_sessions_loads_and_writes_unchanged() {
     let entry = SessionEntry::Message(MessageEntry {
         id: EntryId::new(),
         ts: Utc::now(),
-        message: Message::new(
+        message: Arc::new(Message::new(
             Role::Assistant,
             vec![Content::Thinking {
                 text: "hmm".into(),
@@ -177,7 +186,7 @@ fn thinking_from_older_sessions_loads_and_writes_unchanged() {
                 duration_ms: None,
             }],
             None,
-        ),
+        )),
         usage: None,
     });
     let mut w = SessionWriter::create(&path, fresh_header()).unwrap();
@@ -204,31 +213,35 @@ fn fork_is_self_consistent_with_replay() {
     let m1 = MessageEntry {
         id: EntryId::new(),
         ts: Utc::now(),
-        message: Message::new(Role::User, vec![Content::Text { text: "ask".into() }], None),
+        message: Arc::new(Message::new(
+            Role::User,
+            vec![Content::Text { text: "ask".into() }],
+            None,
+        )),
         usage: None,
     };
     let m2 = MessageEntry {
         id: EntryId::new(),
         ts: Utc::now(),
-        message: Message::new(
+        message: Arc::new(Message::new(
             Role::Assistant,
             vec![Content::Text {
                 text: "answer".into(),
             }],
             None,
-        ),
+        )),
         usage: None,
     };
     let m3 = MessageEntry {
         id: EntryId::new(),
         ts: Utc::now(),
-        message: Message::new(
+        message: Arc::new(Message::new(
             Role::User,
             vec![Content::Text {
                 text: "follow up".into(),
             }],
             None,
-        ),
+        )),
         usage: None,
     };
     {
@@ -262,26 +275,26 @@ fn search_indexes_assistant_text_and_user_prompts() {
     w.append(&SessionEntry::Message(MessageEntry {
         id: EntryId::new(),
         ts: Utc::now(),
-        message: Message::new(
+        message: Arc::new(Message::new(
             Role::User,
             vec![Content::Text {
                 text: "tell me about migration safety".into(),
             }],
             None,
-        ),
+        )),
         usage: None,
     }))
     .unwrap();
     w.append(&SessionEntry::Message(MessageEntry {
         id: EntryId::new(),
         ts: Utc::now(),
-        message: Message::new(
+        message: Arc::new(Message::new(
             Role::Assistant,
             vec![Content::Text {
                 text: "migrations should be reversible".into(),
             }],
             None,
-        ),
+        )),
         usage: None,
     }))
     .unwrap();

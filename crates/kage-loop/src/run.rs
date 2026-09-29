@@ -15,6 +15,7 @@
 //! }
 //! ```
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use kage_core::{CancelFlag, Content, LoopError, LoopEvent, Message, MessageId};
@@ -292,9 +293,11 @@ fn drain_messages<F: FnMut() -> Option<String>>(mode: SteeringMode, mut poll: F)
 }
 
 /// Append `message` to history and announce it with
-/// [`LoopEvent::MessageAppended`].
+/// [`LoopEvent::MessageAppended`]. History and event share one
+/// allocation.
 fn append<F: FnMut(LoopEvent)>(cx: &mut AgentContext, emit: &mut F, message: Message) {
-    cx.history.push(message.clone());
+    let message = Arc::new(message);
+    cx.history.push(Arc::clone(&message));
     emit(LoopEvent::MessageAppended { message });
 }
 
@@ -329,7 +332,7 @@ fn push_user_text<F: FnMut(LoopEvent)>(cx: &mut AgentContext, emit: &mut F, text
 /// Only persisted history is touched. The in-flight assistant turn is
 /// not appended to `cx.history` until after it has streamed, so live
 /// thinking deltas reach the UI unmodified.
-fn flatten_thinking(history: &[Message]) -> Vec<Message> {
+fn flatten_thinking(history: &[Arc<Message>]) -> Vec<Arc<Message>> {
     history
         .iter()
         .map(|msg| {
@@ -338,11 +341,11 @@ fn flatten_thinking(history: &[Message]) -> Vec<Message> {
                 .iter()
                 .any(|c| matches!(c, Content::Thinking { .. }))
             {
-                return msg.clone();
+                return Arc::clone(msg);
             }
             // Build the rewritten content directly instead of
-            // `msg.clone()` then overwriting `.content`: the other
-            // fields are all `Copy`, so `..*msg` copies them and the
+            // `(**msg).clone()` then overwriting `.content`: the other
+            // fields are all `Copy`, so `..**msg` copies them and the
             // original content vec is never cloned just to be dropped.
             let content = msg
                 .content
@@ -354,7 +357,7 @@ fn flatten_thinking(history: &[Message]) -> Vec<Message> {
                     other => Some(other.clone()),
                 })
                 .collect();
-            Message { content, ..*msg }
+            Arc::new(Message { content, ..**msg })
         })
         .collect()
 }

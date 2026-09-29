@@ -159,7 +159,7 @@ mod tests {
         let mut buf = live("one\ntwo");
         buf.finish_streaming();
         assert!(matches!(
-            buf.blocks()[0],
+            buf.blocks()[0].as_ref(),
             Block::Thinking { folded: true, .. }
         ));
         assert_eq!(rows(&buf), ["Thought for 1s"]);

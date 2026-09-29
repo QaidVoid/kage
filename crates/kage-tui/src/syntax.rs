@@ -18,7 +18,7 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -30,10 +30,15 @@ use syntect::util::LinesWithEndings;
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
 
-/// Cache size cap. Holds up to this many distinct highlight results;
-/// older entries get evicted in FIFO order. Sized for "a session's
-/// worth of assistant blocks plus their tool reads", not unbounded.
-const CACHE_CAP: usize = 64;
+/// Cache caps. Holds at most this many distinct highlight results and
+/// at most [`CACHE_BYTE_CAP`] bytes of styled text, whichever binds
+/// first; older entries get evicted in FIFO order. The count keeps a
+/// session's worth of assistant blocks plus their tool reads cheap;
+/// the byte bound stops a run of large `read` results from pinning
+/// unbounded memory.
+const CACHE_CAP: usize = 256;
+/// See [`CACHE_CAP`].
+const CACHE_BYTE_CAP: usize = 8 * 1024 * 1024;
 
 /// Skip syntect entirely for inputs above this many bytes. Even with
 /// the result cache, the first render of a huge file would block the
@@ -53,8 +58,9 @@ thread_local! {
 }
 
 struct HighlightCache {
-    entries: std::collections::HashMap<u64, Vec<Line<'static>>>,
-    order: VecDeque<u64>,
+    entries: std::collections::HashMap<u64, Arc<Vec<Line<'static>>>>,
+    order: VecDeque<(u64, usize)>,
+    bytes: usize,
 }
 
 impl HighlightCache {
@@ -62,25 +68,39 @@ impl HighlightCache {
         Self {
             entries: std::collections::HashMap::new(),
             order: VecDeque::new(),
+            bytes: 0,
         }
     }
 
-    fn get(&self, key: u64) -> Option<Vec<Line<'static>>> {
+    fn get(&self, key: u64) -> Option<Arc<Vec<Line<'static>>>> {
         self.entries.get(&key).cloned()
     }
 
-    fn insert(&mut self, key: u64, lines: Vec<Line<'static>>) {
+    fn insert(&mut self, key: u64, lines: Arc<Vec<Line<'static>>>, size: usize) {
         if self.entries.contains_key(&key) {
             return;
         }
-        while self.order.len() >= CACHE_CAP {
-            if let Some(stale) = self.order.pop_front() {
-                self.entries.remove(&stale);
+        while self.bytes + size > CACHE_BYTE_CAP || self.order.len() >= CACHE_CAP {
+            let Some((stale, stale_size)) = self.order.pop_front() else {
+                break;
+            };
+            if self.entries.remove(&stale).is_some() {
+                self.bytes -= stale_size;
             }
         }
-        self.order.push_back(key);
+        self.order.push_back((key, size));
         self.entries.insert(key, lines);
+        self.bytes += size;
     }
+}
+
+/// The cached text bytes of a highlight result: the span contents,
+/// which is what grows with the highlighted input.
+fn lines_size(lines: &[Line<'static>]) -> usize {
+    lines
+        .iter()
+        .map(|l| l.spans.iter().map(|s| s.content.len()).sum::<usize>())
+        .sum()
 }
 
 fn cache_key(text: &str, marker: &str, theme_name: &str) -> u64 {
@@ -91,7 +111,7 @@ fn cache_key(text: &str, marker: &str, theme_name: &str) -> u64 {
     h.finish()
 }
 
-fn cached_or<F>(key: u64, build: F) -> Vec<Line<'static>>
+fn cached_or<F>(key: u64, build: F) -> Arc<Vec<Line<'static>>>
 where
     F: FnOnce() -> Vec<Line<'static>>,
 {
@@ -99,8 +119,9 @@ where
         if let Some(hit) = c.borrow().get(key) {
             return hit;
         }
-        let computed = build();
-        c.borrow_mut().insert(key, computed.clone());
+        let computed = Arc::new(build());
+        let size = lines_size(&computed);
+        c.borrow_mut().insert(key, Arc::clone(&computed), size);
         computed
     })
 }
@@ -134,12 +155,17 @@ fn theme() -> &'static Theme {
 ///
 /// Results are cached per-thread on `(code, extension, paired theme)`;
 /// identical inputs reuse a previous render rather than re-running
-/// syntect each frame. Cache caps at `CACHE_CAP` entries with FIFO
-/// eviction.
+/// syntect each frame, and hits share one [`Arc`] instead of copying
+/// the lines. The cache holds at most [`CACHE_CAP`] entries and
+/// [`CACHE_BYTE_CAP`] bytes, evicting in FIFO order.
 #[must_use]
-pub fn highlight_extension(code: &str, extension: &str, fallback: Style) -> Vec<Line<'static>> {
+pub fn highlight_extension(
+    code: &str,
+    extension: &str,
+    fallback: Style,
+) -> Arc<Vec<Line<'static>>> {
     if code.len() > HIGHLIGHT_BYTE_LIMIT {
-        return plain_lines(code, fallback);
+        return Arc::new(plain_lines(code, fallback));
     }
     let light = crate::theme::current().bg_is_light();
     let key = cache_key(code, extension, syntect_theme_name(light));
@@ -260,5 +286,65 @@ mod tests {
         let light = cache_key(text, "rs", syntect_theme_name(true));
         assert_ne!(dark, light);
         assert_eq!(dark, cache_key(text, "rs", syntect_theme_name(false)));
+    }
+
+    #[test]
+    fn the_highlight_cache_evicts_by_bytes_in_fifo_order() {
+        let mut cache = HighlightCache::new();
+        let lines = Arc::new(vec![Line::from("x".repeat(3 * 1024 * 1024))]);
+        let size = lines_size(&lines);
+        cache.insert(1, Arc::clone(&lines), size);
+        cache.insert(2, Arc::clone(&lines), size);
+        assert!(cache.get(1).is_some());
+        assert!(cache.get(2).is_some());
+        cache.insert(3, Arc::clone(&lines), size);
+        assert!(cache.get(1).is_none(), "the oldest entry goes first");
+        assert!(cache.get(2).is_some());
+        assert!(cache.get(3).is_some());
+        assert_eq!(cache.bytes, 2 * size);
+    }
+
+    #[test]
+    fn the_highlight_cache_evicts_by_count_in_fifo_order() {
+        let mut cache = HighlightCache::new();
+        let lines = Arc::new(vec![Line::from("x")]);
+        let cap = CACHE_CAP as u64;
+        for key in 0..cap {
+            cache.insert(key, Arc::clone(&lines), lines_size(&lines));
+        }
+        assert!(cache.get(0).is_some());
+        cache.insert(cap, Arc::clone(&lines), lines_size(&lines));
+        assert!(cache.get(0).is_none());
+        assert!(cache.get(cap).is_some());
+    }
+
+    #[test]
+    fn a_duplicate_highlight_insert_keeps_the_cached_lines() {
+        let mut cache = HighlightCache::new();
+        let lines = Arc::new(vec![Line::from("a")]);
+        cache.insert(7, Arc::clone(&lines), lines_size(&lines));
+        cache.insert(7, Arc::new(vec![Line::from("b")]), lines_size(&lines));
+        assert_eq!(cache.get(7).unwrap()[0].spans[0].content, "a");
+    }
+
+    #[test]
+    fn the_byte_cap_bounds_the_real_highlight_cache() {
+        let blob = "x".repeat(HIGHLIGHT_BYTE_LIMIT - 1);
+        let rendered: usize = (0..160)
+            .map(|i| highlight_extension(&format!("{blob}\n{i}"), "xyzz", Style::default()).len())
+            .sum();
+        assert!(rendered > 0);
+        HIGHLIGHT_CACHE.with(|c| assert!(c.borrow().bytes <= CACHE_BYTE_CAP));
+    }
+
+    #[test]
+    fn a_highlight_hit_shares_one_line_allocation() {
+        let code = "fn main() {}";
+        let first = highlight_extension(code, "rs", Style::default());
+        let second = highlight_extension(code, "rs", Style::default());
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "a cache hit must not rebuild or copy the lines"
+        );
     }
 }

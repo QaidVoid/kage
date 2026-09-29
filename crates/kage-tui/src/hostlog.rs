@@ -126,7 +126,7 @@ mod tests {
         let sink = buffer_host_log(buffer.clone(), toasts, Arc::default());
         sink.lock().unwrap().log(LogLevel::Error, "boom");
         let buf = buffer.lock().unwrap();
-        match &buf.blocks()[0] {
+        match buf.blocks()[0].as_ref() {
             Block::Custom { kind, folded, text } => {
                 assert_eq!(kind, "kage:error");
                 assert_eq!(text, "boom");
@@ -156,7 +156,7 @@ mod tests {
         sink.lock().unwrap().log(LogLevel::Error, raw);
         let want = "init.lua: runtime error: init.lua:3: boom\nFix init.lua, then run /reload.";
         let buf = buffer.lock().unwrap();
-        assert!(matches!(&buf.blocks()[0], Block::Custom { text, .. } if text == want));
+        assert!(matches!(buf.blocks()[0].as_ref(), Block::Custom { text, .. } if text == want));
         assert_eq!(*calls.lock().unwrap(), [want]);
     }
 
@@ -167,7 +167,7 @@ mod tests {
         let sink = buffer_host_log(buffer.clone(), toasts, Arc::default());
         sink.lock().unwrap().log(LogLevel::Info, "ok");
         let buf = buffer.lock().unwrap();
-        match &buf.blocks()[0] {
+        match buf.blocks()[0].as_ref() {
             Block::Custom { text, folded, .. } => {
                 assert_eq!(text, "ok");
                 assert!(folded);
@@ -195,7 +195,7 @@ mod tests {
         let buf = buffer.lock().unwrap();
         assert_eq!(buf.blocks().len(), 1);
         assert!(matches!(
-            &buf.blocks()[0],
+            buf.blocks()[0].as_ref(),
             Block::Custom { text, .. } if text == "[Warn] early"
         ));
         assert_eq!(
@@ -245,9 +245,9 @@ mod tests {
         assert!(app.drain_engine_events());
         let buf = buffer.lock().unwrap();
         let blocks = buf.blocks();
-        assert!(matches!(&blocks[0], Block::User { text } if text == "hi"));
+        assert!(matches!(blocks[0].as_ref(), Block::User { text } if text == "hi"));
         assert!(matches!(
-            &blocks[1],
+            blocks[1].as_ref(),
             Block::Custom { text, .. } if text == "plugin says hi"
         ));
     }

@@ -584,21 +584,21 @@ fn toggling_either_half_of_a_pair_flips_both() {
     buffer.push_tool_call("c1", "ls", json!({"path": "."}));
     buffer.push_tool_result("c1", "a", false);
     assert!(matches!(
-        buffer.blocks()[0],
+        buffer.blocks()[0].as_ref(),
         Block::ToolCall { folded: true, .. }
     ));
     assert!(matches!(
-        buffer.blocks()[1],
+        buffer.blocks()[1].as_ref(),
         Block::ToolResult { folded: true, .. }
     ));
     // Toggle the result; the call should flip too.
     assert!(buffer.toggle_fold(1));
     assert!(matches!(
-        buffer.blocks()[0],
+        buffer.blocks()[0].as_ref(),
         Block::ToolCall { folded: false, .. }
     ));
     assert!(matches!(
-        buffer.blocks()[1],
+        buffer.blocks()[1].as_ref(),
         Block::ToolResult { folded: false, .. }
     ));
 }

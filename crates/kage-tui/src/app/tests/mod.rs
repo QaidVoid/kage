@@ -101,7 +101,7 @@ fn input(action: InputAction) -> Vec<Routed> {
 }
 
 fn last_block_text(buffer: &SharedBuffer) -> String {
-    match buffer.lock().unwrap().blocks().last() {
+    match buffer.lock().unwrap().blocks().last().map(Arc::as_ref) {
         Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
         other => panic!("expected a custom block, got {other:?}"),
     }
@@ -172,7 +172,7 @@ fn tool_phase(app: &App, id: &str) -> crate::view::tool_view::ToolPhase {
     let buf = app.buffer.lock().unwrap();
     buf.blocks()
         .iter()
-        .find_map(|b| match b {
+        .find_map(|b| match b.as_ref() {
             crate::buffer::Block::ToolCall { call_id, phase, .. } if call_id == id => Some(*phase),
             _ => None,
         })

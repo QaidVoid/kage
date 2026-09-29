@@ -29,7 +29,7 @@ fn submitting_a_prompt_sends_it_without_painting() {
             .unwrap()
             .blocks()
             .iter()
-            .any(|b| matches!(b, crate::buffer::Block::User { .. })),
+            .any(|b| matches!(b.as_ref(), crate::buffer::Block::User { .. })),
         "the user block appears when the engine delivers the prompt"
     );
     assert_eq!(app.input().mode(), Mode::Insert);
@@ -98,7 +98,7 @@ fn delivered_prompts_paint_user_blocks() {
         .unwrap();
     assert!(app.drain_engine_events());
     assert!(matches!(
-        app.buffer.lock().unwrap().blocks().last(),
+        app.buffer.lock().unwrap().blocks().last().map(Arc::as_ref),
         Some(crate::buffer::Block::User { text }) if text == "hi"
     ));
 }
@@ -166,7 +166,7 @@ fn session_changed_rebuilds_the_transcript() {
     let buf = app.buffer.lock().unwrap();
     assert_eq!(buf.blocks().len(), 1);
     assert!(matches!(
-        buf.blocks().first(),
+        buf.blocks().first().map(Arc::as_ref),
         Some(crate::buffer::Block::User { text }) if text == "restored"
     ));
 }
@@ -417,7 +417,7 @@ fn shell_submit_sends_run_shell_without_a_user_block() {
             .unwrap()
             .blocks()
             .iter()
-            .any(|b| matches!(b, crate::buffer::Block::User { .. })),
+            .any(|b| matches!(b.as_ref(), crate::buffer::Block::User { .. })),
         "shell submit must not paint a user block"
     );
 }

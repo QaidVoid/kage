@@ -67,7 +67,7 @@ fn tool_timing_excludes_the_approval_wait() {
     );
     assert_eq!(tool_phase(&app, "c1"), ToolPhase::Done);
     let buf = app.buffer.lock().unwrap();
-    let duration = buf.blocks().iter().find_map(|b| match b {
+    let duration = buf.blocks().iter().find_map(|b| match b.as_ref() {
         crate::buffer::Block::ToolResult { duration_ms, .. } => *duration_ms,
         _ => None,
     });

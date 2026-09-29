@@ -128,7 +128,31 @@ pub struct EditDiff {
     pub removed: usize,
 }
 
+/// Lines a stored [`EditDiff`] keeps. A larger change keeps this many
+/// head lines and this many tail lines with one elision marker row
+/// between, so an edit of a huge file does not pin whole-file line
+/// vectors for the life of its block. The `added`/`removed` counts
+/// stay exact.
+const EDIT_DIFF_WINDOW: usize = 2000;
+
 impl EditDiff {
+    fn windowed(mut self) -> Self {
+        let total = self.lines.len();
+        if total <= EDIT_DIFF_WINDOW {
+            return self;
+        }
+        let keep = EDIT_DIFF_WINDOW / 2;
+        let tail = self.lines.split_off(total - keep);
+        self.lines.truncate(keep);
+        let elided = total - 2 * keep;
+        self.lines.push(BodyLine::new(
+            LineKind::Marker,
+            format!("... {elided} lines elided ..."),
+        ));
+        self.lines.extend(tail);
+        self
+    }
+
     fn push_change(&mut self, change: &Value) {
         if let Some(range) = change.get("range") {
             let bound = |key| range.get(key).and_then(Value::as_u64).unwrap_or(0);
@@ -339,7 +363,7 @@ pub fn edit_diff(input: &Value) -> EditDiff {
         Some(changes) => changes.iter().for_each(|c| diff.push_change(c)),
         None => diff.push_change(input),
     }
-    diff
+    diff.windowed()
 }
 
 /// Which version of its file an `edit` call is compared against.
@@ -389,7 +413,7 @@ pub fn file_edit_diff(input: &Value, content: &str, side: EditSide) -> Option<Ed
         let (head, tail) = (&content[start..at], &content[after..end]);
         diff.push_line_change(&format!("{head}{old}{tail}"), &format!("{head}{new}{tail}"));
     }
-    Some(diff)
+    Some(diff.windowed())
 }
 
 /// Split `shell` output text into display lines and the exit status.
@@ -1003,6 +1027,62 @@ mod tests {
                 (LineKind::Add, "B"),
                 (LineKind::Context, "c"),
             ]
+        );
+    }
+
+    #[test]
+    fn an_edit_diff_past_the_window_keeps_head_tail_and_a_marker() {
+        let old = (0..3000)
+            .map(|i| format!("o{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let new = (0..3000)
+            .map(|i| format!("n{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let diff = edit_diff(&json!({"path": "a", "old_str": old, "new_str": new}));
+        assert_eq!(diff.lines.len(), 2001);
+        assert_eq!(
+            (diff.added, diff.removed),
+            (3000, 3000),
+            "counts stay exact"
+        );
+        assert_eq!(diff.lines[0], BodyLine::new(LineKind::Delete, "o0"));
+        assert_eq!(diff.lines[999], BodyLine::new(LineKind::Delete, "o999"));
+        assert_eq!(diff.lines[1000].kind, LineKind::Marker);
+        assert!(
+            diff.lines[1000].text.contains("4000"),
+            "{}",
+            diff.lines[1000].text
+        );
+        assert_eq!(diff.lines[1001], BodyLine::new(LineKind::Add, "n2000"));
+        assert_eq!(diff.lines[2000], BodyLine::new(LineKind::Add, "n2999"));
+    }
+
+    #[test]
+    fn file_edit_diff_windows_a_whole_file_change() {
+        let content = (0..5000)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let replaced = content.replace("line 2500", "line 2500 changed");
+        let input = json!({"path": "f", "old_str": content, "new_str": replaced});
+        let diff = file_edit_diff(&input, &content, EditSide::Before).unwrap();
+        assert_eq!(diff.lines.len(), 2001);
+        assert_eq!((diff.added, diff.removed), (1, 1), "counts stay exact");
+        assert_eq!(diff.lines[0], BodyLine::new(LineKind::Context, "line 0"));
+        assert_eq!(
+            diff.lines[999],
+            BodyLine::new(LineKind::Context, "line 999")
+        );
+        assert_eq!(diff.lines[1000].kind, LineKind::Marker);
+        assert_eq!(
+            diff.lines[1001],
+            BodyLine::new(LineKind::Context, "line 4000")
+        );
+        assert_eq!(
+            diff.lines[2000],
+            BodyLine::new(LineKind::Context, "line 4999")
         );
     }
 

@@ -41,6 +41,7 @@ pub(crate) use ratatui::layout::{Alignment, Rect};
 pub(crate) use ratatui::style::{Color, Modifier, Style};
 pub(crate) use ratatui::text::{Line, Span};
 pub(crate) use ratatui::widgets::{Block as RtBlock, Paragraph, Wrap};
+pub(crate) use std::sync::Arc;
 pub(crate) use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(crate) use crate::buffer::{Block, Buffer};
@@ -336,7 +337,8 @@ fn first_footer_row(footer: Rect) -> Rect {
 /// prompt does.
 fn start_area(buffer: &Buffer, area: Rect) -> Option<Rect> {
     let blocks = buffer.blocks();
-    let is_notice = |b: &Block| matches!(b, Block::Custom { kind, .. } if kind != "kage:shell");
+    let is_notice =
+        |b: &Arc<Block>| matches!(b.as_ref(), Block::Custom { kind, .. } if kind != "kage:shell");
     if !blocks.iter().all(is_notice) {
         return None;
     }

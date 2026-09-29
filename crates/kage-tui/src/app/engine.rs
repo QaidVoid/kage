@@ -313,6 +313,10 @@ impl App {
             }
             Event::Host(event) => self.apply_agent_host_event(session, &buffer, event),
         };
+        // The paint loop trims only the on-screen buffer, so an agent's
+        // own scrollback is trimmed here: a background child that never
+        // gets focused stays bounded too.
+        lock(&buffer).trim_scrollback();
         if card {
             self.update_card(session);
         }
@@ -429,6 +433,7 @@ impl App {
                 let mut buf = lock(&buffer);
                 let durations = crate::events::tool_durations(&messages);
                 crate::events::populate_from_history(&mut buf, &messages, &durations, None);
+                buf.trim_scrollback();
             }
             self.annotate_edits(&buffer);
             self.agent_buffers.insert(session, buffer);
@@ -839,7 +844,7 @@ fn is_running_shell(text: &str, command: &str) -> bool {
 pub(super) fn agent_activity(buffer: &crate::Buffer) -> String {
     let mut latest = None;
     for block in buffer.blocks().iter().rev() {
-        match block {
+        match block.as_ref() {
             crate::Block::ToolCall {
                 name, input, phase, ..
             } => {

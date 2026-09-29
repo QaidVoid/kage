@@ -506,7 +506,7 @@ mod tests {
         let buf = buf.lock().unwrap();
         let blocks = buf.blocks();
         assert_eq!(blocks.len(), 1);
-        match &blocks[0] {
+        match blocks[0].as_ref() {
             Block::Assistant { text, live } => {
                 assert_eq!(text, "hello world");
                 assert!(!*live);
@@ -530,14 +530,14 @@ mod tests {
         let buf = buf.lock().unwrap();
         let blocks = buf.blocks();
         assert_eq!(blocks.len(), 2);
-        match &blocks[0] {
+        match blocks[0].as_ref() {
             Block::Assistant { text, live } => {
                 assert_eq!(text, "partial ans");
                 assert!(!live, "assistant block must be finished");
             }
             other => panic!("expected assistant, got {other:?}"),
         }
-        match &blocks[1] {
+        match blocks[1].as_ref() {
             Block::Custom { kind, text, folded } => {
                 assert_eq!(kind, "kage:truncated");
                 assert_eq!(text, "reply hit the max output token limit");
@@ -560,8 +560,8 @@ mod tests {
         });
         let buf = buf.lock().unwrap();
         assert_eq!(buf.blocks().len(), 2);
-        assert!(matches!(buf.blocks()[0], Block::Thinking { .. }));
-        assert!(matches!(buf.blocks()[1], Block::Assistant { .. }));
+        assert!(matches!(buf.blocks()[0].as_ref(), Block::Thinking { .. }));
+        assert!(matches!(buf.blocks()[1].as_ref(), Block::Assistant { .. }));
     }
 
     #[test]
@@ -584,11 +584,11 @@ mod tests {
         });
         let buf = buf.lock().unwrap();
         assert_eq!(buf.blocks().len(), 2);
-        match &buf.blocks()[0] {
+        match buf.blocks()[0].as_ref() {
             Block::ToolCall { name, .. } => assert_eq!(name, "shell"),
             other => panic!("expected ToolCall, got {other:?}"),
         }
-        match &buf.blocks()[1] {
+        match buf.blocks()[1].as_ref() {
             Block::ToolResult {
                 output, is_error, ..
             } => {
@@ -612,7 +612,7 @@ mod tests {
     fn tool_events_walk_the_phases() {
         let (buf, mut hooks) = fresh();
         let cid = ToolCallId::new("c1");
-        let phase = |buf: &SharedBuffer| match &lock(buf).blocks()[0] {
+        let phase = |buf: &SharedBuffer| match lock(buf).blocks()[0].as_ref() {
             Block::ToolCall { phase, .. } => *phase,
             other => panic!("expected ToolCall, got {other:?}"),
         };
@@ -670,7 +670,7 @@ mod tests {
         let durations: Vec<Option<u64>> = lock(&buf)
             .blocks()
             .iter()
-            .filter_map(|b| match b {
+            .filter_map(|b| match b.as_ref() {
                 Block::ToolResult { duration_ms, .. } => Some(*duration_ms),
                 _ => None,
             })
@@ -732,7 +732,7 @@ mod tests {
         });
         assert_eq!(phases(&buf), [ToolPhase::Interrupted]);
         assert!(matches!(
-            lock(&buf).blocks()[1],
+            lock(&buf).blocks()[1].as_ref(),
             Block::ToolResult {
                 duration_ms: None,
                 ..
@@ -774,7 +774,7 @@ mod tests {
         let commands: Vec<String> = buf
             .blocks()
             .iter()
-            .filter_map(|b| match b {
+            .filter_map(|b| match b.as_ref() {
                 Block::ToolCall { input, .. } => Some(input["command"].to_string()),
                 _ => None,
             })
@@ -789,7 +789,7 @@ mod tests {
     fn phases_of(buf: &Buffer) -> Vec<ToolPhase> {
         buf.blocks()
             .iter()
-            .filter_map(|b| match b {
+            .filter_map(|b| match b.as_ref() {
                 Block::ToolCall { phase, .. } => Some(*phase),
                 _ => None,
             })
@@ -889,7 +889,7 @@ mod tests {
         let buf = lock(&buf);
         assert_eq!(buf.blocks().len(), 1);
         assert!(matches!(
-            &buf.blocks()[0],
+            buf.blocks()[0].as_ref(),
             Block::Custom { text, .. } if text.contains("retrying 3/5")
         ));
     }
@@ -907,7 +907,7 @@ mod tests {
         });
         let buf = lock(&buf);
         assert!(matches!(
-            buf.blocks()[0],
+            buf.blocks()[0].as_ref(),
             Block::Thinking {
                 live: false,
                 folded: true,
@@ -944,7 +944,7 @@ mod tests {
         )];
         populate_from_history(&mut buf, &history, &HashMap::new(), None);
         assert!(matches!(
-            buf.blocks()[0],
+            buf.blocks()[0].as_ref(),
             Block::Thinking {
                 duration_ms: None,
                 folded: true,
@@ -952,7 +952,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            buf.blocks()[1],
+            buf.blocks()[1].as_ref(),
             Block::Thinking {
                 duration_ms: Some(2_300),
                 folded: true,
@@ -960,7 +960,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            buf.blocks()[2],
+            buf.blocks()[2].as_ref(),
             Block::ToolCall {
                 phase: ToolPhase::Interrupted,
                 ..
@@ -977,7 +977,7 @@ mod tests {
             summary: "everyone agrees".into(),
         });
         let buf = buf.lock().unwrap();
-        match &buf.blocks()[0] {
+        match buf.blocks()[0].as_ref() {
             Block::Custom { kind, text, .. } => {
                 assert_eq!(kind, "kage:compaction");
                 assert!(text.starts_with("Compacted history (12 messages summarized, 4 kept)"));
@@ -994,7 +994,7 @@ mod tests {
             kind: LoopError::ContextOverflow,
         });
         let buf = buf.lock().unwrap();
-        match &buf.blocks()[0] {
+        match buf.blocks()[0].as_ref() {
             Block::Custom { kind, folded, .. } => {
                 assert_eq!(kind, "kage:error");
                 assert!(!folded, "errors should be visible by default");
@@ -1016,8 +1016,11 @@ mod tests {
         let buf = buf.lock().unwrap();
         let blocks = buf.blocks();
         assert_eq!(blocks.len(), 2);
-        assert!(matches!(blocks[0], Block::Assistant { live: false, .. }));
-        match &blocks[1] {
+        assert!(matches!(
+            blocks[0].as_ref(),
+            Block::Assistant { live: false, .. }
+        ));
+        match blocks[1].as_ref() {
             Block::Custom { kind, text, .. } => {
                 assert_eq!(kind, "kage:notify");
                 assert_eq!(text, "Interrupted");
@@ -1035,7 +1038,7 @@ mod tests {
             },
         });
         let buf = buf.lock().unwrap();
-        match &buf.blocks()[0] {
+        match buf.blocks()[0].as_ref() {
             Block::Custom { kind, text, .. } => {
                 assert_eq!(kind, "kage:error");
                 assert_eq!(
@@ -1090,15 +1093,15 @@ mod tests {
         ];
         populate_from_history(&mut buf, &history, &std::collections::HashMap::new(), None);
         let blocks = buf.blocks();
-        assert!(matches!(blocks[0], Block::User { .. }));
-        assert!(matches!(blocks[1], Block::Thinking { .. }));
-        assert!(matches!(blocks[2], Block::Assistant { .. }));
+        assert!(matches!(blocks[0].as_ref(), Block::User { .. }));
+        assert!(matches!(blocks[1].as_ref(), Block::Thinking { .. }));
+        assert!(matches!(blocks[2].as_ref(), Block::Assistant { .. }));
         assert!(matches!(
-            &blocks[3],
+            blocks[3].as_ref(),
             Block::ToolCall { name, .. } if name == "ls"
         ));
         assert!(matches!(
-            &blocks[4],
+            blocks[4].as_ref(),
             Block::ToolResult { output, .. } if output == "a.rs\nb.rs"
         ));
     }
@@ -1120,7 +1123,7 @@ mod tests {
         populate_from_history(&mut buf, &history, &std::collections::HashMap::new(), None);
         let blocks = buf.blocks();
         assert_eq!(blocks.len(), 1);
-        match &blocks[0] {
+        match blocks[0].as_ref() {
             Block::Custom { kind, .. } => assert_eq!(kind, "kage:compaction"),
             other => panic!("expected Custom compaction block, got {other:?}"),
         }
@@ -1141,7 +1144,7 @@ mod tests {
         let header = |counts| {
             let mut buf = Buffer::new();
             populate_from_history(&mut buf, &history, &HashMap::new(), counts);
-            match &buf.blocks()[0] {
+            match buf.blocks()[0].as_ref() {
                 Block::Custom { text, .. } => text.lines().next().unwrap().to_owned(),
                 other => panic!("expected a compaction block, got {other:?}"),
             }
@@ -1170,7 +1173,7 @@ mod tests {
         populate_from_history(&mut buf, &history, &std::collections::HashMap::new(), None);
         let blocks = buf.blocks();
         assert_eq!(blocks.len(), 1);
-        assert!(matches!(blocks[0], Block::User { .. }));
+        assert!(matches!(blocks[0].as_ref(), Block::User { .. }));
     }
 
     #[test]
@@ -1197,10 +1200,10 @@ mod tests {
         hooks.on_event(&LoopEvent::MessageAppended {
             message: message.clone(),
         });
-        assert!(matches!(&lock(&buf).blocks()[0], Block::User { text } if text == want));
+        assert!(matches!(lock(&buf).blocks()[0].as_ref(), Block::User { text } if text == want));
         let mut replayed = Buffer::new();
         populate_from_history(&mut replayed, &[message], &HashMap::new(), None);
-        assert!(matches!(&replayed.blocks()[0], Block::User { text } if text == want));
+        assert!(matches!(replayed.blocks()[0].as_ref(), Block::User { text } if text == want));
     }
 
     #[test]
@@ -1238,10 +1241,10 @@ mod tests {
         });
         let blocks = lock(&buf).blocks().to_vec();
         assert_eq!(blocks.len(), 1, "{blocks:?}");
-        assert!(matches!(&blocks[0], Block::User { text } if text == want));
+        assert!(matches!(blocks[0].as_ref(), Block::User { text } if text == want));
         let mut replayed = Buffer::new();
         populate_from_history(&mut replayed, &[message], &HashMap::new(), None);
-        assert!(matches!(&replayed.blocks()[0], Block::User { text } if text == want));
+        assert!(matches!(replayed.blocks()[0].as_ref(), Block::User { text } if text == want));
     }
 
     #[test]
@@ -1267,7 +1270,7 @@ mod tests {
         });
         let buf = buf.lock().unwrap();
         assert_eq!(buf.blocks().len(), 2);
-        assert!(matches!(&buf.blocks()[0], Block::User { text } if text == "hello"));
+        assert!(matches!(buf.blocks()[0].as_ref(), Block::User { text } if text == "hello"));
     }
 
     #[test]
@@ -1325,7 +1328,7 @@ mod tests {
         let durations: Vec<Option<u64>> = buf
             .blocks()
             .iter()
-            .filter_map(|b| match b {
+            .filter_map(|b| match b.as_ref() {
                 Block::ToolResult { duration_ms, .. } => Some(*duration_ms),
                 _ => None,
             })

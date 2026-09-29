@@ -120,7 +120,7 @@ fn streaming_assistant_reassembles_deltas() {
     buf.append_assistant_delta("hello ");
     buf.append_assistant_delta("world");
     assert_eq!(buf.blocks().len(), 1);
-    match &buf.blocks()[0] {
+    match buf.blocks()[0].as_ref() {
         Block::Assistant { text, live } => {
             assert_eq!(text, "hello world");
             assert!(*live);
@@ -134,7 +134,7 @@ fn finish_streaming_marks_last_block_inert() {
     let mut buf = Buffer::new();
     buf.append_assistant_delta("done");
     buf.finish_streaming();
-    match &buf.blocks()[0] {
+    match buf.blocks()[0].as_ref() {
         Block::Assistant { live, .. } => assert!(!*live),
         _ => panic!(),
     }
@@ -160,7 +160,8 @@ fn upsert_tool_call_refreshes_in_place_without_duplicates() {
     let calls: Vec<&Block> = buf
         .blocks()
         .iter()
-        .filter(|b| matches!(b, Block::ToolCall { .. }))
+        .filter(|b| matches!(b.as_ref(), Block::ToolCall { .. }))
+        .map(Arc::as_ref)
         .collect();
     assert_eq!(calls.len(), 1, "same call_id must not duplicate the block");
     match calls[0] {
@@ -186,7 +187,7 @@ fn upsert_tool_call_appends_distinct_ids() {
     let calls = buf
         .blocks()
         .iter()
-        .filter(|b| matches!(b, Block::ToolCall { .. }))
+        .filter(|b| matches!(b.as_ref(), Block::ToolCall { .. }))
         .count();
     assert_eq!(calls, 2);
 }
@@ -196,7 +197,7 @@ fn tool_result_inherits_name_from_matching_call() {
     let mut buf = Buffer::new();
     buf.push_tool_call("c1", "shell", json!({"command": "ls"}));
     buf.push_tool_result("c1", "file1\nfile2\n", false);
-    match &buf.blocks()[1] {
+    match buf.blocks()[1].as_ref() {
         Block::ToolResult { name, .. } => assert_eq!(name, "shell"),
         other => panic!("expected ToolResult, got {other:?}"),
     }
@@ -206,7 +207,7 @@ fn tool_result_inherits_name_from_matching_call() {
 fn tool_result_without_matching_call_has_empty_name() {
     let mut buf = Buffer::new();
     buf.push_tool_result("orphan", "x", false);
-    match &buf.blocks()[0] {
+    match buf.blocks()[0].as_ref() {
         Block::ToolResult { name, .. } => assert_eq!(name, ""),
         _ => panic!(),
     }
@@ -246,7 +247,7 @@ fn thinking_streams_separately_from_assistant() {
     buf.append_assistant_delta("ok");
     buf.append_thinking_delta(" more");
     assert_eq!(buf.blocks().len(), 3);
-    if let Block::Thinking { text, .. } = &buf.blocks()[2] {
+    if let Block::Thinking { text, .. } = buf.blocks()[2].as_ref() {
         assert_eq!(text, " more");
     } else {
         panic!("expected fresh thinking after assistant");
@@ -507,7 +508,7 @@ fn streaming_delta_keeps_caches_inside_throttle_window() {
     assert_eq!(buf.cached_height(0, 80), None);
     assert!(buf.cached_render_lines(0, 80).is_none());
     assert!(matches!(
-        buf.blocks()[0],
+        buf.blocks()[0].as_ref(),
         Block::Assistant { live: false, .. }
     ));
 }
@@ -520,7 +521,7 @@ fn a_tool_call_after_streamed_text_finishes_the_text() {
     buf.push_tool_call("c2", "read", json!({"path": "b.rs"}));
     buf.finish_streaming();
     assert!(matches!(
-        &buf.blocks()[0],
+        buf.blocks()[0].as_ref(),
         Block::Assistant { text, live: false } if text == "hello world and the rest"
     ));
     assert!(buf.cached_render_lines(0, 80).is_none());
@@ -624,10 +625,12 @@ fn compact_drops_oldest_and_keeps_pairs_together() {
     assert_eq!(buf.compact_to(4), 6);
     assert_eq!(buf.blocks().len(), 4);
     assert!(
-        matches!(&buf.blocks()[0], Block::ToolCall { call_id, .. } if call_id == "B"),
+        matches!(buf.blocks()[0].as_ref(), Block::ToolCall { call_id, .. } if call_id == "B"),
         "the frontier lands on the surviving call, not its oldest filler"
     );
-    assert!(matches!(&buf.blocks()[1], Block::ToolResult { call_id, .. } if call_id == "B"));
+    assert!(
+        matches!(buf.blocks()[1].as_ref(), Block::ToolResult { call_id, .. } if call_id == "B")
+    );
 }
 
 #[test]
@@ -649,7 +652,7 @@ fn compact_frontier_extends_past_orphaned_results() {
     assert_eq!(buf.compact_to(5), 4);
     assert_eq!(buf.blocks().len(), 4);
     assert!(
-        matches!(&buf.blocks()[0], Block::User { text } if text == "filler0"),
+        matches!(buf.blocks()[0].as_ref(), Block::User { text } if text == "filler0"),
         "the orphaned call/result pair is gone entirely"
     );
 }
@@ -748,13 +751,117 @@ fn trim_scrollback_enforces_the_block_cap() {
     assert_eq!(buf.trim_scrollback(), extra);
     assert_eq!(buf.blocks().len(), MAX_BLOCKS);
     assert!(
-        matches!(&buf.blocks()[0], Block::User { text } if text == "m8"),
+        matches!(buf.blocks()[0].as_ref(), Block::User { text } if text == "m8"),
         "oldest blocks are the ones dropped"
     );
     assert!(
-        matches!(&buf.blocks()[MAX_BLOCKS - 1], Block::User { text } if *text == format!("m{}", MAX_BLOCKS + extra - 1)),
+        matches!(buf.blocks()[MAX_BLOCKS - 1].as_ref(), Block::User { text } if *text == format!("m{}", MAX_BLOCKS + extra - 1)),
         "newest block survives"
     );
+}
+
+#[test]
+fn a_huge_tool_output_is_truncated_at_push_time() {
+    let mut buf = Buffer::new();
+    buf.push_tool_call("c1", "shell", json!({"command": "dump"}));
+    let output = format!("{}\n{}", "x".repeat(200 * 1024), "y".repeat(200 * 1024));
+    buf.push_tool_result("c1", output, false);
+    let Block::ToolResult { output, .. } = buf.blocks()[1].as_ref() else {
+        panic!("expected a tool result");
+    };
+    assert!(output.len() < 80 * 1024 + 100, "{}", output.len());
+    assert!(output.starts_with('x'), "the head is kept");
+    assert!(output.ends_with('y'), "the tail is kept");
+    assert!(output.contains("bytes elided"));
+}
+
+#[test]
+fn the_byte_cap_compacts_oldest_blocks_first() {
+    let mut buf = Buffer::new();
+    let blob = "x".repeat(1024 * 1024);
+    for _ in 0..100 {
+        buf.push_custom("kage:notify", blob.clone(), false);
+    }
+    assert_eq!(buf.total_text_bytes, 100 * 1024 * 1024);
+    assert!(buf.trim_scrollback() > 0);
+    assert!(
+        buf.total_text_bytes <= MAX_BYTES,
+        "{} bytes kept",
+        buf.total_text_bytes
+    );
+    assert!(buf.blocks().len() < 100);
+    assert!(
+        matches!(buf.blocks().last().map(Arc::as_ref), Some(Block::Custom { text, .. }) if text.len() == blob.len()),
+        "the newest block survives"
+    );
+    assert_eq!(buf.trim_scrollback(), 0, "a second trim is a no-op");
+}
+
+#[test]
+fn streamed_deltas_count_toward_the_byte_cap() {
+    let mut buf = Buffer::new();
+    let chunk = "x".repeat(4 * 1024 * 1024);
+    buf.push_user("start");
+    buf.begin_assistant();
+    for _ in 0..20 {
+        buf.append_assistant_delta(&chunk);
+    }
+    assert_eq!(buf.total_text_bytes, 20 * 4 * 1024 * 1024 + "start".len());
+    buf.trim_scrollback();
+    assert_eq!(
+        buf.blocks().len(),
+        1,
+        "older blocks compact away before the live one"
+    );
+    assert_eq!(buf.total_text_bytes, 20 * 4 * 1024 * 1024);
+    assert!(matches!(
+        buf.blocks()[0].as_ref(),
+        Block::Assistant { live: true, .. }
+    ));
+}
+
+#[test]
+fn a_single_oversized_block_survives_the_byte_cap() {
+    let mut buf = Buffer::new();
+    buf.push_user("x".repeat(60 * 1024 * 1024));
+    buf.trim_scrollback();
+    assert_eq!(buf.blocks().len(), 1, "the newest block is never dropped");
+    assert!(buf.total_text_bytes > MAX_BYTES);
+}
+
+#[test]
+fn clone_shares_block_payloads_until_a_mutation_unshares_one() {
+    let mut buf = Buffer::new();
+    buf.append_assistant_delta("hello");
+    let snapshot = buf.clone();
+    assert!(
+        buf.blocks().iter().all(|b| Arc::strong_count(b) == 2),
+        "a clone must share every block instead of copying its text"
+    );
+    assert_eq!(Arc::strong_count(&snapshot.blocks()[0]), 2);
+
+    buf.append_assistant_delta(" world");
+    assert_eq!(
+        Arc::strong_count(&buf.blocks()[0]),
+        1,
+        "make_mut replaced the shared handle with a private clone"
+    );
+    assert_eq!(
+        Arc::strong_count(&snapshot.blocks()[0]),
+        1,
+        "the snapshot keeps the original block alive"
+    );
+    assert!(
+        matches!(
+            snapshot.blocks()[0].as_ref(),
+            Block::Assistant { text, .. } if text == "hello"
+        ),
+        "the snapshot's text is untouched by the write"
+    );
+    assert!(matches!(
+        buf.blocks()[0].as_ref(),
+        Block::Assistant { text, .. } if text == "hello world"
+    ));
 }
 
 #[test]

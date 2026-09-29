@@ -91,7 +91,7 @@ fn events_command_lists_known_hooks_by_kind() {
     let mut app = app_with_defaults(buffer.clone(), tx);
     app.push_events();
     let buf = buffer.lock().unwrap();
-    let rendered = match buf.blocks().last() {
+    let rendered = match buf.blocks().last().map(Arc::as_ref) {
         Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
         other => panic!("expected a custom block, got {other:?}"),
     };
@@ -121,7 +121,7 @@ fn usage_command_renders_totals_cache_and_context_bar() {
     }
     app.push_usage();
     let buf = buffer.lock().unwrap();
-    let rendered = match buf.blocks().last() {
+    let rendered = match buf.blocks().last().map(Arc::as_ref) {
         Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
         other => panic!("expected a custom block, got {other:?}"),
     };
@@ -147,7 +147,7 @@ fn usage_command_without_window_or_cost() {
     let mut app = app_with_defaults(buffer.clone(), tx);
     app.push_usage();
     let buf = buffer.lock().unwrap();
-    let rendered = match buf.blocks().last() {
+    let rendered = match buf.blocks().last().map(Arc::as_ref) {
         Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
         other => panic!("expected a custom block, got {other:?}"),
     };
@@ -247,7 +247,7 @@ fn permission_command_without_arg_reports_current_mode() {
     let result = app.run_command_validated("permission", &registry);
     assert!(matches!(result, CommandResult::Done(None)));
     let buf = buffer.lock().unwrap();
-    let rendered = match buf.blocks().last() {
+    let rendered = match buf.blocks().last().map(Arc::as_ref) {
         Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
         other => panic!("expected a custom block, got {other:?}"),
     };
@@ -523,7 +523,7 @@ fn login_command_errors_without_a_runner() {
     assert!(matches!(result, CommandResult::Done(None)));
     assert_eq!(app.pending_login, None, "no flow queued without a runner");
     let buf = buffer.lock().unwrap();
-    let rendered = match buf.blocks().last() {
+    let rendered = match buf.blocks().last().map(Arc::as_ref) {
         Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
         other => panic!("expected a custom block, got {other:?}"),
     };

@@ -8,6 +8,8 @@
 
 use serde_json::Value;
 
+use std::borrow::Borrow;
+
 use crate::buffer::Block;
 
 /// Tool name this reads from.
@@ -59,10 +61,14 @@ impl TodoStrip {
 /// rather than clearing the row. The argument reads leniently, matching
 /// what the tool accepts: a bare array is the list, and a `todos` map
 /// nested one level deep unwraps.
-pub(crate) fn from_blocks(blocks: &[Block]) -> TodoStrip {
+pub(crate) fn from_blocks<'a, I, B>(blocks: I) -> TodoStrip
+where
+    I: IntoIterator<Item = &'a B>,
+    B: Borrow<Block> + 'a + ?Sized,
+{
     let mut strip = TodoStrip::default();
     for block in blocks {
-        let Block::ToolCall { name, input, .. } = block else {
+        let Block::ToolCall { name, input, .. } = block.borrow() else {
             continue;
         };
         if name != TODO_TOOL {

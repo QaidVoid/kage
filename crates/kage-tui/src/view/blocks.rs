@@ -508,10 +508,14 @@ fn highlighted_head(
         .map(|l| l.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    let mut out = if output.is_empty() {
+    let mut out: Vec<Line<'static>> = if output.is_empty() {
         Vec::new()
     } else {
-        crate::syntax::highlight_extension(&code, ext, tool_result_style())
+        std::sync::Arc::unwrap_or_clone(crate::syntax::highlight_extension(
+            &code,
+            ext,
+            tool_result_style(),
+        ))
     };
     out.extend(head(plain, usize::MAX, tool_result_style()));
     if more > 0 {

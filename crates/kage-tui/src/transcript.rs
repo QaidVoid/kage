@@ -1,6 +1,8 @@
 //! The plain-text transcript printed after the TUI exits.
 
 use kage_core::sync::read;
+use std::sync::Arc;
+
 use ratatui::text::Line;
 
 use crate::buffer::{Block, Buffer, ToolTopology, gap_between};
@@ -43,7 +45,10 @@ pub fn render(buffer: &Buffer, width: u16, scope: TranscriptScope) -> String {
     let start = match scope {
         TranscriptScope::Full => 0,
         TranscriptScope::Last => {
-            match blocks.iter().rposition(|b| matches!(b, Block::User { .. })) {
+            match blocks
+                .iter()
+                .rposition(|b| matches!(b.as_ref(), Block::User { .. }))
+            {
                 Some(idx) => idx,
                 None => return String::new(),
             }
@@ -53,7 +58,7 @@ pub fn render(buffer: &Buffer, width: u16, scope: TranscriptScope) -> String {
     let topology = ToolTopology::build(blocks);
     let registry = read(registry::global());
     let mut out: Vec<String> = Vec::new();
-    let mut above: Option<&Block> = None;
+    let mut above: Option<&Arc<Block>> = None;
     for (idx, block) in blocks.iter().enumerate().skip(start) {
         if topology.is_hidden(idx) {
             continue;
@@ -75,7 +80,7 @@ pub fn render(buffer: &Buffer, width: u16, scope: TranscriptScope) -> String {
         };
         rows.truncate(last + 1);
         rows.drain(..first);
-        if matches!(block, Block::User { .. }) {
+        if matches!(block.as_ref(), Block::User { .. }) {
             for (i, row) in rows.iter_mut().enumerate() {
                 if !row.is_empty() {
                     row.insert_str(0, if i == 0 { "> " } else { "  " });

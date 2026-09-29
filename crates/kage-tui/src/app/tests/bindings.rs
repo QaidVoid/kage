@@ -145,7 +145,7 @@ fn config_action_binding_wins_over_builtin_handler() {
     if let Ok(buf) = buffer.lock() {
         assert!(
             matches!(
-                buf.blocks()[0],
+                buf.blocks()[0].as_ref(),
                 crate::buffer::Block::Thinking { folded: true, .. }
             ),
             "the builtin fold toggle did not run"
@@ -480,7 +480,7 @@ fn fold_all_then_unfold_all_toggles_folds() {
     app.handle_key(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::NONE));
     if let Ok(buf) = buffer.lock() {
         assert!(matches!(
-            buf.blocks()[0],
+            buf.blocks()[0].as_ref(),
             crate::buffer::Block::Thinking { folded: true, .. }
         ));
     }
@@ -489,7 +489,7 @@ fn fold_all_then_unfold_all_toggles_folds() {
     app.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
     if let Ok(buf) = buffer.lock() {
         assert!(matches!(
-            buf.blocks()[0],
+            buf.blocks()[0].as_ref(),
             crate::buffer::Block::Thinking { folded: false, .. }
         ));
     }

@@ -115,6 +115,35 @@ pub enum Block {
 }
 
 impl Block {
+    /// Byte length of the owned text this block stores. Small
+    /// constant fields (ids, names, kinds) are not counted: the
+    /// quantity exists for [`Buffer`]'s scrollback byte cap, which
+    /// bounds the payload that can grow without bound.
+    #[must_use]
+    pub(crate) fn text_bytes(&self) -> usize {
+        match self {
+            Self::User { text }
+            | Self::Assistant { text, .. }
+            | Self::Thinking { text, .. }
+            | Self::Custom { text, .. } => text.len(),
+            Self::ToolCall {
+                input_summary,
+                input_pretty,
+                progress,
+                diff,
+                ..
+            } => {
+                input_summary.len()
+                    + input_pretty.len()
+                    + progress.len()
+                    + diff
+                        .as_ref()
+                        .map_or(0, |d| d.lines.iter().map(|l| l.text.len()).sum::<usize>())
+            }
+            Self::ToolResult { output, .. } => output.len(),
+        }
+    }
+
     /// Count of logical (newline-separated) lines this block contributes
     /// when rendered. Folded blocks always contribute 1 (the header).
     /// Width-aware wrapping happens in the renderer.
@@ -317,11 +346,11 @@ pub struct ToolTopology {
 
 impl ToolTopology {
     /// Derive the pairing and grouping from an append-only block list.
-    pub(crate) fn build(blocks: &[Block]) -> Self {
+    pub(crate) fn build(blocks: &[Arc<Block>]) -> Self {
         let mut topo = Self::default();
         let mut open: HashMap<&str, usize> = HashMap::new();
         for (i, block) in blocks.iter().enumerate() {
-            match block {
+            match block.as_ref() {
                 Block::ToolCall { call_id, .. } => {
                     open.insert(call_id, i);
                 }
@@ -343,13 +372,13 @@ impl ToolTopology {
     /// are finished, paired, read-only tool calls, unless the user
     /// unfolded the run's first call, which shows the run's calls
     /// individually.
-    fn group_read_only_runs(&mut self, blocks: &[Block]) {
+    fn group_read_only_runs(&mut self, blocks: &[Arc<Block>]) {
         let mut run = Vec::new();
         for (i, block) in blocks.iter().enumerate() {
             if self.consumed_results.contains(&i) {
                 continue;
             }
-            if self.groupable(i, block) {
+            if self.groupable(i, block.as_ref()) {
                 run.push(i);
             } else {
                 self.close_run(&mut run, blocks);
@@ -370,10 +399,10 @@ impl ToolTopology {
         )
     }
 
-    fn close_run(&mut self, run: &mut Vec<usize>, blocks: &[Block]) {
+    fn close_run(&mut self, run: &mut Vec<usize>, blocks: &[Arc<Block>]) {
         let head_folded = run
             .first()
-            .is_some_and(|&h| matches!(blocks[h], Block::ToolCall { folded: true, .. }));
+            .is_some_and(|&h| matches!(blocks[h].as_ref(), Block::ToolCall { folded: true, .. }));
         if run.len() >= 2 && head_folded {
             let head = run[0];
             for &member in &run[1..] {
@@ -409,7 +438,17 @@ impl ToolTopology {
 /// clamp lands the viewport on the bottom row).
 #[derive(Clone, Debug, Default)]
 pub struct Buffer {
-    blocks: Vec<Block>,
+    /// Blocks, each shared behind an [`Arc`] so a [`Buffer::clone`] (the
+    /// per-frame draw snapshot) copies pointers instead of every
+    /// block's text. Mutators go through [`Arc::make_mut`], which
+    /// clones a block's payload only while a snapshot still shares it.
+    blocks: Vec<Arc<Block>>,
+    /// Running sum of every block's [`Block::text_bytes`], maintained
+    /// by block adds, text growth and in-place text replacement, and
+    /// reduced by [`Self::compact_to`] when blocks are dropped. Keeps
+    /// the [`MAX_BYTES`] enforcement in [`Self::trim_scrollback`] a
+    /// comparison instead of a rescan of the block list.
+    total_text_bytes: usize,
     scroll: Option<usize>,
     /// Index of the user-selected foldable block, if any. `None` means
     /// "no explicit selection"; the renderer falls back to the last
@@ -525,7 +564,16 @@ const STREAM_REPARSE_THROTTLE: Duration = Duration::from_millis(50);
 /// session can't grow memory (blocks, text, and render caches)
 /// without bound. Chosen to stay far above what a focused work
 /// session produces while keeping the per-frame block walk cheap.
-const MAX_BLOCKS: usize = 512;
+pub(crate) const MAX_BLOCKS: usize = 512;
+
+/// Maximum kept text across every block, in bytes. Beyond this,
+/// [`Buffer::trim_scrollback`] compacts the oldest blocks so huge
+/// streamed text and tool outputs cannot hold hundreds of megabytes
+/// between paints. Chosen above the worst case of [`MAX_BLOCKS`]
+/// blocks at their push-time output truncation (about 41 MB), so the
+/// count cap stays the binding one in ordinary sessions and the byte
+/// cap only binds when text genuinely piles up.
+const MAX_BYTES: usize = 48 * 1024 * 1024;
 
 mod edit;
 mod view;

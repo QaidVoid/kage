@@ -9,16 +9,18 @@ impl Buffer {
         Self::default()
     }
 
-    /// Read-only view of the blocks.
+    /// Read-only view of the blocks. Each block is shared, so cloning
+    /// the handle is cheap and the payload is read through its
+    /// [`Deref`](std::ops::Deref) to [`Block`].
     #[must_use]
-    pub fn blocks(&self) -> &[Block] {
+    pub fn blocks(&self) -> &[Arc<Block>] {
         &self.blocks
     }
 
     /// Total logical lines summed across all blocks.
     #[must_use]
     pub fn total_lines(&self) -> usize {
-        self.blocks.iter().map(Block::line_count).sum()
+        self.blocks.iter().map(|b| b.line_count()).sum()
     }
 
     /// Absolute virtual row of the viewport's first visible row while
@@ -181,7 +183,7 @@ impl Buffer {
     /// block; every change that starts a timer drops its caches.
     #[must_use]
     pub fn is_timed(&self, idx: usize) -> bool {
-        self.blocks.get(idx).is_some_and(Block::is_timed)
+        self.blocks.get(idx).is_some_and(|b| b.is_timed())
     }
 
     /// Whether any tool call is still in flight: streaming its
@@ -190,7 +192,7 @@ impl Buffer {
     pub fn has_running_tool_call(&self) -> bool {
         self.blocks.iter().any(|b| {
             matches!(
-                b,
+                b.as_ref(),
                 Block::ToolCall {
                     phase: ToolPhase::Streaming
                         | ToolPhase::Queued
@@ -213,7 +215,7 @@ impl Buffer {
     pub fn jump_targets(&self, label_width: usize) -> Vec<(usize, String)> {
         let mut out = Vec::new();
         for (idx, block) in self.blocks.iter().enumerate() {
-            let label = match block {
+            let label = match block.as_ref() {
                 Block::User { text } => Some(format!("you: {}", plain_first_line(text))),
                 Block::Custom { kind, .. }
                     if matches!(kind.as_str(), "kage:help" | "kage:notify") =>
@@ -562,7 +564,7 @@ impl Buffer {
             .iter()
             .enumerate()
             .filter(|(_, b)| {
-                matches!(b, Block::ToolCall { call_id: cid, .. } | Block::ToolResult { call_id: cid, .. } if cid == call_id)
+                matches!(b.as_ref(), Block::ToolCall { call_id: cid, .. } | Block::ToolResult { call_id: cid, .. } if cid == call_id)
             })
             .map(|(i, _)| i)
             .collect();
@@ -584,7 +586,7 @@ impl Buffer {
         if needle.is_empty() {
             return false;
         }
-        let Some(block) = self.blocks.get(idx) else {
+        let Some(block) = self.blocks.get(idx).map(Arc::as_ref) else {
             return false;
         };
         match block {
@@ -617,7 +619,7 @@ impl Buffer {
     /// `None` for an out-of-range index.
     #[must_use]
     pub fn block_text(&self, idx: usize) -> Option<String> {
-        let block = self.blocks.get(idx)?;
+        let block = self.blocks.get(idx).map(Arc::as_ref)?;
         Some(match block {
             Block::User { text }
             | Block::Assistant { text, .. }
@@ -765,10 +767,10 @@ impl Buffer {
     /// look like a no-op visual) and a call grouped under another
     /// `Explored` head.
     pub(crate) fn is_selectable(&self, idx: usize) -> bool {
-        match self.blocks.get(idx) {
-            Some(Block::ToolResult { call_id, .. }) => !self.blocks[..idx]
-                .iter()
-                .any(|b| matches!(b, Block::ToolCall { call_id: cid, .. } if cid == call_id)),
+        match self.blocks.get(idx).map(Arc::as_ref) {
+            Some(Block::ToolResult { call_id, .. }) => !self.blocks[..idx].iter().any(
+                |b| matches!(b.as_ref(), Block::ToolCall { call_id: cid, .. } if cid == call_id),
+            ),
             Some(Block::ToolCall { .. }) => !self.is_grouped_member(idx),
             Some(_) => true,
             None => false,

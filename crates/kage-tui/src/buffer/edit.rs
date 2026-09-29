@@ -12,7 +12,8 @@ impl Buffer {
         if self.last_is_live_assistant() || self.last_is_live_thinking() {
             self.finish_streaming();
         }
-        self.blocks.push(block);
+        self.total_text_bytes += block.text_bytes();
+        self.blocks.push(Arc::new(block));
         self.push_block_caches();
     }
 
@@ -36,9 +37,10 @@ impl Buffer {
         if !self.last_is_live_assistant() {
             self.begin_assistant();
         }
-        if let Some(Block::Assistant { text, .. }) = self.blocks.last_mut() {
+        if let Some(Block::Assistant { text, .. }) = self.blocks.last_mut().map(Arc::make_mut) {
             text.push_str(delta);
         }
+        self.total_text_bytes += delta.len();
         self.mark_stream_dirty();
     }
 
@@ -60,9 +62,10 @@ impl Buffer {
         if !self.last_is_live_thinking() {
             self.begin_thinking();
         }
-        if let Some(Block::Thinking { text, .. }) = self.blocks.last_mut() {
+        if let Some(Block::Thinking { text, .. }) = self.blocks.last_mut().map(Arc::make_mut) {
             text.push_str(delta);
         }
+        self.total_text_bytes += delta.len();
         self.mark_stream_dirty();
     }
 
@@ -128,6 +131,7 @@ impl Buffer {
     ) {
         let call_id = call_id.into();
         let name = name.into();
+        let before = self.tool_call_text_bytes(&call_id);
         let Some(Block::ToolCall {
             name: n,
             input_summary,
@@ -143,6 +147,7 @@ impl Buffer {
         *input_pretty = pretty_input(&input);
         *n = name;
         *i = Arc::new(input);
+        self.reaccount(&call_id, before);
         self.invalidate_pair_height(&call_id);
         self.bump_version();
     }
@@ -181,10 +186,12 @@ impl Buffer {
     /// edit waiting for approval whose file lacks the text to replace.
     /// No-op for an unknown id.
     pub fn set_tool_diff(&mut self, call_id: &str, diff: EditDiff) {
+        let before = self.tool_call_text_bytes(call_id);
         let Some(Block::ToolCall { diff: d, .. }) = self.open_tool_call_mut(call_id) else {
             return;
         };
         *d = Some(Arc::new(diff));
+        self.reaccount(call_id, before);
         self.invalidate_pair_height(call_id);
         self.bump_version();
     }
@@ -192,10 +199,12 @@ impl Buffer {
     /// Replace the progress text of the call `call_id` with the latest
     /// tool update. No-op for an unknown id.
     pub fn set_tool_progress(&mut self, call_id: &str, text: impl Into<String>) {
+        let before = self.tool_call_text_bytes(call_id);
         let Some(Block::ToolCall { progress, .. }) = self.open_tool_call_mut(call_id) else {
             return;
         };
         *progress = text.into();
+        self.reaccount(call_id, before);
         self.invalidate_pair_height(call_id);
         self.bump_version();
     }
@@ -203,13 +212,13 @@ impl Buffer {
     /// Set how long the call `call_id` took, once its result is in.
     /// No-op while the newest call with that id has no result.
     pub fn set_tool_duration(&mut self, call_id: &str, ms: u64) {
-        let newest = self.blocks.iter_mut().rev().find(|b| match b {
+        let newest = self.blocks.iter_mut().rev().find(|b| match b.as_ref() {
             Block::ToolCall { call_id: cid, .. } | Block::ToolResult { call_id: cid, .. } => {
                 cid == call_id
             }
             _ => false,
         });
-        let Some(Block::ToolResult { duration_ms, .. }) = newest else {
+        let Some(Block::ToolResult { duration_ms, .. }) = newest.map(Arc::make_mut) else {
             return;
         };
         if *duration_ms == Some(ms) {
@@ -226,16 +235,20 @@ impl Buffer {
     pub fn interrupt_running_tools(&mut self) {
         let mut changed = Vec::new();
         for (i, block) in self.blocks.iter_mut().enumerate() {
-            if let Block::ToolCall { phase, .. } = block
-                && matches!(
-                    phase,
-                    ToolPhase::Streaming
+            if !matches!(
+                block.as_ref(),
+                Block::ToolCall {
+                    phase: ToolPhase::Streaming
                         | ToolPhase::Queued
                         | ToolPhase::Waiting
                         | ToolPhase::Approved
-                        | ToolPhase::Running
-                )
-            {
+                        | ToolPhase::Running,
+                    ..
+                }
+            ) {
+                continue;
+            }
+            if let Block::ToolCall { phase, .. } = Arc::make_mut(block) {
                 *phase = ToolPhase::Interrupted;
                 changed.push(i);
             }
@@ -253,14 +266,15 @@ impl Buffer {
         use crate::view::tool_view::{EditSide, edit_diff, file_edit_diff};
         let mut files: HashMap<String, Option<String>> = HashMap::new();
         let mut changed = Vec::new();
+        let mut added_bytes = 0usize;
         for (i, block) in self.blocks.iter_mut().enumerate() {
             let Block::ToolCall {
                 name,
                 input,
                 phase: ToolPhase::Done,
-                diff: diff @ None,
+                diff: None,
                 ..
-            } = block
+            } = &**block
             else {
                 continue;
             };
@@ -275,9 +289,15 @@ impl Buffer {
                     .as_deref()
             });
             let lines = content.and_then(|c| file_edit_diff(input, c, EditSide::After));
-            *diff = Some(Arc::new(lines.unwrap_or_else(|| edit_diff(input))));
+            let diff = lines.unwrap_or_else(|| edit_diff(input));
+            added_bytes += diff.lines.iter().map(|l| l.text.len()).sum::<usize>();
+            let Block::ToolCall { diff: slot, .. } = Arc::make_mut(block) else {
+                continue;
+            };
+            *slot = Some(Arc::new(diff));
             changed.push(i);
         }
+        self.total_text_bytes += added_bytes;
         for i in changed {
             self.invalidate_height(i);
         }
@@ -285,26 +305,30 @@ impl Buffer {
 
     /// The newest call `call_id` that has no result yet. Providers may
     /// reuse ids across turns, so a call already answered never matches.
+    /// The returned block is uniquely owned by this buffer, so writes
+    /// never disturb a snapshot's copy.
     fn open_tool_call_mut(&mut self, call_id: &str) -> Option<&mut Block> {
-        let idx = self.blocks.iter().rposition(|b| match b {
+        let idx = self.blocks.iter().rposition(|b| match b.as_ref() {
             Block::ToolCall { call_id: cid, .. } | Block::ToolResult { call_id: cid, .. } => {
                 cid == call_id
             }
             _ => false,
         })?;
-        let block = &mut self.blocks[idx];
-        matches!(block, Block::ToolCall { .. }).then_some(block)
+        if !matches!(self.blocks[idx].as_ref(), Block::ToolCall { .. }) {
+            return None;
+        }
+        Some(Arc::make_mut(&mut self.blocks[idx]))
     }
 
     /// The open tool call `call_id`, if it is still shown.
     fn open_tool_call(&self, call_id: &str) -> Option<&Block> {
-        let idx = self.blocks.iter().rposition(|b| match b {
+        let idx = self.blocks.iter().rposition(|b| match b.as_ref() {
             Block::ToolCall { call_id: cid, .. } | Block::ToolResult { call_id: cid, .. } => {
                 cid == call_id
             }
             _ => false,
         })?;
-        let block = &self.blocks[idx];
+        let block = self.blocks[idx].as_ref();
         matches!(block, Block::ToolCall { .. }).then_some(block)
     }
 
@@ -319,7 +343,7 @@ impl Buffer {
         is_error: bool,
     ) {
         let call_id = call_id.into();
-        let duration_ms = match self.open_tool_call_mut(&call_id) {
+        let duration_ms = match self.open_tool_call(&call_id) {
             Some(Block::ToolCall {
                 phase: ToolPhase::Running,
                 started_at,
@@ -341,7 +365,7 @@ impl Buffer {
         duration_ms: Option<u64>,
     ) {
         let call_id = call_id.into();
-        let output = output.into();
+        let output = truncate_tool_output(output.into());
         let name = match self.open_tool_call_mut(&call_id) {
             Some(Block::ToolCall { name, phase, .. }) => {
                 *phase = result_phase(*phase, &output, is_error);
@@ -375,12 +399,22 @@ impl Buffer {
     /// custom block of `kind`, otherwise push a new one. Keeps a burst
     /// of status notices, such as provider retries, to one line.
     pub fn replace_or_push_custom(&mut self, kind: &str, text: impl Into<String>) {
-        if let Some(Block::Custom {
-            kind: k, text: t, ..
-        }) = self.blocks.last_mut()
-            && k == kind
+        if let Some(last) = self.blocks.last_mut()
+            && matches!(
+                last.as_ref(),
+                Block::Custom {
+                    kind: k,
+                    ..
+                } if k == kind
+            )
         {
-            *t = text.into();
+            let Block::Custom { text: t, .. } = Arc::make_mut(last) else {
+                unreachable!("just matched a custom block");
+            };
+            let text = text.into();
+            self.total_text_bytes += text.len();
+            self.total_text_bytes -= t.len();
+            *t = text;
             self.invalidate_last_block_caches();
         } else {
             self.push_custom(kind, text, false);
@@ -397,14 +431,19 @@ impl Buffer {
         text: impl Into<String>,
     ) {
         let found = self.blocks.iter().rposition(
-            |b| matches!(b, Block::Custom { kind: k, text: t, .. } if k == kind && pick(t)),
+            |b| matches!(b.as_ref(), Block::Custom { kind: k, text: t, .. } if k == kind && pick(t)),
         );
-        match found.map(|idx| (idx, &mut self.blocks[idx])) {
-            Some((idx, Block::Custom { text: t, .. })) => {
-                *t = text.into();
-                self.invalidate_height(idx);
-            }
-            _ => self.push_custom(kind, text, false),
+        if let Some(idx) = found {
+            let Block::Custom { text: t, .. } = Arc::make_mut(&mut self.blocks[idx]) else {
+                unreachable!("matched a custom block above");
+            };
+            let text = text.into();
+            self.total_text_bytes += text.len();
+            self.total_text_bytes -= t.len();
+            *t = text;
+            self.invalidate_height(idx);
+        } else {
+            self.push_custom(kind, text, false);
         }
     }
 
@@ -412,7 +451,7 @@ impl Buffer {
     /// finished. No-op if there is no streaming block.
     pub fn finish_streaming(&mut self) {
         if let Some(last) = self.blocks.last_mut() {
-            last.finish();
+            Arc::make_mut(last).finish();
         }
         // Finishing folds a thinking block and drops the live markdown
         // renderer, so the cached lines are stale.
@@ -443,14 +482,14 @@ impl Buffer {
         if !block.is_foldable() {
             return false;
         }
-        block.toggle_fold();
+        Arc::make_mut(block).toggle_fold();
         self.invalidate_height(index);
         if let Block::ToolCall {
             call_id, folded, ..
         }
         | Block::ToolResult {
             call_id, folded, ..
-        } = &self.blocks[index]
+        } = self.blocks[index].as_ref()
         {
             let (call_id, folded) = (call_id.clone(), *folded);
             self.set_call_folded(&call_id, folded);
@@ -462,17 +501,24 @@ impl Buffer {
     /// Fold or unfold both halves of the tool call `call_id`.
     fn set_call_folded(&mut self, call_id: &str, folded: bool) {
         for block in &mut self.blocks {
-            match block {
+            let hit = matches!(
+                block.as_ref(),
                 Block::ToolCall {
                     call_id: cid,
-                    folded: f,
                     ..
                 }
                 | Block::ToolResult {
                     call_id: cid,
-                    folded: f,
                     ..
-                } if cid == call_id => *f = folded,
+                } if cid == call_id
+            );
+            if !hit {
+                continue;
+            }
+            match Arc::make_mut(block) {
+                Block::ToolCall { folded: f, .. } | Block::ToolResult { folded: f, .. } => {
+                    *f = folded;
+                }
                 _ => {}
             }
         }
@@ -484,7 +530,16 @@ impl Buffer {
     pub fn set_all_folded(&mut self, folded: bool) {
         let mut invalidated: Vec<usize> = Vec::new();
         for (i, block) in self.blocks.iter_mut().enumerate() {
-            match block {
+            if !matches!(
+                block.as_ref(),
+                Block::Thinking { .. }
+                    | Block::ToolCall { .. }
+                    | Block::ToolResult { .. }
+                    | Block::Custom { .. }
+            ) {
+                continue;
+            }
+            match Arc::make_mut(block) {
                 Block::Thinking { folded: f, .. }
                 | Block::ToolCall { folded: f, .. }
                 | Block::ToolResult { folded: f, .. }
@@ -511,6 +566,7 @@ impl Buffer {
     /// render, and `set_focus`'s range check never sees this path.
     pub fn clear(&mut self) {
         self.blocks.clear();
+        self.total_text_bytes = 0;
         self.clear_block_caches();
         self.scroll = None;
         self.focus = None;
@@ -521,30 +577,53 @@ impl Buffer {
 
     /// Take ownership of the blocks, leaving the buffer empty. Focus
     /// and scroll reset for the same reason as [`Self::clear`].
-    pub fn take(&mut self) -> Vec<Block> {
+    pub fn take(&mut self) -> Vec<Arc<Block>> {
         self.scroll = None;
         self.focus = None;
         self.last_drawn_focus = None;
         self.last_user_focus = None;
         self.stream_dirty_since = None;
+        self.total_text_bytes = 0;
         self.clear_block_caches();
         mem::take(&mut self.blocks)
     }
 
-    /// Enforce [`MAX_BLOCKS`]. Returns the number of blocks dropped
-    /// (zero when under the cap). UI-thread only: it shifts every
-    /// block index, so it must run before a draw snapshots the
-    /// buffer; the version bump it performs makes index-bearing
-    /// caches elsewhere (the search-match list) rebuild themselves.
+    /// Enforce [`MAX_BLOCKS`] and [`MAX_BYTES`]. Returns the number of
+    /// blocks dropped (zero when under both caps). The count cap compacts
+    /// first; the byte cap then keeps compacting the oldest blocks while
+    /// the kept text still exceeds [`MAX_BYTES`], never below the newest
+    /// block, so one oversized block is retained rather than erased. UI-
+    /// thread only: it shifts every block index, so it must run before a
+    /// draw snapshots the buffer; the version bump it performs makes
+    /// index-bearing caches elsewhere (the search-match list) rebuild
+    /// themselves.
     ///
     /// Not to be confused with the agent loop's context compaction:
     /// that compacts the *session history* against the token budget;
     /// this only trims *rendered scrollback*.
     pub(crate) fn trim_scrollback(&mut self) -> usize {
-        if self.blocks.len() <= MAX_BLOCKS {
-            return 0;
+        let mut dropped = 0;
+        if self.blocks.len() > MAX_BLOCKS {
+            dropped += self.compact_to(MAX_BLOCKS);
         }
-        self.compact_to(MAX_BLOCKS)
+        while self.total_text_bytes > MAX_BYTES && self.blocks.len() > 1 {
+            dropped += self.compact_to(self.blocks.len() - 1);
+        }
+        dropped
+    }
+
+    /// The kept text bytes of the newest open call `call_id`, captured
+    /// before an in-place text replacement.
+    fn tool_call_text_bytes(&self, call_id: &str) -> usize {
+        self.open_tool_call(call_id).map_or(0, Block::text_bytes)
+    }
+
+    /// Re-account the open call `call_id` after an in-place text
+    /// change; `before` is what [`Self::tool_call_text_bytes`] read
+    /// beforehand.
+    fn reaccount(&mut self, call_id: &str, before: usize) {
+        self.total_text_bytes += self.tool_call_text_bytes(call_id);
+        self.total_text_bytes -= before;
     }
 
     /// Drop the oldest blocks so at most `cap` remain, keeping every
@@ -564,21 +643,23 @@ impl Buffer {
             return 0;
         }
         let mut k = len - cap;
+        let mut dropped_bytes: usize = self.blocks[..k].iter().map(|b| b.text_bytes()).sum();
         loop {
             let dropped_calls: std::collections::HashSet<&str> = self.blocks[..k]
                 .iter()
-                .filter_map(|b| match b {
+                .filter_map(|b| match b.as_ref() {
                     Block::ToolCall { call_id, .. } => Some(call_id.as_str()),
                     _ => None,
                 })
                 .collect();
-            let Some(next) = self.blocks[k..].iter().position(|b| match b {
+            let Some(next) = self.blocks[k..].iter().position(|b| match b.as_ref() {
                 Block::ToolResult { call_id, .. } => dropped_calls.contains(call_id.as_str()),
                 _ => false,
             }) else {
                 break;
             };
             k += next + 1;
+            dropped_bytes += self.blocks[k - 1].text_bytes();
         }
 
         // Shift a pinned viewport anchor up by the virtual rows the
@@ -592,6 +673,7 @@ impl Buffer {
         self.blocks.drain(0..k);
         self.block_heights.drain(0..k);
         self.block_render_lines.drain(0..k);
+        self.total_text_bytes -= dropped_bytes;
         self.focus = self.focus.and_then(|f| f.checked_sub(k));
         self.last_drawn_focus = self.last_drawn_focus.and_then(|f| f.checked_sub(k));
         self.last_user_focus = self.last_user_focus.and_then(|f| f.checked_sub(k));
@@ -624,14 +706,60 @@ impl Buffer {
 
     pub(crate) fn last_is_live_assistant(&self) -> bool {
         matches!(
-            self.blocks.last(),
+            self.blocks.last().map(Arc::as_ref),
             Some(Block::Assistant { live: true, .. })
         )
     }
 
     pub(crate) fn last_is_live_thinking(&self) -> bool {
-        matches!(self.blocks.last(), Some(Block::Thinking { live: true, .. }))
+        matches!(
+            self.blocks.last().map(Arc::as_ref),
+            Some(Block::Thinking { live: true, .. })
+        )
     }
+}
+
+/// Oldest bytes of a tool result kept verbatim when the result is
+/// pushed.
+const TOOL_OUTPUT_HEAD_BYTES: usize = 64 * 1024;
+/// Newest bytes of a tool result kept verbatim when the result is
+/// pushed.
+const TOOL_OUTPUT_TAIL_BYTES: usize = 16 * 1024;
+
+/// Bound a tool result's stored output: past the first
+/// [`TOOL_OUTPUT_HEAD_BYTES`] plus the last [`TOOL_OUTPUT_TAIL_BYTES`]
+/// bytes, one elision marker line replaces the middle. Rendering caps
+/// a body at 500 lines and 256 KB anyway, so only extremely long tails
+/// change what is shown. Cut points move back and forward to UTF-8
+/// character boundaries, so multi-byte text never splits.
+fn truncate_tool_output(output: String) -> String {
+    if output.len() <= TOOL_OUTPUT_HEAD_BYTES + TOOL_OUTPUT_TAIL_BYTES {
+        return output;
+    }
+    let head_end = floor_boundary(&output, TOOL_OUTPUT_HEAD_BYTES);
+    let tail_start = ceil_boundary(&output, output.len() - TOOL_OUTPUT_TAIL_BYTES);
+    format!(
+        "{}\n[{} bytes elided]\n{}",
+        &output[..head_end],
+        tail_start - head_end,
+        &output[tail_start..]
+    )
+}
+
+/// The largest character boundary of `s` at or before `at`.
+fn floor_boundary(s: &str, mut at: usize) -> usize {
+    while !s.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
+/// The smallest character boundary of `s` at or after `at`.
+fn ceil_boundary(s: &str, mut at: usize) -> usize {
+    while !s.is_char_boundary(at) {
+        at += 1;
+    }
+    at
 }
 
 /// The phase a call in `phase` moves to when its result arrives. A

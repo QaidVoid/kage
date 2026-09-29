@@ -8,7 +8,7 @@ fn progress_of(buffer: &SharedBuffer, id: &str) -> String {
     let buf = buffer.lock().unwrap();
     buf.blocks()
         .iter()
-        .find_map(|b| match b {
+        .find_map(|b| match b.as_ref() {
             crate::buffer::Block::ToolCall {
                 call_id, progress, ..
             } if call_id == id => Some(progress.clone()),
@@ -36,11 +36,33 @@ fn agent_deltas_land_in_the_agent_buffer_only() {
     );
     let has_reply = |buffer: &SharedBuffer| {
         buffer.lock().unwrap().blocks().iter().any(
-            |b| matches!(b, crate::buffer::Block::Assistant { text, .. } if text == "child reply"),
+            |b| matches!(b.as_ref(), crate::buffer::Block::Assistant { text, .. } if text == "child reply"),
         )
     };
     assert!(has_reply(&app.agent_buffers[&child]));
     assert!(!has_reply(&app.buffer));
+}
+
+#[test]
+fn an_agent_buffer_is_trimmed_like_the_main_one() {
+    let (mut app, _rx, events) = app_with_events();
+    let child = spawn_agent(&mut app, &events, "a1", "explore");
+    let batch: Vec<kage_core::protocol::Event> = (0..crate::buffer::MAX_BLOCKS + 8)
+        .map(|i| {
+            kage_core::LoopEvent::ToolCallStart {
+                id: kage_core::ToolCallId::new(format!("c{i}")),
+                name: "read".into(),
+                input_partial: serde_json::json!({ "path": format!("f{i}") }),
+            }
+            .into()
+        })
+        .collect();
+    send_to(&mut app, &events, child, batch);
+    let buffer = Arc::clone(&app.agent_buffers[&child]);
+    assert_eq!(
+        buffer.lock().unwrap().blocks().len(),
+        crate::buffer::MAX_BLOCKS
+    );
 }
 
 #[test]
@@ -122,7 +144,7 @@ fn an_agent_card_follows_its_latest_tool_and_asks() {
         .unwrap()
         .blocks()
         .iter()
-        .find_map(|b| match b {
+        .find_map(|b| match b.as_ref() {
             crate::buffer::Block::ToolCall { call_id, phase, .. } if call_id == "c2" => {
                 Some(*phase)
             }
@@ -1208,7 +1230,7 @@ fn result_duration(buffer: &SharedBuffer, id: &str) -> Option<u64> {
     buf.blocks()
         .iter()
         .rev()
-        .find_map(|b| match b {
+        .find_map(|b| match b.as_ref() {
             crate::buffer::Block::ToolResult {
                 call_id,
                 duration_ms,
@@ -1472,7 +1494,7 @@ fn a_resumed_session_lists_its_agents_and_opens_them_read_only() {
     app.handle_key(code(KeyCode::Enter));
     assert_eq!(app.focus, Some(child));
     assert!(lock(&app.buffer).blocks().iter().any(
-        |b| matches!(b, crate::buffer::Block::User { text } if text == "map everything under src")
+        |b| matches!(b.as_ref(), crate::buffer::Block::User { text } if text == "map everything under src")
     ));
     assert_eq!(
         app.agent_placeholder().as_deref(),

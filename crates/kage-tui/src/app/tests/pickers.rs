@@ -64,7 +64,7 @@ fn tree_command_without_source_reports_unavailable() {
     assert!(app.session_tree.is_none());
     let buf = buffer.lock().unwrap();
     assert!(matches!(
-        buf.blocks().last(),
+        buf.blocks().last().map(Arc::as_ref),
         Some(crate::buffer::Block::Custom { kind, .. }) if kind == "kage:error"
     ));
 }

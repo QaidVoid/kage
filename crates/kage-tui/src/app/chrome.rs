@@ -298,7 +298,7 @@ impl App {
     fn current_work(&self, buffer: &crate::Buffer) -> String {
         use crate::view::tool_view::{ToolPhase, describe};
         for block in buffer.blocks().iter().rev() {
-            match block {
+            match block.as_ref() {
                 crate::Block::User { .. } => break,
                 crate::Block::ToolCall {
                     name,
@@ -395,7 +395,7 @@ impl App {
             .blocks()
             .iter()
             .enumerate()
-            .filter_map(|(i, block)| match block {
+            .filter_map(|(i, block)| match block.as_ref() {
                 crate::Block::ToolCall { call_id, name, .. } if name == "agent" => {
                     Some((call_id.clone(), i))
                 }
@@ -557,7 +557,7 @@ impl App {
                     let calls = lock(buffer)
                         .blocks()
                         .iter()
-                        .filter(|b| matches!(b, crate::Block::ToolCall { .. }))
+                        .filter(|b| matches!(b.as_ref(), crate::Block::ToolCall { .. }))
                         .count();
                     u32::try_from(calls).unwrap_or(u32::MAX)
                 })
@@ -628,12 +628,15 @@ pub(crate) struct KeyLabels {
 /// The first line of the first prompt in `buffer`, which names a
 /// session until its title arrives.
 fn first_prompt(buffer: &crate::Buffer) -> Option<String> {
-    buffer.blocks().iter().find_map(|block| match block {
-        crate::Block::User { text } => text
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .map(str::to_owned),
-        _ => None,
-    })
+    buffer
+        .blocks()
+        .iter()
+        .find_map(|block| match block.as_ref() {
+            crate::Block::User { text } => text
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(str::to_owned),
+            _ => None,
+        })
 }

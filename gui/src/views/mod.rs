@@ -1,0 +1,13 @@
+//! The shell's three panels, thin over the store.
+//!
+//! Each view reads [`kage_client`] state through the store entity and
+//! sends commands back through it. No view parses frames or names
+//! wire types beyond the transcript items it renders.
+
+pub mod sidebar;
+pub mod transcript;
+pub mod workbench;
+
+pub use sidebar::SidebarView;
+pub use transcript::TranscriptView;
+pub use workbench::WorkbenchView;

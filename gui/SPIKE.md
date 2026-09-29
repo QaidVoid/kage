@@ -1,28 +1,105 @@
-# Desktop client spike and go/no-go
+# Desktop client: spike report and app shell notes
 
-Status: done, decision recorded at the bottom.
+Status: spike done, decision recorded at the bottom. The spike window became
+the app shell and transports; see "The app shell and transports" (added
+2026-09-29).
 Date: 2026-09-29. All numbers below are from this date unless marked otherwise.
 
 ## What this is
 
 `gui/` is its own Cargo workspace (own `Cargo.lock`, own `rust-toolchain.toml`)
-holding one app crate, `kage-desktop`. Its window carries the four hard things
-the client needs, nothing more:
+holding one app crate, `kage-desktop`. The spike window became the app shell:
+the same four hard things, now wired to the real client model.
 
-- A virtualized list of 5,000 rows with variable heights (28 to 140 px,
-  deterministic per index), scrolling through a precomputed size table and
-  rendering only the visible range. A button jumps to row 2500 to prove
-  random access.
-- A multi-line text input with newlines and IME support (`Textarea` over the
-  toolkit's shared editing engine).
-- A markdown view rendering headings, bold, emphasis, code spans, a fenced
-  code block, lists and a link.
+- The window is three resizable panels in the toolkit's resizable panel
+  group: sidebar, main transcript, workbench. Keybindings: ctrl-n new
+  session, ctrl-b toggle workbench, ctrl-\\ toggle sidebar, ctrl-q quit,
+  ctrl-enter sends the composer.
+- The main panel renders the active session's transcript through the virtual
+  list (variable-height rows, estimated per item) with agent text as
+  markdown, plus the multi-line composer (`Textarea` over the toolkit's
+  shared editing engine).
+- A `Transport` trait sits behind the shell with three implementations:
+  stdio (spawns `kage rpc`), WebSocket (`kage serve`, token as the
+  `kage.<token>` subprotocol, reconnect with backoff), and replay (plays a
+  recorded golden transcript). Frames travel both ways through
+  `kage-client`: incoming frames into `Client::handle`, outgoing frames
+  drained to the transport.
+- The `initialize` handshake is gated on the client side: the agent version
+  against `MINIMUM_KAGE_VERSION` (0.1.0) and the capabilities the UI gates
+  on (steering, session close). Shortfalls raise a dismissible banner.
 - The kage shadow dark theme applied, mapped from the palette the repository
-  bundles in `crates/kage-tui/src/theme/kage.rs` (see the mapping table below).
+  bundles in `crates/kage-tui/src/theme/kage.rs` (see the mapping table
+  below).
 
-The binary has two switches for automated runs: `--smoke [MILLIS]` quits after
-a delay and prints the final list counters, and `--stream` starts appending
-list rows at 30 updates per second with the view following the bottom.
+## The app shell and transports
+
+Source layout: `src/app.rs` (the shell: panels, key router, transport pump),
+`src/store.rs` (the store over `kage-client`: state reads, commands, gate,
+boot flow), `src/gate.rs` (version and capability check), `src/transport/`
+(`stdio.rs`, `ws.rs`, `replay.rs`, and the trait plus connect states in
+`mod.rs`), `src/views/` (sidebar, transcript, workbench; thin over the
+store), `src/theme.rs` (shadow palette).
+
+Connect states, per transport: `connecting`, `connected`, `refused` (the
+endpoint said no for good, such as a 401; no retry), `reconnecting` (the
+link dropped; a retry is scheduled), `closed`. The WebSocket transport backs
+off from 1s doubling to a 30s cap and, on every reconnect, sends
+`initialize` again and replays open sessions through `session/load`. The
+replay transport embeds
+`crates/kage-client/tests/fixtures/fix-tools.jsonl` at build time and plays
+it at 100ms per frame, so the shell is fully usable with no engine and no
+`kage` binary; its answer ids line up with the handshake and the prompt the
+shell sends, so the scripted run completes on its own.
+
+### Smoke runs and the real engine
+
+```
+cd gui
+cargo build
+# recorded transcript, no engine needed, exits 0:
+ZED_HEADLESS=1 ./target/debug/kage-desktop --replay --smoke 3000
+# streaming append at 30 Hz on top of the replay:
+ZED_HEADLESS=1 ./target/debug/kage-desktop --replay --stream --smoke 6000
+```
+
+Stdio against the real engine. Build the engine in the main workspace
+first, then point the desktop client at it with `--rpc-bin` (without the
+flag it resolves `kage` on `PATH`):
+
+```
+cargo build -p kage-cli                       # in the repository root
+cd gui
+ZED_HEADLESS=1 ./target/debug/kage-desktop --rpc-bin ../target/debug/kage --smoke 6000
+#   smoke: connect=connected agent=(kage 0.1.0) sessions=1 items=0 used=0/1000000 ...
+```
+
+WebSocket against a real `kage serve`. The token never rides the URL; the
+client sends it as the `kage.<token>` subprotocol and reads the
+`Acp-Connection-Id` from the 101:
+
+```
+./target/debug/kage serve --port 7433 &       # in the repository root
+TOKEN=$(cat ~/.local/share/kage/remote-token)
+cd gui
+ZED_HEADLESS=1 ./target/debug/kage-desktop --ws ws://127.0.0.1:7433/acp --token "$TOKEN" --smoke 4000
+#   smoke: ... connection=0     (the 101's Acp-Connection-Id)
+# a wrong token is refused once and the state ends closed; the serve log
+# shows `refuse ... (401)`
+```
+
+Reconnect against a real serve: connect, kill the server, start it again;
+the client walks the backoff (1s, 2s, 4s, ... observed live) and comes back
+`connected` with the session rebuilt through the re-handshake and
+`session/load`.
+
+Driving one prompt over stdio interactively: run
+`./target/debug/kage-desktop --rpc-bin ../target/debug/kage` on a real
+session, type into the composer, press ctrl-enter or the Send button. The
+headless path cannot type, so the automated proof of the prompt round trip
+is the stub test in `src/transport/stdio.rs`: it spawns a scripted `sh`
+engine over real pipes and asserts the prompt frame reaches the child and
+its reply lands in client state (run released, stop reason recorded).
 
 ## Pinned snapshot
 
@@ -53,10 +130,13 @@ tree, and the committed `gui/Cargo.lock` freezes the 852 transitive crates.
 
 ## How to build and run
 
+The transport flags and smoke commands are in "The app shell and transports"
+above. Bare runs:
+
 ```
 cd gui
 cargo build --release
-./target/release/kage-desktop                # a window on Wayland or X11
+./target/release/kage-desktop                # a window on Wayland or X11, stdio engine
 ZED_HEADLESS=1 ./target/release/kage-desktop --smoke 3000   # no display needed
 ./target/release/kage-desktop --smoke 10000 --stream        # 30 Hz append test
 ```
@@ -100,11 +180,14 @@ release binary and five-run or ten-run medians.
 | CJK IME, Wayland and X11 | needs hands-on QA | checklist below |
 | Screen reader on the list | needs hands-on QA | checklist below |
 
-Streaming notes: the 30 Hz loop is a timer task that appends a row, extends
-the size table, scrolls to the bottom and repaints. Holding 299 of 300 ticks
-over ten seconds means the append path, the size table rebuild and the
-repaint together fit inside a 33 ms frame budget with room to spare, on a
-debug-grade build profile in the headless case too (148 of 150 in 5 s).
+Streaming notes: the 30 Hz loop is a timer task that appends a synthetic
+agent chunk through the client, extends the transcript's size table, scrolls
+to the bottom and repaints. Holding 299 of 300 ticks over ten seconds means
+the append path, the size table rebuild and the repaint together fit inside
+a 33 ms frame budget with room to spare, on a debug-grade build profile in
+the headless case too (148 of 150 in 5 s). The spike measured the same loop
+over a plain row list; the number carries over, the path only gained the
+client absorb step.
 Scroll smoothness as a human-visible number (frame pacing under wheel and
 drag through all 5,000 rows) needs eyes on a real compositor.
 

@@ -1,22 +1,60 @@
 //! The kage desktop client.
+//!
+//! One window over one transport: `kage rpc` as a child by default,
+//! `kage serve` over WebSocket with `--ws` and `--token`, or the
+//! recorded golden transcript with `--replay`. `--smoke` quits after
+//! a delay and prints what the window reached, which is how the
+//! headless runs are automated.
 
+mod app;
+mod gate;
+mod store;
 mod theme;
-mod window;
+mod transport;
+mod views;
 
 use std::time::Duration;
 
+use app::{Shell, ShellArgs};
 use gpui_kit::assets::Assets;
-use gpui_kit::{App, KeyBinding};
+use gpui_kit::{App, AppContext, Entity, KeyBinding, TitlebarOptions, WindowOptions, px, size};
+use transport::Transport;
+use transport::replay::ReplayTransport;
+use transport::stdio::{Config as StdioConfig, StdioTransport};
+use transport::ws::WsTransport;
 
-gpui_kit::actions!(kage_desktop, [Quit]);
+/// Which transport the shell connects through.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum Wire {
+    /// Spawn `kage rpc`, with an optional explicit binary.
+    #[default]
+    Stdio,
+    /// Dial `kage serve` over WebSocket.
+    WebSocket {
+        /// The `ws://` endpoint, path included.
+        url: String,
+        /// The bearer token of the endpoint.
+        token: String,
+    },
+    /// Play the recorded golden transcript.
+    Replay,
+}
 
-/// Command line switches for automated runs and measurements.
+/// Command line switches for automated runs and transport choice.
 #[derive(Debug, Default)]
 struct Launch {
+    wire: Wire,
     /// Quit this many milliseconds after launch, for smoke runs.
     smoke_millis: Option<u64>,
-    /// Start the 30 updates per second stream on open.
+    /// Run the 30 updates per second stream on open.
     stream: bool,
+    /// Why the switches do not fit together, if they do not.
+    error: Option<String>,
+    /// Raw flags, resolved by [`Launch::finalize`].
+    ws_url: Option<String>,
+    token: Option<String>,
+    rpc_bin: Option<String>,
+    replay: bool,
 }
 
 impl Launch {
@@ -33,41 +71,151 @@ impl Launch {
                     launch.smoke_millis = Some(millis.unwrap_or(0));
                 }
                 "--stream" => launch.stream = true,
+                "--replay" => launch.replay = true,
+                "--ws" => match args.next() {
+                    Some(url) => launch.ws_url = Some(url),
+                    None => launch.error = Some("--ws needs a ws:// URL".to_owned()),
+                },
+                "--token" => match args.next() {
+                    Some(token) => launch.token = Some(token),
+                    None => launch.error = Some("--token needs a value".to_owned()),
+                },
+                "--rpc-bin" => match args.next() {
+                    Some(program) => launch.rpc_bin = Some(program),
+                    None => launch.error = Some("--rpc-bin needs a path".to_owned()),
+                },
                 _ => {}
             }
         }
-        launch
+        launch.finalize()
+    }
+
+    /// Resolves the raw flags into the wire to use.
+    fn finalize(mut self) -> Self {
+        if self.error.is_some() {
+            return self;
+        }
+        self.wire = if let Some(url) = self.ws_url.take() {
+            match self.token.take() {
+                Some(token) => Wire::WebSocket { url, token },
+                None => {
+                    self.error =
+                        Some("--ws needs --token; the token never rides the URL".to_owned());
+                    return self;
+                }
+            }
+        } else if self.token.take().is_some() {
+            self.error = Some("--token needs --ws".to_owned());
+            return self;
+        } else if self.replay {
+            Wire::Replay
+        } else {
+            Wire::Stdio
+        };
+        self
+    }
+
+    /// The transport the launch selected.
+    fn transport(&self) -> Box<dyn Transport> {
+        match &self.wire {
+            Wire::Stdio => {
+                let config = match &self.rpc_bin {
+                    Some(program) => StdioConfig {
+                        program: program.clone(),
+                        args: vec!["rpc".to_owned()],
+                    },
+                    None => StdioConfig::engine(),
+                };
+                Box::new(StdioTransport::new(config))
+            }
+            Wire::WebSocket { url, token } => {
+                Box::new(WsTransport::new(url.clone(), token.clone()))
+            }
+            Wire::Replay => Box::new(ReplayTransport::new()),
+        }
     }
 }
 
 fn main() {
     let launch = Launch::parse(std::env::args().skip(1));
+    if let Some(error) = &launch.error {
+        eprintln!("kage-desktop: {error}");
+        std::process::exit(2);
+    }
+    let replay = launch.wire == Wire::Replay;
+    let stream = launch.stream;
+    let smoke_millis = launch.smoke_millis;
     gpui_kit::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
             theme::apply_shadow(cx);
             cx.bind_keys([
-                KeyBinding::new("ctrl-q", Quit, None),
-                KeyBinding::new("cmd-q", Quit, None),
+                KeyBinding::new("ctrl-q", app::Quit, None),
+                KeyBinding::new("cmd-q", app::Quit, None),
+                KeyBinding::new("ctrl-n", app::NewSession, None),
+                KeyBinding::new("cmd-n", app::NewSession, None),
+                KeyBinding::new("ctrl-b", app::ToggleWorkbench, None),
+                KeyBinding::new("cmd-b", app::ToggleWorkbench, None),
+                KeyBinding::new("ctrl-\\", app::ToggleSidebar, None),
+                KeyBinding::new("cmd-\\", app::ToggleSidebar, None),
+                KeyBinding::new("ctrl-enter", app::SendPrompt, None),
             ]);
-            cx.on_action(|_: &Quit, cx| cx.quit());
-            let spike = window::open(cx, &launch);
-            if let Some(millis) = launch.smoke_millis {
-                quit_after(cx, spike, Duration::from_millis(millis));
+            let options = WindowOptions {
+                titlebar: Some(TitlebarOptions {
+                    title: Some("kage client".into()),
+                    ..Default::default()
+                }),
+                window_min_size: Some(size(px(960.), px(640.))),
+                ..Default::default()
+            };
+            let args = ShellArgs {
+                transport: launch.transport(),
+                replay,
+                stream,
+            };
+            let (handle, shell) = gpui_kit::open_window(options, cx, move |window, cx| {
+                cx.new(|cx| Shell::new(args, window, cx))
+            })
+            .expect("failed to open the window");
+            let shell_new = shell.clone();
+
+            // The key router: app-level listeners run at the end of the
+            // bubble phase, after whatever the focused view consumed.
+            cx.on_action(move |_: &app::Quit, cx| cx.quit());
+            cx.on_action(move |_: &app::NewSession, cx| {
+                shell_new.update(cx, |shell, cx| shell.open_session(cx));
+            });
+            let shell_toggle_sidebar = shell.clone();
+            cx.on_action(move |_: &app::ToggleSidebar, cx| {
+                shell_toggle_sidebar.update(cx, |shell, cx| shell.toggle_sidebar(cx));
+            });
+            let shell_toggle_workbench = shell.clone();
+            cx.on_action(move |_: &app::ToggleWorkbench, cx| {
+                shell_toggle_workbench.update(cx, |shell, cx| shell.toggle_workbench(cx));
+            });
+            cx.on_action(move |_: &app::SendPrompt, cx| {
+                let _ = handle.update(cx, |root, window, cx| {
+                    if let Ok(shell) = root.downcast::<Shell>() {
+                        shell.update(cx, |shell, cx| shell.send_composer(window, cx));
+                    }
+                });
+            });
+
+            if let Some(millis) = smoke_millis {
+                quit_after(cx, shell, Duration::from_millis(millis));
             }
         });
 }
 
-/// Schedule the process to exit after `delay`, letting a headless run
-/// exercise the event loop and exit on its own. The final list counters go
-/// to stdout so automated runs report what the window did.
-fn quit_after(cx: &mut App, spike: window::SpikeHandle, delay: Duration) {
+/// Schedules the process to exit after `delay`, letting a headless run
+/// exercise the event loop and exit on its own. The final store
+/// counters go to stdout so automated runs report what happened.
+fn quit_after(cx: &mut App, shell: Entity<Shell>, delay: Duration) {
     cx.spawn(async move |cx| {
         cx.background_executor().timer(delay).await;
         cx.update(|cx| {
-            let (rows, streamed) = spike.counts(cx);
-            println!("smoke: rows={rows} streamed={streamed}");
+            println!("{}", shell.read(cx).smoke_line(cx));
             cx.quit();
         });
     })
@@ -76,17 +224,19 @@ fn quit_after(cx: &mut App, spike: window::SpikeHandle, delay: Duration) {
 
 #[cfg(test)]
 mod tests {
-    use super::Launch;
+    use super::{Launch, Wire};
 
     fn parse(args: &[&str]) -> Launch {
         Launch::parse(args.iter().map(|arg| arg.to_string()))
     }
 
     #[test]
-    fn defaults_have_no_smoke_or_stream() {
+    fn defaults_have_no_smoke_or_stream_and_speak_stdio() {
         let launch = parse(&[]);
         assert_eq!(launch.smoke_millis, None);
         assert!(!launch.stream);
+        assert_eq!(launch.wire, Wire::Stdio);
+        assert!(launch.rpc_bin.is_none());
     }
 
     #[test]
@@ -100,5 +250,37 @@ mod tests {
         let launch = parse(&["--stream"]);
         assert!(launch.stream);
         assert_eq!(launch.smoke_millis, None);
+    }
+
+    #[test]
+    fn replay_selects_the_recording() {
+        assert_eq!(parse(&["--replay"]).wire, Wire::Replay);
+    }
+
+    #[test]
+    fn ws_needs_a_token_and_the_token_needs_ws() {
+        let launch = parse(&["--ws", "ws://127.0.0.1:7433/acp"]);
+        assert!(launch.error.is_some(), "a tokenless ws is refused");
+
+        let launch = parse(&["--token", "t"]);
+        assert!(launch.error.is_some(), "a token without ws is refused");
+
+        let launch = parse(&["--ws", "ws://127.0.0.1:7433/acp", "--token", "t"]);
+        assert_eq!(
+            launch.wire,
+            Wire::WebSocket {
+                url: "ws://127.0.0.1:7433/acp".to_owned(),
+                token: "t".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn rpc_bin_overrides_the_engine_binary() {
+        assert_eq!(
+            parse(&["--rpc-bin", "/opt/kage"]).rpc_bin.as_deref(),
+            Some("/opt/kage")
+        );
+        assert_eq!(parse(&["--rpc-bin", "/opt/kage"]).wire, Wire::Stdio);
     }
 }

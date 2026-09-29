@@ -1,5 +1,5 @@
-//! The shared engine and session setup behind every `kage rpc`
-//! connection.
+//! The shared engine and session setup behind every `kage rpc` and
+//! `kage serve` connection.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::BufRead;
@@ -11,7 +11,7 @@ use kage_acp::acp::SessionConfigSelectOption;
 use kage_acp::agent::serve_agent;
 use kage_core::config::{Config, McpServer as McpSpec};
 use kage_core::permissions::PermissionAction;
-use kage_core::protocol::{Event, HostEvent, SessionId};
+use kage_core::protocol::{Command, CommandKind, Event, HostEvent, SessionId};
 use kage_core::sync::lock;
 use kage_jsonrpc::RpcError;
 use kage_loop::{AgentContext, LoopConfig};
@@ -26,7 +26,7 @@ use crate::permissions::PermissionGate;
 /// Builds the engine session for a client session from its id, working
 /// directory, model and the MCP servers the client passed. The caller
 /// fills in the history and recorder.
-pub(super) type SpecBuilder = Box<
+pub(crate) type SpecBuilder = Box<
     dyn Fn(SessionId, &str, &str, BTreeMap<String, McpSpec>) -> Result<SessionSpec, RpcError>
         + Send
         + Sync,
@@ -41,7 +41,7 @@ pub(super) struct Open {
 
 /// One engine with the shared setup of [`CliAcpAgent`], behind every
 /// connection served on the host.
-pub(super) struct Host {
+pub(crate) struct Host {
     pub(super) engine: Engine,
     pub(super) registry: Arc<ProviderRegistry>,
     pub(super) default_model: String,
@@ -67,17 +67,18 @@ pub(super) struct Host {
 }
 
 impl Host {
-    /// The host `kage rpc` serves, with the credential and model checks
-    /// the subcommand ran before serving. `Err` names the failure, ready
-    /// for the `kage: ` error line.
-    pub(super) fn start(
+    /// The host every connection is served on, with the credential and
+    /// model checks the subcommand ran before serving. The error is
+    /// ready for the caller's `kage: ` line; the caller adds its own
+    /// subcommand prefix.
+    pub(crate) fn start(
         model_override: Option<&str>,
         system_role: &str,
     ) -> Result<Arc<Self>, String> {
         let registry = crate::build_provider_registry()?;
         if !crate::has_usable_provider(&registry) && model_override.is_none() {
             return Err(
-                "rpc: no provider credentials found; run `kage auth login` or set an API-key env var"
+                "no provider credentials found; run `kage auth login` or set an API-key env var"
                     .to_owned(),
             );
         }
@@ -85,8 +86,8 @@ impl Host {
             model_override.map_or_else(|| crate::default_model(&registry), str::to_owned);
         registry
             .resolve(&default_model)
-            .map_err(|e| format!("rpc: cannot resolve model {default_model}: {e}"))?;
-        let sessions = crate::sessions_dir().map_err(|e| format!("rpc: {e}"))?;
+            .map_err(|e| format!("cannot resolve model {default_model}: {e}"))?;
+        let sessions = crate::sessions_dir()?;
         let registry = Arc::new(registry);
         let aliases = {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -107,7 +108,7 @@ impl Host {
 
     /// The engine and shared setup every connection works through. The
     /// model list follows `registry`.
-    pub(super) fn new(
+    pub(crate) fn new(
         registry: Arc<ProviderRegistry>,
         default_model: String,
         sessions: PathBuf,
@@ -150,7 +151,7 @@ impl Host {
 
     /// Serves one connection: a fresh agent on this host for `reader`
     /// and `writer`, sharing the engine with every other connection.
-    pub(super) fn serve<R, W>(self: Arc<Self>, reader: R, writer: W) -> Result<(), RpcError>
+    pub(crate) fn serve<R, W>(self: Arc<Self>, reader: R, writer: W) -> Result<(), RpcError>
     where
         R: BufRead + Send + 'static,
         W: std::io::Write + Send + 'static,
@@ -220,6 +221,13 @@ impl Host {
     /// The next connection's id on this host.
     pub(super) fn next_connection(&self) -> u64 {
         self.next_connection.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Cancels every run. The dispatcher stops once each session is
+    /// idle, which closes the session files; the caller gives it a
+    /// moment before the process exits.
+    pub(crate) fn shutdown(&self) {
+        self.engine.send(Command::active(CommandKind::Shutdown));
     }
 
     /// Records `connection` as the owner of `id`'s running prompt, or

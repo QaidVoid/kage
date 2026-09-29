@@ -20,6 +20,23 @@ Credentials resolve as for the TUI and print mode (OS keyring,
 `kage auth login`, or an API-key env var). With no provider
 configured `kage rpc` prints a message and exits non-zero.
 
+## connect over the network
+
+The same protocol is reachable over WebSocket with `kage serve`, so a
+Zed instance on another machine can drive your kage. Start the server,
+then point the client at the connect URL it prints:
+
+```sh
+kage serve                       # prints ws://127.0.0.1:7433/acp?token=...
+ssh -N -L 7433:127.0.0.1:7433 you@kage-host   # from the client machine
+```
+
+The client opens `ws://127.0.0.1:7433/acp?token=...` through the
+tunnel. The token rides the URL, the `Authorization` header, or a
+`Sec-WebSocket-Protocol` entry. Sessions attach with full replay, and
+several clients can watch one session. See [remote](/editors/remote)
+for the token forms, TLS, and the security notes.
+
 ## configure zed
 
 Add kage as an agent server in Zed's `settings.json`:

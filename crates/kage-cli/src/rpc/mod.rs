@@ -31,7 +31,7 @@
 mod bridge;
 mod content;
 mod fs;
-mod host;
+pub(crate) mod host;
 mod live;
 mod mcp;
 mod options;
@@ -71,10 +71,12 @@ use crate::engine::{Recorder, SessionSpec, SubscriptionId};
 
 /// Entry point for the `Rpc` subcommand.
 pub(crate) fn run(model_override: Option<&str>, system_role: &str) -> ExitCode {
-    let served = Host::start(model_override, system_role).and_then(|host| {
-        host.serve(BufReader::new(std::io::stdin()), std::io::stdout())
-            .map_err(|e| format!("rpc: {e}"))
-    });
+    let served = Host::start(model_override, system_role)
+        .map_err(|e| format!("rpc: {e}"))
+        .and_then(|host| {
+            host.serve(BufReader::new(std::io::stdin()), std::io::stdout())
+                .map_err(|e| format!("rpc: {e}"))
+        });
     match served {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

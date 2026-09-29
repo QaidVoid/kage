@@ -12,7 +12,9 @@
 //!   first-run setup wizard.
 //! - `doctor` diagnoses the install, and `trust` trusts a project config.
 //! - `models` manages the model catalog.
-//! - `rpc` serves the Agent Client Protocol over stdio. `mcp` serves the
+//! - `rpc` serves the Agent Client Protocol over stdio, and `serve`
+//!   serves it over WebSocket behind a token, so editors and ACP
+//!   clients drive kage locally or over the network. `mcp` serves the
 //!   built-in tools over the Model Context Protocol and logs in to MCP
 //!   servers.
 //! - `completions` and the hidden `gen-manpage` generate shell and man
@@ -33,6 +35,7 @@ mod plugins;
 mod providers;
 mod rpc;
 mod runtime_env;
+mod serve;
 mod state;
 mod title;
 mod trust;
@@ -214,6 +217,33 @@ pub(crate) enum Command {
         #[arg(long = "system", default_value = "")]
         system: String,
     },
+    /// Serve the Agent Client Protocol over WebSocket so remote editors
+    /// and ACP clients can drive kage over the network. One endpoint
+    /// (`/acp`) behind a bearer token; every connection shares one
+    /// engine. The startup output on stderr carries the connect URL,
+    /// the only place the token is ever printed.
+    Serve {
+        /// Provider-qualified model id (`provider:model`). Defaults
+        /// the same way as the top-level `-m`.
+        #[arg(short = 'm', long = "model")]
+        model: Option<String>,
+        /// System-prompt role override forwarded to the agent loop.
+        #[arg(long = "system", default_value = "")]
+        system: String,
+        /// Address to bind. Loopback by default; a non-loopback
+        /// address prints a warning because kage itself has no TLS.
+        #[arg(long = "host", default_value = "127.0.0.1")]
+        host: String,
+        /// TCP port to bind. `0` picks a free port and the connect
+        /// URL shows it.
+        #[arg(long = "port", default_value_t = serve::DEFAULT_PORT)]
+        port: u16,
+        /// Replace the stored token with a fresh one before serving,
+        /// so every client holding the old connect URL must be sent
+        /// the new one.
+        #[arg(long = "rotate-token")]
+        rotate_token: bool,
+    },
     /// Trust the current directory's `.kage/config.toml`. Until a
     /// project is trusted, its `mcp`, `permissions` and
     /// `plugins.capabilities` settings are ignored. Trust covers the
@@ -341,6 +371,14 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
         Command::Rpc { model, system } => {
             config_error().unwrap_or_else(|| rpc::run(model.as_deref(), &system))
         }
+        Command::Serve {
+            model,
+            system,
+            host,
+            port,
+            rotate_token,
+        } => config_error()
+            .unwrap_or_else(|| serve::run(model.as_deref(), &system, &host, port, rotate_token)),
         Command::Trust { revoke } => trust::run(revoke),
         Command::Models {
             action: ModelsAction::Refresh,

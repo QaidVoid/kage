@@ -13,6 +13,7 @@ kage-mcp        (core + jsonrpc + tools)
 kage-acp        (core + jsonrpc + provider)
 kage-plugin     (core + provider + tools)
 kage-loop       (core + provider + tools)
+kage-remote     (core + tungstenite)
 kage-tui        (core + plugin)
 kage-cli        (binary)            (depends on everything it uses)
 ```
@@ -33,6 +34,7 @@ the only crate that wires the whole graph together.
 | `kage-mcp`       | MCP client (tools, resources, prompts, the OAuth protocol, prompt expansion) and MCP server (kage's built-in tools over stdio) |
 | `kage-acp`       | ACP agent (editors drive kage) and ACP client (kage drives another agent as a provider) |
 | `kage-plugin`    | Lua runtime, sandbox, host API surface, embedded stdlib and defaults, `init.lua` loading |
+| `kage-remote`    | The ACP WebSocket transport: request-head parsing and token authorization, the bearer token file, and the frame-to-line pipe that turns one accepted TCP stream into the reader and writer pair the agent serving loop consumes |
 | `kage-tui`       | The interactive TUI, modal input, block renderer    |
 | `kage-cli`       | The binary, CLI flags, the session engine, frontend wiring |
 
@@ -254,6 +256,36 @@ written, so a client never sees them first.
 
 Config option changes and prompts become ordinary engine commands, so
 the editor, the TUI and print mode share one implementation.
+
+## the serve component
+
+`kage serve` puts the host behind a TCP listener. One endpoint, one
+token:
+
+- `kage-remote` parses the upgrade request head (16 KiB cap, 10 s
+  deadline), checks the token in constant time in a fixed order (the
+  `Authorization: Bearer` header, then a `kage.` or `acp.`
+  `Sec-WebSocket-Protocol` entry echoed in the 101, then the `token`
+  query parameter), and upgrades the socket: two plain threads turn
+  text frames into JSON-RPC lines and flushed writes into text
+  frames, with byte-capped backpressure, pings and an idle timeout.
+- The serve command owns the routing table. A valid-token `GET /acp`
+  upgrade is served like a `kage rpc` connection on the shared
+  `Host`; everything else gets a plain HTTP reply: `401` without a
+  valid token, `405` for non-upgrade traffic on `/acp`, `404`
+  elsewhere, `431` for an oversize head, and `503` once 16
+  connections are already served. Every connection runs on its own
+  thread off the main accept loop.
+- Attach, shared approvals and idle close are host behavior, not
+  transport behavior: a second connection attaches to the live
+  session with a replay inside one bus lock, every attached client is
+  asked each approval with the first answer winning, a second
+  client's prompt during a run fails busy, and a session no connection
+  holds is closed once idle.
+- SIGINT and SIGTERM cancel every run and give the sessions a moment
+  to close their files before the process exits; a second signal
+  exits at once. The connect URL printed at startup is the only place
+  the token is ever rendered.
 
 ## data flow per turn
 

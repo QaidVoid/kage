@@ -4,9 +4,9 @@
 .SH NAME
 kage \- A minimal, extensible coding agent in your terminal
 .SH SYNOPSIS
-\fBkage\fR [\fB\-p\fR|\fB\-\-print\fR] [\fB\-m\fR|\fB\-\-model\fR] [\fB\-\-system\fR] [\fB\-\-no\-session\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
+\fBkage\fR [\fB\-p\fR|\fB\-\-print\fR] [\fB\-m\fR|\fB\-\-model\fR] [\fB\-\-system\fR] [\fB\-\-no\-session\fR] [\fB\-\-yolo\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
 .SH DESCRIPTION
-With no command and no \fB\-p\fR, kage opens its interactive TUI in the current directory. Type a prompt and press enter to send it. On an empty prompt, \fB?\fR shows the keys and \fB/\fR opens the command palette. \fBctrl+q\fR quits.
+With no command and no \fB\-p\fR, kage opens its interactive TUI in the current directory. Type a prompt and press enter to send it. On an empty prompt, \fB?\fR shows the keys and a prompt starting with \fB/\fR runs a command. \fBctrl+q\fR quits.
 .PP
 With \fB\-p\fR, kage runs one prompt through the agent loop, streams the reply to stdout and exits.
 .SH OPTIONS
@@ -22,6 +22,9 @@ System prompt to prepend
 .TP
 \fB\-\-no\-session\fR
 Disable session recording. By default every run writes a JSONL session file under `$XDG_DATA_HOME/kage/sessions/<session\-id>.jsonl`
+.TP
+\fB\-\-yolo\fR
+Start the session in allow mode: every tool call runs without asking, MCP servers included. A configured deny still denies. Same effect as `/permission allow`, applied at startup
 .TP
 \fB\-\-json\fR
 Emit one JSON object per event on stdout instead of plain text. Only meaningful with `\-p/\-\-print`. Each line carries the event\*(Aqs `type` (such as `text_delta`, `tool_call_start`, `message_appended`, or `run_ended`) plus the `session` it belongs to and a per\-session `seq` number, so external tools can parse the agent\*(Aqs output without screen\-scraping
@@ -61,13 +64,16 @@ Show which known and custom providers have credentials available
 First\-run setup wizard. Creates `~/.config/kage/config.toml`, scaffolds the data directories, and offers to save a provider API key. Idempotent: rerunning without `\-\-force` keeps any existing config in place
 .TP
 \fBkage doctor\fR
-Diagnose the kage install: parses config, lists available providers, validates plugins, reports the active sandbox. Exit code is `0` when no check fails, `1` otherwise
+Diagnose the kage install: parses config, lists available providers, validates plugins, probes each MCP server. Exit code is `0` when no check fails, `1` otherwise
 .TP
 \fBkage completions\fR
 Print a shell completion script for `kage` to stdout
 .TP
 \fBkage rpc\fR
 Agent Client Protocol server: speak JSON\-RPC over stdio so an editor (Zed, Neovim, ...) can drive kage. Messages are newline\-delimited JSON. Each request is answered, and loop progress is streamed back as ACP `session/update` notifications
+.TP
+\fBkage serve\fR
+Serve the Agent Client Protocol over WebSocket so remote editors and ACP clients can drive kage over the network. One endpoint (`/acp`) behind a bearer token; every connection shares one engine. The startup output on stderr carries the connect URL, the only place the token is ever printed
 .TP
 \fBkage trust\fR
 Trust the current directory\*(Aqs `.kage/config.toml`. Until a project is trusted, its `mcp`, `permissions` and `plugins.capabilities` settings are ignored. Trust covers the values as they are now, so editing any of them asks again

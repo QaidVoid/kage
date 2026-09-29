@@ -61,6 +61,7 @@ export default defineConfig({
           { text: "zed", link: "/editors/zed" },
           { text: "neovim", link: "/editors/neovim" },
           { text: "acp client", link: "/editors/acp-client" },
+          { text: "remote", link: "/editors/remote" },
         ],
       },
       {

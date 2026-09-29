@@ -9,6 +9,7 @@ members = [
   "crates/kage-mcp",
   "crates/kage-plugin",
   "crates/kage-provider",
+  "crates/kage-remote",
   "crates/kage-session",
   "crates/kage-tools",
   "crates/kage-tui",
@@ -34,6 +35,7 @@ kage-loop = { path = "crates/kage-loop" }
 kage-mcp = { path = "crates/kage-mcp" }
 kage-plugin = { path = "crates/kage-plugin" }
 kage-provider = { path = "crates/kage-provider" }
+kage-remote = { path = "crates/kage-remote" }
 kage-session = { path = "crates/kage-session" }
 kage-tools = { path = "crates/kage-tools" }
 kage-tui = { path = "crates/kage-tui" }
@@ -79,6 +81,7 @@ terminal-colorsaurus = "1.0.3"
 thiserror = "2.0.21"
 toml = "1.1.6"
 toml_edit = "0.25.15"
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 ulid = { version = "3.0.0", features = ["serde"] }
 ureq = { version = "3.4.2", features = ["json"] }
 url = "2.5.8"

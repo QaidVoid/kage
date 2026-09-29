@@ -76,3 +76,39 @@ jobs:
       # --no-fail-fast so one failing OS surfaces every failure in that
       # leg instead of hiding them behind the first.
       - run: cargo nextest run --all-targets --no-tests=pass --no-fail-fast
+
+  gui:
+    name: gui (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # gui/ is its own Cargo workspace with its own Cargo.lock and
+        # rust-toolchain.toml, so every command here runs inside it.
+        working-directory: gui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: gui
+      - name: Install Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libwayland-dev libxcb1-dev
+      - name: fmt
+        if: runner.os == 'Linux'
+        run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo build --locked --release
+      # The headless platform needs no display and no GPU, so this
+      # exercises the real event loop, window, list, composer, markdown
+      # and the 30 Hz stream on every Linux CI run.
+      - name: Smoke run
+        if: runner.os == 'Linux'
+        run: ZED_HEADLESS=1 timeout 60 ./target/release/kage-desktop --smoke 5000 --stream

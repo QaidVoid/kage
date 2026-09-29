@@ -1,0 +1,5 @@
+# Linux builds the font stack against fontconfig in dlopen mode, so no
+# fontconfig development package is needed to compile and the library is
+# loaded at runtime like the rest of the system GLib stack.
+[env]
+RUST_FONTCONFIG_DLOPEN = "1"

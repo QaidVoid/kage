@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = ["."]
+
+[package]
+name = "kage-desktop"
+version = "0.1.0"
+edition = "2024"
+description = "The kage desktop client"
+license = "MIT"
+publish = false
+
+[dependencies]
+# Exactly pinned GPUI Kit stack. gpui-kit 0.7.0 re-exports GPUI (`gpui-pre`
+# 0.3.7), the platform crates and gpui-component 0.7.0; every one of those is
+# pinned `=x.y.z` inside the toolkit itself, so this single pin holds the
+# whole tree. Bump all of them together, see SPIKE.md for the procedure.
+gpui-kit = "=0.7.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 16
+strip = "debuginfo"

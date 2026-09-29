@@ -524,7 +524,7 @@ impl OpenAiStream {
             self.flush_pending_tool_calls();
             self.pending.push_back(Ok(ProviderEvent::MessageEnd {
                 stop_reason: self.finish_reason,
-                usage: self.usage,
+                usage: crate::event::without_cached_input(self.usage),
             }));
             self.done = true;
             return;
@@ -742,7 +742,7 @@ impl crate::sse::SseStreamCore for OpenAiStream {
             self.flush_pending_tool_calls();
             self.pending.push_back(Ok(ProviderEvent::MessageEnd {
                 stop_reason: self.finish_reason,
-                usage: self.usage,
+                usage: crate::event::without_cached_input(self.usage),
             }));
         }
     }
@@ -960,7 +960,7 @@ mod tests {
         let bytes: &[u8] = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":6}}}\n\ndata: [DONE]\n\n";
         let events = collect_ok(stream_from_bytes(bytes));
         if let ProviderEvent::MessageEnd { usage, .. } = events.last().unwrap() {
-            assert_eq!(usage.input, 10);
+            assert_eq!(usage.input, 4, "the cached part leaves the prompt count");
             assert_eq!(usage.output, 2);
             assert_eq!(usage.cache_read, 6);
         } else {

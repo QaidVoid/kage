@@ -26,9 +26,13 @@ pub enum StopReason {
 }
 
 /// Token usage reported by a provider for one assistant turn.
+///
+/// The four fields do not overlap, so their sum is the turn's context
+/// fill. Providers whose APIs count cached tokens inside the prompt
+/// subtract them from `input`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TokenUsage {
-    /// Tokens consumed from the conversation context.
+    /// Prompt tokens neither read from nor written to the prompt cache.
     pub input: u64,
     /// Tokens emitted by the model.
     pub output: u64,

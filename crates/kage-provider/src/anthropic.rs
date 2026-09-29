@@ -500,22 +500,19 @@ impl AnthropicStream {
         }
     }
 
+    /// Merge the usage of `message_start` or `message_delta`. The
+    /// counts are cumulative, so each field keeps its largest value:
+    /// some compatible endpoints send zeros in `message_delta` for
+    /// counts only `message_start` carried.
     fn absorb_usage(&mut self, usage: &Value) {
-        if let Some(v) = usage.get("input_tokens").and_then(Value::as_u64) {
-            self.state.usage.input = v;
-        }
-        if let Some(v) = usage.get("output_tokens").and_then(Value::as_u64) {
-            self.state.usage.output = v;
-        }
-        if let Some(v) = usage
-            .get("cache_creation_input_tokens")
-            .and_then(Value::as_u64)
-        {
-            self.state.usage.cache_write = v;
-        }
-        if let Some(v) = usage.get("cache_read_input_tokens").and_then(Value::as_u64) {
-            self.state.usage.cache_read = v;
-        }
+        let usage_of = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+        let total = &mut self.state.usage;
+        total.input = total.input.max(usage_of("input_tokens"));
+        total.output = total.output.max(usage_of("output_tokens"));
+        total.cache_write = total
+            .cache_write
+            .max(usage_of("cache_creation_input_tokens"));
+        total.cache_read = total.cache_read.max(usage_of("cache_read_input_tokens"));
     }
 
     fn on_block_start(&mut self, value: &Value) {

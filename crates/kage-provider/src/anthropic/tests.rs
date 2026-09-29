@@ -478,6 +478,28 @@ fn eof_without_message_stop_completes_the_turn() {
     assert!(events.next().is_none());
 }
 
+/// Some compatible endpoints repeat the usage object in
+/// `message_delta` with zeros for the prompt counts. They must not wipe
+/// the counts `message_start` reported.
+#[test]
+fn zero_counts_in_message_delta_keep_the_start_usage() {
+    let bytes: &[u8] = b"event: message_start\n\
+         data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5000,\"cache_read_input_tokens\":90000,\"output_tokens\":1}}}\n\n\
+         event: message_delta\n\
+         data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":40}}\n\n\
+         event: message_stop\n\
+         data: {\"type\":\"message_stop\"}\n\n";
+    let usage = stream_from_bytes(bytes)
+        .find_map(|event| match event {
+            Ok(ProviderEvent::MessageEnd { usage, .. }) => Some(usage),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(usage.input, 5000);
+    assert_eq!(usage.cache_read, 90000);
+    assert_eq!(usage.output, 40);
+}
+
 #[test]
 fn eof_before_message_start_invents_nothing() {
     let mut events = stream_from_bytes(b"");

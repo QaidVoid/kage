@@ -788,27 +788,20 @@ pub(super) fn search_count_label((current, total): (usize, usize)) -> String {
     }
 }
 
-/// The cached share the footer shows: the read share of cache traffic
-/// when the provider reports writes (Anthropic style), else the cached
-/// share of the prompt. OpenAI-style providers fold cached tokens into
-/// the prompt and report no writes, so a bare hit rate there would
-/// always read 100%. `None` while nothing was cached.
+/// The cached share the footer shows: the part of every prompt token
+/// sent so far that was read from the cache. The usage fields do not
+/// overlap for any provider, so the prompt is their sum. `None` while
+/// nothing was cached.
 #[expect(
     clippy::cast_precision_loss,
     reason = "token counts exceed float precision harmlessly"
 )]
 fn cached_hit(u: &SessionUsage) -> Option<f64> {
-    let cached = u.cache_read_tokens + u.cache_write_tokens;
-    if cached == 0 {
+    if u.cache_read_tokens + u.cache_write_tokens == 0 {
         return None;
     }
-    let read = u.cache_read_tokens as f64;
-    let hit = if u.cache_write_tokens > 0 {
-        read / cached as f64 * 100.0
-    } else {
-        read / u.input_tokens.max(1) as f64 * 100.0
-    };
-    Some(hit.clamp(0.0, 100.0))
+    let prompt = u.input_tokens + u.cache_read_tokens + u.cache_write_tokens;
+    Some(u.cache_read_tokens as f64 / prompt as f64 * 100.0)
 }
 
 /// Paint a built-in component that reads the session usage.
@@ -1039,28 +1032,28 @@ mod tests {
         let input = InputState::new();
         assert_eq!(
             painted("tokens", &usage, &input),
-            "in 10k out 2k cached 80k (90.91%)"
+            "in 10k out 2k cached 80k (81.63%)"
         );
         assert_eq!(painted("context", &usage, &input), "2% ctx (24k/1M)");
     }
 
     #[test]
-    fn cached_share_of_the_prompt_shows_when_no_cache_writes_are_reported() {
-        // OpenAI-style providers fold cached tokens into the prompt and
-        // report no writes, so the read share of cache traffic would
-        // always be 100%.
+    fn cached_share_stays_under_the_prompt_without_cache_writes() {
+        // Anthropic-compatible endpoints often report cache reads but
+        // never writes. The share must still be of the whole prompt,
+        // not of the uncached input alone, which read past 100%.
         let usage = SessionUsage {
             model: "fake:m".into(),
-            input_tokens: 160_000,
+            input_tokens: 20_000,
             output_tokens: 2_000,
-            cache_read_tokens: 80_000,
+            cache_read_tokens: 180_000,
             cache_write_tokens: 0,
             ..SessionUsage::default()
         };
         let input = InputState::new();
         assert_eq!(
             painted("tokens", &usage, &input),
-            "in 160k out 2k cached 80k (50.00%)"
+            "in 20k out 2k cached 180k (90.00%)"
         );
     }
 

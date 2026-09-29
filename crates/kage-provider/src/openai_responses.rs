@@ -607,7 +607,7 @@ impl ResponsesStream {
         }
         self.pending.push_back(Ok(ProviderEvent::MessageEnd {
             stop_reason: self.finish_reason,
-            usage: self.usage,
+            usage: crate::event::without_cached_input(self.usage),
         }));
         self.done = true;
     }
@@ -966,6 +966,18 @@ mod tests {
             assert_eq!(*stop_reason, StopReason::EndTurn);
             assert_eq!(usage.input, 10);
             assert_eq!(usage.output, 2);
+        } else {
+            panic!("expected MessageEnd");
+        }
+    }
+
+    #[test]
+    fn cached_input_tokens_leave_the_prompt_count() {
+        let bytes: &[u8] = b"data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":6}}}}\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+        if let Some(ProviderEvent::MessageEnd { usage, .. }) = events.last() {
+            assert_eq!(usage.input, 4);
+            assert_eq!(usage.cache_read, 6);
         } else {
             panic!("expected MessageEnd");
         }

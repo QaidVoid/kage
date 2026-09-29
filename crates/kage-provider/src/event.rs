@@ -8,6 +8,17 @@ use serde::{Deserialize, Serialize};
 
 pub use kage_core::StopReason;
 
+/// `usage` from an API that counts cached tokens inside the prompt
+/// (`prompt_tokens` of chat completions, `input_tokens` of responses),
+/// with them taken back out: [`TokenUsage::input`] holds only the uncached part, so the
+/// context fill, the cost and the cache share add the fields without
+/// counting a cached token twice.
+#[must_use]
+pub(crate) fn without_cached_input(mut usage: TokenUsage) -> TokenUsage {
+    usage.input = usage.input.saturating_sub(usage.cache_read);
+    usage
+}
+
 /// One event in a provider's streaming response.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

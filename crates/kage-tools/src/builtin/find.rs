@@ -133,7 +133,6 @@ impl Tool for FindTool {
                 "pattern": input.pattern,
                 "matches": count,
                 "truncated": truncated,
-                "paths": matches,
             })),
             terminate: false,
         })
@@ -217,7 +216,17 @@ mod tests {
         let structured = out.structured.unwrap();
         assert_eq!(structured["truncated"], true);
         assert_eq!(structured["matches"], MAX_ENTRIES);
-        assert_eq!(structured["paths"].as_array().unwrap().len(), MAX_ENTRIES);
+    }
+
+    #[test]
+    fn structured_keeps_counts_but_not_the_path_list() {
+        let dir = tempfile::tempdir().unwrap();
+        populate(dir.path());
+        let out = run(dir.path(), serde_json::json!({"pattern":"**/*.rs"})).unwrap();
+        let structured = out.structured.unwrap();
+        assert!(structured.get("paths").is_none(), "{structured}");
+        assert_eq!(structured["matches"], 2);
+        assert_eq!(structured["truncated"], false);
     }
 
     #[test]

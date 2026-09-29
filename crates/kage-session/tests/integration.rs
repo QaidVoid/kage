@@ -287,7 +287,7 @@ fn search_indexes_assistant_text_and_user_prompts() {
     .unwrap();
     drop(w);
 
-    let hits = search(dir.path(), "migration").unwrap();
+    let hits = search(dir.path(), "migration", 100).unwrap();
     assert_eq!(hits.len(), 2);
     let parsed: Vec<_> = hits
         .iter()

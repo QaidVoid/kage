@@ -4,7 +4,8 @@
 //! matching line. The query is a regular expression; matching is done with
 //! the same engine that powers `ripgrep` (`grep-regex` + `grep-searcher`).
 //! Results carry the source path, the 1-based line number, and the raw
-//! matched line so the caller can render or further parse it.
+//! matched line so the caller can render or further parse it. The walk
+//! stops as soon as `max_hits` hits have been collected.
 
 use std::path::{Path, PathBuf};
 
@@ -35,11 +36,13 @@ impl SearchHit {
     }
 }
 
-/// Run `query` against every `*.jsonl` file in `dir` and return all hits.
+/// Run `query` against every `*.jsonl` file in `dir` and return up to
+/// `max_hits` hits.
 ///
 /// `query` is parsed as a regex. Hits are returned in directory-traversal
-/// order; within a single file they appear in line order.
-pub fn search(dir: &Path, query: &str) -> Result<Vec<SearchHit>, SessionError> {
+/// order; within a single file they appear in line order. Once `max_hits`
+/// hits have been collected, later files are not searched.
+pub fn search(dir: &Path, query: &str, max_hits: usize) -> Result<Vec<SearchHit>, SessionError> {
     let matcher = RegexMatcher::new(query).map_err(|err| SessionError::Io {
         path: dir.to_path_buf(),
         source: std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()),
@@ -66,16 +69,21 @@ pub fn search(dir: &Path, query: &str) -> Result<Vec<SearchHit>, SessionError> {
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
             continue;
         }
-        search_one(&matcher, &path, &mut hits)?;
+        if search_one(&matcher, &path, max_hits, &mut hits)? {
+            break;
+        }
     }
     Ok(hits)
 }
 
+/// Search one file, appending to `hits`. Returns `true` when `max_hits`
+/// was reached and the caller should stop walking.
 fn search_one(
     matcher: &RegexMatcher,
     path: &Path,
+    max_hits: usize,
     hits: &mut Vec<SearchHit>,
-) -> Result<(), SessionError> {
+) -> Result<bool, SessionError> {
     let file = std::fs::File::open(path).map_err(|err| SessionError::Io {
         path: path.to_path_buf(),
         source: err,
@@ -83,6 +91,8 @@ fn search_one(
     let mut sink = HitSink {
         path: path.to_path_buf(),
         hits,
+        max_hits,
+        capped: false,
     };
     Searcher::new()
         .search_file(matcher, &file, &mut sink)
@@ -90,18 +100,24 @@ fn search_one(
             path: path.to_path_buf(),
             source: std::io::Error::other(err.to_string()),
         })?;
-    Ok(())
+    Ok(sink.capped)
 }
 
 struct HitSink<'a> {
     path: PathBuf,
     hits: &'a mut Vec<SearchHit>,
+    max_hits: usize,
+    capped: bool,
 }
 
 impl Sink for HitSink<'_> {
     type Error = std::io::Error;
 
     fn matched(&mut self, _searcher: &Searcher, mat: &SinkMatch) -> Result<bool, Self::Error> {
+        if self.hits.len() >= self.max_hits {
+            self.capped = true;
+            return Ok(false);
+        }
         let line_no = mat
             .line_number()
             .ok_or_else(|| std::io::Error::error_message("line number unavailable"))?;
@@ -169,7 +185,7 @@ mod tests {
         write_session(&dir.path().join("a.jsonl"), "what is migration about");
         write_session(&dir.path().join("b.jsonl"), "let's add a feature");
 
-        let hits = search(dir.path(), "migration").unwrap();
+        let hits = search(dir.path(), "migration", 100).unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].line.contains("migration about"));
     }
@@ -178,7 +194,7 @@ mod tests {
     fn search_returns_empty_for_no_match() {
         let dir = tempdir().unwrap();
         write_session(&dir.path().join("a.jsonl"), "hello world");
-        let hits = search(dir.path(), "absent").unwrap();
+        let hits = search(dir.path(), "absent", 100).unwrap();
         assert!(hits.is_empty());
     }
 
@@ -188,7 +204,7 @@ mod tests {
         write_session(&dir.path().join("a.jsonl"), "fix bug 1234");
         write_session(&dir.path().join("b.jsonl"), "fix typo");
 
-        let hits = search(dir.path(), r"bug \d+").unwrap();
+        let hits = search(dir.path(), r"bug \d+", 100).unwrap();
         assert_eq!(hits.len(), 1);
     }
 
@@ -197,14 +213,14 @@ mod tests {
         let dir = tempdir().unwrap();
         write_session(&dir.path().join("real.jsonl"), "alpha");
         std::fs::write(dir.path().join("notes.txt"), b"alpha\n").unwrap();
-        let hits = search(dir.path(), "alpha").unwrap();
+        let hits = search(dir.path(), "alpha", 100).unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].path.ends_with("real.jsonl"));
     }
 
     #[test]
     fn search_returns_empty_for_missing_dir() {
-        let hits = search(Path::new("/nonexistent/dir/here"), "x").unwrap();
+        let hits = search(Path::new("/nonexistent/dir/here"), "x", 100).unwrap();
         assert!(hits.is_empty());
     }
 
@@ -213,7 +229,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("a.jsonl");
         write_session(&path, "decode me");
-        let hits = search(dir.path(), "decode").unwrap();
+        let hits = search(dir.path(), "decode", 100).unwrap();
         let entry = hits[0].entry().expect("decode succeeds");
         assert!(matches!(entry, SessionEntry::Message(_)));
     }
@@ -222,7 +238,40 @@ mod tests {
     fn invalid_regex_errors() {
         let dir = tempdir().unwrap();
         write_session(&dir.path().join("a.jsonl"), "hi");
-        let err = search(dir.path(), "(unbalanced").unwrap_err();
+        let err = search(dir.path(), "(unbalanced", 100).unwrap_err();
         assert!(matches!(err, SessionError::Io { .. }));
+    }
+
+    #[test]
+    fn search_stops_at_max_hits() {
+        let dir = tempdir().unwrap();
+        {
+            let mut w = SessionWriter::create(dir.path().join("a.jsonl"), fresh_header()).unwrap();
+            for i in 0..30 {
+                w.append(&message_entry(Role::User, &format!("needle {i}")))
+                    .unwrap();
+            }
+        }
+        let hits = search(dir.path(), "needle", 10).unwrap();
+        assert_eq!(hits.len(), 10);
+        assert_eq!(hits[0].line_no, 2);
+        assert_eq!(hits[9].line_no, 11);
+    }
+
+    #[test]
+    fn search_cap_stops_across_files() {
+        let dir = tempdir().unwrap();
+        write_session(&dir.path().join("a.jsonl"), "needle one");
+        write_session(&dir.path().join("b.jsonl"), "needle two");
+        let hits = search(dir.path(), "needle", 1).unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn search_with_zero_cap_returns_no_hits() {
+        let dir = tempdir().unwrap();
+        write_session(&dir.path().join("a.jsonl"), "needle");
+        let hits = search(dir.path(), "needle", 0).unwrap();
+        assert!(hits.is_empty());
     }
 }

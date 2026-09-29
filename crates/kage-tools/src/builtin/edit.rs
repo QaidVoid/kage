@@ -8,8 +8,10 @@
 //!    precise line range `{range: {start, end}, text}` (1-based, inclusive).
 //!
 //! The tool validates that no two resulting byte ranges overlap before
-//! writing anything, so a partial apply never lands on disk.
+//! writing anything, so a partial apply never lands on disk. Files over
+//! the read cap are refused instead of loaded.
 
+use std::io::Read;
 use std::path::Path;
 
 use kage_core::{Risk, ToolOutput};
@@ -19,6 +21,10 @@ use similar::TextDiff;
 
 use crate::atomic::atomic_write;
 use crate::{Tool, ToolContext, ToolError, schema_for};
+
+/// Files larger than this are refused; loading one for a single edit
+/// would otherwise slurp the whole file into memory.
+const MAX_EDIT_BYTES: u64 = 2_000_000;
 
 /// Input shape for the `edit` tool. Accepts either the shorthand
 /// single-substring form or the multi-change form.
@@ -110,7 +116,31 @@ impl Tool for EditTool {
     ) -> Result<ToolOutput, ToolError> {
         let input: EditInput = serde_json::from_value(input)?;
         let path = cx.resolve_path(Path::new(&input.path))?;
-        let original = std::fs::read_to_string(&path).map_err(ToolError::io_at("read", &path))?;
+        let file = std::fs::File::open(&path).map_err(ToolError::io_at("read", &path))?;
+        let total_bytes = file
+            .metadata()
+            .map_err(ToolError::io_at("read", &path))?
+            .len();
+        if total_bytes > MAX_EDIT_BYTES {
+            return Ok(error(
+                &input.path,
+                format!(
+                    "cannot edit `{}`: the file is {total_bytes} bytes; the edit \
+                     tool refuses files over {MAX_EDIT_BYTES} bytes",
+                    input.path
+                ),
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_EDIT_BYTES)
+            .read_to_end(&mut bytes)
+            .map_err(ToolError::io_at("read", &path))?;
+        let original = String::from_utf8(bytes).map_err(|_| {
+            ToolError::io_at("read", &path)(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "stream did not contain valid UTF-8",
+            ))
+        })?;
 
         // Edits are applied in normalized LF space and the file's own
         // line ending is re-applied afterwards, so a multi-line
@@ -750,6 +780,24 @@ mod tests {
         assert!(diff.contains("+ONE"));
         assert!(diff.contains("-three"));
         assert!(diff.contains("+THREE"));
+    }
+
+    #[test]
+    fn oversized_file_is_refused_without_editing() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = format!("{}\n", "x".repeat(usize::try_from(MAX_EDIT_BYTES).unwrap()));
+        fs::write(dir.path().join("big.txt"), &big).unwrap();
+        let out = run(
+            dir.path(),
+            serde_json::json!({"path":"big.txt","old_str":"x","new_str":"y"}),
+        )
+        .unwrap();
+        assert!(out.is_error, "got {out:?}");
+        assert!(
+            out.text
+                .contains("the edit tool refuses files over 2000000 bytes")
+        );
+        assert_eq!(fs::read_to_string(dir.path().join("big.txt")).unwrap(), big);
     }
 
     #[test]

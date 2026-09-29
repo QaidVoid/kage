@@ -120,7 +120,6 @@ impl Tool for LsTool {
             structured: Some(serde_json::json!({
                 "count": count,
                 "truncated": truncated,
-                "entries": entries,
             })),
             terminate: false,
         })
@@ -226,7 +225,18 @@ mod tests {
         let structured = out.structured.unwrap();
         assert_eq!(structured["truncated"], true);
         assert_eq!(structured["count"], MAX_ENTRIES);
-        assert_eq!(structured["entries"].as_array().unwrap().len(), MAX_ENTRIES);
+    }
+
+    #[test]
+    fn structured_keeps_counts_but_not_the_entry_list() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "x").unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        let out = run(dir.path(), serde_json::json!({})).unwrap();
+        let structured = out.structured.unwrap();
+        assert!(structured.get("entries").is_none(), "{structured}");
+        assert_eq!(structured["count"], 2);
+        assert_eq!(structured["truncated"], false);
     }
 
     #[test]

@@ -151,6 +151,10 @@ pub(crate) fn run_resume(
     exit
 }
 
+/// Upper bound on `kage search` hits; keeps huge session dirs from
+/// flooding the terminal.
+const MAX_SEARCH_HITS: usize = 200;
+
 /// Implement `kage search <query>`: regex-grep across the sessions dir and
 /// render each hit as `<file>:<line>: <text>`.
 pub(crate) fn run_search(query: &str) -> ExitCode {
@@ -161,7 +165,7 @@ pub(crate) fn run_search(query: &str) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let hits = match kage_session::search(&dir, query) {
+    let hits = match kage_session::search(&dir, query, MAX_SEARCH_HITS) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("kage: search failed: {e}");

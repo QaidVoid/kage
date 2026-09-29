@@ -134,10 +134,11 @@ impl PromptContext {
 }
 
 /// Emit a `session/update` notification for `session_id` on `peer`.
+/// The update is converted into the wire union, its serde form.
 pub fn send_update(peer: &Peer, session_id: &str, update: SessionUpdate) {
     let note = SessionNotification {
         session_id: session_id.to_owned(),
-        update,
+        update: update.into(),
     };
     if let Ok(params) = serde_json::to_value(&note) {
         let _ = peer.notify("session/update", params);

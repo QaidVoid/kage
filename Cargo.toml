@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "crates/kage-acp",
+  "crates/kage-acp-wire",
   "crates/kage-cli",
   "crates/kage-core",
   "crates/kage-jsonrpc",
@@ -29,6 +30,7 @@ categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 kage-acp = { path = "crates/kage-acp" }
+kage-acp-wire = { path = "crates/kage-acp-wire" }
 kage-core = { path = "crates/kage-core" }
 kage-jsonrpc = { path = "crates/kage-jsonrpc" }
 kage-loop = { path = "crates/kage-loop" }

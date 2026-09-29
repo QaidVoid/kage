@@ -36,6 +36,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
+use kage_acp_wire::schema::{SessionNotification, SessionUpdate};
 use kage_core::{CancelFlag, Content, Message, Role, TokenUsage, sync::lock};
 use kage_jsonrpc::{Inbound, Peer, RpcError, connect};
 use kage_provider::{
@@ -46,8 +47,7 @@ use kage_provider::{
 use crate::acp::{
     ClientCapabilities, ContentBlock, Implementation, InitializeRequest, NewSessionRequest,
     PROTOCOL_VERSION, PermissionOption, PermissionOptionKind, PermissionOutcome, PromptRequest,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedOption, SessionNotification,
-    SessionUpdate,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedOption,
 };
 use crate::agent::PermissionDecision;
 
@@ -492,6 +492,7 @@ mod tests {
     use super::*;
     use crate::acp::{
         AgentCapabilities, InitializeResponse, MessageChunk, NewSessionResponse, PromptResponse,
+        SessionUpdate,
     };
     use crate::agent::{Agent, PromptContext, serve_agent};
 

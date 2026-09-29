@@ -1732,12 +1732,21 @@ dependencies = [
 name = "kage-acp"
 version = "0.1.0"
 dependencies = [
+ "kage-acp-wire",
  "kage-core",
  "kage-jsonrpc",
  "kage-provider",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "kage-acp-wire"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

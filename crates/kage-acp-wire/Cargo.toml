@@ -1,6 +1,6 @@
 [package]
-name = "kage-acp"
-description = "Agent Client Protocol server adapter for kage."
+name = "kage-acp-wire"
+description = "Agent Client Protocol wire schema for kage, shared by native and wasm clients."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,10 +15,5 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
-kage-acp-wire.workspace = true
-kage-core.workspace = true
-kage-jsonrpc.workspace = true
-kage-provider.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true

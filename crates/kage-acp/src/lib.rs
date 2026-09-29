@@ -1,6 +1,8 @@
 //! Spec-conformant Agent Client Protocol over stdio.
 //!
-//! Layering: depends on `kage-core`, `kage-jsonrpc`, and `kage-provider`.
+//! Layering: depends on `kage-core`, `kage-jsonrpc`, and `kage-provider`;
+//! the serde-only wire schema lives in [`kage_acp_wire`] and is
+//! re-exported by [`acp`].
 //!
 //! Built bottom-up on the shared [`kage_jsonrpc`] bidirectional peer:
 //! [`acp`] is the protocol's wire schema (protocol version 1);

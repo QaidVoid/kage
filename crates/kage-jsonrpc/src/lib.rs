@@ -48,6 +48,13 @@ pub mod testing;
 /// line is answered with a -32700 error and the connection closes.
 const MAX_LINE: u64 = 8 * 1024 * 1024;
 
+/// Inbound messages the reader thread may queue for the owner before
+/// `send` blocks it, so a chatty peer cannot grow the queue without
+/// bound. Response routing bypasses this channel and answers the
+/// waiting caller directly, so a blocked reader cannot deadlock a
+/// request the owner is waiting on.
+const INBOUND_CAP: usize = 256;
+
 /// A JSON-RPC error object (`code` / `message`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("jsonrpc error {code}: {message}")]
@@ -377,7 +384,7 @@ where
         next_id: Arc::new(AtomicI64::new(1)),
         cancel_notice,
     };
-    let (in_tx, in_rx) = mpsc::channel();
+    let (in_tx, in_rx) = mpsc::sync_channel::<Inbound>(INBOUND_CAP);
     let reader_peer = ReaderPeer {
         writer: Arc::downgrade(&writer),
     };
@@ -432,7 +439,7 @@ fn reply_error(
 fn route_line(
     peer: &ReaderPeer,
     pending: &Pending,
-    in_tx: &mpsc::Sender<Inbound>,
+    in_tx: &mpsc::SyncSender<Inbound>,
     line: &str,
 ) -> bool {
     let value = match serde_json::from_str::<serde_json::Value>(line) {
@@ -855,5 +862,22 @@ mod tests {
         // line was dropped, not answered with -32600.
         assert!(reply.contains("-32700"), "{reply}");
         assert!(reply.contains("parse error"), "{reply}");
+    }
+
+    /// The reader parks on the full inbound queue instead of queueing
+    /// every line the peer sends, and no queued message is lost.
+    #[test]
+    fn the_inbound_queue_is_bounded_and_keeps_every_message() {
+        let line = "{\"jsonrpc\":\"2.0\",\"method\":\"n\"}\n";
+        let total = INBOUND_CAP + 44;
+        let (_peer, inbound, handle) =
+            connect(std::io::Cursor::new(line.repeat(total)), std::io::sink());
+        // At EOF an unbounded channel would have let the reader parse
+        // everything and exit; bounded, it waits on the blocked send.
+        thread::sleep(Duration::from_millis(500));
+        assert!(!handle.is_finished());
+        let got = std::iter::from_fn(|| inbound.recv_timeout(Duration::from_secs(5)).ok()).count();
+        assert_eq!(got, total);
+        handle.join().unwrap();
     }
 }

@@ -189,6 +189,11 @@ impl LuaHost {
         self.inner.state.in_flight.load(Ordering::SeqCst) == 0
     }
 
+    /// Number of jobs queued or running on the owner thread.
+    pub(crate) fn in_flight(&self) -> usize {
+        self.inner.state.in_flight.load(Ordering::SeqCst)
+    }
+
     /// Record that a render skipped a recompute because the owner was
     /// busy. The redraw flag is set once the queue drains, so the host
     /// renders again and the recompute happens then.

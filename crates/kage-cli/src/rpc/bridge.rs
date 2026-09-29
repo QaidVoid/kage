@@ -24,6 +24,12 @@ use super::options::{Settings, config_options};
 use super::{Held, Ids, PromptEnd, ShownBySession, Waiters};
 use crate::engine::Commander;
 
+/// Updates buffered for one unannounced client session before later
+/// ones are dropped. A client that opens a session but never announces
+/// it would otherwise pin every update it generates, full tool
+/// outputs included, for as long as the connection lives.
+pub(super) const HELD_CAP: usize = 4096;
+
 /// Turns engine events into ACP traffic for the sessions a client opened
 /// and the agents under them.
 pub(super) struct Bridge {
@@ -164,7 +170,7 @@ impl Bridge {
     fn send(&self, session: SessionId, client_id: &str, update: SessionUpdate) {
         let mut held = lock(&self.held);
         if let Some(updates) = held.get_mut(&session) {
-            updates.push(update);
+            hold(updates, update);
             return;
         }
         drop(held);
@@ -231,6 +237,7 @@ impl Bridge {
             if let Some(waiter) = lock(&self.waiters).remove(&session) {
                 let _ = waiter.send(end);
             }
+            self.prune_tree(session);
             return;
         }
         lock(&self.ids).subagents.remove(&session.to_string());
@@ -254,6 +261,23 @@ impl Bridge {
             );
         }
         self.settle(parent);
+    }
+
+    /// Forgets the agents under a client session whose run just
+    /// settled. Every member is terminal by then, so the nodes, each
+    /// carrying its agent's latest tool input, would otherwise outlive
+    /// the agents they describe. A later run re-announces its agents
+    /// with fresh `AgentSpawned` envelopes.
+    fn prune_tree(&mut self, session: SessionId) {
+        let roots: Vec<SessionId> = self
+            .tree
+            .under(session)
+            .into_iter()
+            .filter_map(|(depth, node)| (depth == 1).then_some(node.session))
+            .collect();
+        for root in roots {
+            self.tree.remove_subtree(root);
+        }
     }
 
     /// Shows an agent's activity as the content of the root session's
@@ -379,6 +403,18 @@ impl Bridge {
             let _ = ask.thread.join();
         }
     }
+}
+
+/// Buffers `update` for an unannounced session, keeping the first
+/// [`HELD_CAP`] and dropping later ones. The early updates are the
+/// ones a client replays first; nothing here is worth an unbounded
+/// buffer on a session that never announces.
+pub(super) fn hold(updates: &mut Vec<SessionUpdate>, update: SessionUpdate) -> bool {
+    if updates.len() >= HELD_CAP {
+        return false;
+    }
+    updates.push(update);
+    true
 }
 
 /// The tool call a permission request for `tool` shows.

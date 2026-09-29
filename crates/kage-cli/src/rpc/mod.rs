@@ -152,7 +152,8 @@ type ShownBySession = Arc<Mutex<HashMap<SessionId, Shown>>>;
 
 /// Updates for client sessions whose opening response is not written
 /// yet. Sending them earlier would reach the client before it knows the
-/// session.
+/// session. Capped per session at [`bridge::HELD_CAP`]; later updates
+/// are dropped.
 type Held = Arc<Mutex<HashMap<SessionId, Vec<SessionUpdate>>>>;
 
 /// Builds the engine session for a client session from its id, working

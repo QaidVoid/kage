@@ -250,3 +250,25 @@ fn notify_event_returns_before_its_handler_runs() {
     busy.open();
     assert_eq!(rt.eval("return hits").unwrap().as_integer(), Some(2));
 }
+
+#[test]
+fn queued_repeats_of_one_event_coalesce_into_the_newest_payload() {
+    let rt = PluginRuntime::new().unwrap();
+    rt.eval(
+        "seen = {};\
+         kage.on('turn_start', function(p) seen[#seen + 1] = 'a' .. p.n end);\
+         kage.on('turn_end', function() seen[#seen + 1] = 'b' end)",
+    )
+    .unwrap();
+    let busy = occupy(&rt.host);
+    rt.notify_event("turn_start", &json!({ "n": 1 })).unwrap();
+    rt.notify_event("turn_end", &json!({})).unwrap();
+    rt.notify_event("turn_start", &json!({ "n": 2 })).unwrap();
+    busy.assert_held();
+    busy.open();
+    let seen = match rt.eval("return table.concat(seen, ',')").unwrap() {
+        mlua::Value::String(s) => s.to_str().unwrap().to_owned(),
+        other => panic!("expected a string, got {other:?}"),
+    };
+    assert_eq!(seen, "a2,b");
+}

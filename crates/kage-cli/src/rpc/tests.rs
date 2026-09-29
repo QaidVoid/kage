@@ -1495,6 +1495,35 @@ fn kind(update: &SessionUpdate) -> &'static str {
     }
 }
 
+/// The per-session held buffer keeps the first updates and drops
+/// later ones, so an unannounced session cannot grow it without
+/// bound.
+#[test]
+fn held_updates_stop_at_a_hard_cap() {
+    use super::bridge::{HELD_CAP, hold};
+    use kage_acp::acp::{ContentBlock, MessageChunk};
+
+    let held = Held::default();
+    let session = SessionId::new();
+    lock(&held).insert(session, Vec::new());
+    let chunk = |n: u64| {
+        SessionUpdate::AgentMessageChunk(MessageChunk {
+            content: ContentBlock::text(n.to_string()),
+        })
+    };
+    let kept = (0..HELD_CAP as u64 + 100)
+        .filter(|n| {
+            let mut held = lock(&held);
+            hold(held.get_mut(&session).unwrap(), chunk(*n))
+        })
+        .count();
+    assert_eq!(kept, HELD_CAP);
+    let updates = lock(&held).remove(&session).unwrap();
+    assert_eq!(updates.len(), HELD_CAP);
+    assert_eq!(updates[0], chunk(0));
+    assert_eq!(updates.last().unwrap(), &chunk(HELD_CAP as u64 - 1));
+}
+
 fn status(update: &SessionUpdate) -> Option<ToolCallStatus> {
     match update {
         SessionUpdate::ToolCall(call) => Some(call.status),

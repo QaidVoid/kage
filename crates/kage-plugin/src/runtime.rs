@@ -148,6 +148,20 @@ pub struct PluginRuntime {
     /// Pending `session_write` reseat request (`switch`/`fork_to`),
     /// drained by the host.
     switch_request: SharedSwitchRequest,
+    /// Queued `notify_event` payloads not yet picked up by the owner
+    /// thread, keyed by event name. See [`Self::notify_event`].
+    pending_notifies: PendingNotifies,
+}
+
+/// Queued `notify_event` payloads not yet picked up by the owner
+/// thread, keyed by event name. At most one dispatch job per name sits
+/// in the queue; later calls replace its payload, so a lagging owner
+/// coalesces repeats instead of accumulating them.
+pub(crate) type PendingNotifies = Arc<Mutex<HashMap<String, serde_json::Value>>>;
+
+/// Shared slot for [`PendingNotifies`].
+pub(crate) fn shared_pending_notifies() -> PendingNotifies {
+    Arc::default()
 }
 
 /// Plugin evaluation settings and per-plugin environments, shared with

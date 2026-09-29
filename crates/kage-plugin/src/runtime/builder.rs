@@ -229,6 +229,7 @@ impl PluginRuntimeBuilder {
         acp::register(&cap_registry, Arc::clone(&acp_agents));
         let session_entries = session_write::shared_session_entries();
         let switch_request = session_write::shared_switch_request();
+        let pending_notifies = shared_pending_notifies();
         session_write::register(
             &cap_registry,
             Arc::clone(&session_entries),
@@ -360,6 +361,7 @@ impl PluginRuntimeBuilder {
             options,
             session_entries,
             switch_request,
+            pending_notifies,
         })
     }
 }

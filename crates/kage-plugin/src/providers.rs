@@ -88,6 +88,12 @@ const ERROR_FIELD_SEP: char = '\u{1}';
 /// that came from a Lua raise.
 const TRACEBACK_MARKER: &str = "\nstack traceback:";
 
+/// Events the stream channel buffers before `emit` blocks the owner
+/// thread. A lagging consumer therefore applies backpressure to a
+/// plugin handler, the way a slow HTTP provider would, instead of
+/// letting a fast emitter buffer without bound.
+const STREAM_CHANNEL_CAP: usize = 64;
+
 /// Every kind `typed_error` accepts, named in the error a typo
 /// produces.
 const ERROR_KINDS: &str = "transport, rate_limited, http, auth, unknown_model, decode";
@@ -236,7 +242,8 @@ impl Provider for LuaProvider {
         }
         let req_value = serde_json::to_value(&req)
             .map_err(|e| ProviderError::Decode(format!("plugin provider: encode request: {e}")))?;
-        let (tx, rx) = mpsc::channel::<Result<ProviderEvent, ProviderError>>();
+        let (tx, rx) =
+            mpsc::sync_channel::<Result<ProviderEvent, ProviderError>>(STREAM_CHANNEL_CAP);
         let handler_key = self.handler_key.clone();
         let sink = self.sink.clone();
         let worker_cancel = cancel.clone();
@@ -269,8 +276,10 @@ impl Provider for LuaProvider {
 }
 
 /// Channel-backed iterator returned from [`LuaProvider::stream`]. The
-/// receiver blocks on `recv()` until the owner-thread job either sends
-/// an event or drops the sender (which fuses the iterator).
+/// channel holds at most [`STREAM_CHANNEL_CAP`] events, so an `emit`
+/// call blocks the owner thread while the consumer lags. The receiver
+/// blocks on `recv()` until the owner-thread job either sends an event
+/// or drops the sender (which fuses the iterator).
 struct ChannelStream {
     rx: mpsc::Receiver<Result<ProviderEvent, ProviderError>>,
 }
@@ -304,7 +313,7 @@ fn run_handler(
     sink: &SharedHostLog,
     req: &serde_json::Value,
     cancel: &CancelFlag,
-    tx: mpsc::Sender<Result<ProviderEvent, ProviderError>>,
+    tx: mpsc::SyncSender<Result<ProviderEvent, ProviderError>>,
 ) -> Result<(), PluginError> {
     let handler: Function = lua.registry_value(handler_key)?;
     let lua_req = json_to_lua(lua, req)?;

@@ -7,9 +7,10 @@
 //! pinned under the host workdir via [`kage_tools::resolve_under`]
 //! (the same escape check `kage.fs` uses). The call blocks until the
 //! process exits or `timeout_secs` elapses (default 30) and returns
-//! its captured output plus a `timed_out` flag, the way
+//! its captured output plus `timed_out` and `truncated` flags, the way
 //! `kage.http.get` blocks; a rewind plugin uses it to snapshot files
-//! with `git` between turns.
+//! with `git` between turns. Each stream keeps at most 1 MB; output
+//! past that is dropped and the `truncated` flag is set.
 //!
 //! The `exec` grant is coarse and all-or-nothing: there is no command
 //! allowlist and no per-command scoping. A granted plugin may run any
@@ -36,6 +37,24 @@ const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How often the waiter polls the child while it runs.
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Output bytes kept per stream before the rest is dropped and the
+/// result's `truncated` flag is set.
+const EXEC_OUTPUT_MAX: u64 = 1024 * 1024;
+
+/// Read one pipe up to [`EXEC_OUTPUT_MAX`], reporting whether more
+/// output was dropped.
+fn drain(pipe: impl Read) -> (Vec<u8>, bool) {
+    let mut buf = Vec::new();
+    let mut taken = pipe.take(EXEC_OUTPUT_MAX + 1);
+    let _ = taken.read_to_end(&mut buf);
+    let cap = usize::try_from(EXEC_OUTPUT_MAX).unwrap_or(usize::MAX);
+    let truncated = buf.len() > cap;
+    if truncated {
+        buf.truncate(cap);
+    }
+    (buf, truncated)
+}
 
 /// Register the `exec` installer into `registry`.
 ///
@@ -89,20 +108,8 @@ pub(crate) fn register(registry: &CapabilityRegistry, workdir: PathBuf) {
                     // full pipe while we are waiting for it to exit.
                     let stdout_pipe = child.stdout.take();
                     let stderr_pipe = child.stderr.take();
-                    let stdout_thread = stdout_pipe.map(|mut pipe| {
-                        thread::spawn(move || {
-                            let mut buf = Vec::new();
-                            let _ = pipe.read_to_end(&mut buf);
-                            buf
-                        })
-                    });
-                    let stderr_thread = stderr_pipe.map(|mut pipe| {
-                        thread::spawn(move || {
-                            let mut buf = Vec::new();
-                            let _ = pipe.read_to_end(&mut buf);
-                            buf
-                        })
-                    });
+                    let stdout_thread = stdout_pipe.map(|pipe| thread::spawn(move || drain(pipe)));
+                    let stderr_thread = stderr_pipe.map(|pipe| thread::spawn(move || drain(pipe)));
 
                     let deadline = Instant::now() + timeout;
                     let mut timed_out = false;
@@ -128,15 +135,16 @@ pub(crate) fn register(registry: &CapabilityRegistry, workdir: PathBuf) {
                         }
                     };
 
-                    let stdout = stdout_thread
+                    let (stdout, stdout_truncated) = stdout_thread
                         .map(|h| h.join().unwrap_or_default())
                         .unwrap_or_default();
-                    let stderr = stderr_thread
+                    let (stderr, stderr_truncated) = stderr_thread
                         .map(|h| h.join().unwrap_or_default())
                         .unwrap_or_default();
                     let out = lua.create_table()?;
                     out.set("code", status.code().unwrap_or(-1))?;
                     out.set("timed_out", timed_out)?;
+                    out.set("truncated", stdout_truncated || stderr_truncated)?;
                     out.set("stdout", lua.create_string(&stdout)?)?;
                     out.set("stderr", lua.create_string(&stderr)?)?;
                     Ok(out)
@@ -230,6 +238,20 @@ mod tests {
                 "p",
                 "kage.request_capabilities({'exec'}); \
                  return kage.exec({ cmd = 'true' }).timed_out == false",
+            )
+            .unwrap();
+        assert_eq!(v.as_boolean(), Some(true));
+    }
+
+    #[test]
+    fn exec_truncates_output_past_the_cap_and_sets_the_flag() {
+        let rt = rt_with_exec();
+        let v = rt
+            .eval_plugin(
+                "p",
+                "kage.request_capabilities({'exec'}); \
+                 local r = kage.exec({ cmd = 'head', args = { '-c', '2097152', '/dev/zero' } }); \
+                 return r.truncated and r.stdout:len() == 1048576 and r.stderr:len() == 0",
             )
             .unwrap();
         assert_eq!(v.as_boolean(), Some(true));

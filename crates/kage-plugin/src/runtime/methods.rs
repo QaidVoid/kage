@@ -136,6 +136,13 @@ impl PluginRuntime {
     /// handlers' side effects right away. Handler errors go to the host
     /// log. Jobs keep submission order, so a later [`Self::dispatch_event`]
     /// runs after this one. With no subscriber nothing is queued.
+    ///
+    /// At most one queued dispatch per event name is held: while the
+    /// owner thread is still busy, a repeat notification replaces the
+    /// stale queued payload instead of queueing another copy, so an
+    /// event fired per keystroke or per delta cannot pile up. Handlers
+    /// that must see every occurrence of an event need a caller that
+    /// dispatches synchronously.
     pub fn notify_event(
         &self,
         event_name: &str,
@@ -144,19 +151,58 @@ impl PluginRuntime {
         if self.handler_count(event_name) == 0 {
             return Ok(());
         }
-        let (name, payload) = (event_name.to_owned(), payload.clone());
-        let (sink, budget) = (self.sink(), self.eval.script_budget);
+        let queued = {
+            let mut pending = lock(&self.pending_notifies);
+            pending
+                .insert(event_name.to_owned(), payload.clone())
+                .is_none()
+        };
+        if !queued {
+            return Ok(());
+        }
+        let name = event_name.to_owned();
+        let (pending, sink, budget) = (
+            Arc::clone(&self.pending_notifies),
+            self.sink(),
+            self.eval.script_budget,
+        );
         self.host.submit(move |lua| {
-            let result = watchdog::run(lua, budget, || {
-                events::dispatch(lua, &name, &payload, &sink)
-            });
-            if let Err(err) = result {
-                lock(&sink).log(
-                    crate::api::LogLevel::Error,
-                    &format!("{name} dispatch: {err}"),
-                );
+            if let Some(payload) = lock(&pending).remove(&name) {
+                let result = watchdog::run(lua, budget, || {
+                    events::dispatch(lua, &name, &payload, &sink)
+                });
+                if let Err(err) = result {
+                    lock(&sink).log(
+                        crate::api::LogLevel::Error,
+                        &format!("{name} dispatch: {err}"),
+                    );
+                }
             }
-        })
+        })?;
+        self.warn_queue_depth();
+        Ok(())
+    }
+
+    /// Queue depth past which [`Self::notify_event`] warns that the
+    /// owner thread is falling behind.
+    const QUEUE_WARN_DEPTH: usize = 128;
+
+    /// Warn through the sink when the owner-thread queue keeps
+    /// growing past [`Self::QUEUE_WARN_DEPTH`]: the host is producing
+    /// jobs faster than handlers run them.
+    fn warn_queue_depth(&self) {
+        let depth = self.host.in_flight();
+        if depth > Self::QUEUE_WARN_DEPTH {
+            let sink = self.sink();
+            lock(&sink).log(
+                crate::api::LogLevel::Warn,
+                &format!(
+                    "plugin event queue depth {depth} exceeds {}; \
+                     the Lua owner thread is running behind",
+                    Self::QUEUE_WARN_DEPTH
+                ),
+            );
+        }
     }
 
     /// Chain every handler subscribed to `event_name` and return the

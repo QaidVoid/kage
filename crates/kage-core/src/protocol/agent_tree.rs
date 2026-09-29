@@ -6,7 +6,7 @@
 //! client can route agent events and show what each agent is doing. It
 //! holds [`Instant`]s, so it lives in memory only and is never serialized.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use super::{Envelope, Event, HostEvent, RunOutcome, SessionId, SwarmMember, TokenUsage, Usage};
@@ -257,6 +257,31 @@ impl AgentTree {
     pub fn clear(&mut self) {
         self.nodes.clear();
         self.index.clear();
+    }
+
+    /// Forget `root` and every agent under it. A root that is not an
+    /// agent removes nothing, so pruning an already-gone subtree is a
+    /// no-op.
+    pub fn remove_subtree(&mut self, root: SessionId) {
+        if !self.index.contains_key(&root) {
+            return;
+        }
+        let mut doomed: HashSet<SessionId> = HashSet::from([root]);
+        let mut stack = vec![root];
+        while let Some(session) = stack.pop() {
+            for node in &self.nodes {
+                if node.parent == session && doomed.insert(node.session) {
+                    stack.push(node.session);
+                }
+            }
+        }
+        self.nodes.retain(|node| !doomed.contains(&node.session));
+        self.index = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, node)| (node.session, i))
+            .collect();
     }
 
     /// Add `node` unless its session is known or its parent sits in
@@ -746,5 +771,37 @@ mod tests {
         assert!(tree.get(child).is_none());
         assert!(tree.under(root).is_empty());
         assert!(!tree.apply(&envelope(child, HostEvent::RunStarted)));
+    }
+
+    #[test]
+    fn remove_subtree_forgets_a_branch_and_keeps_the_rest() {
+        let mut tree = AgentTree::default();
+        let root = SessionId::new();
+        let first = spawn(&mut tree, root, "general");
+        let second = spawn(&mut tree, root, "explore");
+        let nested = spawn(&mut tree, first, "test");
+        spawn(&mut tree, SessionId::new(), "other");
+
+        tree.remove_subtree(first);
+        assert!(tree.get(first).is_none());
+        assert!(tree.get(nested).is_none());
+        assert!(!tree.apply(&envelope(nested, HostEvent::RunStarted)));
+        let rows: Vec<(usize, SessionId)> = tree
+            .under(root)
+            .into_iter()
+            .map(|(depth, node)| (depth, node.session))
+            .collect();
+        assert_eq!(rows, [(1, second)]);
+        // The kept branch still folds envelopes.
+        assert!(tree.apply(&envelope(second, HostEvent::RunStarted)));
+        assert_eq!(tree.get(second).unwrap().state, AgentState::Running);
+
+        // A node without children removes just itself, and an unknown
+        // root removes nothing.
+        let lone = spawn(&mut tree, SessionId::new(), "lone");
+        tree.remove_subtree(lone);
+        assert!(tree.get(lone).is_none());
+        tree.remove_subtree(lone);
+        assert!(tree.get(second).is_some());
     }
 }

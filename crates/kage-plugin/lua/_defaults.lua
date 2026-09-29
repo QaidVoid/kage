@@ -17,7 +17,7 @@ kage.ui.set_slot("footer", {
 
 local tips = {
   "Press tab to queue a message while kage works, or enter to steer the running turn.",
-  "Press alt+up to pull a sent prompt back out of the queue and edit it.",
+  "Press up to pull a sent prompt back out of the queue and edit it.",
   "Press ctrl+f to search the conversation, then up and down to walk the matches.",
   "Press shift+enter for a newline, or ctrl+g to edit the prompt in $EDITOR.",
   "Press ctrl+o to fold the focused block, and alt+p or alt+n to move the focus.",
@@ -45,7 +45,6 @@ map("g", "<S-Tab>", act.TogglePlanMode, { desc = "toggle plan mode", group = "ge
 map("g", "<M-t>", act.CycleThinkingLevel, { desc = "cycle thinking level", group = "general" })
 map("g", "<C-v>", act.AttachClipboardImage, { desc = "attach image from clipboard", group = "general" })
 map("i", "<Tab>", act.QueuePrompt, { desc = "queue the prompt until the run ends", group = "general" })
-map("i", "<M-Up>", act.RecallPrompt, { desc = "pull the last queued prompt back to edit", group = "general" })
 map("i", "<C-f>", act.BeginSearch, { desc = "search the conversation", group = "general" })
 
 local conversation = "conversation"

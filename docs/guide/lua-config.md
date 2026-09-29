@@ -230,8 +230,9 @@ mapping.
 
 `RecallPrompt` takes the newest prompt waiting above the input back
 out of the engine queue and puts it in the editor to edit, images
-included. While nothing is pending it does nothing. The default
-`<M-Up>` mapping never fires while idle.
+included. While nothing is pending it does nothing. It has no default
+mapping: `Up` on the draft's top row does the same while a prompt is
+pending, and walks the history otherwise.
 
 `opts` takes `desc` and `group`. The `?` reference lists every mapping
 that has a `desc`, under its `group` (`other` when unset). Mappings

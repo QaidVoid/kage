@@ -308,6 +308,9 @@ pub struct InputState {
     history: Vec<String>,
     history_cursor: Option<usize>,
     history_stash: Option<String>,
+    /// Whether a sent prompt waits in the engine queue, so `Up` at the
+    /// top of the draft takes it back before it walks the history.
+    recallable: bool,
     focused_pane: Pane,
     /// Shell-escape mode: `!` on an empty prompt arms it; the next
     /// submit runs the line as a shell command instead of a prompt.
@@ -379,6 +382,7 @@ impl Default for InputState {
             history: Vec::new(),
             history_cursor: None,
             history_stash: None,
+            recallable: false,
             focused_pane: Pane::default(),
             shell: false,
             pending_op: None,

@@ -22,6 +22,13 @@ impl InputState {
         self.mode
     }
 
+    /// Record whether a sent prompt waits in the engine queue. While
+    /// one does, `Up` on the draft's top row asks for it back
+    /// ([`InputAction::RecallPrompt`]) instead of walking the history.
+    pub fn set_recallable(&mut self, on: bool) {
+        self.recallable = on;
+    }
+
     /// Switch between vim-modal and non-modal (modeless) editing.
     /// Turning modeless on snaps the editor into the insert-like
     /// state and keeps it there; `Esc` then clears the draft or

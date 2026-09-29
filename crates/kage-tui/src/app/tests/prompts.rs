@@ -343,6 +343,22 @@ fn recall_when_the_engine_queue_was_empty_keeps_the_row() {
 }
 
 #[test]
+fn up_on_the_prompt_recalls_a_pending_prompt() {
+    let (mut app, rx, _events) = app_with_events();
+    lock(app.session_usage.as_ref().unwrap()).working = true;
+    app.handle_submit("queued one".into(), true);
+    while rx.try_recv().is_ok() {}
+    app.handle_key(code(KeyCode::Up));
+    assert_eq!(
+        rx.recv_timeout(Duration::from_millis(100)).unwrap(),
+        RunRequest::RecallPrompt {
+            session: None,
+            delivery: kage_core::protocol::Delivery::Queue,
+        }
+    );
+}
+
+#[test]
 fn recall_with_nothing_pending_sends_nothing() {
     let (mut app, rx, _events) = app_with_events();
     app.apply(InputAction::RecallPrompt);

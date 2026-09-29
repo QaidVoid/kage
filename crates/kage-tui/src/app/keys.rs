@@ -300,6 +300,9 @@ impl App {
         key: ratatui::crossterm::event::KeyEvent,
         now: Instant,
     ) -> Vec<Routed> {
+        let focus = self.focus;
+        self.input
+            .set_recallable(self.pending.iter().any(|(session, _)| *session == focus));
         let mapped = if self.input.is_pending() {
             None
         } else {

@@ -156,11 +156,16 @@ impl InputState {
             }
             KeyCode::Up => {
                 // Multi-line input: walk a row up first; only fall
-                // through to history when the cursor is already on the
-                // top row of the current draft.
-                if !self.move_cursor_up() {
-                    self.history_prev();
+                // through when the cursor is already on the top row of
+                // the current draft. A sent prompt still waiting is
+                // newer than any history entry, so it comes back first.
+                if self.move_cursor_up() {
+                    return Vec::new();
                 }
+                if self.recallable && self.history_cursor.is_none() && !self.shell {
+                    return vec![InputAction::RecallPrompt];
+                }
+                self.history_prev();
                 Vec::new()
             }
             KeyCode::Down => {

@@ -63,8 +63,11 @@ impl App {
         let label =
             |app: &mut Self, action, what| app.key_label(action).map(|key| format!("{key} {what}"));
         let queue = label(self, "QueuePrompt", "to queue").filter(|_| working);
-        let recall = label(self, "RecallPrompt", "to edit pending")
-            .filter(|_| self.pending.iter().any(|(s, _)| *s == self.focus));
+        let recall = self
+            .pending
+            .iter()
+            .any(|(s, _)| *s == self.focus)
+            .then(|| "up to edit pending".to_owned());
         let has_agents = working
             && self.active_session.is_some_and(|main| {
                 self.agents.under(main).iter().any(|(_, node)| {

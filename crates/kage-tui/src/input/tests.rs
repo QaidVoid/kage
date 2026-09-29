@@ -366,6 +366,39 @@ fn up_in_insert_walks_back_through_history() {
 }
 
 #[test]
+fn up_takes_a_pending_prompt_back_before_the_history() {
+    let mut state = InputState::new();
+    state.set_history(vec!["alpha".into()]);
+    state.set_recallable(true);
+    assert_eq!(
+        state.handle_key(key(KeyCode::Up)),
+        vec![InputAction::RecallPrompt]
+    );
+    assert_eq!(state.text(), "", "the engine sends the text back");
+
+    state.set_recallable(false);
+    state.handle_key(key(KeyCode::Up));
+    assert_eq!(state.text(), "alpha");
+    state.set_recallable(true);
+    assert!(
+        state.handle_key(key(KeyCode::Up)).is_empty(),
+        "a history walk in progress goes on"
+    );
+
+    let mut state = InputState::new();
+    state.set_recallable(true);
+    state.paste("one\ntwo");
+    assert!(
+        state.handle_key(key(KeyCode::Up)).is_empty(),
+        "a multi-line draft moves the cursor up first"
+    );
+    assert_eq!(
+        state.handle_key(key(KeyCode::Up)),
+        vec![InputAction::RecallPrompt]
+    );
+}
+
+#[test]
 fn down_in_insert_returns_to_stashed_draft() {
     let mut state = InputState::new();
     state.set_history(vec!["one".into(), "two".into()]);

@@ -1498,7 +1498,6 @@ fn a_new_session_is_answered_before_its_updates_as_the_input_ends() {
     let request =
         serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "session/new", "params": params});
     writeln!(cli_w, "{request}").unwrap();
-    drop(cli_w);
     let provider = Listed::of(MockProvider::sequence(Vec::new()));
     let host = test_host(
         Arc::new(provider),
@@ -1508,10 +1507,40 @@ fn a_new_session_is_answered_before_its_updates_as_the_input_ends() {
     );
     std::thread::spawn(move || host.serve(BufReader::new(srv_r), srv_w).unwrap());
 
-    let lines: Vec<serde_json::Value> = BufReader::new(cli_r)
-        .lines()
-        .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
-        .collect();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(cli_r).lines() {
+            if tx
+                .send(serde_json::from_str::<serde_json::Value>(&line.unwrap()).unwrap())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let mut lines = Vec::new();
+    loop {
+        match rx.recv_timeout(WAIT).expect("no session/new answer") {
+            line if line["id"] == 1 => {
+                lines.push(line);
+                break;
+            }
+            line => lines.push(line),
+        }
+    }
+    loop {
+        match rx.recv_timeout(WAIT).expect("no session updates") {
+            line if line["params"]["sessionId"].is_string() => {
+                lines.push(line);
+                break;
+            }
+            line => lines.push(line),
+        }
+    }
+    drop(cli_w);
+    while let Ok(line) = rx.recv_timeout(WAIT) {
+        lines.push(line);
+    }
     let answered = lines.iter().position(|l| l["id"] == 1).expect("answered");
     let session = &lines[answered]["result"]["sessionId"];
     let updates: Vec<usize> = (0..lines.len())

@@ -6,8 +6,8 @@ use kage_core::agents::AgentDefs;
 use kage_core::permissions::{PermissionsConfig, ToolPermissionRules};
 use kage_core::protocol::{McpServerInfo, McpServerStatus, Usage};
 use kage_core::{
-    Content, ImageSource, LoopEvent, Message, MessageId, Role, ThinkingLevel, TokenUsage,
-    ToolCallId, ToolOutput, ToolUpdate,
+    Content, ImageSource, Input, Inputs, LoopEvent, Message, MessageId, Role, ThinkingLevel,
+    TokenUsage, ToolCallId, ToolOutput, ToolUpdate,
 };
 use kage_jsonrpc::Inbound;
 use kage_mcp::McpError;
@@ -74,12 +74,25 @@ impl Harness {
 }
 
 /// The mock provider, offering `mock:m` and `mock:other` to pickers.
+/// `input` is what both listed models declare; empty means unknown.
 #[derive(Debug)]
-struct Listed(MockProvider);
+struct Listed {
+    mock: MockProvider,
+    input: Inputs,
+}
+
+impl Listed {
+    fn of(mock: MockProvider) -> Self {
+        Self {
+            mock,
+            input: Inputs::default(),
+        }
+    }
+}
 
 impl kage_provider::Provider for Listed {
     fn metadata(&self) -> &kage_provider::ProviderMetadata {
-        self.0.metadata()
+        self.mock.metadata()
     }
 
     fn stream(
@@ -87,7 +100,7 @@ impl kage_provider::Provider for Listed {
         req: kage_provider::StreamRequest,
         cancel: &kage_core::CancelFlag,
     ) -> Result<kage_provider::EventStream, ProviderError> {
-        self.0.stream(req, cancel)
+        self.mock.stream(req, cancel)
     }
 
     fn models(&self) -> Vec<kage_provider::ProviderModel> {
@@ -95,6 +108,7 @@ impl kage_provider::Provider for Listed {
             .map(|id| kage_provider::ProviderModel {
                 id: id.into(),
                 name: format!("Mock {id}"),
+                input: self.input,
                 ..kage_provider::ProviderModel::default()
             })
             .into()
@@ -105,20 +119,30 @@ impl kage_provider::Provider for Listed {
 /// `sessions`, with one open session. Every session runs in
 /// `workdir`, asks before `ls` calls and generates a title.
 fn serve(scripts: Vec<Script>, workdir: &Path, sessions: &Path) -> Harness {
-    serve_with(scripts, workdir, sessions, false)
+    serve_with(scripts, workdir, sessions, false, Inputs::default())
 }
 
 /// [`serve`], where every session also has the MCP server of
 /// [`mcp_connection`] as `srv` when `mcp` is set. Servers a client
-/// passes are spawned, and the tools of every server ask.
-fn serve_with(scripts: Vec<Script>, workdir: &Path, sessions: &Path, mcp: bool) -> Harness {
+/// passes are spawned, and the tools of every server ask. `input` is
+/// what the listed models declare; empty means unknown.
+fn serve_with(
+    scripts: Vec<Script>,
+    workdir: &Path,
+    sessions: &Path,
+    mcp: bool,
+    input: Inputs,
+) -> Harness {
     let (srv_r, cli_w) = std::io::pipe().unwrap();
     let (cli_r, srv_w) = std::io::pipe().unwrap();
     let id = SessionId::new();
     let workdir = workdir.to_path_buf();
     let sessions = sessions.to_path_buf();
     let mock = MockProvider::sequence(scripts);
-    let provider = Listed(mock.clone());
+    let provider = Listed {
+        mock: mock.clone(),
+        input,
+    };
     let (commander_tx, commander) = mpsc::channel();
     std::thread::spawn(move || {
         serve_agent(BufReader::new(srv_r), srv_w, |peer| {
@@ -657,6 +681,29 @@ fn prompt_blocks_reach_the_engine_as_content() {
             text("[binary resource file:///w/d.bin: application/octet-stream]"),
             text("[audio omitted]"),
         ]
+    );
+}
+
+#[test]
+fn an_image_only_prompt_to_a_text_only_model_answers_invalid_params() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve_with(
+        vec![],
+        dir.path(),
+        dir.path(),
+        false,
+        Inputs::of(&[Input::Text]),
+    );
+    let params = serde_json::json!({
+        "sessionId": h.session,
+        "prompt": [{"type": "image", "data": "aGk=", "mimeType": "image/png"}],
+    });
+    let err = h.client.request("session/prompt", params).unwrap_err();
+    assert_eq!(err.code, -32602);
+    assert!(
+        err.message.contains("does not accept images"),
+        "{}",
+        err.message
     );
 }
 
@@ -1229,7 +1276,13 @@ fn a_turn_reports_usage_and_a_generated_title() {
 #[test]
 fn mcp_prompts_are_commands_that_expand_when_sent_back() {
     let dir = tempfile::tempdir().unwrap();
-    let h = serve_with(vec![text_turn("ok")], dir.path(), dir.path(), true);
+    let h = serve_with(
+        vec![text_turn("ok")],
+        dir.path(),
+        dir.path(),
+        true,
+        Inputs::default(),
+    );
 
     let updates = updates_until(&h.inbox, &h.session, "available_commands_update");
     let update = &updates.last().unwrap()["update"];
@@ -1406,7 +1459,7 @@ fn a_new_session_is_answered_before_its_updates_as_the_input_ends() {
         serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "session/new", "params": params});
     writeln!(cli_w, "{request}").unwrap();
     drop(cli_w);
-    let provider = Listed(MockProvider::sequence(Vec::new()));
+    let provider = Listed::of(MockProvider::sequence(Vec::new()));
     let (workdir, sessions) = (dir.path().to_path_buf(), dir.path().to_path_buf());
     serve_agent(BufReader::new(srv_r), srv_w, |peer| {
         test_agent(peer, provider, workdir, sessions, true)

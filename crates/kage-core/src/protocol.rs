@@ -537,6 +537,11 @@ pub enum CommandKind {
         /// Whether the session plans before it changes anything.
         on: bool,
     },
+    /// Drop an idle session and its idle agent descendants from the
+    /// engine. A session with a run or shell in flight is kept and
+    /// warned instead. Engine-internal: hosts close sessions through
+    /// their own protocol, so this never crosses the ACP wire.
+    Close,
     /// Cancel every run and stop the engine.
     Shutdown,
 }
@@ -716,6 +721,16 @@ mod tests {
         let value = serde_json::to_value(&cmd).unwrap();
         assert_eq!(value["type"], "restart_mcp");
         assert_eq!(value["server"], "everything");
+        let back: Command = serde_json::from_value(value).unwrap();
+        assert_eq!(back, cmd);
+    }
+
+    #[test]
+    fn close_roundtrips() {
+        let cmd = Command::to(SessionId::new(), CommandKind::Close);
+        let value = serde_json::to_value(&cmd).unwrap();
+        assert_eq!(value["type"], "close");
+        assert_eq!(value["session"], cmd.session.unwrap().to_string());
         let back: Command = serde_json::from_value(value).unwrap();
         assert_eq!(back, cmd);
     }

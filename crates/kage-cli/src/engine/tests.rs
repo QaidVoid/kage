@@ -3775,3 +3775,217 @@ fn a_queued_fork_child_loads_its_snapshot_at_its_first_run() {
         .expect("child b appended its prompt");
     assert!(prompt_of_b, "the snapshot loaded before the first prompt");
 }
+
+#[test]
+fn an_image_only_prompt_to_a_text_only_model_ends_the_run_at_once() {
+    use kage_core::{Input, Inputs};
+    let declared = Declared {
+        mock: MockProvider::replaying(text_turn("ok")),
+        model: kage_provider::ProviderModel {
+            id: "m".into(),
+            input: Inputs::of(&[Input::Text]),
+            ..kage_provider::ProviderModel::default()
+        },
+    };
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(declared)));
+    let id = SessionId::new();
+    h.open(id, None);
+    h.engine.send(Command::to(
+        id,
+        CommandKind::Prompt {
+            content: vec![Content::Image {
+                source: kage_core::ImageSource::Base64 {
+                    data: "AA==".into(),
+                },
+                mime: "image/png".into(),
+            }],
+            delivery: Delivery::Steer,
+        },
+    ));
+    let events = until_runs_end(&h.events, 1);
+
+    assert_eq!(
+        notices(&events),
+        ["mock:m does not accept images; nothing to send"]
+    );
+    let ends: Vec<RunOutcome> = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            Event::Host(HostEvent::RunEnded { outcome }) => Some(outcome.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ends,
+        [RunOutcome::Failed {
+            error: LoopError::InvalidPrompt {
+                message: "mock:m does not accept images; nothing to send".into(),
+            },
+        }]
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.event, Event::Host(HostEvent::RunStarted))),
+        "no run started: {events:?}"
+    );
+
+    prompt(&h.engine, id, "plain text", Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+    assert_eq!(outcomes(&events), [RunOutcome::Completed]);
+    h.engine.shutdown();
+}
+
+#[test]
+fn an_unsubscribed_subscriber_receives_nothing_more() {
+    let h = harness(MockProvider::replaying(text_turn("ok")));
+    let id = SessionId::new();
+    h.open(id, None);
+    wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::McpServers { .. }))
+    });
+
+    let (tx, other) = channel();
+    let subscription = h.engine.subscribe(Box::new(move |envelope| {
+        let _ = tx.send(envelope.clone());
+    }));
+    h.engine.unsubscribe(subscription);
+
+    prompt(&h.engine, id, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+    assert_eq!(outcomes(&events), [RunOutcome::Completed]);
+    assert!(
+        other.try_recv().is_err(),
+        "the unsubscribed subscriber stayed quiet"
+    );
+    h.engine.shutdown();
+}
+
+#[test]
+fn hold_events_delays_a_publish_from_another_thread_until_it_returns() {
+    let h = harness(MockProvider::replaying(text_turn("ok")));
+    let id = SessionId::new();
+    h.open(id, None);
+    wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::McpServers { .. }))
+    });
+
+    let (acked, acked_rx) = channel();
+    let held_bus = Arc::clone(&h.engine.bus);
+    let held = h.engine.hold_events(move || {
+        let bus = Arc::clone(&held_bus);
+        let publisher_thread = std::thread::spawn(move || {
+            bus.publish(
+                id,
+                HostEvent::Notice {
+                    level: NoticeLevel::Info,
+                    text: "held back".into(),
+                    transient: false,
+                },
+            );
+            let _ = acked.send(());
+        });
+        // The publish cannot finish while this closure holds the bus
+        // lock, so the ack waits for hold_events to return.
+        let waited = acked_rx.recv_timeout(Duration::from_millis(100)).is_err();
+        (publisher_thread, waited)
+    });
+    let (publisher_thread, waited) = held;
+    assert!(waited, "the publish landed while the bus lock was held");
+    publisher_thread.join().unwrap();
+    let seen = wait_for(
+        &h.events,
+        |e| matches!(&e.event, Event::Host(HostEvent::Notice { text, .. }) if text == "held back"),
+    );
+    assert_eq!(seen.last().unwrap().session, id);
+    h.engine.shutdown();
+}
+
+#[test]
+fn close_drops_an_idle_session_and_its_idle_agents() {
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("work"))]),
+        text_turn("child reply"),
+        text_turn("parent done"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 2);
+    let (child, _) = spawned(&events)[0].clone();
+    assert_eq!(h.engine.hosted_sessions().len(), 2);
+
+    h.engine.send(Command::to(parent, CommandKind::Close));
+    prompt(&h.engine, child, "gone?", Delivery::Steer);
+    let unknown = wait_for(&h.events, |e| {
+        is_notice(e) && notices(std::slice::from_ref(e))[0].starts_with("unknown session")
+    });
+    assert_eq!(unknown.last().unwrap().session, child);
+    assert!(h.engine.hosted_sessions().is_empty());
+    h.engine.shutdown();
+}
+
+#[test]
+fn close_during_a_run_warns_and_keeps_the_session() {
+    let h = harness(MockProvider::replaying(tool_turn("gate")));
+    let id = SessionId::new();
+    h.open(id, None);
+    prompt(&h.engine, id, "go", Delivery::Steer);
+    wait_for(&h.events, is_tool_start);
+
+    h.engine.send(Command::to(id, CommandKind::Close));
+    let refused = wait_for(&h.events, is_notice);
+    assert_eq!(
+        notices(&refused),
+        ["close: wait for the current run to finish or cancel it"]
+    );
+
+    h.engine.send(Command::to(id, CommandKind::Cancel));
+    let events = until_runs_end(&h.events, 1);
+    assert_eq!(outcomes(&events), [RunOutcome::Cancelled]);
+    assert!(
+        h.engine
+            .hosted_sessions()
+            .iter()
+            .any(|(hosted, _)| *hosted == id),
+        "the session stayed hosted"
+    );
+    h.engine.shutdown();
+}
+
+#[test]
+fn closing_the_active_session_clears_active() {
+    let h = harness(MockProvider::replaying(text_turn("ok")));
+    let (a, b) = (SessionId::new(), SessionId::new());
+    h.open(a, None);
+    h.open(b, None);
+    let marker = |text: &str| HostEvent::Notice {
+        level: NoticeLevel::Info,
+        text: text.into(),
+        transient: false,
+    };
+    h.engine.commander.publish(marker("first"));
+    let seen = wait_for(&h.events, |e| {
+        is_notice(e) && notices(std::slice::from_ref(e))[0] == "first"
+    });
+    assert_eq!(
+        seen.last().unwrap().session,
+        a,
+        "a opened first, so it is active"
+    );
+
+    h.engine.send(Command::to(a, CommandKind::Close));
+    h.engine.commander.publish(marker("second"));
+    prompt(&h.engine, b, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+    assert_eq!(outcomes(&events), [RunOutcome::Completed]);
+    assert!(
+        !notices(&events).contains(&"second".to_owned()),
+        "{:?}",
+        notices(&events)
+    );
+    h.engine.shutdown();
+}

@@ -1,5 +1,5 @@
 //! Session file operations: fork, clone, export, and the engine commands
-//! that replace or copy a session.
+//! that replace, copy, or drop a session.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -164,6 +164,36 @@ impl super::Dispatcher {
             format!("{what}: wait for the current run to finish or cancel it"),
         );
         false
+    }
+
+    /// Drop the idle session `id` and its idle agent descendants. A
+    /// session with a run or shell in flight is kept and warned
+    /// instead. Closing the active session leaves the engine without
+    /// one, so a later command without a session id is refused.
+    pub(super) fn close(&mut self, id: SessionId) {
+        if !self.ensure_idle(id, "close") {
+            return;
+        }
+        let mut dropped = vec![id];
+        dropped.extend(
+            self.sessions
+                .keys()
+                .copied()
+                .filter(|agent| self.descends_from(*agent, id))
+                .filter(|agent| {
+                    self.sessions
+                        .get(agent)
+                        .is_some_and(|s| s.idle.is_some() && s.shells == 0)
+                }),
+        );
+        for dropped in &dropped {
+            self.sessions.remove(dropped);
+            self.waiting.retain(|w| w != dropped);
+            self.swarm_requeues.remove(dropped);
+        }
+        if self.active == Some(id) {
+            self.active = None;
+        }
     }
 
     /// `true` when `id` is an agent session, which cannot be replaced or

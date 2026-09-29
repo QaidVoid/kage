@@ -49,7 +49,7 @@ use kage_tools::ToolRegistry;
 
 use self::swarm_tool::SwarmInfo;
 
-pub(crate) use bus::Subscriber;
+pub(crate) use bus::{Subscriber, SubscriptionId};
 pub(crate) use recorder::Recorder;
 #[cfg(test)]
 pub(crate) use sessions::render_session_markdown;
@@ -260,9 +260,36 @@ impl Engine {
         }
     }
 
-    /// Deliver every event published from now on to `subscriber`.
-    pub(crate) fn subscribe(&self, subscriber: Subscriber) {
-        self.bus.subscribe(subscriber);
+    /// Deliver every event published from now on to `subscriber`, and
+    /// return the id [`Engine::unsubscribe`] takes.
+    pub(crate) fn subscribe(&self, subscriber: Subscriber) -> SubscriptionId {
+        self.bus.subscribe(subscriber)
+    }
+
+    /// Stop delivering events to the subscription `id`. Must not be
+    /// called from inside a subscriber: publishing holds the bus lock
+    /// while it runs subscribers, so that deadlocks.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the serve host unsubscribes detached connections")
+    )]
+    pub(crate) fn unsubscribe(&self, id: SubscriptionId) {
+        self.bus.unsubscribe(id);
+    }
+
+    /// Run `f` while the bus is locked, so no envelope is published
+    /// during it: a publish from another thread waits until `f`
+    /// returns. Like a subscriber, `f` must not publish, subscribe, or
+    /// unsubscribe, or it deadlocks on the same lock.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the serve host attaches clients inside this guard"
+        )
+    )]
+    pub(crate) fn hold_events<R>(&self, f: impl FnOnce() -> R) -> R {
+        self.bus.hold(f)
     }
 
     pub(crate) fn commander(&self) -> Commander {
@@ -626,6 +653,7 @@ impl Dispatcher {
                 s.state.permission_mode = mode;
             }),
             CommandKind::RestartMcp { server } => self.restart_mcp(id, server),
+            CommandKind::Close => self.close(id),
             CommandKind::SwarmMode { on } => self.set_swarm_mode(id, on),
             CommandKind::PlanMode { on } => {
                 let session = self.sessions.get_mut(&id).expect("session checked");
@@ -802,8 +830,16 @@ impl Dispatcher {
             } else {
                 format!("{model} does not accept images; sent the prompt without them")
             };
-            notice(&self.bus, id, NoticeLevel::Warning, text);
+            notice(&self.bus, id, NoticeLevel::Warning, text.clone());
             if content.is_empty() {
+                self.bus.publish(
+                    id,
+                    HostEvent::RunEnded {
+                        outcome: RunOutcome::Failed {
+                            error: LoopError::InvalidPrompt { message: text },
+                        },
+                    },
+                );
                 return;
             }
         }

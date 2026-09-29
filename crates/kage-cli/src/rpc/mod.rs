@@ -170,6 +170,8 @@ impl CliAcpAgent {
             streaming: HashSet::new(),
             ended: HashMap::new(),
             commands: HashMap::new(),
+            fills: HashMap::new(),
+            compacting: HashMap::new(),
             held: Arc::clone(&held),
             approving: HashMap::new(),
             seeds: Arc::clone(&seeds),

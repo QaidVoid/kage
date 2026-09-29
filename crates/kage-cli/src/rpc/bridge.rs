@@ -5,14 +5,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use kage_acp::acp::{
-    AvailableCommandsUpdate, ConfigOptionUpdate, ContentBlock, Cost, MessageChunk,
-    SessionConfigSelectOption, SessionInfoUpdate, SessionUpdate, SubagentSessionCapabilities,
-    SubagentState, SubagentUpdate, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
-    ToolKind, UsageUpdate,
+    AvailableCommandsUpdate, CompactionUpdate, ConfigOptionUpdate, ContentBlock, Cost,
+    MessageChunk, NoticeTone, NoticeUpdate, SessionConfigSelectOption, SessionInfoUpdate,
+    SessionUpdate, SubagentSessionCapabilities, SubagentState, SubagentUpdate, ToolCall,
+    ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind, TurnPhase, TurnReason, TurnUpdate,
+    UsageUpdate,
 };
 use kage_acp::agent::{PermissionDecision, send_update};
 use kage_core::protocol::{
-    AgentNode, AgentTree, Command, CommandKind, Envelope, Event, HostEvent,
+    AgentNode, AgentTree, Command, CommandKind, Envelope, Event, HostEvent, NoticeLevel,
     PermissionDecision as Decision, RequestId, RunOutcome, Usage, with_canonical_tool_names,
 };
 use kage_core::sync::lock;
@@ -63,6 +64,12 @@ pub(super) struct Bridge {
     pub(super) ended: HashMap<SessionId, PromptEnd>,
     /// The commands last sent to each client session.
     pub(super) commands: HashMap<SessionId, Vec<serde_json::Value>>,
+    /// Last known context fill per session, in tokens, from usage
+    /// reports.
+    pub(super) fills: HashMap<SessionId, u64>,
+    /// Compactions waiting for the post-compaction usage: the turn
+    /// count kept and the fill before the compaction.
+    pub(super) compacting: HashMap<SessionId, (u64, u64)>,
     pub(super) held: Held,
     /// Agent calls waiting for approval, by session and call id, with the
     /// line their card shows again once they run.
@@ -160,8 +167,16 @@ impl Bridge {
     fn handle_client(&mut self, session: SessionId, client_id: String, event: &Event) {
         match event {
             Event::Loop(event) => {
-                if let LoopEvent::MessageEnd { stop_reason, .. } = event {
+                if let LoopEvent::MessageEnd {
+                    stop_reason, usage, ..
+                } = event
+                {
                     self.stops.insert(session, *stop_reason);
+                    let fill = usage.input + usage.output + usage.cache_read + usage.cache_write;
+                    self.observe_turn_end(session, &client_id, fill);
+                }
+                if let LoopEvent::Compaction { kept, .. } = event {
+                    self.observe_compaction(session, *kept);
                 }
                 if let LoopEvent::MessageAppended { message } = event {
                     self.echo(session, &client_id, message);
@@ -182,6 +197,7 @@ impl Bridge {
                 self.ask(session, *request_id, client_id, tool_call);
             }
             Event::Host(HostEvent::UsageUpdated { usage }) => {
+                self.fills.insert(session, usage.context_used);
                 if let Some(update) = usage_update(usage) {
                     self.send(session, &client_id, update);
                 }
@@ -213,6 +229,10 @@ impl Bridge {
                     SessionUpdate::SessionInfoUpdate(update),
                 );
             }
+            Event::Host(HostEvent::Notice { level, text, .. }) => {
+                let update = notice_update(*level, text.clone());
+                self.send(session, &client_id, update);
+            }
             Event::Host(HostEvent::McpServers { servers })
                 if !self.streaming.contains(&session) =>
             {
@@ -232,6 +252,7 @@ impl Bridge {
             Event::Host(HostEvent::RunEnded { outcome }) => {
                 self.end_asks(session);
                 self.seen.remove(&session);
+                self.compacting.remove(&session);
                 let stop = self.stops.remove(&session);
                 let end = PromptEnd {
                     outcome: outcome.clone(),
@@ -241,6 +262,27 @@ impl Bridge {
                 self.settle(session);
             }
             Event::Host(_) => {}
+        }
+    }
+
+    /// Remembers a compaction until the post-compaction usage arrives.
+    fn observe_compaction(&mut self, session: SessionId, kept: usize) {
+        let before = self.fills.get(&session).copied().unwrap_or_default();
+        let kept = u64::try_from(kept).unwrap_or_default();
+        self.compacting.insert(session, (kept, before));
+    }
+
+    /// Records the fill a finished turn reported and answers a pending
+    /// compaction with it.
+    fn observe_turn_end(&mut self, session: SessionId, client_id: &str, fill: u64) {
+        self.fills.insert(session, fill);
+        if let Some((kept, before)) = self.compacting.remove(&session) {
+            let update = SessionUpdate::Compaction(CompactionUpdate {
+                kept,
+                before,
+                after: fill,
+            });
+            self.send(session, client_id, update);
         }
     }
 
@@ -654,8 +696,49 @@ pub(super) fn to_update(
                 ..ToolCallUpdate::default()
             }))
         }
+        LoopEvent::TurnStarted { .. } => Some(SessionUpdate::Turn(TurnUpdate {
+            phase: TurnPhase::Start,
+            reason: None,
+        })),
+        LoopEvent::TurnEnded { had_tool_calls, .. } => Some(SessionUpdate::Turn(TurnUpdate {
+            phase: TurnPhase::End,
+            reason: Some(turn_reason(*had_tool_calls)),
+        })),
+        LoopEvent::ProviderRetry {
+            attempt,
+            max_attempts,
+            wait_secs,
+            error,
+            ..
+        } => Some(notice_update(
+            NoticeLevel::Info,
+            format!("provider error ({error}); retrying {attempt}/{max_attempts} in {wait_secs}s"),
+        )),
+        LoopEvent::Error { kind } => Some(notice_update(NoticeLevel::Error, kind.to_string())),
         _ => None,
     }
+}
+
+/// The turn-end reason for whether the model requested tool calls.
+fn turn_reason(had_tool_calls: bool) -> TurnReason {
+    if had_tool_calls {
+        TurnReason::ToolCalls
+    } else {
+        TurnReason::NoToolCalls
+    }
+}
+
+/// The `_kage/notice` carrying an engine notice, with its tone from
+/// the notice level.
+pub(super) fn notice_update(level: NoticeLevel, text: String) -> SessionUpdate {
+    SessionUpdate::Notice(NoticeUpdate {
+        tone: match level {
+            NoticeLevel::Info => NoticeTone::Info,
+            NoticeLevel::Warning => NoticeTone::Warn,
+            NoticeLevel::Error => NoticeTone::Error,
+        },
+        text,
+    })
 }
 
 /// The `usage_update` for `usage`, or `None` while the context window is

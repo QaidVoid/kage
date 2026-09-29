@@ -572,6 +572,15 @@ pub enum SessionUpdate {
     ConfigOptionUpdate(ConfigOptionUpdate),
     /// A subagent was announced or changed (draft RFD PR #1992).
     SubagentUpdate(SubagentUpdate),
+    /// A turn of the running prompt began or ended.
+    #[serde(rename = "_kage/turn")]
+    Turn(TurnUpdate),
+    /// A message for the user outside the conversation.
+    #[serde(rename = "_kage/notice")]
+    Notice(NoticeUpdate),
+    /// Older context turns were summarized.
+    #[serde(rename = "_kage/compaction")]
+    Compaction(CompactionUpdate),
     /// Any update kind kage does not know. Never sent.
     #[serde(other)]
     Unknown,
@@ -808,6 +817,74 @@ pub enum SubagentState {
     Failed,
     /// Was cancelled.
     Cancelled,
+}
+
+/// Whether a `_kage/turn` update opens or closes a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnPhase {
+    /// The turn began.
+    Start,
+    /// The turn ended.
+    End,
+}
+
+/// Why a turn ended: whether the model asked for tool calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnReason {
+    /// The model requested tool calls, so more turns follow.
+    ToolCalls,
+    /// The model replied without tool calls.
+    NoToolCalls,
+}
+
+/// A `_kage/turn` update: one provider round trip of the running
+/// prompt, with the tool calls it asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnUpdate {
+    /// Whether the turn began or ended.
+    pub phase: TurnPhase,
+    /// Why the turn ended. Present on `end`, absent on `start`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<TurnReason>,
+}
+
+/// Severity of a `_kage/notice` update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeTone {
+    /// Informational.
+    Info,
+    /// Something the user may want to act on.
+    Warn,
+    /// Something failed.
+    Error,
+}
+
+/// A `_kage/notice` update: a message for the user that is not part
+/// of the conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoticeUpdate {
+    /// Severity.
+    pub tone: NoticeTone,
+    /// Message text.
+    pub text: String,
+}
+
+/// A `_kage/compaction` update: older turns were summarized to fit
+/// the context window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionUpdate {
+    /// Recent turns kept verbatim.
+    pub kept: u64,
+    /// Context tokens in use before the compaction.
+    pub before: u64,
+    /// Context tokens in use by the first turn after the compaction.
+    pub after: u64,
 }
 
 /// How a permission option resolves.
@@ -1338,6 +1415,71 @@ mod tests {
                 }),
             );
         }
+    }
+
+    #[test]
+    fn turn_update_shapes() {
+        roundtrip(
+            &SessionUpdate::Turn(TurnUpdate {
+                phase: TurnPhase::Start,
+                reason: None,
+            }),
+            serde_json::json!({"sessionUpdate": "_kage/turn", "phase": "start"}),
+        );
+        for (reason, name) in [
+            (TurnReason::ToolCalls, "tool_calls"),
+            (TurnReason::NoToolCalls, "no_tool_calls"),
+        ] {
+            roundtrip(
+                &SessionUpdate::Turn(TurnUpdate {
+                    phase: TurnPhase::End,
+                    reason: Some(reason),
+                }),
+                serde_json::json!({
+                    "sessionUpdate": "_kage/turn",
+                    "phase": "end",
+                    "reason": name
+                }),
+            );
+        }
+    }
+
+    #[test]
+    fn notice_update_shapes() {
+        for (tone, name) in [
+            (NoticeTone::Info, "info"),
+            (NoticeTone::Warn, "warn"),
+            (NoticeTone::Error, "error"),
+        ] {
+            roundtrip(
+                &SessionUpdate::Notice(NoticeUpdate {
+                    tone,
+                    text: "heads up".into(),
+                }),
+                serde_json::json!({
+                    "sessionUpdate": "_kage/notice",
+                    "tone": name,
+                    "text": "heads up"
+                }),
+            );
+        }
+    }
+
+    #[test]
+    fn compaction_update_shapes() {
+        roundtrip(
+            &SessionUpdate::Compaction(CompactionUpdate {
+                kept: 4,
+                before: 1200,
+                after: 300,
+            }),
+            serde_json::json!({
+                "sessionUpdate": "_kage/compaction",
+                "kept": 4,
+                "before": 1200,
+                "after": 300
+            }),
+        );
     }
 
     #[test]

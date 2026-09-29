@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kage_acp::acp::{McpServer, ToolCallStatus, ToolKind};
 use kage_core::agents::AgentDefs;
@@ -33,6 +33,15 @@ const WAIT: Duration = Duration::from_secs(5);
 type Script = Vec<Result<ProviderEvent, ProviderError>>;
 
 fn tool_turn(id: &str, name: &str, input: serde_json::Value) -> Script {
+    tool_turn_with_usage(id, name, input, 0)
+}
+
+fn tool_turn_with_usage(
+    id: &str,
+    name: &str,
+    input: serde_json::Value,
+    input_tokens: u64,
+) -> Script {
     let id = ToolCallId::new(id);
     vec![
         Ok(ProviderEvent::MessageStart),
@@ -43,18 +52,22 @@ fn tool_turn(id: &str, name: &str, input: serde_json::Value) -> Script {
         Ok(ProviderEvent::ToolCallEnd { id, input }),
         Ok(ProviderEvent::MessageEnd {
             stop_reason: CoreStopReason::ToolUse,
-            usage: TokenUsage::default(),
+            usage: usage(input_tokens, 0),
         }),
     ]
 }
 
 fn text_turn(text: &str) -> Script {
+    text_turn_with_usage(text, 0)
+}
+
+fn text_turn_with_usage(text: &str, input_tokens: u64) -> Script {
     vec![
         Ok(ProviderEvent::MessageStart),
         Ok(ProviderEvent::TextDelta { delta: text.into() }),
         Ok(ProviderEvent::MessageEnd {
             stop_reason: CoreStopReason::EndTurn,
-            usage: TokenUsage::default(),
+            usage: usage(input_tokens, 0),
         }),
     ]
 }
@@ -1313,6 +1326,368 @@ fn a_turn_reports_usage_and_a_generated_title() {
     assert!(usage.get("cost").is_none());
     let info = &updates.last().unwrap()["update"];
     assert_eq!(info["title"], "Greeting title");
+}
+
+fn turn_phases(updates: &[serde_json::Value]) -> Vec<(&str, Option<&str>)> {
+    updates
+        .iter()
+        .filter_map(|p| {
+            let u = &p["update"];
+            (u["sessionUpdate"] == "_kage/turn")
+                .then(|| (u["phase"].as_str().unwrap_or(""), u["reason"].as_str()))
+        })
+        .collect()
+}
+
+#[test]
+fn a_tool_run_brackets_its_calls_with_turn_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().display().to_string();
+    let h = serve(
+        vec![
+            tool_turn("call_1", "ls", serde_json::json!({ "path": path })),
+            text_turn("done"),
+            text_turn("Listed"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+
+    let mut updates = Vec::new();
+    let (ask, _) = until_ask(&h.inbox, &mut updates);
+    allow(&h.client, &ask);
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    updates.extend(drain(&h.inbox));
+
+    assert_eq!(
+        turn_phases(&updates),
+        [
+            ("start", None),
+            ("end", Some("tool_calls")),
+            ("start", None),
+            ("end", Some("no_tool_calls")),
+        ]
+    );
+    let first_start = updates
+        .iter()
+        .position(|p| p["update"]["sessionUpdate"] == "_kage/turn")
+        .unwrap();
+    let first_call = updates
+        .iter()
+        .position(|p| p["update"]["sessionUpdate"] == "tool_call")
+        .unwrap();
+    assert!(first_start < first_call);
+    let last_tool_update = updates
+        .iter()
+        .rposition(|p| p["update"]["sessionUpdate"] == "tool_call_update")
+        .unwrap();
+    let last_end = updates
+        .iter()
+        .rposition(|p| p["update"]["sessionUpdate"] == "_kage/turn")
+        .unwrap();
+    assert!(last_end > last_tool_update);
+}
+
+#[test]
+fn a_plain_reply_still_ends_its_turn_without_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(
+        vec![text_turn("hi there"), text_turn("Greeted")],
+        dir.path(),
+        dir.path(),
+    );
+    let prompt_end = prompt_async(&h.client, &h.session, "hello");
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    let updates = drain(&h.inbox);
+    assert_eq!(
+        turn_phases(&updates),
+        [("start", None), ("end", Some("no_tool_calls"))]
+    );
+}
+
+#[test]
+fn a_close_refusal_during_a_run_reaches_the_client_as_a_warn_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve_paused(
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::TextDelta {
+                delta: "Hel".into(),
+            }),
+        ],
+        vec![
+            Ok(ProviderEvent::TextDelta { delta: "lo".into() }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: CoreStopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        ],
+        vec![text_turn("titled")],
+        dir.path(),
+        dir.path(),
+    );
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+    until(|| h.paused.is_parked());
+    h.host
+        .engine
+        .commander()
+        .send(Command::to(h.id, CommandKind::Close));
+
+    let updates = updates_until(&h.inbox, &h.session, "_kage/notice");
+    let notice = &updates.last().unwrap()["update"];
+    assert_eq!(notice["tone"], "warn");
+    assert_eq!(
+        notice["text"],
+        "close: wait for the current run to finish or cancel it"
+    );
+
+    h.release.send(()).unwrap();
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+}
+
+#[test]
+fn a_compacting_run_reports_kept_and_the_usage_around_it() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "tiny").unwrap();
+    let input = serde_json::json!({ "path": "notes.txt" });
+    let h = serve(
+        vec![
+            tool_turn_with_usage("call_1", "read", input.clone(), 900),
+            tool_turn_with_usage("call_2", "read", input, 900),
+            text_turn("kept decisions"),
+            text_turn_with_usage("after the compaction", 120),
+            text_turn("Compacted title"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+
+    let updates = updates_until(&h.inbox, &h.session, "_kage/compaction");
+    let update = &updates.last().unwrap()["update"];
+    assert_eq!(update["kept"], 4);
+    assert_eq!(update["before"], 900);
+    assert_eq!(update["after"], 120);
+
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+}
+
+#[test]
+fn a_failed_run_sends_an_error_notice_before_the_prompt_resolves() {
+    let dir = tempfile::tempdir().unwrap();
+    let failure: Script = vec![Err(ProviderError::Auth("token expired".into()))];
+    let h = serve(vec![failure], dir.path(), dir.path());
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+
+    let updates = updates_until(&h.inbox, &h.session, "_kage/notice");
+    let notice = &updates.last().unwrap()["update"];
+    assert_eq!(notice["tone"], "error");
+    assert_eq!(notice["text"], "authentication failed: token expired");
+
+    let response = prompt_end.recv_timeout(WAIT).unwrap();
+    assert!(response.is_err(), "{response:?}");
+}
+
+#[test]
+fn a_provider_retry_reaches_the_client_as_an_info_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let failure: Script = vec![Err(ProviderError::Transport("connection reset".into()))];
+    let h = serve(
+        vec![failure, text_turn("recovered"), text_turn("Retried title")],
+        dir.path(),
+        dir.path(),
+    );
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+
+    let updates = updates_until(&h.inbox, &h.session, "_kage/notice");
+    let notice = &updates.last().unwrap()["update"];
+    assert_eq!(notice["tone"], "info");
+    assert_eq!(
+        notice["text"],
+        "provider error (transport: connection reset); retrying 1/4 in 1s"
+    );
+
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+}
+
+/// The client's notifications until the prompt resolves, each with the
+/// time it arrived.
+fn streamed_until_response(
+    h: &Harness,
+    prompt_end: &mpsc::Receiver<Result<serde_json::Value, kage_jsonrpc::RpcError>>,
+) -> (Vec<(Instant, serde_json::Value)>, Vec<serde_json::Value>) {
+    let mut stream = Vec::new();
+    loop {
+        if let Ok(response) = prompt_end.try_recv() {
+            assert_eq!(response.unwrap()["stopReason"], "end_turn");
+            return (stream, drain(&h.inbox));
+        }
+        let message = h.inbox.recv_timeout(WAIT).expect("prompt did not resolve");
+        match message {
+            Inbound::Notification { params, .. } => stream.push((Instant::now(), params)),
+            Inbound::Request { .. } => {}
+        }
+    }
+}
+
+/// The status and `raw_output.exit_code` of the final update of `call`.
+fn final_shell_update<'a>(
+    updates: &'a [(Instant, serde_json::Value)],
+    call: &str,
+) -> &'a serde_json::Value {
+    updates
+        .iter()
+        .rev()
+        .map(|(_, params)| params)
+        .find(|p| p["update"]["toolCallId"] == call && p["update"]["status"].is_string())
+        .map(|p| &p["update"])
+        .expect("no final shell update")
+}
+
+#[test]
+fn shell_progress_streams_the_latest_tail_and_ends_with_the_exit_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(
+        vec![
+            tool_turn(
+                "call_sh",
+                "shell",
+                serde_json::json!({
+                    "command": "for i in $(seq 1 30); do echo line$i; sleep 0.05; done",
+                }),
+            ),
+            text_turn("done"),
+            text_turn("Shell title"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+    let (stream, after) = streamed_until_response(&h, &prompt_end);
+
+    let mut progress: Vec<(Instant, Vec<usize>)> = Vec::new();
+    for (at, params) in &stream {
+        let update = &params["update"];
+        if update["toolCallId"] != "call_sh" || update["status"].is_string() {
+            continue;
+        }
+        if let Some(text) = update["content"][0]["content"]["text"].as_str() {
+            let lines = text
+                .lines()
+                .map(|l| l.strip_prefix("line").unwrap().parse::<usize>().unwrap())
+                .collect::<Vec<_>>();
+            progress.push((*at, lines));
+        }
+    }
+
+    assert!(progress.len() >= 2, "expected several progress ticks");
+    let mut last_end = 0;
+    for lines in progress.iter().map(|(_, lines)| lines) {
+        for pair in lines.windows(2) {
+            assert_eq!(pair[1], pair[0] + 1, "tail is not contiguous: {lines:?}");
+        }
+        assert!(lines.len() <= 10, "tail exceeds ten lines: {lines:?}");
+        let end = *lines.last().unwrap();
+        assert!(end > last_end, "tail did not advance: {lines:?}");
+        assert_eq!(
+            lines[0],
+            end.saturating_sub(9).max(1),
+            "tail is not the latest: {lines:?}"
+        );
+        last_end = end;
+    }
+    assert!(
+        last_end >= 20,
+        "progress stopped tracking early: {last_end}"
+    );
+    assert_eq!(progress.last().unwrap().1.len(), 10);
+    for pair in progress.windows(2) {
+        let gap = pair[1].0 - pair[0].0;
+        assert!(
+            gap >= Duration::from_millis(80),
+            "updates {} ms apart",
+            gap.as_millis()
+        );
+    }
+
+    let final_update = final_shell_update(&stream, "call_sh");
+    assert_eq!(final_update["status"], "completed");
+    assert_eq!(final_update["rawOutput"]["exit_code"], 0);
+    assert!(
+        after.iter().all(|p| p["update"]["toolCallId"] != "call_sh"),
+        "updates after the run ended: {after:?}"
+    );
+}
+
+#[test]
+fn shell_failure_reports_the_exit_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(
+        vec![
+            tool_turn(
+                "call_sh",
+                "shell",
+                serde_json::json!({ "command": "echo boom; exit 7" }),
+            ),
+            text_turn("done"),
+            text_turn("Shell title"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    prompt(&h.client, &h.session, "go");
+    let updates = drain(&h.inbox);
+    let stream: Vec<(Instant, serde_json::Value)> = updates
+        .into_iter()
+        .map(|params| (Instant::now(), params))
+        .collect();
+    let final_update = final_shell_update(&stream, "call_sh");
+    assert_eq!(final_update["status"], "failed");
+    assert_eq!(final_update["rawOutput"]["exit_code"], 7);
+}
+
+#[test]
+fn shell_signal_reports_a_null_exit_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(
+        vec![
+            tool_turn(
+                "call_sh",
+                "shell",
+                serde_json::json!({ "command": "kill -TERM $$" }),
+            ),
+            text_turn("done"),
+            text_turn("Shell title"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    prompt(&h.client, &h.session, "go");
+    let updates = drain(&h.inbox);
+    let stream: Vec<(Instant, serde_json::Value)> = updates
+        .into_iter()
+        .map(|params| (Instant::now(), params))
+        .collect();
+    let final_update = final_shell_update(&stream, "call_sh");
+    assert_eq!(final_update["status"], "failed");
+    assert!(final_update["rawOutput"]["exit_code"].is_null());
+    let texts: Vec<String> = stream
+        .iter()
+        .map(|(_, p)| p)
+        .filter(|p| p["update"]["toolCallId"] == "call_sh")
+        .filter_map(|p| p["update"]["content"][0]["content"]["text"].as_str())
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        texts.iter().any(|t| t.contains("exit: signal")),
+        "{texts:?}"
+    );
 }
 
 #[test]

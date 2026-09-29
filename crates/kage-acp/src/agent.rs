@@ -24,12 +24,13 @@ use kage_core::CancelFlag;
 use kage_jsonrpc::{CancelNotice, Inbound, Peer, RpcError, connect_with};
 
 use crate::acp::{
-    CloseSessionRequest, CloseSessionResponse, InitializeRequest, InitializeResponse,
-    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
-    NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind,
-    PermissionOutcome, PromptRequest, PromptResponse, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, ResumeSessionResponse, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, ToolCallUpdate,
+    CloseSessionRequest, CloseSessionResponse, ConfigGetRequest, ConfigGetResult, FsRequest,
+    FsResult, InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
+    PermissionOption, PermissionOptionKind, PermissionOutcome, PromptRequest, PromptResponse,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    ResumeSessionResponse, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, ToolCallUpdate,
 };
 
 /// The client's answer to a `session/request_permission`.
@@ -229,6 +230,28 @@ pub trait Agent: Send + Sync + 'static {
         Err(RpcError::method_not_found("session/set_config_option"))
     }
 
+    /// The read-only configuration sections (`_kage/config/get`). The
+    /// default rejects: only agents that serve the host config answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the config cannot be read.
+    fn config_get(&self, _req: ConfigGetRequest) -> Result<ConfigGetResult, RpcError> {
+        Err(RpcError::method_not_found("_kage/config/get"))
+    }
+
+    /// The confined file operations (`_kage/fs`): list and read under
+    /// the session workdir. The default rejects: only agents with a
+    /// session workdir answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session is unknown or a path
+    /// escapes the workdir.
+    fn fs(&self, _req: FsRequest) -> Result<FsResult, RpcError> {
+        Err(RpcError::method_not_found("_kage/fs"))
+    }
+
     /// Run one prompt turn to completion, streaming `session/update`
     /// notifications through `ctx`.
     ///
@@ -359,6 +382,16 @@ where
     })
 }
 
+/// Answers `id` with the params parse error `e`.
+fn parse_failed(
+    peer: &Peer,
+    id: &serde_json::Value,
+    e: RpcError,
+) -> Option<thread::JoinHandle<()>> {
+    let _ = peer.respond(id, Err(e));
+    None
+}
+
 /// Answer one request, on its own thread for all but `initialize`.
 /// Returns the thread to wait for at the end of the input, which is
 /// every one but a prompt's.
@@ -452,6 +485,14 @@ fn handle_request<A: Agent>(
                 return None;
             }
             Ok(req) => spawn_op(peer, agent, id, move |a| a.close_session(req).map(jval)),
+        },
+        "_kage/config/get" => match parse::<ConfigGetRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.config_get(req).map(jval)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/fs" => match parse::<FsRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.fs(req).map(jval)),
+            Err(e) => return parse_failed(peer, &id, e),
         },
         other => {
             let _ = peer.respond(&id, Err(RpcError::method_not_found(other)));

@@ -30,6 +30,7 @@
 
 mod bridge;
 mod content;
+mod fs;
 mod host;
 mod live;
 mod mcp;
@@ -43,15 +44,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use kage_acp::acp::{
-    AgentCapabilities, CloseSessionRequest, CloseSessionResponse, Implementation,
-    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, McpCapabilities, NewSessionRequest,
-    NewSessionResponse, PROTOCOL_VERSION, PromptCapabilities, PromptRequest, PromptResponse,
-    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionConfigOption,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
-    Supported,
+    AgentCapabilities, CloseSessionRequest, CloseSessionResponse, ConfigGetRequest,
+    ConfigGetResult, FsRequest, FsResult, Implementation, InitializeRequest, InitializeResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
+    McpCapabilities, NewSessionRequest, NewSessionResponse, PROTOCOL_VERSION, PromptCapabilities,
+    PromptDelivery, PromptRequest, PromptResponse, ResumeSessionRequest, ResumeSessionResponse,
+    SessionCapabilities, SessionConfigOption, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, StopReason, Supported,
 };
 use kage_acp::agent::{Agent, PromptContext, send_update};
+use kage_core::config::Config;
 use kage_core::protocol::{AgentTree, Command, CommandKind, Delivery, RunOutcome};
 use kage_core::sync::lock;
 use kage_core::{LoopError, SessionId, StopReason as CoreStopReason};
@@ -106,13 +108,16 @@ impl Ids {
     }
 }
 
-/// How a prompt's run ended, handed from the bridge to the waiting prompt.
+/// How a prompt's run ended, handed from the bridge to every waiting
+/// prompt. Several prompts can wait on one run: one running and the
+/// prompts steering or queuing behind it.
+#[derive(Clone)]
 struct PromptEnd {
     outcome: RunOutcome,
     stop: Option<CoreStopReason>,
 }
 
-type Waiters = Arc<Mutex<HashMap<SessionId, mpsc::Sender<PromptEnd>>>>;
+type Waiters = Arc<Mutex<HashMap<SessionId, Vec<mpsc::Sender<PromptEnd>>>>>;
 
 type ShownBySession = Arc<Mutex<HashMap<SessionId, Shown>>>;
 
@@ -170,6 +175,8 @@ impl CliAcpAgent {
             streaming: HashSet::new(),
             ended: HashMap::new(),
             commands: HashMap::new(),
+            names: HashMap::new(),
+            statuses: HashMap::new(),
             fills: HashMap::new(),
             compacting: HashMap::new(),
             held: Arc::clone(&held),
@@ -251,6 +258,7 @@ impl Agent for CliAcpAgent {
             protocol_version: PROTOCOL_VERSION,
             agent_capabilities: AgentCapabilities {
                 load_session: true,
+                steer: true,
                 prompt_capabilities: PromptCapabilities {
                     image: true,
                     embedded_context: true,
@@ -372,6 +380,30 @@ impl Agent for CliAcpAgent {
         Ok(SetSessionConfigOptionResponse { config_options })
     }
 
+    fn config_get(&self, _req: ConfigGetRequest) -> Result<ConfigGetResult, RpcError> {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let config = Config::load_layered(&cwd).map_err(|e| RpcError::internal(e.to_string()))?;
+        Ok(ConfigGetResult {
+            providers: config.providers,
+            mcp: config.mcp,
+            permissions: config.permissions,
+            plugins: config.plugins,
+            ui: config.ui,
+        })
+    }
+
+    fn fs(&self, req: FsRequest) -> Result<FsResult, RpcError> {
+        let id = self.engine_id(&req.session_id)?;
+        let workdir = self
+            .host
+            .workdir(id)
+            .ok_or_else(|| RpcError::new(-32602, format!("unknown session {}", req.session_id)))?;
+        let permissions = Config::load_layered(&workdir)
+            .map(|config| config.permissions)
+            .unwrap_or_default();
+        fs::handle(&workdir, &permissions, &req)
+    }
+
     fn prompt(&self, req: PromptRequest, _ctx: &PromptContext) -> Result<PromptResponse, RpcError> {
         let id = self.engine_id(&req.session_id)?;
         if !self.host.claim_prompt(id, self.connection) {
@@ -381,15 +413,15 @@ impl Agent for CliAcpAgent {
             ));
         }
         let content = req.prompt.into_iter().map(prompt_content).collect();
+        let delivery = match req.delivery {
+            Some(PromptDelivery::Steer) => Delivery::Steer,
+            _ => Delivery::Queue,
+        };
         let (done, end) = mpsc::channel();
-        lock(&self.waiters).insert(id, done);
-        self.host.engine.send(Command::to(
-            id,
-            CommandKind::Prompt {
-                content,
-                delivery: Delivery::Queue,
-            },
-        ));
+        lock(&self.waiters).entry(id).or_default().push(done);
+        self.host
+            .engine
+            .send(Command::to(id, CommandKind::Prompt { content, delivery }));
         let end = end
             .recv()
             .map_err(|_| RpcError::internal("engine stopped"))?;

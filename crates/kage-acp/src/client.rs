@@ -407,6 +407,7 @@ where
     let prompt_req = PromptRequest {
         session_id: session.session_id,
         prompt: vec![ContentBlock::text(prompt)],
+        delivery: None,
     };
     let params =
         serde_json::to_value(&prompt_req).map_err(|e| ProviderError::Decode(e.to_string()))?;

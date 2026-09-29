@@ -4,14 +4,17 @@
 //! replaces it wholesale, so the model cannot leave an item stranded
 //! in `in_progress` by forgetting to clear it.
 //!
-//! State is in memory for the session; a resumed session starts empty.
+//! A write also returns the stored list as structured output, which
+//! the ACP bridge turns into a `plan` update for the client. State is
+//! in memory for the session; a resumed session starts empty, so a
+//! replay sends no `plan` update.
 
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
 use kage_core::{Risk, ToolOutput};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{Tool, ToolContext, ToolError, schema_for};
 
@@ -23,7 +26,7 @@ const MAX_TITLE: usize = 200;
 
 /// What one task is doing. Serialized lowercase, which is what the
 /// model sends back.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, JsonSchema)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
     /// Not started.
@@ -45,14 +48,25 @@ impl TodoStatus {
     }
 }
 
-/// One task. Only `title` and `status` are kept, so a write cannot
-/// smuggle anything else through.
-#[derive(Clone, Debug, Deserialize, JsonSchema)]
+/// One task. `title` and `status` are required; `id`, `owner` and
+/// `blockedBy` are kept when supplied, so a later adoption of the
+/// plan 019 item shape keeps its fields.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct TodoItem {
     /// Short, actionable description of the task.
     pub title: String,
     /// Where the task stands.
     pub status: TodoStatus,
+    /// Stable id of the task, when the model supplies one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Who is on the task, when the model says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// Ids of tasks that must finish before this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_by: Option<Vec<String>>,
 }
 
 impl TodoItem {
@@ -68,6 +82,9 @@ impl TodoItem {
         Ok(TodoItem {
             title: truncate(title),
             status: self.status,
+            id: self.id.clone(),
+            owner: self.owner.clone(),
+            blocked_by: self.blocked_by.clone(),
         })
     }
 }
@@ -169,7 +186,9 @@ impl Tool for TodoListTool {
         "Read or replace the todo list for this session. Call it with no \
          arguments to read the list; call it with `todos` to replace the \
          whole list. Each item is `{ \"title\": \"...\", \"status\": \
-         \"pending\" | \"in_progress\" | \"done\" }`. The rendered list \
+         \"pending\" | \"in_progress\" | \"done\" }`, optionally with \
+         `id`, `owner` and `blockedBy` (ids of items that must finish \
+         first), which are kept with the item. The rendered list \
          marks items `[ ]` pending, `[~]` in progress, `[x]` done. Send \
          an empty list to clear it. Worth using for a task that takes \
          several tool calls; not worth it for a single step."
@@ -228,7 +247,7 @@ impl Tool for TodoListTool {
             } else {
                 format!("Todo list updated.\n{}", render(&stored))
             },
-            structured: None,
+            structured: Some(serde_json::to_value(&stored)?),
             terminate: false,
         })
     }
@@ -555,5 +574,57 @@ mod tests {
             run(theirs, serde_json::json!({})).unwrap().text,
             "Todo list is empty."
         );
+    }
+
+    #[test]
+    fn a_write_returns_the_list_as_structured_output() {
+        let todos = TodoList::new();
+        let out = run(
+            todos,
+            serde_json::json!({"todos": [
+                {"title": "Read", "status": "in_progress", "id": "1"},
+                {"title": "Write", "status": "pending", "owner": "agent", "blockedBy": ["1"]},
+                item("Ship", "done")
+            ]}),
+        )
+        .unwrap();
+        assert_eq!(
+            out.structured,
+            Some(serde_json::json!([
+                {"title": "Read", "status": "in_progress", "id": "1"},
+                {"title": "Write", "status": "pending", "owner": "agent", "blockedBy": ["1"]},
+                {"title": "Ship", "status": "done"}
+            ]))
+        );
+    }
+
+    #[test]
+    fn a_read_returns_no_structured_output() {
+        let todos = TodoList::new();
+        run(
+            todos.clone(),
+            serde_json::json!({"todos": [item("a", "pending")]}),
+        )
+        .unwrap();
+        let out = run(todos, serde_json::json!({})).unwrap();
+        assert_eq!(out.structured, None);
+    }
+
+    #[test]
+    fn the_new_item_fields_are_optional_in_the_schema() {
+        let s = TodoListTool::new(TodoList::new()).schema();
+        let item = &s["$defs"]["TodoItem"];
+        let required = item["required"].as_array().unwrap();
+        assert_eq!(
+            required.len(),
+            2,
+            "only title and status are required: {item}"
+        );
+        for field in ["id", "owner", "blockedBy"] {
+            assert!(
+                item["properties"].get(field).is_some(),
+                "{field} missing from the schema"
+            );
+        }
     }
 }

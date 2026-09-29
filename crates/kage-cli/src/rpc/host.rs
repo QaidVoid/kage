@@ -59,6 +59,9 @@ pub(super) struct Host {
     /// Sessions open in the engine, so a load from another connection
     /// attaches to the live session instead of reopening its file.
     open: Arc<Mutex<HashMap<SessionId, Open>>>,
+    /// The workdir of every launched session, so `_kage/fs` can confine
+    /// its paths per session.
+    workdirs: Arc<Mutex<HashMap<SessionId, PathBuf>>>,
     /// The id the next connection gets.
     next_connection: AtomicU64,
 }
@@ -128,6 +131,7 @@ impl Host {
             aliases,
             live,
             open: Arc::default(),
+            workdirs: Arc::default(),
             next_connection: AtomicU64::new(0),
         });
         let open = Arc::clone(&host.open);
@@ -181,7 +185,14 @@ impl Host {
     pub(super) fn launch(&self, spec: SessionSpec, settings: Settings) {
         lock(&self.live).attach(spec.id, true);
         lock(&self.open).insert(spec.id, Open { settings });
+        lock(&self.workdirs).insert(spec.id, spec.cx.workdir.clone());
         self.engine.open(spec);
+    }
+
+    /// The workdir a session was launched with, the root `_kage/fs`
+    /// confines its paths to.
+    pub(super) fn workdir(&self, id: SessionId) -> Option<PathBuf> {
+        lock(&self.workdirs).get(&id).cloned()
     }
 
     /// The settings of a session another connection has open, so the

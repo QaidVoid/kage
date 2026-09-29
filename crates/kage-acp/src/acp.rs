@@ -12,6 +12,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use kage_core::config::{McpConfig, PluginsConfig, ProvidersConfig, UiConfig};
+use kage_core::permissions::PermissionsConfig;
+use kage_core::protocol::McpServerStatus;
+
 /// ACP protocol version kage implements.
 pub const PROTOCOL_VERSION: i64 = 1;
 
@@ -90,6 +94,10 @@ pub struct AgentCapabilities {
     /// Agent implements `session/load`.
     #[serde(default)]
     pub load_session: bool,
+    /// Agent steers a running prompt at its next turn boundary when a
+    /// `session/prompt` arrives marked [`PromptDelivery::Steer`].
+    #[serde(default)]
+    pub steer: bool,
     /// Prompt content the agent accepts.
     #[serde(default)]
     pub prompt_capabilities: PromptCapabilities,
@@ -299,6 +307,124 @@ pub struct SetSessionConfigOptionResponse {
     pub config_options: Vec<SessionConfigOption>,
 }
 
+/// `_kage/config/get` request params. Empty: the answer is the live
+/// configuration of the running process.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigGetRequest {}
+
+/// `_kage/config/get` result: the read-only sections a settings page
+/// renders. Serving them never writes `config.toml`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigGetResult {
+    /// Custom providers and overrides of registered providers.
+    pub providers: ProvidersConfig,
+    /// External MCP tool servers.
+    pub mcp: McpConfig,
+    /// Tool permission rules.
+    pub permissions: PermissionsConfig,
+    /// Plugin loader settings.
+    pub plugins: PluginsConfig,
+    /// User interface settings.
+    pub ui: UiConfig,
+}
+
+/// One MCP server's reachability, carried by the `_kage/mcp_status`
+/// update.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpStatusUpdate {
+    /// Configured server name.
+    pub name: String,
+    /// Whether the server is usable.
+    #[serde(flatten)]
+    pub status: McpServerStatus,
+}
+
+/// `_kage/fs` request params. `path` is relative to the session
+/// workdir; empty or `.` lists the workdir itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsRequest {
+    /// Target session, whose workdir confines every path.
+    pub session_id: String,
+    /// Which operation to run.
+    pub op: FsOp,
+    /// Path relative to the session workdir.
+    #[serde(default)]
+    pub path: String,
+}
+
+/// What `_kage/fs` should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FsOp {
+    /// List a directory subtree, depth- and entry-capped.
+    List,
+    /// Read one file, capped at 512 KB.
+    Read,
+}
+
+/// `_kage/fs` result for the op that was asked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum FsResult {
+    /// The answer to a `list` op.
+    List(FsListResult),
+    /// The answer to a `read` op.
+    Read(FsReadResult),
+}
+
+/// `_kage/fs` list result: a capped subtree of the session workdir.
+/// When [`FsListResult::truncated`] is set the client continues by
+/// listing a subdirectory.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsListResult {
+    /// The entries found, a directory directly before its children.
+    pub entries: Vec<FsEntry>,
+    /// Whether caps cut the subtree short.
+    pub truncated: bool,
+}
+
+/// One `_kage/fs` list entry. `path` is relative to the session
+/// workdir, with `/` separators.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsEntry {
+    /// Path relative to the session workdir.
+    pub path: String,
+    /// What the entry is.
+    pub kind: FsKind,
+    /// Size in bytes; directories report 0.
+    pub size: u64,
+}
+
+/// What a `_kage/fs` list entry is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FsKind {
+    /// A directory.
+    Directory,
+    /// A regular file.
+    File,
+    /// Anything else, such as a symlink or a fifo.
+    Other,
+}
+
+/// `_kage/fs` read result. A `binary` file carries no `content`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsReadResult {
+    /// The file bytes as UTF-8 text, capped at 512 KB.
+    pub content: String,
+    /// Whether the file was longer than the cap.
+    pub truncated: bool,
+    /// Whether the file is not valid UTF-8.
+    pub binary: bool,
+}
+
 /// A session setting the client can show and change (a select).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -422,6 +548,21 @@ pub struct PromptRequest {
     pub session_id: String,
     /// The user's turn as content blocks.
     pub prompt: Vec<ContentBlock>,
+    /// How the prompt joins a run already in flight. Absent queues it
+    /// until that run ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<PromptDelivery>,
+}
+
+/// How a prompt joins a run already in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptDelivery {
+    /// Deliver at the running run's next turn boundary.
+    Steer,
+    /// Deliver as a new run once the current run ends.
+    #[default]
+    Queue,
 }
 
 /// Why a prompt turn ended.
@@ -581,6 +722,9 @@ pub enum SessionUpdate {
     /// Older context turns were summarized.
     #[serde(rename = "_kage/compaction")]
     Compaction(CompactionUpdate),
+    /// An MCP server's reachability changed.
+    #[serde(rename = "_kage/mcp_status")]
+    McpStatus(McpStatusUpdate),
     /// Any update kind kage does not know. Never sent.
     #[serde(other)]
     Unknown,
@@ -993,6 +1137,7 @@ mod tests {
                 protocol_version: 1,
                 agent_capabilities: AgentCapabilities {
                     load_session: true,
+                    steer: true,
                     prompt_capabilities: PromptCapabilities {
                         image: false,
                         audio: false,
@@ -1019,6 +1164,7 @@ mod tests {
                 "protocolVersion": 1,
                 "agentCapabilities": {
                     "loadSession": true,
+                    "steer": true,
                     "promptCapabilities": {
                         "image": false, "audio": false, "embeddedContext": true
                     },
@@ -1060,6 +1206,7 @@ mod tests {
             &AgentCapabilities::default(),
             serde_json::json!({
                 "loadSession": false,
+                "steer": false,
                 "promptCapabilities": {"image": false, "audio": false, "embeddedContext": false},
                 "mcpCapabilities": {"http": false, "sse": false},
                 "sessionCapabilities": {}
@@ -1279,12 +1426,32 @@ mod tests {
             &PromptRequest {
                 session_id: "s1".into(),
                 prompt: vec![ContentBlock::text("hello")],
+                delivery: None,
             },
             serde_json::json!({
                 "sessionId": "s1",
                 "prompt": [{"type": "text", "text": "hello"}]
             }),
         );
+        roundtrip(
+            &PromptRequest {
+                session_id: "s1".into(),
+                prompt: vec![ContentBlock::text("look")],
+                delivery: Some(PromptDelivery::Steer),
+            },
+            serde_json::json!({
+                "sessionId": "s1",
+                "prompt": [{"type": "text", "text": "look"}],
+                "delivery": "steer"
+            }),
+        );
+        let queued: PromptRequest = serde_json::from_value(serde_json::json!({
+            "sessionId": "s1",
+            "prompt": [],
+            "delivery": "queue"
+        }))
+        .unwrap();
+        assert_eq!(queued.delivery, Some(PromptDelivery::Queue));
         roundtrip(
             &PromptResponse {
                 stop_reason: StopReason::EndTurn,
@@ -1326,6 +1493,131 @@ mod tests {
                 "kind": "execute",
                 "status": "pending",
                 "rawInput": {"cmd": "ls"}
+            }),
+        );
+    }
+
+    #[test]
+    fn config_get_and_mcp_status_shapes() {
+        roundtrip(&ConfigGetRequest {}, serde_json::json!({}));
+        let value = serde_json::to_value(ConfigGetResult::default()).unwrap();
+        for section in ["providers", "mcp", "permissions", "plugins", "ui"] {
+            assert!(value.get(section).is_some(), "{section} must be present");
+        }
+        let back: ConfigGetResult = serde_json::from_value(value).unwrap();
+        assert_eq!(back, ConfigGetResult::default());
+        roundtrip(
+            &SessionNotification {
+                session_id: "s1".into(),
+                update: SessionUpdate::McpStatus(McpStatusUpdate {
+                    name: "fs".into(),
+                    status: McpServerStatus::Connected,
+                }),
+            },
+            serde_json::json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "_kage/mcp_status",
+                    "name": "fs",
+                    "status": "connected"
+                }
+            }),
+        );
+        roundtrip(
+            &SessionUpdate::McpStatus(McpStatusUpdate {
+                name: "db".into(),
+                status: McpServerStatus::Failed {
+                    error: "spawn failed".into(),
+                },
+            }),
+            serde_json::json!({
+                "sessionUpdate": "_kage/mcp_status",
+                "name": "db",
+                "status": "failed",
+                "error": "spawn failed"
+            }),
+        );
+        roundtrip(
+            &SessionUpdate::McpStatus(McpStatusUpdate {
+                name: "api".into(),
+                status: McpServerStatus::NeedsAuth,
+            }),
+            serde_json::json!({
+                "sessionUpdate": "_kage/mcp_status",
+                "name": "api",
+                "status": "needs_auth"
+            }),
+        );
+    }
+
+    #[test]
+    fn fs_request_and_result_shapes() {
+        roundtrip(
+            &FsRequest {
+                session_id: "s1".into(),
+                op: FsOp::List,
+                path: "src".into(),
+            },
+            serde_json::json!({"sessionId": "s1", "op": "list", "path": "src"}),
+        );
+        roundtrip(
+            &FsRequest {
+                session_id: "s1".into(),
+                op: FsOp::Read,
+                path: String::new(),
+            },
+            serde_json::json!({"sessionId": "s1", "op": "read", "path": ""}),
+        );
+        roundtrip(
+            &FsResult::List(FsListResult {
+                entries: vec![
+                    FsEntry {
+                        path: "src".into(),
+                        kind: FsKind::Directory,
+                        size: 0,
+                    },
+                    FsEntry {
+                        path: "src/lib.rs".into(),
+                        kind: FsKind::File,
+                        size: 512,
+                    },
+                    FsEntry {
+                        path: "link".into(),
+                        kind: FsKind::Other,
+                        size: 0,
+                    },
+                ],
+                truncated: true,
+            }),
+            serde_json::json!({
+                "op": "list",
+                "entries": [
+                    {"path": "src", "kind": "directory", "size": 0},
+                    {"path": "src/lib.rs", "kind": "file", "size": 512},
+                    {"path": "link", "kind": "other", "size": 0}
+                ],
+                "truncated": true
+            }),
+        );
+        roundtrip(
+            &FsResult::Read(FsReadResult {
+                content: "hello".into(),
+                truncated: false,
+                binary: false,
+            }),
+            serde_json::json!({"op": "read", "content": "hello", "truncated": false, "binary": false}),
+        );
+        roundtrip(
+            &FsResult::Read(FsReadResult {
+                content: String::new(),
+                truncated: true,
+                binary: true,
+            }),
+            serde_json::json!({
+                "op": "read",
+                "content": "",
+                "truncated": true,
+                "binary": true
             }),
         );
     }

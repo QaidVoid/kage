@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use kage_acp::acp::{McpServer, ToolCallStatus, ToolKind};
@@ -482,12 +483,25 @@ fn prompt_async(
     session: &str,
     text: &str,
 ) -> mpsc::Receiver<Result<serde_json::Value, kage_jsonrpc::RpcError>> {
+    prompt_async_with(client, session, text, None)
+}
+
+/// [`prompt_async`] with a `delivery` marker on the params.
+fn prompt_async_with(
+    client: &Peer,
+    session: &str,
+    text: &str,
+    delivery: Option<&str>,
+) -> mpsc::Receiver<Result<serde_json::Value, kage_jsonrpc::RpcError>> {
     let (done, end) = mpsc::channel();
     let client = client.clone();
-    let params = serde_json::json!({
+    let mut params = serde_json::json!({
         "sessionId": session,
         "prompt": [{"type": "text", "text": text}],
     });
+    if let Some(delivery) = delivery {
+        params["delivery"] = serde_json::json!(delivery);
+    }
     std::thread::spawn(move || {
         let _ = done.send(client.request("session/prompt", params));
     });
@@ -680,6 +694,7 @@ fn initialize_advertises_image_and_embedded_context() {
     assert_eq!(caps["image"], true);
     assert_eq!(caps["embeddedContext"], true);
     assert_eq!(caps["audio"], false);
+    assert_eq!(init["agentCapabilities"]["steer"], true);
 }
 
 #[test]
@@ -1409,6 +1424,92 @@ fn a_plain_reply_still_ends_its_turn_without_tools() {
 }
 
 #[test]
+fn a_steer_marked_prompt_lands_at_the_running_runs_next_turn_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().display().to_string();
+    let h = serve_paused(
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::ToolCallStart {
+                id: ToolCallId::new("call_1"),
+                name: "ls".into(),
+            }),
+        ],
+        vec![
+            Ok(ProviderEvent::ToolCallEnd {
+                id: ToolCallId::new("call_1"),
+                input: serde_json::json!({ "path": path }),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: CoreStopReason::ToolUse,
+                usage: TokenUsage::default(),
+            }),
+        ],
+        vec![text_turn("run one done"), text_turn("Titles")],
+        dir.path(),
+        dir.path(),
+    );
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+    until(|| h.paused.is_parked());
+
+    // Sent while the run is parked mid-turn, so the steer is queued
+    // before the ask can be answered and turn two must carry it.
+    let steer_end = prompt_async_with(&h.client, &h.session, "hurry", Some("steer"));
+    std::thread::sleep(Duration::from_millis(250));
+    h.release.send(()).unwrap();
+
+    let mut updates = Vec::new();
+    let (ask, _) = until_ask(&h.inbox, &mut updates);
+    allow(&h.client, &ask);
+
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    let steered = steer_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(steered["stopReason"], "end_turn");
+    until(|| lock(&h.paused.requests).len() >= 2);
+    let turn_two = &lock(&h.paused.requests)[1];
+    assert_eq!(turn_two.messages.last().unwrap().content, [text("hurry")]);
+}
+
+#[test]
+fn an_unmarked_prompt_during_a_run_queues_instead_of_steering() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().display().to_string();
+    let h = serve(
+        vec![
+            tool_turn("call_1", "ls", serde_json::json!({ "path": path })),
+            text_turn("run one done"),
+            text_turn("queued done"),
+            text_turn("Titles"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+    let mut updates = Vec::new();
+    let (ask, _) = until_ask(&h.inbox, &mut updates);
+
+    let queued_end = prompt_async(&h.client, &h.session, "later");
+    allow(&h.client, &ask);
+
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    let queued = queued_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(queued["stopReason"], "end_turn");
+    until(|| h.mock.requests().len() >= 2);
+    let turn_two = &h.mock.requests()[1];
+    assert_ne!(turn_two.messages.last().unwrap().content, [text("later")]);
+    until(|| {
+        h.mock.requests().iter().any(|request| {
+            request
+                .messages
+                .iter()
+                .any(|m| m.content == [text("later")])
+        })
+    });
+}
+
+#[test]
 fn a_close_refusal_during_a_run_reaches_the_client_as_a_warn_notice() {
     let dir = tempfile::tempdir().unwrap();
     let h = serve_paused(
@@ -1523,15 +1624,19 @@ fn streamed_until_response(
     prompt_end: &mpsc::Receiver<Result<serde_json::Value, kage_jsonrpc::RpcError>>,
 ) -> (Vec<(Instant, serde_json::Value)>, Vec<serde_json::Value>) {
     let mut stream = Vec::new();
+    let deadline = Instant::now() + WAIT;
     loop {
         if let Ok(response) = prompt_end.try_recv() {
             assert_eq!(response.unwrap()["stopReason"], "end_turn");
             return (stream, drain(&h.inbox));
         }
-        let message = h.inbox.recv_timeout(WAIT).expect("prompt did not resolve");
-        match message {
-            Inbound::Notification { params, .. } => stream.push((Instant::now(), params)),
-            Inbound::Request { .. } => {}
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "prompt did not resolve");
+        let slice = remaining.min(Duration::from_millis(25));
+        match h.inbox.recv_timeout(slice) {
+            Ok(Inbound::Notification { params, .. }) => stream.push((Instant::now(), params)),
+            Err(RecvTimeoutError::Disconnected) => panic!("inbox closed before prompt resolved"),
+            Ok(Inbound::Request { .. }) | Err(RecvTimeoutError::Timeout) => {}
         }
     }
 }
@@ -1725,6 +1830,182 @@ fn mcp_prompts_are_commands_that_expand_when_sent_back() {
     let err = h.client.request("session/prompt", params).unwrap_err();
     assert_eq!(err.code, -32602);
     assert_eq!(err.message, "mcp srv:p: missing argument a");
+}
+
+#[test]
+fn config_get_serves_the_read_only_sections_without_writing_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(vec![], dir.path(), dir.path());
+
+    let result = h
+        .client
+        .request("_kage/config/get", serde_json::json!({}))
+        .unwrap();
+    for section in ["providers", "mcp", "permissions", "plugins", "ui"] {
+        assert!(result.get(section).is_some(), "missing {section}");
+    }
+    assert!(!dir.path().join("config.toml").exists());
+}
+
+#[test]
+fn mcp_status_arrives_per_server_and_only_carries_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve_with(
+        vec![text_turn("ok")],
+        dir.path(),
+        dir.path(),
+        true,
+        Inputs::default(),
+    );
+
+    let updates = updates_until(&h.inbox, &h.session, "_kage/mcp_status");
+    let statuses: Vec<(&str, &str)> = updates
+        .iter()
+        .filter(|p| p["update"]["sessionUpdate"] == "_kage/mcp_status")
+        .map(|p| {
+            (
+                p["update"]["name"].as_str().unwrap(),
+                p["update"]["status"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    let (name, status) = statuses.last().unwrap();
+    assert_eq!(*name, "srv");
+    assert_eq!(*status, "connected");
+    for pair in statuses.windows(2) {
+        assert_ne!(pair[0], pair[1], "repeated status: {statuses:?}");
+    }
+}
+
+#[test]
+fn fs_requests_list_and_read_under_the_session_workdir() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("hello.txt"), "hi").unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    let h = serve(vec![], dir.path(), dir.path());
+    let created = h
+        .client
+        .request(
+            "session/new",
+            serde_json::json!({"cwd": dir.path().display().to_string()}),
+        )
+        .unwrap();
+    let session = created["sessionId"].as_str().unwrap();
+
+    let list = h
+        .client
+        .request(
+            "_kage/fs",
+            serde_json::json!({"sessionId": session, "op": "list", "path": ""}),
+        )
+        .unwrap();
+    assert_eq!(
+        list,
+        serde_json::json!({
+            "op": "list",
+            "entries": [
+                {"path": "hello.txt", "kind": "file", "size": 2},
+                {"path": "sub", "kind": "directory", "size": 0}
+            ],
+            "truncated": false
+        })
+    );
+
+    let read = h
+        .client
+        .request(
+            "_kage/fs",
+            serde_json::json!({"sessionId": session, "op": "read", "path": "hello.txt"}),
+        )
+        .unwrap();
+    assert_eq!(
+        read,
+        serde_json::json!({
+            "op": "read",
+            "content": "hi",
+            "truncated": false,
+            "binary": false
+        })
+    );
+
+    let err = h
+        .client
+        .request(
+            "_kage/fs",
+            serde_json::json!({"sessionId": session, "op": "read", "path": "../escape"}),
+        )
+        .unwrap_err();
+    assert_eq!(err.code, -32602);
+    assert!(err.message.contains("escapes workdir"));
+}
+
+#[test]
+fn a_todo_write_reaches_the_client_as_a_plan_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(
+        vec![
+            tool_turn(
+                "call_1",
+                "todo_list",
+                serde_json::json!({"todos": [
+                    {"title": "Read", "status": "in_progress", "id": "1"},
+                    {"title": "Write", "status": "pending", "owner": "agent", "blockedBy": ["1"]},
+                    {"title": "Ship", "status": "done"}
+                ]}),
+            ),
+            text_turn("planned"),
+            text_turn("Titles"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+
+    let updates = updates_until(&h.inbox, &h.session, "plan");
+    let plan = &updates.last().unwrap()["update"];
+    assert_eq!(
+        plan["entries"],
+        serde_json::json!([
+            {
+                "content": "Read",
+                "priority": "medium",
+                "status": "in_progress",
+                "_meta": {"kage": {"id": "1"}}
+            },
+            {
+                "content": "Write",
+                "priority": "medium",
+                "status": "pending",
+                "_meta": {"kage": {"owner": "agent", "blockedBy": ["1"]}}
+            },
+            {"content": "Ship", "priority": "medium", "status": "completed"}
+        ])
+    );
+    prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+}
+
+#[test]
+fn a_todo_read_sends_no_plan_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(
+        vec![
+            tool_turn("call_1", "todo_list", serde_json::json!({})),
+            text_turn("read it"),
+            text_turn("Titles"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    let drained = drain(&h.inbox);
+    assert!(
+        !update_kinds(&drained).contains(&"plan"),
+        "{:?}",
+        update_kinds(&drained)
+    );
 }
 
 #[test]

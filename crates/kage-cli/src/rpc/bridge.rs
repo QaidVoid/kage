@@ -6,20 +6,21 @@ use std::sync::{Arc, Mutex};
 
 use kage_acp::acp::{
     AvailableCommandsUpdate, CompactionUpdate, ConfigOptionUpdate, ContentBlock, Cost,
-    MessageChunk, NoticeTone, NoticeUpdate, SessionConfigSelectOption, SessionInfoUpdate,
-    SessionUpdate, SubagentSessionCapabilities, SubagentState, SubagentUpdate, ToolCall,
-    ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind, TurnPhase, TurnReason, TurnUpdate,
-    UsageUpdate,
+    McpStatusUpdate, MessageChunk, NoticeTone, NoticeUpdate, Plan, SessionConfigSelectOption,
+    SessionInfoUpdate, SessionUpdate, SubagentSessionCapabilities, SubagentState, SubagentUpdate,
+    ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind, TurnPhase, TurnReason,
+    TurnUpdate, UsageUpdate,
 };
 use kage_acp::agent::{PermissionDecision, send_update};
 use kage_core::protocol::{
-    AgentNode, AgentTree, Command, CommandKind, Envelope, Event, HostEvent, NoticeLevel,
-    PermissionDecision as Decision, RequestId, RunOutcome, Usage, with_canonical_tool_names,
+    AgentNode, AgentTree, Command, CommandKind, Envelope, Event, HostEvent, McpServerInfo,
+    McpServerStatus, NoticeLevel, PermissionDecision as Decision, RequestId, RunOutcome, Usage,
+    with_canonical_tool_names,
 };
 use kage_core::sync::lock;
 use kage_core::{
     CancelFlag, Content, LoopEvent, Message, Role, SessionId, StopReason as CoreStopReason,
-    ToolCallId,
+    ToolCallId, ToolOutput,
 };
 use kage_jsonrpc::Peer;
 
@@ -64,6 +65,12 @@ pub(super) struct Bridge {
     pub(super) ended: HashMap<SessionId, PromptEnd>,
     /// The commands last sent to each client session.
     pub(super) commands: HashMap<SessionId, Vec<serde_json::Value>>,
+    /// The tool of every in-flight call per session, so a completed
+    /// `todo_list` write can become a `plan` update.
+    pub(super) names: HashMap<SessionId, HashMap<String, String>>,
+    /// Last-known MCP statuses per session, so `_kage/mcp_status` only
+    /// carries a server whose status changed.
+    pub(super) statuses: HashMap<SessionId, HashMap<String, McpServerStatus>>,
     /// Last known context fill per session, in tokens, from usage
     /// reports.
     pub(super) fills: HashMap<SessionId, u64>,
@@ -181,9 +188,21 @@ impl Bridge {
                 if let LoopEvent::MessageAppended { message } = event {
                     self.echo(session, &client_id, message);
                 }
+                if let LoopEvent::ToolCallStart { id, name, .. } = event {
+                    self.names
+                        .entry(session)
+                        .or_default()
+                        .insert(id.to_string(), name.clone());
+                }
                 let seen = self.seen.entry(session).or_default();
                 if let Some(update) = to_update(seen, event) {
                     self.send(session, &client_id, update);
+                }
+                if let LoopEvent::ToolCallEnd { id, output } = event
+                    && self.call_name(session, id) == Some("todo_list")
+                    && let Some(plan) = todo_plan(output)
+                {
+                    self.send(session, &client_id, plan);
                 }
             }
             Event::Host(HostEvent::PermissionRequested {
@@ -236,22 +255,12 @@ impl Bridge {
             Event::Host(HostEvent::McpServers { servers })
                 if !self.streaming.contains(&session) =>
             {
-                let commands = prompt_commands(servers);
-                let last = self.commands.insert(session, commands.clone());
-                if last.unwrap_or_default() != commands {
-                    let update = AvailableCommandsUpdate {
-                        available_commands: commands,
-                    };
-                    self.send(
-                        session,
-                        &client_id,
-                        SessionUpdate::AvailableCommandsUpdate(update),
-                    );
-                }
+                self.mcp_servers(session, &client_id, servers);
             }
             Event::Host(HostEvent::RunEnded { outcome }) => {
                 self.end_asks(session);
                 self.seen.remove(&session);
+                self.names.remove(&session);
                 self.compacting.remove(&session);
                 let stop = self.stops.remove(&session);
                 let end = PromptEnd {
@@ -262,6 +271,45 @@ impl Bridge {
                 self.settle(session);
             }
             Event::Host(_) => {}
+        }
+    }
+
+    /// The tool of an in-flight call of `session`.
+    fn call_name(&self, session: SessionId, id: &ToolCallId) -> Option<&str> {
+        self.names
+            .get(&session)
+            .and_then(|names| names.get(&id.to_string()).map(String::as_str))
+    }
+
+    /// Refreshes a session's MCP commands and statuses: the prompt
+    /// commands as one `available_commands_update` when they changed,
+    /// and one `_kage/mcp_status` per server whose status changed.
+    fn mcp_servers(&mut self, session: SessionId, client_id: &str, servers: &[McpServerInfo]) {
+        let commands = prompt_commands(servers);
+        let last = self.commands.insert(session, commands.clone());
+        if last.unwrap_or_default() != commands {
+            let update = AvailableCommandsUpdate {
+                available_commands: commands,
+            };
+            self.send(
+                session,
+                client_id,
+                SessionUpdate::AvailableCommandsUpdate(update),
+            );
+        }
+        let statuses: HashMap<String, McpServerStatus> = servers
+            .iter()
+            .map(|server| (server.name.clone(), server.status.clone()))
+            .collect();
+        let last = self.statuses.insert(session, statuses.clone());
+        for (name, status) in &statuses {
+            if last.as_ref().and_then(|last| last.get(name)) != Some(status) {
+                let update = McpStatusUpdate {
+                    name: name.clone(),
+                    status: status.clone(),
+                };
+                self.send(session, client_id, SessionUpdate::McpStatus(update));
+            }
         }
     }
 
@@ -374,8 +422,8 @@ impl Bridge {
             return;
         };
         if !self.streaming.remove(&session) {
-            if let Some(waiter) = lock(&self.waiters).remove(&session) {
-                let _ = waiter.send(end);
+            for waiter in lock(&self.waiters).remove(&session).unwrap_or_default() {
+                let _ = waiter.send(end.clone());
             }
             self.prune_tree(session);
             return;
@@ -726,6 +774,43 @@ fn turn_reason(had_tool_calls: bool) -> TurnReason {
     } else {
         TurnReason::NoToolCalls
     }
+}
+
+/// The `plan` update a completed `todo_list` write carries: one entry
+/// per todo, with the plan 019 `_meta.kage` fields when supplied. The
+/// write is what returns the list as structured output, so a read-only
+/// call, which has none, sends no plan.
+fn todo_plan(output: &ToolOutput) -> Option<SessionUpdate> {
+    let todos = output.structured.as_ref()?.as_array()?;
+    Some(SessionUpdate::Plan(Plan {
+        entries: todos.iter().map(todo_plan_entry).collect(),
+    }))
+}
+
+/// One ACP plan entry for one todo: the title as content, the status
+/// mapped (`done` becomes `completed`), and `id`, `owner` and
+/// `blockedBy` under `_meta.kage` when the model supplied them.
+fn todo_plan_entry(todo: &serde_json::Value) -> serde_json::Value {
+    let status = match todo["status"].as_str() {
+        Some("in_progress") => "in_progress",
+        Some("done") => "completed",
+        _ => "pending",
+    };
+    let mut entry = serde_json::json!({
+        "content": todo["title"].as_str().unwrap_or_default(),
+        "priority": "medium",
+        "status": status,
+    });
+    let mut kage = serde_json::Map::new();
+    for field in ["id", "owner", "blockedBy"] {
+        if let Some(value) = todo.get(field) {
+            kage.insert(field.to_owned(), value.clone());
+        }
+    }
+    if !kage.is_empty() {
+        entry["_meta"] = serde_json::json!({ "kage": kage });
+    }
+    entry
 }
 
 /// The `_kage/notice` carrying an engine notice, with its tone from

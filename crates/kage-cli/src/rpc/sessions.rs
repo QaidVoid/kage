@@ -115,7 +115,8 @@ impl super::CliAcpAgent {
 
 /// The `session/update`s that show `history` as the live bridge showed
 /// it: user chunks, then each assistant block and tool result mapped
-/// through [`to_update`].
+/// through [`to_update`]. No `plan` update: the todo list lives in
+/// memory only, so a resumed session starts with an empty plan.
 pub(super) fn replay_updates(history: &[Message]) -> Vec<SessionUpdate> {
     let mut seen = HashMap::new();
     let mut updates = Vec::new();

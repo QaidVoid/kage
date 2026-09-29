@@ -200,6 +200,9 @@ enum Input {
     /// The user approved a session's plan and `exit_plan` turned plan
     /// mode off in the gate. The engine records and announces it.
     PlanApproved(SessionId),
+    /// Test-only: report the hosted session ids.
+    #[cfg(test)]
+    HostedSessions(crossbeam_channel::Sender<Vec<SessionId>>),
 }
 
 /// One verified resume target, from its session marker.
@@ -273,6 +276,14 @@ impl Engine {
 
     pub(crate) fn send(&self, command: Command) {
         self.commander.send(command);
+    }
+
+    /// Test-only: the session ids the dispatcher hosts right now.
+    #[cfg(test)]
+    pub(crate) fn hosted_sessions(&self) -> Vec<SessionId> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let _ = self.commander.0.send(Input::HostedSessions(tx));
+        rx.recv_timeout(Duration::from_secs(5)).unwrap_or_default()
     }
 
     /// Cancel every run and wait for the engine to stop.
@@ -415,6 +426,10 @@ impl Dispatcher {
                 }
                 Input::Finished(finished) => self.finish(*finished),
                 Input::RequeueChild { id } => self.requeue_child(id),
+                #[cfg(test)]
+                Input::HostedSessions(reply) => {
+                    let _ = reply.send(self.sessions.keys().copied().collect());
+                }
                 Input::McpDone(done) => self.mcp_done(*done),
                 Input::ShellDone(done) => self.shell_done(*done),
                 Input::Title { session, title } => self.record_title(session, title),
@@ -1033,6 +1048,7 @@ impl Dispatcher {
             session.queued.pop_front()
         };
         self.bus.publish(id, HostEvent::RunEnded { outcome });
+        self.deny_asks_of(id);
         self.bus.publish(id, HostEvent::StateChanged { state });
         if let Some((reply, output)) = reply {
             let _ = reply.send(output);
@@ -1050,6 +1066,58 @@ impl Dispatcher {
             self.end_waiting(orphan);
         }
         self.start_waiting();
+        self.reap_swarm_child(id);
+    }
+
+    /// Deny every permission ask the ended run of `session` still has
+    /// parked. A run that ends mid-ask, such as a cancelled child,
+    /// otherwise leaves the ask and its reply channel in `asks`
+    /// forever, because only [`Self::resolve_permission`] removes
+    /// entries.
+    fn deny_asks_of(&self, session: SessionId) {
+        let stale: Vec<RequestId> = lock(&self.asks)
+            .iter()
+            .filter_map(|(id, (asker, _))| (*asker == session).then_some(*id))
+            .collect();
+        for request_id in stale {
+            self.resolve_permission(Some(session), request_id, PermissionDecision::Deny);
+        }
+    }
+
+    /// Drop a finished swarm child whose result was already delivered.
+    ///
+    /// The child's transcript stays in its session file and a later
+    /// `swarm resume` reopens the file (`attach`), so hosting the idle
+    /// session only pins its whole history in RAM for the engine's
+    /// life. Plain `agent` children stay hosted: they can still be
+    /// re-prompted in place, and their own agents keep finding them.
+    fn reap_swarm_child(&mut self, id: SessionId) {
+        let Some(session) = self.sessions.get(&id) else {
+            return;
+        };
+        let delivered = session
+            .link
+            .as_ref()
+            .is_some_and(|link| link.batch_id.is_some() && link.reply.is_none());
+        let quiet = session.idle.is_some()
+            && session.queued.is_empty()
+            && session.pending_history.is_empty()
+            && session.pending_entries.is_empty()
+            && session.shells == 0
+            && session.late_title.is_none()
+            && !self.swarm_requeues.contains_key(&id)
+            && !self.waiting.contains(&id)
+            && !self
+                .sessions
+                .values()
+                .any(|s| s.idle.is_none() && s.link.as_ref().is_some_and(|l| l.parent == id));
+        if !(delivered && quiet) {
+            return;
+        }
+        self.deny_asks_of(id);
+        self.watchdogs.remove(&id);
+        self.swarm_requeues.remove(&id);
+        self.sessions.remove(&id);
     }
 
     /// Re-prompt a swarm child whose run failed on a rate limit, or

@@ -2222,7 +2222,7 @@ fn a_swarm_and_an_agent_call_work_in_sequence() {
 }
 
 #[test]
-fn a_swarm_resume_reprompts_the_hosted_children() {
+fn a_swarm_resume_reprompts_children_from_their_files() {
     let dir = tempfile::tempdir().unwrap();
     let mock = MockProvider::sequence(vec![
         swarm_turn(&[("call_s1", swarm_task(&["a", "b"]))]),
@@ -2281,10 +2281,14 @@ fn a_swarm_resume_reprompts_the_hosted_children() {
     assert!(output.text.contains("item=\"a\""));
     assert!(output.text.contains("item=\"b\""));
     assert!(!output.is_error);
-    assert!(
-        spawned(&second).is_empty(),
-        "hosted children keep their ids"
-    );
+    // The batch reaped both children, so the resume reopens each from
+    // its session file and publishes a fresh spawn card, with the same
+    // session id.
+    let mut reopened: Vec<SessionId> = spawned(&second).into_iter().map(|(id, _)| id).collect();
+    reopened.sort();
+    let mut first_ids = vec![children[0].0, children[1].0];
+    first_ids.sort();
+    assert_eq!(reopened, first_ids, "resumed children keep their ids");
 }
 
 #[test]
@@ -3564,4 +3568,122 @@ fn plan_mode_survives_a_restart() {
         |e| matches!(&e.event, Event::Host(HostEvent::StateChanged { state }) if state.plan),
     );
     assert_eq!(last_plan_state(&seen), Some(true));
+}
+
+#[test]
+fn finishing_a_swarm_child_reaps_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::sequence(vec![
+        swarm_turn(&[("call_s", swarm_task(&["a", "b"]))]),
+        text_turn("a reply"),
+        text_turn("b reply"),
+        text_turn("parent done"),
+    ]));
+    let (recorder, _) = recorder_in(dir.path(), SessionId::new());
+    let parent = h.open_parent(
+        Some(recorder),
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(swarm_setup(2, 60_000)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 3);
+    let children: Vec<SessionId> = spawned(&events).into_iter().map(|(id, _)| id).collect();
+    assert_eq!(children.len(), 2);
+
+    let hosted = h.engine.hosted_sessions();
+    assert!(hosted.contains(&parent), "the parent stays hosted");
+    for child in &children {
+        assert!(!hosted.contains(child), "child {child} should be reaped");
+        // The transcript survives in the session file the reaped child
+        // was writing.
+        let entries: Vec<kage_session::SessionEntry> =
+            kage_session::SessionReader::iter(dir.path().join(format!("{child}.jsonl")))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|e| matches!(e, kage_session::SessionEntry::Message(_)))
+        );
+    }
+    h.engine.shutdown();
+}
+
+#[test]
+fn a_reaped_swarm_child_resumes_from_its_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::sequence(vec![
+        swarm_turn(&[("call_s", swarm_task(&["a", "b"]))]),
+        text_turn("a reply"),
+        text_turn("b reply"),
+        text_turn("parent done"),
+        text_turn("resumed reply"),
+    ]));
+    let parent = SessionId::new();
+    let (recorder, _) = recorder_in(dir.path(), parent);
+    h.engine.open(SessionSpec {
+        recorder: Some(recorder),
+        agents: Some(swarm_setup(1, 60_000)),
+        ..h.spec(parent)
+    });
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 3);
+    let (child, _) = spawned(&events)[0].clone();
+    assert!(!h.engine.hosted_sessions().contains(&child));
+
+    // Re-prompt the reaped child the way a second swarm call would.
+    let (reply, reply_rx) = crossbeam_channel::bounded(1);
+    let _ = h.engine.commander.0.send(Input::Attach(Box::new(Attach {
+        parent,
+        id: child,
+        agent: "general".into(),
+        description: "a swarm".into(),
+        batch_id: ToolCallId::new("call_r"),
+        prompt: "continue".into(),
+        reply,
+        swarm: None,
+    })));
+
+    // The file path publishes a fresh spawn card; the hosted path does
+    // not.
+    let reopened = wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::AgentSpawned { .. })) && e.session == child
+    });
+    assert!(matches!(
+        &reopened.last().unwrap().event,
+        Event::Host(HostEvent::AgentSpawned { parent: p, .. }) if *p == parent
+    ));
+    let output = reply_rx.recv_timeout(WAIT).expect("no reply");
+    assert!(!output.is_error, "{}", output.text);
+    assert!(output.text.contains("resumed reply"), "{}", output.text);
+    assert!(!h.engine.hosted_sessions().contains(&child));
+    h.engine.shutdown();
+}
+
+#[test]
+fn a_run_ending_mid_ask_resolves_the_pending_ask() {
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("ask"))]),
+        tool_turn("gate"),
+    ]));
+    let parent = h.open_parent(None, ask_for_gate(), Some(agent_setup(1, 1)));
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let child = wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::PermissionRequested { .. }))
+    })
+    .last()
+    .unwrap()
+    .session;
+    h.engine.send(Command::to(parent, CommandKind::Cancel));
+    let events = until_runs_end(&h.events, 2);
+    let resolved = events
+        .iter()
+        .filter(|e| {
+            e.session == child
+                && matches!(e.event, Event::Host(HostEvent::PermissionResolved { .. }))
+        })
+        .count();
+    assert_eq!(resolved, 1, "the ask is denied once, unprompted");
+    h.engine.shutdown();
 }

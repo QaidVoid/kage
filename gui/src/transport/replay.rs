@@ -212,6 +212,7 @@ mod tests {
                 TranscriptItem::Notice { .. } => "notice",
                 TranscriptItem::Compaction { .. } => "compaction",
                 TranscriptItem::Plan { .. } => "plan",
+                TranscriptItem::Decision { .. } => "decision",
             })
             .collect::<Vec<_>>();
         assert_eq!(

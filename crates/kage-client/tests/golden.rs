@@ -14,7 +14,9 @@ use kage_acp_wire::{
     ClientCapabilities, ContentBlock, FsEntry, FsKind, FsListResult, FsOp, FsResult,
     RequestPermissionRequest, SessionNotification, StopReason, ToolCallStatus,
 };
-use kage_client::{Change, Client, Frame, PermissionDecision, PromptOutcome, SteerError, TranscriptItem};
+use kage_client::{
+    Change, Client, Frame, PermissionDecision, PromptOutcome, SteerError, TranscriptItem,
+};
 
 const PARENT: &str = "01KA5C0D1NG000000000000000";
 const CHILD: &str = "01KA5C0D1NG000000000000001";
@@ -286,6 +288,22 @@ fn the_approval_fixture_round_trips_a_permission_ask() {
             .permissions
             .is_empty()
     );
+    {
+        let session = client.state().session(PARENT).unwrap();
+        assert!(
+            matches!(
+                &session.items[1],
+                TranscriptItem::Decision {
+                    subject,
+                    label,
+                    allowed: true,
+                    feedback: None,
+                } if subject == "shell" && label == "Allow shell"
+            ),
+            "the reply appended the decision record: {:?}",
+            session.items[1]
+        );
+    }
 
     changes.extend(drive(&mut client, &frames[5..]));
     let session = client.state().session(PARENT).unwrap();
@@ -301,7 +319,7 @@ fn the_approval_fixture_round_trips_a_permission_ask() {
             .ends_with("test result: ok. 12 passed; 0 failed")
     );
     assert_eq!(call.raw_output, Some(serde_json::json!({"exit_code": 0})));
-    assert!(matches!(&session.items[1], TranscriptItem::TurnEnd { .. }));
+    assert!(matches!(&session.items[2], TranscriptItem::TurnEnd { .. }));
 }
 
 #[test]
@@ -317,6 +335,13 @@ fn the_cancel_fixture_withdraws_the_ask_and_ends_cancelled() {
 
     let changes = drive(&mut client, &frames[2..6]);
     assert!(changes.contains(&Change::Permission { id: PARENT.into() }));
+    assert!(
+        changes.contains(&Change::AnsweredElsewhere {
+            id: PARENT.into(),
+            request_id: 101,
+        }),
+        "the withdraw names the ask that closed: {changes:?}"
+    );
     let session = client.state().session(PARENT).unwrap();
     assert!(
         session.permissions.is_empty(),
@@ -339,6 +364,183 @@ fn the_cancel_fixture_withdraws_the_ask_and_ends_cancelled() {
     assert!(
         session.in_turn,
         "the turn never closed on the wire, so it stays open"
+    );
+}
+
+#[test]
+fn the_ask_keeps_the_offered_options_verbatim_in_offer_order() {
+    let frames = fixture("approval.jsonl");
+    let mut client = Client::new();
+    client.initialize(ClientCapabilities::default(), None);
+    client.new_session("/w", &[]);
+    let _ = client.take_outgoing();
+    drive(&mut client, &frames[..2]);
+    let outcome = client.prompt(PARENT, text("run the tests"));
+    assert_eq!(outcome, PromptOutcome::Sent { request_id: 3 });
+    let _ = client.take_outgoing();
+    drive(&mut client, &frames[2..5]);
+
+    let asks = client.state().open_asks();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    let (session_id, ask) = asks[0];
+    assert_eq!(session_id, PARENT);
+    let ids: Vec<&str> = ask
+        .options
+        .iter()
+        .map(|option| option.option_id.as_str())
+        .collect();
+    let names: Vec<&str> = ask
+        .options
+        .iter()
+        .map(|option| option.name.as_str())
+        .collect();
+    let kinds: Vec<kage_acp_wire::PermissionOptionKind> =
+        ask.options.iter().map(|option| option.kind).collect();
+    assert_eq!(ids, vec!["allow", "allow_session", "reject"]);
+    assert_eq!(
+        names,
+        vec![
+            "Allow shell",
+            "Allow shell for this session",
+            "Reject shell",
+        ]
+    );
+    assert_eq!(
+        kinds,
+        vec![
+            kage_acp_wire::PermissionOptionKind::AllowOnce,
+            kage_acp_wire::PermissionOptionKind::AllowAlways,
+            kage_acp_wire::PermissionOptionKind::RejectOnce,
+        ]
+    );
+}
+
+#[test]
+fn a_reraised_ask_replaces_its_echo_instead_of_duplicating() {
+    let frames = fixture("approval.jsonl");
+    let mut client = Client::new();
+    client.initialize(ClientCapabilities::default(), None);
+    client.new_session("/w", &[]);
+    let _ = client.take_outgoing();
+    drive(&mut client, &frames[..2]);
+    let outcome = client.prompt(PARENT, text("run the tests"));
+    assert_eq!(outcome, PromptOutcome::Sent { request_id: 3 });
+    let _ = client.take_outgoing();
+    drive(&mut client, &frames[2..5]);
+
+    // The same request id again, as a re-attach re-raises the ask,
+    // this time with a narrower offer.
+    let changes = client.handle(Frame::Request {
+        id: 101,
+        method: "session/request_permission".into(),
+        params: serde_json::json!({
+            "sessionId": PARENT,
+            "toolCall": {"toolCallId": "call-sh", "title": "shell", "kind": "execute",
+                "status": "pending", "rawInput": {"command": "cargo test"}},
+            "options": [{"optionId": "allow", "name": "Allow shell", "kind": "allow_once"}],
+        }),
+    });
+    assert!(changes.contains(&Change::Permission { id: PARENT.into() }));
+    let session = client.state().session(PARENT).unwrap();
+    assert_eq!(session.permissions.len(), 1, "one ask per request id");
+    assert_eq!(session.permissions[0].request_id, 101);
+    assert_eq!(
+        session.permissions[0].options.len(),
+        1,
+        "the re-raised offer replaces the first, position kept"
+    );
+
+    // And the identical replay leaves exactly the one ask standing.
+    client.handle(frames[4].clone());
+    let session = client.state().session(PARENT).unwrap();
+    assert_eq!(session.permissions.len(), 1);
+    assert_eq!(session.permissions[0].options.len(), 3);
+}
+
+#[test]
+fn feedback_rides_the_meta_channel_and_the_record_quotes_it() {
+    let frames = fixture("approval.jsonl");
+    let mut client = Client::new();
+    client.initialize(ClientCapabilities::default(), None);
+    client.new_session("/w", &[]);
+    let _ = client.take_outgoing();
+    drive(&mut client, &frames[..2]);
+    let outcome = client.prompt(PARENT, text("run the tests"));
+    assert_eq!(outcome, PromptOutcome::Sent { request_id: 3 });
+    let _ = client.take_outgoing();
+    drive(&mut client, &frames[2..5]);
+
+    assert!(client.reply_permission(
+        PARENT,
+        101,
+        &PermissionDecision::Feedback {
+            option_id: "reject".into(),
+            feedback: "use rustfmt first".into(),
+        },
+    ));
+    let outgoing = client.take_outgoing();
+    assert_eq!(
+        outgoing.last(),
+        Some(&Frame::Success {
+            id: 101,
+            result: serde_json::json!({
+                "outcome": {"outcome": "selected", "optionId": "reject"},
+                "_meta": {"kage": {"planReview": {"revision": "use rustfmt first"}}},
+            }),
+        }),
+        "the extended answer carries the text through _meta.kage.planReview"
+    );
+    let session = client.state().session(PARENT).unwrap();
+    assert!(
+        matches!(
+            &session.items[1],
+            TranscriptItem::Decision {
+                subject,
+                label,
+                allowed: false,
+                feedback: Some(text),
+            } if subject == "shell" && label == "Reject shell" && text == "use rustfmt first"
+        ),
+        "the decision record quotes the feedback: {:?}",
+        session.items[1]
+    );
+}
+
+#[test]
+fn a_dismissal_answers_cancelled_and_records_no_choice() {
+    let frames = fixture("approval.jsonl");
+    let mut client = Client::new();
+    client.initialize(ClientCapabilities::default(), None);
+    client.new_session("/w", &[]);
+    let _ = client.take_outgoing();
+    drive(&mut client, &frames[..2]);
+    let outcome = client.prompt(PARENT, text("run the tests"));
+    assert_eq!(outcome, PromptOutcome::Sent { request_id: 3 });
+    let _ = client.take_outgoing();
+    drive(&mut client, &frames[2..5]);
+
+    assert!(client.reply_permission(PARENT, 101, &PermissionDecision::Cancel));
+    let outgoing = client.take_outgoing();
+    assert_eq!(
+        outgoing.last(),
+        Some(&Frame::Success {
+            id: 101,
+            result: serde_json::json!({"outcome": {"outcome": "cancelled"}}),
+        })
+    );
+    let session = client.state().session(PARENT).unwrap();
+    assert!(
+        matches!(
+            &session.items[1],
+            TranscriptItem::Decision {
+                label,
+                allowed: false,
+                feedback: None,
+                ..
+            } if label == "cancelled"
+        ),
+        "{:?}",
+        session.items[1]
     );
 }
 
@@ -372,6 +574,16 @@ fn the_subagent_fixture_builds_the_agent_tree_and_the_child_transcript() {
     assert_eq!(child.permissions.len(), 1, "the child's tool call asks");
     assert_eq!(child.permissions[0].request_id, 101);
 
+    let asks = client.state().open_asks();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(asks[0].0, CHILD, "the ask carries its asking session");
+    assert_eq!(
+        client.state().asker_byline(CHILD),
+        Some("sub agent \u{b7} general".to_owned()),
+        "the child ask names its subagent"
+    );
+    assert_eq!(client.state().asker_byline(PARENT), None);
+
     assert!(client.reply_permission(CHILD, 101, &PermissionDecision::Allow));
     assert!(
         client
@@ -404,7 +616,19 @@ fn the_subagent_fixture_builds_the_agent_tree_and_the_child_transcript() {
     let child = client.state().session(CHILD).unwrap();
     assert!(!child.running);
     assert!(child.permissions.is_empty());
-    assert_eq!(child.items.len(), 4, "{:#?}", child.items);
+    assert_eq!(child.items.len(), 5, "{:#?}", child.items);
+    assert!(
+        matches!(
+            &child.items[1],
+            TranscriptItem::Decision {
+                subject,
+                label,
+                allowed: true,
+                feedback: None,
+            } if subject == "ls" && label == "Allow ls"
+        ),
+        "the child's answer recorded its own decision"
+    );
     let child_call = match &child.items[0] {
         TranscriptItem::ToolCall(call) => call,
         other => panic!("expected the ls call, got {other:?}"),
@@ -413,7 +637,7 @@ fn the_subagent_fixture_builds_the_agent_tree_and_the_child_transcript() {
     assert_eq!(child_call.status, ToolCallStatus::Completed);
     assert_eq!(child_call.text(), "main.rs\nlib.rs");
     assert_eq!(
-        match &child.items[2] {
+        match &child.items[3] {
             TranscriptItem::Assistant { text } => text.as_str(),
             other => panic!("expected the child reply, got {other:?}"),
         },
@@ -439,7 +663,10 @@ fn a_prompt_queues_while_a_run_is_in_flight_even_with_the_capability() {
         PromptOutcome::Queued,
         "plain prompts queue while a run is in flight"
     );
-    assert!(client.take_outgoing().is_empty(), "a queued prompt sends nothing");
+    assert!(
+        client.take_outgoing().is_empty(),
+        "a queued prompt sends nothing"
+    );
     let session = client.state().session("s1").unwrap();
     assert_eq!(session.queue.len(), 1);
     assert_eq!(session.queue[0].prompt, text("later"));
@@ -545,7 +772,10 @@ fn steer_refuses_when_the_capability_was_not_advertised() {
         client.steer("s1", text("hurry")),
         Err(SteerError::NotAdvertised)
     );
-    assert!(client.take_outgoing().is_empty(), "a refused steer sends nothing");
+    assert!(
+        client.take_outgoing().is_empty(),
+        "a refused steer sends nothing"
+    );
     assert!(client.state().session("s1").unwrap().queue.is_empty());
 }
 
@@ -561,14 +791,20 @@ fn queued_prompts_withdraw_and_promote_to_steer() {
     assert_eq!(client.prompt("s1", text("second")), PromptOutcome::Queued);
     assert_eq!(client.state().session("s1").unwrap().queue.len(), 2);
 
-    assert!(client.withdraw_queued("s1", 0), "the held prompt is dropped");
+    assert!(
+        client.withdraw_queued("s1", 0),
+        "the held prompt is dropped"
+    );
     assert_eq!(
         client.state().session("s1").unwrap().queue[0].prompt,
         text("second")
     );
     assert!(!client.withdraw_queued("s1", 5), "nothing at the index");
     assert_eq!(client.state().session("s1").unwrap().queue.len(), 1);
-    assert!(client.take_outgoing().is_empty(), "withdrawal sends nothing");
+    assert!(
+        client.take_outgoing().is_empty(),
+        "withdrawal sends nothing"
+    );
 
     assert_eq!(client.steer_queued("s1", 0), Ok(4));
     let outgoing = client.take_outgoing();

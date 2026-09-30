@@ -32,6 +32,17 @@ pub enum Change {
         /// The session whose ask queue moved.
         id: String,
     },
+    /// An open ask was withdrawn through `$/cancel_request`: another
+    /// client answered it, or the agent took it back. The ask left
+    /// this client's queue without a reply of ours and no decision
+    /// was recorded. A host closes the card on this and may toast
+    /// that the ask was answered elsewhere.
+    AnsweredElsewhere {
+        /// The session whose ask was withdrawn.
+        id: String,
+        /// The request id that was withdrawn.
+        request_id: u64,
+    },
     /// A session's agent tree changed.
     Agents {
         /// The session whose subagents moved.
@@ -74,6 +85,7 @@ impl Change {
             Self::Session { id }
             | Self::Transcript { id }
             | Self::Permission { id }
+            | Self::AnsweredElsewhere { id, .. }
             | Self::Agents { id } => Some(id),
             Self::Fs { session_id, .. } => Some(session_id),
             Self::Connection | Self::Directory | Self::Config { .. } | Self::Failed { .. } => None,

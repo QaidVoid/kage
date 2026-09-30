@@ -66,6 +66,42 @@ impl State {
             .get(session_id)
             .and_then(|session| session.draft.as_deref())
     }
+
+    /// Every open permission ask with the session that holds it, in
+    /// session id order, asks in arrival order within a session. The
+    /// approval surface renders this queue; the asking session id
+    /// travels with each ask so the card can name its context.
+    #[must_use]
+    pub fn open_asks(&self) -> Vec<(&str, &PermissionAsk)> {
+        self.sessions
+            .values()
+            .flat_map(|session| {
+                session
+                    .permissions
+                    .iter()
+                    .map(move |ask| (session.id.as_str(), ask))
+            })
+            .collect()
+    }
+
+    /// How `session_id` presents itself on an approval: the subagent's
+    /// name when another session announced it as a child, else the
+    /// session title. `None` when the state knows neither, in which
+    /// case the card names no byline rather than inventing one.
+    #[must_use]
+    pub fn asker_byline(&self, session_id: &str) -> Option<String> {
+        for session in self.sessions.values() {
+            if let Some(agent) = session.agents.get(session_id) {
+                return Some(match &agent.name {
+                    Some(name) => format!("sub agent \u{b7} {name}"),
+                    None => "sub agent".to_owned(),
+                });
+            }
+        }
+        self.sessions
+            .get(session_id)
+            .and_then(|session| session.title.clone())
+    }
 }
 
 /// One session: a run the client is driving, a subagent it hears, or a
@@ -296,6 +332,22 @@ pub enum TranscriptItem {
     Plan {
         /// Plan entries, as the wire carried them.
         entries: Vec<Value>,
+    },
+    /// A permission ask was answered from this client: what it was
+    /// about and what was chosen. A one-line record; an ask withdrawn
+    /// through `$/cancel_request` leaves no record, because this
+    /// client never chose.
+    Decision {
+        /// What the ask was about: the tool call title, or its id when
+        /// the agent sent no title.
+        subject: String,
+        /// The chosen option's label, as offered, or that the ask was
+        /// dismissed without a choice.
+        label: String,
+        /// Whether the choice lets the tool call proceed.
+        allowed: bool,
+        /// The feedback text the answer carried, when it did.
+        feedback: Option<String>,
     },
 }
 

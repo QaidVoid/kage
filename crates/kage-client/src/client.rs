@@ -14,11 +14,11 @@ use serde_json::Value;
 
 use kage_acp_wire::{
     CancelNotification, ClientCapabilities, CloseSessionRequest, ConfigGetRequest, ContentBlock,
-    FsOp, FsRequest, Implementation, InitializeRequest, ListSessionsRequest, LoadSessionRequest,
-    McpServer, NewSessionRequest, PROTOCOL_VERSION, PermissionOptionKind, PermissionOutcome,
-    PromptDelivery, PromptRequest, PromptResponse, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SelectedOption, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest,
+    FsOp, FsRequest, Implementation, InitializeRequest, KageMeta, ListSessionsRequest,
+    LoadSessionRequest, McpServer, NewSessionRequest, PROTOCOL_VERSION, PermissionOptionKind,
+    PermissionOutcome, PlanReview, PromptDelivery, PromptRequest, PromptResponse, RequestMeta,
+    RequestPermissionRequest, RequestPermissionResult, ResumeSessionRequest, SelectedOption,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
 };
 
 use crate::change::Change;
@@ -71,6 +71,16 @@ pub enum PermissionDecision {
     AllowAlways,
     /// Pick the ask's `reject_once` option.
     Reject,
+    /// Pick the option with this id and carry `feedback` as the
+    /// user's own words through the `_meta.kage.planReview` channel:
+    /// the revise and reject-with-feedback answers of a plan review
+    /// ride it.
+    Feedback {
+        /// The offered option the verdict picks, verbatim.
+        option_id: String,
+        /// The text the user typed.
+        feedback: String,
+    },
     /// Answer with the cancelled outcome, as when the dialog is
     /// dismissed without a choice.
     Cancel,
@@ -242,7 +252,11 @@ impl Client {
     /// Steers the run in flight on `session_id` with `prompt`, joining
     /// it at its next turn boundary. Only when a run is in flight and
     /// the agent advertised the steering capability.
-    pub fn steer(&mut self, session_id: &str, prompt: Vec<ContentBlock>) -> Result<u64, SteerError> {
+    pub fn steer(
+        &mut self,
+        session_id: &str,
+        prompt: Vec<ContentBlock>,
+    ) -> Result<u64, SteerError> {
         let running = self
             .state
             .sessions
@@ -279,11 +293,12 @@ impl Client {
     /// limits as [`Client::steer`] apply, and a rejected steer leaves
     /// the queue untouched.
     pub fn steer_queued(&mut self, session_id: &str, index: usize) -> Result<u64, SteerError> {
-        let prompt = match self.state.session(session_id).and_then(|session| {
-            session.queue.get(index).map(|queued| queued.prompt.clone())
-        }) {
-            Some(prompt) => prompt,
-            None => return Err(SteerError::NotRunning),
+        let Some(prompt) = self
+            .state
+            .session(session_id)
+            .and_then(|session| session.queue.get(index).map(|queued| queued.prompt.clone()))
+        else {
+            return Err(SteerError::NotRunning);
         };
         let sent = self.steer(session_id, prompt);
         if sent.is_ok() {
@@ -319,15 +334,18 @@ impl Client {
     }
 
     /// Answers the ask `request_id` of `session_id`. The ask leaves
-    /// the queue once answered. Returns false when no such ask is
-    /// open, in which case nothing is sent.
+    /// the queue once answered, a decision record joins the session's
+    /// transcript so a redraw shows what was chosen, and the answer
+    /// goes out. A [`PermissionDecision::Feedback`] verdict rides the
+    /// `_meta.kage.planReview` channel. Returns false when no such
+    /// ask is open, in which case nothing is sent.
     pub fn reply_permission(
         &mut self,
         session_id: &str,
         request_id: u64,
         decision: &PermissionDecision,
     ) -> bool {
-        let outcome = {
+        let (outcome, meta) = {
             let Some(session) = self.state.sessions.get_mut(session_id) else {
                 return false;
             };
@@ -338,33 +356,54 @@ impl Client {
             else {
                 return false;
             };
-            let outcome = {
-                let ask = &session.permissions[index];
-                let option_id = match decision {
-                    PermissionDecision::Cancel => None,
-                    PermissionDecision::Option(option_id) => Some(option_id.clone()),
-                    PermissionDecision::Allow => ask
-                        .option_of(PermissionOptionKind::AllowOnce)
-                        .map(str::to_owned),
-                    PermissionDecision::AllowAlways => ask
-                        .option_of(PermissionOptionKind::AllowAlways)
-                        .map(str::to_owned),
-                    PermissionDecision::Reject => ask
-                        .option_of(PermissionOptionKind::RejectOnce)
-                        .map(str::to_owned),
-                };
-                match option_id {
-                    Some(option_id) => PermissionOutcome::Selected(SelectedOption { option_id }),
-                    None if *decision == PermissionDecision::Cancel => PermissionOutcome::Cancelled,
-                    None => return false,
+            let ask = &session.permissions[index];
+            let mut meta = None;
+            let option_id = match decision {
+                PermissionDecision::Cancel => None,
+                PermissionDecision::Option(option_id) => Some(option_id.clone()),
+                PermissionDecision::Allow => ask
+                    .option_of(PermissionOptionKind::AllowOnce)
+                    .map(str::to_owned),
+                PermissionDecision::AllowAlways => ask
+                    .option_of(PermissionOptionKind::AllowAlways)
+                    .map(str::to_owned),
+                PermissionDecision::Reject => ask
+                    .option_of(PermissionOptionKind::RejectOnce)
+                    .map(str::to_owned),
+                PermissionDecision::Feedback {
+                    option_id,
+                    feedback,
+                } => {
+                    meta = Some(RequestMeta {
+                        kage: KageMeta {
+                            plan_review: Some(PlanReview {
+                                revision: Some(feedback.clone()),
+                                plan: None,
+                            }),
+                            ..KageMeta::default()
+                        },
+                    });
+                    Some(option_id.clone())
                 }
             };
+            let outcome = if let Some(ref option_id) = option_id {
+                PermissionOutcome::Selected(SelectedOption {
+                    option_id: option_id.clone(),
+                })
+            } else {
+                if *decision != PermissionDecision::Cancel {
+                    return false;
+                }
+                PermissionOutcome::Cancelled
+            };
+            let record = decision_record(ask, decision, option_id.as_deref());
             session.permissions.remove(index);
-            outcome
+            session.items.push(record);
+            (outcome, meta)
         };
         self.outgoing.push(Frame::Success {
             id: request_id,
-            result: params(&RequestPermissionResponse { outcome }),
+            result: params(&RequestPermissionResult { outcome, meta }),
         });
         true
     }
@@ -518,11 +557,23 @@ impl Client {
         };
         let session_id = request.session_id;
         let session = self.session_mut(&session_id);
-        session.permissions.push(PermissionAsk {
+        let ask = PermissionAsk {
             request_id: id,
             tool_call: request.tool_call,
             options: request.options,
-        });
+        };
+        // A re-attach makes the agent raise its open asks again, so a
+        // frame whose id is already queued replaces its echo instead
+        // of joining it: one ask per request id, in the latest offer's
+        // shape, position kept.
+        match session
+            .permissions
+            .iter()
+            .position(|open| open.request_id == id)
+        {
+            Some(index) => session.permissions[index] = ask,
+            None => session.permissions.push(ask),
+        }
         vec![Change::Permission { id: session_id }]
     }
 
@@ -542,8 +593,11 @@ impl Client {
         }
     }
 
-    /// Removes the open ask `request_id` was answered elsewhere or the
-    /// agent withdrew: its dialog closes without a reply of ours.
+    /// Removes the open ask `request_id`: it was answered elsewhere
+    /// or the agent withdrew it through `$/cancel_request`. The ask
+    /// leaves the queue with no reply of ours and no decision record;
+    /// [`Change::AnsweredElsewhere`] is the host's cue to close the
+    /// card.
     fn withdraw_ask(&mut self, request_id: u64) -> Vec<Change> {
         let mut moved = Vec::new();
         let sessions = self.state.sessions.keys().cloned().collect::<Vec<_>>();
@@ -551,13 +605,21 @@ impl Client {
             let Some(session) = self.state.sessions.get_mut(&session_id) else {
                 continue;
             };
-            let before = session.permissions.len();
-            session
+            let Some(index) = session
                 .permissions
-                .retain(|ask| ask.request_id != request_id);
-            if session.permissions.len() != before {
-                moved.push(Change::Permission { id: session_id });
-            }
+                .iter()
+                .position(|ask| ask.request_id == request_id)
+            else {
+                continue;
+            };
+            session.permissions.remove(index);
+            moved.push(Change::Permission {
+                id: session_id.clone(),
+            });
+            moved.push(Change::AnsweredElsewhere {
+                id: session_id,
+                request_id,
+            });
         }
         moved
     }
@@ -881,6 +943,48 @@ fn apply_item(session: &mut Session, update: SessionUpdate) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+/// The transcript record of a decision: the subject the ask named,
+/// the chosen option's label as offered, whether it lets the call
+/// proceed, and any feedback text. An answer without a chosen option
+/// records `cancelled`. A label for an option id the ask never
+/// offered is the id itself, never a made-up name.
+fn decision_record(
+    ask: &PermissionAsk,
+    decision: &PermissionDecision,
+    option_id: Option<&str>,
+) -> TranscriptItem {
+    let subject = ask
+        .tool_call
+        .title
+        .clone()
+        .unwrap_or_else(|| ask.tool_call.tool_call_id.clone());
+    let chosen = option_id.and_then(|option_id| {
+        ask.options
+            .iter()
+            .find(|option| option.option_id == option_id)
+    });
+    let label = match chosen {
+        Some(option) => option.name.clone(),
+        None => option_id.map_or_else(|| "cancelled".to_owned(), str::to_owned),
+    };
+    let allowed = chosen.is_some_and(|option| {
+        matches!(
+            option.kind,
+            PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways
+        )
+    });
+    let feedback = match decision {
+        PermissionDecision::Feedback { feedback, .. } => Some(feedback.clone()),
+        _ => None,
+    };
+    TranscriptItem::Decision {
+        subject,
+        label,
+        allowed,
+        feedback,
     }
 }
 

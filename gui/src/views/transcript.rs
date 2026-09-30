@@ -15,17 +15,20 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::input::TextareaState;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::theme::ActiveTheme;
-use gpui_kit::component::{Sizable as _, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list};
+use gpui_kit::component::{
+    Icon, Sizable as _, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Context, Div, ElementId, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    AnyElement, Context, Div, ElementId, Entity, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, Render, ScrollStrategy, SharedString, Size, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px, size,
+    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div, px, size,
 };
 
 use crate::store::Store;
@@ -530,6 +533,11 @@ enum Row {
         /// The item index.
         ix: usize,
     },
+    /// A permission ask was answered: one line with the chosen label.
+    Decision {
+        /// The item index.
+        ix: usize,
+    },
 }
 
 impl Row {
@@ -544,7 +552,8 @@ impl Row {
             | Row::TurnEnd { ix, .. }
             | Row::Notice { ix }
             | Row::Compaction { ix }
-            | Row::Plan { ix } => RowKey::Item(*ix),
+            | Row::Plan { ix }
+            | Row::Decision { ix } => RowKey::Item(*ix),
         }
     }
 
@@ -561,6 +570,7 @@ impl Row {
             Row::Notice { .. } => "notice",
             Row::Compaction { .. } => "compaction",
             Row::Plan { .. } => "plan",
+            Row::Decision { .. } => "decision",
         }
     }
 }
@@ -670,6 +680,7 @@ fn row_height(session: &Session, row: &Row, ui: &UiState) -> Pixels {
             };
             px(BASE + entries as f32 * LINE)
         }
+        Row::Decision { .. } => px(24.0),
     }
 }
 
@@ -809,6 +820,7 @@ fn plain_row(session: &Session, ix: usize, ui: &UiState, last: usize) -> Row {
         TranscriptItem::Notice { .. } => Row::Notice { ix },
         TranscriptItem::Compaction { .. } => Row::Compaction { ix },
         TranscriptItem::Plan { .. } => Row::Plan { ix },
+        TranscriptItem::Decision { .. } => Row::Decision { ix },
     }
 }
 
@@ -929,15 +941,15 @@ impl TranscriptView {
     }
 
     /// One transcript row, from the model and the session it names.
-    fn render_row(&self, row: &Row, cx: &Context<Self>) -> Stateful<Div> {
+    fn render_row(&self, row: &Row, cx: &Context<Self>) -> AnyElement {
         let session = self.store.read(cx).active_session();
         match row {
-            Row::User { ix, text } => self.render_user(*ix, text, cx),
+            Row::User { ix, text } => self.render_user(*ix, text, cx).into_any_element(),
             Row::Assistant { ix, live } => match session.and_then(|s| s.items.get(*ix)) {
-                Some(TranscriptItem::Assistant { text }) => {
-                    self.render_assistant(*ix, text, *live, cx)
-                }
-                _ => blank_row(*ix),
+                Some(TranscriptItem::Assistant { text }) => self
+                    .render_assistant(*ix, text, *live, cx)
+                    .into_any_element(),
+                _ => blank_row(*ix).into_any_element(),
             },
             Row::Thinking {
                 ix,
@@ -945,14 +957,16 @@ impl TranscriptView {
                 expanded,
                 duration,
             } => match session.and_then(|s| s.items.get(*ix)) {
-                Some(TranscriptItem::Thinking { text }) => {
-                    self.render_thinking(*ix, text, *live, *expanded, *duration, cx)
-                }
-                _ => blank_row(*ix),
+                Some(TranscriptItem::Thinking { text }) => self
+                    .render_thinking(*ix, text, *live, *expanded, *duration, cx)
+                    .into_any_element(),
+                _ => blank_row(*ix).into_any_element(),
             },
             Row::Tool { ix, nested } => match session.and_then(|s| s.items.get(*ix)) {
-                Some(TranscriptItem::ToolCall(call)) => self.render_tool(*ix, call, *nested, cx),
-                _ => blank_row(*ix),
+                Some(TranscriptItem::ToolCall(call)) => {
+                    self.render_tool(*ix, call, *nested, cx).into_any_element()
+                }
+                _ => blank_row(*ix).into_any_element(),
             },
             Row::Group {
                 key,
@@ -960,27 +974,44 @@ impl TranscriptView {
                 members: _,
                 failed,
                 expanded,
-            } => self.render_group(*key, label, *failed, *expanded, cx),
+            } => self
+                .render_group(*key, label, *failed, *expanded, cx)
+                .into_any_element(),
             Row::TurnEnd {
                 ix,
                 tools_follow,
                 outcome,
-            } => self.render_turn_end(*ix, *tools_follow, *outcome, cx),
+            } => self
+                .render_turn_end(*ix, *tools_follow, *outcome, cx)
+                .into_any_element(),
             Row::Notice { ix } => match session.and_then(|s| s.items.get(*ix)) {
-                Some(TranscriptItem::Notice { tone, text }) => render_notice(*ix, *tone, text, cx),
-                _ => blank_row(*ix),
+                Some(TranscriptItem::Notice { tone, text }) => {
+                    render_notice(*ix, *tone, text, cx).into_any_element()
+                }
+                _ => blank_row(*ix).into_any_element(),
             },
             Row::Compaction { ix } => match session.and_then(|s| s.items.get(*ix)) {
                 Some(TranscriptItem::Compaction {
                     kept,
                     before,
                     after,
-                }) => render_compaction(*ix, *kept, *before, *after, cx),
-                _ => blank_row(*ix),
+                }) => render_compaction(*ix, *kept, *before, *after, cx).into_any_element(),
+                _ => blank_row(*ix).into_any_element(),
             },
             Row::Plan { ix } => match session.and_then(|s| s.items.get(*ix)) {
-                Some(TranscriptItem::Plan { entries }) => render_plan(*ix, entries, cx),
-                _ => blank_row(*ix),
+                Some(TranscriptItem::Plan { entries }) => {
+                    render_plan(*ix, entries, cx).into_any_element()
+                }
+                _ => blank_row(*ix).into_any_element(),
+            },
+            Row::Decision { ix } => match session.and_then(|s| s.items.get(*ix)) {
+                Some(TranscriptItem::Decision {
+                    subject,
+                    label,
+                    allowed,
+                    feedback,
+                }) => render_decision(*ix, subject, label, *allowed, feedback.as_deref(), cx),
+                _ => blank_row(*ix).into_any_element(),
             },
         }
     }
@@ -1456,6 +1487,66 @@ fn render_plan(
         .child(rows)
 }
 
+/// The one-line record of an answered permission ask: what the ask
+/// was about, the chosen label as offered, and the feedback quoted
+/// when it rode along.
+fn render_decision(
+    ix: usize,
+    subject: &str,
+    label: &str,
+    allowed: bool,
+    feedback: Option<&str>,
+    cx: &Context<TranscriptView>,
+) -> AnyElement {
+    let theme = cx.theme().colors;
+    let color = if allowed { theme.success } else { theme.danger };
+    let mut row = h_flex()
+        .gap_2()
+        .items_center()
+        .child(
+            Icon::new(if allowed {
+                IconName::ShieldCheck
+            } else {
+                IconName::ShieldX
+            })
+            .text_color(color),
+        )
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(theme.foreground)
+                .child(SharedString::from(label.to_owned())),
+        )
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(theme.muted_foreground)
+                .truncate()
+                .child(SharedString::from(subject.to_owned())),
+        );
+    if let Some(feedback) = feedback {
+        row = row.child(
+            div()
+                .text_size(px(12.))
+                .italic()
+                .text_color(theme.muted_foreground)
+                .child(SharedString::from(format!("\"{feedback}\""))),
+        );
+    }
+    div()
+        .id(ElementId::named_usize("row-decision", ix))
+        .test_support()
+        .w_full()
+        .px_3()
+        .py_1()
+        .aria_label(SharedString::from(match feedback {
+            Some(feedback) => format!("{label} {subject} \"{feedback}\""),
+            None => format!("{label} {subject}"),
+        }))
+        .child(row)
+        .into_any_element()
+}
+
 /// A unified diff with per-line added and removed coloring, computed
 /// from the markers the delivered text carries.
 fn render_diff(lines: &[DiffLine], cx: &Context<TranscriptView>) -> Div {
@@ -1601,6 +1692,7 @@ impl Render for TranscriptView {
 mod tests {
     use std::collections::HashSet;
 
+    use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AppContext as _, TestAppContext, Window};
 
     use super::{
@@ -2059,6 +2151,57 @@ mod tests {
     }
 
     #[test]
+    fn a_decision_is_a_one_line_row_carrying_label_subject_and_feedback() {
+        let read = call(
+            "r",
+            "read",
+            ToolKind::Read,
+            ToolCallStatus::Completed,
+            vec![text_chunk("a")],
+            None,
+            Some(serde_json::json!({"path": "src/a.rs"})),
+        );
+        let session = session_with(vec![
+            read,
+            TranscriptItem::Decision {
+                subject: "shell".into(),
+                label: "Reject shell".into(),
+                allowed: false,
+                feedback: Some("use rustfmt first".into()),
+            },
+        ]);
+        let model = row_model(&session, &UiState::default());
+        assert_eq!(model.kinds(), vec!["tool", "decision"]);
+        match &model.rows[1] {
+            Row::Decision { ix } => assert_eq!(*ix, 1),
+            other => panic!("expected a decision row, got {other:?}"),
+        }
+        match &session.items[1] {
+            TranscriptItem::Decision {
+                subject,
+                label,
+                allowed,
+                feedback,
+            } => {
+                assert_eq!(
+                    (subject.as_str(), label.as_str(), *allowed),
+                    ("shell", "Reject shell", false)
+                );
+                assert_eq!(feedback.as_deref(), Some("use rustfmt first"));
+            }
+            other => panic!("expected the decision item, got {other:?}"),
+        }
+        let bare = session_with(vec![TranscriptItem::Decision {
+            subject: "ls".into(),
+            label: "Allow ls".into(),
+            allowed: true,
+            feedback: None,
+        }]);
+        let model = row_model(&bare, &UiState::default());
+        assert_eq!(model.kinds(), vec!["decision"]);
+    }
+
+    #[test]
     fn heights_stay_variable_and_deterministic_per_row() {
         let short = session_with(vec![TranscriptItem::TurnEnd { reason: None }]);
         let long = session_with(vec![TranscriptItem::Assistant {
@@ -2254,6 +2397,25 @@ mod tests {
         }
     }
 
+    /// A `session/request_permission` ask on "s1" with three options.
+    fn ask_frame() -> Frame {
+        Frame::Request {
+            id: 101,
+            method: "session/request_permission".into(),
+            params: serde_json::json!({
+                "sessionId": "s1",
+                "toolCall": {"toolCallId": "call-sh", "title": "shell", "kind": "execute",
+                    "status": "pending", "rawInput": {"command": "cargo test"}},
+                "options": [
+                    {"optionId": "allow", "name": "Allow shell", "kind": "allow_once"},
+                    {"optionId": "allow_session", "name": "Allow shell for this session",
+                        "kind": "allow_always"},
+                    {"optionId": "reject", "name": "Reject shell", "kind": "reject_once"},
+                ],
+            }),
+        }
+    }
+
     /// Opens a window on a transcript view over `store`.
     fn window_on(
         cx: &mut TestAppContext,
@@ -2382,5 +2544,36 @@ mod tests {
             !visual.update(|_, cx| view.read(cx).follow),
             "scrolling up stops the bottom follow"
         );
+    }
+
+    #[gpui_kit::test]
+    fn a_decision_renders_as_a_one_line_row_quoting_the_feedback(cx: &mut TestAppContext) {
+        let mut store = booted_store();
+        store.absorb(ask_frame());
+        let store = cx.new(|_| store);
+        let (_view, visual) = window_on(cx, store.clone());
+        visual.update(|window, cx| window.render_frame(cx));
+        visual.update(|_, cx| {
+            store.update(cx, |store, _| {
+                store.reply_permission(
+                    "s1",
+                    101,
+                    &kage_client::PermissionDecision::Feedback {
+                        option_id: "reject".into(),
+                        feedback: "use rustfmt first".into(),
+                    },
+                );
+            });
+        });
+        visual.update(|window, cx| window.render_frame(cx));
+        visual.update(|window, _| {
+            assert_eq!(
+                window
+                    .find(gpui_kit::ElementId::named_usize("row-decision", 0))
+                    .label(),
+                Some("Reject shell shell \"use rustfmt first\""),
+                "the decision row names the chosen label, the subject and the feedback"
+            );
+        });
     }
 }

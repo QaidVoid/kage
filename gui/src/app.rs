@@ -76,12 +76,12 @@ impl Shell {
         let cwd = working_dir();
         let store = cx.new(|_| Store::new(cwd, args.replay));
         let sidebar = cx.new(|_| SidebarView::new(store.clone()));
-        let transcript = cx.new(|cx| TranscriptView::new(store.clone(), cx));
-        let workbench = cx.new(|_| WorkbenchView::new(store.clone()));
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx).placeholder("Message the agent; ctrl-enter sends")
         });
         composer.update(cx, |state, cx| state.focus(window, cx));
+        let transcript = cx.new(|cx| TranscriptView::new(store.clone(), composer.clone(), cx));
+        let workbench = cx.new(|_| WorkbenchView::new(store.clone()));
 
         let handle = window.window_handle();
         let (events, incoming) = async_channel::unbounded();

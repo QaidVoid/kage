@@ -25,6 +25,7 @@ mod agents;
 mod auth;
 mod doctor;
 mod engine;
+mod goal;
 mod history;
 mod init;
 mod mcp;

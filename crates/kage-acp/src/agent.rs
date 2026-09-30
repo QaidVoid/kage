@@ -31,7 +31,7 @@ use crate::acp::{
     PromptRequest, PromptResponse, RequestMeta, RequestPermissionRequest,
     RequestPermissionResponse, RequestPermissionResult, ResumeSessionRequest,
     ResumeSessionResponse, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, ToolCallUpdate,
+    SetSessionConfigOptionResponse, SwarmResumeRequest, SwarmResumeResponse, ToolCallUpdate,
 };
 
 /// The client's answer to a `session/request_permission`.
@@ -171,6 +171,7 @@ pub fn request_plan_review(
                     plan: Some(plan.to_owned()),
                     revision: None,
                 }),
+                ..KageMeta::default()
             },
         }),
     };
@@ -347,6 +348,18 @@ pub trait Agent: Send + Sync + 'static {
         Err(RpcError::method_not_found("_kage/fs"))
     }
 
+    /// Continue children of an earlier `swarm` call of a session
+    /// (`_kage/swarm/resume`). The default rejects: only agents with a
+    /// swarm engine answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session is unknown or a member is
+    /// not a session id.
+    fn swarm_resume(&self, _req: SwarmResumeRequest) -> Result<SwarmResumeResponse, RpcError> {
+        Err(RpcError::method_not_found("_kage/swarm/resume"))
+    }
+
     /// Run one prompt turn to completion, streaming `session/update`
     /// notifications through `ctx`.
     ///
@@ -504,20 +517,14 @@ fn handle_request<A: Agent>(
             return None;
         }
         "session/new" => match parse::<NewSessionRequest>(params) {
-            Err(e) => {
-                let _ = peer.respond(&id, Err(e));
-                return None;
-            }
+            Err(e) => return parse_failed(peer, &id, e),
             Ok(req) => spawn_open(peer, agent, id, move |a| {
                 a.new_session(req)
                     .map(|resp| (resp.session_id.clone(), jval(resp)))
             }),
         },
         "session/prompt" => match parse::<PromptRequest>(params) {
-            Err(e) => {
-                let _ = peer.respond(&id, Err(e));
-                return None;
-            }
+            Err(e) => return parse_failed(peer, &id, e),
             Ok(req) => {
                 let ctx = PromptContext {
                     peer: peer.clone(),
@@ -528,10 +535,7 @@ fn handle_request<A: Agent>(
             }
         },
         "session/load" => match parse::<LoadSessionRequest>(params) {
-            Err(e) => {
-                let _ = peer.respond(&id, Err(e));
-                return None;
-            }
+            Err(e) => return parse_failed(peer, &id, e),
             Ok(req) => {
                 let ctx = PromptContext {
                     peer: peer.clone(),
@@ -551,10 +555,7 @@ fn handle_request<A: Agent>(
             Ok(req) => spawn_op(peer, agent, id, move |a| a.list_sessions(req).map(jval)),
         },
         "session/resume" => match parse::<ResumeSessionRequest>(params) {
-            Err(e) => {
-                let _ = peer.respond(&id, Err(e));
-                return None;
-            }
+            Err(e) => return parse_failed(peer, &id, e),
             Ok(req) => {
                 let ctx = PromptContext {
                     peer: peer.clone(),
@@ -568,17 +569,11 @@ fn handle_request<A: Agent>(
             }
         },
         "session/set_config_option" => match parse::<SetSessionConfigOptionRequest>(params) {
-            Err(e) => {
-                let _ = peer.respond(&id, Err(e));
-                return None;
-            }
+            Err(e) => return parse_failed(peer, &id, e),
             Ok(req) => spawn_op(peer, agent, id, move |a| a.set_config_option(req).map(jval)),
         },
         "session/close" => match parse::<CloseSessionRequest>(params) {
-            Err(e) => {
-                let _ = peer.respond(&id, Err(e));
-                return None;
-            }
+            Err(e) => return parse_failed(peer, &id, e),
             Ok(req) => spawn_op(peer, agent, id, move |a| a.close_session(req).map(jval)),
         },
         "_kage/config/get" => match parse::<ConfigGetRequest>(params) {
@@ -587,6 +582,10 @@ fn handle_request<A: Agent>(
         },
         "_kage/fs" => match parse::<FsRequest>(params) {
             Ok(req) => spawn_op(peer, agent, id, move |a| a.fs(req).map(jval)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/swarm/resume" => match parse::<SwarmResumeRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.swarm_resume(req).map(jval)),
             Err(e) => return parse_failed(peer, &id, e),
         },
         other => {

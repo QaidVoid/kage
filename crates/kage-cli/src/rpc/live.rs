@@ -656,6 +656,7 @@ impl CliAcpAgent {
                     task: Some(seed.description.clone()),
                     capabilities: Some(SubagentSessionCapabilities { cancel: true }),
                     state: seed.ended,
+                    ..SubagentUpdate::default()
                 }),
             );
             if seed.ended.is_none() {

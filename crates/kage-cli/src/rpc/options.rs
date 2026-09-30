@@ -47,6 +47,10 @@ pub(super) struct Settings {
     /// Whether the session plans before it changes anything, which
     /// rides above the permission mode.
     pub(super) plan: bool,
+    /// Whether the session delegates repeated work through `swarm`.
+    pub(super) swarm: bool,
+    /// The goal the session works toward, if set.
+    pub(super) goal: Option<String>,
 }
 
 impl Settings {
@@ -111,6 +115,24 @@ impl Settings {
                 commands.push(CommandKind::SetPermissionMode { mode: *mode });
                 Ok(commands)
             }
+            "swarm" => {
+                let on = match value {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err(invalid()),
+                };
+                self.swarm = on;
+                Ok(vec![CommandKind::SwarmMode { on }])
+            }
+            "goal" => {
+                let goal = if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_owned())
+                };
+                self.goal.clone_from(&goal);
+                Ok(vec![CommandKind::SetGoal { goal }])
+            }
             _ => Err(RpcError::new(-32602, format!("unknown config option {id}"))),
         }
     }
@@ -137,6 +159,8 @@ impl From<&SessionState> for Settings {
             levels: state.thinking_levels.clone(),
             mode: state.permission_mode,
             plan: state.plan,
+            swarm: state.swarm,
+            goal: state.goal.clone(),
         }
     }
 }
@@ -225,6 +249,22 @@ pub(super) fn config_options(
             settings.mode_id(),
             mode_values.collect(),
         ),
+        select(
+            "swarm",
+            "Swarm",
+            SessionConfigCategory::Mode,
+            if settings.swarm { "on" } else { "off" },
+            vec![
+                choice("off", "Off", Some("Do the work in this session")),
+                choice("on", "On", Some("Delegate repeated work to swarm batches")),
+            ],
+        ),
+        text(
+            "goal",
+            "Goal",
+            Some("What done looks like; the session is told when a turn meets it"),
+            settings.goal.as_deref().unwrap_or_default(),
+        ),
     ]
 }
 
@@ -243,6 +283,18 @@ fn select(
         kind: SessionConfigKind::Select,
         current_value: current.to_owned(),
         options,
+    }
+}
+
+fn text(id: &str, name: &str, description: Option<&str>, current: &str) -> SessionConfigOption {
+    SessionConfigOption {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        description: description.map(str::to_owned),
+        category: None,
+        kind: SessionConfigKind::Text,
+        current_value: current.to_owned(),
+        options: Vec::new(),
     }
 }
 

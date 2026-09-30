@@ -490,6 +490,7 @@ fn push_notices(
         let (glyph, style) = match level {
             NoticeLevel::Warning => ("! ", Style::default().fg(theme.warning_fg)),
             NoticeLevel::Error => ("! ", Style::default().fg(theme.tool_error_fg)),
+            NoticeLevel::Success => ("+ ", Style::default().fg(theme.success_fg)),
             NoticeLevel::Info => ("  ", styles.base),
         };
         let keep = if i < START_NOTICES_KEPT {

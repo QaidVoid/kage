@@ -176,19 +176,61 @@ fn serve_with(
     mcp: bool,
     input: Inputs,
 ) -> Harness {
+    serve_inner(
+        scripts,
+        workdir,
+        sessions,
+        mcp,
+        input,
+        default_agents(),
+        false,
+    )
+}
+
+/// [`serve`] with the session's agent setup replaced, for swarm tests
+/// that need their children to run in a fixed order. The open session
+/// is recorded, so its swarm children can be resumed.
+fn serve_agents(
+    scripts: Vec<Script>,
+    workdir: &Path,
+    sessions: &Path,
+    agents: AgentSetup,
+) -> Harness {
+    serve_inner(
+        scripts,
+        workdir,
+        sessions,
+        false,
+        Inputs::default(),
+        agents,
+        true,
+    )
+}
+
+fn serve_inner(
+    scripts: Vec<Script>,
+    workdir: &Path,
+    sessions: &Path,
+    mcp: bool,
+    input: Inputs,
+    agents: AgentSetup,
+    record: bool,
+) -> Harness {
     let (srv_r, cli_w) = std::io::pipe().unwrap();
     let (cli_r, srv_w) = std::io::pipe().unwrap();
     let id = SessionId::new();
+    let sessions = sessions.to_path_buf();
     let mock = MockProvider::sequence(scripts);
     let provider = Listed {
         mock: mock.clone(),
         input,
     };
-    let host = test_host(
+    let host = test_host_agents(
         Arc::new(provider),
         workdir.to_path_buf(),
-        sessions.to_path_buf(),
+        sessions.clone(),
         mcp,
+        agents,
     );
     let commander = host.engine.commander();
     let standing = Arc::clone(&host);
@@ -196,7 +238,22 @@ fn serve_with(
     std::thread::spawn(move || {
         standing
             .serve_with(BufReader::new(srv_r), srv_w, move |agent| {
-                let spec = (agent.host.spec)(id, "", "mock:m", BTreeMap::new()).unwrap();
+                let mut spec = (agent.host.spec)(id, "", "mock:m", BTreeMap::new()).unwrap();
+                if record {
+                    let path = sessions.join(format!("{id}.jsonl"));
+                    let header = Header {
+                        version: FORMAT_VERSION,
+                        session: id,
+                        id: EntryId::new(),
+                        ts: chrono::Utc::now(),
+                        cwd: spec.cx.workdir.clone(),
+                        model: "mock:m".into(),
+                        system_prompt: spec.cx.system_prompt.clone(),
+                        parent_session: None,
+                        parent_entry: None,
+                    };
+                    spec.recorder = Some(Recorder::planned(path, header, spec.plugins.clone()));
+                }
                 agent.open(id.to_string(), spec);
                 agent.session_announced(&id.to_string());
                 let _ = opened_tx.send(());
@@ -224,8 +281,32 @@ fn test_host(
     sessions: PathBuf,
     mcp: bool,
 ) -> Arc<Host> {
+    test_host_agents(provider, workdir, sessions, mcp, default_agents())
+}
+
+/// The agent setup every non-swarm test runs with.
+fn default_agents() -> AgentSetup {
+    AgentSetup {
+        defs: Arc::new(AgentDefs::builtin()),
+        max_depth: 1,
+        max_running: 4,
+        swarm_max_items: 32,
+        swarm_timeout_ms: 60_000,
+    }
+}
+
+/// [`test_host`] with the session's agent setup replaced.
+fn test_host_agents(
+    provider: Arc<dyn kage_provider::Provider>,
+    workdir: PathBuf,
+    sessions: PathBuf,
+    mcp: bool,
+    agents: AgentSetup,
+) -> Arc<Host> {
     let registry = Arc::new(ProviderRegistry::new().with(provider));
+    let agents = Arc::new(agents);
     let spec = Box::new(move |id, _cwd: &str, model: &str, servers| {
+        let agents = Arc::clone(&agents);
         let mut rules = PermissionsConfig::default();
         rules.tools.insert(
             "ls".into(),
@@ -254,13 +335,7 @@ fn test_host(
             interactive: true,
             title: true,
             shell: None,
-            agents: Some(AgentSetup {
-                defs: Arc::new(AgentDefs::builtin()),
-                max_depth: 1,
-                max_running: 4,
-                swarm_max_items: 32,
-                swarm_timeout_ms: 60_000,
-            }),
+            agents: Some((*agents).clone()),
         })
     });
     Host::new(registry, "mock:m".into(), sessions, spec, BTreeMap::new())
@@ -684,6 +759,324 @@ fn a_cancelled_prompt_answers_after_its_subagents_end() {
     assert_eq!(terminal["update"]["state"], "cancelled");
 }
 
+/// One provider call that fails with a rate limit carrying a tiny
+/// retry hint, so the loop's own retries stay fast in tests.
+fn rate_limited() -> Script {
+    vec![Err(ProviderError::RateLimited {
+        retry_after: Some(Duration::from_millis(5)),
+    })]
+}
+
+fn swarm_input(items: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "description": "review crates",
+        "agent": "general",
+        "prompt_template": "review {{item}}",
+        "items": items,
+    })
+}
+
+#[test]
+fn a_swarm_call_announces_its_members_and_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve_agents(
+        vec![
+            tool_turn("call_s", "swarm", swarm_input(&["kage-core", "kage-tui"])),
+            text_turn("core done"),
+            text_turn("tui done"),
+            text_turn("parent done"),
+        ],
+        dir.path(),
+        dir.path(),
+        AgentSetup {
+            max_running: 1,
+            ..default_agents()
+        },
+    );
+    initialize(&h.client);
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    let updates = drain(&h.inbox);
+
+    let announced = updates
+        .iter()
+        .find(|p| {
+            p["update"]["toolCallId"] == "call_s"
+                && p["update"]["_meta"]["kage"]["swarm"].is_object()
+        })
+        .expect("the swarm call announces its members");
+    let meta = &announced["update"]["_meta"]["kage"]["swarm"];
+    assert_eq!(
+        meta["members"],
+        serde_json::json!(["kage-core", "kage-tui"])
+    );
+    assert_eq!(meta["template"], "review {{item}}");
+
+    let members: Vec<_> = updates
+        .iter()
+        .filter(|p| {
+            p["update"]["sessionUpdate"] == "subagent_update" && p["update"]["swarm"].is_object()
+        })
+        .map(|p| &p["update"])
+        .collect();
+    assert_eq!(members.len(), 2, "{updates:#?}");
+    let batch = members[0]["swarm"]["id"].as_str().unwrap().to_owned();
+    assert!(batch.starts_with("swarm_"), "{batch}");
+    assert_eq!(members[0]["swarm"]["index"], 0);
+    assert_eq!(members[0]["swarm"]["item"], "kage-core");
+    assert_eq!(members[0]["swarm"]["total"], 2);
+    assert_eq!(members[1]["swarm"]["id"], batch.as_str());
+    assert_eq!(members[1]["swarm"]["index"], 1);
+    assert_eq!(members[1]["swarm"]["item"], "kage-tui");
+    for member in &members {
+        assert_eq!(member["task"], "review crates");
+    }
+    let states: Vec<_> = updates
+        .iter()
+        .filter(|p| is_terminal(p))
+        .map(|p| p["update"]["state"].clone())
+        .collect();
+    assert_eq!(states, ["completed", "completed"]);
+}
+
+#[test]
+fn a_rate_limited_swarm_child_pauses_with_a_reason_and_finishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut scripts = vec![tool_turn("call_s", "swarm", swarm_input(&["a", "b"]))];
+    scripts.push(text_turn("a done"));
+    scripts.extend(std::iter::repeat_n(rate_limited(), 5));
+    scripts.push(text_turn("b done"));
+    scripts.push(text_turn("parent done"));
+    let h = serve_agents(
+        scripts,
+        dir.path(),
+        dir.path(),
+        AgentSetup {
+            max_running: 1,
+            ..default_agents()
+        },
+    );
+    initialize(&h.client);
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    let updates = drain(&h.inbox);
+
+    let announced = updates
+        .iter()
+        .find(|p| p["update"]["swarm"]["item"] == "b")
+        .expect("b announced");
+    let b = announced["update"]["subagentSessionId"].as_str().unwrap();
+    let paused_at = updates
+        .iter()
+        .position(|p| p["update"]["subagentSessionId"] == b && p["update"]["state"] == "paused")
+        .expect("b pauses");
+    let reason = updates[paused_at]["update"]["reason"].as_str().unwrap();
+    assert!(reason.contains("rate limited"), "{reason}");
+    let terminal_at = updates
+        .iter()
+        .position(|p| {
+            is_terminal(p)
+                && p["update"]["subagentSessionId"] == b
+                && p["update"]["state"] != "paused"
+        })
+        .expect("b ends");
+    assert!(paused_at < terminal_at, "{updates:#?}");
+    assert_eq!(updates[terminal_at]["update"]["state"], "completed");
+    let failed = updates.iter().any(|p| {
+        is_terminal(p) && p["update"]["subagentSessionId"] == b && p["update"]["state"] == "failed"
+    });
+    assert!(!failed, "{updates:#?}");
+}
+
+#[test]
+fn a_failed_swarm_member_resumes_from_the_wire() {
+    let dir = tempfile::tempdir().unwrap();
+    // The open session is recorded, so it has swarm children to resume.
+    // Member b fails on an auth error, which no requeue retries. The
+    // parent's title call follows its first turn; waiting for it keeps
+    // it from consuming b's resumed script.
+    let h = serve_agents(
+        vec![
+            tool_turn("call_s", "swarm", swarm_input(&["a", "b"])),
+            text_turn("a done"),
+            vec![Err(ProviderError::Auth("boom".into()))],
+            text_turn("parent done"),
+            text_turn("Parent title"),
+            text_turn("b resumed"),
+        ],
+        dir.path(),
+        dir.path(),
+        AgentSetup {
+            max_running: 1,
+            ..default_agents()
+        },
+    );
+    initialize(&h.client);
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    let updates = drain(&h.inbox);
+    let announced = updates
+        .iter()
+        .find(|p| p["update"]["swarm"]["item"] == "b")
+        .expect("b announced");
+    let b = announced["update"]["subagentSessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let batch = announced["update"]["swarm"]["id"].clone();
+    let failed = updates
+        .iter()
+        .find(|p| is_terminal(p) && p["update"]["subagentSessionId"] == b)
+        .expect("b ends");
+    assert_eq!(failed["update"]["state"], "failed");
+
+    // The parent's title call follows its first turn. Waiting for its
+    // recorded title keeps the call from consuming b's resumed script.
+    let title = updates
+        .iter()
+        .find(|p| {
+            p["update"]["sessionUpdate"] == "session_info_update"
+                && p["update"]["title"] == "Parent title"
+        })
+        .cloned()
+        .unwrap_or_else(|| {
+            loop {
+                let Inbound::Notification { params, .. } =
+                    h.inbox.recv_timeout(WAIT).expect("no title update")
+                else {
+                    continue;
+                };
+                if params["update"]["sessionUpdate"] == "session_info_update"
+                    && params["update"]["title"] == "Parent title"
+                {
+                    break params;
+                }
+            }
+        });
+    assert_eq!(title["update"]["title"], "Parent title");
+
+    // Resuming the failed member continues it in a fresh batch.
+    let resumed = h
+        .client
+        .request(
+            "_kage/swarm/resume",
+            serde_json::json!({"sessionId": h.session, "members": {&b: "go on"}}),
+        )
+        .unwrap();
+    assert_eq!(resumed["resumed"], serde_json::json!([b]));
+    let updates: Vec<_> = until_terminal(&h.inbox)
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect();
+    let reannounced = updates
+        .iter()
+        .find(|p| p["update"]["subagentSessionId"] == b && p["update"]["swarm"].is_object())
+        .expect("b re-announced into a fresh batch");
+    let new_batch = reannounced["update"]["swarm"]["id"].clone();
+    assert_ne!(new_batch, batch);
+    let terminal = updates
+        .iter()
+        .find(|p| {
+            is_terminal(p)
+                && p["update"]["subagentSessionId"] == b
+                && p["update"]["state"] != "failed"
+        })
+        .expect("b ends");
+    assert_eq!(terminal["update"]["state"], "completed");
+    assert_eq!(terminal["sessionId"], h.session);
+    assert!(updates.iter().any(|p| p["sessionId"] == b));
+}
+
+#[test]
+fn the_swarm_option_toggles_swarm_mode_with_enter_and_exit_notices() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(vec![text_turn("ok")], dir.path(), dir.path());
+
+    let created = set_option(&h, "swarm", "on").unwrap();
+    let options = created["configOptions"].as_array().unwrap();
+    assert_eq!(options[3]["id"], "swarm");
+    assert_eq!(options[3]["currentValue"], "on");
+    assert_eq!(values_of(&options[3], "value"), ["off", "on"]);
+    // A change the client made rides the response, so only the notice
+    // follows.
+    let updates = updates_until(&h.inbox, &h.session, "_kage/notice");
+    let notice = updates.last().unwrap();
+    assert_eq!(notice["update"]["tone"], "info");
+    assert_eq!(notice["update"]["text"], "swarm mode on");
+
+    let cleared = set_option(&h, "swarm", "off").unwrap();
+    assert_eq!(cleared["configOptions"][3]["currentValue"], "off");
+    let updates = updates_until(&h.inbox, &h.session, "_kage/notice");
+    let notice = updates.last().unwrap();
+    assert_eq!(notice["update"]["tone"], "info");
+    assert_eq!(notice["update"]["text"], "swarm mode off");
+}
+
+#[test]
+fn the_goal_option_sets_and_clears_the_goal() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(vec![text_turn("ok")], dir.path(), dir.path());
+
+    let created = set_option(&h, "goal", "ship it").unwrap();
+    let options = created["configOptions"].as_array().unwrap();
+    assert_eq!(options[4]["id"], "goal");
+    assert_eq!(options[4]["type"], "text");
+    assert_eq!(options[4]["currentValue"], "ship it");
+
+    let cleared = set_option(&h, "goal", "").unwrap();
+    assert_eq!(cleared["configOptions"][4]["currentValue"], "");
+}
+
+#[test]
+fn a_set_goal_is_checked_each_turn_and_clearing_stops_the_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(
+        vec![
+            text_turn("hello"),
+            text_turn("T1"),
+            text_turn("did it"),
+            text_turn("YES"),
+            text_turn("after clear"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+
+    // No goal: the turn and its title call are the only provider calls.
+    // The title call runs on its own thread, so wait for it to land.
+    let response = prompt(&h.client, &h.session, "first");
+    assert_eq!(response["stopReason"], "end_turn");
+    let deadline = Instant::now() + WAIT;
+    while h.mock.call_count() < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(h.mock.call_count(), 2);
+
+    let created = set_option(&h, "goal", "ship it").unwrap();
+    assert_eq!(created["configOptions"][4]["currentValue"], "ship it");
+
+    // The completed turn of a goal session is checked, and meeting the
+    // goal reaches the client as a success notice.
+    let response = prompt(&h.client, &h.session, "go");
+    assert_eq!(response["stopReason"], "end_turn");
+    let updates = updates_until(&h.inbox, &h.session, "_kage/notice");
+    let notice = updates.last().unwrap();
+    assert_eq!(notice["update"]["tone"], "success");
+    assert_eq!(notice["update"]["text"], "goal met: ship it");
+    assert_eq!(h.mock.call_count(), 4);
+
+    // Clearing the goal stops the checks.
+    let cleared = set_option(&h, "goal", "").unwrap();
+    assert_eq!(cleared["configOptions"][4]["currentValue"], "");
+    let response = prompt(&h.client, &h.session, "last");
+    assert_eq!(response["stopReason"], "end_turn");
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(h.mock.call_count(), 5);
+}
+
 #[test]
 fn initialize_advertises_image_and_embedded_context() {
     let dir = tempfile::tempdir().unwrap();
@@ -837,7 +1230,10 @@ fn plan_mode_refuses_a_write_and_announces_entry_and_exit() {
     );
 
     let set = set_option(&h, "mode", "plan").unwrap();
-    assert_eq!(current_values(&set), ["mock:m", "default", "plan"]);
+    assert_eq!(
+        current_values(&set),
+        ["mock:m", "default", "plan", "off", ""]
+    );
     let updates = updates_until(&h.inbox, &h.session, "current_mode_update");
     assert_eq!(updates.last().unwrap()["update"]["currentModeId"], "plan");
 
@@ -858,7 +1254,10 @@ fn plan_mode_refuses_a_write_and_announces_entry_and_exit() {
     assert!(!file.exists(), "the write must not execute");
 
     let set = set_option(&h, "mode", "default").unwrap();
-    assert_eq!(current_values(&set), ["mock:m", "default", "default"]);
+    assert_eq!(
+        current_values(&set),
+        ["mock:m", "default", "default", "off", ""]
+    );
     let updates = updates_until(&h.inbox, &h.session, "current_mode_update");
     assert_eq!(
         updates.last().unwrap()["update"]["currentModeId"],
@@ -1260,7 +1659,7 @@ fn session_load_replays_the_whole_transcript_and_restores_the_session() {
     let loaded = h.client.request("session/load", params).unwrap();
     assert_eq!(
         current_values(&loaded),
-        ["mock:recorded", "high", "default"]
+        ["mock:recorded", "high", "default", "off", ""]
     );
     let updates = updates_until(&h.inbox, &session, "usage_update");
     assert_eq!(
@@ -1316,7 +1715,10 @@ fn session_resume_skips_the_replay_and_continues_the_history() {
 
     let params = serde_json::json!({"sessionId": session, "cwd": cwd, "mcpServers": []});
     let resumed = h.client.request("session/resume", params).unwrap();
-    assert_eq!(current_values(&resumed), ["mock:m", "default", "default"]);
+    assert_eq!(
+        current_values(&resumed),
+        ["mock:m", "default", "default", "off", ""]
+    );
     assert_eq!(
         prompt(&h.client, &session, "next")["stopReason"],
         "end_turn"
@@ -1375,13 +1777,31 @@ fn a_new_session_lists_model_thinking_and_mode() {
 
     let params = serde_json::json!({"cwd": dir.path(), "mcpServers": []});
     let created = h.client.request("session/new", params).unwrap();
-    assert_eq!(current_values(&created), ["mock:m", "default", "default"]);
+    assert_eq!(
+        current_values(&created),
+        ["mock:m", "default", "default", "off", ""]
+    );
     let options = created["configOptions"].as_array().unwrap();
     let ids: Vec<_> = options.iter().map(|o| o["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, ["model", "thinking", "mode"]);
+    assert_eq!(ids, ["model", "thinking", "mode", "swarm", "goal"]);
     let categories: Vec<_> = options.iter().map(|o| o["category"].clone()).collect();
-    assert_eq!(categories, ["model", "thought_level", "mode"]);
-    assert!(options.iter().all(|o| o["type"] == "select"));
+    assert_eq!(
+        categories,
+        [
+            serde_json::json!("model"),
+            serde_json::json!("thought_level"),
+            serde_json::json!("mode"),
+            serde_json::json!("mode"),
+            serde_json::Value::Null,
+        ]
+    );
+    assert_eq!(
+        [options[0]["type"].clone(), options[3]["type"].clone()],
+        ["select", "select"]
+    );
+    assert_eq!(options[4]["type"], "text");
+    assert!(options[4]["options"].as_array().unwrap().is_empty());
+    assert!(options.iter().take(4).all(|o| o["type"] == "select"));
     assert_eq!(values_of(&options[0], "value"), ["mock:m", "mock:other"]);
     assert_eq!(values_of(&options[0], "name"), ["Mock m", "Mock other"]);
     assert_eq!(options[0]["options"][0]["description"], "Mock");
@@ -1406,6 +1826,8 @@ fn the_thinking_option_offers_default_and_the_model_levels() {
         levels: vec![Low, High],
         mode: None,
         plan: false,
+        swarm: false,
+        goal: None,
     };
     let options = config_options(&[], &settings);
     let values: Vec<&str> = options[1]
@@ -1437,6 +1859,8 @@ fn the_mode_option_selects_and_leaves_plan_mode() {
         levels: Vec::new(),
         mode: None,
         plan: false,
+        swarm: false,
+        goal: None,
     };
     assert_eq!(settings.mode_id(), "default");
     assert_eq!(
@@ -1466,10 +1890,16 @@ fn setting_options_changes_the_next_turn() {
     let h = serve(vec![text_turn("ok")], dir.path(), dir.path());
 
     let set = set_option(&h, "thinking", "high").unwrap();
-    assert_eq!(current_values(&set), ["mock:m", "high", "default"]);
+    assert_eq!(
+        current_values(&set),
+        ["mock:m", "high", "default", "off", ""]
+    );
     set_option(&h, "model", "mock:other").unwrap();
     let set = set_option(&h, "mode", "ask").unwrap();
-    assert_eq!(current_values(&set), ["mock:other", "high", "ask"]);
+    assert_eq!(
+        current_values(&set),
+        ["mock:other", "high", "ask", "off", ""]
+    );
 
     assert_eq!(
         prompt(&h.client, &h.session, "hi")["stopReason"],
@@ -1492,6 +1922,7 @@ fn unknown_options_and_values_are_invalid_params() {
         ("model", "mock:missing"),
         ("thinking", "extreme"),
         ("mode", "yolo"),
+        ("swarm", "maybe"),
     ] {
         let err = set_option(&h, id, value).unwrap_err();
         assert_eq!(err.code, -32602, "{id}={value}");
@@ -1515,7 +1946,10 @@ fn a_change_the_client_did_not_make_sends_config_option_update() {
     h.command(model("mock:other"));
     let updates = updates_until(&h.inbox, &h.session, "config_option_update");
     let update = &updates.last().unwrap()["update"];
-    assert_eq!(current_values(update), ["mock:other", "default", "default"]);
+    assert_eq!(
+        current_values(update),
+        ["mock:other", "default", "default", "off", ""]
+    );
 
     h.command(model("mock:other"));
     h.command(CommandKind::SetThinking {
@@ -1524,7 +1958,10 @@ fn a_change_the_client_did_not_make_sends_config_option_update() {
     let updates = updates_until(&h.inbox, &h.session, "config_option_update");
     assert_eq!(update_kinds(&updates), ["config_option_update"]);
     let update = &updates[0]["update"];
-    assert_eq!(current_values(update), ["mock:other", "low", "default"]);
+    assert_eq!(
+        current_values(update),
+        ["mock:other", "low", "default", "off", ""]
+    );
 }
 
 #[test]
@@ -1535,6 +1972,8 @@ fn states_older_than_a_client_change_are_not_sent_back() {
         levels: Vec::new(),
         mode: None,
         plan: false,
+        swarm: false,
+        goal: None,
     };
     let mut shown = Shown {
         settings: settings("mock:other", ThinkingLevel::High),
@@ -3010,7 +3449,10 @@ fn a_second_connection_attaches_to_an_open_session() {
     let params = serde_json::json!({"sessionId": session, "cwd": cwd, "mcpServers": []});
     h.client.request("session/resume", params.clone()).unwrap();
     let loaded = c2.client.request("session/load", params).unwrap();
-    assert_eq!(current_values(&loaded), ["mock:m", "default", "default"]);
+    assert_eq!(
+        current_values(&loaded),
+        ["mock:m", "default", "default", "off", ""]
+    );
 
     let prompt_end = prompt_async(&h.client, &session, "hello");
     updates_until(&h.inbox, &session, "agent_message_chunk");

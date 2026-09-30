@@ -37,7 +37,7 @@ mod mcp;
 mod options;
 mod sessions;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufReader;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,7 +50,7 @@ use kage_acp::acp::{
     McpCapabilities, NewSessionRequest, NewSessionResponse, PROTOCOL_VERSION, PromptCapabilities,
     PromptDelivery, PromptRequest, PromptResponse, ResumeSessionRequest, ResumeSessionResponse,
     SessionCapabilities, SessionConfigOption, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, StopReason, Supported,
+    SetSessionConfigOptionResponse, StopReason, Supported, SwarmResumeRequest, SwarmResumeResponse,
 };
 use kage_acp::agent::{Agent, PromptContext, send_update};
 use kage_core::config::Config;
@@ -182,6 +182,7 @@ impl CliAcpAgent {
             statuses: HashMap::new(),
             fills: HashMap::new(),
             compacting: HashMap::new(),
+            paused: HashSet::new(),
             held: Arc::clone(&held),
             approving: HashMap::new(),
             seeds: Arc::clone(&seeds),
@@ -395,6 +396,27 @@ impl Agent for CliAcpAgent {
             plugins: config.plugins,
             ui: config.ui,
         })
+    }
+
+    /// Continues swarm children of the session. The engine verifies the
+    /// members once the command lands; one that is not a swarm child of
+    /// the session refuses the whole request with a notice.
+    fn swarm_resume(&self, req: SwarmResumeRequest) -> Result<SwarmResumeResponse, RpcError> {
+        let id = self.engine_id(&req.session_id)?;
+        let mut members = BTreeMap::new();
+        let mut resumed = Vec::new();
+        for (key, prompt) in req.members {
+            let child = key
+                .parse::<ulid::Ulid>()
+                .map(SessionId)
+                .map_err(|_| RpcError::new(-32602, format!("{key} is not a session id")))?;
+            members.insert(child, prompt);
+            resumed.push(key);
+        }
+        self.host
+            .engine
+            .send(Command::to(id, CommandKind::SwarmResume { members }));
+        Ok(SwarmResumeResponse { resumed })
     }
 
     fn fs(&self, req: FsRequest) -> Result<FsResult, RpcError> {

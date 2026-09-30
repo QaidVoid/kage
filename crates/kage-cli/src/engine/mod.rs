@@ -194,6 +194,12 @@ enum Input {
         session: SessionId,
         title: String,
     },
+    /// A session's finished turn met its goal. Published as a success
+    /// notice.
+    GoalMet {
+        session: SessionId,
+        goal: String,
+    },
     Publish(HostEvent),
     SetRegistry(Arc<ProviderRegistry>),
     ReloadPluginTools,
@@ -455,6 +461,12 @@ impl Dispatcher {
                 Input::McpDone(done) => self.mcp_done(*done),
                 Input::ShellDone(done) => self.shell_done(*done),
                 Input::Title { session, title } => self.record_title(session, title),
+                Input::GoalMet { session, goal } => notice(
+                    &self.bus,
+                    session,
+                    NoticeLevel::Success,
+                    format!("goal met: {goal}"),
+                ),
                 Input::Publish(event) => {
                     if let Some(id) = self.active {
                         self.bus.publish(id, event);
@@ -644,6 +656,8 @@ impl Dispatcher {
             CommandKind::RestartMcp { server } => self.restart_mcp(id, server),
             CommandKind::Close => self.close(id),
             CommandKind::SwarmMode { on } => self.set_swarm_mode(id, on),
+            CommandKind::SetGoal { goal } => self.set_goal(id, goal),
+            CommandKind::SwarmResume { members } => self.resume_members(id, &members),
             CommandKind::PlanMode { on } => {
                 let session = self.sessions.get_mut(&id).expect("session checked");
                 if session.gate.plan() != on {
@@ -728,6 +742,16 @@ impl Dispatcher {
             NoticeLevel::Info,
             format!("swarm mode {}", if on { "on" } else { "off" }),
         );
+    }
+
+    /// Set the goal the session works toward, or clear it. Publishing
+    /// the state is all a change needs: the check runs at the end of
+    /// every completed turn while a goal is set.
+    fn set_goal(&mut self, id: SessionId, goal: Option<String>) {
+        let goal = goal.filter(|g| !g.trim().is_empty());
+        self.update_state(id, |s| {
+            s.state.goal = goal;
+        });
     }
 
     /// Announce and persist a plan mode change the gate already holds.
@@ -1022,6 +1046,16 @@ impl Dispatcher {
         if let Some(armed) = self.watchdogs.remove(&id) {
             armed.store(false, Ordering::Relaxed);
         }
+        // Read before the session borrow goes out for the bookkeeping
+        // below; the check itself runs after it.
+        let goal = (outcome == RunOutcome::Completed)
+            .then(|| {
+                self.sessions
+                    .get(&id)
+                    .and_then(|s| s.state.goal.clone())
+                    .filter(|g| !g.trim().is_empty())
+            })
+            .flatten();
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
@@ -1042,6 +1076,10 @@ impl Dispatcher {
             session.title_pending = false;
             let model = session.state.model.clone();
             self.generate_title(id, &cx, &model);
+        }
+        if let Some(goal) = goal {
+            let model = self.sessions[&id].state.model.clone();
+            self.check_goal(id, &cx, &model, &goal);
         }
         let requeued = self.requeue_rate_limited(id, &outcome);
         let reply = if requeued {
@@ -1203,16 +1241,13 @@ impl Dispatcher {
                 since,
             },
         );
-        notice(
-            &self.bus,
-            id,
-            NoticeLevel::Warning,
-            format!(
-                "rate limited; retrying in {}s (attempt {} of {MAX_REQUEUES})",
-                backoff.as_secs().max(1),
-                attempts + 1
-            ),
+        let reason = format!(
+            "rate limited; retrying in {}s (attempt {} of {MAX_REQUEUES})",
+            backoff.as_secs().max(1),
+            attempts + 1
         );
+        notice(&self.bus, id, NoticeLevel::Warning, reason.clone());
+        self.bus.publish(id, HostEvent::AgentPaused { reason });
         let engine = self.tx.clone();
         let shutdown = Arc::clone(&self.engine_shutdown);
         thread::spawn(move || {
@@ -1264,6 +1299,40 @@ impl Dispatcher {
 
     /// Ask the model for a short title for the session's first exchange,
     /// off the dispatcher thread.
+    /// Ask the model, off the run thread, whether the finished turn
+    /// met the session's goal, and publish a success notice when it
+    /// did. A failed or unreadable check stays silent.
+    fn check_goal(&self, id: SessionId, cx: &AgentContext, model: &str, goal: &str) {
+        let Ok(resolved) = self.registry.resolve(model) else {
+            return;
+        };
+        let provider = Arc::clone(resolved.provider);
+        let bare_model = resolved.model;
+        let last_text = |role: Role| {
+            cx.history
+                .iter()
+                .rev()
+                .find(|m| m.role == role)
+                .map(|m| crate::cli_loop_run::first_user_text(m))
+                .unwrap_or_default()
+        };
+        let (user, reply) = (last_text(Role::User), last_text(Role::Assistant));
+        let tx = self.tx.clone();
+        let goal = goal.to_owned();
+        thread::spawn(move || {
+            if crate::goal::met(
+                provider.as_ref(),
+                &bare_model,
+                &goal,
+                &user,
+                &reply,
+                &CancelFlag::new(),
+            ) {
+                let _ = tx.send(Input::GoalMet { session: id, goal });
+            }
+        });
+    }
+
     fn generate_title(&self, id: SessionId, cx: &AgentContext, model: &str) {
         let Ok(resolved) = self.registry.resolve(model) else {
             return;

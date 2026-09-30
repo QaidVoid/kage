@@ -207,6 +207,7 @@ impl AgentTree {
                                 agent: agent.agent,
                                 description: description.clone(),
                                 swarm: swarm.then_some(SwarmMember {
+                                    batch: None,
                                     item,
                                     index,
                                     total: u32::try_from(total).unwrap_or(u32::MAX),

@@ -6,10 +6,11 @@ use std::sync::{Arc, Mutex};
 
 use kage_acp::acp::{
     AvailableCommandsUpdate, CompactionUpdate, ConfigOptionUpdate, ContentBlock, Cost,
-    CurrentModeUpdate, McpStatusUpdate, MessageChunk, NoticeTone, NoticeUpdate, Plan,
+    CurrentModeUpdate, KageMeta, McpStatusUpdate, MessageChunk, NoticeTone, NoticeUpdate, Plan,
     SessionConfigSelectOption, SessionInfoUpdate, SessionUpdate, SubagentSessionCapabilities,
-    SubagentState, SubagentUpdate, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
-    ToolKind, TurnPhase, TurnReason, TurnUpdate, UsageUpdate,
+    SubagentState, SubagentSwarm, SubagentUpdate, SwarmMeta, ToolCall, ToolCallContent,
+    ToolCallMeta, ToolCallStatus, ToolCallUpdate, ToolKind, TurnPhase, TurnReason, TurnUpdate,
+    UsageUpdate,
 };
 use kage_acp::agent::{PermissionDecision, PlanReviewDecision, request_plan_review, send_update};
 use kage_core::protocol::{
@@ -19,8 +20,8 @@ use kage_core::protocol::{
 };
 use kage_core::sync::lock;
 use kage_core::{
-    CancelFlag, Content, LoopEvent, Message, Role, SessionId, StopReason as CoreStopReason,
-    ToolCallId, ToolOutput,
+    CancelFlag, Content, LoopError, LoopEvent, Message, Role, SessionId,
+    StopReason as CoreStopReason, ToolCallId, ToolOutput,
 };
 use kage_jsonrpc::Peer;
 
@@ -80,6 +81,9 @@ pub(super) struct Bridge {
     /// Compactions waiting for the post-compaction usage: the turn
     /// count kept and the fill before the compaction.
     pub(super) compacting: HashMap<SessionId, (u64, u64)>,
+    /// Streaming children the engine requeued after a rate limit, so
+    /// the `RunEnded` that precedes their next run does not end them.
+    pub(super) paused: HashSet<SessionId>,
     pub(super) held: Held,
     /// Agent calls waiting for approval, by session and call id, with the
     /// line their card shows again once they run.
@@ -426,12 +430,15 @@ impl Bridge {
     }
 
     /// Announces an agent as a subagent of its parent's client session,
-    /// then shows its activity on its own session until it ends.
+    /// then shows its activity on its own session until it ends. A
+    /// requeued child reports `paused` with its reason to the parent
+    /// instead of ending.
     fn handle_subagent(&mut self, session: SessionId, event: &Event) {
         if let Event::Host(HostEvent::AgentSpawned {
             parent,
             agent,
             description,
+            swarm,
             ..
         }) = event
         {
@@ -447,7 +454,38 @@ impl Bridge {
                 name: Some(agent.clone()),
                 task: Some(description.clone()),
                 capabilities: Some(SubagentSessionCapabilities { cancel: true }),
+                swarm: swarm.as_ref().and_then(|member| {
+                    let batch = member.batch.as_ref()?;
+                    Some(SubagentSwarm {
+                        id: batch.0.clone(),
+                        item: member.item.clone(),
+                        index: member.index,
+                        total: member.total,
+                    })
+                }),
                 state: None,
+                reason: None,
+            };
+            send_update(
+                &self.peer,
+                &parent_id,
+                SessionUpdate::SubagentUpdate(update),
+            );
+        } else if let Event::Host(HostEvent::AgentPaused { reason }) = event
+            && self.streaming.contains(&session)
+        {
+            let Some(parent) = self.tree.get(session).map(|node| node.parent) else {
+                return;
+            };
+            let Some(parent_id) = self.client_of(parent) else {
+                return;
+            };
+            self.paused.insert(session);
+            let update = SubagentUpdate {
+                subagent_session_id: session.to_string(),
+                state: Some(SubagentState::Paused),
+                reason: Some(reason.clone()),
+                ..SubagentUpdate::default()
             };
             send_update(
                 &self.peer,
@@ -485,6 +523,16 @@ impl Bridge {
         let Some(end) = self.ended.remove(&session) else {
             return;
         };
+        let requeued = self.paused.remove(&session)
+            && matches!(
+                &end.outcome,
+                RunOutcome::Failed {
+                    error: LoopError::RateLimited { .. }
+                }
+            );
+        if requeued {
+            return;
+        }
         if !self.streaming.remove(&session) {
             for waiter in lock(&self.waiters).remove(&session).unwrap_or_default() {
                 let _ = waiter.send(end.clone());
@@ -602,6 +650,9 @@ impl Bridge {
                 );
                 self.approving.retain(|(s, _), _| *s != session);
                 self.end_asks(session);
+            }
+            Event::Host(HostEvent::AgentPaused { reason }) => {
+                progress(format!("paused: {reason}"));
             }
             _ => {}
         }
@@ -779,11 +830,13 @@ pub(super) fn to_update(
                 status: ToolCallStatus::Pending,
                 content: Vec::new(),
                 raw_input: Some(input_partial.clone()),
+                meta: swarm_meta(name, input_partial),
             })),
             Some(last) if last == *input_partial => None,
             Some(_) => Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
                 tool_call_id: id.to_string(),
                 raw_input: Some(input_partial.clone()),
+                meta: swarm_meta(name, input_partial),
                 ..ToolCallUpdate::default()
             })),
         },
@@ -846,6 +899,40 @@ fn turn_reason(had_tool_calls: bool) -> TurnReason {
     }
 }
 
+/// The `_meta.kage.swarm` of a `swarm` call whose input names its
+/// members: one entry per item plus one per resumed child. `None` for
+/// any other tool, and for a `swarm` input that has not streamed
+/// whole yet, so a later update carries the meta instead.
+fn swarm_meta(name: &str, input: &serde_json::Value) -> Option<ToolCallMeta> {
+    if name != "swarm" {
+        return None;
+    }
+    let mut members = Vec::new();
+    if let Some(items) = input["items"].as_array() {
+        members.extend(
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::to_owned),
+        );
+    }
+    if let Some(resume) = input["resume"].as_object() {
+        members.extend(resume.keys().cloned());
+    }
+    if members.is_empty() {
+        return None;
+    }
+    Some(ToolCallMeta {
+        kage: KageMeta {
+            swarm: Some(SwarmMeta {
+                members,
+                template: input["prompt_template"].as_str().map(str::to_owned),
+            }),
+            ..KageMeta::default()
+        },
+    })
+}
+
 /// The `plan` update a completed `todo_list` write carries: one entry
 /// per todo, with the plan 019 `_meta.kage` fields when supplied. The
 /// write is what returns the list as structured output, so a read-only
@@ -889,6 +976,7 @@ pub(super) fn notice_update(level: NoticeLevel, text: String) -> SessionUpdate {
     SessionUpdate::Notice(NoticeUpdate {
         tone: match level {
             NoticeLevel::Info => NoticeTone::Info,
+            NoticeLevel::Success => NoticeTone::Success,
             NoticeLevel::Warning => NoticeTone::Warn,
             NoticeLevel::Error => NoticeTone::Error,
         },

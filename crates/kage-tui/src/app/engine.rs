@@ -276,7 +276,8 @@ impl App {
             // Handled before this dispatch, in `apply_envelope`.
             HostEvent::PromptWithdrawn { .. }
             | HostEvent::TitleChanged { .. }
-            | HostEvent::AgentSpawned { .. } => {}
+            | HostEvent::AgentSpawned { .. }
+            | HostEvent::AgentPaused { .. } => {}
         }
     }
 
@@ -405,7 +406,8 @@ impl App {
             | HostEvent::StateChanged { .. }
             | HostEvent::TitleChanged { .. }
             | HostEvent::SessionChanged { .. }
-            | HostEvent::McpServers { .. } => false,
+            | HostEvent::McpServers { .. }
+            | HostEvent::AgentPaused { .. } => false,
         }
     }
 
@@ -601,6 +603,7 @@ impl App {
         if let Some(toasts) = &self.toasts {
             let kind = match level {
                 NoticeLevel::Info => ToastKind::Info,
+                NoticeLevel::Success => ToastKind::Success,
                 NoticeLevel::Warning => ToastKind::Warning,
                 NoticeLevel::Error => ToastKind::Error,
             };
@@ -804,7 +807,7 @@ impl App {
 fn push_notice(buffer: &SharedBuffer, level: NoticeLevel, text: String) {
     let kind = match level {
         NoticeLevel::Error => "kage:error",
-        NoticeLevel::Info | NoticeLevel::Warning => "kage:notify",
+        NoticeLevel::Info | NoticeLevel::Warning | NoticeLevel::Success => "kage:notify",
     };
     lock(buffer).push_custom(kind, text, false);
 }

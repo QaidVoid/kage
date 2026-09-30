@@ -1,5 +1,6 @@
 //! Agent sessions an `agent` call starts.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +15,10 @@ use kage_tools::ToolRegistry;
 
 use super::agent_tool::{self, AGENT_TOOL, Spawn};
 use super::runner::Work;
-use super::{AgentSetup, Attach, Recorder, ResumeChild, Session, SessionSpec, notice};
+use super::swarm_tool::SwarmInfo;
+use super::{
+    AgentSetup, Attach, CONTINUE_PROMPT, Recorder, ResumeChild, Session, SessionSpec, notice,
+};
 
 /// Tells a forked child that the conversation it starts with is
 /// inherited reference material, not its own past. Ported from
@@ -122,6 +126,7 @@ impl super::Dispatcher {
 
         let max = setup.max_running;
         let member = swarm.as_ref().map(|info| SwarmMember {
+            batch: Some(info.batch_id.clone()),
             item: info.item.clone(),
             index: u32::try_from(info.index).unwrap_or(u32::MAX),
             total: u32::try_from(info.total).unwrap_or(u32::MAX),
@@ -296,6 +301,7 @@ impl super::Dispatcher {
         };
         let (spec, missing, note, cancel, link) = opened;
         let member = swarm.as_ref().map(|info| SwarmMember {
+            batch: Some(info.batch_id.clone()),
             item: info.item.clone(),
             index: u32::try_from(info.index).unwrap_or(u32::MAX),
             total: u32::try_from(info.total).unwrap_or(u32::MAX),
@@ -315,6 +321,56 @@ impl super::Dispatcher {
         }
         let max = setup.max_running;
         self.launch_agent(id, max, content);
+    }
+
+    /// Continue the named swarm children of `id`, the engine answer to
+    /// a `_kage/swarm/resume` request. Each verified child joins a
+    /// fresh batch and runs again; a child that is not a swarm member
+    /// of `id` refuses the whole request with a notice.
+    pub(super) fn resume_members(&mut self, id: SessionId, members: &BTreeMap<SessionId, String>) {
+        if members.is_empty() {
+            return;
+        }
+        let ids: Vec<SessionId> = members.keys().copied().collect();
+        let children = match self.verify_resume(id, &ids) {
+            Ok(children) => children,
+            Err(text) => {
+                notice(&self.bus, id, NoticeLevel::Warning, text);
+                return;
+            }
+        };
+        let batch_id = ToolCallId::new(format!("swarm_{}", ulid::Ulid::generate()));
+        let total = children.len();
+        notice(
+            &self.bus,
+            id,
+            NoticeLevel::Info,
+            format!("resuming {} swarm member(s)", children.len()),
+        );
+        for (index, child) in children.into_iter().enumerate() {
+            let prompt = members
+                .get(&child.id)
+                .filter(|prompt| !prompt.trim().is_empty())
+                .cloned()
+                .unwrap_or_else(|| CONTINUE_PROMPT.to_owned());
+            let (reply, _result) = crossbeam_channel::bounded(1);
+            self.attach(Attach {
+                parent: id,
+                id: child.id,
+                agent: child.agent,
+                description: child.description,
+                batch_id: batch_id.clone(),
+                prompt,
+                reply,
+                swarm: Some(SwarmInfo {
+                    id: child.id,
+                    batch_id: batch_id.clone(),
+                    index,
+                    item: child.item,
+                    total,
+                }),
+            });
+        }
     }
 
     /// Write the `kage:agent` marker and the title right after the header.

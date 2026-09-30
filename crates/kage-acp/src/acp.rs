@@ -34,7 +34,8 @@ pub use kage_acp_wire::schema::{
     SessionConfigKind, SessionConfigOption, SessionConfigSelectOption, SessionInfo,
     SessionInfoUpdate, SessionNotification, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, StopReason, SubagentSessionCapabilities, SubagentState,
-    SubagentUpdate, Supported, TerminalRef, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
+    SubagentSwarm, SubagentUpdate, Supported, SwarmMeta, SwarmResumeRequest, SwarmResumeResponse,
+    TerminalRef, TextContent, ToolCall, ToolCallContent, ToolCallMeta, ToolCallStatus,
     ToolCallUpdate, ToolKind, TurnPhase, TurnReason, TurnUpdate, UsageUpdate,
 };
 

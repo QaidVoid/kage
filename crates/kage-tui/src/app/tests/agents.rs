@@ -409,6 +409,7 @@ fn the_working_row_reports_swarm_batch_progress() {
         agent: "explore".into(),
         description: "review the crates".into(),
         swarm: Some(SwarmMember {
+            batch: None,
             item: item.to_owned(),
             index,
             total: 3,

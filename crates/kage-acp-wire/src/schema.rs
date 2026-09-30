@@ -14,6 +14,7 @@
 //! unknown `sessionUpdate` kind parses as [`SessionUpdate::Unknown`].
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// ACP protocol version kage implements.
 pub const PROTOCOL_VERSION: i64 = 1;
@@ -344,6 +345,28 @@ pub struct McpStatusUpdate {
     pub status: McpServerStatus,
 }
 
+/// `_kage/swarm/resume` request params: continue children of an
+/// earlier `swarm` call of the session, whether they failed or never
+/// ran. The children re-announce and stream on their own sessions
+/// like any other member.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmResumeRequest {
+    /// Session whose swarm children continue.
+    pub session_id: String,
+    /// Child session id to a follow-up prompt. An empty prompt
+    /// continues the child's task with a short nudge.
+    pub members: BTreeMap<String, String>,
+}
+
+/// `_kage/swarm/resume` result.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmResumeResponse {
+    /// The children the engine accepted, in map order.
+    pub resumed: Vec<String>,
+}
+
 /// `_kage/fs` request params. `path` is relative to the session
 /// workdir; empty or `.` lists the workdir itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -456,6 +479,8 @@ pub struct SessionConfigOption {
 pub enum SessionConfigKind {
     /// Pick one of `options`.
     Select,
+    /// A free-form string. An empty value clears the setting.
+    Text,
 }
 
 /// What a [`SessionConfigOption`] controls.
@@ -797,6 +822,10 @@ pub struct ToolCall {
     /// Raw tool input echoed for the UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_input: Option<serde_json::Value>,
+    /// Kage extension fields. A `swarm` call names its members and
+    /// template under `_meta.kage.swarm`.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<ToolCallMeta>,
 }
 
 /// A `tool_call_update` (partial; only changed fields set).
@@ -823,6 +852,11 @@ pub struct ToolCallUpdate {
     /// Raw tool output, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_output: Option<serde_json::Value>,
+    /// Kage extension fields, if changed. A `swarm` call names its
+    /// members and template under `_meta.kage.swarm` once its input
+    /// has streamed whole.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<ToolCallMeta>,
 }
 
 /// Rich tool-call content (`type`-tagged).
@@ -941,6 +975,12 @@ pub struct SubagentUpdate {
     /// Lifecycle state. A child never given one is running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<SubagentState>,
+    /// Swarm batch membership, when a `swarm` call started the child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm: Option<SubagentSwarm>,
+    /// Why the child paused. Set while [`SubagentState::Paused`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Client operations permitted on one subagent session.
@@ -951,7 +991,8 @@ pub struct SubagentSessionCapabilities {
     pub cancel: bool,
 }
 
-/// Lifecycle state of a subagent. Every state but `running` is final.
+/// Lifecycle state of a subagent. Every state but `running` and
+/// `paused` is final.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentState {
@@ -963,6 +1004,25 @@ pub enum SubagentState {
     Failed,
     /// Was cancelled.
     Cancelled,
+    /// Temporarily not making progress, such as a child waiting out a
+    /// provider rate limit. `SubagentUpdate::reason` says why, and a
+    /// later state follows.
+    Paused,
+}
+
+/// Swarm batch membership of a subagent: which batch it belongs to and
+/// where it sits in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentSwarm {
+    /// Id of the swarm batch, shared by every member of one call.
+    pub id: String,
+    /// The item this child was spawned for.
+    pub item: String,
+    /// Position of this child in the batch, 0-based.
+    pub index: u32,
+    /// How many children the batch has.
+    pub total: u32,
 }
 
 /// Whether a `_kage/turn` update opens or closes a turn.
@@ -1007,6 +1067,8 @@ pub enum NoticeTone {
     Warn,
     /// Something failed.
     Error,
+    /// Something the user wanted happened.
+    Success,
 }
 
 /// A `_kage/notice` update: a message for the user that is not part
@@ -1121,6 +1183,30 @@ pub struct RequestMeta {
     pub kage: KageMeta,
 }
 
+/// The `_meta` extension object kage adds to a tool call and its
+/// updates.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallMeta {
+    /// The kage-namespaced fields.
+    #[serde(default)]
+    pub kage: KageMeta,
+}
+
+/// The swarm facts of a `swarm` tool call, under
+/// `_meta.kage.swarm`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmMeta {
+    /// One entry per member: the item a new child runs, or the session
+    /// id of a child the call resumes.
+    pub members: Vec<String>,
+    /// The prompt template the items substitute into. Absent on a
+    /// resume-only call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+}
+
 /// The `kage` extension fields of a permission exchange's `_meta`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1130,6 +1216,10 @@ pub struct KageMeta {
     /// revise answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_review: Option<PlanReview>,
+    /// The swarm batch a `swarm` tool call announces, on the call and
+    /// on the update that carries its whole input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm: Option<SwarmMeta>,
 }
 
 /// One plan review's payload. Exactly one field is set per message:
@@ -1306,6 +1396,25 @@ mod tests {
     #[test]
     fn config_option_shapes() {
         roundtrip(&model_option(), model_option_json());
+        let mut goal = model_option();
+        goal.id = "goal".into();
+        goal.name = "Goal".into();
+        goal.description = Some("what done looks like".into());
+        goal.category = None;
+        goal.kind = SessionConfigKind::Text;
+        goal.current_value = "ship it".into();
+        goal.options = vec![];
+        roundtrip(
+            &goal,
+            serde_json::json!({
+                "id": "goal",
+                "name": "Goal",
+                "description": "what done looks like",
+                "type": "text",
+                "currentValue": "ship it",
+                "options": []
+            }),
+        );
         roundtrip(
             &SessionConfigOption {
                 id: "thinking".into(),
@@ -1537,6 +1646,7 @@ mod tests {
                 status: ToolCallStatus::Pending,
                 content: vec![],
                 raw_input: Some(serde_json::json!({"cmd": "ls"})),
+                meta: None,
             }),
             serde_json::json!({
                 "sessionUpdate": "tool_call",
@@ -1546,6 +1656,59 @@ mod tests {
                 "status": "pending",
                 "rawInput": {"cmd": "ls"}
             }),
+        );
+    }
+
+    /// A `swarm` call names its members and template under
+    /// `_meta.kage.swarm`, on the announce and on the update that
+    /// carries the whole input.
+    #[test]
+    fn swarm_tool_call_meta_shapes() {
+        let meta = ToolCallMeta {
+            kage: KageMeta {
+                swarm: Some(SwarmMeta {
+                    members: vec!["kage-core".into(), "kage-tui".into()],
+                    template: Some("review {{item}}".into()),
+                }),
+                ..KageMeta::default()
+            },
+        };
+        let json = serde_json::json!({
+            "kage": {"swarm": {"members": ["kage-core", "kage-tui"], "template": "review {{item}}"}}
+        });
+        roundtrip(&meta, json.clone());
+        roundtrip(
+            &SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+                tool_call_id: "t1".into(),
+                raw_input: Some(serde_json::json!({})),
+                meta: Some(meta),
+                ..ToolCallUpdate::default()
+            }),
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "t1",
+                "rawInput": {},
+                "_meta": json
+            }),
+        );
+    }
+
+    /// A resume-only swarm call carries the resumed session ids as its
+    /// members and no template.
+    #[test]
+    fn swarm_meta_omits_an_absent_template() {
+        let meta = ToolCallMeta {
+            kage: KageMeta {
+                swarm: Some(SwarmMeta {
+                    members: vec!["01J8".into()],
+                    template: None,
+                }),
+                ..KageMeta::default()
+            },
+        };
+        roundtrip(
+            &meta,
+            serde_json::json!({"kage": {"swarm": {"members": ["01J8"]}}}),
         );
     }
 
@@ -1729,6 +1892,7 @@ mod tests {
                 task: Some("review the diff".into()),
                 capabilities: Some(SubagentSessionCapabilities { cancel: true }),
                 state: None,
+                ..SubagentUpdate::default()
             }),
             serde_json::json!({
                 "sessionUpdate": "subagent_update",
@@ -1743,6 +1907,7 @@ mod tests {
             (SubagentState::Completed, "completed"),
             (SubagentState::Failed, "failed"),
             (SubagentState::Cancelled, "cancelled"),
+            (SubagentState::Paused, "paused"),
         ] {
             roundtrip(
                 &SessionUpdate::SubagentUpdate(SubagentUpdate {
@@ -1757,6 +1922,60 @@ mod tests {
                 }),
             );
         }
+    }
+
+    /// A swarm child's update carries its batch membership, and a
+    /// rate-limited one pauses with a reason.
+    #[test]
+    fn subagent_swarm_and_paused_shapes() {
+        roundtrip(
+            &SessionUpdate::SubagentUpdate(SubagentUpdate {
+                subagent_session_id: "child".into(),
+                swarm: Some(SubagentSwarm {
+                    id: "swarm_01J8".into(),
+                    item: "kage-core".into(),
+                    index: 0,
+                    total: 2,
+                }),
+                ..SubagentUpdate::default()
+            }),
+            serde_json::json!({
+                "sessionUpdate": "subagent_update",
+                "subagentSessionId": "child",
+                "swarm": {"id": "swarm_01J8", "item": "kage-core", "index": 0, "total": 2}
+            }),
+        );
+        roundtrip(
+            &SessionUpdate::SubagentUpdate(SubagentUpdate {
+                subagent_session_id: "child".into(),
+                state: Some(SubagentState::Paused),
+                reason: Some("rate limited; retrying in 3s".into()),
+                ..SubagentUpdate::default()
+            }),
+            serde_json::json!({
+                "sessionUpdate": "subagent_update",
+                "subagentSessionId": "child",
+                "state": "paused",
+                "reason": "rate limited; retrying in 3s"
+            }),
+        );
+    }
+
+    #[test]
+    fn swarm_resume_shapes() {
+        roundtrip(
+            &SwarmResumeRequest {
+                session_id: "s1".into(),
+                members: BTreeMap::from([("01J8".into(), "go on".into())]),
+            },
+            serde_json::json!({"sessionId": "s1", "members": {"01J8": "go on"}}),
+        );
+        roundtrip(
+            &SwarmResumeResponse {
+                resumed: vec!["01J8".into()],
+            },
+            serde_json::json!({"resumed": ["01J8"]}),
+        );
     }
 
     #[test]
@@ -1792,6 +2011,7 @@ mod tests {
             (NoticeTone::Info, "info"),
             (NoticeTone::Warn, "warn"),
             (NoticeTone::Error, "error"),
+            (NoticeTone::Success, "success"),
         ] {
             roundtrip(
                 &SessionUpdate::Notice(NoticeUpdate {
@@ -1896,6 +2116,7 @@ mod tests {
                             plan: Some("# Fix the build".into()),
                             revision: None,
                         }),
+                        ..KageMeta::default()
                     },
                 }),
             },
@@ -1921,6 +2142,7 @@ mod tests {
                             plan: None,
                             revision: Some("also add tests".into()),
                         }),
+                        ..KageMeta::default()
                     },
                 }),
             },

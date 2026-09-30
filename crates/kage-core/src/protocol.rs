@@ -241,6 +241,14 @@ pub enum HostEvent {
         #[serde(default)]
         swarm: Option<SwarmMember>,
     },
+    /// A swarm child hit a provider rate limit and the engine requeued
+    /// it: its result is still pending, so it is paused rather than
+    /// finished, and its next run follows the backoff. Never recorded.
+    /// Live.
+    AgentPaused {
+        /// Why the child paused, for the client to show.
+        reason: String,
+    },
     /// The session's MCP servers and what they offer. Published when a
     /// session opens, after a restart, and when a server's catalog
     /// changes. The latest snapshot wins. Never recorded. Live.
@@ -265,6 +273,10 @@ pub enum HostEvent {
 /// client can show batch progress instead of one card per call.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SwarmMember {
+    /// Id of the batch, shared by every member of one call. `None` for
+    /// a member restored from a transcript, which records no batch id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<ToolCallId>,
     /// The item this child was spawned for.
     pub item: String,
     /// Position of this child in the batch, 0-based.
@@ -322,6 +334,11 @@ pub struct SessionState {
     /// `swarm` segment while it is.
     #[serde(default)]
     pub swarm: bool,
+    /// Goal the session works toward. When set, every completed turn is
+    /// checked against it and the user is told when it is met. `None`
+    /// means no goal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
     /// Whether the session's plan mode is on: write tools are refused,
     /// command tools always ask, and the agent ends by presenting a
     /// plan for review. The statusline shows a `plan` segment while it
@@ -366,6 +383,8 @@ pub enum NoticeLevel {
     Warning,
     /// Something failed.
     Error,
+    /// Something the user wanted happened.
+    Success,
 }
 
 /// Answer to a [`HostEvent::PermissionRequested`].
@@ -529,6 +548,23 @@ pub enum CommandKind {
     SwarmMode {
         /// Whether the session delegates repeated work through `swarm`.
         on: bool,
+    },
+    /// Continue children of an earlier `swarm` call of the session,
+    /// each with its own follow-up prompt. Engine answer to the
+    /// `_kage/swarm/resume` request; the model cannot send it. Each
+    /// accepted child re-announces and runs like a member of a fresh
+    /// batch.
+    SwarmResume {
+        /// Child session id to a follow-up prompt.
+        members: BTreeMap<SessionId, String>,
+    },
+    /// Set the goal the session works toward. Once set, every
+    /// completed turn is checked against it and the user is told when
+    /// it is met. `None` clears the goal and stops the checks.
+    SetGoal {
+        /// What done looks like. `None` clears the goal.
+        #[serde(default)]
+        goal: Option<String>,
     },
     /// Turn the session's plan mode on or off. Like
     /// [`CommandKind::SwarmMode`], a change injects a short note into

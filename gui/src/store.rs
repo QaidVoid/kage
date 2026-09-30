@@ -7,8 +7,8 @@
 //! shell, which owns the transport. Views read the store and call its
 //! command methods; they never see frames.
 
-use kage_client::wire::ContentBlock;
-use kage_client::{Change, Client, Frame, Session};
+use kage_client::wire::{ContentBlock, FsListResult, FsOp};
+use kage_client::{Change, Client, Frame, PromptOutcome, Session, SteerError};
 
 use crate::gate::{self, Report};
 use crate::transport::State;
@@ -54,6 +54,10 @@ pub struct Store {
     cwd: String,
     /// The session the transcript view follows.
     active: Option<String>,
+    /// The last `_kage/fs` listing answer, held with the session it
+    /// ran against for the picker that asked. A later answer replaces
+    /// it.
+    fs_listing: Option<(String, FsListResult)>,
     /// Commands waiting for the shell.
     commands: Vec<Command>,
 }
@@ -74,6 +78,7 @@ impl Store {
             prompted: false,
             cwd: cwd.into(),
             active: None,
+            fs_listing: None,
             commands: Vec::new(),
         }
     }
@@ -144,6 +149,13 @@ impl Store {
                     self.commands.push(Command::ReplayPrompt);
                 }
             }
+            if let Change::Fs {
+                session_id,
+                result: kage_client::wire::FsResult::List(listing),
+            } = change
+            {
+                self.fs_listing = Some((session_id.clone(), listing.clone()));
+            }
         }
         changes
     }
@@ -203,6 +215,96 @@ impl Store {
         true
     }
 
+    /// Sends or queues `text` on the active session: plain when idle,
+    /// queued while a run is in flight. Reports what became of it.
+    #[must_use]
+    pub fn submit(&mut self, text: &str) -> Option<PromptOutcome> {
+        let id = self.active.clone()?;
+        let outcome = self.client.prompt(&id, vec![ContentBlock::text(text)]);
+        Some(outcome)
+    }
+
+    /// Steers the run in flight on the active session with `text`.
+    /// Reports why nothing went out: no session, no run, or the agent
+    /// never advertised steering.
+    pub fn steer(&mut self, text: &str) -> Result<u64, SteerError> {
+        let Some(id) = self.active.clone() else {
+            return Err(SteerError::NotRunning);
+        };
+        self.client.steer(&id, vec![ContentBlock::text(text)])
+    }
+
+    /// Cancels the run of the active session. Reports whether there
+    /// was a session to cancel.
+    pub fn cancel(&mut self) -> bool {
+        let Some(id) = self.active.clone() else {
+            return false;
+        };
+        self.client.cancel(&id);
+        true
+    }
+
+    /// Stores the composer draft of `session`, when the state knows
+    /// it.
+    pub fn set_draft(&mut self, session: Option<&str>, text: &str) {
+        if let Some(id) = session {
+            self.client.set_draft(id, text);
+        }
+    }
+
+    /// The stored draft of `session`.
+    #[must_use]
+    pub fn draft(&self, session: &str) -> Option<&str> {
+        self.state().draft(session)
+    }
+
+    /// Sets one config option of the active session, by option id.
+    /// Reports whether a session is open to carry it.
+    pub fn set_option(&mut self, id: &str, value: &str) -> bool {
+        let Some(session) = self.active.clone() else {
+            return false;
+        };
+        self.client.set_config_option(&session, id, value);
+        true
+    }
+
+    /// Lists the active session's workdir through `_kage/fs`. The
+    /// answer lands in [`Store::fs_listing`]. Reports whether a
+    /// session is open to ask.
+    pub fn fs_list(&mut self, path: &str) -> bool {
+        let Some(session) = self.active.clone() else {
+            return false;
+        };
+        self.client.fs(&session, FsOp::List, path);
+        true
+    }
+
+    /// The last `_kage/fs` listing answer for `session`, for the
+    /// picker that asked.
+    #[must_use]
+    pub fn fs_listing(&self, session: &str) -> Option<&FsListResult> {
+        let (id, listing) = self.fs_listing.as_ref()?;
+        (id == session).then_some(listing)
+    }
+
+    /// Removes the queued prompt at `index` of the active session
+    /// before it went on the wire.
+    pub fn withdraw_queued(&mut self, index: usize) -> bool {
+        let Some(session) = self.active.clone() else {
+            return false;
+        };
+        self.client.withdraw_queued(&session, index)
+    }
+
+    /// Sends the queued prompt at `index` of the active session as a
+    /// steer on the run in flight.
+    pub fn steer_queued(&mut self, index: usize) -> Result<u64, SteerError> {
+        let Some(session) = self.active.clone() else {
+            return Err(SteerError::NotRunning);
+        };
+        self.client.steer_queued(&session, index)
+    }
+
     /// Dismisses the gate banner until the next initialize answer.
     pub fn dismiss_gate(&mut self) {
         self.gate_dismissed = true;
@@ -223,7 +325,7 @@ impl Store {
 mod tests {
     use super::{Command, Store};
     use crate::transport::State;
-    use kage_client::Frame;
+    use kage_client::{Frame, PromptOutcome, SteerError};
 
     /// An initialize answer with the given version and capabilities.
     fn init_answer(version: Option<&str>, steer: bool, close: bool) -> Frame {
@@ -424,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn a_prompt_in_flight_steers_when_the_agent_advertises_it() {
+    fn a_running_enter_queues_and_ctrl_enter_steers_with_the_capability() {
         let mut store = Store::new("/w", false);
         store.set_connect(State::Connected);
         run_commands(&mut store);
@@ -436,16 +538,202 @@ mod tests {
             id: 2,
             result: serde_json::json!({"sessionId": "s1"}),
         });
+        let _ = store.take_outgoing();
 
-        assert!(store.prompt("hello"));
+        assert_eq!(
+            store.submit("hello"),
+            Some(PromptOutcome::Sent { request_id: 3 })
+        );
         let outgoing = store.take_outgoing();
         assert!(matches!(&outgoing[0], Frame::Request { method, params, .. }
             if method == "session/prompt" && params.get("delivery").is_none()));
 
-        assert!(store.prompt("again"), "steered prompts still send");
+        assert_eq!(
+            store.submit("later"),
+            Some(PromptOutcome::Queued),
+            "a running turn holds plain submits in the queue"
+        );
+        assert!(store.take_outgoing().is_empty(), "queuing sends no frame");
+        assert_eq!(store.state().session("s1").unwrap().queue.len(), 1);
+
+        assert_eq!(store.steer("hurry"), Ok(4), "ctrl-enter steers the run");
         let outgoing = store.take_outgoing();
         assert!(matches!(&outgoing[0], Frame::Request { method, params, .. }
             if method == "session/prompt" && params["delivery"] == "steer"));
+    }
+
+    #[test]
+    fn ctrl_enter_without_the_capability_and_double_esc_send_the_wire_frames() {
+        let mut store = Store::new("/w", false);
+        store.set_connect(State::Connected);
+        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store.absorb(init_answer(Some("0.1.0"), false, true));
+        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store.absorb(Frame::Success {
+            id: 2,
+            result: serde_json::json!({"sessionId": "s1"}),
+        });
+        let _ = store.take_outgoing();
+
+        assert_eq!(
+            store.submit("hello"),
+            Some(PromptOutcome::Sent { request_id: 3 })
+        );
+        let _ = store.take_outgoing();
+        assert_eq!(
+            store.steer("hurry"),
+            Err(SteerError::NotAdvertised),
+            "no capability, no steer"
+        );
+        assert!(store.take_outgoing().is_empty());
+
+        assert!(store.cancel());
+        let outgoing = store.take_outgoing();
+        assert!(matches!(&outgoing[0], Frame::Notification { method, .. }
+            if method == "session/cancel"));
+    }
+
+    #[test]
+    fn the_draft_survives_a_switch_away_and_back() {
+        let mut store = Store::new("/w", false);
+        store.set_connect(State::Connected);
+        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store.absorb(init_answer(Some("0.1.0"), true, true));
+        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store.absorb(Frame::Success {
+            id: 2,
+            result: serde_json::json!({"sessionId": "s1"}),
+        });
+        let _ = store.take_outgoing();
+        store.new_session();
+        store.absorb(Frame::Success {
+            id: 3,
+            result: serde_json::json!({"sessionId": "s2"}),
+        });
+        let _ = store.take_outgoing();
+
+        store.set_active("s1");
+        let active = store.active_id().map(str::to_owned);
+        store.set_draft(active.as_deref(), "typed and never sent");
+        store.set_active("s2");
+        let active = store.active_id().map(str::to_owned);
+        store.set_draft(active.as_deref(), "another session, another draft");
+        store.set_active("s1");
+        assert_eq!(
+            store.draft("s1"),
+            Some("typed and never sent"),
+            "switching back restores the draft"
+        );
+        assert_eq!(store.draft("s2"), Some("another session, another draft"));
+    }
+
+    #[test]
+    fn mode_cycles_exactly_the_advertised_values() {
+        let mut store = Store::new("/w", false);
+        store.set_connect(State::Connected);
+        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store.absorb(init_answer(Some("0.1.0"), true, true));
+        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store.absorb(Frame::Success {
+            id: 2,
+            result: serde_json::json!({"sessionId": "s1"}),
+        });
+        let _ = store.take_outgoing();
+        store.absorb(Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "config_option_update",
+                    "configOptions": [{
+                        "id": "mode", "name": "Mode", "category": "mode",
+                        "type": "select", "currentValue": "default",
+                        "options": [
+                            {"value": "default", "name": "Default"},
+                            {"value": "ask", "name": "Ask"},
+                            {"value": "allow", "name": "Allow"},
+                            {"value": "deny", "name": "Deny"},
+                            {"value": "plan", "name": "Plan"}
+                        ]
+                    }]
+                },
+            }),
+        });
+
+        let mut sent = 0usize;
+        for expected in ["ask", "allow", "deny", "plan", "default"] {
+            assert!(
+                crate::views::composer::next_mode_value(store.active_session().unwrap(),)
+                    .is_some_and(|next| next == expected)
+            );
+            assert!(store.set_option("mode", expected));
+            let outgoing = store.take_outgoing();
+            assert_eq!(outgoing.len(), 1, "one set_config_option per step");
+            let Frame::Request { id, method, params } = &outgoing[0] else {
+                panic!("expected a request, got {:?}", outgoing[0]);
+            };
+            assert_eq!(method, "session/set_config_option");
+            assert_eq!(params["configId"], "mode");
+            sent += 1;
+            store.absorb(Frame::Success {
+                id: *id,
+                result: serde_json::json!({"configOptions": [{
+                    "id": "mode", "name": "Mode", "category": "mode",
+                    "type": "select", "currentValue": expected,
+                    "options": [
+                        {"value": "default", "name": "Default"},
+                        {"value": "ask", "name": "Ask"},
+                        {"value": "allow", "name": "Allow"},
+                        {"value": "deny", "name": "Deny"},
+                        {"value": "plan", "name": "Plan"}
+                    ]
+                }]}),
+            });
+        }
+        assert_eq!(sent, 5, "one cycle through every advertised value");
+        assert!(store.take_outgoing().is_empty(), "everything was drained");
+    }
+
+    #[test]
+    fn the_fs_listing_holds_for_the_mention_menu() {
+        let mut store = Store::new("/w", false);
+        store.set_connect(State::Connected);
+        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store.absorb(init_answer(Some("0.1.0"), true, true));
+        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store.absorb(Frame::Success {
+            id: 2,
+            result: serde_json::json!({"sessionId": "s1"}),
+        });
+        let _ = store.take_outgoing();
+
+        assert!(store.fs_listing("s1").is_none(), "nothing asked yet");
+        assert!(store.fs_list(""));
+        store.absorb(Frame::Success {
+            id: 3,
+            result: serde_json::json!({
+                "op": "list",
+                "entries": [
+                    {"path": "src", "kind": "directory", "size": 0},
+                    {"path": "src/main.rs", "kind": "file", "size": 12}
+                ],
+                "truncated": false
+            }),
+        });
+        let listing = store.fs_listing("s1").unwrap();
+        assert_eq!(listing.entries.len(), 2);
+        assert!(
+            store.fs_listing("other").is_none(),
+            "the listing is per session"
+        );
     }
 
     #[test]

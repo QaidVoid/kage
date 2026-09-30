@@ -14,7 +14,7 @@ use kage_acp_wire::{
     ClientCapabilities, ContentBlock, FsEntry, FsKind, FsListResult, FsOp, FsResult,
     RequestPermissionRequest, SessionNotification, StopReason, ToolCallStatus,
 };
-use kage_client::{Change, Client, Frame, PermissionDecision, PromptOutcome, TranscriptItem};
+use kage_client::{Change, Client, Frame, PermissionDecision, PromptOutcome, SteerError, TranscriptItem};
 
 const PARENT: &str = "01KA5C0D1NG000000000000000";
 const CHILD: &str = "01KA5C0D1NG000000000000001";
@@ -427,6 +427,25 @@ fn the_subagent_fixture_builds_the_agent_tree_and_the_child_transcript() {
 }
 
 #[test]
+fn a_prompt_queues_while_a_run_is_in_flight_even_with_the_capability() {
+    let mut client = connected(true);
+    assert_eq!(
+        client.prompt("s1", text("go")),
+        PromptOutcome::Sent { request_id: 3 }
+    );
+    let _ = client.take_outgoing();
+    assert_eq!(
+        client.prompt("s1", text("later")),
+        PromptOutcome::Queued,
+        "plain prompts queue while a run is in flight"
+    );
+    assert!(client.take_outgoing().is_empty(), "a queued prompt sends nothing");
+    let session = client.state().session("s1").unwrap();
+    assert_eq!(session.queue.len(), 1);
+    assert_eq!(session.queue[0].prompt, text("later"));
+}
+
+#[test]
 fn a_prompt_queues_without_the_steer_capability() {
     let mut client = connected(false);
     assert!(!client.state().steer_available());
@@ -474,24 +493,22 @@ fn a_prompt_queues_without_the_steer_capability() {
 }
 
 #[test]
-fn a_prompt_steers_when_the_capability_is_advertised() {
+fn steer_joins_a_run_only_when_advertised_and_in_flight() {
     let mut client = connected(true);
-    assert!(client.state().steer_available());
-
     assert_eq!(
         client.prompt("s1", text("go")),
         PromptOutcome::Sent { request_id: 3 }
     );
     let _ = client.take_outgoing();
+
     assert_eq!(
-        client.prompt("s1", text("hurry")),
-        PromptOutcome::Steered { request_id: 4 }
+        client.steer("s1", text("hurry")),
+        Ok(4),
+        "the advertised capability steers the run in flight"
     );
     let session = client.state().session("s1").unwrap();
     assert!(session.queue.is_empty(), "steered prompts never queue");
-
     let outgoing = client.take_outgoing();
-    assert_eq!(outgoing.len(), 1, "{outgoing:?}");
     match &outgoing[0] {
         Frame::Request { id: 4, params, .. } => {
             assert_eq!(params["delivery"], "steer");
@@ -506,9 +523,77 @@ fn a_prompt_steers_when_the_capability_is_advertised() {
         "the steered prompt does not end the run it joined"
     );
     client.handle(stop(3, "end_turn"));
-    let session = client.state().session("s1").unwrap();
-    assert!(!session.running);
-    assert!(client.take_outgoing().is_empty(), "nothing queued to flush");
+    assert!(!client.state().session("s1").unwrap().running);
+
+    assert_eq!(
+        client.steer("s1", text("late")),
+        Err(SteerError::NotRunning),
+        "an idle session has no run to steer"
+    );
+    assert!(client.take_outgoing().is_empty());
+}
+
+#[test]
+fn steer_refuses_when_the_capability_was_not_advertised() {
+    let mut client = connected(false);
+    assert_eq!(
+        client.prompt("s1", text("go")),
+        PromptOutcome::Sent { request_id: 3 }
+    );
+    let _ = client.take_outgoing();
+    assert_eq!(
+        client.steer("s1", text("hurry")),
+        Err(SteerError::NotAdvertised)
+    );
+    assert!(client.take_outgoing().is_empty(), "a refused steer sends nothing");
+    assert!(client.state().session("s1").unwrap().queue.is_empty());
+}
+
+#[test]
+fn queued_prompts_withdraw_and_promote_to_steer() {
+    let mut client = connected(true);
+    assert_eq!(
+        client.prompt("s1", text("go")),
+        PromptOutcome::Sent { request_id: 3 }
+    );
+    let _ = client.take_outgoing();
+    assert_eq!(client.prompt("s1", text("first")), PromptOutcome::Queued);
+    assert_eq!(client.prompt("s1", text("second")), PromptOutcome::Queued);
+    assert_eq!(client.state().session("s1").unwrap().queue.len(), 2);
+
+    assert!(client.withdraw_queued("s1", 0), "the held prompt is dropped");
+    assert_eq!(
+        client.state().session("s1").unwrap().queue[0].prompt,
+        text("second")
+    );
+    assert!(!client.withdraw_queued("s1", 5), "nothing at the index");
+    assert_eq!(client.state().session("s1").unwrap().queue.len(), 1);
+    assert!(client.take_outgoing().is_empty(), "withdrawal sends nothing");
+
+    assert_eq!(client.steer_queued("s1", 0), Ok(4));
+    let outgoing = client.take_outgoing();
+    match &outgoing[0] {
+        Frame::Request { id: 4, params, .. } => {
+            assert_eq!(params["delivery"], "steer");
+            assert_eq!(params["prompt"][0]["text"], "second");
+        }
+        other => panic!("expected the promoted prompt, got {other:?}"),
+    }
+    assert!(client.state().session("s1").unwrap().queue.is_empty());
+}
+
+#[test]
+fn drafts_round_trip_per_session() {
+    let mut client = connected(false);
+    assert_eq!(client.state().draft("s1"), None);
+    assert!(client.set_draft("s1", "fix the loop"));
+    assert_eq!(client.state().draft("s1"), Some("fix the loop"));
+    assert!(
+        !client.set_draft("ghost", "lost"),
+        "a session the state has not heard of holds no draft"
+    );
+    assert!(client.set_draft("s1", ""));
+    assert_eq!(client.state().draft("s1"), Some(""));
 }
 
 #[test]

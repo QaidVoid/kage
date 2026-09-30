@@ -47,6 +47,25 @@ impl State {
     pub fn session(&self, id: &str) -> Option<&Session> {
         self.sessions.get(id)
     }
+
+    /// Stores the composer text of `session_id`, replacing any earlier
+    /// draft. A session the state has not heard of holds no draft, so
+    /// the call reports false.
+    pub fn set_draft(&mut self, session_id: &str, text: &str) -> bool {
+        let Some(session) = self.sessions.get_mut(session_id) else {
+            return false;
+        };
+        session.draft = Some(text.to_owned());
+        true
+    }
+
+    /// The composer text stored for `session_id`.
+    #[must_use]
+    pub fn draft(&self, session_id: &str) -> Option<&str> {
+        self.sessions
+            .get(session_id)
+            .and_then(|session| session.draft.as_deref())
+    }
 }
 
 /// One session: a run the client is driving, a subagent it hears, or a
@@ -94,6 +113,9 @@ pub struct Session {
     pub plan: Option<Vec<Value>>,
     /// Why the last answered prompt ended.
     pub last_stop: Option<StopReason>,
+    /// The composer text the user typed here and has not sent, kept
+    /// across switches away from the session.
+    pub draft: Option<String>,
 }
 
 impl Session {

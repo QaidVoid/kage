@@ -24,7 +24,7 @@ mod frame;
 mod state;
 
 pub use change::Change;
-pub use client::{Client, PermissionDecision, PromptOutcome};
+pub use client::{Client, PermissionDecision, PromptOutcome, SteerError};
 pub use frame::{Frame, RpcError};
 pub use state::{
     PermissionAsk, QueuedPrompt, Session, State, Subagent, ToolCallItem, TranscriptItem, Usage,

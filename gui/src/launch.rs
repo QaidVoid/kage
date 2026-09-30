@@ -147,7 +147,7 @@ pub fn run() {
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
             theme::apply_shadow(cx);
-            cx.bind_keys([
+            let mut keys = vec![
                 KeyBinding::new("ctrl-q", crate::app::Quit, None),
                 KeyBinding::new("cmd-q", crate::app::Quit, None),
                 KeyBinding::new("ctrl-n", crate::app::NewSession, None),
@@ -157,7 +157,16 @@ pub fn run() {
                 KeyBinding::new("ctrl-\\", crate::app::ToggleSidebar, None),
                 KeyBinding::new("cmd-\\", crate::app::ToggleSidebar, None),
                 KeyBinding::new("ctrl-enter", crate::app::SendPrompt, None),
-            ]);
+            ];
+            // The composer claims Shift+Tab inside the input's own key
+            // context, so it wins over the toolkit's outdent binding
+            // while the input is focused.
+            keys.push(KeyBinding::new(
+                "shift-tab",
+                crate::views::composer::CycleMode,
+                Some("Input"),
+            ));
+            cx.bind_keys(keys);
             let options = WindowOptions {
                 titlebar: Some(TitlebarOptions {
                     title: Some("kage client".into()),

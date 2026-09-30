@@ -8,18 +8,16 @@
 
 use std::time::Duration;
 
-use gpui_kit::component::button::Button;
-use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::theme::ActiveTheme;
-use gpui_kit::component::{h_flex, h_resizable, resizable_panel, v_flex};
+use gpui_kit::component::{h_resizable, resizable_panel, v_flex};
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext, Context, Entity, IntoElement, ParentElement, Render,
-    SharedString, Styled, Window, div, px,
+    App, AppContext, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
+    Styled as _, Window, div, px,
 };
 
 use crate::store::{Command, Store};
 use crate::transport::{Event, Transport};
-use crate::views::{SidebarView, TranscriptView, WorkbenchView};
+use crate::views::{ComposerView, SidebarView, TranscriptView, WorkbenchView};
 use kage_client::Frame;
 
 /// The prompt the replay transcript was recorded with.
@@ -60,11 +58,10 @@ pub struct ShellArgs {
 pub struct Shell {
     store: Entity<Store>,
     transport: Box<dyn Transport>,
-    composer: Entity<TextareaState>,
+    composer: Entity<ComposerView>,
     sidebar: Entity<SidebarView>,
     transcript: Entity<TranscriptView>,
     workbench: Entity<WorkbenchView>,
-    handle: AnyWindowHandle,
     sidebar_visible: bool,
     workbench_visible: bool,
     streamed: usize,
@@ -76,14 +73,11 @@ impl Shell {
         let cwd = working_dir();
         let store = cx.new(|_| Store::new(cwd, args.replay));
         let sidebar = cx.new(|_| SidebarView::new(store.clone()));
-        let composer = cx.new(|cx| {
-            TextareaState::new(window, cx).placeholder("Message the agent; ctrl-enter sends")
-        });
-        composer.update(cx, |state, cx| state.focus(window, cx));
-        let transcript = cx.new(|cx| TranscriptView::new(store.clone(), composer.clone(), cx));
+        let composer = cx.new(|cx| ComposerView::new(store.clone(), window, cx));
+        let input = composer.read(cx).input().clone();
+        let transcript = cx.new(|cx| TranscriptView::new(store.clone(), input, cx));
         let workbench = cx.new(|_| WorkbenchView::new(store.clone()));
 
-        let handle = window.window_handle();
         let (events, incoming) = async_channel::unbounded();
         args.transport.start(events);
 
@@ -121,7 +115,6 @@ impl Shell {
             sidebar,
             transcript,
             workbench,
-            handle,
             sidebar_visible: true,
             workbench_visible: true,
             streamed: 0,
@@ -180,24 +173,10 @@ impl Shell {
         });
     }
 
-    /// Sends the composer text to the active session and clears the
-    /// composer when it was accepted.
+    /// Sends or queues the composer text on the active session.
     pub fn send_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.composer.read(cx).value().trim().to_owned();
-        if text.is_empty() {
-            return;
-        }
-        let sent = self.store.update(cx, |store, cx| {
-            let sent = store.prompt(&text);
-            cx.notify();
-            sent
-        });
-        if sent {
-            self.composer.update(cx, |state, cx| {
-                state.set_value("", window, cx);
-            });
-            cx.notify();
-        }
+        self.composer
+            .update(cx, |composer, cx| composer.submit(false, window, cx));
     }
 
     pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -262,29 +241,8 @@ impl Shell {
     }
 
     /// The composer row under the transcript.
-    fn composer_row(&self, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().colors;
-        let handle = self.handle;
-        v_flex()
-            .border_t_1()
-            .border_color(theme.border)
-            .p_3()
-            .gap_2()
-            .child(Textarea::new(&self.composer).h(px(96.)))
-            .child(
-                h_flex().justify_end().child(
-                    Button::new("send")
-                        .label("Send (ctrl-enter)")
-                        .on_click(move |_, _, cx| {
-                            let _ = handle.update(cx, |root, window, cx| {
-                                let Ok(shell) = root.downcast::<Shell>() else {
-                                    return;
-                                };
-                                shell.update(cx, |shell, cx| shell.send_composer(window, cx));
-                            });
-                        }),
-                ),
-            )
+    fn composer_row(&self, _cx: &Context<Self>) -> impl IntoElement {
+        div().w_full().child(self.composer.clone())
     }
 
     /// The status bar under the panels.

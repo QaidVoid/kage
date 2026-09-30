@@ -30,6 +30,17 @@ use crate::state::{
 /// The method an agent calls to ask for a tool call's verdict.
 const ASK_METHOD: &str = "session/request_permission";
 
+/// Why a steer did not go out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteerError {
+    /// No run is in flight on the session, so there is nothing to
+    /// steer. Send the prompt plain instead.
+    NotRunning,
+    /// The agent did not advertise the steering capability, so the
+    /// wire cannot join a run in flight. The prompt queues instead.
+    NotAdvertised,
+}
+
 /// What [`Client::prompt`] did with a prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptOutcome {
@@ -125,6 +136,12 @@ impl Client {
         std::mem::take(&mut self.outgoing)
     }
 
+    /// Stores the composer draft of `session_id`. See
+    /// [`State::set_draft`].
+    pub fn set_draft(&mut self, session_id: &str, text: &str) -> bool {
+        self.state.set_draft(session_id, text)
+    }
+
     /// Applies one incoming message and reports what moved. Server
     /// requests are answered here too: an unknown method is refused
     /// with a method-not-found error, and a malformed permission ask
@@ -203,8 +220,9 @@ impl Client {
     }
 
     /// Runs one prompt on `session_id`. A prompt that arrives while a
-    /// run is in flight steers that run when the agent advertised the
-    /// steering capability, and queues otherwise.
+    /// run is in flight is held in the session's queue and sent plain
+    /// when the run ends; joining a run in flight on purpose goes
+    /// through [`Client::steer`].
     pub fn prompt(&mut self, session_id: &str, prompt: Vec<ContentBlock>) -> PromptOutcome {
         let running = self
             .state
@@ -212,11 +230,6 @@ impl Client {
             .get(session_id)
             .is_some_and(|session| session.running);
         if running {
-            if self.state.steer_available() {
-                let request_id =
-                    self.send_prompt(session_id, prompt, Some(PromptDelivery::Steer), false);
-                return PromptOutcome::Steered { request_id };
-            }
             self.session_mut(session_id)
                 .queue
                 .push(QueuedPrompt { prompt });
@@ -224,6 +237,59 @@ impl Client {
         }
         let request_id = self.send_prompt(session_id, prompt, None, true);
         PromptOutcome::Sent { request_id }
+    }
+
+    /// Steers the run in flight on `session_id` with `prompt`, joining
+    /// it at its next turn boundary. Only when a run is in flight and
+    /// the agent advertised the steering capability.
+    pub fn steer(&mut self, session_id: &str, prompt: Vec<ContentBlock>) -> Result<u64, SteerError> {
+        let running = self
+            .state
+            .sessions
+            .get(session_id)
+            .is_some_and(|session| session.running);
+        if !running {
+            return Err(SteerError::NotRunning);
+        }
+        if !self.state.steer_available() {
+            return Err(SteerError::NotAdvertised);
+        }
+        let request_id = self.send_prompt(session_id, prompt, Some(PromptDelivery::Steer), false);
+        Ok(request_id)
+    }
+
+    /// Removes the queued prompt at `index` of `session_id` before it
+    /// ever went on the wire, reporting whether there was one.
+    ///
+    /// The ACP surface has no withdraw method: the engine-side prompt
+    /// queue is only reachable through `session/prompt` deliveries, so
+    /// a client that holds the queue, as this one does, withdraws by
+    /// dropping the held prompt.
+    pub fn withdraw_queued(&mut self, session_id: &str, index: usize) -> bool {
+        let queue = &mut self.session_mut(session_id).queue;
+        if index >= queue.len() {
+            return false;
+        }
+        queue.remove(index);
+        true
+    }
+
+    /// Sends the queued prompt at `index` of `session_id` as a steer
+    /// on the run in flight, removing it from the queue. The same wire
+    /// limits as [`Client::steer`] apply, and a rejected steer leaves
+    /// the queue untouched.
+    pub fn steer_queued(&mut self, session_id: &str, index: usize) -> Result<u64, SteerError> {
+        let prompt = match self.state.session(session_id).and_then(|session| {
+            session.queue.get(index).map(|queued| queued.prompt.clone())
+        }) {
+            Some(prompt) => prompt,
+            None => return Err(SteerError::NotRunning),
+        };
+        let sent = self.steer(session_id, prompt);
+        if sent.is_ok() {
+            self.withdraw_queued(session_id, index);
+        }
+        sent
     }
 
     /// Asks the agent to stop the run of `session_id`.

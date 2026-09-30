@@ -276,6 +276,18 @@ token:
   elsewhere, `431` for an oversize head, and `503` once 16
   connections are already served. Every connection runs on its own
   thread off the main accept loop.
+- The same routing table serves the web client bundle when a web
+  directory is available (`--web-dir`, default `web/` beside the
+  executable): `GET /` answers the page and `GET /<file>` a file
+  under the directory. Every asset response carries a strict
+  `Content-Security-Policy` (same-origin sources only, WebAssembly
+  compilation allowed, inline script closed off) plus `nosniff` and
+  `no-referrer`; the page is `no-store`, the unhashed module and
+  glue are cached for five minutes at most, and the page and the
+  module carry cross-origin isolation headers so a future atomics
+  build can use `SharedArrayBuffer`. A path is served only when it
+  decodes inside the web directory, so traversals are refused. The
+  assets hold no secret, so the token still guards `/acp` only.
 - Attach, shared approvals and idle close are host behavior, not
   transport behavior: a second connection attaches to the live
   session with a replay inside one bus lock, every attached client is

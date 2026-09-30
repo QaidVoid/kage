@@ -17,9 +17,12 @@ The startup output on stderr carries everything a client needs:
 
     kage serve: token file /home/you/.local/share/kage/remote-token
     kage serve: connect: ws://127.0.0.1:7433/acp?token=<64 hex chars>
+    kage serve: web UI: http://127.0.0.1:7433/
 
 The `connect:` line is the URL clients open, and the only place the
 token is ever printed. Copy it into the client's server URL field.
+The `web UI:` line appears when the server is also serving the browser
+client (below) and names the page URL, never the token.
 
 Flags:
 
@@ -31,6 +34,10 @@ Flags:
 - `--port <n>` changes the TCP port. The default is 7433, and
   `--port 0` picks a free port and shows it in the connect URL.
 - `--rotate-token` replaces the stored token before serving.
+- `--web-dir <dir>` serves the browser client bundle at `/` from
+  `dir`. The default is a `web/` directory beside the executable; a
+  missing or empty directory only disables the web UI, `/acp` keeps
+  working.
 
 Credentials resolve as for the TUI and `kage rpc` (OS keyring,
 `kage auth login`, or an API-key env var). With no provider configured
@@ -208,12 +215,79 @@ because it is one.
 Every connection is logged on stderr prefixed `kage serve:`: connect,
 attach, disconnect, and refusals with the reason (a missing or wrong
 token is `401`, a non-upgrade request on `/acp` is `405`, an unknown
-path is `404`, a full server is `503`). Refusals name the peer
-address, never the value presented.
+path is `404`, a path that tries to escape the web directory is a
+`404` logged as a traversal, a full server is `503`). Refusals name
+the peer address, never the value presented.
+
+## web client
+
+`kage serve` can serve the repository's own browser client, so a
+browser needs nothing but the page URL and the token. Build the
+bundle once (the full commands and caveats are in `gui/SPIKE.md`):
+
+```sh
+rustup target add --toolchain nightly wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.129   # match gui/Cargo.lock
+cd gui
+cargo +nightly build --release --locked --target wasm32-unknown-unknown
+wasm-bindgen --out-dir web --target web \
+    target/wasm32-unknown-unknown/release/kage_desktop.wasm
+mkdir -p web/assets/icons
+cp "$(ls -d ~/.local/share/cargo/registry/src/*/gpui-kit-assets-0.7.0/assets/icons)"/*.svg \
+    web/assets/icons/
+cd ..
+cargo run --bin kage -- serve --web-dir gui/web
+```
+
+Then open the page URL from the startup output:
+
+    kage serve: web UI: http://127.0.0.1:7433/
+
+The page shows a small form before the app boots: the server URL,
+prefilled with `/acp` on the page's own origin, and the token. Enter
+the token from the connect line and press Connect. The client dials
+`/acp` on the same origin and presents the token as the
+`kage.<token>` `Sec-WebSocket-Protocol` entry, so the token never
+rides any URL; the serve log shows no query-string token. The three
+token forms above stay available for non-browser clients.
+
+The serving origin answers only from the bundle directory: `GET /`
+with the page, `GET /<file>` with a file under `--web-dir`, everything
+else `404`. A path is served only when it stays inside the directory
+after its %-escapes are decoded, so `GET /../Cargo.toml` and its
+encoded forms are refused.
+
+What the headers on every asset response protect:
+
+- `Content-Security-Policy` with `default-src 'none'`: the page may
+  load scripts, styles, images and connections from its own origin
+  only, WebAssembly compilation is allowed (`'wasm-unsafe-eval'`),
+  and inline script, framing, form actions and base hijacking are
+  closed off. A compromised asset cannot phone home.
+- `X-Content-Type-Options: nosniff` and an explicit content type keep
+  the browser from reinterpreting a file.
+- `Referrer-Policy: no-referrer` keeps page URLs (and anything typed
+  into them) out of other servers' logs.
+- `Cache-Control: no-store` on the page so a rebuilt bundle is picked
+  up on reload; the unhashed module and glue are cached for five
+  minutes at most.
+- `Cross-Origin-Opener-Policy: same-origin` and
+  `Cross-Origin-Embedder-Policy: require-corp` on the page and the
+  WebAssembly module isolate the browsing context, ready for a future
+  build that uses `SharedArrayBuffer` threads.
+
+The bundle makes zero non-self requests: the page loads `boot.js`,
+the wasm-bindgen glue and the module from the serving origin, fonts
+are embedded in the module, and the icon SVGs are fetched same-origin
+on first use. There is no CDN, webfont, remote image or analytics
+fetch, so the browser talks to one host, and that host is the kage
+server the token belongs to.
 
 ## clients
 
-See [zed](/editors/zed) for the stdio setup; over the network the same
-client connects by URL. Any ACP client that speaks WebSocket can
-connect: give it the connect URL and, where it cannot set headers,
-enter the token as the client directs.
+The browser client of the repository is served by `kage serve`
+itself; see "web client" above. See [zed](/editors/zed) for the stdio
+setup; over the network the same client connects by URL. Any ACP
+client that speaks WebSocket can connect: give it the connect URL
+and, where it cannot set headers, enter the token as the client
+directs.

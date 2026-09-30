@@ -2,21 +2,22 @@
 //!
 //! The crate compiles for wasm32-unknown-unknown and binds into the
 //! static bundle with wasm-bindgen (`--target web`); the exact
-//! commands, the serving headers and the measurements live in
-//! `gui/SPIKE.md`. GPUI renders through `gpui-pre-web`: WebGPU when
-//! the browser has it, an automatic WebGL2 canvas fallback when it
-//! does not. The transport is [`WebTransport`]; the token rides the
-//! `kage.<token>` subprotocol of the dial and never a query string.
+//! commands and the serving headers live in `gui/SPIKE.md`. GPUI
+//! renders through `gpui-pre-web`: WebGPU when the browser has it, an
+//! automatic WebGL2 canvas fallback when it does not. The transport is
+//! [`WebTransport`]; the token rides the `kage.<token>` subprotocol of
+//! the dial and never a query string.
 //!
-//! The page address carries the only configuration a browser page can
-//! read: `?ws=` overrides the endpoint (default: `/acp` on the page's
-//! own origin) and `?token=` carries the bearer token; without it the
-//! page asks once through a prompt dialog. Both values configure the
-//! page only, the WebSocket dial itself stays clean.
+//! The page's `boot.js` draws the connection form first and hands the
+//! server URL and the token over through `window.__kageConnect` before
+//! this module loads; there is no token URL parameter. The `?ws=`
+//! query parameter stays as a developer override for the endpoint,
+//! which without it defaults to `/acp` on the page's own origin.
 
 use std::borrow::Cow;
 
 use wasm_bindgen::prelude::wasm_bindgen;
+use wasm_bindgen::{JsCast as _, JsValue};
 
 use gpui_kit::assets::Assets;
 use gpui_kit::component::theme::Theme;
@@ -25,6 +26,24 @@ use gpui_kit::{App, AppContext, KeyBinding, TitlebarOptions, WindowOptions, px, 
 use crate::app::{Shell, ShellArgs};
 use crate::theme;
 use crate::transport::web::WebTransport;
+
+#[wasm_bindgen]
+extern "C" {
+    /// The connection values the boot form collected, stored on the
+    /// window before this module loads.
+    #[wasm_bindgen(thread_local_v2, js_namespace = window, js_name = __kageConnect)]
+    static KAGE_CONNECT: JsValue;
+
+    type Handoff;
+
+    /// The server URL the form sent.
+    #[wasm_bindgen(method, getter)]
+    fn server(this: &Handoff) -> Option<String>;
+
+    /// The token the form sent.
+    #[wasm_bindgen(method, getter)]
+    fn token(this: &Handoff) -> Option<String>;
+}
 
 /// The UI family, the one font the web text system names as its
 /// fallback, bundled in `assets/fonts`.
@@ -72,9 +91,10 @@ pub fn start() {
                 window_min_size: Some(size(px(960.), px(640.))),
                 ..Default::default()
             };
+            let (server, token) = connection();
             let (handle, shell) = gpui_kit::open_window(options, cx, |window, cx| {
                 let args = ShellArgs {
-                    transport: Box::new(WebTransport::new(endpoint(), token())),
+                    transport: Box::new(WebTransport::new(server, token)),
                     replay: false,
                     stream: false,
                 };
@@ -136,16 +156,23 @@ fn endpoint() -> String {
         .unwrap_or_else(|| format!("ws://localhost:0{ACP_PATH}"))
 }
 
-/// The bearer token: the page's `?token=` value, else one ask
-/// through a prompt dialog, else empty, which the endpoint refuses.
-fn token() -> String {
-    let search = page_search();
-    if let Some(token) = query_parameter(&search, "token") {
-        return token;
-    }
-    web_sys::window()
-        .and_then(|window| window.prompt_with_message("kage token").ok().flatten())
-        .unwrap_or_default()
+/// The endpoint and token the boot form handed over: the form's
+/// values win, the endpoint falls back to the page's `?ws=` override,
+/// else `/acp` on the page's own origin with the scheme mapped to ws
+/// or wss. Without the form there is no token, and the endpoint
+/// refuses the dial until one is entered.
+fn connection() -> (String, String) {
+    KAGE_CONNECT.with(|value| {
+        let handed = value.is_object().then(|| value.unchecked_ref::<Handoff>());
+        let server = handed
+            .and_then(|handoff| handoff.server())
+            .filter(|server| !server.is_empty())
+            .unwrap_or_else(endpoint);
+        let token = handed
+            .and_then(|handoff| handoff.token())
+            .unwrap_or_default();
+        (server, token)
+    })
 }
 
 /// The query part of the page address, empty without a window.

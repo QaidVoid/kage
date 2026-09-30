@@ -30,6 +30,7 @@ use super::*;
 use crate::engine::SessionSpec;
 use crate::permissions::PermissionGate;
 use crate::rpc::host::Host;
+use crate::serve::assets::CONTENT_SECURITY_POLICY;
 
 /// Every wait in these tests is bounded by this.
 const WAIT: Duration = Duration::from_secs(10);
@@ -139,6 +140,13 @@ impl Server {
 
 /// Serves `scripts` from a mock host with a fresh token.
 fn spawn_server(scripts: Vec<Script>) -> Server {
+    spawn_server_in(scripts, None)
+}
+
+/// Serves with the web bundle directory at `web`, when given. The
+/// startup lines (web UI URL, or the unavailability notice) come from
+/// the same code path `serve::run` uses.
+fn spawn_server_in(scripts: Vec<Script>, web_dir: Option<&Path>) -> Server {
     let dir = tempfile::tempdir().unwrap();
     let host = test_host(scripts, dir.path());
     let token = Arc::new(Token::load_or_create(&dir.path().join("remote-token")).unwrap());
@@ -148,11 +156,28 @@ fn spawn_server(scripts: Vec<Script>) -> Server {
     let stop = Arc::new(AtomicBool::new(false));
     let sink = Arc::clone(&lines);
     let log: Log = Arc::new(move |line| sink.lock().unwrap().push(line.to_owned()));
+    let bundle_dir = web_dir.map_or_else(default_web_dir, std::path::Path::to_path_buf);
+    let web = WebDir::open(&bundle_dir);
+    if web.available() {
+        log(&format!("web UI: http://{addr}/"));
+    } else {
+        log(&format!(
+            "web UI unavailable: no index.html under {}; pass --web-dir to serve it",
+            bundle_dir.display()
+        ));
+    }
     let served_token = Arc::clone(&token);
     let served_stop = Arc::clone(&stop);
     let served_log = Arc::clone(&log);
     thread::spawn(move || {
-        accept_until(&listener, &host, &served_token, &served_stop, &served_log);
+        accept_until(
+            &listener,
+            &host,
+            &served_token,
+            &web,
+            &served_stop,
+            &served_log,
+        );
     });
     Server {
         _dir: dir,
@@ -514,4 +539,310 @@ fn non_loopback_hosts_are_warned_about_in_plain_text() {
         let printed = lines.lock().unwrap().join("\n");
         assert_eq!(printed.contains("no TLS"), warned, "{host}: {printed}");
     }
+}
+
+/// A minimal stand-in for the built web bundle, with one file per
+/// content type the server knows.
+struct WebBundle {
+    dir: tempfile::TempDir,
+}
+
+impl WebBundle {
+    fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+/// The page of the bundle, shaped like `gui/web/index.html`.
+const PAGE: &str = concat!(
+    "<!doctype html>\n",
+    "<html lang=\"en\">\n",
+    "<head>\n",
+    "<meta charset=\"utf-8\">\n",
+    "<title>kage client</title>\n",
+    "</head>\n",
+    "<body>\n",
+    "<script type=\"module\" src=\"./boot.js\"></script>\n",
+    "</body>\n",
+    "</html>\n",
+);
+
+/// Writes the bundle files into a fresh directory.
+fn web_bundle() -> WebBundle {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("assets/icons")).unwrap();
+    std::fs::write(dir.path().join("index.html"), PAGE).unwrap();
+    std::fs::write(dir.path().join("boot.js"), "window.__kageBoot = true;\n").unwrap();
+    std::fs::write(
+        dir.path().join("kage_desktop.js"),
+        "export default function init() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("kage_desktop_bg.wasm"),
+        b"\0asm\x01\x00\x00\x00",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("styles.css"),
+        "body { background: #0f0e13; }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("data.json"), "{}\n").unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "notes\n").unwrap();
+    std::fs::write(dir.path().join("assets/icons/lucide.svg"), "<svg></svg>\n").unwrap();
+    WebBundle { dir }
+}
+
+/// Every asset response carries the full security header set.
+fn assert_security_headers(reply: &str) {
+    assert!(
+        reply.contains(&format!(
+            "Content-Security-Policy: {CONTENT_SECURITY_POLICY}\r\n"
+        )),
+        "CSP missing: {reply}"
+    );
+    assert!(
+        reply.contains("X-Content-Type-Options: nosniff\r\n"),
+        "nosniff missing: {reply}"
+    );
+    assert!(
+        reply.contains("Referrer-Policy: no-referrer\r\n"),
+        "referrer policy missing: {reply}"
+    );
+}
+
+#[test]
+fn root_serves_the_page_with_every_security_header() {
+    let bundle = web_bundle();
+    let server = spawn_server_in(vec![], Some(bundle.path()));
+
+    let (_, reply) = request_with_token(server.addr, "GET /", &server.token);
+    assert!(reply.starts_with("HTTP/1.1 200 "), "{reply}");
+    assert!(
+        reply.contains("Content-Type: text/html; charset=utf-8\r\n"),
+        "{reply}"
+    );
+    assert!(reply.contains("Cache-Control: no-store\r\n"), "{reply}");
+    assert!(
+        reply.contains("Cross-Origin-Opener-Policy: same-origin\r\n"),
+        "{reply}"
+    );
+    assert!(
+        reply.contains("Cross-Origin-Embedder-Policy: require-corp\r\n"),
+        "{reply}"
+    );
+    assert_security_headers(&reply);
+    assert!(reply.ends_with(PAGE), "{reply}");
+    server.stop();
+}
+
+#[test]
+fn unknown_paths_are_404_and_acp_is_unchanged_with_a_web_dir() {
+    let bundle = web_bundle();
+    let server = spawn_server_in(vec![], Some(bundle.path()));
+
+    let (_, missing) = request_with_token(server.addr, "GET /nope", &server.token);
+    assert!(missing.starts_with("HTTP/1.1 404 "), "{missing}");
+    assert_security_headers(&missing);
+
+    let (_, deep) = request_with_token(server.addr, "GET /assets/missing.svg", &server.token);
+    assert!(deep.starts_with("HTTP/1.1 404 "), "{deep}");
+
+    let (_, post) = request_with_token(server.addr, "POST /acp", &server.token);
+    assert!(post.starts_with("HTTP/1.1 405 "), "{post}");
+    assert!(post.contains("WebSocket"), "{post}");
+
+    let (_, unauthorized) = http_request(
+        server.addr,
+        &format!("GET /acp HTTP/1.1\r\nHost: {}\r\n\r\n", server.addr),
+    );
+    assert!(unauthorized.starts_with("HTTP/1.1 401 "), "{unauthorized}");
+
+    let lines = server.lines();
+    assert!(
+        lines.iter().any(|l| l.contains("(404)")),
+        "asset 404s are logged: {lines:?}"
+    );
+    server.stop();
+}
+
+#[test]
+fn post_and_delete_on_asset_paths_get_405() {
+    let bundle = web_bundle();
+    let server = spawn_server_in(vec![], Some(bundle.path()));
+
+    let (_, post) = request_with_token(server.addr, "POST /", &server.token);
+    assert!(post.starts_with("HTTP/1.1 405 "), "{post}");
+    assert_security_headers(&post);
+
+    let (_, delete) = request_with_token(server.addr, "DELETE /boot.js", &server.token);
+    assert!(delete.starts_with("HTTP/1.1 405 "), "{delete}");
+    assert_security_headers(&delete);
+    server.stop();
+}
+
+#[test]
+fn traversal_attempts_are_refused() {
+    let bundle = web_bundle();
+    let secret = "the engine binary is not an asset";
+    std::fs::write(bundle.path().join("secret.txt"), secret).unwrap();
+    let server = spawn_server_in(vec![], Some(bundle.path()));
+
+    for target in [
+        "/../secret.txt",
+        "/%2e%2e/secret.txt",
+        "/%2e%2e%2fsecret.txt",
+        "/assets/../../secret.txt",
+        "/..%2fsecret.txt",
+    ] {
+        let (local, reply) =
+            request_with_token(server.addr, &format!("GET {target}"), &server.token);
+        assert!(reply.starts_with("HTTP/1.1 404 "), "{target}: {reply}");
+        assert!(
+            !reply.contains(secret),
+            "{target} must not leak the file: {reply}"
+        );
+        let lines = server.lines();
+        let peer = local.to_string();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("(traversal)") && l.contains(peer.as_str())),
+            "{target}: {lines:?}"
+        );
+    }
+    server.stop();
+}
+
+#[test]
+fn content_types_match_the_bundle() {
+    let bundle = web_bundle();
+    let server = spawn_server_in(vec![], Some(bundle.path()));
+
+    let (_, js) = request_with_token(server.addr, "GET /boot.js", &server.token);
+    assert!(js.starts_with("HTTP/1.1 200 "), "{js}");
+    assert!(
+        js.contains("Content-Type: application/javascript\r\n"),
+        "{js}"
+    );
+
+    let (_, glue) = request_with_token(server.addr, "GET /kage_desktop.js", &server.token);
+    assert!(
+        glue.contains("Content-Type: application/javascript\r\n"),
+        "{glue}"
+    );
+
+    let (_, wasm) = request_with_token(server.addr, "GET /kage_desktop_bg.wasm", &server.token);
+    assert!(
+        wasm.contains("Content-Type: application/wasm\r\n"),
+        "{wasm}"
+    );
+    assert!(
+        wasm.contains("Cross-Origin-Opener-Policy: same-origin\r\n"),
+        "{wasm}"
+    );
+    assert!(
+        wasm.contains("Cross-Origin-Embedder-Policy: require-corp\r\n"),
+        "{wasm}"
+    );
+    assert!(
+        wasm.contains("Cache-Control: public, max-age=300\r\n"),
+        "{wasm}"
+    );
+    assert_security_headers(&wasm);
+
+    let (_, svg) = request_with_token(server.addr, "GET /assets/icons/lucide.svg", &server.token);
+    assert!(svg.contains("Content-Type: image/svg+xml\r\n"), "{svg}");
+
+    let (_, css) = request_with_token(server.addr, "GET /styles.css", &server.token);
+    assert!(
+        css.contains("Content-Type: text/css; charset=utf-8\r\n"),
+        "{css}"
+    );
+
+    let (_, json) = request_with_token(server.addr, "GET /data.json", &server.token);
+    assert!(
+        json.contains("Content-Type: application/json\r\n"),
+        "{json}"
+    );
+
+    let (_, txt) = request_with_token(server.addr, "GET /notes.txt", &server.token);
+    assert!(
+        txt.contains("Content-Type: text/plain; charset=utf-8\r\n"),
+        "{txt}"
+    );
+    server.stop();
+}
+
+#[test]
+fn web_ui_startup_line_names_the_page_url_and_never_the_token() {
+    let bundle = web_bundle();
+    let server = spawn_server_in(vec![], Some(bundle.path()));
+
+    let lines = server.lines();
+    let expected = format!("web UI: http://{}/", server.addr);
+    assert!(
+        lines.contains(&expected),
+        "the startup line names the page URL: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains(server.token.as_str())),
+        "the token must never be logged: {lines:?}"
+    );
+
+    let (_, with_query) = request_with_token(
+        server.addr,
+        &format!("GET /acp?token={}", server.token.as_str()),
+        &server.token,
+    );
+    assert!(with_query.starts_with("HTTP/1.1 405 "), "{with_query}");
+
+    let (_, page_with_query) = http_request(
+        server.addr,
+        &format!(
+            "GET /?token={} HTTP/1.1\r\nHost: {}\r\n\r\n",
+            server.token.as_str(),
+            server.addr
+        ),
+    );
+    assert!(
+        page_with_query.starts_with("HTTP/1.1 200 "),
+        "{page_with_query}"
+    );
+
+    let lines = server.lines();
+    assert!(
+        !lines.iter().any(|l| l.contains(server.token.as_str())),
+        "a query-string token must never be logged: {lines:?}"
+    );
+    server.stop();
+}
+
+#[test]
+fn a_missing_web_dir_logs_unavailable_and_keeps_acp_working() {
+    let server = spawn_server(vec![text_turn("hi")]);
+
+    let (_, root) = request_with_token(server.addr, "GET /", &server.token);
+    assert!(root.starts_with("HTTP/1.1 404 "), "{root}");
+
+    let lines = server.lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("web UI unavailable") && l.contains("--web-dir")),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.starts_with("web UI: ")),
+        "{lines:?}"
+    );
+
+    let client = connect_client(&server);
+    initialize(&client);
+    let session = new_session(&client);
+    let answer = prompt(&client, &session);
+    assert_eq!(answer["stopReason"], "end_turn");
+    drop(client);
+    server.stop();
 }

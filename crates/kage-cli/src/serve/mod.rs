@@ -8,9 +8,11 @@
 //! shared [`Host`]; the `101` response names the connection with
 //! `Acp-Connection-Id`. Every other request gets a plain HTTP reply:
 //! `401` without a valid token, `405` for non-upgrade traffic on
-//! `/acp`, `404` everywhere else, `431` for an oversize request head,
-//! and `503` once [`MAX_CONNECTIONS`] connections are already being
-//! served.
+//! `/acp`, `431` for an oversize request head, and `503` once
+//! [`MAX_CONNECTIONS`] connections are already being served. The other
+//! routes serve the web client bundle: `GET /` with the page and
+//! `GET /<file>` with a file under the `--web-dir` directory
+//! ([`assets`]), `405` for other methods, `404` elsewhere.
 //!
 //! The accept loop runs on the main thread and hands every connection
 //! its own thread. SIGINT and SIGTERM cancel every run, give the
@@ -23,7 +25,7 @@
 
 use std::io::{self, Read as _};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -37,6 +39,10 @@ use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 
 use crate::rpc::host::Host;
+
+mod assets;
+
+use assets::WebDir;
 
 /// How many connections may be served at once. The next one is refused
 /// with `503`.
@@ -78,6 +84,16 @@ fn token_path() -> Result<PathBuf, String> {
     Ok(crate::data_root()?.join("remote-token"))
 }
 
+/// The web bundle directory when `--web-dir` is not given: a `web/`
+/// directory beside the executable, where a bundle copied next to the
+/// binary is picked up without flags.
+pub(crate) fn default_web_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        .map_or_else(|| PathBuf::from("web"), |dir| dir.join("web"))
+}
+
 /// Entry point for the `Serve` subcommand.
 pub(crate) fn run(
     model: Option<&str>,
@@ -85,6 +101,7 @@ pub(crate) fn run(
     bind_host: &str,
     port: u16,
     rotate_token: bool,
+    web_dir: Option<&Path>,
 ) -> ExitCode {
     let log: Log = Arc::new(|line| eprintln!("kage serve: {line}"));
     let host = match Host::start(model, system_role) {
@@ -101,6 +118,14 @@ pub(crate) fn run(
             return ExitCode::from(1);
         }
     };
+    let bundle_dir = web_dir.map_or_else(default_web_dir, Path::to_path_buf);
+    let web = WebDir::open(&bundle_dir);
+    if !web.available() {
+        log(&format!(
+            "web UI unavailable: no index.html under {}; pass --web-dir to serve it",
+            bundle_dir.display()
+        ));
+    }
     let listener = match TcpListener::bind((bind_host, port)) {
         Ok(listener) => listener,
         Err(e) => {
@@ -120,11 +145,14 @@ pub(crate) fn run(
         "connect: ws://{addr}/acp?token={}",
         token.as_str()
     ));
+    if web.available() {
+        log(&format!("web UI: http://{addr}/"));
+    }
     warn_non_loopback(bind_host, &log);
 
     let stop = Arc::new(AtomicBool::new(false));
     install_signals(&stop, &log);
-    accept_until(&listener, &host, &token, &stop, &log);
+    accept_until(&listener, &host, &token, &web, &stop, &log);
 
     log("shutting down; cancelling runs");
     host.shutdown();
@@ -183,6 +211,7 @@ fn accept_until(
     listener: &TcpListener,
     host: &Arc<Host>,
     token: &Arc<Token>,
+    web: &WebDir,
     stop: &AtomicBool,
     log: &Log,
 ) {
@@ -200,12 +229,20 @@ fn accept_until(
                 active.fetch_add(1, Ordering::SeqCst);
                 let thread_host = Arc::clone(host);
                 let thread_token = Arc::clone(token);
+                let thread_web = web.clone();
                 let thread_log = Arc::clone(log);
                 let thread_active = Arc::clone(&active);
                 let spawned = thread::Builder::new()
                     .name("kage-serve-conn".to_owned())
                     .spawn(move || {
-                        handle_connection(stream, peer, &thread_host, &thread_token, &thread_log);
+                        handle_connection(
+                            stream,
+                            peer,
+                            &thread_host,
+                            &thread_token,
+                            &thread_web,
+                            &thread_log,
+                        );
                         thread_active.fetch_sub(1, Ordering::SeqCst);
                     });
                 if spawned.is_err() {
@@ -230,6 +267,7 @@ fn handle_connection(
     peer: SocketAddr,
     host: &Arc<Host>,
     token: &Arc<Token>,
+    web: &WebDir,
     log: &Log,
 ) {
     match head::read_head(&mut stream) {
@@ -243,7 +281,7 @@ fn handle_connection(
             );
         }
         Err(_) => log(&format!("refuse {peer} (unreadable request head)")),
-        Ok(head) => route(head, stream, peer, host, token, log),
+        Ok(head) => route(head, stream, peer, host, token, web, log),
     }
 }
 
@@ -254,11 +292,20 @@ fn route(
     peer: SocketAddr,
     host: &Arc<Host>,
     token: &Arc<Token>,
+    web: &WebDir,
     log: &Log,
 ) {
     if head.path != "/acp" {
-        log(&format!("refuse {peer} (404)"));
-        reject(stream, 404, "Not Found", BODY_404);
+        if !head.method.eq_ignore_ascii_case("GET") {
+            log(&format!("refuse {peer} (405)"));
+            assets::reject_method(&mut stream);
+            return;
+        }
+        match web.serve(&head.path, &mut stream) {
+            assets::Outcome::Served => {}
+            assets::Outcome::NotFound => log(&format!("refuse {peer} (404)")),
+            assets::Outcome::Traversal => log(&format!("refuse {peer} (traversal)")),
+        }
         return;
     }
     let Some(auth) = head::authorize(&head, token) else {
@@ -308,7 +355,6 @@ fn reject(mut stream: TcpStream, status: u16, reason: &str, body: &str) {
 }
 
 const BODY_401: &str = "a valid token is required\n";
-const BODY_404: &str = "not found; the only endpoint is /acp\n";
 const BODY_405: &str =
     "the ACP endpoint /acp speaks the WebSocket protocol; send a GET upgrade request\n";
 const BODY_503: &str = "the server is at its connection limit; try again later\n";

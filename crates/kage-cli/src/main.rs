@@ -14,9 +14,10 @@
 //! - `models` manages the model catalog.
 //! - `rpc` serves the Agent Client Protocol over stdio, and `serve`
 //!   serves it over WebSocket behind a token, so editors and ACP
-//!   clients drive kage locally or over the network. `mcp` serves the
-//!   built-in tools over the Model Context Protocol and logs in to MCP
-//!   servers.
+//!   clients drive kage locally or over the network; `serve` also
+//!   serves the web client bundle at `/` from `--web-dir`. `mcp` serves
+//!   the built-in tools over the Model Context Protocol and logs in to
+//!   MCP servers.
 //! - `completions` and the hidden `gen-manpage` generate shell and man
 //!   page files.
 
@@ -221,8 +222,10 @@ pub(crate) enum Command {
     /// Serve the Agent Client Protocol over WebSocket so remote editors
     /// and ACP clients can drive kage over the network. One endpoint
     /// (`/acp`) behind a bearer token; every connection shares one
-    /// engine. The startup output on stderr carries the connect URL,
-    /// the only place the token is ever printed.
+    /// engine. With `--web-dir` the same listener serves the web
+    /// client bundle at `/`, so a browser needs only the page URL and
+    /// the token. The startup output on stderr carries the connect
+    /// URL, the only place the token is ever printed.
     Serve {
         /// Provider-qualified model id (`provider:model`). Defaults
         /// the same way as the top-level `-m`.
@@ -244,6 +247,12 @@ pub(crate) enum Command {
         /// the new one.
         #[arg(long = "rotate-token")]
         rotate_token: bool,
+        /// Directory with the web client bundle to serve at `/`
+        /// (built from `gui/`). Defaults to a `web/` directory beside
+        /// the executable. A missing or empty directory only disables
+        /// the web UI; `/acp` keeps working.
+        #[arg(long = "web-dir")]
+        web_dir: Option<PathBuf>,
     },
     /// Trust the current directory's `.kage/config.toml`. Until a
     /// project is trusted, its `mcp`, `permissions` and
@@ -378,8 +387,17 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
             host,
             port,
             rotate_token,
-        } => config_error()
-            .unwrap_or_else(|| serve::run(model.as_deref(), &system, &host, port, rotate_token)),
+            web_dir,
+        } => config_error().unwrap_or_else(|| {
+            serve::run(
+                model.as_deref(),
+                &system,
+                &host,
+                port,
+                rotate_token,
+                web_dir.as_deref(),
+            )
+        }),
         Command::Trust { revoke } => trust::run(revoke),
         Command::Models {
             action: ModelsAction::Refresh,

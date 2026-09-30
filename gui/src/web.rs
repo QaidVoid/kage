@@ -14,13 +14,10 @@
 //! query parameter stays as a developer override for the endpoint,
 //! which without it defaults to `/acp` on the page's own origin.
 
-use std::borrow::Cow;
-
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::{JsCast as _, JsValue};
 
 use gpui_kit::assets::Assets;
-use gpui_kit::component::theme::Theme;
 use gpui_kit::{App, AppContext, KeyBinding, TitlebarOptions, WindowOptions, px, size};
 
 use crate::app::{Shell, ShellArgs};
@@ -45,14 +42,6 @@ extern "C" {
     fn token(this: &Handoff) -> Option<String>;
 }
 
-/// The UI family, the one font the web text system names as its
-/// fallback, bundled in `assets/fonts`.
-const UI_FONT: &str = "Inter";
-
-/// The monospace family for code and identifiers, bundled in
-/// `assets/fonts`.
-const MONO_FONT: &str = "JetBrains Mono";
-
 /// The path of the ACP endpoint on the page's own origin.
 const ACP_PATH: &str = "/acp";
 
@@ -65,13 +54,9 @@ pub fn start() {
     gpui_kit::application()
         .with_assets(Assets::default())
         .run(|cx: &mut App| {
-            install_fonts(cx);
+            theme::install_fonts(cx);
             gpui_kit::init(cx);
             theme::apply_shadow(cx);
-            Theme::update(cx, |theme| {
-                theme.font_family = UI_FONT.into();
-                theme.mono_font_family = MONO_FONT.into();
-            });
             cx.bind_keys([
                 KeyBinding::new("ctrl-q", crate::app::Quit, None),
                 KeyBinding::new("cmd-q", crate::app::Quit, None),
@@ -122,18 +107,6 @@ pub fn start() {
                 });
             });
         });
-}
-
-/// Loads the bundled fonts before anything lays out text: the web
-/// text system starts with no fonts at all, and the first layout in
-/// a family it cannot find would panic.
-fn install_fonts(cx: &mut App) {
-    cx.text_system()
-        .add_fonts(vec![
-            Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Regular.ttf").as_slice()),
-            Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf").as_slice()),
-        ])
-        .expect("the bundled fonts load");
 }
 
 /// The endpoint to dial: the page's `?ws=` value, else `/acp` on the

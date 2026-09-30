@@ -8,8 +8,11 @@
 
 use std::time::Duration;
 
+use gpui_kit::assets::IconName;
+use gpui_kit::base::Selectable as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::theme::ActiveTheme;
-use gpui_kit::component::{h_resizable, resizable_panel, v_flex};
+use gpui_kit::component::{Sizable as _, h_flex, h_resizable, resizable_panel, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
@@ -17,6 +20,7 @@ use gpui_kit::{
 };
 
 use crate::store::{Command, Store};
+use crate::theme::{CONTENT_W, PANEL_HEAD_H, SIDE_W, SP_4, SP_6, SP_8};
 use crate::transport::{Event, Transport};
 use crate::views::chrome::{
     FindBar, FindEvent, NoticeWatch, PaletteView, Toasts, WelcomeView, toasts_for_changes,
@@ -28,6 +32,10 @@ use kage_client::{Change, Frame};
 
 /// The prompt the replay transcript was recorded with.
 const REPLAY_PROMPT: &str = "fix the null check";
+
+/// The workbench panel's open width, matching the web client's
+/// default workbench width.
+const WORKBENCH_W: f32 = 460.0;
 
 /// The directory new sessions open in. The browser has no filesystem,
 /// so the read is desktop-only and sessions start without a directory
@@ -342,6 +350,82 @@ impl Shell {
         div().w_full().child(self.composer.clone())
     }
 
+    /// The 48px panel head over the content: the restore-sidebar
+    /// button when the sidebar is hidden and the workbench toggle at
+    /// the far end, as in the web client's topbar.
+    fn topbar(&self, cx: &Context<Self>) -> impl IntoElement {
+        let sidebar_visible = self.sidebar_visible;
+        let workbench_visible = self.workbench_visible;
+        h_flex()
+            .h(px(PANEL_HEAD_H))
+            .flex_none()
+            .pl(px(14.))
+            .pr(px(10.))
+            .gap(px(SP_4))
+            .when(!sidebar_visible, |bar| {
+                bar.child(
+                    Button::new("show-sidebar")
+                        .icon(IconName::PanelLeft)
+                        .xsmall()
+                        .ghost()
+                        .tooltip("Show sidebar (Ctrl \\)")
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+                )
+            })
+            .child(div().flex_1())
+            .child(
+                Button::new("toggle-workbench")
+                    .icon(IconName::PanelRight)
+                    .xsmall()
+                    .ghost()
+                    .selected(workbench_visible)
+                    .tooltip("Workbench (Ctrl B)")
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_workbench(cx))),
+            )
+    }
+
+    /// The centered content column: the transcript scroller, or the
+    /// welcome state, constrained to the design's content width and
+    /// horizontally centered.
+    fn content_column(&self, cx: &Context<Self>) -> impl IntoElement {
+        let has_session = self.store.read(cx).active_session().is_some();
+        div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(CONTENT_W))
+                    .h_full()
+                    .min_h_0()
+                    .when(has_session, |column| column.child(self.transcript.clone()))
+                    .when(!has_session, |column| column.child(self.welcome.clone())),
+            )
+    }
+
+    /// The bottom band: dock, approval card and composer in a
+    /// centered content-width column inside the design's padding.
+    fn bottom_band(&self, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .w_full()
+            .flex_none()
+            .px(px(SP_8))
+            .pb(px(SP_6))
+            .flex()
+            .justify_center()
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(px(CONTENT_W))
+                    .child(self.dock.clone())
+                    .child(self.approval.clone())
+                    .child(self.composer_row(cx)),
+            )
+    }
+
     /// The status bar under the panels.
     fn status_bar(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
@@ -383,7 +467,7 @@ impl Render for Shell {
                 h_resizable("kage-shell")
                     .child(
                         resizable_panel()
-                            .size(px(240.))
+                            .size(px(SIDE_W))
                             .size_range(px(160.)..px(420.))
                             .flex_none()
                             .visible(sidebar_visible)
@@ -394,17 +478,15 @@ impl Render for Shell {
                             v_flex()
                                 .size_full()
                                 .min_h_0()
+                                .when(has_session, |column| column.child(self.topbar(cx)))
                                 .child(self.find.clone())
-                                .when(has_session, |column| column.child(self.transcript.clone()))
-                                .when(!has_session, |column| column.child(self.welcome.clone()))
-                                .child(self.dock.clone())
-                                .child(self.approval.clone())
-                                .child(self.composer_row(cx)),
+                                .child(self.content_column(cx))
+                                .child(self.bottom_band(cx)),
                         ),
                     )
                     .child(
                         resizable_panel()
-                            .size(px(300.))
+                            .size(px(WORKBENCH_W))
                             .size_range(px(200.)..px(520.))
                             .flex_none()
                             .visible(workbench_visible)

@@ -145,6 +145,7 @@ pub fn run() {
     gpui_kit::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
+            theme::install_fonts(cx);
             gpui_kit::init(cx);
             theme::apply_shadow(cx);
             let mut keys = vec![

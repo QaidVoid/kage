@@ -79,33 +79,45 @@ impl WebTransport {
         }
     }
 
+    /// [`Self::report`] for a transport that is not borrowed yet.
+    fn report_borrowed(transport: &Self, state: State) {
+        let inner = transport.inner.borrow();
+        Self::report(&inner, state);
+    }
+
     /// Dials once and wires the browser callbacks. A drop schedules
     /// another dial on the backoff ladder until
     /// [`Transport::close`]; only a rejected URL gives up at once.
     fn dial(&self) {
-        let mut inner = self.inner.borrow_mut();
-        if inner.closed {
+        let (events_ready, already_closed) = {
+            let inner = self.inner.borrow();
+            (inner.events.is_some(), inner.closed)
+        };
+        if already_closed || !events_ready {
             return;
         }
-        if inner.events.is_none() {
-            return;
-        }
-        Self::report(&inner, State::Connecting);
+        Self::report_borrowed(self, State::Connecting);
         let entry = format!("{TOKEN_SUBPROTOCOL_PREFIX}{token}", token = self.token);
         let socket = match WebSocket::new_with_str(&self.url, &entry) {
             Ok(socket) => socket,
             Err(_) => {
-                inner.closed = true;
-                Self::report(
-                    &inner,
-                    State::Refused("the endpoint URL is not a WebSocket URL".to_owned()),
-                );
-                Self::report(&inner, State::Closed);
+                let refused = {
+                    let mut inner = self.inner.borrow_mut();
+                    let refused = !inner.closed;
+                    inner.closed = true;
+                    refused
+                };
+                if refused {
+                    Self::report_borrowed(
+                        self,
+                        State::Refused("the endpoint URL is not a WebSocket URL".to_owned()),
+                    );
+                    Self::report_borrowed(self, State::Closed);
+                }
                 return;
             }
         };
         socket.set_binary_type(web_sys::BinaryType::Arraybuffer);
-        inner.socket = Some(socket.clone());
 
         let on_open = self.bind(|transport, _| {
             let mut inner = transport.inner.borrow_mut();
@@ -154,10 +166,17 @@ impl WebTransport {
             // The status of a failed handshake is invisible here; the
             // close callback schedules the retry.
         });
-        let _ = socket.set_onopen(Some(on_open.as_ref().unchecked_ref()));
-        let _ = socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
-        let _ = socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
-        let _ = socket.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+        socket.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+        socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+        socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+        socket.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+        let mut inner = self.inner.borrow_mut();
+        if inner.closed {
+            drop(inner);
+            let _ = socket.close();
+            return;
+        }
+        inner.socket = Some(socket);
         inner
             .keepalive
             .extend([on_open, on_message, on_close, on_error]);
@@ -184,9 +203,14 @@ impl WebTransport {
         fire.forget();
     }
 
-    /// Shuts the link down and reports [`State::Closed`].
+    /// Shuts the link down and reports [`State::Closed`]. Safe to call
+    /// from inside a callback: a contended borrow defers the shutdown
+    /// to the next tick instead of panicking.
     fn shutdown(&self) {
-        let mut inner = self.inner.borrow_mut();
+        let Ok(mut inner) = self.inner.try_borrow_mut() else {
+            self.schedule(Duration::ZERO);
+            return;
+        };
         if inner.closed {
             return;
         }
@@ -195,6 +219,8 @@ impl WebTransport {
         if let Some(socket) = inner.socket.take() {
             let _ = socket.close();
         }
+        drop(inner);
+        let inner = self.inner.borrow();
         Self::report(&inner, State::Closed);
     }
 }

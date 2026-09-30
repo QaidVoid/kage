@@ -161,24 +161,34 @@ wasm-bindgen --out-dir web --target web \
 mkdir -p web/assets/icons
 cp "$(ls -d ~/.local/share/cargo/registry/src/*/gpui-kit-assets-0.7.0/assets/icons)"/*.svg \
     web/assets/icons/
-python3 web/serve_web.py 8090          # static, MIME-correct, optional --coop
+cd ..
+cargo run --bin kage -- serve --web-dir gui/web
+#   kage serve: web UI: http://127.0.0.1:7433/
 ```
 
 The bundle lands in `gui/web/`: `kage_desktop.js` (the wasm-bindgen
-glue), `kage_desktop_bg.wasm`, `index.html` (a page shell: dark
-background, one `<script type="module">` calling `init()`), and
-`assets/icons/` (the 1830 Lucide SVGs the component library fetches
+glue), `kage_desktop_bg.wasm`, `index.html` (a page shell that loads
+`boot.js`, which draws the connection form and then imports the glue),
+and `assets/icons/` (the 1830 Lucide SVGs the component library fetches
 from its own origin on first use; without them the page still works,
 it just logs a 404 per missing icon and draws the label only).
-`web/serve_web.py` is the local static server: it sends
-`application/wasm` for `.wasm` (required for streaming compilation)
-and `--coop` adds the cross-origin isolation headers.
+`kage serve --web-dir` is the serving path for real deployments: it
+serves the bundle at `/` with the MIME types, security headers and
+cross-origin isolation the page needs, next to the token-gated
+`/acp` endpoint (see docs/editors/remote.md). `web/serve_web.py`
+remains only as a minimal static server for iterating on the page
+without a kage build; it is not the deployment path.
 
-The page address carries the only configuration a browser page can
-read: `?ws=` overrides the endpoint (default `/acp` on the page's own
-origin, scheme mapped to ws or wss) and `?token=` carries the bearer
-token; without it the page asks once through a `prompt` dialog. Both
-configure the page only. The WebSocket dial itself is always the bare
+The connection flow is form-based. `boot.js` shows a small form
+before the app boots: the server URL (default `/acp` on the page's
+own origin, scheme mapped to ws or wss) and the token. On submit it
+stores both on `window.__kageConnect`, removes the form, and imports
+the glue; the wasm entry reads them from there and dials. The token
+never rides any URL. The `?ws=` query parameter remains a developer
+override that prefills and overrides the endpoint; there is no
+`?token=` parameter.
+
+The WebSocket dial itself is always the bare
 URL plus the subprotocol, verified live by wrapping
 `window.WebSocket` before page scripts run:
 
@@ -228,10 +238,10 @@ no atomics. Threading needs all three at once: the isolation headers
 (so `SharedArrayBuffer` exists), a rebuild with
 `RUSTFLAGS="-C target-feature=+atomics,+bulk-memory"`, and workers
 that can import the module. That is a real speedup candidate for the
-wgpu and text work but it is not required to ship, so the decision
-belongs to the stories that serve and ship the build, with these
-numbers: shipping without the headers is the simpler default, and
-nothing in this build breaks without them.
+wgpu and text work but it is not required to ship. The serving path
+(`kage serve --web-dir`) sends the isolation headers on the page and
+the module, so a future atomics build needs no serving change and the
+numbers above carry over unchanged.
 
 ### WebGPU and canvas caveats
 

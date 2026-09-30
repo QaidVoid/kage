@@ -4,12 +4,16 @@
 //! sends commands back through it. No view parses frames or names
 //! wire types beyond the transcript items it renders.
 
+pub mod approval;
 pub mod composer;
+pub mod dock;
 pub mod sidebar;
 pub mod transcript;
 pub mod workbench;
 
+pub use approval::ApprovalCard;
 pub use composer::ComposerView;
+pub use dock::DockRow;
 pub use sidebar::SidebarView;
 pub use transcript::TranscriptView;
 pub use workbench::WorkbenchView;

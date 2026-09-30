@@ -244,6 +244,17 @@ impl Store {
         true
     }
 
+    /// Answers the open permission ask of `session`, by request id.
+    /// Reports whether the ask was found and the answer queued.
+    pub fn reply_permission(
+        &mut self,
+        session: &str,
+        request_id: u64,
+        decision: &kage_client::PermissionDecision,
+    ) -> bool {
+        self.client.reply_permission(session, request_id, decision)
+    }
+
     /// Stores the composer draft of `session`, when the state knows
     /// it.
     pub fn set_draft(&mut self, session: Option<&str>, text: &str) {

@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use gpui_kit::component::theme::ActiveTheme;
 use gpui_kit::component::{h_resizable, resizable_panel, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
     Styled as _, Window, div, px,
@@ -17,8 +18,13 @@ use gpui_kit::{
 
 use crate::store::{Command, Store};
 use crate::transport::{Event, Transport};
-use crate::views::{ComposerView, SidebarView, TranscriptView, WorkbenchView};
-use kage_client::Frame;
+use crate::views::chrome::{
+    FindBar, FindEvent, NoticeWatch, PaletteView, Toasts, WelcomeView, toasts_for_changes,
+};
+use crate::views::{
+    ApprovalCard, ComposerView, DockEvent, DockRow, SidebarView, TranscriptView, WorkbenchView,
+};
+use kage_client::{Change, Frame};
 
 /// The prompt the replay transcript was recorded with.
 const REPLAY_PROMPT: &str = "fix the null check";
@@ -40,7 +46,15 @@ fn working_dir() -> String {
 
 gpui_kit::actions!(
     kage_desktop,
-    [Quit, NewSession, ToggleSidebar, ToggleWorkbench, SendPrompt]
+    [
+        Quit,
+        NewSession,
+        ToggleSidebar,
+        ToggleWorkbench,
+        SendPrompt,
+        OpenFind,
+        OpenPalette
+    ]
 );
 
 /// What the shell is launched with.
@@ -62,6 +76,15 @@ pub struct Shell {
     sidebar: Entity<SidebarView>,
     transcript: Entity<TranscriptView>,
     workbench: Entity<WorkbenchView>,
+    dock: Entity<DockRow>,
+    approval: Entity<ApprovalCard>,
+    find: Entity<FindBar>,
+    palette: Entity<PaletteView>,
+    toasts: Entity<Toasts>,
+    welcome: Entity<WelcomeView>,
+    /// Counts the notice items each session held, so frames that add
+    /// notices raise their toast once.
+    notices: NoticeWatch,
     sidebar_visible: bool,
     workbench_visible: bool,
     streamed: usize,
@@ -75,8 +98,33 @@ impl Shell {
         let sidebar = cx.new(|_| SidebarView::new(store.clone()));
         let composer = cx.new(|cx| ComposerView::new(store.clone(), window, cx));
         let input = composer.read(cx).input().clone();
-        let transcript = cx.new(|cx| TranscriptView::new(store.clone(), input, cx));
+        let transcript = cx.new(|cx| TranscriptView::new(store.clone(), input.clone(), cx));
         let workbench = cx.new(|_| WorkbenchView::new(store.clone()));
+        let dock = cx.new(|cx| DockRow::new(store.clone(), window, cx));
+        let approval = cx.new(|cx| ApprovalCard::new(store.clone(), window, cx));
+        let find = cx.new(|cx| FindBar::new(store.clone(), transcript.clone(), window, cx));
+        let palette = cx.new(|cx| PaletteView::new(store.clone(), input.clone(), window, cx));
+        let toasts = cx.new(|_| Toasts::new(store.clone()));
+        let welcome = cx.new(|cx| WelcomeView::new(store.clone(), input.clone(), window, cx));
+
+        cx.subscribe_in(
+            &dock,
+            window,
+            |shell, _, event: &DockEvent, _, cx| match event {
+                DockEvent::ScrollToPlan => shell
+                    .transcript
+                    .update(cx, |transcript, cx| transcript.scroll_to_plan(cx)),
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &find,
+            window,
+            |shell, _, event: &FindEvent, window, cx| match event {
+                FindEvent::Closed => shell.on_find_closed(window, cx),
+            },
+        )
+        .detach();
 
         let (events, incoming) = async_channel::unbounded();
         args.transport.start(events);
@@ -115,6 +163,13 @@ impl Shell {
             sidebar,
             transcript,
             workbench,
+            dock,
+            approval,
+            find,
+            palette,
+            toasts,
+            welcome,
+            notices: NoticeWatch::default(),
             sidebar_visible: true,
             workbench_visible: true,
             streamed: 0,
@@ -126,10 +181,12 @@ impl Shell {
     fn on_transport(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::Frame(frame) => {
-                self.store.update(cx, |store, cx| {
-                    store.absorb(frame);
+                let changes = self.store.update(cx, |store, cx| {
+                    let changes = store.absorb(frame);
                     cx.notify();
+                    changes
                 });
+                self.raise_toasts(&changes, cx);
             }
             Event::State(state) => {
                 self.store.update(cx, |store, cx| {
@@ -155,6 +212,21 @@ impl Shell {
         });
     }
 
+    /// Raises toasts for the answered-elsewhere change and for any
+    /// notice items the frames added.
+    fn raise_toasts(&mut self, changes: &[Change], cx: &mut Context<Self>) {
+        let mut drafts = toasts_for_changes(changes);
+        drafts.extend(self.notices.scan(self.store.read(cx).state()));
+        if drafts.is_empty() {
+            return;
+        }
+        self.toasts.update(cx, |toasts, cx| {
+            for draft in drafts {
+                toasts.push(draft, cx);
+            }
+        });
+    }
+
     /// Drains the client's outgoing frames into the transport. Runs
     /// on every store change, so views that only talk to the store
     /// still reach the engine.
@@ -171,6 +243,31 @@ impl Shell {
             store.new_session();
             cx.notify();
         });
+    }
+
+    /// Opens find over the transcript; the palette steps aside.
+    pub fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette.update(cx, |palette, cx| palette.close(cx));
+        self.find.update(cx, |find, cx| find.open(window, cx));
+        cx.notify();
+    }
+
+    /// Opens the command palette; find steps aside.
+    pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find.update(cx, |find, cx| find.close(window, cx));
+        self.palette
+            .update(cx, |palette, cx| palette.open(window, cx));
+        cx.notify();
+    }
+
+    /// Hands the focus back to the composer after the find bar closed
+    /// itself, unless an approval ask holds the focus.
+    fn on_find_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.store.read(cx).state().open_asks().is_empty() {
+            let input = self.composer.read(cx).input().clone();
+            input.update(cx, |state, cx| state.focus(window, cx));
+        }
+        cx.notify();
     }
 
     /// Sends or queues the composer text on the active session.
@@ -267,7 +364,7 @@ impl Shell {
             .text_size(px(12.))
             .text_color(theme.muted_foreground)
             .child(left)
-            .child("ctrl-n new | ctrl-b workbench | ctrl-\\ sidebar | ctrl-q quit")
+            .child("ctrl-n new | ctrl-f find | ctrl-k palette | ctrl-b workbench | ctrl-\\ sidebar | ctrl-q quit")
     }
 }
 
@@ -276,8 +373,10 @@ impl Render for Shell {
         let theme = cx.theme().colors;
         let sidebar_visible = self.sidebar_visible;
         let workbench_visible = self.workbench_visible;
+        let has_session = self.store.read(cx).active_session().is_some();
         v_flex()
             .size_full()
+            .relative()
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(
@@ -295,7 +394,11 @@ impl Render for Shell {
                             v_flex()
                                 .size_full()
                                 .min_h_0()
-                                .child(self.transcript.clone())
+                                .child(self.find.clone())
+                                .when(has_session, |column| column.child(self.transcript.clone()))
+                                .when(!has_session, |column| column.child(self.welcome.clone()))
+                                .child(self.dock.clone())
+                                .child(self.approval.clone())
                                 .child(self.composer_row(cx)),
                         ),
                     )
@@ -309,5 +412,7 @@ impl Render for Shell {
                     ),
             )
             .child(self.status_bar(cx))
+            .child(self.palette.clone())
+            .child(self.toasts.clone())
     }
 }

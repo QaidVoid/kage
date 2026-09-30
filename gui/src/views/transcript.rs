@@ -20,14 +20,14 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::input::TextareaState;
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::theme::ActiveTheme;
+use gpui_kit::component::theme::{ActiveTheme, ThemeColor};
 use gpui_kit::component::{
     Icon, Sizable as _, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, Div, ElementId, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, ScrollStrategy, SharedString, Size, Stateful,
+    AnyElement, App, Context, Div, ElementId, Entity, FontWeight, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, ScrollStrategy, SharedString, Size, Stateful,
     StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div, px, size,
 };
 
@@ -435,9 +435,10 @@ fn turn_outcome(stop: Option<kage_client::wire::StopReason>) -> Option<Outcome> 
     }
 }
 
-/// Where one row came from, for element identity and expansion state.
+/// Where one row came from, for element identity, expansion state and
+/// the find bar's per-row marks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum RowKey {
+pub enum RowKey {
     /// The transcript item at this index.
     Item(usize),
     /// The collapse group whose first member sits at this index.
@@ -586,6 +587,16 @@ struct UiState {
     thinking: HashMap<usize, (Instant, Option<Duration>)>,
 }
 
+/// The find state the transcript tints rows with: the matching row
+/// keys and which of them the counter points at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindMarks {
+    /// The keys of the rows the query matched, in transcript order.
+    pub keys: Vec<RowKey>,
+    /// The index into `keys` the find bar's counter names.
+    pub current: usize,
+}
+
 /// The rows and heights a transcript renders, in order.
 #[derive(Debug, Default)]
 struct RowModel {
@@ -606,6 +617,66 @@ impl RowModel {
 /// Whether a running shell call shows its streamed tail unprompted.
 fn live_shell_tail(call: &ToolCallItem) -> bool {
     call.title == "shell" && call.status == ToolCallStatus::InProgress && !call.text().is_empty()
+}
+
+/// The text one tool call contributes to find: the verb, the target,
+/// the tool title and the delivered output.
+fn tool_search_text(call: &ToolCallItem) -> String {
+    let (verb, target) = tool_verb(call);
+    format!("{verb} {target} {} {}", call.title, call.text())
+}
+
+/// The text one row contributes to find: what it renders, with tool
+/// titles, targets and notice text included.
+fn row_search_text(session: &Session, row: &Row) -> String {
+    let item_text = |ix: usize| match session.items.get(ix) {
+        Some(TranscriptItem::Assistant { text } | TranscriptItem::Thinking { text }) => {
+            text.clone()
+        }
+        Some(TranscriptItem::Notice { text, .. }) => text.clone(),
+        Some(TranscriptItem::User { content }) => content.as_text().unwrap_or_default().to_owned(),
+        _ => String::new(),
+    };
+    match row {
+        Row::User { text, .. } => text.clone(),
+        Row::Assistant { ix, .. } | Row::Thinking { ix, .. } | Row::Notice { ix } => item_text(*ix),
+        Row::Tool { ix, .. } => match session.items.get(*ix) {
+            Some(TranscriptItem::ToolCall(call)) => tool_search_text(call),
+            _ => String::new(),
+        },
+        Row::Group { label, members, .. } => {
+            let mut text = label.clone();
+            for ix in members {
+                if let Some(TranscriptItem::ToolCall(call)) = session.items.get(*ix) {
+                    text.push(' ');
+                    text.push_str(&tool_search_text(call));
+                }
+            }
+            text
+        }
+        Row::TurnEnd { .. } => "turn ended".to_owned(),
+        Row::Compaction { .. } => "context compacted".to_owned(),
+        Row::Plan { ix } => match session.items.get(*ix) {
+            Some(TranscriptItem::Plan { entries }) => entries
+                .iter()
+                .filter_map(|entry| entry.get("content").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+                .join(" "),
+            _ => String::new(),
+        },
+        Row::Decision { ix } => match session.items.get(*ix) {
+            Some(TranscriptItem::Decision {
+                subject,
+                label,
+                feedback,
+                ..
+            }) => format!(
+                "{label} {subject} {}",
+                feedback.as_deref().unwrap_or_default()
+            ),
+            _ => String::new(),
+        },
+    }
 }
 
 /// The line count a tool detail renders when shown.
@@ -839,6 +910,8 @@ pub struct TranscriptView {
     follow: bool,
     /// Per-row render counts since this session opened.
     render_counts: HashMap<RowKey, u32>,
+    /// The find marks the find bar last set, tinting matching rows.
+    find: Option<FindMarks>,
 }
 
 impl TranscriptView {
@@ -859,6 +932,7 @@ impl TranscriptView {
             session_key: None,
             follow: true,
             render_counts: HashMap::new(),
+            find: None,
         }
     }
 
@@ -876,6 +950,63 @@ impl TranscriptView {
         if !self.ui.expanded.remove(&key) {
             self.ui.expanded.insert(key);
         }
+    }
+
+    /// The searchable text of every model row, in row order: what the
+    /// rows render, with tool titles, targets and notice text
+    /// included.
+    #[must_use]
+    pub fn searchable_rows(&self, cx: &App) -> Vec<(RowKey, String)> {
+        let Some(session) = self.store.read(cx).active_session() else {
+            return Vec::new();
+        };
+        row_model(session, &self.ui)
+            .rows
+            .iter()
+            .map(|row| (row.key(), row_search_text(session, row)))
+            .collect()
+    }
+
+    /// Tints the rows the find bar matched; `None` clears the tint.
+    pub fn set_find(&mut self, find: Option<FindMarks>, cx: &mut Context<Self>) {
+        self.find = find;
+        cx.notify();
+    }
+
+    /// The tint a row renders with under the find bar: the current
+    /// match strongest, the other matches softer.
+    fn row_tint(&self, key: RowKey, colors: ThemeColor) -> Option<Hsla> {
+        let find = self.find.as_ref()?;
+        if find.keys.get(find.current) == Some(&key) {
+            return Some(colors.list_active);
+        }
+        find.keys.contains(&key).then_some(colors.list_hover)
+    }
+
+    /// Brings the row `key` into view and stops following the bottom.
+    pub fn scroll_to_row(&mut self, key: RowKey, cx: &mut Context<Self>) {
+        let Some(ix) = self.model.rows.iter().position(|row| row.key() == key) else {
+            return;
+        };
+        self.follow = false;
+        self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    /// Brings the plan card into view: the dock's review pill asks for
+    /// this through the shell.
+    pub fn scroll_to_plan(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.store.read(cx).active_session() else {
+            return;
+        };
+        let Some(ix) = session
+            .items
+            .iter()
+            .rposition(|item| matches!(item, TranscriptItem::Plan { .. }))
+        else {
+            return;
+        };
+        self.scroll_to_row(RowKey::Item(ix), cx);
     }
 
     /// Records the thinking spans the view observes, so an ended
@@ -1588,6 +1719,7 @@ impl Render for TranscriptView {
             self.session_key = active;
             self.ui = UiState::default();
             self.render_counts.clear();
+            self.find = None;
             self.follow = true;
         }
         let observed = self.store.read(cx).active_session().map(|session| {
@@ -1630,6 +1762,7 @@ impl Render for TranscriptView {
         let banner = self.banner(cx);
         let scroll = self.scroll.clone();
         let follow = self.follow;
+        let colors = cx.theme().colors;
 
         let mut panel = v_flex().id("transcript").size_full().min_h_0();
         if let Some(banner) = banner {
@@ -1659,7 +1792,17 @@ impl Render for TranscriptView {
                                 .map(|ix| {
                                     let row = &model.rows[ix];
                                     *this.render_counts.entry(row.key()).or_insert(0) += 1;
-                                    this.render_row(row, cx)
+                                    let element = this.render_row(row, cx);
+                                    match this.row_tint(row.key(), colors) {
+                                        Some(tint) => div()
+                                            .id(ElementId::named_usize("find-hit", ix))
+                                            .test_support()
+                                            .w_full()
+                                            .bg(tint)
+                                            .child(element)
+                                            .into_any_element(),
+                                        None => element,
+                                    }
                                 })
                                 .collect::<Vec<_>>()
                         },
@@ -2575,5 +2718,62 @@ mod tests {
                 "the decision row names the chosen label, the subject and the feedback"
             );
         });
+    }
+
+    #[gpui_kit::test]
+    fn scroll_to_plan_jumps_to_the_plan_card_and_stops_the_follow(cx: &mut TestAppContext) {
+        let store = cx.new(|_| booted_store());
+        let (view, visual) = window_on(cx, store.clone());
+        visual.update(|_, cx| {
+            store.update(cx, |store, _| {
+                for i in 0..400 {
+                    store.absorb(user_chunk("s1", &format!("message {i}")));
+                }
+                store.absorb(plan_frame("s1"));
+                for i in 400..800 {
+                    store.absorb(user_chunk("s1", &format!("message {i}")));
+                }
+            });
+        });
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            visual.update(|_, cx| view.read(cx).follow),
+            "a fresh list follows the bottom"
+        );
+        assert!(
+            !visual.update(|_, cx| view.read(cx).render_counts.contains_key(&RowKey::Item(400))),
+            "the plan card starts far outside the viewport"
+        );
+
+        visual.update(|_, cx| view.update(cx, |view, cx| view.scroll_to_plan(cx)));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            !visual.update(|_, cx| view.read(cx).follow),
+            "jumping to the plan stops the bottom follow"
+        );
+        assert!(
+            visual.update(|_, cx| view.read(cx).render_counts.contains_key(&RowKey::Item(400))),
+            "the plan card is in view after the jump"
+        );
+    }
+
+    /// A plan update frame for `session`.
+    fn plan_frame(session: &str) -> Frame {
+        Frame::Notification {
+            method: "session/update".to_owned(),
+            params: serde_json::json!({
+                "sessionId": session,
+                "update": {
+                    "sessionUpdate": "plan",
+                    "entries": [
+                        {"content": "read the parser", "priority": "high",
+                            "status": "completed"},
+                        {"content": "write the tests", "priority": "medium",
+                            "status": "in_progress"},
+                        {"content": "ship it", "priority": "low", "status": "pending"},
+                    ],
+                },
+            }),
+        }
     }
 }

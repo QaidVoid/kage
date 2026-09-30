@@ -5,6 +5,7 @@
 //! wire types beyond the transcript items it renders.
 
 pub mod approval;
+pub mod chrome;
 pub mod composer;
 pub mod dock;
 pub mod sidebar;
@@ -12,8 +13,9 @@ pub mod transcript;
 pub mod workbench;
 
 pub use approval::ApprovalCard;
+pub use chrome::{FindBar, PaletteView, Toasts, WelcomeView};
 pub use composer::ComposerView;
-pub use dock::DockRow;
+pub use dock::{DockEvent, DockRow};
 pub use sidebar::SidebarView;
 pub use transcript::TranscriptView;
 pub use workbench::WorkbenchView;

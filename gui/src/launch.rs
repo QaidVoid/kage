@@ -157,7 +157,31 @@ pub fn run() {
                 KeyBinding::new("ctrl-\\", crate::app::ToggleSidebar, None),
                 KeyBinding::new("cmd-\\", crate::app::ToggleSidebar, None),
                 KeyBinding::new("ctrl-enter", crate::app::SendPrompt, None),
+                KeyBinding::new("ctrl-f", crate::app::OpenFind, None),
+                KeyBinding::new("cmd-f", crate::app::OpenFind, None),
+                KeyBinding::new("ctrl-k", crate::app::OpenPalette, None),
+                KeyBinding::new("cmd-k", crate::app::OpenPalette, None),
             ];
+            // The find bar answers in its own key context, so Enter,
+            // Shift+Enter and Esc close or step only while its query
+            // holds the focus.
+            keys.extend([
+                KeyBinding::new("enter", crate::views::chrome::FindNext, Some("Find")),
+                KeyBinding::new("shift-enter", crate::views::chrome::FindPrev, Some("Find")),
+                KeyBinding::new("escape", crate::views::chrome::FindClose, Some("Find")),
+            ]);
+            // The palette owns its arrows, Enter and Esc the same way;
+            // the single-line query never claims them for itself.
+            keys.extend([
+                KeyBinding::new("up", crate::views::chrome::PaletteUp, Some("Palette")),
+                KeyBinding::new("down", crate::views::chrome::PaletteDown, Some("Palette")),
+                KeyBinding::new("enter", crate::views::chrome::PaletteRun, Some("Palette")),
+                KeyBinding::new(
+                    "escape",
+                    crate::views::chrome::PaletteClose,
+                    Some("Palette"),
+                ),
+            ]);
             // The composer claims Shift+Tab inside the input's own key
             // context, so it wins over the toolkit's outdent binding
             // while the input is focused.
@@ -204,6 +228,22 @@ pub fn run() {
                 let _ = handle.update(cx, |root, window, cx| {
                     if let Ok(shell) = root.downcast::<Shell>() {
                         shell.update(cx, |shell, cx| shell.send_composer(window, cx));
+                    }
+                });
+            });
+            let shell_find = handle;
+            cx.on_action(move |_: &crate::app::OpenFind, cx| {
+                let _ = shell_find.update(cx, |root, window, cx| {
+                    if let Ok(shell) = root.downcast::<Shell>() {
+                        shell.update(cx, |shell, cx| shell.open_find(window, cx));
+                    }
+                });
+            });
+            let shell_palette = handle;
+            cx.on_action(move |_: &crate::app::OpenPalette, cx| {
+                let _ = shell_palette.update(cx, |root, window, cx| {
+                    if let Ok(shell) = root.downcast::<Shell>() {
+                        shell.update(cx, |shell, cx| shell.open_palette(window, cx));
                     }
                 });
             });

@@ -25,6 +25,21 @@ use kage_client::Frame;
 /// The prompt the replay transcript was recorded with.
 const REPLAY_PROMPT: &str = "fix the null check";
 
+/// The directory new sessions open in. The browser has no filesystem,
+/// so the read is desktop-only and sessions start without a directory
+/// there.
+#[cfg(not(target_arch = "wasm32"))]
+fn working_dir() -> String {
+    std::env::current_dir()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn working_dir() -> String {
+    String::new()
+}
+
 gpui_kit::actions!(
     kage_desktop,
     [Quit, NewSession, ToggleSidebar, ToggleWorkbench, SendPrompt]
@@ -58,9 +73,7 @@ pub struct Shell {
 impl Shell {
     /// Builds the shell, starts the transport, and pumps its events.
     pub fn new(mut args: ShellArgs, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let cwd = std::env::current_dir()
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let cwd = working_dir();
         let store = cx.new(|_| Store::new(cwd, args.replay));
         let sidebar = cx.new(|_| SidebarView::new(store.clone()));
         let transcript = cx.new(|cx| TranscriptView::new(store.clone(), cx));

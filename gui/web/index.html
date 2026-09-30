@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kage client</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #0f0e13; overflow: hidden; }
+  canvas { outline: none; }
+</style>
+</head>
+<body>
+<script type="module">
+  import init from "./kage_desktop.js";
+  init().catch((error) => {
+    document.body.replaceChildren(Object.assign(document.createElement("pre"), {
+      textContent: "kage client failed to load: " + error,
+      style: "color: #f2727f; font: 14px monospace; padding: 2em; white-space: pre-wrap;",
+    }));
+  });
+</script>
+</body>
+</html>

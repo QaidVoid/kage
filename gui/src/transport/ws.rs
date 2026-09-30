@@ -119,7 +119,7 @@ impl WsTransport {
                         let _ = events.send_blocking(Event::State(State::Closed));
                         return;
                     }
-                    let delay = backoff.next();
+                    let delay = backoff.retry_delay();
                     attempts += 1;
                     let _ = events.send_blocking(Event::State(State::Reconnecting {
                         attempt: attempts,
@@ -270,7 +270,7 @@ fn dial(
 fn classify(error: &WsError, backoff: &mut Backoff) -> Failure {
     match error {
         WsError::Http(response) => match response.status().as_u16() {
-            503 => Failure::Retry(backoff.next()),
+            503 => Failure::Retry(backoff.retry_delay()),
             status => Failure::Refused(format!(
                 "the endpoint answered HTTP {status}; check the URL and the token"
             )),
@@ -278,20 +278,20 @@ fn classify(error: &WsError, backoff: &mut Backoff) -> Failure {
         WsError::Url(UrlError::TlsFeatureNotEnabled) => {
             Failure::Refused("wss:// needs TLS, which this build leaves out; use ws://".to_owned())
         }
-        WsError::Url(UrlError::UnableToConnect(_)) => Failure::Retry(backoff.next()),
+        WsError::Url(UrlError::UnableToConnect(_)) => Failure::Retry(backoff.retry_delay()),
         WsError::Url(error) => Failure::Refused(format!("bad endpoint: {error}")),
         WsError::Utf8(why) => Failure::Refused(format!("the handshake was rejected: {why}")),
         WsError::HttpFormat(error) => {
             Failure::Refused(format!("the handshake was rejected: {error}"))
         }
         WsError::Protocol(error) => Failure::Refused(format!("handshake failed: {error}")),
-        WsError::Io(_) => Failure::Retry(backoff.next()),
-        WsError::Tls(_) => Failure::Retry(backoff.next()),
+        WsError::Io(_) => Failure::Retry(backoff.retry_delay()),
+        WsError::Tls(_) => Failure::Retry(backoff.retry_delay()),
         WsError::Capacity(_)
         | WsError::WriteBufferFull(_)
         | WsError::AttackAttempt
         | WsError::ConnectionClosed
-        | WsError::AlreadyClosed => Failure::Retry(backoff.next()),
+        | WsError::AlreadyClosed => Failure::Retry(backoff.retry_delay()),
     }
 }
 

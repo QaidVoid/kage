@@ -6,14 +6,19 @@
 //! [`async_channel`], and accepts outgoing frames from anywhere. The
 //! shell never sees threads, sockets or subprocesses, only events.
 //!
-//! Three implementations live here: [`stdio`](self::stdio) spawns
+//! Four implementations live here: [`stdio`](self::stdio) spawns
 //! `kage rpc` as a child, [`ws`](self::ws) dials `kage serve` over a
-//! WebSocket and reconnects with backoff, and [`replay`](self::replay)
-//! plays a recorded golden transcript so the shell is fully usable
-//! with no engine on the machine.
+//! WebSocket and reconnects with backoff, [`web`](self::web) does the
+//! same through a browser `WebSocket` on wasm targets, and
+//! [`replay`](self::replay) plays a recorded golden transcript so the
+//! shell is fully usable with no engine on the machine.
 
 pub mod replay;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod stdio;
+#[cfg(target_arch = "wasm32")]
+pub mod web;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod ws;
 
 use std::time::Duration;
@@ -121,8 +126,8 @@ impl Backoff {
         Self { attempt: 0 }
     }
 
-    /// The next delay, one rung further up.
-    pub fn next(&mut self) -> Duration {
+    /// The delay before the next retry, one rung further up.
+    pub fn retry_delay(&mut self) -> Duration {
         let shift = self.attempt.min(5);
         self.attempt += 1;
         Self::BASE.saturating_mul(1 << shift).min(Self::CAP)
@@ -149,7 +154,7 @@ mod tests {
     #[test]
     fn backoff_doubles_from_one_second_to_the_cap() {
         let mut backoff = Backoff::new();
-        let delays: Vec<u64> = (0..8).map(|_| backoff.next().as_secs()).collect();
+        let delays: Vec<u64> = (0..8).map(|_| backoff.retry_delay().as_secs()).collect();
         assert_eq!(delays, vec![1, 2, 4, 8, 16, 30, 30, 30]);
     }
 
@@ -157,10 +162,10 @@ mod tests {
     fn backoff_resets_after_a_link_returns() {
         let mut backoff = Backoff::new();
         for _ in 0..4 {
-            backoff.next();
+            backoff.retry_delay();
         }
         backoff.reset();
-        assert_eq!(backoff.next(), Duration::from_secs(1));
+        assert_eq!(backoff.retry_delay(), Duration::from_secs(1));
     }
 
     #[test]

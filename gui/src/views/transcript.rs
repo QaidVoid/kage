@@ -244,6 +244,7 @@ impl TranscriptView {
                     kage_client::wire::NoticeTone::Info => theme.info,
                     kage_client::wire::NoticeTone::Warn => theme.warning,
                     kage_client::wire::NoticeTone::Error => theme.danger,
+                    kage_client::wire::NoticeTone::Success => theme.success,
                 };
                 div()
                     .w_full()

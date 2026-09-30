@@ -1,0 +1,250 @@
+//! The browser transport: a web-sys `WebSocket` carrying ACP frames.
+//!
+//! The token rides the `kage.<token>` subprotocol entry, never a query
+//! string, and the connect states of [`State`] drive the same status
+//! bar as the desktop transports. Two facts of the browser platform
+//! shape this module, both recorded in `gui/SPIKE.md`:
+//!
+//! - A failed handshake surfaces only as an `error` plus a `close`
+//!   with code 1006; the HTTP status is invisible to JavaScript. A
+//!   wrong token and an unreachable endpoint look identical, so both
+//!   are retried on the backoff ladder and end in
+//!   [`State::Reconnecting`] rather than [`State::Refused`].
+//! - Response headers of the 101 are unreadable, so the
+//!   `Acp-Connection-Id` cannot be learned here and
+//!   [`Transport::connection_id`] always reports none.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::Duration;
+
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::{JsCast, JsValue};
+use web_sys::{MessageEvent, WebSocket};
+
+use kage_client::Frame;
+
+use super::{Backoff, Event, EventSender, State, Transport};
+
+/// The prefix of the subprotocol entry kage's own client sends.
+const TOKEN_SUBPROTOCOL_PREFIX: &str = "kage.";
+
+/// What the dial loop shares across links.
+struct Inner {
+    events: Option<EventSender>,
+    /// The live link, absent between links.
+    socket: Option<WebSocket>,
+    /// Set by [`Transport::close`]; ends every retry.
+    closed: bool,
+    /// The backoff ladder, shared across retries of one transport.
+    backoff: Backoff,
+    /// Which retry this is, counting from one per lost link.
+    attempt: u32,
+    /// The browser callbacks of the live link, dropped with it.
+    keepalive: Vec<Closure<dyn FnMut(JsValue)>>,
+}
+
+/// The browser transport to one `kage serve` endpoint.
+#[derive(Clone)]
+pub struct WebTransport {
+    url: String,
+    token: String,
+    inner: Rc<RefCell<Inner>>,
+}
+
+impl WebTransport {
+    /// A transport for the `ws://` or `wss://` endpoint at `url`,
+    /// authenticating with `token` through the subprotocol.
+    #[must_use]
+    pub fn new(url: impl Into<String>, token: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            token: token.into(),
+            inner: Rc::new(RefCell::new(Inner {
+                events: None,
+                socket: None,
+                closed: false,
+                backoff: Backoff::new(),
+                attempt: 0,
+                keepalive: Vec::new(),
+            })),
+        }
+    }
+
+    /// Reports one state move into the event stream, best effort: the
+    /// receiver is gone once the shell closed.
+    fn report(inner: &Inner, state: State) {
+        if let Some(events) = &inner.events {
+            let _ = events.try_send(Event::State(state));
+        }
+    }
+
+    /// Dials once and wires the browser callbacks. A drop schedules
+    /// another dial on the backoff ladder until
+    /// [`Transport::close`]; only a rejected URL gives up at once.
+    fn dial(&self) {
+        let mut inner = self.inner.borrow_mut();
+        if inner.closed {
+            return;
+        }
+        if inner.events.is_none() {
+            return;
+        }
+        Self::report(&inner, State::Connecting);
+        let entry = format!("{TOKEN_SUBPROTOCOL_PREFIX}{token}", token = self.token);
+        let socket = match WebSocket::new_with_str(&self.url, &entry) {
+            Ok(socket) => socket,
+            Err(_) => {
+                inner.closed = true;
+                Self::report(
+                    &inner,
+                    State::Refused("the endpoint URL is not a WebSocket URL".to_owned()),
+                );
+                Self::report(&inner, State::Closed);
+                return;
+            }
+        };
+        socket.set_binary_type(web_sys::BinaryType::Arraybuffer);
+        inner.socket = Some(socket.clone());
+
+        let on_open = self.bind(|transport, _| {
+            let mut inner = transport.inner.borrow_mut();
+            inner.backoff.reset();
+            inner.attempt = 0;
+            Self::report(&inner, State::Connected);
+        });
+        let on_message = self.bind(|transport, event| {
+            let Ok(message) = event.dyn_into::<MessageEvent>() else {
+                return;
+            };
+            let Some(text) = message.data().as_string() else {
+                return;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                return;
+            };
+            if let Some(frame) = Frame::parse(&value) {
+                let inner = transport.inner.borrow();
+                if let Some(events) = &inner.events {
+                    let _ = events.try_send(Event::Frame(frame));
+                }
+            }
+        });
+        let on_close = self.bind(|transport, _| {
+            let delay = {
+                let mut inner = transport.inner.borrow_mut();
+                inner.socket = None;
+                if inner.closed {
+                    return;
+                }
+                let delay = inner.backoff.retry_delay();
+                inner.attempt += 1;
+                Self::report(
+                    &inner,
+                    State::Reconnecting {
+                        attempt: inner.attempt,
+                        delay,
+                    },
+                );
+                delay
+            };
+            transport.schedule(delay);
+        });
+        let on_error = self.bind(|_, _| {
+            // The status of a failed handshake is invisible here; the
+            // close callback schedules the retry.
+        });
+        let _ = socket.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+        let _ = socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+        let _ = socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+        let _ = socket.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+        inner
+            .keepalive
+            .extend([on_open, on_message, on_close, on_error]);
+    }
+
+    /// Builds one browser callback bound to this transport; the
+    /// caller registers it with the socket and keeps it in
+    /// `Inner::keepalive` so it outlives the dial.
+    fn bind(&self, run: impl Fn(&WebTransport, JsValue) + 'static) -> Closure<dyn FnMut(JsValue)> {
+        let transport = self.clone();
+        Closure::new(move |event: JsValue| run(&transport, event))
+    }
+
+    /// Schedules one dial after `delay`.
+    fn schedule(&self, delay: Duration) {
+        let transport = self.clone();
+        let fire = Closure::once(move || transport.dial());
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                fire.as_ref().unchecked_ref(),
+                delay.as_millis().min(i32::MAX as u128) as i32,
+            );
+        }
+        fire.forget();
+    }
+
+    /// Shuts the link down and reports [`State::Closed`].
+    fn shutdown(&self) {
+        let mut inner = self.inner.borrow_mut();
+        if inner.closed {
+            return;
+        }
+        inner.closed = true;
+        inner.keepalive.clear();
+        if let Some(socket) = inner.socket.take() {
+            let _ = socket.close();
+        }
+        Self::report(&inner, State::Closed);
+    }
+}
+
+impl Transport for WebTransport {
+    fn start(&mut self, events: EventSender) {
+        self.inner.borrow_mut().events = Some(events);
+        self.dial();
+    }
+
+    fn send(&self, frame: Frame) {
+        let inner = self.inner.borrow();
+        let Some(socket) = &inner.socket else {
+            return;
+        };
+        let line = serde_json::to_string(&frame.to_value()).expect("frame serializes");
+        let _ = socket.send_with_str(&line);
+    }
+
+    fn close(&self) {
+        self.shutdown();
+    }
+}
+
+impl Drop for WebTransport {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// Resolves after `millis`, driven by a browser timer. The replay
+/// transport paces its recording with this on wasm, where blocking
+/// sleeps do not exist.
+pub(crate) async fn sleep(millis: u32) {
+    let (done, wait) = async_channel::bounded::<()>(1);
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let fire = Closure::once(move || {
+        let _ = done.try_send(());
+    });
+    if window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(
+            fire.as_ref().unchecked_ref(),
+            millis as i32,
+        )
+        .is_err()
+    {
+        return;
+    }
+    fire.forget();
+    let _ = wait.recv().await;
+}

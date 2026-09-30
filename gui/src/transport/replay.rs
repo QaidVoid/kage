@@ -7,10 +7,17 @@
 //! plays out on its own, prompts and answers included, because the
 //! fixture's answer ids line up with the handshake and prompt the
 //! shell sends.
+//!
+//! Native runs pace the playback on a thread; the browser build has
+//! no threads, so it paces the same frames from a timer task
+//! instead.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 use kage_client::Frame;
@@ -20,8 +27,12 @@ use super::{Event, EventSender, State, Transport};
 /// The golden transcript the replay transport plays, in wire order.
 const TRANSCRIPT: &str = include_str!("../../../crates/kage-client/tests/fixtures/fix-tools.jsonl");
 
+/// The pause between two played frames, in milliseconds.
+const BEAT_MILLIS: u32 = 100;
+
 /// The pause between two played frames.
-const BEAT: Duration = Duration::from_millis(100);
+#[cfg(not(target_arch = "wasm32"))]
+const BEAT: Duration = Duration::from_millis(BEAT_MILLIS as u64);
 
 /// The transcript as frames, in file order. Every line must parse.
 ///
@@ -59,25 +70,21 @@ impl ReplayTransport {
 
 impl Transport for ReplayTransport {
     fn start(&mut self, events: EventSender) {
-        let transport = self.clone();
-        thread::Builder::new()
-            .name("kage-replay".to_owned())
-            .spawn(move || {
-                let _ = events.send_blocking(Event::State(State::Connecting));
-                let _ = events.send_blocking(Event::State(State::Connected));
-                for frame in transcript() {
-                    if transport.stop.load(Ordering::SeqCst) {
-                        return;
-                    }
-                    thread::sleep(BEAT);
-                    if events.send_blocking(Event::Frame(frame)).is_err() {
-                        return;
-                    }
-                }
-                // The transcript ends but the link stays up: the shell
-                // remains usable against the recording.
-            })
-            .expect("replay thread spawns");
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let transport = self.clone();
+            thread::Builder::new()
+                .name("kage-replay".to_owned())
+                .spawn(move || play_blocking(transport, events))
+                .expect("replay thread spawns");
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let transport = self.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                play_timed(transport, events).await;
+            });
+        }
     }
 
     fn send(&self, _frame: Frame) {
@@ -87,6 +94,42 @@ impl Transport for ReplayTransport {
 
     fn close(&self) {
         self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Plays the recording on a thread, blocking between frames. The
+/// transcript ends but the link stays up: the shell remains usable
+/// against the recording.
+#[cfg(not(target_arch = "wasm32"))]
+fn play_blocking(transport: ReplayTransport, events: EventSender) {
+    let _ = events.send_blocking(Event::State(State::Connecting));
+    let _ = events.send_blocking(Event::State(State::Connected));
+    for frame in transcript() {
+        if transport.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        thread::sleep(BEAT);
+        if events.send_blocking(Event::Frame(frame)).is_err() {
+            return;
+        }
+    }
+}
+
+/// Plays the recording from a timer task, awaiting between frames.
+/// The transcript ends but the link stays up: the shell remains
+/// usable against the recording.
+#[cfg(target_arch = "wasm32")]
+async fn play_timed(transport: ReplayTransport, events: EventSender) {
+    let _ = events.send(Event::State(State::Connecting)).await;
+    let _ = events.send(Event::State(State::Connected)).await;
+    for frame in transcript() {
+        if transport.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        crate::transport::web::sleep(BEAT_MILLIS).await;
+        if events.send(Event::Frame(frame)).await.is_err() {
+            return;
+        }
     }
 }
 

@@ -2,7 +2,8 @@
 
 Status: spike done, decision recorded at the bottom. The spike window became
 the app shell and transports; see "The app shell and transports" (added
-2026-09-29).
+2026-09-29), and the web build skeleton; see "The web build" (added
+2026-09-30).
 Date: 2026-09-29. All numbers below are from this date unless marked otherwise.
 
 ## What this is
@@ -101,6 +102,200 @@ is the stub test in `src/transport/stdio.rs`: it spawns a scripted `sh`
 engine over real pipes and asserts the prompt frame reaches the child and
 its reply lands in client state (run released, stop reason recorded).
 
+## The web build
+
+Added 2026-09-30. The same crate builds a second way for
+`wasm32-unknown-unknown` and runs in a browser: GPUI renders through
+`gpui-pre-web` (WebGPU when the browser has it, an automatic WebGL2
+fallback on a fresh canvas when it does not), and a web-sys
+`WebSocket` transport replaces stdio, which has no subprocess to
+spawn. The desktop build and its behavior are unchanged; the browser
+build shares every line of the shell, store and views with it.
+
+### Does the pinned stack support the web?
+
+Yes, and the web backend is a first-class member of the pinned family,
+not an extra feature to enable:
+
+- `gpui-kit` 0.7.0 depends on `gpui-pre-web` `=0.3.7` under
+  `cfg(target_family = "wasm")`, unconditionally (optional = false in
+  the published dependency metadata), so the lockfile resolves the web
+  stack whether or not a build uses it.
+- `gpui-pre-web` 0.3.7 (published 2026-09-28, crates.io) is Zed's
+  `gpui_web` crate, the same zed@1a28cff snapshot as the rest of the
+  family. Its `Platform::run` prefers WebGPU and falls back to WebGL2
+  on a fresh canvas when the probe fails (`WebBackendPreference::Auto`
+  is what `gpui_kit::application()` selects on wasm). It supports one
+  top-level window, which the shell uses.
+- `gpui_kit::platform::web_init()` installs the panic hook and web
+  logging, and the web `AssetSource` fetches icon SVGs from
+  `{endpoint}/assets/<path>` on demand.
+
+One real toolchain constraint: `gpui-pre-web`'s default `multithreaded`
+feature pulls `wasm_thread` 0.3.3 (the newest release, 2024-10-29),
+whose crate root opens with
+`#![cfg_attr(target_arch = "wasm32", feature(stdarch_wasm_atomic_wait))]`.
+Stable rustc rejects any `#![feature]`, so
+`cargo check --target wasm32-unknown-unknown` fails on the pinned
+1.95.0 with E0554 inside `wasm_thread` before our crate is even
+reached. The wasm build therefore runs under nightly
+(`cargo +nightly ...`, nightly 1.101.0-nightly here compiles it); the
+native build stays on the pinned 1.95.0 in `rust-toolchain.toml`.
+When `wasm_thread` ships a stable-clean release or the toolkit makes
+`multithreaded` non-default, the wasm build moves back to the pinned
+stable toolchain.
+
+### Build and run commands
+
+The wasm-bindgen CLI version must equal the `wasm-bindgen` crate in
+`gui/Cargo.lock` exactly (0.2.129 here); a mismatch aborts at load
+with a version check in the generated glue.
+
+```
+rustup target add --toolchain nightly wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.129   # match Cargo.lock
+cd gui
+cargo +nightly build --release --locked --target wasm32-unknown-unknown
+wasm-bindgen --out-dir web --target web \
+    target/wasm32-unknown-unknown/release/kage_desktop.wasm
+mkdir -p web/assets/icons
+cp "$(ls -d ~/.local/share/cargo/registry/src/*/gpui-kit-assets-0.7.0/assets/icons)"/*.svg \
+    web/assets/icons/
+python3 web/serve_web.py 8090          # static, MIME-correct, optional --coop
+```
+
+The bundle lands in `gui/web/`: `kage_desktop.js` (the wasm-bindgen
+glue), `kage_desktop_bg.wasm`, `index.html` (a page shell: dark
+background, one `<script type="module">` calling `init()`), and
+`assets/icons/` (the 1830 Lucide SVGs the component library fetches
+from its own origin on first use; without them the page still works,
+it just logs a 404 per missing icon and draws the label only).
+`web/serve_web.py` is the local static server: it sends
+`application/wasm` for `.wasm` (required for streaming compilation)
+and `--coop` adds the cross-origin isolation headers.
+
+The page address carries the only configuration a browser page can
+read: `?ws=` overrides the endpoint (default `/acp` on the page's own
+origin, scheme mapped to ws or wss) and `?token=` carries the bearer
+token; without it the page asks once through a `prompt` dialog. Both
+configure the page only. The WebSocket dial itself is always the bare
+URL plus the subprotocol, verified live by wrapping
+`window.WebSocket` before page scripts run:
+
+```
+url: "ws://127.0.0.1:7433/acp"
+protocols: "kage.<token>"
+```
+
+No query string, the token in the subprotocol entry only.
+
+### Browser verification
+
+Against a real `kage serve` on 127.0.0.1:7433, page served from
+127.0.0.1:8090 (cross-origin on purpose, Chromium headless via
+Playwright):
+
+- The app boots: one full-viewport canvas, one window, the shell
+  layout painted, screenshot in `web/screenshots/`.
+- The WebSocket connects and the server accepts it:
+  `kage serve: connect ...` then
+  `kage serve: attach ... (connection 0)`; the handshake and the boot
+  session run (the store's `initialize` then `session/new`, the same
+  path the desktop transports drive and the 34 tests cover).
+- Typing into the page changes the framebuffer (screenshot diff), so
+  keyboard input reaches the shell through the browser IME bridge.
+- A wrong token: the server logs `refuse ... (401)`, the page sees
+  only an `error` plus a `close` (code 1006), and the transport walks
+  the backoff ladder (two dials in the first 3.5s: immediate, then
+  after 1s). See "What the web cannot see" below.
+- Console at boot, headless Chromium, no COOP/COEP:
+  `Required WebAssembly threading APIs are unavailable; falling back
+  to single-threaded dispatcher` and
+  `WebGPU initialization failed; falling back to WebGL2: browser
+  WebGPU probe did not return a usable adapter`, then rendering
+  proceeds. The only page error is the cosmetic `favicon.ico` 404.
+
+### COOP/COEP
+
+Not needed for this build. Measured: the page served bare (no
+isolation headers) boots, connects and renders; the dispatcher logs
+its single-threaded fallback warning and carries on. With
+`Cross-Origin-Opener-Policy: same-origin` plus
+`Cross-Origin-Embedder-Policy: require-corp` served instead, the page
+reports `crossOriginIsolated === true` and behaves identically; the
+dispatcher still runs single-threaded, because the shipped module has
+no atomics. Threading needs all three at once: the isolation headers
+(so `SharedArrayBuffer` exists), a rebuild with
+`RUSTFLAGS="-C target-feature=+atomics,+bulk-memory"`, and workers
+that can import the module. That is a real speedup candidate for the
+wgpu and text work but it is not required to ship, so the decision
+belongs to the stories that serve and ship the build, with these
+numbers: shipping without the headers is the simpler default, and
+nothing in this build breaks without them.
+
+### WebGPU and canvas caveats
+
+- `WebBackendPreference::Auto` probes WebGPU first. On failure it
+  removes the probe canvas and builds a fresh one for WebGL2, so a
+  fallback is seamless except for one console warning.
+- Software GL (SwiftShader in headless Chromium) renders correctly
+  but logs `Dual-source blending not available on this GPU. Subpixel
+  text antialiasing will be disabled.` Text is still readable; glyph
+  edges are softer than a hardware GPU.
+- One resize warning appeared under headless software GL
+  (`Failed to poll device during resize: Timeout`), with no visible
+  artifact. Watch it on real hardware before shipping.
+- One top-level window per page; a second `open_window` is an error
+  by design. The shell opens exactly one.
+- The web text system starts with no fonts at all, and the first
+  layout in a family it cannot find would panic. The web entry
+  registers the bundled fonts (IBM Plex Sans, JetBrains Mono, both in
+  `assets/fonts`, OFL licensed) before anything lays out text, then
+  names both families on the theme explicitly. The desktop entry
+  does neither: fontconfig supplies fonts there.
+- Icons are fetched from `<page origin>/assets/icons/*.svg` on first
+  use, so the serving origin must host the icon directory or the UI
+  draws labels without icons (logged, non-fatal).
+
+### What the web cannot see
+
+Two platform facts shape the web transport, both encoded in
+`src/transport/web.rs`:
+
+- A failed WebSocket handshake surfaces to JavaScript only as an
+  `error` plus a `close` with code 1006. The HTTP status is invisible,
+  so a wrong token (401) and a dead endpoint look identical. Only a
+  malformed endpoint URL reports `Refused` (the constructor throws
+  synchronously); everything else retries on the backoff ladder and
+  the status bar shows `reconnecting`.
+- Response headers of the 101 are unreadable, so the
+  `Acp-Connection-Id` cannot be learned in a browser;
+  `Transport::connection_id` always reports none there. The desktop
+  transports keep reporting it.
+
+### Measurements
+
+Machine as above, nightly 1.101.0-nightly, release profile, no `-Z`
+flags. Sizes are for the bundle `gui/web/` as built; gzip is
+`gzip -9`, what any compressing server hands out.
+
+| Measurement | Value | How |
+|---|---|---|
+| `kage_desktop_bg.wasm` | 25,238,572 bytes (24.1 MiB) | `ls -l web/` |
+| same, gzip -9 | 6,823,231 bytes (6.5 MiB) | `gzip -9` |
+| `kage_desktop.js` glue | 171,419 bytes (167 KiB) | `ls -l web/` |
+| same, gzip -9 | 25,747 bytes (25 KiB) | `gzip -9` |
+| icons, 1830 SVGs | 8.1 MiB on disk, fetched per icon on demand | `du -sh web/assets/icons` |
+| `index.html` | 675 bytes | `ls -l web/` |
+| wasm build, clean release | 92 s wall | `cargo +nightly build --release --target wasm32-unknown-unknown` |
+| wasm-bindgen step | under 5 s | `wasm-bindgen --target web` |
+
+The 24 MiB wasm is the whole framework: wgpu with both backends,
+cosmic-text, the component library and the client. The gzip number is
+the honest wire size for the serving decision; `wasm-opt -Oz`
+typically trims another 20 to 40 percent and is the first knob if the
+download needs to shrink, but it was not needed to prove the target.
+
 ## Pinned snapshot
 
 The toolkit family is published together, roughly weekly, under the name
@@ -117,6 +312,7 @@ GPUI Kit. The exact pins, all `=x.y.z` in `gui/Cargo.toml` and locked in
 | `gpui-pre-platform` | =0.3.7 | 2026-09-28 | Platform selector, x11 + wayland + font-kit features on |
 | `gpui-pre-linux` | =0.3.7 | 2026-09-28 | Wayland, X11 and headless backends |
 | `gpui-pre-wgpu` | =0.3.7 | 2026-09-28 | The wgpu renderer |
+| `gpui-pre-web` | =0.3.7 | 2026-09-28 | The browser backend, WebGPU with a WebGL2 canvas fallback |
 
 Name mapping note: the toolkit does not use the `gpui` crate from crates.io
 for this stack. That crate is Zed's own direct publish (0.2.2, 2025-10-22) and
@@ -131,7 +327,8 @@ tree, and the committed `gui/Cargo.lock` freezes the 852 transitive crates.
 ## How to build and run
 
 The transport flags and smoke commands are in "The app shell and transports"
-above. Bare runs:
+above. The browser build has its own commands, headers, caveats and
+sizes in "The web build". Bare runs:
 
 ```
 cd gui
@@ -282,7 +479,9 @@ The stack carries the client. Reasons:
 - The CI story works. The same binary builds on Linux (Wayland and X11
   features on), macOS and Windows, and the headless path runs the full
   window, views and 30 Hz stream with no display and no GPU, which is what
-  the CI job exercises.
+  the CI job exercises. The same stack also carries the browser target:
+  the web backend ships inside the pinned family and the skeleton boots
+  and connects in a real browser (see "The web build").
 - The automated measurements are all inside comfortable bounds: 48.7 MiB
   release binary, sub-150 ms cold start even with a real Wayland window and
   GPU init, flat 104.6 MB idle RSS with 5,000 rows loaded, and 30 Hz

@@ -25,10 +25,11 @@ use kage_jsonrpc::{CancelNotice, Inbound, Peer, RpcError, connect_with};
 
 use crate::acp::{
     CloseSessionRequest, CloseSessionResponse, ConfigGetRequest, ConfigGetResult, FsRequest,
-    FsResult, InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
-    PermissionOption, PermissionOptionKind, PermissionOutcome, PromptRequest, PromptResponse,
-    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    FsResult, InitializeRequest, InitializeResponse, KageMeta, ListSessionsRequest,
+    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
+    NewSessionResponse, PermissionOption, PermissionOptionKind, PermissionOutcome, PlanReview,
+    PromptRequest, PromptResponse, RequestMeta, RequestPermissionRequest,
+    RequestPermissionResponse, RequestPermissionResult, ResumeSessionRequest,
     ResumeSessionResponse, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, ToolCallUpdate,
 };
@@ -82,6 +83,7 @@ pub fn request_permission(
                 kind: PermissionOptionKind::RejectOnce,
             },
         ],
+        meta: None,
     };
     let Ok(params) = serde_json::to_value(&req) else {
         return PermissionDecision::Deny(Some("encode permission request".to_owned()));
@@ -104,6 +106,98 @@ pub fn request_permission(
             PermissionDecision::Unanswered
         }
         Err(e) => PermissionDecision::Deny(Some(e.message)),
+    }
+}
+
+/// The client's answer to a plan-mode review raised through
+/// [`request_plan_review`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanReviewDecision {
+    /// The plan was approved: run the `exit_plan` call, which ends plan
+    /// mode and resumes the run.
+    Approve,
+    /// The user asked for changes, in their own words. The `exit_plan`
+    /// call is denied, which ends the run with plan mode still on, and
+    /// the text is delivered to the model as its next prompt.
+    Revise(String),
+    /// The plan was rejected: deny the call, ending the run like any
+    /// other denial.
+    Reject,
+    /// The ask was withdrawn or the connection closed before an answer
+    /// arrived. No decision is sent.
+    Unanswered,
+}
+
+/// Ask the client to review `plan`, presented by the plan-mode
+/// `exit_plan` tool as `tool_call`. Offers exactly approve, revise and
+/// reject, with the document under `_meta.kage.planReview`; a revise
+/// answer brings the user's text back in the same field. Blocks until
+/// the client answers, `cancel` withdraws the ask, or the connection
+/// closes. Any unexpected answer, rejection or decode failure resolves
+/// to [`PlanReviewDecision::Reject`]; a withdrawn ask and a closed
+/// connection resolve to [`PlanReviewDecision::Unanswered`]. Never
+/// auto-approves.
+#[must_use]
+pub fn request_plan_review(
+    peer: &Peer,
+    session_id: &str,
+    tool_call: ToolCallUpdate,
+    plan: &str,
+    cancel: &CancelFlag,
+) -> PlanReviewDecision {
+    let req = RequestPermissionRequest {
+        session_id: session_id.to_owned(),
+        tool_call,
+        options: vec![
+            PermissionOption {
+                option_id: "approve".to_owned(),
+                name: "Approve".to_owned(),
+                kind: PermissionOptionKind::AllowOnce,
+            },
+            PermissionOption {
+                option_id: "revise".to_owned(),
+                name: "Revise".to_owned(),
+                kind: PermissionOptionKind::RejectOnce,
+            },
+            PermissionOption {
+                option_id: "reject".to_owned(),
+                name: "Reject".to_owned(),
+                kind: PermissionOptionKind::RejectOnce,
+            },
+        ],
+        meta: Some(RequestMeta {
+            kage: KageMeta {
+                plan_review: Some(PlanReview {
+                    plan: Some(plan.to_owned()),
+                    revision: None,
+                }),
+            },
+        }),
+    };
+    let Ok(params) = serde_json::to_value(&req) else {
+        return PlanReviewDecision::Reject;
+    };
+    match peer.request_cancellable("session/request_permission", params, cancel) {
+        Ok(value) => match serde_json::from_value::<RequestPermissionResult>(value) {
+            Ok(resp) => match resp.outcome {
+                PermissionOutcome::Selected(sel) => match sel.option_id.as_str() {
+                    "approve" => PlanReviewDecision::Approve,
+                    "revise" => PlanReviewDecision::Revise(
+                        resp.meta
+                            .and_then(|meta| meta.kage.plan_review)
+                            .and_then(|review| review.revision)
+                            .unwrap_or_default(),
+                    ),
+                    _ => PlanReviewDecision::Reject,
+                },
+                PermissionOutcome::Cancelled => PlanReviewDecision::Reject,
+            },
+            Err(_) => PlanReviewDecision::Reject,
+        },
+        Err(e) if e.code == -32800 || e.message == "connection closed" => {
+            PlanReviewDecision::Unanswered
+        }
+        Err(_) => PlanReviewDecision::Reject,
     }
 }
 
@@ -1038,6 +1132,120 @@ mod tests {
             [PermissionDecision::Unanswered]
         );
         let _ = prompt.join();
+    }
+
+    /// Raises a plan review on every prompt and records the decision.
+    #[derive(Default)]
+    struct ReviewAgent {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<PlanReviewDecision>>>,
+    }
+
+    impl Agent for ReviewAgent {
+        fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
+            MockAgent.initialize(req)
+        }
+
+        fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+            MockAgent.new_session(req)
+        }
+
+        fn prompt(
+            &self,
+            req: PromptRequest,
+            ctx: &PromptContext,
+        ) -> Result<PromptResponse, RpcError> {
+            let tool_call = ToolCallUpdate {
+                tool_call_id: "call-1".into(),
+                ..ToolCallUpdate::default()
+            };
+            let decision = request_plan_review(
+                ctx.peer(),
+                &req.session_id,
+                tool_call,
+                "# P",
+                &CancelFlag::new(),
+            );
+            kage_core::sync::lock(&self.seen).push(decision);
+            Ok(PromptResponse {
+                stop_reason: StopReason::Cancelled,
+            })
+        }
+
+        fn cancel(&self, _session_id: &str) {}
+    }
+
+    /// Answers one plan review with `answer` and returns the decision
+    /// the ask came back with.
+    fn review_answer(answer: serde_json::Value) -> PlanReviewDecision {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let agent = ReviewAgent::default();
+        let seen = std::sync::Arc::clone(&agent.seen);
+        let server = thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, |_| agent));
+        let (client, inbox, _h) = connect(BufReader::new(cli_r), cli_w);
+        let prompt = {
+            let client = client.clone();
+            thread::spawn(move || {
+                client.request(
+                    "session/prompt",
+                    serde_json::json!({"sessionId": "sess-1", "prompt": []}),
+                )
+            })
+        };
+        let Ok(Inbound::Request { id, method, params }) =
+            inbox.recv_timeout(std::time::Duration::from_secs(5))
+        else {
+            panic!("expected the permission request");
+        };
+        assert_eq!(method, "session/request_permission");
+        let options: Vec<&str> = params["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["optionId"].as_str().unwrap())
+            .collect();
+        assert_eq!(options, ["approve", "revise", "reject"]);
+        assert_eq!(params["_meta"]["kage"]["planReview"]["plan"], "# P");
+        client.respond(&id, Ok(answer)).unwrap();
+        prompt.join().unwrap().unwrap();
+        drop(client);
+        drop(inbox);
+        server.join().unwrap().unwrap();
+        let mut seen = kage_core::sync::lock(&seen);
+        seen.pop().unwrap()
+    }
+
+    #[test]
+    fn a_plan_review_maps_approve_revise_and_reject() {
+        assert_eq!(
+            review_answer(serde_json::json!({
+                "outcome": {"outcome": "selected", "optionId": "approve"}
+            })),
+            PlanReviewDecision::Approve
+        );
+        assert_eq!(
+            review_answer(serde_json::json!({
+                "outcome": {"outcome": "selected", "optionId": "revise"},
+                "_meta": {"kage": {"planReview": {"revision": "add tests"}}}
+            })),
+            PlanReviewDecision::Revise("add tests".to_owned())
+        );
+        assert_eq!(
+            review_answer(serde_json::json!({
+                "outcome": {"outcome": "selected", "optionId": "revise"}
+            })),
+            PlanReviewDecision::Revise(String::new())
+        );
+        assert_eq!(
+            review_answer(serde_json::json!({
+                "outcome": {"outcome": "selected", "optionId": "reject"}
+            })),
+            PlanReviewDecision::Reject
+        );
+        assert_eq!(
+            review_answer(serde_json::json!({"outcome": {"outcome": "cancelled"}})),
+            PlanReviewDecision::Reject
+        );
     }
 
     #[test]

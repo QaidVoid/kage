@@ -6,16 +6,16 @@ use std::sync::{Arc, Mutex};
 
 use kage_acp::acp::{
     AvailableCommandsUpdate, CompactionUpdate, ConfigOptionUpdate, ContentBlock, Cost,
-    McpStatusUpdate, MessageChunk, NoticeTone, NoticeUpdate, Plan, SessionConfigSelectOption,
-    SessionInfoUpdate, SessionUpdate, SubagentSessionCapabilities, SubagentState, SubagentUpdate,
-    ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind, TurnPhase, TurnReason,
-    TurnUpdate, UsageUpdate,
+    CurrentModeUpdate, McpStatusUpdate, MessageChunk, NoticeTone, NoticeUpdate, Plan,
+    SessionConfigSelectOption, SessionInfoUpdate, SessionUpdate, SubagentSessionCapabilities,
+    SubagentState, SubagentUpdate, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
+    ToolKind, TurnPhase, TurnReason, TurnUpdate, UsageUpdate,
 };
-use kage_acp::agent::{PermissionDecision, send_update};
+use kage_acp::agent::{PermissionDecision, PlanReviewDecision, request_plan_review, send_update};
 use kage_core::protocol::{
-    AgentNode, AgentTree, Command, CommandKind, Envelope, Event, HostEvent, McpServerInfo,
-    McpServerStatus, NoticeLevel, PermissionDecision as Decision, RequestId, RunOutcome, Usage,
-    with_canonical_tool_names,
+    AgentNode, AgentTree, Command, CommandKind, Delivery, EXIT_PLAN_TOOL, Envelope, Event,
+    HostEvent, McpServerInfo, McpServerStatus, NoticeLevel, PermissionDecision as Decision,
+    RequestId, RunOutcome, SessionState, Usage, with_canonical_tool_names,
 };
 use kage_core::sync::lock;
 use kage_core::{
@@ -65,6 +65,9 @@ pub(super) struct Bridge {
     pub(super) ended: HashMap<SessionId, PromptEnd>,
     /// The commands last sent to each client session.
     pub(super) commands: HashMap<SessionId, Vec<serde_json::Value>>,
+    /// The mode id `current_mode_update` last reported per session, so
+    /// only a change sends one.
+    pub(super) modes: HashMap<SessionId, String>,
     /// The tool of every in-flight call per session, so a completed
     /// `todo_list` write can become a `plan` update.
     pub(super) names: HashMap<SessionId, HashMap<String, String>>,
@@ -109,10 +112,25 @@ impl Ask {
 /// The open asks of one connection, keyed by the session that asked.
 pub(super) type AskSet = Arc<Mutex<HashMap<SessionId, Vec<Ask>>>>;
 
-/// Spawns the thread that asks the client on `client_id` about
-/// `tool_call` and resolves `request_id` of `session` with the answer,
-/// recording the ask under `asks` so a withdraw can stop it. Used by
-/// the bridge for events and by an attach for asks already open.
+/// What an ask shows the client: an ordinary tool-call permission, or
+/// the plan-mode review of the plan document `exit_plan` presented.
+pub(super) enum AskKind {
+    /// Allow or refuse one tool call.
+    Permission(ToolCallUpdate),
+    /// Approve, revise or reject a plan. A revise answer denies the
+    /// call and queues the user's text as the session's next prompt.
+    Review {
+        /// The `exit_plan` call awaiting a verdict.
+        tool_call: ToolCallUpdate,
+        /// The plan document under review.
+        plan: String,
+    },
+}
+
+/// Spawns the thread that asks the client on `client_id` about `kind`
+/// and resolves `request_id` of `session` with the answer, recording
+/// the ask under `asks` so a withdraw can stop it. Used by the bridge
+/// for events and by an attach for asks already open.
 pub(super) fn spawn_ask(
     peer: &Peer,
     commander: &Commander,
@@ -120,21 +138,36 @@ pub(super) fn spawn_ask(
     session: SessionId,
     client_id: String,
     request_id: RequestId,
-    tool_call: ToolCallUpdate,
+    kind: AskKind,
 ) {
     let withdraw = CancelFlag::new();
     let flag = withdraw.clone();
     let peer = peer.clone();
     let commander = commander.clone();
     let thread = std::thread::spawn(move || {
+        let (tool_call, review) = match kind {
+            AskKind::Permission(tool_call) => (tool_call, None),
+            AskKind::Review { tool_call, plan } => (tool_call, Some(plan)),
+        };
         let title = tool_call.title.clone().unwrap_or_default();
-        let decision =
-            kage_acp::agent::request_permission(&peer, &client_id, tool_call, &title, &flag);
-        let decision = match decision {
-            PermissionDecision::Unanswered => return,
-            PermissionDecision::Allow => Decision::AllowOnce,
-            PermissionDecision::AllowSession => Decision::AllowSession,
-            PermissionDecision::Deny(_) => Decision::Deny,
+        let (decision, revision) = if let Some(plan) = review {
+            let decision = request_plan_review(&peer, &client_id, tool_call, &plan, &flag);
+            match decision {
+                PlanReviewDecision::Unanswered => return,
+                PlanReviewDecision::Approve => (Decision::AllowOnce, None),
+                PlanReviewDecision::Revise(text) => (Decision::Deny, Some(text)),
+                PlanReviewDecision::Reject => (Decision::Deny, None),
+            }
+        } else {
+            let decision =
+                kage_acp::agent::request_permission(&peer, &client_id, tool_call, &title, &flag);
+            let decision = match decision {
+                PermissionDecision::Unanswered => return,
+                PermissionDecision::Allow => Decision::AllowOnce,
+                PermissionDecision::AllowSession => Decision::AllowSession,
+                PermissionDecision::Deny(_) => Decision::Deny,
+            };
+            (decision, None)
         };
         commander.send(Command::to(
             session,
@@ -143,6 +176,15 @@ pub(super) fn spawn_ask(
                 decision,
             },
         ));
+        if let Some(text) = revision.filter(|text| !text.is_empty()) {
+            commander.send(Command::to(
+                session,
+                CommandKind::Prompt {
+                    content: vec![Content::Text { text }],
+                    delivery: Delivery::Queue,
+                },
+            ));
+        }
     });
     lock(asks).entry(session).or_default().push(Ask {
         request_id,
@@ -213,7 +255,9 @@ impl Bridge {
                 ..
             }) => {
                 let tool_call = permission_call(tool_call_id.as_ref(), tool, input);
-                self.ask(session, *request_id, client_id, tool_call);
+                let review = (tool == EXIT_PLAN_TOOL)
+                    .then(|| input["plan"].as_str().unwrap_or_default().to_owned());
+                self.ask(session, *request_id, client_id, tool_call, review);
             }
             Event::Host(HostEvent::UsageUpdated { usage }) => {
                 self.fills.insert(session, usage.context_used);
@@ -222,20 +266,7 @@ impl Bridge {
                 }
             }
             Event::Host(HostEvent::StateChanged { state }) => {
-                let settings = Settings::from(state);
-                let changed = lock(&self.shown)
-                    .get_mut(&session)
-                    .is_some_and(|shown| shown.observe(&settings));
-                if changed {
-                    let update = ConfigOptionUpdate {
-                        config_options: config_options(&self.models, &settings),
-                    };
-                    self.send(
-                        session,
-                        &client_id,
-                        SessionUpdate::ConfigOptionUpdate(update),
-                    );
-                }
+                self.state_changed(session, &client_id, state);
             }
             Event::Host(HostEvent::TitleChanged { title }) => {
                 let update = SessionInfoUpdate {
@@ -271,6 +302,39 @@ impl Bridge {
                 self.settle(session);
             }
             Event::Host(_) => {}
+        }
+    }
+
+    /// Refreshes a session's config options when the engine reported a
+    /// change the client did not make, and reports a changed mode id as
+    /// `current_mode_update`. The first reported state only seeds the
+    /// mode: a client that opens or attaches learns the mode from the
+    /// config options of the session response.
+    fn state_changed(&mut self, session: SessionId, client_id: &str, state: &SessionState) {
+        let settings = Settings::from(state);
+        let changed = lock(&self.shown)
+            .get_mut(&session)
+            .is_some_and(|shown| shown.observe(&settings));
+        if changed {
+            let update = ConfigOptionUpdate {
+                config_options: config_options(&self.models, &settings),
+            };
+            self.send(
+                session,
+                client_id,
+                SessionUpdate::ConfigOptionUpdate(update),
+            );
+        }
+        let mode = settings.mode_id();
+        let last = self.modes.insert(session, mode.to_owned());
+        if last.is_some_and(|last| last != mode) {
+            self.send(
+                session,
+                client_id,
+                SessionUpdate::CurrentModeUpdate(CurrentModeUpdate {
+                    current_mode_id: mode.to_owned(),
+                }),
+            );
         }
     }
 
@@ -525,7 +589,7 @@ impl Bridge {
                     raw_input: Some(input.clone()),
                     ..ToolCallUpdate::default()
                 };
-                self.ask(session, *request_id, client_id, tool_call);
+                self.ask(session, *request_id, client_id, tool_call, None);
             }
             Event::Host(HostEvent::RunEnded { outcome }) => {
                 progress(
@@ -544,17 +608,23 @@ impl Bridge {
     }
 
     /// Asks the client on `client_id` and resolves `request_id` of
-    /// `session` with the answer. The ask is withdrawn when that
-    /// session's run ends first, when another client's answer resolves
-    /// it, or when the connection detaches; a withdrawn ask sends no
-    /// decision.
+    /// `session` with the answer. A review `plan` document raises the
+    /// plan-mode review instead of the ordinary allow-and-reject ask.
+    /// The ask is withdrawn when that session's run ends first, when
+    /// another client's answer resolves it, or when the connection
+    /// detaches; a withdrawn ask sends no decision.
     fn ask(
         &mut self,
         session: SessionId,
         request_id: RequestId,
         client_id: String,
         tool_call: ToolCallUpdate,
+        review: Option<String>,
     ) {
+        let kind = match review {
+            Some(plan) => AskKind::Review { tool_call, plan },
+            None => AskKind::Permission(tool_call),
+        };
         spawn_ask(
             &self.peer,
             &self.commander,
@@ -562,7 +632,7 @@ impl Bridge {
             session,
             client_id,
             request_id,
-            tool_call,
+            kind,
         );
     }
 

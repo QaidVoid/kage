@@ -819,6 +819,212 @@ fn allow_for_this_session_stops_the_next_identical_ask() {
     assert_eq!(results, [false, false]);
 }
 
+#[test]
+fn plan_mode_refuses_a_write_and_announces_entry_and_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("new.txt");
+    let h = serve(
+        vec![
+            tool_turn(
+                "call_w",
+                "write",
+                serde_json::json!({"path": file.display().to_string(), "content": "nope"}),
+            ),
+            text_turn("still planning"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+
+    let set = set_option(&h, "mode", "plan").unwrap();
+    assert_eq!(current_values(&set), ["mock:m", "default", "plan"]);
+    let updates = updates_until(&h.inbox, &h.session, "current_mode_update");
+    assert_eq!(updates.last().unwrap()["update"]["currentModeId"], "plan");
+
+    let response = prompt(&h.client, &h.session, "investigate");
+    assert_eq!(response["stopReason"], "end_turn");
+    let updates = drain(&h.inbox);
+    let refused = updates
+        .iter()
+        .find(|p| p["update"]["toolCallId"] == "call_w" && p["update"]["status"] == "failed")
+        .expect("the write is refused");
+    assert!(
+        refused["update"]["content"][0]["content"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("plan mode is on"),
+        "{refused}"
+    );
+    assert!(!file.exists(), "the write must not execute");
+
+    let set = set_option(&h, "mode", "default").unwrap();
+    assert_eq!(current_values(&set), ["mock:m", "default", "default"]);
+    let updates = updates_until(&h.inbox, &h.session, "current_mode_update");
+    assert_eq!(
+        updates.last().unwrap()["update"]["currentModeId"],
+        "default"
+    );
+}
+
+#[test]
+fn a_plan_review_offers_three_options_and_approve_resumes_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(
+        vec![
+            tool_turn(
+                "call_p",
+                "exit_plan",
+                serde_json::json!({"plan": "# Fix\n\n1. Edit a.rs"}),
+            ),
+            text_turn("doing the work"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    set_option(&h, "mode", "plan").unwrap();
+    updates_until(&h.inbox, &h.session, "current_mode_update");
+
+    let prompt_end = prompt_async(&h.client, &h.session, "plan it");
+    let mut updates = Vec::new();
+    let (ask, params) = until_ask(&h.inbox, &mut updates);
+    assert_eq!(params["toolCall"]["toolCallId"], "call_p");
+    assert_eq!(params["toolCall"]["title"], "exit_plan");
+    let options: Vec<&str> = params["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["optionId"].as_str().unwrap())
+        .collect();
+    assert_eq!(options, ["approve", "revise", "reject"]);
+    assert_eq!(
+        params["_meta"]["kage"]["planReview"]["plan"],
+        "# Fix\n\n1. Edit a.rs"
+    );
+
+    let outcome = serde_json::json!({"outcome": {"outcome": "selected", "optionId": "approve"}});
+    h.client.respond(&ask, Ok(outcome)).unwrap();
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    updates.extend(drain(&h.inbox));
+
+    let ran = updates
+        .iter()
+        .find(|p| p["update"]["toolCallId"] == "call_p" && p["update"]["status"] == "completed")
+        .expect("exit_plan runs once approved");
+    assert!(
+        ran["update"]["content"][0]["content"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("approved"),
+        "{ran}"
+    );
+    assert!(updates.iter().any(|p| {
+        p["update"]["sessionUpdate"] == "agent_message_chunk"
+            && p["update"]["content"]["text"] == "doing the work"
+    }));
+    let modes: Vec<&str> = updates
+        .iter()
+        .filter(|p| p["update"]["sessionUpdate"] == "current_mode_update")
+        .filter_map(|p| p["update"]["currentModeId"].as_str())
+        .collect();
+    assert_eq!(modes, ["default"], "plan mode ends with the approval");
+}
+
+#[test]
+fn a_rejected_plan_ends_the_turn_like_a_denial() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(
+        vec![tool_turn(
+            "call_p",
+            "exit_plan",
+            serde_json::json!({"plan": "# Fix"}),
+        )],
+        dir.path(),
+        dir.path(),
+    );
+    set_option(&h, "mode", "plan").unwrap();
+    updates_until(&h.inbox, &h.session, "current_mode_update");
+
+    let prompt_end = prompt_async(&h.client, &h.session, "plan it");
+    let (ask, _) = until_ask(&h.inbox, &mut Vec::new());
+    let outcome = serde_json::json!({"outcome": {"outcome": "selected", "optionId": "reject"}});
+    h.client.respond(&ask, Ok(outcome)).unwrap();
+
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    until(|| h.mock.call_count() >= 2);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        h.mock.call_count(),
+        2,
+        "a rejected plan must not resume the run"
+    );
+    let late = drain(&h.inbox);
+    assert!(
+        !late
+            .iter()
+            .any(|p| p["update"]["sessionUpdate"] == "current_mode_update"),
+        "plan mode stays on: {late:?}"
+    );
+    assert!(
+        !late.iter().any(|p| {
+            p["update"]["sessionUpdate"] == "_kage/notice"
+                && p["update"]["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("plan mode off"))
+        }),
+        "{late:?}"
+    );
+}
+
+#[test]
+fn a_revised_plan_delivers_the_text_to_the_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(
+        vec![
+            tool_turn("call_p", "exit_plan", serde_json::json!({"plan": "# Fix"})),
+            text_turn("revised"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    set_option(&h, "mode", "plan").unwrap();
+    updates_until(&h.inbox, &h.session, "current_mode_update");
+
+    let prompt_end = prompt_async(&h.client, &h.session, "plan it");
+    let (ask, _) = until_ask(&h.inbox, &mut Vec::new());
+    let outcome = serde_json::json!({
+        "outcome": {"outcome": "selected", "optionId": "revise"},
+        "_meta": {"kage": {"planReview": {"revision": "cover the tests too"}}},
+    });
+    h.client.respond(&ask, Ok(outcome)).unwrap();
+
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    until(|| h.mock.call_count() >= 3);
+    let requests = h.mock.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests.iter().any(|request| request
+            .messages
+            .last()
+            .is_some_and(|m| m.content == [text("cover the tests too")])),
+        "the revision reaches the model as its own prompt"
+    );
+    // The revision runs as a fresh turn; the ended run's title call
+    // may take the scripted turn, so only the turn boundary is
+    // asserted on the wire.
+    let mut updates = updates_until(&h.inbox, &h.session, "_kage/turn");
+    updates.extend(drain(&h.inbox));
+    assert!(
+        !updates.iter().any(|p| {
+            p["update"]["sessionUpdate"] == "current_mode_update"
+                && p["update"]["currentModeId"] != "plan"
+        }),
+        "plan mode stays on through a revision: {updates:?}"
+    );
+}
+
 fn usage(input: u64, output: u64) -> TokenUsage {
     TokenUsage {
         input,
@@ -1187,7 +1393,7 @@ fn a_new_session_lists_model_thinking_and_mode() {
     );
     assert_eq!(
         values_of(&options[2], "value"),
-        ["default", "ask", "allow", "deny"]
+        ["default", "ask", "allow", "deny", "plan"]
     );
 }
 
@@ -1199,6 +1405,7 @@ fn the_thinking_option_offers_default_and_the_model_levels() {
         thinking: None,
         levels: vec![Low, High],
         mode: None,
+        plan: false,
     };
     let options = config_options(&[], &settings);
     let values: Vec<&str> = options[1]
@@ -1212,13 +1419,45 @@ fn the_thinking_option_offers_default_and_the_model_levels() {
     assert!(settings.apply(&[], "thinking", "medium").is_err());
     assert_eq!(
         settings.apply(&[], "thinking", "high").unwrap(),
-        CommandKind::SetThinking { level: Some(High) }
+        [CommandKind::SetThinking { level: Some(High) }]
     );
     assert_eq!(
         settings.apply(&[], "thinking", "default").unwrap(),
-        CommandKind::SetThinking { level: None }
+        [CommandKind::SetThinking { level: None }]
     );
     assert_eq!(settings.thinking, None);
+}
+
+#[test]
+fn the_mode_option_selects_and_leaves_plan_mode() {
+    use PermissionAction::Allow;
+    let mut settings = Settings {
+        model: "m".into(),
+        thinking: None,
+        levels: Vec::new(),
+        mode: None,
+        plan: false,
+    };
+    assert_eq!(settings.mode_id(), "default");
+    assert_eq!(
+        settings.apply(&[], "mode", "plan").unwrap(),
+        [CommandKind::PlanMode { on: true }]
+    );
+    assert_eq!(settings.mode_id(), "plan");
+    assert_eq!(
+        settings.apply(&[], "mode", "allow").unwrap(),
+        [
+            CommandKind::PlanMode { on: false },
+            CommandKind::SetPermissionMode { mode: Some(Allow) },
+        ]
+    );
+    assert_eq!(settings.mode_id(), "allow");
+    assert_eq!(
+        settings.apply(&[], "mode", "default").unwrap(),
+        [CommandKind::SetPermissionMode { mode: None }]
+    );
+    assert_eq!(settings.mode_id(), "default");
+    assert!(settings.apply(&[], "mode", "yolo").is_err());
 }
 
 #[test]
@@ -1295,6 +1534,7 @@ fn states_older_than_a_client_change_are_not_sent_back() {
         thinking: Some(thinking),
         levels: Vec::new(),
         mode: None,
+        plan: false,
     };
     let mut shown = Shown {
         settings: settings("mock:other", ThinkingLevel::High),

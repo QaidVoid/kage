@@ -1069,6 +1069,10 @@ pub struct RequestPermissionRequest {
     pub tool_call: ToolCallUpdate,
     /// The choices offered.
     pub options: Vec<PermissionOption>,
+    /// Kage extension fields. A plan-mode review carries the plan
+    /// document under `_meta.kage.planReview`.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<RequestMeta>,
 }
 
 /// The client's verdict.
@@ -1094,6 +1098,52 @@ pub struct SelectedOption {
 pub struct RequestPermissionResponse {
     /// The verdict.
     pub outcome: PermissionOutcome,
+}
+
+/// The `session/request_permission` result as the agent reads it: the
+/// base response plus the kage `_meta`, which a revise answer uses to
+/// carry the user's requested changes under `_meta.kage.planReview`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestPermissionResult {
+    /// The verdict.
+    pub outcome: PermissionOutcome,
+    /// Kage extension fields.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<RequestMeta>,
+}
+
+/// The `_meta` extension object kage adds to a permission exchange.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestMeta {
+    /// The kage-namespaced fields.
+    #[serde(default)]
+    pub kage: KageMeta,
+}
+
+/// The `kage` extension fields of a permission exchange's `_meta`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KageMeta {
+    /// The plan review of a plan-mode `exit_plan` ask: the plan
+    /// document on the request, the user's requested changes on a
+    /// revise answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_review: Option<PlanReview>,
+}
+
+/// One plan review's payload. Exactly one field is set per message:
+/// `plan` rides the `session/request_permission` request, `revision`
+/// rides the answer when the user picked revise.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanReview {
+    /// The plan document in Markdown, as `exit_plan` presented it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// The changes the user asked for, in their own words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
 }
 
 #[cfg(test)]
@@ -1807,6 +1857,88 @@ mod tests {
                 kind: PermissionOptionKind::AllowOnce,
             },
             serde_json::json!({"optionId": "a", "name": "Allow", "kind": "allow_once"}),
+        );
+    }
+
+    /// A plan-mode review carries the plan document to the client under
+    /// `_meta.kage.planReview`, and a revise answer brings the user's
+    /// requested changes back through the same field.
+    #[test]
+    fn plan_review_shapes() {
+        roundtrip(
+            &RequestPermissionRequest {
+                session_id: "s1".into(),
+                tool_call: ToolCallUpdate {
+                    tool_call_id: "t1".into(),
+                    title: Some("exit_plan".into()),
+                    ..ToolCallUpdate::default()
+                },
+                options: vec![
+                    PermissionOption {
+                        option_id: "approve".into(),
+                        name: "Approve".into(),
+                        kind: PermissionOptionKind::AllowOnce,
+                    },
+                    PermissionOption {
+                        option_id: "revise".into(),
+                        name: "Revise".into(),
+                        kind: PermissionOptionKind::RejectOnce,
+                    },
+                    PermissionOption {
+                        option_id: "reject".into(),
+                        name: "Reject".into(),
+                        kind: PermissionOptionKind::RejectOnce,
+                    },
+                ],
+                meta: Some(RequestMeta {
+                    kage: KageMeta {
+                        plan_review: Some(PlanReview {
+                            plan: Some("# Fix the build".into()),
+                            revision: None,
+                        }),
+                    },
+                }),
+            },
+            serde_json::json!({
+                "sessionId": "s1",
+                "toolCall": {"toolCallId": "t1", "title": "exit_plan"},
+                "options": [
+                    {"optionId": "approve", "name": "Approve", "kind": "allow_once"},
+                    {"optionId": "revise", "name": "Revise", "kind": "reject_once"},
+                    {"optionId": "reject", "name": "Reject", "kind": "reject_once"}
+                ],
+                "_meta": {"kage": {"planReview": {"plan": "# Fix the build"}}}
+            }),
+        );
+        roundtrip(
+            &RequestPermissionResult {
+                outcome: PermissionOutcome::Selected(SelectedOption {
+                    option_id: "revise".into(),
+                }),
+                meta: Some(RequestMeta {
+                    kage: KageMeta {
+                        plan_review: Some(PlanReview {
+                            plan: None,
+                            revision: Some("also add tests".into()),
+                        }),
+                    },
+                }),
+            },
+            serde_json::json!({
+                "outcome": {"outcome": "selected", "optionId": "revise"},
+                "_meta": {"kage": {"planReview": {"revision": "also add tests"}}}
+            }),
+        );
+        let plain: RequestPermissionResponse = serde_json::from_value(serde_json::json!({
+            "outcome": {"outcome": "selected", "optionId": "approve"},
+            "_meta": {"kage": {"planReview": {"revision": "x"}}}
+        }))
+        .unwrap();
+        assert_eq!(
+            plain.outcome,
+            PermissionOutcome::Selected(SelectedOption {
+                option_id: "approve".into()
+            })
         );
     }
 }

@@ -177,6 +177,7 @@ impl CliAcpAgent {
             streaming: HashSet::new(),
             ended: HashMap::new(),
             commands: HashMap::new(),
+            modes: HashMap::new(),
             names: HashMap::new(),
             statuses: HashMap::new(),
             fills: HashMap::new(),
@@ -367,18 +368,20 @@ impl Agent for CliAcpAgent {
         req: SetSessionConfigOptionRequest,
     ) -> Result<SetSessionConfigOptionResponse, RpcError> {
         let id = self.engine_id(&req.session_id)?;
-        let (command, config_options) = {
+        let (commands, config_options) = {
             let mut shown = lock(&self.shown);
             let shown = shown.get_mut(&id).ok_or_else(|| {
                 RpcError::new(-32602, format!("unknown session {}", req.session_id))
             })?;
-            let command = shown
+            let commands = shown
                 .settings
                 .apply(&self.host.models, &req.config_id, &req.value)?;
             shown.catching_up = true;
-            (command, config_options(&self.host.models, &shown.settings))
+            (commands, config_options(&self.host.models, &shown.settings))
         };
-        self.host.engine.send(Command::to(id, command));
+        for command in commands {
+            self.host.engine.send(Command::to(id, command));
+        }
         Ok(SetSessionConfigOptionResponse { config_options })
     }
 

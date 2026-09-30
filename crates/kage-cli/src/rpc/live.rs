@@ -19,15 +19,17 @@ use kage_acp::acp::{
 };
 use kage_acp::agent::{PromptContext, send_update};
 use kage_core::protocol::{
-    AgentState, AgentTree, Command, CommandKind, Envelope, Event, HostEvent, NoticeLevel,
-    RequestId, SwarmMember,
+    AgentState, AgentTree, Command, CommandKind, EXIT_PLAN_TOOL, Envelope, Event, HostEvent,
+    NoticeLevel, RequestId, SwarmMember,
 };
 use kage_core::sync::lock;
 use kage_core::{LoopEvent, MessageId, SessionId, ToolCallId};
 use kage_jsonrpc::RpcError;
 
 use super::CliAcpAgent;
-use super::bridge::{permission_call, spawn_ask, to_update, tool_kind, tool_title, top_agent};
+use super::bridge::{
+    AskKind, permission_call, spawn_ask, to_update, tool_kind, tool_title, top_agent,
+};
 use super::options::{Settings, Shown, config_options};
 use crate::engine::Commander;
 
@@ -602,6 +604,14 @@ impl CliAcpAgent {
                     ask.session.to_string(),
                 ),
             };
+            let kind = if ask.tool == EXIT_PLAN_TOOL {
+                AskKind::Review {
+                    tool_call,
+                    plan: ask.input["plan"].as_str().unwrap_or_default().to_owned(),
+                }
+            } else {
+                AskKind::Permission(tool_call)
+            };
             spawn_ask(
                 &self.peer,
                 &commander,
@@ -609,7 +619,7 @@ impl CliAcpAgent {
                 ask.session,
                 client_id,
                 ask.request_id,
-                tool_call,
+                kind,
             );
         }
         lock(&self.seeds).push(Seed {

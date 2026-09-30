@@ -44,6 +44,9 @@ pub(super) struct Settings {
     /// Levels the model accepts, the other `thinking` choices.
     pub(super) levels: Vec<ThinkingLevel>,
     pub(super) mode: Option<PermissionAction>,
+    /// Whether the session plans before it changes anything, which
+    /// rides above the permission mode.
+    pub(super) plan: bool,
 }
 
 impl Settings {
@@ -58,14 +61,16 @@ impl Settings {
         Self::from(&state)
     }
 
-    /// Sets option `id` to `value` and returns the engine command that
-    /// makes the same change. `models` are the models the client may pick.
+    /// Sets option `id` to `value` and returns the engine commands that
+    /// make the same change, in order. `models` are the models the
+    /// client may pick. Leaving plan mode for a regular mode needs two
+    /// commands, so a change can be more than one.
     pub(super) fn apply(
         &mut self,
         models: &[SessionConfigSelectOption],
         id: &str,
         value: &str,
-    ) -> Result<CommandKind, RpcError> {
+    ) -> Result<Vec<CommandKind>, RpcError> {
         let invalid = || RpcError::new(-32602, format!("invalid value {value} for option {id}"));
         match id {
             "model" => {
@@ -73,9 +78,9 @@ impl Settings {
                     return Err(invalid());
                 }
                 value.clone_into(&mut self.model);
-                Ok(CommandKind::SetModel {
+                Ok(vec![CommandKind::SetModel {
                     model: value.to_owned(),
-                })
+                }])
             }
             "thinking" => {
                 let level = if value == AUTO_THINKING {
@@ -88,14 +93,38 @@ impl Settings {
                     Some(level)
                 };
                 self.thinking = level;
-                Ok(CommandKind::SetThinking { level })
+                Ok(vec![CommandKind::SetThinking { level }])
             }
             "mode" => {
+                let mut commands = Vec::new();
+                if value == PLAN_MODE {
+                    self.plan = true;
+                    commands.push(CommandKind::PlanMode { on: true });
+                    return Ok(commands);
+                }
                 let (_, mode, ..) = MODES.iter().find(|m| m.0 == value).ok_or_else(invalid)?;
+                if self.plan {
+                    self.plan = false;
+                    commands.push(CommandKind::PlanMode { on: false });
+                }
                 self.mode = *mode;
-                Ok(CommandKind::SetPermissionMode { mode: *mode })
+                commands.push(CommandKind::SetPermissionMode { mode: *mode });
+                Ok(commands)
             }
             _ => Err(RpcError::new(-32602, format!("unknown config option {id}"))),
+        }
+    }
+
+    /// The mode id a `current_mode_update` names: `plan` while the
+    /// session plans, else the permission mode's id.
+    pub(super) fn mode_id(&self) -> &'static str {
+        if self.plan {
+            PLAN_MODE
+        } else {
+            MODES
+                .iter()
+                .find(|m| m.1 == self.mode)
+                .map_or("default", |m| m.0)
         }
     }
 }
@@ -107,6 +136,7 @@ impl From<&SessionState> for Settings {
             thinking: state.thinking,
             levels: state.thinking_levels.clone(),
             mode: state.permission_mode,
+            plan: state.plan,
         }
     }
 }
@@ -140,6 +170,10 @@ const MODES: [(&str, Option<PermissionAction>, &str, &str); 4] = [
     ),
 ];
 
+/// The id of plan mode in the `mode` option and on
+/// `current_mode_update`.
+const PLAN_MODE: &str = "plan";
+
 /// The model, thinking and mode options showing `settings`. The model
 /// option offers `models`, plus the current model when they lack it.
 pub(super) fn config_options(
@@ -159,10 +193,14 @@ pub(super) fn config_options(
         .levels
         .iter()
         .map(|level| choice(level.as_str(), level.label(), None));
-    let mode = MODES
+    let mode_values = MODES
         .iter()
-        .find(|m| m.1 == settings.mode)
-        .map_or("default", |m| m.0);
+        .map(|(value, _, name, description)| choice(value, name, Some(description)))
+        .chain(std::iter::once(choice(
+            PLAN_MODE,
+            "Plan",
+            Some("Read-only until the agent presents a plan"),
+        )));
     vec![
         select(
             "model",
@@ -184,11 +222,8 @@ pub(super) fn config_options(
             "mode",
             "Mode",
             SessionConfigCategory::Mode,
-            mode,
-            MODES
-                .iter()
-                .map(|(value, _, name, description)| choice(value, name, Some(description)))
-                .collect(),
+            settings.mode_id(),
+            mode_values.collect(),
         ),
     ]
 }

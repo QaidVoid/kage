@@ -1048,6 +1048,9 @@ pub struct SubagentUpdate {
     /// Why the child paused. Set while [`SubagentState::Paused`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The parent's `agent` or `swarm` call that started the child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 /// Client operations permitted on one subagent session.
@@ -1988,6 +1991,7 @@ mod tests {
                 task: Some("review the diff".into()),
                 capabilities: Some(SubagentSessionCapabilities { cancel: true }),
                 state: None,
+                tool_call_id: Some("call_agent".into()),
                 ..SubagentUpdate::default()
             }),
             serde_json::json!({
@@ -1995,7 +1999,8 @@ mod tests {
                 "subagentSessionId": "child",
                 "name": "reviewer",
                 "task": "review the diff",
-                "capabilities": {"cancel": true}
+                "capabilities": {"cancel": true},
+                "toolCallId": "call_agent"
             }),
         );
         for (state, name) in [

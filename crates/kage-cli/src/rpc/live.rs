@@ -61,6 +61,8 @@ pub(super) struct SubagentSeed {
     pub(super) parent: SessionId,
     pub(super) agent: String,
     pub(super) description: String,
+    /// The parent's call that started the agent.
+    pub(super) tool_call_id: String,
     /// Where the agent already ended: the state to announce. `None`
     /// leaves the client reading it as running.
     pub(super) ended: Option<SubagentState>,
@@ -434,6 +436,7 @@ impl Live {
                     parent: node.parent,
                     agent: node.agent.clone(),
                     description: node.description.clone(),
+                    tool_call_id: node.tool_call_id.to_string(),
                     ended,
                 }
             })
@@ -656,6 +659,7 @@ impl CliAcpAgent {
                     task: Some(seed.description.clone()),
                     capabilities: Some(SubagentSessionCapabilities { cancel: true }),
                     state: seed.ended,
+                    tool_call_id: Some(seed.tool_call_id.clone()),
                     ..SubagentUpdate::default()
                 }),
             );

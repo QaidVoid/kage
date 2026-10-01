@@ -436,10 +436,10 @@ impl Bridge {
     fn handle_subagent(&mut self, session: SessionId, event: &Event) {
         if let Event::Host(HostEvent::AgentSpawned {
             parent,
+            tool_call_id,
             agent,
             description,
             swarm,
-            ..
         }) = event
         {
             let Some(parent_id) = self.client_of(*parent) else {
@@ -465,6 +465,7 @@ impl Bridge {
                 }),
                 state: None,
                 reason: None,
+                tool_call_id: Some(tool_call_id.to_string()),
             };
             send_update(
                 &self.peer,

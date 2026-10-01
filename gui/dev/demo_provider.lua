@@ -188,6 +188,21 @@ local function script_for(prompt)
       append(hit.key)
     end
   end
+  -- A text-only step ends the turn, so in a combined script it rides
+  -- the next step's tool calls instead and the run keeps going.
+  local merged = {}
+  for i, step in ipairs(steps) do
+    local next_step = steps[i + 1]
+    local prev = merged[#merged]
+    if prev and prev.carry then
+      merged[#merged] = { say = prev.say, think = step.think, tools = step.tools, plan = step.plan, error = step.error }
+    else
+      local carry = step.say and not step.tools and not step.plan and not step.error
+        and next_step and (next_step.tools or next_step.plan) and not next_step.say
+      merged[#merged + 1] = carry and { say = step.say, think = step.think, carry = true } or step
+    end
+  end
+  steps = merged
   if #steps == 0 then
     -- Plain prompts and child agents: look around, then answer.
     return {

@@ -23,6 +23,17 @@ pub(crate) fn models_cache_path() -> Result<PathBuf, String> {
     Ok(cache_root()?.join("models.json"))
 }
 
+/// Resolve the directory for sockets and other per-boot files:
+/// `$XDG_RUNTIME_DIR/kage`, or `$XDG_DATA_HOME/kage/run` when no
+/// runtime directory is set.
+#[cfg(unix)]
+pub(crate) fn runtime_dir() -> Result<PathBuf, String> {
+    match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir).join("kage")),
+        _ => Ok(data_root()?.join("run")),
+    }
+}
+
 /// Resolve the XDG-style directory holding session files:
 /// `$XDG_DATA_HOME/kage/sessions` (default `~/.local/share/kage/sessions`).
 pub(crate) fn sessions_dir() -> Result<PathBuf, String> {

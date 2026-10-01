@@ -721,6 +721,330 @@ mod tests {
         }
     }
 
+    /// A message carrying every content block, an inline and a remote
+    /// image among them.
+    fn rich_message() -> Message {
+        Message::new(
+            Role::Assistant,
+            vec![
+                Content::Text { text: "q".into() },
+                Content::Thinking {
+                    text: "hm".into(),
+                    signature: Some(crate::ThinkingSignature {
+                        model: "anthropic/claude".into(),
+                        data: "sig".into(),
+                        redacted: false,
+                    }),
+                    duration_ms: Some(1_250),
+                },
+                Content::Image {
+                    source: crate::ImageSource::Base64 {
+                        data: "iVBORw0KGgo=".into(),
+                    },
+                    mime: "image/png".into(),
+                },
+                Content::Image {
+                    source: crate::ImageSource::Url {
+                        url: "https://example.com/a.png".into(),
+                    },
+                    mime: "image/png".into(),
+                },
+                Content::ToolCall {
+                    id: ToolCallId::new("call_1"),
+                    name: "read".into(),
+                    input: serde_json::json!({ "path": "a", "offset": 3, "ratio": 0.5 }),
+                },
+                Content::ToolResultBlock {
+                    call_id: ToolCallId::new("call_1"),
+                    output: "ok".into(),
+                    is_error: false,
+                },
+                Content::Custom {
+                    kind: "plugin:tps".into(),
+                    data: serde_json::json!({ "tps": 41.5, "n": u64::MAX }),
+                },
+            ],
+            Some(MessageId::new()),
+        )
+    }
+
+    fn loop_events() -> Vec<LoopEvent> {
+        let id = MessageId::new();
+        let call = ToolCallId::new("call_1");
+        vec![
+            LoopEvent::MessageStart { id },
+            LoopEvent::TextDelta {
+                id,
+                delta: "d".into(),
+            },
+            LoopEvent::ThinkingDelta {
+                id,
+                delta: "t".into(),
+            },
+            LoopEvent::ToolCallStart {
+                id: call.clone(),
+                name: "shell".into(),
+                input_partial: serde_json::json!({ "command": "ls", "timeout": 30 }),
+            },
+            LoopEvent::ToolCallArgsDelta {
+                id: call.clone(),
+                name: "shell".into(),
+                input_partial: serde_json::json!({}),
+            },
+            LoopEvent::ToolExecutionStart { id: call.clone() },
+            LoopEvent::ToolUpdate {
+                id: call.clone(),
+                update: crate::ToolUpdate {
+                    content: "1/2".into(),
+                    structured: Some(serde_json::json!({ "done": 1 })),
+                },
+            },
+            LoopEvent::ToolCallEnd {
+                id: call,
+                output: crate::ToolOutput {
+                    is_error: false,
+                    text: "a".into(),
+                    structured: Some(serde_json::json!({ "exit_code": 0 })),
+                    terminate: true,
+                },
+            },
+            LoopEvent::MessageEnd {
+                id,
+                usage: TokenUsage {
+                    input: 12,
+                    output: 34,
+                    cache_read: u64::MAX,
+                    cache_write: 0,
+                },
+                stop_reason: crate::StopReason::MaxTokens,
+            },
+            LoopEvent::MessageAppended {
+                message: Arc::new(rich_message()),
+            },
+            LoopEvent::TurnStarted { index: 1 },
+            LoopEvent::TurnEnded {
+                index: 1,
+                had_tool_calls: false,
+            },
+            LoopEvent::Compaction {
+                kept: 2,
+                summarized: 9,
+                summary: "s".into(),
+            },
+            LoopEvent::ProviderRetry {
+                attempt: 2,
+                max_attempts: 4,
+                wait_secs: 8,
+                requested_secs: Some(300),
+                error: "busy".into(),
+            },
+            LoopEvent::Error {
+                kind: LoopError::RateLimited {
+                    message: "slow down".into(),
+                    retry_after_secs: Some(60),
+                },
+            },
+        ]
+    }
+
+    /// The host events about runs, state and sessions.
+    fn session_host_events() -> Vec<HostEvent> {
+        vec![
+            HostEvent::RunStarted,
+            HostEvent::RunEnded {
+                outcome: RunOutcome::Completed,
+            },
+            HostEvent::RunEnded {
+                outcome: RunOutcome::Failed {
+                    error: LoopError::Tool {
+                        name: "shell".into(),
+                        message: "boom".into(),
+                    },
+                },
+            },
+            HostEvent::StateChanged {
+                state: SessionState {
+                    model: "anthropic/claude-sonnet-4-6".into(),
+                    thinking: None,
+                    thinking_effective: Some(ThinkingLevel::Medium),
+                    thinking_levels: vec![ThinkingLevel::Low, ThinkingLevel::High],
+                    input: Inputs::of(&[crate::Input::Text, crate::Input::Image]),
+                    permission_mode: Some(PermissionAction::Deny),
+                    working: true,
+                    swarm: true,
+                    goal: Some("ship it".into()),
+                    plan: true,
+                    shells: 2,
+                },
+            },
+            HostEvent::UsageUpdated {
+                usage: Usage {
+                    total: TokenUsage {
+                        input: 1_000_000,
+                        output: 2,
+                        cache_read: 3,
+                        cache_write: 4,
+                    },
+                    context_used: 900,
+                    context_window: 200_000,
+                    cost: 0.123_456_789,
+                },
+            },
+            HostEvent::SessionChanged {
+                path: PathBuf::from("/tmp/s.jsonl"),
+                title: None,
+                messages: vec![Arc::new(rich_message())],
+                compaction: Some(CompactionCounts {
+                    summarized: 10,
+                    kept: 3,
+                }),
+            },
+            HostEvent::TitleChanged { title: "t".into() },
+        ]
+    }
+
+    /// The host events about asks, notices, shells, agents and MCP.
+    fn other_host_events() -> Vec<HostEvent> {
+        vec![
+            HostEvent::PermissionRequested {
+                request_id: RequestId(u64::MAX),
+                tool_call_id: None,
+                tool: "write".into(),
+                subject: "{}".into(),
+                input: serde_json::json!({ "path": "a", "bytes": 12 }),
+            },
+            HostEvent::PermissionResolved {
+                request_id: RequestId(1),
+            },
+            HostEvent::Notice {
+                level: NoticeLevel::Success,
+                text: "done".into(),
+                transient: true,
+            },
+            HostEvent::ShellOutput {
+                command: "ls".into(),
+                tail: "a\nb".into(),
+            },
+            HostEvent::ShellFinished {
+                command: "false".into(),
+                output: String::new(),
+                exit_code: None,
+            },
+            HostEvent::AgentSpawned {
+                parent: SessionId::new(),
+                tool_call_id: ToolCallId::new("call_2"),
+                agent: "explore".into(),
+                description: "map".into(),
+                swarm: Some(SwarmMember {
+                    batch: Some(ToolCallId::new("call_2")),
+                    item: "src/a.rs".into(),
+                    index: 1,
+                    total: 3,
+                }),
+            },
+            HostEvent::AgentPaused {
+                reason: "rate limited".into(),
+            },
+            HostEvent::McpServers {
+                servers: vec![McpServerInfo {
+                    name: "srv".into(),
+                    status: McpServerStatus::Failed {
+                        error: "gone".into(),
+                    },
+                    tools: 0,
+                    resources: Vec::new(),
+                    templates: Vec::new(),
+                    prompts: Vec::new(),
+                }],
+            },
+            HostEvent::PromptWithdrawn {
+                delivery: Delivery::Queue,
+                content: Some(rich_message().content),
+            },
+        ]
+    }
+
+    #[test]
+    fn every_event_roundtrips_inside_an_envelope() {
+        let events = loop_events()
+            .into_iter()
+            .map(Event::from)
+            .chain(session_host_events().into_iter().map(Event::from))
+            .chain(other_host_events().into_iter().map(Event::from));
+        for event in events {
+            let env = envelope(event);
+            let line = serde_json::to_string(&env).unwrap();
+            let back: Envelope = serde_json::from_str(&line).unwrap();
+            assert_eq!(back, env, "{line}");
+        }
+    }
+
+    #[test]
+    fn every_command_roundtrips() {
+        let kinds = vec![
+            CommandKind::Prompt {
+                content: rich_message().content,
+                delivery: Delivery::Steer,
+            },
+            CommandKind::WithdrawPrompt {
+                delivery: Delivery::Queue,
+            },
+            CommandKind::Cancel,
+            CommandKind::ResolvePermission {
+                request_id: RequestId(9),
+                decision: PermissionDecision::AllowSession,
+            },
+            CommandKind::SetModel {
+                model: "openai/gpt-5".into(),
+            },
+            CommandKind::SetThinking {
+                level: Some(ThinkingLevel::Off),
+            },
+            CommandKind::SetPermissionMode { mode: None },
+            CommandKind::Compact,
+            CommandKind::SetTitle { title: "t".into() },
+            CommandKind::Shell {
+                command: "ls".into(),
+            },
+            CommandKind::NewSession,
+            CommandKind::LoadSession {
+                path: PathBuf::from("/tmp/s.jsonl"),
+            },
+            CommandKind::Fork {
+                at: Some("01J".into()),
+                switch: true,
+            },
+            CommandKind::ForkFile {
+                path: PathBuf::from("/tmp/s.jsonl"),
+            },
+            CommandKind::Clone,
+            CommandKind::DeleteSession {
+                path: PathBuf::from("/tmp/s.jsonl"),
+            },
+            CommandKind::Export { path: None },
+            CommandKind::RestartMcp {
+                server: "srv".into(),
+            },
+            CommandKind::SwarmMode { on: true },
+            CommandKind::SetGoal {
+                goal: Some("g".into()),
+            },
+            CommandKind::PlanMode { on: false },
+            CommandKind::Close,
+            CommandKind::Shutdown,
+        ];
+        for kind in kinds {
+            for command in [
+                Command::active(kind.clone()),
+                Command::to(SessionId::new(), kind.clone()),
+            ] {
+                let line = serde_json::to_string(&command).unwrap();
+                let back: Command = serde_json::from_str(&line).unwrap();
+                assert_eq!(back, command, "{line}");
+            }
+        }
+    }
+
     #[test]
     fn agent_spawned_has_its_own_tag() {
         let parent = SessionId::new();

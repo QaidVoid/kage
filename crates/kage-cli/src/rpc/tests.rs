@@ -4720,3 +4720,6 @@ fn the_model_catalog_lists_each_provider_with_its_models() {
     assert_eq!(ids, ["mock/m", "mock/other"]);
     assert_eq!(mock["models"][0]["name"], "Mock m");
 }
+
+#[cfg(unix)]
+mod link;

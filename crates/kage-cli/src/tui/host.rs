@@ -17,6 +17,65 @@ use kage_provider::ProviderError;
 
 use crate::engine::{AUTO_THINKING, Commander};
 
+/// Where the TUI's commands go: the engine in this process, or the
+/// `kage serve` the TUI attached to.
+#[derive(Clone)]
+pub(crate) enum Link {
+    /// The engine in this process.
+    Local(Commander),
+    /// A session a `kage serve` hosts.
+    #[cfg(unix)]
+    Remote(Arc<super::remote::Remote>),
+}
+
+impl Link {
+    pub(crate) fn send(&self, command: Command) {
+        match self {
+            Self::Local(commander) => commander.send(command),
+            #[cfg(unix)]
+            Self::Remote(remote) => remote.send(&command),
+        }
+    }
+
+    /// Publish a host event, such as a notice, on the active session.
+    pub(crate) fn publish(&self, event: HostEvent) {
+        match self {
+            Self::Local(commander) => commander.publish(event),
+            #[cfg(unix)]
+            Self::Remote(remote) => remote.publish(event),
+        }
+    }
+
+    /// Resolve models against `registry` from the next run on. Serve
+    /// keeps its own registry.
+    fn set_registry(&self, registry: Arc<ProviderRegistry>) {
+        match self {
+            Self::Local(commander) => commander.set_registry(registry),
+            #[cfg(unix)]
+            Self::Remote(_) => {}
+        }
+    }
+
+    /// Replace every session's plugin tools after a plugin reload.
+    /// Serve's plugins are its own.
+    fn reload_plugin_tools(&self) {
+        match self {
+            Self::Local(commander) => commander.reload_plugin_tools(),
+            #[cfg(unix)]
+            Self::Remote(_) => {}
+        }
+    }
+
+    /// The process id of the serve the TUI is attached to.
+    fn serve_pid(&self) -> Option<u32> {
+        match self {
+            Self::Local(_) => None,
+            #[cfg(unix)]
+            Self::Remote(remote) => Some(remote.pid),
+        }
+    }
+}
+
 /// What the TUI host knows about the active session, kept current by
 /// [`mirror`].
 pub(crate) struct Mirror {
@@ -96,7 +155,7 @@ pub(crate) fn mirror(
 
 /// Everything the request thread needs.
 pub(crate) struct Host {
-    pub commander: Commander,
+    pub link: Link,
     pub registry: Arc<ProviderRegistry>,
     pub plugins: Option<Arc<PluginRuntime>>,
     pub plugins_dir: Option<PathBuf>,
@@ -120,11 +179,11 @@ impl Host {
     }
 
     fn send(&self, kind: CommandKind) {
-        self.commander.send(Command::active(kind));
+        self.link.send(Command::active(kind));
     }
 
     fn notify(&self, text: String) {
-        self.commander.publish(HostEvent::Notice {
+        self.link.publish(HostEvent::Notice {
             level: NoticeLevel::Info,
             text,
             transient: true,
@@ -132,7 +191,7 @@ impl Host {
     }
 
     fn error(&self, text: String) {
-        self.commander.publish(HostEvent::Notice {
+        self.link.publish(HostEvent::Notice {
             level: NoticeLevel::Error,
             text,
             transient: false,
@@ -154,8 +213,33 @@ impl Host {
         }
     }
 
+    /// Refuses `request` with a notice when it would replace the session
+    /// a `kage serve` shares with other clients.
+    fn refused_while_attached(&self, request: &RunRequest) -> bool {
+        let Some(pid) = self.link.serve_pid() else {
+            return false;
+        };
+        let op = match request {
+            RunRequest::NewSession => "a new session",
+            RunRequest::CloneSession => "cloning",
+            RunRequest::ResumeSession(_) | RunRequest::SwitchSession(SwitchTarget::Session(_)) => {
+                "switching sessions"
+            }
+            RunRequest::SwitchSession(SwitchTarget::PendingFork(_)) => "switching to a fork",
+            _ => return false,
+        };
+        self.error(format!(
+            "{op} is not available while attached to kage serve (pid {pid}); \
+             quit and start kage again for it"
+        ));
+        true
+    }
+
     #[expect(clippy::too_many_lines, reason = "one match arm per request kind")]
     fn handle(&mut self, request: RunRequest) {
+        if self.refused_while_attached(&request) {
+            return;
+        }
         match request {
             RunRequest::Submit {
                 text,
@@ -181,18 +265,16 @@ impl Host {
                 };
                 let kind = CommandKind::Prompt { content, delivery };
                 match session {
-                    Some(session) => self.commander.send(Command::to(session, kind)),
+                    Some(session) => self.link.send(Command::to(session, kind)),
                     None => self.send(kind),
                 }
             }
             RunRequest::Cancel { session } => match session {
-                Some(session) => self
-                    .commander
-                    .send(Command::to(session, CommandKind::Cancel)),
+                Some(session) => self.link.send(Command::to(session, CommandKind::Cancel)),
                 None => self.send(CommandKind::Cancel),
             },
             RunRequest::RecallPrompt { session, delivery } => match session {
-                Some(session) => self.commander.send(Command::to(
+                Some(session) => self.link.send(Command::to(
                     session,
                     CommandKind::WithdrawPrompt { delivery },
                 )),
@@ -231,7 +313,9 @@ impl Host {
             RunRequest::RunShell(command) => self.send(CommandKind::Shell { command }),
             RunRequest::NewSession => self.send(CommandKind::NewSession),
             RunRequest::CloneSession => self.send(CommandKind::Clone),
-            RunRequest::ExportSession(path) => self.send(CommandKind::Export { path }),
+            RunRequest::ExportSession(path) => self.send(CommandKind::Export {
+                path: path.map(|path| std::path::absolute(&path).unwrap_or(path)),
+            }),
             RunRequest::ForkSessionFile(path) => self.send(CommandKind::ForkFile { path }),
             RunRequest::DeleteSession(path) => self.send(CommandKind::DeleteSession { path }),
             RunRequest::ResumeSession(path) => {
@@ -283,7 +367,7 @@ impl Host {
                 match command {
                     Some(cmd) => {
                         let output =
-                            run_bridged_command(&rt, &cmd, &args, &self.dialog_tx, &self.commander);
+                            run_bridged_command(&rt, &cmd, &args, &self.dialog_tx, &self.link);
                         self.show_plugin_output(output);
                     }
                     None => self.error(format!("no plugin command: {name}")),
@@ -293,7 +377,7 @@ impl Host {
                 let Some(rt) = self.plugins.clone() else {
                     return;
                 };
-                let output = run_bridged_keymap(&rt, id, &self.dialog_tx, &self.commander);
+                let output = run_bridged_keymap(&rt, id, &self.dialog_tx, &self.link);
                 self.show_plugin_output(output);
             }
             RunRequest::RefreshProviders => self.refresh_providers(),
@@ -373,7 +457,7 @@ impl Host {
         let Some(output) = output.filter(|o| !o.text.is_empty()) else {
             return;
         };
-        self.commander.publish(HostEvent::Notice {
+        self.link.publish(HostEvent::Notice {
             level: if output.is_error {
                 NoticeLevel::Error
             } else {
@@ -439,7 +523,7 @@ impl Host {
         }
         let active_ok = fresh.resolve(&lock(&self.mirror).state.model).is_ok();
         self.registry = Arc::new(fresh);
-        self.commander.set_registry(Arc::clone(&self.registry));
+        self.link.set_registry(Arc::clone(&self.registry));
         Ok(active_ok)
     }
 
@@ -452,7 +536,7 @@ impl Host {
             return;
         };
         let reload = rt.reload_all(self.plugins_dir.as_deref());
-        self.commander.reload_plugin_tools();
+        self.link.reload_plugin_tools();
         super::support::register_block_renderers(&rt);
         if let Err(e) = self.rebuild_registry() {
             self.error(format!("providers not refreshed: {e}"));

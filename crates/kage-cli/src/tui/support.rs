@@ -18,7 +18,7 @@ pub(crate) fn run_bridged_command(
     cmd: &kage_plugin::LuaCommand,
     raw: &str,
     dialog_tx: &mpsc::Sender<PluginDialog>,
-    commander: &Commander,
+    link: &Link,
 ) -> Option<CommandOutput> {
     let label = format!("command {}", cmd.name());
     let prep = match cmd.prepare_bridge(raw, &serde_json::Value::Null) {
@@ -33,7 +33,7 @@ pub(crate) fn run_bridged_command(
         Ok(step) => step,
         Err(e) => return Some(error_output(&label, &e.to_string())),
     };
-    drive_bridge(rt, &label, step, dialog_tx, commander)
+    drive_bridge(rt, &label, step, dialog_tx, link)
 }
 
 /// Run a key mapping's Lua handler through the coroutine bridge,
@@ -44,7 +44,7 @@ pub(crate) fn run_bridged_keymap(
     rt: &PluginRuntime,
     id: u64,
     dialog_tx: &mpsc::Sender<PluginDialog>,
-    commander: &Commander,
+    link: &Link,
 ) -> Option<CommandOutput> {
     let label = "key mapping";
     let handler = match rt.keymap_handler(id) {
@@ -55,7 +55,7 @@ pub(crate) fn run_bridged_keymap(
         Ok(step) => step,
         Err(e) => return Some(error_output(label, &e.to_string())),
     };
-    drive_bridge(rt, label, step, dialog_tx, commander)
+    drive_bridge(rt, label, step, dialog_tx, link)
 }
 
 /// Drive a started bridge call to completion: service each suspend
@@ -67,13 +67,13 @@ pub(crate) fn drive_bridge(
     label: &str,
     mut step: BridgeStep,
     dialog_tx: &mpsc::Sender<PluginDialog>,
-    commander: &Commander,
+    link: &Link,
 ) -> Option<CommandOutput> {
     loop {
         match step {
             BridgeStep::Done(value) => return Some(CommandOutput::from_json(&value)),
             BridgeStep::Suspended(req) => {
-                let resumed = match service_dialog(&req, dialog_tx, commander) {
+                let resumed = match service_dialog(&req, dialog_tx, link) {
                     Some(value) => rt.bridge_resume(&value),
                     None => rt.bridge_cancel(),
                 };
@@ -97,7 +97,7 @@ pub(crate) fn drive_bridge(
 pub(crate) fn service_dialog(
     req: &kage_plugin::SuspendRequest,
     dialog_tx: &mpsc::Sender<PluginDialog>,
-    commander: &Commander,
+    link: &Link,
 ) -> Option<serde_json::Value> {
     let (reply_tx, reply_rx) = mpsc::channel();
     let dialog = match req.kind.as_str() {
@@ -108,7 +108,7 @@ pub(crate) fn service_dialog(
                 reply: reply_tx,
             },
             Err(e) => {
-                dialog_error(commander, format!("ui.select: {e}"));
+                dialog_error(link, format!("ui.select: {e}"));
                 return None;
             }
         },
@@ -119,7 +119,7 @@ pub(crate) fn service_dialog(
                 reply: reply_tx,
             },
             Err(e) => {
-                dialog_error(commander, format!("ui.confirm: {e}"));
+                dialog_error(link, format!("ui.confirm: {e}"));
                 return None;
             }
         },
@@ -130,7 +130,7 @@ pub(crate) fn service_dialog(
                 reply: reply_tx,
             },
             Err(e) => {
-                dialog_error(commander, format!("ui.input: {e}"));
+                dialog_error(link, format!("ui.input: {e}"));
                 return None;
             }
         },
@@ -141,12 +141,12 @@ pub(crate) fn service_dialog(
                 reply: reply_tx,
             },
             Err(e) => {
-                dialog_error(commander, format!("ui.editor: {e}"));
+                dialog_error(link, format!("ui.editor: {e}"));
                 return None;
             }
         },
         other => {
-            dialog_error(commander, format!("unsupported plugin dialog: {other}"));
+            dialog_error(link, format!("unsupported plugin dialog: {other}"));
             return None;
         }
     };
@@ -156,8 +156,8 @@ pub(crate) fn service_dialog(
     reply_rx.recv().unwrap_or(None)
 }
 
-fn dialog_error(commander: &Commander, text: String) {
-    commander.publish(kage_core::protocol::HostEvent::Notice {
+fn dialog_error(link: &Link, text: String) {
+    link.publish(kage_core::protocol::HostEvent::Notice {
         level: NoticeLevel::Error,
         text,
         transient: false,

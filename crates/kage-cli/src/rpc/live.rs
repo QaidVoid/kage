@@ -20,7 +20,7 @@ use kage_acp::acp::{
 use kage_acp::agent::{PromptContext, send_update};
 use kage_core::protocol::{
     AgentState, AgentTree, Command, CommandKind, EXIT_PLAN_TOOL, Envelope, Event, HostEvent,
-    NoticeLevel, RequestId, RunOutcome, SwarmMember,
+    McpServerInfo, NoticeLevel, RequestId, RunOutcome, SessionState, SwarmMember, Usage,
 };
 use kage_core::sync::lock;
 use kage_core::{LoopError, LoopEvent, MessageId, SessionId, ToolCallId};
@@ -89,12 +89,17 @@ pub(super) struct AskSeed {
 
 /// A permission request still open in the engine.
 #[derive(Clone)]
+#[cfg_attr(
+    not(unix),
+    allow(dead_code, reason = "only link clients read the subject")
+)]
 pub(super) struct OpenAsk {
     pub(super) request_id: RequestId,
     /// Session that asked: the attached session or an agent under it.
     pub(super) session: SessionId,
     pub(super) tool_call_id: Option<ToolCallId>,
     pub(super) tool: String,
+    pub(super) subject: String,
     pub(super) input: serde_json::Value,
 }
 
@@ -186,6 +191,10 @@ struct LiveTool {
 }
 
 /// Live engine state, folded by one subscriber per host.
+#[cfg_attr(
+    not(unix),
+    allow(dead_code, reason = "only link clients read the cached state")
+)]
 pub(super) struct Live {
     commander: Commander,
     flight: HashMap<SessionId, Flight>,
@@ -202,6 +211,11 @@ pub(super) struct Live {
     paused: HashMap<SessionId, String>,
     owners: HashMap<SessionId, u64>,
     working: HashSet<SessionId>,
+    /// The latest state, usage and MCP servers of each client session,
+    /// for link clients attaching to it.
+    states: HashMap<SessionId, SessionState>,
+    usage: HashMap<SessionId, Usage>,
+    mcp: HashMap<SessionId, Vec<McpServerInfo>>,
     /// Connections holding each session open.
     attached: HashMap<SessionId, usize>,
     /// Sessions a close was sent for and not refused.
@@ -221,6 +235,9 @@ impl Live {
             paused: HashMap::new(),
             owners: HashMap::new(),
             working: HashSet::new(),
+            states: HashMap::new(),
+            usage: HashMap::new(),
+            mcp: HashMap::new(),
             attached: HashMap::new(),
             closing: HashSet::new(),
         }
@@ -232,7 +249,30 @@ impl Live {
         let is_agent = self.tree.apply(envelope);
         match &envelope.event {
             Event::Loop(event) => self.observe_loop(envelope.session, event),
-            Event::Host(event) => self.observe_host(envelope.session, event, is_agent),
+            Event::Host(event) => {
+                self.remember(envelope.session, event);
+                self.observe_host(envelope.session, event, is_agent);
+            }
+        }
+    }
+
+    /// Keeps the latest state, usage and MCP servers of client
+    /// sessions, which a link client attaching later is sent.
+    fn remember(&mut self, session: SessionId, event: &HostEvent) {
+        if self.tree.get(session).is_some() {
+            return;
+        }
+        match event {
+            HostEvent::StateChanged { state } => {
+                self.states.insert(session, state.clone());
+            }
+            HostEvent::UsageUpdated { usage } => {
+                self.usage.insert(session, *usage);
+            }
+            HostEvent::McpServers { servers } => {
+                self.mcp.insert(session, servers.clone());
+            }
+            _ => {}
         }
     }
 
@@ -287,8 +327,8 @@ impl Live {
                 request_id,
                 tool_call_id,
                 tool,
+                subject,
                 input,
-                ..
             } => {
                 self.asks.insert(
                     *request_id,
@@ -297,6 +337,7 @@ impl Live {
                         request_id: *request_id,
                         tool_call_id: tool_call_id.clone(),
                         tool: tool.clone(),
+                        subject: subject.clone(),
                         input: input.clone(),
                     },
                 );
@@ -404,9 +445,10 @@ impl Live {
             .send(Command::to(session, CommandKind::Close));
     }
 
-    /// What a connection attaching to `attached` needs.
-    pub(super) fn snapshot(&self, attached: SessionId) -> Snapshot {
-        let flight = self.flight.get(&attached);
+    /// The message `session` is streaming, with the loop events that
+    /// replay it in stream order.
+    fn flight_events(&self, session: SessionId) -> (Option<MessageId>, Vec<LoopEvent>) {
+        let flight = self.flight.get(&session);
         let message = flight.and_then(|flight| flight.message);
         let mut events = Vec::new();
         if let Some(flight) = flight {
@@ -436,6 +478,12 @@ impl Live {
                 }
             }
         }
+        (message, events)
+    }
+
+    /// What a connection attaching to `attached` needs.
+    pub(super) fn snapshot(&self, attached: SessionId) -> Snapshot {
+        let (message, events) = self.flight_events(attached);
         let mut asks: Vec<AskSeed> = self
             .asks
             .values()
@@ -497,6 +545,9 @@ impl Live {
             self.titles.remove(&id);
             self.owners.remove(&id);
             self.working.remove(&id);
+            self.states.remove(&id);
+            self.usage.remove(&id);
+            self.mcp.remove(&id);
             let roots: Vec<SessionId> = self
                 .tree
                 .under(id)
@@ -558,6 +609,104 @@ impl Live {
     /// reopens its file instead of attaching to a dropped session.
     pub(super) fn is_closing(&self, id: SessionId) -> bool {
         self.closing.contains(&id)
+    }
+}
+
+/// What link clients ([`super::link`]) read.
+#[cfg(unix)]
+impl Live {
+    /// The live state of `root` as envelopes, for a link client that
+    /// replayed the session file whose messages are `file`: the state,
+    /// usage, MCP servers and title, the run and the message in flight
+    /// unless the file holds it, the agents still running or paused
+    /// with their own messages in flight, and the open asks.
+    pub(super) fn envelopes(&self, root: SessionId, file: &HashSet<MessageId>) -> Vec<Envelope> {
+        let at = |session: SessionId, event: Event| Envelope {
+            session,
+            seq: 0,
+            event,
+        };
+        let mut out = Vec::new();
+        if let Some(state) = self.states.get(&root) {
+            let state = state.clone();
+            out.push(at(root, HostEvent::StateChanged { state }.into()));
+        }
+        if let Some(usage) = self.usage.get(&root) {
+            out.push(at(root, HostEvent::UsageUpdated { usage: *usage }.into()));
+        }
+        if let Some(servers) = self.mcp.get(&root) {
+            let servers = servers.clone();
+            out.push(at(root, HostEvent::McpServers { servers }.into()));
+        }
+        if let Some(title) = self.titles.get(&root) {
+            let title = title.clone();
+            out.push(at(root, HostEvent::TitleChanged { title }.into()));
+        }
+        if self.working.contains(&root) {
+            out.push(at(root, HostEvent::RunStarted.into()));
+        }
+        let (message, flight) = self.flight_events(root);
+        if !message.is_some_and(|message| file.contains(&message)) {
+            if let Some(id) = message {
+                out.push(at(root, LoopEvent::MessageStart { id }.into()));
+            }
+            out.extend(flight.into_iter().map(|event| at(root, event.into())));
+        }
+        let spawns = self.spawns.get(&root).into_iter().flatten();
+        for spawn in spawns.filter(|spawn| {
+            self.running.contains(&spawn.session) || self.paused.contains_key(&spawn.session)
+        }) {
+            out.push(spawn.envelope());
+            if let Some(reason) = self.paused.get(&spawn.session) {
+                let reason = reason.clone();
+                out.push(at(spawn.session, HostEvent::AgentPaused { reason }.into()));
+            }
+            let (message, flight) = self.flight_events(spawn.session);
+            if let Some(id) = message {
+                out.push(at(spawn.session, LoopEvent::MessageStart { id }.into()));
+            }
+            out.extend(
+                flight
+                    .into_iter()
+                    .map(|event| at(spawn.session, event.into())),
+            );
+        }
+        let mut asks: Vec<&OpenAsk> = self
+            .asks
+            .values()
+            .filter(|ask| self.tree.root_of(ask.session) == root)
+            .collect();
+        asks.sort_by_key(|ask| ask.request_id.0);
+        out.extend(asks.into_iter().map(|ask| {
+            let event = HostEvent::PermissionRequested {
+                request_id: ask.request_id,
+                tool_call_id: ask.tool_call_id.clone(),
+                tool: ask.tool.clone(),
+                subject: ask.subject.clone(),
+                input: ask.input.clone(),
+            };
+            at(ask.session, event.into())
+        }));
+        out
+    }
+
+    /// Whether `session` is `root` or an agent under it.
+    pub(super) fn in_tree(&self, root: SessionId, session: SessionId) -> bool {
+        self.tree.root_of(session) == root
+    }
+
+    /// The session that raised the open ask `request_id`.
+    pub(super) fn asker(&self, request_id: RequestId) -> Option<SessionId> {
+        self.asks.get(&request_id).map(|ask| ask.session)
+    }
+
+    /// The open asks under `root`, with the session that raised each.
+    pub(super) fn asks_under(&self, root: SessionId) -> Vec<(SessionId, RequestId)> {
+        self.asks
+            .values()
+            .filter(|ask| self.tree.root_of(ask.session) == root)
+            .map(|ask| (ask.session, ask.request_id))
+            .collect()
     }
 }
 

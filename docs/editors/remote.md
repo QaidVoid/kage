@@ -165,6 +165,34 @@ with the run; cancel the running prompt (`session/cancel`) or wait
 for it to end. Prompts from the client that owns the run are queued
 the same way as in `kage rpc`.
 
+## the TUI joins a session serve hosts
+
+A session open in `kage serve` is locked to it, so another kage
+process cannot append to its file. `kage resume <id>` (or
+`kage resume --last`) on such a session does not fail on the lock:
+the TUI finds the serve hosting it and attaches, showing "attached to
+kage serve (pid N)". It is one more client of the session, like an
+editor: it gets the transcript and the turn in progress, its prompts
+and approvals go to serve, and the busy and first-answer rules above
+apply to it too.
+
+Serve listens for this on a unix socket only its own user can reach:
+`serve-<pid>.sock` beside a `serve-<pid>.json` record, in
+`$XDG_RUNTIME_DIR/kage` (or `~/.local/share/kage/run` without a
+runtime directory). Both go away when serve stops. There is no token;
+the socket checks that the TUI runs as the same user.
+
+While attached, Lua runs in serve, so the TUI loads no plugins and no
+`init.lua` (keymaps, options and themes from `config.toml` still
+apply). Starting a new session, cloning, switching to a fork or
+resuming another session is refused with a notice; quit and start
+kage again for those. When serve stops, the TUI shows "serve stopped;
+session detached" and takes no more prompts. If no running serve
+hosts the locked session, the TUI says the session is open in another
+kage process, as before.
+
+This works on unix systems only.
+
 ## idle sessions close
 
 A session no client is attached to, with no run in flight and no open

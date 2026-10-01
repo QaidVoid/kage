@@ -32,6 +32,8 @@ mod bridge;
 mod content;
 mod fs;
 pub(crate) mod host;
+#[cfg(unix)]
+pub(crate) mod link;
 mod live;
 mod mcp;
 mod models;

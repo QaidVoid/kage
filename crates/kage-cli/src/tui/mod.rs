@@ -24,12 +24,15 @@ pub(crate) use kage_tui::{
     shared_session_usage, shared_toasts,
 };
 
-pub(crate) use crate::engine::Commander;
 pub(crate) use crate::plugins::setup_tui_runtime;
 
 mod entry;
 mod host;
+#[cfg(unix)]
+mod remote;
 mod support;
+
+pub(crate) use host::Link;
 
 pub use entry::run_tui;
 

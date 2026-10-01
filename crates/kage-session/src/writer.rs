@@ -241,6 +241,30 @@ fn repair_torn_tail(file: &mut File) -> std::io::Result<()> {
     file.sync_all()
 }
 
+/// Whether another writer holds the advisory lock on the session file
+/// at `path`, such as a TUI or `kage serve` hosting the session. The
+/// probe lock is released before returning. `false` when the file is
+/// missing or the filesystem does not support `flock`.
+#[must_use]
+pub fn is_locked(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use nix::fcntl::{Flock, FlockArg};
+        let Ok(file) = File::open(path) else {
+            return false;
+        };
+        matches!(
+            Flock::lock(file, FlockArg::LockSharedNonblock),
+            Err((_, nix::errno::Errno::EWOULDBLOCK))
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 /// Take an exclusive non-blocking advisory lock on the file.
 ///
 /// `EWOULDBLOCK` means another appender holds the lock, reported as
@@ -403,6 +427,20 @@ mod tests {
         assert!(matches!(err, SessionError::Locked { .. }));
         drop(w);
         SessionWriter::open(&path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_locked_while_a_writer_holds_the_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        assert!(!is_locked(&path), "a missing file is not locked");
+        let w = SessionWriter::create(&path, fresh_header()).unwrap();
+        assert!(is_locked(&path));
+        assert!(is_locked(&path), "the probe must not keep a lock");
+        drop(w);
+        assert!(!is_locked(&path));
+        let _w = SessionWriter::open(&path).unwrap();
     }
 
     #[test]

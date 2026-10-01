@@ -281,6 +281,18 @@ impl super::Dispatcher {
         };
         let writer = match SessionWriter::open(path) {
             Ok(writer) => writer,
+            Err(kage_session::SessionError::Locked { .. }) => {
+                let short = short_id(replay.header.session);
+                self.error(
+                    id,
+                    format!(
+                        "resume: session {short} is open in another kage process. Quit kage \
+                         there and resume it again. When a `kage serve` hosts it, \
+                         `kage resume {short}` attaches to it."
+                    ),
+                );
+                return;
+            }
             Err(err) => {
                 self.error(id, format!("resume {}: {err}", path.display()));
                 return;

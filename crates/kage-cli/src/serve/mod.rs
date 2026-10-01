@@ -14,6 +14,10 @@
 //! `GET /<file>` with a file under the `--web-dir` directory
 //! ([`assets`]), `405` for other methods, `404` elsewhere.
 //!
+//! On unix, serve also registers a local socket ([`crate::rpc::link`])
+//! that a kage TUI of the same user attaches through, so `kage resume`
+//! on a session open here joins it instead of failing on its lock.
+//!
 //! The accept loop runs on the main thread and hands every connection
 //! its own thread. SIGINT and SIGTERM cancel every run, give the
 //! sessions a moment to close their files, and exit with status 0; a
@@ -59,7 +63,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 
 /// How long the accept loop sleeps between polls. The listener is
 /// nonblocking so the shutdown flag is checked promptly.
-const ACCEPT_POLL: Duration = Duration::from_millis(25);
+pub(crate) const ACCEPT_POLL: Duration = Duration::from_millis(25);
 
 /// How long a rejected connection may take to collect its reply before
 /// the socket is dropped.
@@ -152,12 +156,42 @@ pub(crate) fn run(
 
     let stop = Arc::new(AtomicBool::new(false));
     install_signals(&stop, &log);
+    #[cfg(unix)]
+    let registration = start_link(&host, &stop, &log);
     accept_until(&listener, &host, &token, &web, &stop, &log);
 
+    #[cfg(unix)]
+    drop(registration);
     log("shutting down; cancelling runs");
     host.shutdown();
     thread::sleep(SHUTDOWN_GRACE);
     ExitCode::SUCCESS
+}
+
+/// Registers the link socket TUIs attach through and starts accepting
+/// on it. Serve runs on without it when that fails.
+#[cfg(unix)]
+fn start_link(
+    host: &Arc<Host>,
+    stop: &Arc<AtomicBool>,
+    log: &Log,
+) -> Option<crate::serve_registry::Registration> {
+    let registered =
+        crate::paths::runtime_dir().and_then(|dir| match crate::serve_registry::register(&dir) {
+            Ok((listener, registration)) => Ok((dir, listener, registration)),
+            Err(e) => Err(format!("{}: {e}", dir.display())),
+        });
+    match registered {
+        Ok((dir, listener, registration)) => {
+            log(&format!("TUI attach socket in {}", dir.display()));
+            crate::rpc::link::listen(listener, Arc::clone(host), Arc::clone(stop), log);
+            Some(registration)
+        }
+        Err(e) => {
+            log(&format!("warning: the TUI cannot attach here: {e}"));
+            None
+        }
+    }
 }
 
 /// Loads the token at [`token_path`], or replaces it when `rotate` is

@@ -1772,6 +1772,7 @@ dependencies = [
  "kage-session",
  "kage-tools",
  "kage-tui",
+ "nix 0.31.3",
  "rpassword",
  "serde",
  "serde_json",
@@ -2266,6 +2267,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]

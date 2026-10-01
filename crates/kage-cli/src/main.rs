@@ -38,6 +38,8 @@ mod providers;
 mod rpc;
 mod runtime_env;
 mod serve;
+#[cfg(unix)]
+mod serve_registry;
 mod state;
 mod title;
 mod trust;

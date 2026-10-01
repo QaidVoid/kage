@@ -711,6 +711,12 @@ impl WorkbenchView {
             .into_any_element()
     }
 
+    /// Shows the files the session changed.
+    pub fn open_changes(&mut self, cx: &mut Context<Self>) {
+        self.tab = Tab::Changes;
+        cx.notify();
+    }
+
     /// Shows the agents list.
     pub fn open_agents(&mut self, cx: &mut Context<Self>) {
         self.tab = Tab::Agents;

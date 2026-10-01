@@ -490,9 +490,120 @@ impl Render for FindBar {
     }
 }
 
+/// An app command the palette offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppAction {
+    /// Show the welcome pane for a fresh session.
+    NewSession,
+    /// Turn swarm mode on or off.
+    Swarm,
+    /// Turn plan mode on or off.
+    Plan,
+    /// Set or clear the goal.
+    Goal,
+    /// Show or hide the workbench.
+    Workbench,
+    /// Show or hide the sidebar.
+    Sidebar,
+    /// Show the agents list.
+    Agents,
+    /// Show the files the session changed.
+    Changes,
+    /// Open the settings.
+    Settings,
+    /// Open the theme cards.
+    Theme,
+}
+
+impl AppAction {
+    /// Runs the command through its window action, which the shell
+    /// handles.
+    pub fn dispatch(self, window: &mut Window, cx: &mut App) {
+        use crate::app::{
+            NewSession, OpenSettings, ReviewChanges, SetGoal, ShowAgents, TogglePlan,
+            ToggleSidebar, ToggleSwarm, ToggleWorkbench,
+        };
+        let action: Box<dyn gpui_kit::Action> = match self {
+            Self::NewSession => Box::new(NewSession),
+            Self::Swarm => Box::new(ToggleSwarm),
+            Self::Plan => Box::new(TogglePlan),
+            Self::Goal => Box::new(SetGoal),
+            Self::Workbench => Box::new(ToggleWorkbench),
+            Self::Sidebar => Box::new(ToggleSidebar),
+            Self::Agents => Box::new(ShowAgents),
+            Self::Changes => Box::new(ReviewChanges),
+            Self::Settings | Self::Theme => Box::new(OpenSettings),
+        };
+        window.dispatch_action(action, cx);
+    }
+}
+
+/// The app commands for a palette over `session`: the session ones
+/// only while a session shows, named for the state they flip.
+#[must_use]
+pub fn app_actions(session: Option<&kage_client::Session>, plan_on: bool) -> Vec<PaletteEntry> {
+    let action = |action, label: &str, keys: Option<&'static str>| PaletteEntry::Action {
+        action,
+        label: label.to_owned(),
+        keys,
+    };
+    let mut out = vec![action(AppAction::NewSession, "New session", Some("Ctrl N"))];
+    if let Some(session) = session {
+        let swarm = session
+            .config_options
+            .iter()
+            .any(|option| option.id == "swarm" && option.current_value == "on");
+        out.push(action(
+            AppAction::Swarm,
+            if swarm {
+                "Turn swarm mode off"
+            } else {
+                "Turn swarm mode on"
+            },
+            None,
+        ));
+        out.push(action(
+            AppAction::Plan,
+            if plan_on {
+                "Turn plan mode off"
+            } else {
+                "Turn plan mode on"
+            },
+            None,
+        ));
+        out.push(action(AppAction::Goal, "Set goal", None));
+    }
+    out.push(action(
+        AppAction::Workbench,
+        "Toggle workbench",
+        Some("Ctrl B"),
+    ));
+    out.push(action(
+        AppAction::Sidebar,
+        "Toggle sidebar",
+        Some("Ctrl \\"),
+    ));
+    if session.is_some() {
+        out.push(action(AppAction::Agents, "Show agents", None));
+        out.push(action(AppAction::Changes, "Review changes", None));
+    }
+    out.push(action(AppAction::Settings, "Settings", Some("Ctrl ,")));
+    out.push(action(AppAction::Theme, "Change theme", None));
+    out
+}
+
 /// One command palette row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteEntry {
+    /// An app command.
+    Action {
+        /// What runs.
+        action: AppAction,
+        /// The row text.
+        label: String,
+        /// Its shortcut, when it has one.
+        keys: Option<&'static str>,
+    },
     /// An agent command; running it fills the composer draft with the
     /// command text, ready for arguments.
     Command {
@@ -517,6 +628,7 @@ impl PaletteEntry {
     #[must_use]
     pub fn label(&self) -> String {
         match self {
+            Self::Action { label, .. } => label.clone(),
             Self::Command { name, .. } => format!("/{name}"),
             Self::Session { title, .. } => title
                 .clone()
@@ -528,7 +640,7 @@ impl PaletteEntry {
     #[must_use]
     pub fn badge(&self) -> &'static str {
         match self {
-            Self::Command { .. } => "command",
+            Self::Action { .. } | Self::Command { .. } => "command",
             Self::Session { open: true, .. } => "session",
             Self::Session { open: false, .. } => "recorded",
         }
@@ -538,6 +650,7 @@ impl PaletteEntry {
     #[must_use]
     pub fn detail(&self) -> String {
         match self {
+            Self::Action { .. } => String::new(),
             Self::Command { description, .. } => description.clone(),
             Self::Session { id, .. } => id.clone(),
         }
@@ -584,6 +697,22 @@ pub fn palette_entries(
         }
     }
     entries
+}
+
+/// The icon an app command's row leads with.
+fn action_icon(action: AppAction) -> IconName {
+    match action {
+        AppAction::NewSession => IconName::SquarePen,
+        AppAction::Swarm => IconName::Waypoints,
+        AppAction::Plan => IconName::ListTodo,
+        AppAction::Goal => IconName::Target,
+        AppAction::Workbench => IconName::PanelRight,
+        AppAction::Sidebar => IconName::PanelLeft,
+        AppAction::Agents => IconName::Users,
+        AppAction::Changes => IconName::FileDiff,
+        AppAction::Settings => IconName::Settings,
+        AppAction::Theme => IconName::Moon,
+    }
 }
 
 /// The command palette: a modal over the agent's commands and the
@@ -670,7 +799,21 @@ impl PaletteView {
             }
             sessions.push((info.session_id.clone(), info.title.clone(), false));
         }
-        palette_entries(commands, &sessions, &query)
+        let needle = query.to_lowercase();
+        let mut entries: Vec<PaletteEntry> = app_actions(store.active_session(), store.plan_on())
+            .into_iter()
+            .filter(|entry| needle.is_empty() || entry.label().to_lowercase().contains(&needle))
+            .collect();
+        // Recent sessions are a short list; a query widens it a little.
+        let cap = if needle.is_empty() { 5 } else { 8 };
+        let mut found = palette_entries(commands, &sessions, &query);
+        let commands = found
+            .iter()
+            .take_while(|entry| matches!(entry, PaletteEntry::Command { .. }))
+            .count();
+        found.truncate(commands + cap);
+        entries.extend(found);
+        entries
     }
 
     /// Opens the palette over a fresh query and focuses it.
@@ -714,6 +857,11 @@ impl PaletteView {
             return;
         };
         match entry {
+            PaletteEntry::Action { action, .. } => {
+                self.close(cx);
+                action.dispatch(window, cx);
+                return;
+            }
             PaletteEntry::Command { name, .. } => {
                 let text = format!("/{name} ");
                 let active = self.store.read(cx).active_id().map(str::to_owned);
@@ -790,7 +938,7 @@ impl Render for PaletteView {
         for (ix, entry) in entries.iter().enumerate() {
             let this = this.clone();
             let kind = match entry {
-                PaletteEntry::Command { .. } => "command",
+                PaletteEntry::Action { .. } | PaletteEntry::Command { .. } => "command",
                 PaletteEntry::Session { .. } => "session",
             };
             if kind != last_kind {
@@ -812,6 +960,7 @@ impl Render for PaletteView {
                 );
             }
             let (icon, mono_label) = match entry {
+                PaletteEntry::Action { action, .. } => (action_icon(*action), false),
                 PaletteEntry::Command { .. } => (IconName::Command, true),
                 PaletteEntry::Session { .. } => (IconName::MessageSquare, false),
             };
@@ -855,17 +1004,28 @@ impl Render for PaletteView {
                         .with_size(px(14.))
                         .text_color(p.faint),
                 )
-                .child(
-                    v_flex().flex_1().min_w_0().child(label_row).child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(FS_XS))
-                            .text_color(p.muted)
-                            .child(SharedString::from(entry.detail())),
-                    ),
-                )
-                .child(badge_chip(entry.badge(), p));
+                .child({
+                    let detail = entry.detail();
+                    v_flex().flex_1().min_w_0().child(label_row).when(
+                        !detail.is_empty(),
+                        |column| {
+                            column.child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(FS_XS))
+                                    .text_color(p.muted)
+                                    .child(SharedString::from(detail)),
+                            )
+                        },
+                    )
+                })
+                .child(match entry {
+                    PaletteEntry::Action { keys, .. } => {
+                        keys.map_or_else(div, |keys| kbd_chip(keys, p))
+                    }
+                    _ => badge_chip(entry.badge(), p),
+                });
             list = list.child(row);
         }
 
@@ -1890,7 +2050,13 @@ mod tests {
         let store = cx.new(|_| two_session_store());
         let (palette, visual) = palette_window(cx, store.clone());
         visual.update(|_, cx| {
-            assert_eq!(palette.read(cx).entries(cx).len(), 3);
+            let entries = palette.read(cx).entries(cx);
+            let actions = entries
+                .iter()
+                .filter(|entry| matches!(entry, PaletteEntry::Action { .. }))
+                .count();
+            assert_eq!(actions, 10, "the app commands lead, the session ones included");
+            assert_eq!(entries.len() - actions, 3, "then the command and both sessions");
         });
         visual.update(|window, cx| {
             palette.update(cx, |palette, cx| palette.open(window, cx));
@@ -1901,7 +2067,7 @@ mod tests {
         // before the test types into it. The field itself is focused at
         // once, because focusing is not a text write.
         visual.update(|window, cx| window.render_frame(cx));
-        visual.update(|window, cx| window.input("rev", cx));
+        visual.update(|window, cx| window.input("/rev", cx));
         visual.update(|window, cx| window.render_frame(cx));
         visual.update(|window, _| {
             assert!(

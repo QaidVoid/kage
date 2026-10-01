@@ -92,7 +92,12 @@ gpui_kit::actions!(
         SendPrompt,
         OpenFind,
         OpenPalette,
-        OpenSettings
+        OpenSettings,
+        ToggleSwarm,
+        TogglePlan,
+        SetGoal,
+        ShowAgents,
+        ReviewChanges
     ]
 );
 
@@ -736,6 +741,23 @@ impl Shell {
             .update(cx, |settings, cx| settings.open(section, window, cx));
     }
 
+    /// Turns swarm mode off, or asks before turning it on.
+    fn toggle_swarm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let on = self.store.read(cx).active_session().is_some_and(|session| {
+            session
+                .config_options
+                .iter()
+                .any(|option| option.id == "swarm" && option.current_value == "on")
+        });
+        if on {
+            self.store.act(cx, |store| store.set_option("swarm", "off"));
+        } else {
+            self.dialog.update(cx, |dialog, cx| {
+                dialog.open(DialogKind::ConfirmSwarm, window, cx);
+            });
+        }
+    }
+
     /// Toasts the messages the store left for the user.
     fn raise_notes(&mut self, cx: &mut Context<Self>) {
         let notes = self.store.update(cx, |store, _| store.take_notes());
@@ -1070,6 +1092,37 @@ impl Render for Shell {
             .on_action(cx.listener(|shell, _: &OpenFind, window, cx| shell.open_find(window, cx)))
             .on_action(cx.listener(|shell, _: &OpenSettings, window, cx| {
                 shell.open_settings(Section::General, window, cx);
+            }))
+            .on_action(cx.listener(|shell, _: &ToggleSwarm, window, cx| {
+                shell.toggle_swarm(window, cx);
+            }))
+            .on_action(cx.listener(|shell, _: &TogglePlan, _, cx| {
+                shell.store.act(cx, |store| {
+                    if store.plan_on() {
+                        store.exit_plan()
+                    } else {
+                        store.enter_plan()
+                    }
+                });
+            }))
+            .on_action(cx.listener(|shell, _: &SetGoal, window, cx| {
+                shell.dialog.update(cx, |dialog, cx| {
+                    dialog.open(DialogKind::Goal, window, cx);
+                });
+            }))
+            .on_action(cx.listener(|shell, _: &ShowAgents, _, cx| {
+                shell.workbench_visible = true;
+                shell
+                    .workbench
+                    .update(cx, |workbench, cx| workbench.open_agents(cx));
+                cx.notify();
+            }))
+            .on_action(cx.listener(|shell, _: &ReviewChanges, _, cx| {
+                shell.workbench_visible = true;
+                shell
+                    .workbench
+                    .update(cx, |workbench, cx| workbench.open_changes(cx));
+                cx.notify();
             }))
             .on_action(cx.listener(|shell, _: &OpenPalette, window, cx| {
                 shell.open_palette(window, cx);

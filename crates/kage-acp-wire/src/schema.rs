@@ -59,9 +59,53 @@ pub struct ClientCapabilities {
     /// its shape may still change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagents: Option<serde_json::Value>,
+    /// Extension facts; kage's own live under `kage`.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<ClientMeta>,
+}
+
+/// The `_meta` of [`ClientCapabilities`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ClientMeta {
+    /// What a kage client asks of the sessions it opens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kage: Option<KageClientCapabilities>,
+}
+
+/// What a kage client asks of the sessions it opens, under
+/// `clientCapabilities._meta.kage`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KageClientCapabilities {
+    /// How tools without a `[permissions]` rule are judged. Unset means
+    /// [`UnconfiguredTools::Ask`], the editor default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unconfigured_tools: Option<UnconfiguredTools>,
+}
+
+/// How a session judges a tool with no `[permissions]` rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnconfiguredTools {
+    /// Every such call asks the client first.
+    Ask,
+    /// Such calls run, as they do in the TUI. Tools of an MCP server
+    /// with no rule still ask.
+    Allow,
 }
 
 impl ClientCapabilities {
+    /// Whether the client asked for tools without a rule to run, as in
+    /// the TUI, instead of asking first.
+    #[must_use]
+    pub fn unconfigured_tools_run(&self) -> bool {
+        self.meta
+            .as_ref()
+            .and_then(|meta| meta.kage.as_ref())
+            .and_then(|kage| kage.unconfigured_tools)
+            == Some(UnconfiguredTools::Allow)
+    }
+
     /// Whether the client understands `subagent_update` and child
     /// sessions: any advertised value other than `false`.
     #[must_use]
@@ -1262,6 +1306,7 @@ mod tests {
                     },
                     terminal: true,
                     subagents: Some(serde_json::json!({})),
+                    meta: None,
                 },
                 client_info: None,
             },
@@ -1340,6 +1385,33 @@ mod tests {
         assert!(!caps(serde_json::json!({"subagents": false})).supports_subagents());
         assert!(!caps(serde_json::json!({"subagents": null})).supports_subagents());
         assert!(!caps(serde_json::json!({})).supports_subagents());
+    }
+
+    #[test]
+    fn kage_clients_choose_how_unconfigured_tools_run() {
+        let caps = ClientCapabilities {
+            meta: Some(ClientMeta {
+                kage: Some(KageClientCapabilities {
+                    unconfigured_tools: Some(UnconfiguredTools::Allow),
+                }),
+            }),
+            ..ClientCapabilities::default()
+        };
+        roundtrip(
+            &caps,
+            serde_json::json!({
+                "fs": {"readTextFile": false, "writeTextFile": false},
+                "terminal": false,
+                "_meta": {"kage": {"unconfiguredTools": "allow"}},
+            }),
+        );
+        assert!(caps.unconfigured_tools_run());
+        assert!(!ClientCapabilities::default().unconfigured_tools_run());
+        let ask: ClientCapabilities = serde_json::from_value(
+            serde_json::json!({"_meta": {"kage": {"unconfiguredTools": "ask"}}}),
+        )
+        .unwrap();
+        assert!(!ask.unconfigured_tools_run());
     }
 
     #[test]

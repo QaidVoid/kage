@@ -231,6 +231,7 @@ fn serve_inner(
         sessions.clone(),
         mcp,
         agents,
+        PermissionAction::Allow,
     );
     let commander = host.engine.commander();
     let standing = Arc::clone(&host);
@@ -281,7 +282,14 @@ fn test_host(
     sessions: PathBuf,
     mcp: bool,
 ) -> Arc<Host> {
-    test_host_agents(provider, workdir, sessions, mcp, default_agents())
+    test_host_agents(
+        provider,
+        workdir,
+        sessions,
+        mcp,
+        default_agents(),
+        PermissionAction::Allow,
+    )
 }
 
 /// The agent setup every non-swarm test runs with.
@@ -295,13 +303,15 @@ fn default_agents() -> AgentSetup {
     }
 }
 
-/// [`test_host`] with the session's agent setup replaced.
+/// [`test_host`] with the session's agent setup replaced, and with
+/// `fallback` for tools that have no rule (production asks).
 fn test_host_agents(
     provider: Arc<dyn kage_provider::Provider>,
     workdir: PathBuf,
     sessions: PathBuf,
     mcp: bool,
     agents: AgentSetup,
+    fallback: PermissionAction,
 ) -> Arc<Host> {
     let registry = Arc::new(ProviderRegistry::new().with(provider));
     let agents = Arc::new(agents);
@@ -319,7 +329,9 @@ fn test_host_agents(
         let mut tools = builtin_registry();
         let mcp = mcp_manager(&mut tools, servers, mcp);
         let names = mcp.iter().flat_map(kage_mcp::McpManager::server_names);
-        let gate = PermissionGate::new(rules).with_mcp_servers(names.map(str::to_owned).collect());
+        let gate = PermissionGate::new(rules)
+            .with_fallback(fallback)
+            .with_mcp_servers(names.map(str::to_owned).collect());
         Ok(SessionSpec {
             id,
             model: model.to_owned(),
@@ -540,6 +552,71 @@ fn agent_asks_and_progress_reach_the_root_session() {
     );
     assert!(contents_of(&updates, "call_child").is_empty());
     assert!(progress[4].contains("child done"), "{progress:?}");
+}
+
+/// A client that asks for the TUI's rules runs tools that have no rule
+/// without a round-trip, and its agents inherit that; a client that
+/// does not ask gets the editor default and is asked.
+#[test]
+fn a_client_asking_for_tui_rules_runs_unconfigured_tools() {
+    for tui_rules in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().display().to_string();
+        let mock = MockProvider::sequence(vec![
+            tool_turn(
+                "call_find",
+                "find",
+                serde_json::json!({ "pattern": "*.rs", "path": path }),
+            ),
+            text_turn("done"),
+            text_turn("title"),
+        ]);
+        let provider = Listed {
+            mock: mock.clone(),
+            input: Inputs::default(),
+        };
+        let host = test_host_agents(
+            Arc::new(provider),
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            false,
+            default_agents(),
+            PermissionAction::Ask,
+        );
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        std::thread::spawn(move || {
+            host.serve_with(BufReader::new(srv_r), srv_w, |_| {})
+                .unwrap();
+        });
+        let (client, inbox, _reader) = kage_jsonrpc::connect(BufReader::new(cli_r), cli_w);
+        let mut capabilities = serde_json::json!({});
+        if tui_rules {
+            capabilities["_meta"] = serde_json::json!({"kage": {"unconfiguredTools": "allow"}});
+        }
+        let params = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "clientCapabilities": capabilities,
+        });
+        client.request("initialize", params).unwrap();
+        let params = serde_json::json!({ "cwd": path, "mcpServers": [] });
+        let created = client.request("session/new", params).unwrap();
+        let session = created["sessionId"].as_str().unwrap().to_owned();
+        let end = prompt_async(&client, &session, "find the sources");
+        if !tui_rules {
+            let (ask, params) = until_ask(&inbox, &mut Vec::new());
+            assert_eq!(params["toolCall"]["title"], "find");
+            allow(&client, &ask);
+        }
+        let response = end.recv_timeout(WAIT).unwrap().unwrap();
+        assert_eq!(response["stopReason"], "end_turn");
+        if tui_rules {
+            let asked = inbox
+                .try_iter()
+                .any(|message| matches!(message, Inbound::Request { .. }));
+            assert!(!asked, "a tool without a rule ran without asking");
+        }
+    }
 }
 
 /// Initializes as a client that advertises subagents.

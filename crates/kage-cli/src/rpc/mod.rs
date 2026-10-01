@@ -53,7 +53,8 @@ use kage_acp::acp::{
     SetSessionConfigOptionResponse, StopReason, Supported, SwarmResumeRequest, SwarmResumeResponse,
 };
 use kage_acp::agent::{Agent, PromptContext, send_update};
-use kage_core::config::Config;
+use kage_core::config::{Config, McpServer as McpSpec};
+use kage_core::permissions::PermissionAction;
 use kage_core::protocol::{AgentTree, Command, CommandKind, Delivery, RunOutcome};
 use kage_core::sync::lock;
 use kage_core::{LoopError, SessionId, StopReason as CoreStopReason};
@@ -140,6 +141,9 @@ struct CliAcpAgent {
     waiters: Waiters,
     shown: ShownBySession,
     subagents: Arc<AtomicBool>,
+    /// Whether the client asked for tools without a `[permissions]`
+    /// rule to run, as in the TUI, instead of asking first.
+    unconfigured_run: AtomicBool,
     peer: Peer,
     held: Held,
     asks: AskSet,
@@ -197,12 +201,30 @@ impl CliAcpAgent {
             waiters,
             shown,
             subagents,
+            unconfigured_run: AtomicBool::new(false),
             peer,
             held,
             asks,
             subscription,
             seeds,
         }
+    }
+
+    /// What a session of this connection runs with: the host's spec,
+    /// with the permission fallback the client asked for at
+    /// `initialize`. Agents the session starts inherit its gate.
+    fn session_spec(
+        &self,
+        id: SessionId,
+        cwd: &str,
+        model: &str,
+        servers: BTreeMap<String, McpSpec>,
+    ) -> Result<SessionSpec, RpcError> {
+        let mut spec = (self.host.spec)(id, cwd, model, servers)?;
+        if self.unconfigured_run.load(Ordering::SeqCst) {
+            spec.gate = spec.gate.with_fallback(PermissionAction::Allow);
+        }
+        Ok(spec)
     }
 
     /// Opens `spec` as the client session `client_id` and returns its
@@ -258,6 +280,10 @@ impl Agent for CliAcpAgent {
             req.client_capabilities.supports_subagents(),
             Ordering::SeqCst,
         );
+        self.unconfigured_run.store(
+            req.client_capabilities.unconfigured_tools_run(),
+            Ordering::SeqCst,
+        );
         InitializeResponse {
             protocol_version: PROTOCOL_VERSION,
             agent_capabilities: AgentCapabilities {
@@ -292,7 +318,7 @@ impl Agent for CliAcpAgent {
         let (path, mut header) =
             crate::plan_session(&self.host.default_model, "").map_err(RpcError::internal)?;
         let id = header.session;
-        let mut spec = (self.host.spec)(id, &req.cwd, &self.host.default_model, servers)?;
+        let mut spec = self.session_spec(id, &req.cwd, &self.host.default_model, servers)?;
         header.cwd.clone_from(&spec.cx.workdir);
         header.system_prompt.clone_from(&spec.cx.system_prompt);
         spec.recorder = Some(Recorder::planned(path, header, spec.plugins.clone()));

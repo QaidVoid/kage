@@ -95,7 +95,7 @@ impl super::CliAcpAgent {
             );
             self.host.default_model.clone()
         };
-        let mut spec = (self.host.spec)(id, cwd, &model, servers)?;
+        let mut spec = self.session_spec(id, cwd, &model, servers)?;
         spec.cx.history = replay.history.into_iter().map(Arc::new).collect();
         spec.cx.budget = TokenBudget {
             used_input: replay.usage_total.input,

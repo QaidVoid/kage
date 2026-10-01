@@ -188,6 +188,14 @@ fn reject_option_id(ask: &PermissionAsk) -> Option<&str> {
         .map(|option| option.option_id.as_str())
 }
 
+/// What the card tells the shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalEvent {
+    /// The last ask closed while the card held the focus; the composer
+    /// can take it back.
+    Released,
+}
+
 /// The approval card over the store's open permission asks.
 pub struct ApprovalCard {
     store: Entity<Store>,
@@ -201,6 +209,8 @@ pub struct ApprovalCard {
     /// entity.
     feedback: HashMap<u64, Entity<InputState>>,
 }
+
+impl gpui_kit::EventEmitter<ApprovalEvent> for ApprovalCard {}
 
 impl Focusable for ApprovalCard {
     fn focus_handle(&self, _: &gpui_kit::App) -> FocusHandle {
@@ -253,7 +263,7 @@ impl ApprovalCard {
         if open > 0 && was == 0 {
             window.focus(&self.focus, cx);
         } else if open == 0 && was > 0 && self.focus.is_focused(window) {
-            window.blur(cx);
+            cx.emit(ApprovalEvent::Released);
         }
         self.feedback
             .retain(|request_id, _| asks.iter().any(|(_, id, _)| id == request_id));

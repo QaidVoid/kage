@@ -30,8 +30,8 @@ use crate::views::chrome::{
 };
 use crate::views::dialog::DialogView;
 use crate::views::{
-    ApprovalCard, ComposerView, DockEvent, DockRow, SidebarView, TranscriptEvent, TranscriptView,
-    WorkbenchEvent, WorkbenchView,
+    ApprovalCard, ApprovalEvent, ComposerView, DockEvent, DockRow, SidebarView, TranscriptEvent,
+    TranscriptView, WorkbenchEvent, WorkbenchView,
 };
 use kage_client::{Change, Frame};
 
@@ -233,6 +233,17 @@ impl Shell {
                 DockEvent::ScrollToPlan => shell
                     .transcript
                     .update(cx, |transcript, cx| transcript.scroll_to_plan(cx)),
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &approval,
+            window,
+            |shell, _, event: &ApprovalEvent, window, cx| match event {
+                ApprovalEvent::Released => {
+                    let input = shell.composer.read(cx).input().clone();
+                    input.update(cx, |state, cx| state.focus(window, cx));
+                }
             },
         )
         .detach();
@@ -656,6 +667,7 @@ impl Shell {
             .w_full()
             .flex()
             .justify_center()
+            .when(has_session, |column| column.px(px(SP_8)))
             .child(
                 div()
                     .w_full()
@@ -908,5 +920,9 @@ mod tests {
         visual.simulate_keystrokes("ctrl-f");
         let find = visual.update(|_, cx| shell.read(cx).find.read(cx).is_open());
         assert!(find, "Ctrl+F opens find even from the composer");
+        visual.simulate_keystrokes("escape");
+        visual.simulate_keystrokes("ctrl-b");
+        let workbench = visual.update(|_, cx| shell.read(cx).workbench_visible);
+        assert!(workbench, "Ctrl+B opens the workbench");
     }
 }

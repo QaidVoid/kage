@@ -17,7 +17,7 @@ pub mod sidebar;
 pub mod transcript;
 pub mod workbench;
 
-pub use approval::ApprovalCard;
+pub use approval::{ApprovalCard, ApprovalEvent};
 pub use chrome::{FindBar, PaletteView, Toasts, WelcomeView};
 pub use composer::ComposerView;
 pub use dock::{DockEvent, DockRow};

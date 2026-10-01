@@ -347,7 +347,9 @@ impl Render for SidebarView {
         // directory entries no live session holds, each tagged with
         // the project its working directory names.
         let mut items: Vec<RowItem> = Vec::new();
-        for (id, session) in &state.sessions {
+        // A child agent's session is reached through its parent's card
+        // and the Agents tab, never listed on its own.
+        for (id, session) in state.sessions.iter().filter(|(_, s)| s.parent.is_none()) {
             let active = store.active_id() == Some(id.as_str());
             items.push(RowItem {
                 id: id.clone(),

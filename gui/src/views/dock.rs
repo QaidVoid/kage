@@ -1327,6 +1327,7 @@ mod tests {
                     kind: serde_json::from_value(serde_json::json!(kind)).expect("a known kind"),
                 })
                 .collect(),
+            plan: None,
         }
     }
 

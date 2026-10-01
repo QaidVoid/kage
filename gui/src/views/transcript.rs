@@ -848,7 +848,7 @@ fn row_search_text(session: &Session, row: &Row) -> String {
             text.clone()
         }
         Some(TranscriptItem::Notice { text, .. }) => text.clone(),
-        Some(TranscriptItem::User { content }) => content.as_text().unwrap_or_default().to_owned(),
+        Some(TranscriptItem::User { content, .. }) => prompt_text(content),
         _ => String::new(),
     };
     match row {
@@ -975,9 +975,18 @@ fn item_lines(session: &Session, ix: usize) -> usize {
     }
 }
 
+/// The text of a prompt: its text blocks in order, a blank line apart.
+fn prompt_text(content: &[kage_client::wire::ContentBlock]) -> String {
+    content
+        .iter()
+        .filter_map(kage_client::wire::ContentBlock::as_text)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 fn user_text(session: &Session, ix: usize) -> String {
     match session.items.get(ix) {
-        Some(TranscriptItem::User { content }) => content.as_text().unwrap_or("").to_owned(),
+        Some(TranscriptItem::User { content, .. }) => prompt_text(content),
         _ => String::new(),
     }
 }
@@ -1089,9 +1098,9 @@ fn row_model(session: &Session, ui: &UiState) -> RowModel {
 fn plain_row(session: &Session, ix: usize, ui: &UiState, last: usize) -> Row {
     let live = ix == last && session.running;
     match &session.items[ix] {
-        TranscriptItem::User { content } => Row::User {
+        TranscriptItem::User { content, .. } => Row::User {
             ix,
-            text: content.as_text().unwrap_or("").to_owned(),
+            text: prompt_text(content),
         },
         TranscriptItem::Assistant { .. } => Row::Assistant { ix, live },
         TranscriptItem::Thinking { .. } => Row::Thinking {
@@ -2374,6 +2383,7 @@ mod tests {
             kind,
             status,
             input,
+            swarm: None,
             content,
             raw_output,
         })
@@ -2917,6 +2927,7 @@ mod tests {
         assert_eq!(
             model.kinds(),
             vec![
+                "user",
                 "tool",
                 "turn-end",
                 "thinking",

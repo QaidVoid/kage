@@ -658,6 +658,7 @@ mod tests {
                 ..ToolCallUpdate::default()
             },
             options: Vec::new(),
+            plan: None,
         };
         let shell = ask(Some(serde_json::json!({"command": "cargo test"})));
         assert_eq!(subject_of(&shell).as_deref(), Some("cargo test"));
@@ -696,6 +697,7 @@ mod tests {
                     kind: kage_client::wire::PermissionOptionKind::RejectOnce,
                 },
             ],
+            plan: None,
         };
         assert_eq!(super::reject_option_id(&ask), Some("revise"));
         let allow_only = PermissionAsk {
@@ -706,6 +708,7 @@ mod tests {
                 name: "Ok".into(),
                 kind: kage_client::wire::PermissionOptionKind::AllowOnce,
             }],
+            plan: None,
         };
         assert_eq!(super::reject_option_id(&allow_only), None);
     }

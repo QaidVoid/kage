@@ -218,6 +218,7 @@ mod tests {
         assert_eq!(
             kinds,
             vec![
+                "user",
                 "tool",
                 "turn-end",
                 "thinking",

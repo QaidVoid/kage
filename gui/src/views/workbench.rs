@@ -1023,6 +1023,7 @@ mod tests {
             kind,
             status: kage_client::wire::ToolCallStatus::Completed,
             input: None,
+            swarm: None,
             content: Vec::new(),
             raw_output: None,
         }

@@ -4450,3 +4450,61 @@ fn an_unattached_working_session_closes_after_its_run_ends() {
         "end_turn"
     );
 }
+
+#[test]
+fn an_agent_session_loads_to_read_and_refuses_prompts() {
+    let dir = tempfile::tempdir().unwrap();
+    let task = serde_json::json!({"description": "look around", "prompt": "list"});
+    let h = serve_agents(
+        vec![
+            tool_turn("call_agent", "agent", task),
+            text_turn("child done"),
+            text_turn("parent done"),
+        ],
+        dir.path(),
+        dir.path(),
+        default_agents(),
+    );
+    initialize(&h.client);
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+    prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    let updates = drain(&h.inbox);
+    let child = updates
+        .iter()
+        .find(|p| p["update"]["sessionUpdate"] == "subagent_update")
+        .and_then(|p| p["update"]["subagentSessionId"].as_str())
+        .expect("child announced")
+        .to_owned();
+
+    let cwd = dir.path().display().to_string();
+    let params = serde_json::json!({"sessionId": child, "cwd": cwd, "mcpServers": []});
+    let loaded = h.client.request("session/load", params).unwrap();
+    assert!(
+        loaded["configOptions"].as_array().is_none_or(Vec::is_empty),
+        "{loaded}"
+    );
+    let shown = updates_until(&h.inbox, &child, "agent_message_chunk");
+    assert!(
+        shown
+            .iter()
+            .any(|p| p["update"]["content"]["text"] == "child done"),
+        "{shown:#?}"
+    );
+    let calls = h.mock.call_count();
+
+    let params = serde_json::json!({
+        "sessionId": child,
+        "prompt": [{"type": "text", "text": "more"}],
+    });
+    let refused = h.client.request("session/prompt", params).unwrap_err();
+    assert!(refused.to_string().contains("read-only"), "{refused}");
+    assert_eq!(h.mock.call_count(), calls, "nothing ran");
+    let hosted: Vec<String> = h
+        .host
+        .engine
+        .hosted_sessions()
+        .into_iter()
+        .map(|(id, _)| id.to_string())
+        .collect();
+    assert!(!hosted.contains(&child), "{hosted:?}");
+}

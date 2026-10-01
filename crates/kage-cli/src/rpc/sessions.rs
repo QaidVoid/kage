@@ -45,6 +45,9 @@ impl super::CliAcpAgent {
     ) -> Result<Vec<SessionConfigOption>, RpcError> {
         let servers = editor_servers(servers)?;
         let path = self.recorded_path(client_id)?;
+        if kage_session::is_agent_session(&path) {
+            return self.open_agent(client_id, &path, ctx, replay_file);
+        }
         let id = crate::engine::session_id_of(&path).ok_or_else(|| {
             RpcError::internal(format!("bad session file name {}", path.display()))
         })?;
@@ -109,6 +112,34 @@ impl super::CliAcpAgent {
             .and_then(kage_core::ThinkingLevel::parse);
         spec.recorder = Some(Recorder::new(writer, spec.plugins.clone()));
         Ok(self.open(client_id.to_owned(), spec))
+    }
+
+    /// Shows the recorded agent session at `path` without hosting it:
+    /// an agent belongs to the call that started it, so a client reads
+    /// its transcript but never prompts it. With `replay_file`, streams
+    /// its history and title.
+    fn open_agent(
+        &self,
+        client_id: &str,
+        path: &Path,
+        ctx: Option<&PromptContext>,
+        replay_file: bool,
+    ) -> Result<Vec<SessionConfigOption>, RpcError> {
+        if replay_file && let Some(ctx) = ctx {
+            let replay =
+                kage_session::replay(path).map_err(|e| RpcError::internal(e.to_string()))?;
+            for update in replay_updates(&replay.history) {
+                ctx.update(update);
+            }
+            if let Some(title) = replay.title {
+                ctx.update(SessionUpdate::SessionInfoUpdate(SessionInfoUpdate {
+                    title: Some(title),
+                    updated_at: None,
+                }));
+            }
+        }
+        lock(&self.ids).read_only.insert(client_id.to_owned());
+        Ok(Vec::new())
     }
 
     /// The file of the recorded session `client_id` names.

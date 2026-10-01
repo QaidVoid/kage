@@ -30,6 +30,27 @@ use crate::error::SessionError;
 /// `agent` call started. Written as the first entry after the header.
 pub const AGENT_ENTRY_KIND: &str = "kage:agent";
 
+/// Whether the session file at `path` records an agent an `agent` or
+/// `swarm` call started: it carries an [`AGENT_ENTRY_KIND`] entry,
+/// right after the header, or after the history a forked child copied.
+/// Only custom entry lines are decoded. An unreadable file is not one.
+#[must_use]
+pub fn is_agent_session(path: &Path) -> bool {
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    BufReader::new(file)
+        .split(b'\n')
+        .map_while(Result::ok)
+        .filter(|line| line.starts_with(br#"{"type":"custom""#))
+        .any(|line| {
+            matches!(
+                serde_json::from_slice::<SessionEntry>(&line),
+                Ok(SessionEntry::Custom(custom)) if custom.kind == AGENT_ENTRY_KIND
+            )
+        })
+}
+
 /// Kind of the [`SessionEntry::Custom`] entry that records a swarm
 /// mode toggle. Its payload is `{"on": bool}`; the latest entry wins.
 pub const SWARM_MODE_ENTRY_KIND: &str = "kage:swarm_mode";
@@ -735,6 +756,21 @@ mod tests {
             writer.append(entry).unwrap();
         }
         path
+    }
+
+    #[test]
+    fn an_agent_marker_anywhere_marks_an_agent_session() {
+        let dir = tempdir().unwrap();
+        let first = write_agent_session(dir.path(), "agent.jsonl", true);
+        let late = write_agent_session(dir.path(), "forked.jsonl", false);
+        write_session(dir.path(), "plain.jsonl", "hi");
+        assert!(is_agent_session(&first));
+        assert!(
+            is_agent_session(&late),
+            "a forked child's marker follows its copy"
+        );
+        assert!(!is_agent_session(&dir.path().join("plain.jsonl")));
+        assert!(!is_agent_session(&dir.path().join("missing.jsonl")));
     }
 
     #[test]

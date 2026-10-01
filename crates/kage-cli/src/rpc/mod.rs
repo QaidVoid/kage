@@ -126,6 +126,9 @@ struct Ids {
     by_engine: HashMap<SessionId, String>,
     /// Running subagents, which the client may only cancel.
     subagents: HashMap<String, SessionId>,
+    /// Agent sessions the client loaded to read. The engine never
+    /// hosts them for the client, so they take no prompts.
+    read_only: HashSet<String>,
 }
 
 impl Ids {
@@ -402,7 +405,10 @@ impl Agent for CliAcpAgent {
     /// invalid params.
     fn close_session(&self, req: CloseSessionRequest) -> Result<CloseSessionResponse, RpcError> {
         let id = {
-            let ids = lock(&self.ids);
+            let mut ids = lock(&self.ids);
+            if ids.read_only.remove(&req.session_id) {
+                return Ok(CloseSessionResponse {});
+            }
             if ids.subagents.contains_key(&req.session_id) {
                 return Err(RpcError::new(
                     -32602,
@@ -547,6 +553,15 @@ impl Agent for CliAcpAgent {
     }
 
     fn prompt(&self, req: PromptRequest, _ctx: &PromptContext) -> Result<PromptResponse, RpcError> {
+        if lock(&self.ids).read_only.contains(&req.session_id) {
+            return Err(RpcError::new(
+                -32602,
+                format!(
+                    "{} is an agent's session; agent sessions are read-only",
+                    req.session_id
+                ),
+            ));
+        }
         let id = self.engine_id(&req.session_id)?;
         if !self.host.claim_prompt(id, self.connection) {
             return Err(RpcError::new(

@@ -66,6 +66,9 @@ pub struct ReplayResult {
     /// Counts of the last [`SessionEntry::Compaction`], whose summary
     /// opens `history`, or `None` if the session never compacted.
     pub compaction: Option<CompactionCounts>,
+    /// Whether the file carries a `kage:agent` marker: it records an
+    /// agent an `agent` or `swarm` call started, not a user's session.
+    pub agent: bool,
 }
 
 /// Cumulative token totals replayed from a session file, plus the
@@ -125,6 +128,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
     let mut thinking_level: Option<String> = None;
     let mut title: Option<String> = None;
     let mut swarm_mode: Option<bool> = None;
+    let mut agent = false;
     let mut plan_mode: Option<bool> = None;
     let mut history: Vec<Message> = Vec::new();
     // `call_starts` tracks the wall-clock time each ToolCall was
@@ -188,7 +192,10 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
             SessionEntry::ModelChange(mc) => model = mc.model,
             SessionEntry::ThinkingLevelChange(t) => thinking_level = Some(t.level),
             SessionEntry::Title(t) => title = Some(t.title),
-            SessionEntry::Custom(c) => read_mode(&c, &mut swarm_mode, &mut plan_mode),
+            SessionEntry::Custom(c) => {
+                agent |= c.kind == crate::list::AGENT_ENTRY_KIND;
+                read_mode(&c, &mut swarm_mode, &mut plan_mode);
+            }
             SessionEntry::Label(_) => {}
         }
     }
@@ -203,6 +210,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
         swarm_mode,
         plan_mode,
         compaction,
+        agent,
     })
 }
 

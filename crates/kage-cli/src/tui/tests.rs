@@ -70,6 +70,7 @@ fn render_session_markdown_covers_roles_and_blocks() {
         swarm_mode: None,
         plan_mode: None,
         compaction: None,
+        agent: false,
     };
     let md = render_session_markdown(&replay);
     assert!(md.starts_with("# kage session "));

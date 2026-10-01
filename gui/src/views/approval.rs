@@ -601,10 +601,11 @@ mod tests {
         run_commands(&mut store);
         let _ = store.take_outgoing();
         store.absorb(init_answer());
-        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store.new_session();
         let _ = store.take_outgoing();
         store.absorb(Frame::Success {
-            id: 2,
+            id: 3,
             result: serde_json::json!({"sessionId": "s1"}),
         });
         let _ = store.take_outgoing();

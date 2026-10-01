@@ -72,7 +72,7 @@ fn asset_origin() -> String {
 pub fn start() {
     gpui_kit::platform::web_init();
     gpui_kit::application()
-        .with_assets(Assets::new(asset_origin()))
+        .with_assets(crate::assets::KageAssets::new(Assets::new(asset_origin())))
         .run(|cx: &mut App| {
             // Order matters here. `gpui_kit::init` loads the theme, and
             // loading it probes `.SystemUIFont` against the installed
@@ -130,7 +130,7 @@ pub fn start() {
             let shell_new = shell.clone();
             cx.on_action(move |_: &crate::app::Quit, cx| cx.quit());
             cx.on_action(move |_: &crate::app::NewSession, cx| {
-                shell_new.update(cx, |shell, cx| shell.open_session(cx));
+                shell_new.update(cx, |shell, cx| shell.show_welcome(cx));
             });
             let shell_toggle_sidebar = shell.clone();
             cx.on_action(move |_: &crate::app::ToggleSidebar, cx| {

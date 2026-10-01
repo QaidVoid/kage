@@ -23,9 +23,24 @@ pub fn unix_seconds() -> i64 {
     (js_sys::Date::now() / 1_000.0) as i64
 }
 
+/// The elapsed label the topbar's working pill carries: seconds under
+/// a minute, then minutes with seconds, then hours with minutes, as
+/// the web client's duration formatter reads.
+#[must_use]
+pub fn duration(seconds: i64) -> String {
+    let s = seconds.max(0);
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3_600 {
+        format!("{}m {}s", s / 60, s % 60)
+    } else {
+        format!("{}h {}m", s / 3_600, (s % 3_600) / 60)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::unix_seconds;
+    use super::{duration, unix_seconds};
 
     #[test]
     fn reads_a_plausible_epoch_time() {
@@ -33,5 +48,16 @@ mod tests {
         // the year the test stops being meaningful.
         assert!(unix_seconds() > 1_700_000_000);
         assert!(unix_seconds() < 4_000_000_000);
+    }
+
+    #[test]
+    fn durations_read_seconds_minutes_then_hours() {
+        assert_eq!(duration(0), "0s");
+        assert_eq!(duration(45), "45s");
+        assert_eq!(duration(60), "1m 0s");
+        assert_eq!(duration(754), "12m 34s");
+        assert_eq!(duration(3_600), "1h 0m");
+        assert_eq!(duration(4_567), "1h 16m");
+        assert_eq!(duration(-5), "0s", "a stamp ahead of the clock clamps");
     }
 }

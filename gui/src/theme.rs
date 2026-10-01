@@ -134,6 +134,24 @@ pub const SIDE_W: f32 = 270.0;
 /// The centered content column width, 768px.
 pub const CONTENT_W: f32 = 768.0;
 
+/// The welcome block's width, 728px: the wordmark, the composer and the
+/// cards all measure to this, narrower than the content column because the
+/// welcome block is a card-like stack rather than a transcript.
+pub const WELCOME_W: f32 = 728.0;
+
+/// The welcome block's side padding, 24px, outside the column: the
+/// composer, the cards and the wordmark all measure to
+/// [`WELCOME_W`] wide whatever the pane does.
+pub const WELCOME_PAD_X: f32 = 24.0;
+
+/// The welcome block's top padding, 40px.
+pub const WELCOME_PAD_TOP: f32 = 40.0;
+
+/// The share of the viewport the welcome block's bottom pad takes, 12%:
+/// the design pads the bottom by 12vh against 40px at the top, which is
+/// what lifts the stack above the middle of the pane.
+pub const WELCOME_PAD_BOTTOM_SHARE: f32 = 0.12;
+
 /// Fast transition, in seconds.
 pub const T_FAST: f32 = 0.12;
 
@@ -151,10 +169,25 @@ pub fn ease() -> Easing {
 /// The bundled family files. Both frontends load these before any
 /// text is laid out, so the design families render even when the
 /// machine has none of them installed.
+/// Static per-weight faces. The engine selects a face by reported weight
+/// and never applies variable-font axes, so a variable TTF would render
+/// every request at its default instance.
 const FONT_FILES: &[&[u8]] = &[
     include_bytes!("../assets/fonts/SchibstedGrotesk-Regular.ttf"),
+    include_bytes!("../assets/fonts/SchibstedGrotesk-Medium.ttf"),
+    include_bytes!("../assets/fonts/SchibstedGrotesk-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/SchibstedGrotesk-Bold.ttf"),
+    include_bytes!("../assets/fonts/SchibstedGrotesk-ExtraBold.ttf"),
     include_bytes!("../assets/fonts/Inter-Regular.ttf"),
+    include_bytes!("../assets/fonts/Inter-Medium.ttf"),
+    include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/Inter-Bold.ttf"),
+    include_bytes!("../assets/fonts/Inter-ExtraBold.ttf"),
     include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf"),
+    include_bytes!("../assets/fonts/JetBrainsMono-ExtraBold.ttf"),
 ];
 
 /// Registers the three bundled families with the text system. Call
@@ -679,8 +712,8 @@ pub fn apply_dawn(cx: &mut App) {
 }
 
 /// Installs whichever palette the platform's appearance asks for: dawn on a
-/// light desktop, shadow otherwise. The System default, which the prototype
-/// resolves the same way.
+/// light desktop, shadow otherwise. This is the System default: no stored
+/// choice, so the platform decides.
 pub fn apply_system(cx: &mut App, appearance: WindowAppearance) {
     let light = matches!(
         appearance,
@@ -735,8 +768,8 @@ mod tests {
 
     #[gpui_kit::test]
     fn the_system_default_follows_the_appearance(cx: &mut gpui_kit::TestAppContext) {
-        // Dawn on a light desktop, shadow otherwise, which is what the
-        // prototype's `resolvedTheme` does and what E7.1 step 3 asks for.
+        // Dawn on a light desktop, shadow otherwise, which is what E7.1
+        // step 3 asks for.
         for (appearance, dawn) in [
             (WindowAppearance::Light, true),
             (WindowAppearance::VibrantLight, true),
@@ -840,6 +873,7 @@ mod tests {
         assert_eq!(TAB_H, 28.0);
         assert_eq!(SIDE_W, 270.0);
         assert_eq!(CONTENT_W, 768.0);
+        assert_eq!(WELCOME_W, 728.0);
         assert_eq!(T_FAST, 0.12);
         assert_eq!(T_SLOW, 0.26);
     }

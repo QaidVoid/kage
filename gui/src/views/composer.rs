@@ -42,15 +42,13 @@ use crate::theme::{
 };
 use crate::views::deferred::{Deferred, LaidOut};
 use gpui_kit::base::ElementExt as _;
+use gpui_kit::base::TestSupportExt as _;
 
 gpui_kit::actions!(kage_desktop, [CycleMode]);
 
 /// How long the first Esc of an interrupt gesture waits for the
 /// second one.
 pub(crate) const ESC_WINDOW: Duration = Duration::from_millis(1500);
-
-/// The cells of the context fuel gauge.
-pub(crate) const FUEL_CELLS: usize = 20;
 
 /// The palette roles the toolkit theme does not carry, taken from the
 /// active mode's own palette so both palettes stay exact.
@@ -363,15 +361,6 @@ pub(crate) fn esc_step(armed: Option<Instant>, now: Instant, running: bool) -> E
         Some(at) if now.duration_since(at) < ESC_WINDOW => EscStep::Cancel,
         _ => EscStep::Arm,
     }
-}
-
-/// How many fuel gauge cells a context fill lights, out of
-/// [`FUEL_CELLS`].
-#[must_use]
-pub(crate) fn fuel_cells(fill: f64) -> usize {
-    ((fill * FUEL_CELLS as f64) + 0.5)
-        .floor()
-        .clamp(0., FUEL_CELLS as f64) as usize
 }
 
 /// Where the typed text points a suggestion: a slash command or an
@@ -756,16 +745,21 @@ impl ComposerView {
         cx.notify();
     }
 
-    /// Sends the typed text: plain when idle, queued while a run is in
-    /// flight, or steered when `steer` says so and the wire allows it.
-    /// Accepted text leaves the textarea and the draft.
+    /// Sends the typed text: on the welcome pane it opens the session
+    /// the text rides on; plain when idle, or queued while a run is
+    /// in flight, or steered when `steer` says so and the wire allows
+    /// it. Accepted text leaves the textarea and the draft.
     pub fn submit(&mut self, steer: bool, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input_value(cx);
         let text = text.trim();
         if text.is_empty() {
             return;
         }
-        let accepted = if steer {
+        let accepted = if self.loaded.is_none() && !self.store.read(cx).pending_prompt() {
+            self.store
+                .update(cx, |store, _| store.open_with_prompt(text));
+            true
+        } else if steer {
             self.store.update(cx, |store, _| store.steer(text).is_ok())
         } else {
             self.store
@@ -875,6 +869,18 @@ impl ComposerView {
     /// Inserts an at-mention seed at the caret, as the plus menu's
     /// mention entry does.
     fn seed_mention(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.insert_mention(None, window, cx);
+    }
+
+    /// Inserts an at-mention at the caret: a bare `@` when `path` is
+    /// `None`, else `@path` with a trailing space, as the workbench's
+    /// files pane does.
+    pub fn insert_mention(
+        &mut self,
+        path: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let value = self.input_value(cx);
         let cursor = self.input_cursor(cx);
         let before = value.get(..cursor).unwrap_or(&value).to_owned();
@@ -883,8 +889,14 @@ impl ComposerView {
             || before.ends_with(char::is_whitespace)
             || after.starts_with(char::is_whitespace);
         let space = if spaced { "" } else { " " };
-        let text = format!("{before}{space}@{after}");
-        let caret = before.len() + space.len() + 1;
+        let text = match path {
+            Some(path) => format!("{before}{space}@{path} {after}"),
+            None => format!("{before}{space}@{after}"),
+        };
+        let caret = match path {
+            Some(path) => before.len() + space.len() + 1 + path.len() + 1,
+            None => before.len() + space.len() + 1,
+        };
         self.input.update(cx, |state, cx| {
             state.set_value(text.as_str(), window, cx);
             state.set_selected_range(caret..caret, cx);
@@ -1068,8 +1080,6 @@ impl ComposerView {
                 .child(hint_word("send"))
                 .child(kbd("Shift Enter", pal))
                 .child(hint_word("newline"))
-                .child(kbd("Shift Tab", pal))
-                .child(hint_word("mode"))
                 .into_any_element()
         };
         let cost = self
@@ -1418,76 +1428,120 @@ impl ComposerView {
             )
     }
 
-    /// A picker pill over one select config option.
-    fn picker_button(
-        &self,
-        id: &'static str,
-        element_id: &'static str,
-        missing_tooltip: &'static str,
-        title: &'static str,
-        pal: &'static Palette,
-        cx: &Context<Self>,
-    ) -> AnyElement {
+    /// The model and thinking pill: one control, as the web client's
+    /// model button draws it, naming the model's short label and the
+    /// thinking level it runs at. The menu lists the model options and
+    /// the thinking options the agent advertised; with neither the pill
+    /// dims and names what is missing.
+    fn model_button(&self, cx: &Context<Self>, pal: &'static Palette) -> AnyElement {
         let session = self.store.read(cx).active_session();
-        let Some(option) = session.and_then(|session| select_option(session, id)) else {
-            return toolbar_pill(element_id, false, pal, cx)
+        let model = session.and_then(|session| select_option(session, "model"));
+        let thinking = session.and_then(|session| select_option(session, "thinking"));
+        let model = model.cloned();
+        let thinking = thinking.cloned();
+        if model.is_none() && thinking.is_none() {
+            return toolbar_pill("composer-model", false, pal, cx)
                 .opacity(0.45)
                 .cursor_default()
-                .tooltip(move |window, cx| Tooltip::new(missing_tooltip).build(window, cx))
-                .child(title)
+                .tooltip(|window, cx| {
+                    Tooltip::new("the agent sent no model or thinking config option")
+                        .build(window, cx)
+                })
+                .child("Model")
                 .into_any_element();
-        };
-        let option = option.clone();
-        let label = option
-            .current_value
-            .rsplit('/')
-            .next()
-            .unwrap_or_default()
-            .to_owned();
-        let tip: SharedString = format!("{title}: {}", option.current_value).into();
+        }
+        let model_label = model
+            .as_ref()
+            .map(|option| {
+                option
+                    .current_value
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&option.current_value)
+                    .to_owned()
+            })
+            .unwrap_or_else(|| "default".to_owned());
+        // The level label trails a middle dot and drops when thinking
+        // is off, as the web client's label does.
+        let think_label = thinking
+            .as_ref()
+            .filter(|option| option.current_value != "off")
+            .map(|option| {
+                option
+                    .options
+                    .iter()
+                    .find(|value| value.value == option.current_value)
+                    .map(|value| value.name.clone())
+                    .unwrap_or_else(|| option.current_value.clone())
+            });
+        let mut pill = toolbar_pill("composer-model", false, pal, cx)
+            .tooltip(|window, cx| Tooltip::new("Model and thinking").build(window, cx))
+            .child(SharedString::from(model_label));
+        if let Some(level) = think_label {
+            pill = pill
+                .child(
+                    div()
+                        .text_color(pal.faint)
+                        .child(SharedString::from(format!("· {level}"))),
+                )
+                .text_color(pal.ink);
+        }
+        pill = pill.child(
+            Icon::new(IconName::ChevronDown)
+                .with_size(px(12.))
+                .opacity(0.7),
+        );
         let store = self.store.clone();
-        toolbar_pill(element_id, false, pal, cx)
-            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-            .child(SharedString::from(label))
-            .child(
-                Icon::new(IconName::ChevronDown)
-                    .with_size(px(12.))
-                    .opacity(0.7),
-            )
-            .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-                let mut built = menu.label(title);
-                for value in &option.options {
+        pill.dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+            let mut built = menu;
+            if let Some(model) = &model {
+                built = built.label("Model");
+                for value in &model.options {
                     let store = store.clone();
                     let value = value.clone();
                     built = built.item(
                         PopupMenuItem::new(value.name.clone())
-                            .checked(value.value == option.current_value)
+                            .checked(value.value == model.current_value)
                             .on_click(move |_, _, cx| {
                                 store.update(cx, |store, cx| {
-                                    store.set_option(id, &value.value);
+                                    store.set_option("model", &value.value);
                                     cx.notify();
                                 });
                             }),
                     );
                 }
-                built
-            })
-            .into_any_element()
+            }
+            if let Some(thinking) = &thinking {
+                built = built.label("Thinking");
+                for value in &thinking.options {
+                    let store = store.clone();
+                    let value = value.clone();
+                    built = built.item(
+                        PopupMenuItem::new(value.name.clone())
+                            .checked(value.value == thinking.current_value)
+                            .on_click(move |_, _, cx| {
+                                store.update(cx, |store, cx| {
+                                    store.set_option("thinking", &value.value);
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+            }
+            built
+        })
+        .into_any_element()
     }
 
-    /// The context ring with its percent and the compact cell strip.
-    /// At 80 percent the ring turns warn and the tooltip says what the
-    /// wire cannot do about it: no compaction control exists, so none
-    /// is offered.
-    fn fuel(&self, cx: &Context<Self>, pal: &'static Palette) -> Stateful<Div> {
-        let (fill, used, size) = self
-            .store
-            .read(cx)
-            .active_session()
-            .map(|session| (session.usage.fill(), session.usage.used, session.usage.size))
-            .unwrap_or((0.0, 0, 0));
+    /// The context ring with its percent, shown only while a session
+    /// exists, as the web client's `ring-wrap` draws it. At 80 percent
+    /// the ring turns warn and the tooltip says what the wire cannot
+    /// do about it: no compaction control exists, so none is offered.
+    fn fuel(&self, cx: &Context<Self>, pal: &'static Palette) -> Option<Stateful<Div>> {
+        let session = self.store.read(cx).active_session()?;
+        let fill = session.usage.fill();
+        let (used, size) = (session.usage.used, session.usage.size);
         let percent = (fill * 100.0).round() as i64;
-        let filled = fuel_cells(fill);
         let hot = fill >= 0.8;
         let ring = if hot { pal.warn } else { pal.accent };
         let mut tooltip = if size > 0 {
@@ -1498,54 +1552,41 @@ impl ComposerView {
         if hot {
             tooltip.push_str("; no compaction control exists on the wire");
         }
-        let cell_empty = pal.fill_hover;
-        let cells = h_flex()
-            .gap(px(1.))
-            .children((0..FUEL_CELLS).map(move |cell| {
-                div()
-                    .w(px(3.))
-                    .h(px(10.))
-                    .rounded(px(2.))
-                    .when(cell < filled, |cell| cell.bg(ring))
-                    .when(cell >= filled, |cell| cell.bg(cell_empty))
-            }));
         let (faint, ink, hover) = (pal.faint, pal.ink, pal.hover);
         let tip: SharedString = tooltip.into();
-        h_flex()
-            .id("composer-fuel")
-            .h(px(30.))
-            .px(px(6.))
-            .gap(px(6.))
-            .flex_none()
-            .items_center()
-            .rounded(px(R_FULL))
-            .font_family(FONT_MONO)
-            .text_size(px(FS_2XS))
-            .text_color(faint)
-            .hover(move |style| style.bg(hover).text_color(ink))
-            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-            .child(cells)
-            .child(
-                h_flex()
-                    .gap(px(6.))
-                    .items_center()
-                    .child(
-                        ProgressCircle::new("ring")
-                            .value(fill as f32 * 100.0)
-                            .color(ring)
-                            .with_size(px(22.)),
-                    )
-                    .child(SharedString::from(format!("{percent}%"))),
-            )
+        Some(
+            h_flex()
+                .id("composer-fuel")
+                .h(px(30.))
+                .px(px(6.))
+                .gap(px(6.))
+                .flex_none()
+                .items_center()
+                .rounded(px(R_FULL))
+                .font_family(FONT_MONO)
+                .text_size(px(FS_2XS))
+                .text_color(faint)
+                .hover(move |style| style.bg(hover).text_color(ink))
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                .child(
+                    ProgressCircle::new("ring")
+                        .value(fill as f32 * 100.0)
+                        .color(ring)
+                        .with_size(px(22.)),
+                )
+                .child(SharedString::from(format!("{percent}%"))),
+        )
     }
 
     /// The send and stop pair: a 32px circle that interrupts while a
-    /// run is in flight, sends otherwise, and grays out with no shadow
-    /// when there is nothing to send.
+    /// run is in flight and the input is empty, and sends otherwise,
+    /// graying out with no shadow when there is nothing to send. The
+    /// click queues while a run is in flight, as Enter does.
     fn send_button(&self, cx: &Context<Self>, pal: &'static Palette) -> AnyElement {
         let theme = cx.theme().colors;
         let running = self.running(cx);
-        if running {
+        let has_text = !self.input_value(cx).trim().is_empty();
+        if running && !has_text {
             let store = self.store.clone();
             let (hover_bg, hover_fg) = (pal.danger_soft, theme.danger);
             div()
@@ -1570,11 +1611,10 @@ impl ComposerView {
                 })
                 .into_any_element()
         } else {
-            let empty = self.input_value(cx).trim().is_empty();
-            let (bg, fg) = if empty {
-                (pal.send_bg_off, pal.send_icon_off)
-            } else {
+            let (bg, fg) = if has_text {
                 (pal.send_bg, pal.send_icon)
+            } else {
+                (pal.send_bg_off, pal.send_icon_off)
             };
             let hover_bg = pal.send_bg_hover;
             let mut send = div()
@@ -1588,13 +1628,16 @@ impl ComposerView {
                 .rounded(px(R_FULL))
                 .bg(bg)
                 .text_color(fg)
-                .tooltip(|window, cx| {
-                    Tooltip::new("Send (Enter); queues while a turn runs").build(window, cx)
+                .tooltip(move |window, cx| {
+                    Tooltip::new(if running {
+                        "Queue (Enter) or steer (Ctrl+Enter)"
+                    } else {
+                        "Send (Enter)"
+                    })
+                    .build(window, cx)
                 })
                 .child(Icon::new(IconName::ArrowUp).with_size(px(14.)));
-            if empty {
-                send = send.cursor_default();
-            } else {
+            if has_text {
                 send = send
                     .hover(move |style| style.bg(hover_bg))
                     .shadow(pal.shadow_send.clone())
@@ -1604,34 +1647,11 @@ impl ComposerView {
                             this.update(cx, |this, cx| this.submit(false, window, cx));
                         }
                     });
+            } else {
+                send = send.cursor_default();
             }
             send.into_any_element()
         }
-    }
-
-    /// The steer pill, shown while a run is in flight: disabled with
-    /// the missing capability named when the agent did not advertise
-    /// steering.
-    fn steer_button(&self, cx: &Context<Self>, pal: &'static Palette) -> impl IntoElement {
-        let this = cx.entity();
-        let advertised = self.store.read(cx).state().steer_available();
-        let tip = if advertised {
-            "Steer the running turn (Ctrl+Enter)"
-        } else {
-            "the agent did not advertise the steer capability"
-        };
-        let mut pill = toolbar_pill("composer-steer", false, pal, cx)
-            .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
-            .child(Icon::new(IconName::CornerDownLeft).with_size(px(14.)))
-            .child("Steer");
-        if advertised {
-            pill = pill.on_click(move |_, window, cx| {
-                this.update(cx, |this, cx| this.submit(true, window, cx));
-            });
-        } else {
-            pill = pill.opacity(0.45).cursor_default();
-        }
-        pill
     }
 
     /// The toolbar row under the input.
@@ -1641,7 +1661,6 @@ impl ComposerView {
         pal: &'static Palette,
         goal_laid_out: Rc<Cell<bool>>,
     ) -> Div {
-        let running = self.running(cx);
         let session = self.store.read(cx).active_session();
         let plan_on = session
             .and_then(active_mode)
@@ -1655,8 +1674,8 @@ impl ComposerView {
             .items_center()
             .gap(px(SP_2))
             .pt(px(6.))
-            .px(px(SP_2))
-            .pb(px(SP_2))
+            .px(px(8.))
+            .pb(px(8.))
             .child(self.plus_button(cx, pal, goal_laid_out))
             .child(self.mode_button(cx, pal))
             .when(plan_on, |row| {
@@ -1684,24 +1703,8 @@ impl ComposerView {
                 ))
             })
             .child(div().flex_1().min_w(px(4.)))
-            .child(self.fuel(cx, pal))
-            .child(self.picker_button(
-                "thinking",
-                "composer-thinking",
-                "the agent sent no thinking config option",
-                "Thinking",
-                pal,
-                cx,
-            ))
-            .child(self.picker_button(
-                "model",
-                "composer-model",
-                "the agent sent no model config option",
-                "Model",
-                pal,
-                cx,
-            ))
-            .when(running, |row| row.child(self.steer_button(cx, pal)))
+            .children(self.fuel(cx, pal))
+            .child(self.model_button(cx, pal))
             .child(self.send_button(cx, pal))
     }
 }
@@ -1746,6 +1749,7 @@ impl Render for ComposerView {
         let suggestion = self.suggestion_panel(cx, pal);
         v_flex()
             .id("composer")
+            .test_support()
             .w_full()
             .on_action(cx.listener(|this, _: &CycleMode, _, cx| this.cycle_mode(cx)))
             .on_action(cx.listener(|this, _: &Escape, _, cx| this.on_escape(cx)))
@@ -1791,8 +1795,8 @@ mod tests {
     use gpui_kit::{AppContext as _, Entity, TestAppContext};
 
     use super::{
-        ComposerView, ESC_WINDOW, EscStep, FUEL_CELLS, Suggest, active_mode, esc_step, fuel_cells,
-        mention_items, next_mode_value, select_option, slash_items, suggest_for,
+        ComposerView, ESC_WINDOW, EscStep, Suggest, active_mode, esc_step, mention_items,
+        next_mode_value, select_option, slash_items, suggest_for,
     };
     use crate::store::Store;
     use crate::transport::State;
@@ -1917,15 +1921,6 @@ mod tests {
             EscStep::Arm,
             "an expired window arms again"
         );
-    }
-
-    #[test]
-    fn fuel_cells_cover_twenty_cells() {
-        assert_eq!(fuel_cells(0.0), 0);
-        assert_eq!(fuel_cells(0.5), FUEL_CELLS / 2);
-        assert_eq!(fuel_cells(1.0), FUEL_CELLS);
-        assert_eq!(fuel_cells(0.8), 16);
-        assert_eq!(fuel_cells(2.0), FUEL_CELLS, "overfull clamps");
     }
 
     #[test]

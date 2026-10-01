@@ -198,7 +198,7 @@ fn mono_lines(text: &str) -> usize {
 
 /// One rendered line of a unified diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum DiffLine {
+pub(crate) enum DiffLine {
     /// A line only the new text has.
     Add(String),
     /// A line only the old text has.
@@ -287,7 +287,9 @@ fn diff_of_text(text: &str) -> Option<Vec<DiffLine>> {
 
 /// The unified diff a tool call delivered, if any. Structured diff
 /// content wins over diff-marked text content.
-fn diff_lines(call: &ToolCallItem) -> Option<Vec<DiffLine>> {
+/// The unified lines of one tool call's diff, when the call carries
+/// or implies one. Shared with the workbench's changes pane.
+pub(crate) fn diff_lines(call: &ToolCallItem) -> Option<Vec<DiffLine>> {
     for content in &call.content {
         if let ToolCallContent::Diff(diff) = content {
             return Some(diff_of_texts(
@@ -906,7 +908,9 @@ fn detail_line_count(call: &ToolCallItem) -> usize {
     }
 }
 
-/// The estimated height of one tool row, detail included when shown.
+/// The estimated height of one tool row, detail included when shown. The
+/// detail's closing margin is not counted here: it belongs to the gap the
+/// next row is seated on, not to the box.
 fn tool_height(session: &Session, ix: usize, ui: &UiState) -> Pixels {
     let Some(TranscriptItem::ToolCall(call)) = session.items.get(ix) else {
         return px(ROW_H);
@@ -915,11 +919,7 @@ fn tool_height(session: &Session, ix: usize, ui: &UiState) -> Pixels {
     if !shown {
         return px(ROW_H);
     }
-    px(ROW_H
-        + DETAIL_TOP
-        + DETAIL_HEAD_H
-        + detail_line_count(call) as f32 * DETAIL_LINE
-        + DETAIL_BOTTOM)
+    px(ROW_H + DETAIL_TOP + DETAIL_HEAD_H + detail_line_count(call) as f32 * DETAIL_LINE)
 }
 
 /// The estimated height of one model row, top spacing included.
@@ -933,7 +933,7 @@ fn row_height(session: &Session, prev: Option<&Row>, row: &Row, ui: &UiState) ->
         Row::Thinking { ix, expanded, .. } => {
             let mut height = ROW_H;
             if *expanded {
-                height += DETAIL_TOP + item_lines(session, *ix) as f32 * THINK_LINE + DETAIL_BOTTOM;
+                height += DETAIL_TOP + item_lines(session, *ix) as f32 * THINK_LINE;
             }
             height
         }
@@ -1301,6 +1301,7 @@ impl TranscriptView {
     /// seated on the design's collapsed margins.
     fn render_row(
         &self,
+        cell_ix: usize,
         row: &Row,
         prev: Option<&Row>,
         last: bool,
@@ -1382,7 +1383,11 @@ impl TranscriptView {
                 _ => blank_row(*ix).into_any_element(),
             },
         };
-        let mut cell = div().w_full().pt(px(gap(prev, row)));
+        let mut cell = div()
+            .id(ElementId::named_usize("row-cell", cell_ix))
+            .test_support()
+            .w_full()
+            .pt(px(gap(prev, row)));
         if last {
             cell = cell.pb(px(margins(row).1));
         }
@@ -1676,7 +1681,7 @@ impl TranscriptView {
             .child(head);
         if expanded {
             if let Some(lines) = diff {
-                unit = unit.child(render_detail(None, render_diff(&lines, cx), cx));
+                unit = unit.child(render_detail(None, render_diff(&lines, cx), ix, cx));
             } else if !output.is_empty() {
                 let detail_head = if call.title == "read" {
                     Some((
@@ -1696,7 +1701,7 @@ impl TranscriptView {
                 } else {
                     None
                 };
-                unit = unit.child(render_detail(detail_head, render_pre(&output, cx), cx));
+                unit = unit.child(render_detail(detail_head, render_pre(&output, cx), ix, cx));
             }
         }
         unit
@@ -2101,12 +2106,21 @@ fn render_decision(
 
 /// The design's detail box: a bordered surface with an optional head
 /// naming the path or command, indented under the row that opened it.
-fn render_detail(head: Option<(IconName, String)>, body: Div, cx: &Context<TranscriptView>) -> Div {
+/// It carries no bottom margin of its own: [`margins`] reports the
+/// design's 10px as the row's closing margin and [`gap`] seats the next
+/// row on it, so a margin here too would double it.
+fn render_detail(
+    head: Option<(IconName, String)>,
+    body: Div,
+    ix: usize,
+    cx: &Context<TranscriptView>,
+) -> impl IntoElement {
     let theme = cx.theme().colors;
     let mono = cx.theme().mono_font_family.clone();
     let mut box_ = div()
+        .id(ElementId::named_usize("detail", ix))
+        .test_support()
         .mt(px(SP_2))
-        .mb(px(DETAIL_BOTTOM))
         .ml(px(DETAIL_INDENT))
         .border_1()
         .border_color(theme.border)
@@ -2136,7 +2150,7 @@ fn render_detail(head: Option<(IconName, String)>, body: Div, cx: &Context<Trans
                 ),
         );
     }
-    box_.child(body)
+    box_.child(body).into_any_element()
 }
 
 /// The mono body of a detail box: the design's deep well at its 12px
@@ -2155,7 +2169,8 @@ fn render_pre(text: &str, cx: &Context<TranscriptView>) -> Div {
 
 /// A unified diff with per-line added and removed coloring, computed
 /// from the markers the delivered text carries.
-fn render_diff(lines: &[DiffLine], cx: &Context<TranscriptView>) -> Div {
+/// The diff block as the transcript and the workbench both draw it.
+pub(crate) fn render_diff(lines: &[DiffLine], cx: &App) -> Div {
     let theme = cx.theme().colors;
     let mono = cx.theme().mono_font_family.clone();
     let ink = Ink::active(cx);
@@ -2277,7 +2292,7 @@ impl Render for TranscriptView {
                                     let row = &model.rows[ix];
                                     *this.render_counts.entry(row.key()).or_insert(0) += 1;
                                     let prev = ix.checked_sub(1).and_then(|p| model.rows.get(p));
-                                    let element = this.render_row(row, prev, ix == last_ix, cx);
+                                    let element = this.render_row(ix, row, prev, ix == last_ix, cx);
                                     match this.row_tint(row.key(), colors) {
                                         Some(tint) => div()
                                             .id(ElementId::named_usize("find-hit", ix))
@@ -2321,7 +2336,7 @@ mod tests {
     use std::collections::HashSet;
 
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{AppContext as _, TestAppContext, Window};
+    use gpui_kit::{AppContext as _, ElementId, TestAppContext, Window};
 
     use super::{
         ChipTone, Outcome, Row, RowKey, UiState, chips_for, diff_lines, diff_stat, last_sentence,
@@ -2989,10 +3004,11 @@ mod tests {
         run_commands(&mut store);
         let _ = store.take_outgoing();
         store.absorb(init_answer());
-        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store.new_session();
         let _ = store.take_outgoing();
         store.absorb(Frame::Success {
-            id: 2,
+            id: 3,
             result: serde_json::json!({"sessionId": "s1"}),
         });
         let _ = store.take_outgoing();
@@ -3242,6 +3258,65 @@ mod tests {
             visual.update(|_, cx| view.read(cx).render_counts.contains_key(&RowKey::Item(400))),
             "the plan card is in view after the jump"
         );
+    }
+
+    /// The design seats an expanded row's next sibling on the collapsed
+    /// margin, which is the larger of the two, not their sum. The detail
+    /// box itself carries no bottom margin, so the gap between the box
+    /// and the next row is exactly that collapsed value.
+    #[gpui_kit::test]
+    fn an_expanded_detail_closes_with_one_collapsed_margin(cx: &mut TestAppContext) {
+        let mut store = booted_store();
+        store.absorb(shell_call_frame("s1"));
+        store.absorb(agent_chunk("s1", "the answer"));
+        let store = cx.new(|_| store);
+        let (view, visual) = window_on(cx, store.clone());
+        visual.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.ui.expanded.insert(RowKey::Item(0));
+                cx.notify();
+            });
+        });
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let (detail, cell) = visual.update(|window, _| {
+            (
+                window.find(ElementId::named_usize("detail", 0)).bounds(),
+                window.find(ElementId::named_usize("row-cell", 0)).bounds(),
+            )
+        });
+        // The detail box ends where its row cell ends. The design closes an
+        // expanded row with a 10px margin, and [`margins`] reports that as
+        // the row's closing margin so [`gap`] seats the next row on it; a
+        // margin on the box as well would add a second one, which is what a
+        // box bottom past its cell's bottom would mean.
+        assert_eq!(
+            detail.origin.y + detail.size.height,
+            cell.origin.y + cell.size.height,
+            "the detail box adds no margin of its own below the row"
+        );
+    }
+
+    /// A completed read tool call on `session`, carrying output so the row
+    /// has a detail box to show.
+    fn shell_call_frame(session: &str) -> Frame {
+        Frame::Notification {
+            method: "session/update".to_owned(),
+            params: serde_json::json!({
+                "sessionId": session,
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call-read",
+                    "title": "read",
+                    "kind": "read",
+                    "status": "completed",
+                    "rawInput": {"path": "src/main.rs"},
+                    "content": [{
+                        "type": "content",
+                        "content": {"type": "text", "text": "fn main() {}"},
+                    }],
+                },
+            }),
+        }
     }
 
     /// A plan update frame for `session`.

@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use gpui_kit::StyledImage as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState, TextareaState};
@@ -21,8 +22,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Div, Entity, EventEmitter, FontWeight, Hsla,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
-    linear_color_stop, linear_gradient, px, relative,
+    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div, px, relative,
 };
 use kage_client::wire::NoticeTone;
 use kage_client::{Change, State, TranscriptItem};
@@ -31,7 +31,7 @@ use serde_json::Value;
 use crate::store::Store;
 use crate::theme::{
     FONT_DISPLAY, FONT_MONO, FS_2XS, FS_SM, FS_XS, R_LG, R_MD, R_XL, WEIGHT_EXTRABOLD,
-    WEIGHT_SEMIBOLD,
+    WEIGHT_SEMIBOLD, WELCOME_PAD_BOTTOM_SHARE, WELCOME_PAD_TOP, WELCOME_PAD_X, WELCOME_W,
 };
 use crate::views::deferred::{Deferred, LaidOut};
 use crate::views::transcript::{FindMarks, RowKey, TranscriptView};
@@ -54,34 +54,8 @@ fn design_palette(cx: &App) -> crate::theme::Palette {
     }
 }
 
-/// The eclipse brand mark: a gradient disc with a backdrop-colored
-/// disc across its upper right, clipped to the mark's own circle.
-fn eclipse_mark(size: f32, backdrop: Hsla, p: &crate::theme::Palette) -> Div {
-    div()
-        .relative()
-        .flex_none()
-        .size(px(size))
-        .rounded_full()
-        .overflow_hidden()
-        .border_1()
-        .border_color(p.line_strong)
-        .bg(linear_gradient(
-            135.,
-            linear_color_stop(p.orb_1, 0.),
-            linear_color_stop(p.orb_2, 1.),
-        ))
-        .child(
-            div()
-                .absolute()
-                .top(px(size * 0.5 / 24.))
-                .left(px(size * 8. / 24.))
-                .size(px(size * 17. / 24.))
-                .rounded_full()
-                .bg(backdrop),
-        )
-}
-
-/// The bordered keyboard hint chip of the design.
+/// The bordered keyboard hint chip of the design: 18px tall with
+/// 10.5px type, as `.kbd` draws it.
 fn kbd_chip(label: &str, p: &crate::theme::Palette) -> Div {
     div()
         .flex()
@@ -1134,60 +1108,73 @@ impl Render for Toasts {
 /// session offers it, and the draft it fills.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingCard {
-    option_id: &'static str,
-    option_value: String,
+    /// The option to set, when the card carries one.
+    option: Option<(&'static str, String)>,
     /// The draft still to fill; taken once a session carried it.
     draft: Option<String>,
 }
 
-/// The draft the plan card fills.
-pub const WELCOME_PLAN_DRAFT: &str = "Plan a refactor of this repository before changing anything";
-
-/// The draft the swarm card fills.
-pub const WELCOME_SWARM_DRAFT: &str = "Run an audit of this repository with a swarm";
-
-/// One suggestion card.
+/// One suggestion card: what it fills the draft with and the one
+/// config option it sets, when the card carries a mode.
 struct Suggestion {
     id: &'static str,
-    title: &'static str,
-    body: &'static str,
-    option_id: &'static str,
-    option_value: &'static str,
-    draft: &'static str,
+    icon: IconName,
+    text: &'static str,
+    /// The option the card turns on, as the web client's cards do:
+    /// swarm for the audit, plan for the planning prompt. `None` for
+    /// the plain suggestions, which only fill the draft.
+    option: Option<(&'static str, &'static str)>,
+    /// The tag pill the card trails, if any: `swarm` or `plan`.
+    tag: Option<&'static str>,
 }
 
-/// The cards that set an option and fill the draft. Every option here
-/// is one the agent can advertise; a card sets nothing the session
-/// was never offered. The goal card stands alone: its value is
-/// typed, not suggested.
-const SUGGESTIONS: [Suggestion; 2] = [
+/// The cards of the welcome pane, the web client's four suggestions.
+/// Every option here is one the agent can advertise; a card sets
+/// nothing the session was never offered.
+const SUGGESTIONS: [Suggestion; 4] = [
     Suggestion {
-        id: "welcome-card-plan",
-        title: "Plan a refactor",
-        body: "sets the mode option to plan when the agent offers it",
-        option_id: "mode",
-        option_value: "plan",
-        draft: WELCOME_PLAN_DRAFT,
+        id: "welcome-card-fix",
+        icon: IconName::Lightbulb,
+        text: "Fix the flaky retry test in kage-provider",
+        option: None,
+        tag: None,
     },
     Suggestion {
         id: "welcome-card-swarm",
-        title: "Run a swarm audit",
-        body: "sets the swarm option on when the agent offers it",
-        option_id: "swarm",
-        option_value: "on",
-        draft: WELCOME_SWARM_DRAFT,
+        icon: IconName::Waypoints,
+        text: "Audit every crate for unwrap on runtime paths",
+        option: Some(("swarm", "on")),
+        tag: Some("swarm"),
+    },
+    Suggestion {
+        id: "welcome-card-plan",
+        icon: IconName::ListTodo,
+        text: "Plan the remote MCP rollout",
+        option: Some(("mode", "plan")),
+        tag: Some("plan"),
+    },
+    Suggestion {
+        id: "welcome-card-delegate",
+        icon: IconName::Bot,
+        text: "Delegate the docs check to subagents",
+        option: None,
+        tag: None,
     },
 ];
 
-/// The welcome pane: shown when no session is active. A wordmark,
-/// suggestion cards over the real config options, and the composer
-/// the shell keeps below it. A card clicked before any session exists
+/// The welcome pane: shown when no session is active. A wordmark, the
+/// composer, then suggestion cards over the real config options. The
+/// composer is the shell's own entity mounted here rather than in the
+/// bottom band, which is where it goes once a session exists, so the
+/// draft survives the move. A card clicked before any session exists
 /// applies to the first session that opens, and only the option the
 /// agent actually advertised.
 pub struct WelcomeView {
     store: Entity<Store>,
     composer: Entity<TextareaState>,
-    goal: Entity<InputState>,
+    /// The composer element, mounted here so the wordmark reads into the
+    /// input rather than over the cards.
+    composer_view: Entity<crate::views::composer::ComposerView>,
     /// The card text to hand the composer, held until the composer has
     /// been laid out. A card raised before the first frame would
     /// otherwise reach an engine still holding its construction font; see
@@ -1202,34 +1189,11 @@ impl WelcomeView {
     pub fn new(
         store: Entity<Store>,
         composer: Entity<TextareaState>,
+        composer_view: Entity<crate::views::composer::ComposerView>,
         composer_laid_out: LaidOut,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let goal =
-            cx.new(|cx| InputState::new(window, cx).placeholder("State the goal; Enter sets it"));
-        cx.subscribe_in(
-            &goal,
-            window,
-            |this, goal, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    let text = goal.read(cx).value().trim().to_owned();
-                    if !text.is_empty() {
-                        this.raise(
-                            PendingCard {
-                                option_id: "goal",
-                                option_value: text,
-                                draft: None,
-                            },
-                            window,
-                            cx,
-                        );
-                    }
-                    goal.update(cx, |state, cx| state.set_value("", window, cx));
-                }
-            },
-        )
-        .detach();
         cx.observe_in(&store, window, |this, _, window, cx| {
             if let Some(card) = this.pending.take() {
                 this.pending = this.apply_card(card, window, cx);
@@ -1239,7 +1203,7 @@ impl WelcomeView {
         Self {
             store,
             composer,
-            goal,
+            composer_view,
             fill_mirror: Deferred::after(composer_laid_out),
             pending: None,
         }
@@ -1253,7 +1217,9 @@ impl WelcomeView {
 
     /// Applies what `card` can carry now: the draft once a session
     /// exists, the option once that session offers it. Returns
-    /// whatever still waits.
+    /// whatever still waits. A card without an option is done once
+    /// its draft landed; keeping it would refill the draft the user
+    /// is already typing over.
     fn apply_card(
         &mut self,
         mut card: PendingCard,
@@ -1274,11 +1240,11 @@ impl WelcomeView {
             composer.update(cx, |state, cx| state.focus(window, cx));
             cx.notify();
         }
-        if !self.offers(&card, cx) {
+        let (option_id, value) = card.option.take()?;
+        if !self.offers(option_id, &value, cx) {
+            card.option = Some((option_id, value));
             return Some(card);
         }
-        let option_id = card.option_id;
-        let value = card.option_value.clone();
         self.store.update(cx, |store, cx| {
             store.set_option(option_id, &value);
             cx.notify();
@@ -1286,17 +1252,17 @@ impl WelcomeView {
         None
     }
 
-    /// Whether the active session advertises the card's option, and a
-    /// select option lists the card's value.
-    fn offers(&self, card: &PendingCard, cx: &App) -> bool {
+    /// Whether the active session advertises the option, and a select
+    /// option lists the card's value.
+    fn offers(&self, option_id: &str, option_value: &str, cx: &App) -> bool {
         self.store.read(cx).active_session().is_some_and(|session| {
             session.config_options.iter().any(|option| {
-                option.id == card.option_id
+                option.id == option_id
                     && (option.options.is_empty()
                         || option
                             .options
                             .iter()
-                            .any(|value| value.value == card.option_value))
+                            .any(|value| value.value == option_value))
             })
         })
     }
@@ -1311,9 +1277,8 @@ impl WelcomeView {
     fn suggestion(&mut self, card: &Suggestion, window: &mut Window, cx: &mut Context<Self>) {
         self.raise(
             PendingCard {
-                option_id: card.option_id,
-                option_value: card.option_value.to_owned(),
-                draft: Some(card.draft.to_owned()),
+                option: card.option.map(|(id, value)| (id, value.to_owned())),
+                draft: Some(card.text.to_owned()),
             },
             window,
             cx,
@@ -1332,186 +1297,254 @@ impl Render for WelcomeView {
             composer.update(cx, |state, cx| state.set_value(text, window, cx));
         });
         let p = design_palette(cx);
+        // Under 860px the web client stacks the cards in one column and
+        // pads the pane 14px, as `@media (max-width: 860px)` does.
+        let narrow = window.viewport_size().width <= px(860.);
         let this = cx.entity();
 
-        let tag = |suggestion: &Suggestion| {
-            if suggestion.option_id == "swarm" {
-                ("swarm", p.done_soft, p.done)
-            } else {
-                ("plan", p.accent_soft, p.accent)
-            }
-        };
+        // The suggestion grid: two columns of cards, as the web
+        // client's `.suggest` lays them out.
         let mut cards = v_flex()
             .id("welcome-cards")
+            .test_support()
             .w_full()
-            .grid_cols(2)
+            .grid()
+            .grid_cols(if narrow { 1 } else { 2 })
             .gap(px(8.))
             .mt(px(16.));
         for suggestion in &SUGGESTIONS {
             let this = this.clone();
-            let (label, bg, fg) = tag(suggestion);
-            cards = cards.child(
-                v_flex()
-                    .id(suggestion.id)
-                    .test_support()
-                    .items_start()
-                    .px(px(12.))
-                    .py(px(10.))
-                    .gap(px(2.))
-                    .rounded(px(R_LG))
-                    .border_1()
-                    .border_color(p.line)
-                    .text_size(px(FS_SM))
-                    .text_color(p.muted)
-                    .cursor_pointer()
-                    .hover(move |card| {
-                        card.bg(p.hover)
-                            .border_color(p.line_strong)
-                            .text_color(p.ink)
-                    })
-                    .on_click(move |_, window, cx| {
-                        this.update(cx, |this, cx| this.suggestion(suggestion, window, cx));
-                    })
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(div().flex_1().min_w_0().truncate().child(suggestion.title))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .px(px(7.))
-                                    .py(px(1.))
-                                    .rounded_full()
-                                    .text_size(px(FS_2XS))
-                                    .text_color(fg)
-                                    .bg(bg)
-                                    .child(label),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(FS_XS))
-                            .text_color(p.faint)
-                            .child(suggestion.body),
-                    ),
-            );
-        }
-
-        let goal_input = self.goal.clone();
-        cards = cards.child(
-            v_flex()
-                .id("welcome-card-goal")
+            let (tag_fg, tag_bg) = if suggestion.tag == Some("swarm") {
+                (p.done, p.done_soft)
+            } else {
+                (p.accent, p.accent_soft)
+            };
+            let mut card = h_flex()
+                .id(suggestion.id)
                 .test_support()
-                .items_start()
+                .items_center()
+                .gap(px(10.))
                 .px(px(12.))
                 .py(px(10.))
-                .gap(px(2.))
                 .rounded(px(R_LG))
                 .border_1()
                 .border_color(p.line)
                 .text_size(px(FS_SM))
                 .text_color(p.muted)
+                .cursor_pointer()
+                .hover(move |card| {
+                    card.bg(p.hover)
+                        .border_color(p.line_strong)
+                        .text_color(p.ink)
+                })
+                .on_click(move |_, window, cx| {
+                    this.update(cx, |this, cx| this.suggestion(suggestion, window, cx));
+                })
                 .child(
-                    div()
-                        .w_full()
-                        .truncate()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child("Set a goal"),
+                    Icon::new(suggestion.icon)
+                        .with_size(px(14.))
+                        .text_color(p.faint),
                 )
                 .child(
                     div()
-                        .text_size(px(FS_XS))
-                        .text_color(p.faint)
-                        .child("the session works toward it until a notice reports it met"),
-                )
-                .child(
-                    h_flex()
-                        .w_full()
-                        .mt(px(4.))
-                        .gap(px(4.))
-                        .child(Input::new(&goal_input).flex_1())
-                        .child(
-                            Button::new("welcome-goal-set")
-                                .label("Set")
-                                .xsmall()
-                                .on_click(move |_, window, cx| {
-                                    let text = goal_input.read(cx).value().trim().to_owned();
-                                    this.update(cx, |this, cx| {
-                                        if !text.is_empty() {
-                                            this.raise(
-                                                PendingCard {
-                                                    option_id: "goal",
-                                                    option_value: text,
-                                                    draft: None,
-                                                },
-                                                window,
-                                                cx,
-                                            );
-                                        }
-                                    });
-                                    goal_input
-                                        .update(cx, |state, cx| state.set_value("", window, cx));
-                                }),
-                        ),
-                ),
-        );
+                        .flex_1()
+                        .min_w_0()
+                        .line_height(relative(1.5))
+                        .child(suggestion.text),
+                );
+            if let Some(label) = suggestion.tag {
+                card = card.child(
+                    div()
+                        .flex_none()
+                        .px(px(7.))
+                        .py(px(1.))
+                        .rounded_full()
+                        .text_size(px(FS_2XS))
+                        .text_color(tag_fg)
+                        .bg(tag_bg)
+                        .child(label),
+                );
+            }
+            cards = cards.child(card);
+        }
 
+        // The project pill above the composer, as the web client's
+        // proj-picker draws it: a surface fill, the folder, the project
+        // name and the branch label. The client knows one directory,
+        // the shell's own, so the pill names it and picks nothing.
+        let project = crate::app::project_name(
+            self.store
+                .read(cx)
+                .state()
+                .directory
+                .first()
+                .map(|info| info.cwd.as_str())
+                .or_else(|| {
+                    self.store
+                        .read(cx)
+                        .state()
+                        .sessions
+                        .values()
+                        .find_map(|session| session.cwd.as_deref())
+                }),
+        );
+        let proj_picker = h_flex()
+            .id("welcome-proj")
+            .mb(px(8.))
+            .ml(px(12.))
+            .h(px(28.))
+            .px(px(10.))
+            .gap(px(7.))
+            .items_center()
+            .self_start()
+            .rounded(px(R_MD))
+            .bg(p.surface)
+            .hover(|pill| pill.bg(p.raised))
+            .text_size(px(FS_SM))
+            .text_color(p.ink)
+            .cursor_default()
+            .child(
+                Icon::new(IconName::Folder)
+                    .with_size(px(14.))
+                    .text_color(p.muted),
+            )
+            .child(project)
+            .child(
+                div()
+                    .font_family(FONT_MONO)
+                    .text_size(px(11.))
+                    .text_color(p.faint)
+                    .child("main"),
+            )
+            .child(
+                Icon::new(IconName::ChevronDown)
+                    .with_size(px(12.))
+                    .text_color(p.faint),
+            );
+
+        // The wordmark: the kanji glyph over its hard offset shadow,
+        // then the name, as the web client's `.wordmark` draws them.
+        // The face carries the design's real orb gradient, pre-rendered
+        // per palette, because the toolkit's SVG element paints one flat
+        // color only.
+        let face = if cx.theme().mode.is_dark() {
+            crate::assets::GLYPH_FACE_SHADOW
+        } else {
+            crate::assets::GLYPH_FACE_DAWN
+        };
+        let glyph_shadow = gpui_kit::svg()
+            .path(crate::assets::GLYPH_PATH)
+            .size(px(76.))
+            .flex_none()
+            .text_color(p.accent_soft);
         let wordmark_shadow = div()
             .absolute()
-            .top(px(4.))
-            .left(px(4.))
-            .font_family(FONT_DISPLAY)
-            .font_weight(WEIGHT_EXTRABOLD)
-            .text_size(px(60.))
-            .line_height(relative(1.))
-            .text_color(p.accent_soft)
-            .child("kage");
+            .top(px(6.))
+            .left(px(6.))
+            .child(glyph_shadow);
         let wordmark_face = div()
             .relative()
-            .font_family(FONT_DISPLAY)
-            .font_weight(WEIGHT_EXTRABOLD)
-            .text_size(px(60.))
-            .line_height(relative(1.))
-            .text_color(p.ink_strong)
-            .child("kage");
+            .child(gpui_kit::img(face).size(px(76.)).flex_none());
 
+        let hint = h_flex()
+            .id("welcome-hint")
+            .test_support()
+            .flex_none()
+            .items_center()
+            .mt(px(18.))
+            .text_size(px(FS_XS))
+            .text_color(p.faint)
+            .child("Type")
+            .child(kbd_chip("help", &p).mx(px(2.)))
+            .child("in any chat to list the test keywords")
+            .child("\u{b7}")
+            .child(kbd_chip("Ctrl K", &p).mx(px(2.)))
+            .child("commands");
+
+        let column = v_flex()
+            .w_full()
+            .max_w(px(WELCOME_W))
+            .flex_none()
+            .items_center()
+            .mt_auto()
+            .mb_auto()
+            .child(
+                h_flex()
+                    .id("welcome-wordmark")
+                    .test_support()
+                    .items_center()
+                    .gap(px(16.))
+                    .mb(px(30.))
+                    .child(div().relative().child(wordmark_shadow).child(wordmark_face))
+                    .child(
+                        div()
+                            .relative()
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top(px(4.2))
+                                    .left(px(4.2))
+                                    .font_family(FONT_DISPLAY)
+                                    .font_weight(WEIGHT_EXTRABOLD)
+                                    .text_size(px(60.))
+                                    .line_height(relative(1.))
+                                    .text_color(p.accent_soft)
+                                    .child("kage"),
+                            )
+                            .child(
+                                div()
+                                    .relative()
+                                    .font_family(FONT_DISPLAY)
+                                    .font_weight(WEIGHT_EXTRABOLD)
+                                    .text_size(px(60.))
+                                    .line_height(relative(1.))
+                                    .text_color(p.ink_strong)
+                                    .child("kage"),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .child(proj_picker)
+                    .child(div().w_full().child(self.composer_view.clone())),
+            )
+            .child(cards)
+            .child(hint);
+
+        // The design centres the stack in the pane less a 40px top pad and
+        // a 12vh bottom pad, which lifts the stack above the middle. The
+        // bottom pad is a share of the viewport, so it is measured rather
+        // than a constant. Auto margins do the centring: they collapse to
+        // zero when the stack is taller than the padded pane, which pins
+        // the stack to the 40px pad instead of spilling it over the
+        // topbar, as the web client's scroll container resolves it.
+        let viewport = window.viewport_size().height / px(1.0);
+        let glow = if cx.theme().mode.is_dark() {
+            crate::assets::WELCOME_GLOW
+        } else {
+            crate::assets::WELCOME_GLOW_DAWN
+        };
         v_flex()
             .id("welcome")
             .test_support()
             .size_full()
+            .relative()
             .items_center()
-            .justify_center()
+            .pt(px(WELCOME_PAD_TOP))
+            .pb(px(viewport * WELCOME_PAD_BOTTOM_SHARE))
+            .px(px(if narrow { 14. } else { WELCOME_PAD_X }))
+            // The web client's `.welcome` radial glow, behind the stack.
+            // Fill stretches the unit-space render over the pane, which
+            // reproduces the ellipse at any viewport size.
             .child(
-                v_flex()
-                    .w_full()
-                    .max_w(px(728.))
-                    .px(px(24.))
-                    .items_center()
-                    .child(
-                        h_flex()
-                            .id("welcome-wordmark")
-                            .test_support()
-                            .items_center()
-                            .gap(px(16.))
-                            .mb(px(30.))
-                            .child(eclipse_mark(76., p.bg, &p))
-                            .child(div().relative().child(wordmark_shadow).child(wordmark_face)),
-                    )
-                    .child(cards)
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .mt(px(18.))
-                            .gap(px(2.))
-                            .text_size(px(FS_XS))
-                            .text_color(p.faint)
-                            .child("the agent runs here")
-                            .child(kbd_chip("Ctrl N", &p))
-                            .child("opens a session"),
-                    ),
+                div().absolute().inset_0().child(
+                    gpui_kit::img(glow)
+                        .size_full()
+                        .object_fit(gpui_kit::ObjectFit::Fill),
+                ),
             )
+            .child(column)
     }
 }
 
@@ -1526,16 +1559,19 @@ mod tests {
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
         AppContext as _, ElementId, Entity, IntoElement, ParentElement as _, Styled as _,
-        TestAppContext, VisualTestContext, Window, div,
+        TestAppContext, VisualTestContext, Window, div, px,
     };
     use serde_json::Value;
 
     use super::{
-        FindBar, LaidOut, NoticeWatch, PaletteEntry, PaletteView, ToastAction, ToastDraft, Toasts,
-        WelcomeView, counter_text, find_matches, palette_entries, step_match, toasts_for_changes,
+        FindBar, LaidOut, NoticeWatch, PaletteEntry, PaletteView, SUGGESTIONS, ToastAction,
+        ToastDraft, Toasts, WelcomeView, counter_text, find_matches, palette_entries, step_match,
+        toasts_for_changes,
     };
     use crate::store::{Command, Store};
+    use crate::theme::{WELCOME_PAD_BOTTOM_SHARE, WELCOME_PAD_TOP, WELCOME_W};
     use crate::transport::State;
+    use crate::views::composer::ComposerView;
     use crate::views::transcript::TranscriptView;
     use gpui_kit::base::ElementExt as _;
     use gpui_kit::component::input::Textarea;
@@ -1577,10 +1613,11 @@ mod tests {
         run_commands(&mut store);
         let _ = store.take_outgoing();
         store.absorb(init_answer());
-        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store.new_session();
         let _ = store.take_outgoing();
         store.absorb(Frame::Success {
-            id: 2,
+            id: 3,
             result: serde_json::json!({"sessionId": "s1"}),
         });
         let _ = store.take_outgoing();
@@ -1912,7 +1949,7 @@ mod tests {
         let mut store = booted_store();
         store.new_session();
         store.absorb(Frame::Success {
-            id: 3,
+            id: 4,
             result: serde_json::json!({"sessionId": "s2"}),
         });
         let _ = store.take_outgoing();
@@ -2097,6 +2134,162 @@ mod tests {
         );
     }
 
+    /// A connected store with no session, which is the state the welcome
+    /// pane is for.
+    fn sessionless_store() -> Store {
+        let mut store = Store::new("/w", false);
+        store.set_connect(State::Connected);
+        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store.absorb(init_answer());
+        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store
+    }
+
+    /// The welcome pane mounts the composer inside its own column, so the
+    /// wordmark reads into the input rather than over the cards. The
+    /// browser only reaches this state when the agent reports no session,
+    /// which a live `kage serve` never does, so the layout is checked here.
+    #[gpui_kit::test]
+    fn the_welcome_pane_carries_the_composer(cx: &mut TestAppContext) {
+        let store = cx.new(|_| sessionless_store());
+        let (welcome, visual) = welcome_window(cx, store.clone());
+        visual.update(|window, cx| window.render_frame(cx));
+        visual.update(|window, cx| window.render_frame(cx));
+        visual.update(|window, _| {
+            assert!(
+                window.try_find("composer").is_some(),
+                "the composer is mounted in the welcome column"
+            );
+        });
+        // The composer sits below the wordmark and above the cards, so it
+        // reads as part of the welcome stack.
+        visual.update(|window, _| {
+            let wordmark = window
+                .try_find("welcome-wordmark")
+                .expect("the wordmark is on screen")
+                .bounds();
+            let composer = window
+                .try_find("composer")
+                .expect("the composer is on screen")
+                .bounds();
+            let cards = window
+                .try_find("welcome-cards")
+                .expect("the cards are on screen")
+                .bounds();
+            assert!(
+                wordmark.origin.y < composer.origin.y,
+                "the wordmark is above the composer"
+            );
+            assert!(
+                composer.origin.y < cards.origin.y,
+                "the composer is above the cards, not pinned to the window bottom"
+            );
+        });
+        drop(welcome);
+    }
+
+    /// The welcome block measures to the design's column and the cards sit
+    /// in the design's two-up grid. The browser only reaches this state
+    /// when the agent reports no session, which a live `kage serve` never
+    /// does, so the layout is checked here against measured bounds.
+    #[gpui_kit::test]
+    fn the_welcome_block_measures_to_the_design_column(cx: &mut TestAppContext) {
+        let store = cx.new(|_| sessionless_store());
+        let (welcome, visual) = welcome_window(cx, store.clone());
+        visual.update(|window, cx| window.render_frame(cx));
+        visual.update(|window, cx| window.render_frame(cx));
+
+        let mut bounds = |id: &'static str| {
+            visual.update(|window, _| {
+                window
+                    .try_find(id)
+                    .unwrap_or_else(|| panic!("{id} is on screen"))
+                    .bounds()
+            })
+        };
+        let composer = bounds("composer");
+        let cards = bounds("welcome-cards");
+        let fix = bounds("welcome-card-fix");
+        let swarm = bounds("welcome-card-swarm");
+        let plan = bounds("welcome-card-plan");
+        let delegate = bounds("welcome-card-delegate");
+        let hint = bounds("welcome-hint");
+
+        // The composer and the cards span the design's column, and the
+        // hint is centred in it rather than spread across it.
+        assert_eq!(
+            composer.size.width,
+            px(WELCOME_W),
+            "the composer is the column wide"
+        );
+        assert_eq!(
+            cards.size.width,
+            px(WELCOME_W),
+            "the cards are the column wide"
+        );
+        assert!(
+            hint.size.width < cards.size.width,
+            "the hint is one centred line, not a row spread across the column"
+        );
+
+        // Two columns in the design's order: fix and swarm share the
+        // first row, plan and delegate the second.
+        assert_eq!(fix.origin.y, swarm.origin.y, "the first cards share a row");
+        assert!(
+            fix.origin.x < swarm.origin.x,
+            "the swarm card is beside fix"
+        );
+        assert_eq!(
+            plan.origin.y, delegate.origin.y,
+            "the second cards share a row"
+        );
+        assert!(plan.origin.x < delegate.origin.x);
+        assert!(fix.origin.y < plan.origin.y, "the rows stack in order");
+        assert!(
+            plan.size.width < cards.size.width,
+            "a card is one half of the grid, not the whole row"
+        );
+        assert!(
+            cards.origin.y + cards.size.height <= hint.origin.y,
+            "the hint sits below the cards"
+        );
+        drop(welcome);
+    }
+
+    /// The design pads the welcome pane 40px at the top and 12vh at the
+    /// bottom, so the stack sits above the middle by exactly the
+    /// difference between those two pads. That difference is the whole
+    /// invariant and holds whatever height the content turns out to be.
+    #[gpui_kit::test]
+    fn the_welcome_stack_sits_above_the_pane_middle(cx: &mut TestAppContext) {
+        let store = cx.new(|_| sessionless_store());
+        let (welcome, visual) = welcome_window(cx, store.clone());
+        visual.update(|window, cx| window.render_frame(cx));
+        visual.update(|window, cx| window.render_frame(cx));
+        visual.update(|window, _| {
+            let wordmark = window
+                .try_find("welcome-wordmark")
+                .expect("the wordmark is on screen")
+                .bounds();
+            let hint = window
+                .try_find("welcome-hint")
+                .expect("the hint is on screen")
+                .bounds();
+            let pane = window.viewport_size().height / px(1.0);
+            let top = wordmark.origin.y / px(1.0);
+            let bottom = pane - (hint.origin.y + hint.size.height) / px(1.0);
+            let design = pane * WELCOME_PAD_BOTTOM_SHARE - WELCOME_PAD_TOP;
+            assert!(
+                (bottom - top - design).abs() < 2.0,
+                "the bottom gap {bottom} minus the top gap {top} is the design's \
+                 {design}, which is what lifts the stack above the middle"
+            );
+        });
+        drop(welcome);
+    }
+
     #[gpui_kit::test]
     fn welcome_cards_render_and_a_card_sets_its_option_and_fills_the_draft(
         cx: &mut TestAppContext,
@@ -2111,7 +2304,8 @@ mod tests {
             assert!(window.try_find("welcome-wordmark").is_some());
             assert!(window.try_find("welcome-card-plan").is_some());
             assert!(window.try_find("welcome-card-swarm").is_some());
-            assert!(window.try_find("welcome-card-goal").is_some());
+            assert!(window.try_find("welcome-card-fix").is_some());
+            assert!(window.try_find("welcome-card-delegate").is_some());
         });
 
         visual.update(|window, cx| window.click("welcome-card-plan", cx));
@@ -2125,14 +2319,15 @@ mod tests {
         assert_eq!(frames[0].1["configId"], "mode");
         assert_eq!(frames[0].1["value"], "plan");
         visual.update(|_, cx| {
+            let draft = SUGGESTIONS[2].text;
             assert_eq!(
                 store.read(cx).draft("s1"),
-                Some(super::WELCOME_PLAN_DRAFT),
+                Some(draft),
                 "the card filled the session draft"
             );
             assert_eq!(
                 welcome.read(cx).textarea().read(cx).value(),
-                super::WELCOME_PLAN_DRAFT,
+                draft,
                 "the card filled the composer"
             );
         });
@@ -2167,7 +2362,7 @@ mod tests {
                 store.new_session();
                 let _ = store.take_outgoing();
                 store.absorb(Frame::Success {
-                    id: 2,
+                    id: 3,
                     result: serde_json::json!({"sessionId": "s1"}),
                 });
                 store.absorb(options_frame());
@@ -2181,7 +2376,7 @@ mod tests {
         visual.update(|_, cx| {
             assert_eq!(
                 store.read(cx).draft("s1"),
-                Some(super::WELCOME_SWARM_DRAFT),
+                Some(SUGGESTIONS[1].text),
                 "the held card filled the first session's draft"
             );
         });
@@ -2198,23 +2393,24 @@ mod tests {
         let cap = captured.clone();
         cx.update(gpui_kit::init);
         let (_, visual) = cx.add_window_view(move |window: &mut Window, cx| {
-            let composer = cx.new(|cx| TextareaState::new(window, cx));
-            let composer_laid_out = LaidOut::new();
+            let composer_view = cx.new(|cx| ComposerView::new(store.clone(), window, cx));
+            let composer = composer_view.read(cx).input().clone();
+            let composer_laid_out = composer_view.read(cx).input_laid_out();
             let welcome = cx.new(|cx| {
                 WelcomeView::new(
                     store.clone(),
                     composer.clone(),
+                    composer_view.clone(),
                     composer_laid_out.clone(),
                     window,
                     cx,
                 )
             });
             cap.borrow_mut().replace(welcome.clone());
-            WelcomeHost {
-                welcome,
-                composer,
-                composer_laid_out,
-            }
+            // The composer_view and composer_laid_out handles stay alive
+            // through the welcome entity, which holds both.
+            drop(composer_view);
+            WelcomeHost { welcome }
         });
         let welcome = captured.borrow().clone().expect("the welcome was built");
         (welcome, visual)
@@ -2227,20 +2423,11 @@ mod tests {
     /// the only one where the fill can land.
     struct WelcomeHost {
         welcome: Entity<WelcomeView>,
-        composer: Entity<TextareaState>,
-        composer_laid_out: LaidOut,
     }
 
     impl gpui_kit::Render for WelcomeHost {
         fn render(&mut self, _: &mut Window, _: &mut gpui_kit::Context<Self>) -> impl IntoElement {
-            v_flex()
-                .size_full()
-                .child(self.welcome.clone())
-                .child(Textarea::new(&self.composer))
-                .on_prepaint({
-                    let laid_out = self.composer_laid_out.clone();
-                    move |_, _, _| laid_out.mark()
-                })
+            v_flex().size_full().child(self.welcome.clone())
         }
     }
 }

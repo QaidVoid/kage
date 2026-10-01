@@ -6,27 +6,31 @@
 //! ctrl-b toggles the workbench, ctrl-\ toggles the sidebar, ctrl-q
 //! quits, ctrl-enter sends the composer.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::theme::ActiveTheme;
 use gpui_kit::component::{Sizable as _, h_flex, h_resizable, resizable_panel, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
-    Styled as _, Window, div, px,
+    App, AppContext, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, SharedString, Styled as _, Window, div, px,
 };
 
+use crate::clock::unix_seconds;
 use crate::store::{Command, Store};
-use crate::theme::{CONTENT_W, PANEL_HEAD_H, SIDE_W, SP_4, SP_6, SP_8};
+use crate::theme::{CONTENT_W, FS_SM, FS_XS, PANEL_HEAD_H, R_FULL, SIDE_W, SP_4, SP_6, SP_8};
 use crate::transport::{Event, Transport};
 use crate::views::chrome::{
     FindBar, FindEvent, NoticeWatch, PaletteView, Toasts, WelcomeView, toasts_for_changes,
 };
 use crate::views::{
-    ApprovalCard, ComposerView, DockEvent, DockRow, SidebarView, TranscriptView, WorkbenchView,
+    ApprovalCard, ComposerView, DockEvent, DockRow, SidebarView, TranscriptView, WorkbenchEvent,
+    WorkbenchView,
 };
 use kage_client::{Change, Frame};
 
@@ -36,6 +40,33 @@ const REPLAY_PROMPT: &str = "fix the null check";
 /// The workbench panel's open width, matching the web client's
 /// default workbench width.
 const WORKBENCH_W: f32 = 460.0;
+
+/// The design palette of the active theme: the shell installs the
+/// dark kage palette at startup, and the light dawn palette when it
+/// installs the light mode instead.
+fn design_palette(cx: &App) -> crate::theme::Palette {
+    if cx.theme().mode.is_dark() {
+        crate::theme::Palette::shadow()
+    } else {
+        crate::theme::Palette::dawn()
+    }
+}
+
+/// The short name a session's directory carries in the crumbs: the
+/// last path segment, or `local` when the session has none.
+#[must_use]
+pub(crate) fn project_name(cwd: Option<&str>) -> SharedString {
+    let Some(cwd) = cwd else {
+        return "local".into();
+    };
+    let trimmed = cwd.trim_end_matches('/');
+    let name = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    if name.is_empty() {
+        "local".into()
+    } else {
+        name.into()
+    }
+}
 
 /// The directory new sessions open in. The browser has no filesystem,
 /// so the read is desktop-only and sessions start without a directory
@@ -93,8 +124,22 @@ pub struct Shell {
     /// Counts the notice items each session held, so frames that add
     /// notices raise their toast once.
     notices: NoticeWatch,
+    /// When the active turn began, per session, as Unix seconds. The
+    /// client model carries only the in-flight flag, so the shell
+    /// stamps the first frame that sees the flag up.
+    turn_started: BTreeMap<String, i64>,
     sidebar_visible: bool,
     workbench_visible: bool,
+    /// The sidebar floated over the content at the web client's narrow
+    /// breakpoint, where it takes no column. Opening or creating a
+    /// session closes it, as the web client does.
+    side_float: bool,
+    /// The viewport width as of the last rendered frame, so panel
+    /// toggles off the render path can read the breakpoints.
+    viewport_width: f32,
+    /// The active session id as of the last store tick, to close the
+    /// sidebar float when the selection moves.
+    last_active: Option<String>,
     streamed: usize,
 }
 
@@ -130,8 +175,16 @@ impl Shell {
             )
         });
         let toasts = cx.new(|_| Toasts::new(store.clone()));
-        let welcome =
-            cx.new(|cx| WelcomeView::new(store.clone(), input.clone(), input_laid_out, window, cx));
+        let welcome = cx.new(|cx| {
+            WelcomeView::new(
+                store.clone(),
+                input.clone(),
+                composer.clone(),
+                input_laid_out,
+                window,
+                cx,
+            )
+        });
 
         cx.subscribe_in(
             &dock,
@@ -151,12 +204,37 @@ impl Shell {
             },
         )
         .detach();
+        cx.subscribe_in(
+            &workbench,
+            window,
+            |shell, _, event: &WorkbenchEvent, window, cx| match event {
+                WorkbenchEvent::Mention(path) => {
+                    let path = path.clone();
+                    shell.composer.update(cx, |composer, cx| {
+                        composer.insert_mention(Some(&path), window, cx);
+                    });
+                }
+            },
+        )
+        .detach();
 
         let (events, incoming) = async_channel::unbounded();
         args.transport.start(events);
 
-        cx.observe(&store, |shell, _, cx| shell.flush_outgoing(cx))
-            .detach();
+        cx.observe(&store, |shell, _, cx| {
+            shell.flush_outgoing(cx);
+            let active = shell
+                .store
+                .read(cx)
+                .active_session()
+                .map(|session| session.id.clone());
+            if active != shell.last_active {
+                shell.last_active = active;
+                shell.side_float = false;
+                cx.notify();
+            }
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             while let Ok(event) = incoming.recv().await {
                 if this
@@ -196,11 +274,16 @@ impl Shell {
             toasts,
             welcome,
             notices: NoticeWatch::default(),
+            turn_started: BTreeMap::new(),
             sidebar_visible: true,
             // Closed at first, as the design has it: the workbench is a
             // panel the user asks for with Ctrl B, and opening it by
             // default narrows the transcript on every launch.
             workbench_visible: false,
+            side_float: false,
+            // Measured on the first frame; until then behave wide.
+            viewport_width: f32::MAX,
+            last_active: None,
             streamed: 0,
         }
     }
@@ -224,6 +307,7 @@ impl Shell {
                 });
             }
         }
+        self.track_turn(cx);
         let commands = self.store.update(cx, |store, _| store.take_commands());
         if commands.is_empty() {
             return;
@@ -239,6 +323,29 @@ impl Shell {
                 }
             }
         });
+    }
+
+    /// Stamps when a session's turn began, and drops the stamp when
+    /// the turn ends, so the topbar can show a working duration.
+    fn track_turn(&mut self, cx: &mut Context<Self>) {
+        let live: Vec<(String, bool)> = self
+            .store
+            .read(cx)
+            .state()
+            .sessions
+            .iter()
+            .map(|(id, session)| (id.clone(), session.in_turn || session.running))
+            .collect();
+        let now = unix_seconds();
+        for (id, running) in live {
+            if running {
+                self.turn_started.entry(id).or_insert(now);
+            } else {
+                self.turn_started.remove(&id);
+            }
+        }
+        self.turn_started
+            .retain(|id, _| self.store.read(cx).state().sessions.contains_key(id));
     }
 
     /// Raises toasts for the answered-elsewhere change and for any
@@ -266,10 +373,12 @@ impl Shell {
         }
     }
 
-    /// Opens a session through the store.
-    pub fn open_session(&mut self, cx: &mut Context<Self>) {
+    /// Leaves the active session: the welcome pane shows, and the
+    /// next prompt opens the session it rides on. This is what the
+    /// web client's New session does.
+    pub fn show_welcome(&mut self, cx: &mut Context<Self>) {
         self.store.update(cx, |store, cx| {
-            store.new_session();
+            store.show_welcome();
             cx.notify();
         });
     }
@@ -306,7 +415,13 @@ impl Shell {
     }
 
     pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_visible = !self.sidebar_visible;
+        // At the web client's narrow breakpoint the sidebar takes no
+        // column, so the toggle floats it over the content instead.
+        if self.viewport_width <= 860. {
+            self.side_float = !self.side_float;
+        } else {
+            self.sidebar_visible = !self.sidebar_visible;
+        }
         cx.notify();
     }
 
@@ -366,24 +481,44 @@ impl Shell {
         )
     }
 
-    /// The composer row under the transcript.
+    /// The composer under the transcript, at the content width.
+    ///
+    /// Without a session there is no band and no call to this: the
+    /// welcome column carries the composer at the narrower welcome width,
+    /// so the wordmark reads into it rather than over the cards. One
+    /// composer entity mounts in one place or the other, so the draft
+    /// survives the move.
     fn composer_row(&self, _cx: &Context<Self>) -> impl IntoElement {
-        div().w_full().child(self.composer.clone())
+        div()
+            .w_full()
+            .max_w(px(CONTENT_W))
+            .child(self.composer.clone())
     }
 
-    /// The 48px panel head over the content: the restore-sidebar
-    /// button when the sidebar is hidden and the workbench toggle at
-    /// the far end, as in the web client's topbar.
+    /// The 48px panel head over the content: the crumbs (project and
+    /// session title), the working pill while a turn runs, and the
+    /// panel toggles at the far end, as the web client's topbar draws
+    /// them. Without a session the bar carries the toggles alone.
     fn topbar(&self, cx: &Context<Self>) -> impl IntoElement {
+        let p = design_palette(cx);
         let sidebar_visible = self.sidebar_visible;
+        let side_float = self.side_float;
         let workbench_visible = self.workbench_visible;
+        let session = self.store.read(cx).active_session();
+        let now = unix_seconds();
+        let working = session
+            .filter(|session| session.in_turn || session.running)
+            .and_then(|session| self.turn_started.get(&session.id))
+            .map(|started| crate::clock::duration(now - started));
         h_flex()
             .h(px(PANEL_HEAD_H))
             .flex_none()
             .pl(px(14.))
             .pr(px(10.))
             .gap(px(SP_4))
-            .when(!sidebar_visible, |bar| {
+            // At the narrow breakpoint the sidebar takes no column, so
+            // the web client keeps the show button up permanently.
+            .when(side_float || !sidebar_visible, |bar| {
                 bar.child(
                     Button::new("show-sidebar")
                         .icon(IconName::PanelLeft)
@@ -393,7 +528,51 @@ impl Shell {
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
                 )
             })
+            .children(session.map(|session| {
+                let name = project_name(session.cwd.as_deref());
+                let title = session
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "untitled session".to_owned());
+                h_flex()
+                    .id("topbar-crumbs")
+                    .min_w_0()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(FS_SM))
+                    .child(div().flex_none().text_color(p.muted).child(name))
+                    .child(div().flex_none().text_color(p.ghost).child("/"))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(p.ink_strong)
+                            .child(title),
+                    )
+                    .into_any_element()
+            }))
             .child(div().flex_1())
+            .children(working.map(|label| {
+                h_flex()
+                    .id("working-pill")
+                    .flex_none()
+                    .h(px(24.))
+                    .px(px(9.))
+                    .gap(px(6.))
+                    .items_center()
+                    .rounded(px(R_FULL))
+                    .bg(p.fill)
+                    .text_size(px(FS_XS))
+                    .text_color(p.muted)
+                    .child(
+                        Spinner::new()
+                            .icon(IconName::LoaderCircle)
+                            .color(p.accent)
+                            .with_size(px(13.)),
+                    )
+                    .child(SharedString::from(format!("Working {label}")))
+                    .into_any_element()
+            }))
             .child(
                 Button::new("toggle-workbench")
                     .icon(IconName::PanelRight)
@@ -408,6 +587,11 @@ impl Shell {
     /// The centered content column: the transcript scroller, or the
     /// welcome state, constrained to the design's content width and
     /// horizontally centered.
+    ///
+    /// Without a session the column takes no width of its own: the
+    /// welcome pane centres its own 728px block inside the pane's 24px
+    /// padding, and capping the column here as well would take the
+    /// padding out of that 728 twice.
     fn content_column(&self, cx: &Context<Self>) -> impl IntoElement {
         let has_session = self.store.read(cx).active_session().is_some();
         div()
@@ -419,17 +603,22 @@ impl Shell {
             .child(
                 div()
                     .w_full()
-                    .max_w(px(CONTENT_W))
+                    .when(has_session, |column| column.max_w(px(CONTENT_W)))
                     .h_full()
                     .min_h_0()
                     .when(has_session, |column| column.child(self.transcript.clone()))
-                    .when(!has_session, |column| column.child(self.welcome.clone())),
+                    .when(!has_session, |column| {
+                        column.items_center().child(self.welcome.clone())
+                    }),
             )
     }
 
     /// The bottom band: dock, approval card and composer in a
-    /// centered content-width column inside the design's padding.
+    /// centered content-width column inside the design's padding. Only a
+    /// session has one; without a session the composer lives in the
+    /// welcome column and the dock is not up yet.
     fn bottom_band(&self, cx: &Context<Self>) -> impl IntoElement {
+        let has_session = self.store.read(cx).active_session().is_some();
         div()
             .w_full()
             .flex_none()
@@ -437,48 +626,34 @@ impl Shell {
             .pb(px(SP_6))
             .flex()
             .justify_center()
-            .child(
-                v_flex()
-                    .w_full()
-                    .max_w(px(CONTENT_W))
-                    .child(self.dock.clone())
-                    .child(self.approval.clone())
-                    .child(self.composer_row(cx)),
-            )
-    }
-
-    /// The status bar under the panels.
-    fn status_bar(&self, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().colors;
-        let store = self.store.read(cx);
-        let state = store.state();
-        let left = SharedString::from(format!(
-            "{} | {} session(s) | {} recorded",
-            store.connect().label(),
-            state.sessions.len(),
-            state.directory.len(),
-        ));
-        div()
-            .h(px(26.))
-            .px_3()
-            .flex()
-            .items_center()
-            .justify_between()
-            .border_t_1()
-            .border_color(theme.border)
-            .text_size(px(12.))
-            .text_color(theme.muted_foreground)
-            .child(left)
-            .child("ctrl-n new | ctrl-f find | ctrl-k palette | ctrl-b workbench | ctrl-\\ sidebar | ctrl-q quit")
+            .when(!has_session, |band| band.h(px(0.)))
+            .when(has_session, |band| {
+                band.child(
+                    v_flex()
+                        .w_full()
+                        .max_w(px(CONTENT_W))
+                        .child(self.dock.clone())
+                        .child(self.approval.clone())
+                        .child(self.composer_row(cx)),
+                )
+            })
     }
 }
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let sidebar_visible = self.sidebar_visible;
+        let side_float = self.side_float;
         let workbench_visible = self.workbench_visible;
-        let has_session = self.store.read(cx).active_session().is_some();
+        let p = design_palette(cx);
+        // The web client's breakpoints: under 1180px the workbench
+        // overlays instead of taking a column, under 860px the sidebar
+        // does the same and the welcome cards stack.
+        let width = window.viewport_size().width;
+        self.viewport_width = width.into();
+        let mid = width <= px(1180.);
+        let narrow = width <= px(860.);
         v_flex()
             .size_full()
             .relative()
@@ -491,36 +666,130 @@ impl Render for Shell {
             .font_family(cx.theme().font_family.clone())
             .child(
                 h_resizable("kage-shell")
-                    .child(
-                        resizable_panel()
-                            .size(px(SIDE_W))
-                            .size_range(px(160.)..px(420.))
-                            .flex_none()
-                            .visible(sidebar_visible)
-                            .child(self.sidebar.clone()),
-                    )
+                    .when(!narrow, |row| {
+                        row.child(
+                            resizable_panel()
+                                .size(px(SIDE_W))
+                                .size_range(px(160.)..px(420.))
+                                .flex_none()
+                                .visible(sidebar_visible)
+                                .child(self.sidebar.clone()),
+                        )
+                    })
                     .child(
                         resizable_panel().child(
                             v_flex()
                                 .size_full()
                                 .min_h_0()
-                                .when(has_session, |column| column.child(self.topbar(cx)))
+                                .child(self.topbar(cx))
                                 .child(self.find.clone())
                                 .child(self.content_column(cx))
                                 .child(self.bottom_band(cx)),
                         ),
                     )
-                    .child(
-                        resizable_panel()
-                            .size(px(WORKBENCH_W))
-                            .size_range(px(200.)..px(520.))
-                            .flex_none()
-                            .visible(workbench_visible)
-                            .child(self.workbench.clone()),
-                    ),
+                    .when(!mid, |row| {
+                        row.child(
+                            resizable_panel()
+                                .size(px(WORKBENCH_W))
+                                .size_range(px(200.)..px(520.))
+                                .flex_none()
+                                .visible(workbench_visible)
+                                .child(self.workbench.clone()),
+                        )
+                    }),
             )
-            .child(self.status_bar(cx))
+            .when(narrow && side_float, |shell| {
+                shell.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(SIDE_W))
+                        .shadow(p.shadow_2.clone())
+                        .child(self.sidebar.clone()),
+                )
+            })
+            .when(mid && workbench_visible, |shell| {
+                shell.child(
+                    div()
+                        .absolute()
+                        .right_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(WORKBENCH_W))
+                        .shadow(p.shadow_2.clone())
+                        .child(self.workbench.clone()),
+                )
+            })
             .child(self.palette.clone())
             .child(self.toasts.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{ElementId, TestAppContext, VisualTestContext, Window, px};
+
+    use super::{Shell, ShellArgs, project_name};
+    use crate::transport::EventSender;
+
+    #[test]
+    fn project_names_take_the_last_path_segment() {
+        assert_eq!(project_name(Some("/home/u/dev/kage")), "kage");
+        assert_eq!(project_name(Some("/")), "local", "a bare root has no name");
+        assert_eq!(project_name(None), "local");
+    }
+
+    /// A transport that never answers, so the shell stays in the state
+    /// with no session: the welcome pane's state.
+    struct Silent;
+
+    impl crate::transport::Transport for Silent {
+        fn start(&mut self, _events: EventSender) {}
+        fn send(&self, _frame: kage_client::Frame) {}
+        fn close(&self) {}
+    }
+
+    fn args() -> ShellArgs {
+        ShellArgs {
+            transport: Box::new(Silent),
+            replay: false,
+            stream: false,
+        }
+    }
+
+    /// Renders the shell with no session and returns the pane the test
+    /// measures in.
+    fn shell_without_session(cx: &mut TestAppContext) -> &mut VisualTestContext {
+        cx.update(gpui_kit::init);
+        let (_shell, visual) =
+            cx.add_window_view(|window: &mut Window, cx| Shell::new(args(), window, cx));
+        visual
+    }
+
+    /// The shell itself must not cap the welcome column, because the
+    /// welcome pane already centres its own 728px block inside the
+    /// pane's 24px padding. Capping here too takes that padding out of
+    /// the 728 twice and the composer measures 680. The welcome pane's
+    /// own tests cannot see this: they mount the pane directly, so the
+    /// shell's column is not in the tree.
+    #[gpui_kit::test]
+    fn the_welcome_composer_measures_the_design_column_through_the_shell(cx: &mut TestAppContext) {
+        let visual = shell_without_session(cx);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let composer = visual.update(|window, _| {
+            window
+                .find(ElementId::Name("composer".into()))
+                .bounds()
+                .size
+                .width
+        });
+        assert_eq!(
+            composer,
+            px(crate::theme::WELCOME_W),
+            "the composer reaches the design's welcome width through the shell"
+        );
     }
 }

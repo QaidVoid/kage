@@ -19,4 +19,4 @@ pub use composer::ComposerView;
 pub use dock::{DockEvent, DockRow};
 pub use sidebar::SidebarView;
 pub use transcript::TranscriptView;
-pub use workbench::WorkbenchView;
+pub use workbench::{WorkbenchEvent, WorkbenchView};

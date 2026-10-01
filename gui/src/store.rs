@@ -52,8 +52,12 @@ pub struct Store {
     prompted: bool,
     /// The directory sessions open in.
     cwd: String,
-    /// The session the transcript view follows.
+    /// The session the transcript view follows. `None` is the welcome
+    /// state, where the next prompt opens the session it rides on.
     active: Option<String>,
+    /// The prompt typed on the welcome pane, waiting for the session
+    /// it opens.
+    pending_prompt: Option<String>,
     /// The last `_kage/fs` listing answer, held with the session it
     /// ran against for the picker that asked. A later answer replaces
     /// it.
@@ -78,6 +82,7 @@ impl Store {
             prompted: false,
             cwd: cwd.into(),
             active: None,
+            pending_prompt: None,
             fs_listing: None,
             commands: Vec::new(),
         }
@@ -120,9 +125,31 @@ impl Store {
         self.active.as_deref()
     }
 
-    /// Follows another session.
+    /// Follows another session. A session the state only knows from
+    /// the directory is loaded first, so clicking a recorded row
+    /// actually opens it.
     pub fn set_active(&mut self, id: impl Into<String>) {
-        self.active = Some(id.into());
+        let id = id.into();
+        let known = self.state().session(&id).is_some();
+        if !known {
+            let cwd = self
+                .state()
+                .directory
+                .iter()
+                .find(|info| info.session_id == id)
+                .map(|info| info.cwd.clone())
+                .unwrap_or_else(|| self.cwd.clone());
+            self.client.load_session(&id, &cwd, &[]);
+        }
+        self.active = Some(id);
+    }
+
+    /// Leaves the active session: the welcome pane shows, and the
+    /// next prompt opens the session it rides on. This is what the
+    /// New session control does, as the web client's does.
+    pub fn show_welcome(&mut self) {
+        self.active = None;
+        self.pending_prompt = None;
     }
 
     /// Accepts one incoming frame and reports what moved. The gate is
@@ -135,7 +162,17 @@ impl Store {
             self.gate_dismissed = false;
             if !self.booted {
                 self.booted = true;
-                self.commands.push(Command::NewSession);
+                if self.replay {
+                    // The recording opens its session itself and its
+                    // frame ids are fixed, so nothing else rides the
+                    // link.
+                    self.commands.push(Command::NewSession);
+                } else {
+                    // The recorded sessions fill the sidebar's project
+                    // groups, and a live connection lands on the
+                    // welcome pane, the way the web client boots.
+                    self.client.list_sessions(Some(&self.cwd), None);
+                }
             }
         }
         for change in &changes {
@@ -148,6 +185,9 @@ impl Store {
                     self.prompted = true;
                     self.commands.push(Command::ReplayPrompt);
                 }
+                if self.active.as_deref() == Some(id.as_str()) {
+                    self.flush_pending_prompt(id);
+                }
             }
             if let Change::Fs {
                 session_id,
@@ -158,6 +198,14 @@ impl Store {
             }
         }
         changes
+    }
+
+    /// Sends the prompt the welcome pane held, once the session it
+    /// opened is live.
+    fn flush_pending_prompt(&mut self, id: &str) {
+        if let Some(text) = self.pending_prompt.take() {
+            let _ = self.client.prompt(id, vec![ContentBlock::text(text)]);
+        }
     }
 
     /// Records a connect-state move and returns what the shell must
@@ -203,6 +251,20 @@ impl Store {
     /// Opens a fresh session in the store's directory.
     pub fn new_session(&mut self) {
         self.client.new_session(&self.cwd, &[]);
+    }
+
+    /// Opens a fresh session to carry `text`, the prompt a welcome
+    /// pane took. The prompt goes out the moment the session is live;
+    /// until then [`Store::pending_prompt`] tells whether one waits.
+    pub fn open_with_prompt(&mut self, text: &str) {
+        self.pending_prompt = Some(text.to_owned());
+        self.client.new_session(&self.cwd, &[]);
+    }
+
+    /// Whether a welcome-typed prompt waits for its session.
+    #[must_use]
+    pub fn pending_prompt(&self) -> bool {
+        self.pending_prompt.is_some()
     }
 
     /// Sends one text prompt to the session the transcript follows.
@@ -387,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn the_first_connect_handshakes_and_boots_one_session() {
+    fn the_first_connect_handshakes_and_lands_on_the_welcome() {
         let mut store = Store::new("/w", false);
         store.set_connect(State::Connecting);
         assert!(store.take_commands().is_empty());
@@ -405,51 +467,38 @@ mod tests {
 
         store.absorb(init_answer(Some("0.1.0"), true, true));
         assert!(store.gate().is_clean());
-        assert_eq!(store.take_commands(), vec![Command::NewSession]);
-        store.new_session();
-        let outgoing = store.take_outgoing();
-        assert_eq!(outgoing.len(), 1);
-        assert!(matches!(&outgoing[0], Frame::Request { method, .. } if method == "session/new"));
-
-        store.absorb(Frame::Success {
-            id: 2,
-            result: serde_json::json!({"sessionId": "s1"}),
-        });
-        assert_eq!(store.active_id(), Some("s1"));
         assert!(
             store.take_commands().is_empty(),
-            "no scripted prompt off replay"
+            "a live connection boots into the welcome, no session"
         );
+        assert_eq!(store.active_id(), None);
+        let outgoing = store.take_outgoing();
+        assert_eq!(outgoing.len(), 1, "the directory page is asked");
+        assert!(matches!(&outgoing[0], Frame::Request { method, .. } if method == "session/list"));
         assert_eq!(store.take_outgoing(), vec![]);
+    }
+
+    /// Opens a session the way the shell does, answering its
+    /// `session/new`, so the tests have one to work with.
+    fn open_session(store: &mut Store, reply_id: u64, id: &str) {
+        store.new_session();
+        let _ = store.take_outgoing();
+        store.absorb(Frame::Success {
+            id: reply_id,
+            result: serde_json::json!({ "sessionId": id }),
+        });
+        let _ = store.take_outgoing();
     }
 
     #[test]
     fn a_reconnect_handshakes_again_and_replays_open_sessions() {
         let mut store = Store::new("/w", false);
         store.set_connect(State::Connected);
-        for command in store.take_commands() {
-            match command {
-                Command::Handshake { replay_sessions } => store.handshake(replay_sessions),
-                Command::NewSession => store.new_session(),
-                Command::ReplayPrompt => {
-                    store.prompt("fix the null check");
-                }
-            }
-        }
+        run_commands(&mut store);
         let _ = store.take_outgoing();
         store.absorb(init_answer(Some("0.1.0"), true, true));
         let _ = store.take_outgoing();
-        for command in store.take_commands() {
-            if let Command::NewSession = command {
-                store.new_session();
-            }
-        }
-        store.absorb(Frame::Success {
-            id: 2,
-            result: serde_json::json!({"sessionId": "s1"}),
-        });
-        store.handshake(false);
-        let _ = store.take_outgoing();
+        open_session(&mut store, 3, "s1");
 
         store.set_connect(State::Closed);
         store.set_connect(State::Connecting);
@@ -514,10 +563,12 @@ mod tests {
         assert!(!store.gate_dismissed());
         store.dismiss_gate();
         assert!(store.gate_dismissed());
-        let commands = store.take_commands();
-        assert_eq!(commands, vec![Command::NewSession]);
-        run(&mut store, commands);
         let _ = store.take_outgoing();
+        assert_eq!(
+            store.take_commands(),
+            vec![],
+            "a dirty gate still boots into the welcome, no session"
+        );
 
         store.set_connect(State::Closed);
         store.set_connect(State::Connecting);
@@ -543,17 +594,12 @@ mod tests {
         run_commands(&mut store);
         let _ = store.take_outgoing();
         store.absorb(init_answer(Some("0.1.0"), true, true));
-        run_commands(&mut store);
         let _ = store.take_outgoing();
-        store.absorb(Frame::Success {
-            id: 2,
-            result: serde_json::json!({"sessionId": "s1"}),
-        });
-        let _ = store.take_outgoing();
+        open_session(&mut store, 3, "s1");
 
         assert_eq!(
             store.submit("hello"),
-            Some(PromptOutcome::Sent { request_id: 3 })
+            Some(PromptOutcome::Sent { request_id: 4 })
         );
         let outgoing = store.take_outgoing();
         assert!(matches!(&outgoing[0], Frame::Request { method, params, .. }
@@ -567,7 +613,7 @@ mod tests {
         assert!(store.take_outgoing().is_empty(), "queuing sends no frame");
         assert_eq!(store.state().session("s1").unwrap().queue.len(), 1);
 
-        assert_eq!(store.steer("hurry"), Ok(4), "ctrl-enter steers the run");
+        assert_eq!(store.steer("hurry"), Ok(5), "ctrl-enter steers the run");
         let outgoing = store.take_outgoing();
         assert!(matches!(&outgoing[0], Frame::Request { method, params, .. }
             if method == "session/prompt" && params["delivery"] == "steer"));
@@ -580,17 +626,12 @@ mod tests {
         run_commands(&mut store);
         let _ = store.take_outgoing();
         store.absorb(init_answer(Some("0.1.0"), false, true));
-        run_commands(&mut store);
         let _ = store.take_outgoing();
-        store.absorb(Frame::Success {
-            id: 2,
-            result: serde_json::json!({"sessionId": "s1"}),
-        });
-        let _ = store.take_outgoing();
+        open_session(&mut store, 3, "s1");
 
         assert_eq!(
             store.submit("hello"),
-            Some(PromptOutcome::Sent { request_id: 3 })
+            Some(PromptOutcome::Sent { request_id: 4 })
         );
         let _ = store.take_outgoing();
         assert_eq!(
@@ -613,19 +654,9 @@ mod tests {
         run_commands(&mut store);
         let _ = store.take_outgoing();
         store.absorb(init_answer(Some("0.1.0"), true, true));
-        run_commands(&mut store);
         let _ = store.take_outgoing();
-        store.absorb(Frame::Success {
-            id: 2,
-            result: serde_json::json!({"sessionId": "s1"}),
-        });
-        let _ = store.take_outgoing();
-        store.new_session();
-        store.absorb(Frame::Success {
-            id: 3,
-            result: serde_json::json!({"sessionId": "s2"}),
-        });
-        let _ = store.take_outgoing();
+        open_session(&mut store, 3, "s1");
+        open_session(&mut store, 4, "s2");
 
         store.set_active("s1");
         let active = store.active_id().map(str::to_owned);
@@ -649,13 +680,8 @@ mod tests {
         run_commands(&mut store);
         let _ = store.take_outgoing();
         store.absorb(init_answer(Some("0.1.0"), true, true));
-        run_commands(&mut store);
         let _ = store.take_outgoing();
-        store.absorb(Frame::Success {
-            id: 2,
-            result: serde_json::json!({"sessionId": "s1"}),
-        });
-        let _ = store.take_outgoing();
+        open_session(&mut store, 3, "s1");
         store.absorb(Frame::Notification {
             method: "session/update".into(),
             params: serde_json::json!({
@@ -718,18 +744,13 @@ mod tests {
         run_commands(&mut store);
         let _ = store.take_outgoing();
         store.absorb(init_answer(Some("0.1.0"), true, true));
-        run_commands(&mut store);
         let _ = store.take_outgoing();
-        store.absorb(Frame::Success {
-            id: 2,
-            result: serde_json::json!({"sessionId": "s1"}),
-        });
-        let _ = store.take_outgoing();
+        open_session(&mut store, 3, "s1");
 
         assert!(store.fs_listing("s1").is_none(), "nothing asked yet");
         assert!(store.fs_list(""));
         store.absorb(Frame::Success {
-            id: 3,
+            id: 4,
             result: serde_json::json!({
                 "op": "list",
                 "entries": [
@@ -752,5 +773,84 @@ mod tests {
         let mut store = Store::new("/w", false);
         assert!(!store.prompt("hello"));
         assert!(store.take_outgoing().is_empty());
+    }
+
+    #[test]
+    fn a_welcome_prompt_opens_its_session_and_sends_when_live() {
+        let mut store = Store::new("/w", false);
+        store.set_connect(State::Connected);
+        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store.absorb(init_answer(Some("0.1.0"), true, true));
+        let _ = store.take_outgoing();
+        assert_eq!(store.active_id(), None, "the welcome state");
+
+        store.open_with_prompt("fix the flake");
+        assert!(store.pending_prompt(), "the prompt waits for its session");
+        let outgoing = store.take_outgoing();
+        assert_eq!(outgoing.len(), 1);
+        let Frame::Request { id, method, .. } = &outgoing[0] else {
+            panic!("expected a request, got {:?}", outgoing[0]);
+        };
+        assert_eq!(method, "session/new");
+
+        store.absorb(Frame::Success {
+            id: *id,
+            result: serde_json::json!({"sessionId": "s9"}),
+        });
+        assert_eq!(store.active_id(), Some("s9"));
+        assert!(!store.pending_prompt(), "the held prompt went out");
+        let outgoing = store.take_outgoing();
+        assert!(matches!(&outgoing[0], Frame::Request { method, params, .. }
+            if method == "session/prompt" && params["prompt"][0]["text"] == "fix the flake"));
+    }
+
+    #[test]
+    fn the_welcome_clears_and_a_second_prompt_waits_again() {
+        let mut store = Store::new("/w", false);
+        store.set_connect(State::Connected);
+        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store.absorb(init_answer(Some("0.1.0"), true, true));
+        let _ = store.take_outgoing();
+        open_session(&mut store, 3, "s1");
+
+        store.show_welcome();
+        assert_eq!(store.active_id(), None, "New session shows the welcome");
+
+        store.open_with_prompt("again");
+        let outgoing = store.take_outgoing();
+        let Frame::Request { id, .. } = &outgoing[0] else {
+            panic!("expected a request, got {:?}", outgoing[0]);
+        };
+        store.absorb(Frame::Success {
+            id: *id,
+            result: serde_json::json!({"sessionId": "s2"}),
+        });
+        assert_eq!(store.active_id(), Some("s2"));
+        assert!(
+            matches!(&store.take_outgoing()[0], Frame::Request { method, .. } if method == "session/prompt")
+        );
+    }
+
+    #[test]
+    fn following_a_directory_session_loads_it() {
+        let mut store = Store::new("/w", false);
+        store.set_connect(State::Connected);
+        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store.absorb(init_answer(Some("0.1.0"), true, true));
+        let _ = store.take_outgoing();
+
+        store.set_active("rec-1");
+        let outgoing = store.take_outgoing();
+        assert_eq!(outgoing.len(), 1, "an unknown row is loaded, not assumed");
+        let Frame::Request { method, params, .. } = &outgoing[0] else {
+            panic!("expected a request, got {:?}", outgoing[0]);
+        };
+        assert_eq!(method, "session/load");
+        assert_eq!(params["sessionId"], "rec-1");
+        assert_eq!(params["cwd"], "/w", "the store's directory carries it");
+        assert_eq!(store.active_id(), Some("rec-1"));
     }
 }

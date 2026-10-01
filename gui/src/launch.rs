@@ -143,7 +143,7 @@ pub fn run() {
     let stream = launch.stream;
     let smoke_millis = launch.smoke_millis;
     gpui_kit::application()
-        .with_assets(Assets)
+        .with_assets(crate::assets::KageAssets::new(Assets))
         .run(move |cx: &mut App| {
             theme::install_fonts(cx);
             gpui_kit::init(cx);
@@ -225,7 +225,7 @@ pub fn run() {
             // bubble phase, after whatever the focused view consumed.
             cx.on_action(move |_: &crate::app::Quit, cx| cx.quit());
             cx.on_action(move |_: &crate::app::NewSession, cx| {
-                shell_new.update(cx, |shell, cx| shell.open_session(cx));
+                shell_new.update(cx, |shell, cx| shell.show_welcome(cx));
             });
             let shell_toggle_sidebar = shell.clone();
             cx.on_action(move |_: &crate::app::ToggleSidebar, cx| {

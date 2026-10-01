@@ -7,6 +7,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::theme::ActiveTheme;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -19,8 +20,8 @@ use crate::app::{OpenPalette, ToggleSidebar};
 use crate::clock::unix_seconds;
 use crate::store::Store;
 use crate::theme::{
-    FONT_DISPLAY, FONT_MONO, FS_2XS, FS_SM, FS_XS, PANEL_HEAD_H, R_MD, WEIGHT_BOLD, WEIGHT_REGULAR,
-    WEIGHT_SEMIBOLD,
+    FONT_DISPLAY, FONT_MONO, FS_2XS, FS_BASE, FS_SM, FS_XS, PANEL_HEAD_H, R_MD, WEIGHT_BOLD,
+    WEIGHT_REGULAR, WEIGHT_SEMIBOLD,
 };
 use crate::transport::State;
 
@@ -105,6 +106,17 @@ enum RowState {
     Plan,
     /// Quiet: the row shows its relative time.
     Idle,
+}
+
+/// One session row before it lands in the list: the facts the rows
+/// and the project grouping both read.
+struct RowItem {
+    id: String,
+    title: Option<String>,
+    updated_at: Option<String>,
+    state: RowState,
+    active: bool,
+    project: SharedString,
 }
 
 fn row_state(session: &kage_client::Session) -> RowState {
@@ -201,17 +213,27 @@ fn conn_dot(color: Hsla, halo: Option<Hsla>) -> Div {
 /// The left panel.
 pub struct SidebarView {
     store: Entity<Store>,
+    /// Whether the list groups under project rows, as the web
+    /// client's group-by-project setting does.
+    group_by_project: bool,
+    /// The projects whose groups are collapsed, keyed by name.
+    collapsed: std::collections::BTreeSet<String>,
 }
 
 impl SidebarView {
     /// A sidebar following `store`.
     #[must_use]
     pub fn new(store: Entity<Store>) -> Self {
-        Self { store }
+        Self {
+            store,
+            group_by_project: true,
+            collapsed: std::collections::BTreeSet::new(),
+        }
     }
 
     /// One session row: title, relative time, and the lead or badge
-    /// the row state carries.
+    /// the row state carries. Grouped rows carry the design's 32px
+    /// left inset so they clear the project row's icon.
     #[allow(clippy::too_many_arguments)]
     fn session_row(
         &self,
@@ -220,6 +242,7 @@ impl SidebarView {
         updated_at: Option<&str>,
         state: RowState,
         active: bool,
+        grouped: bool,
         now: i64,
         p: &crate::theme::Palette,
     ) -> AnyElement {
@@ -231,6 +254,7 @@ impl SidebarView {
             .w_full()
             .min_h(px(32.))
             .px(px(8.))
+            .when(grouped, |row| row.pl(px(32.)))
             .py(px(5.))
             .flex()
             .items_center()
@@ -302,7 +326,7 @@ impl SidebarView {
             .items_center()
             .gap(px(10.))
             .rounded(px(R_MD))
-            .text_size(px(FS_SM))
+            .text_size(px(FS_BASE))
             .text_color(p.ink)
             .hover(move |row| row.bg(p.hover))
             .child(Icon::new(icon))
@@ -317,33 +341,164 @@ impl Render for SidebarView {
         let store = self.store.read(cx);
         let state = store.state();
         let now = unix_seconds();
+        let this = cx.entity();
 
-        let mut rows: Vec<AnyElement> = Vec::new();
+        // Every row the list carries: live sessions first, then the
+        // directory entries no live session holds, each tagged with
+        // the project its working directory names.
+        let mut items: Vec<RowItem> = Vec::new();
         for (id, session) in &state.sessions {
             let active = store.active_id() == Some(id.as_str());
-            rows.push(self.session_row(
-                id,
-                session.title.as_deref(),
-                session.updated_at.as_deref(),
-                row_state(session),
+            items.push(RowItem {
+                id: id.clone(),
+                title: session.title.clone(),
+                updated_at: session.updated_at.clone(),
+                state: row_state(session),
                 active,
-                now,
-                &p,
-            ));
+                project: crate::app::project_name(session.cwd.as_deref()),
+            });
         }
         for info in &state.directory {
             if state.sessions.contains_key(&info.session_id) {
                 continue;
             }
-            rows.push(self.session_row(
-                &info.session_id,
-                info.title.as_deref(),
-                info.updated_at.as_deref(),
-                RowState::Idle,
-                false,
-                now,
-                &p,
-            ));
+            items.push(RowItem {
+                id: info.session_id.clone(),
+                title: info.title.clone(),
+                updated_at: info.updated_at.clone(),
+                state: RowState::Idle,
+                active: store.active_id() == Some(info.session_id.as_str()),
+                project: crate::app::project_name(Some(&info.cwd)),
+            });
+        }
+
+        // The list body: groups under project rows, or one flat list.
+        let mut list = v_flex()
+            .id("side-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .px(px(8.))
+            .pb(px(12.));
+        if self.group_by_project {
+            let mut groups: Vec<(SharedString, Vec<&RowItem>)> = Vec::new();
+            for item in &items {
+                if let Some(group) = groups.iter_mut().find(|(name, _)| name == &item.project) {
+                    group.1.push(item);
+                } else {
+                    groups.push((item.project.clone(), vec![item]));
+                }
+            }
+            for (project, members) in groups {
+                let open = !self.collapsed.contains(project.as_ref());
+                let this = this.clone();
+                let store = self.store.clone();
+                let key = project.to_string();
+                list = list.child(
+                    h_flex()
+                        .id(SharedString::from(format!("proj-{project}")))
+                        .w_full()
+                        .h(px(32.))
+                        .px(px(8.))
+                        .mt(px(4.))
+                        .items_center()
+                        .gap(px(8.))
+                        .rounded(px(R_MD))
+                        .text_size(px(FS_SM))
+                        .text_color(p.muted)
+                        .hover(move |row| row.bg(p.hover).text_color(p.ink))
+                        .on_click(move |_, _, cx| {
+                            this.update(cx, |this, cx| {
+                                if this.collapsed.contains(&key) {
+                                    this.collapsed.remove(&key);
+                                } else {
+                                    this.collapsed.insert(key.clone());
+                                }
+                                cx.notify();
+                            });
+                        })
+                        .child(
+                            Icon::new(if open {
+                                IconName::FolderOpen
+                            } else {
+                                IconName::Folder
+                            })
+                            .with_size(px(14.))
+                            .text_color(p.muted),
+                        )
+                        .child(div().min_w_0().flex_1().truncate().child(project.clone()))
+                        .when(!members.is_empty(), |row| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(FS_XS))
+                                    .text_color(p.faint)
+                                    .child(SharedString::from(members.len().to_string())),
+                            )
+                        })
+                        .child({
+                            let store = store.clone();
+                            div()
+                                .id(SharedString::from(format!("proj-add-{project}")))
+                                .size(px(22.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(R_MD))
+                                .text_color(p.faint)
+                                .hover(move |row| row.bg(p.fill_hover).text_color(p.ink))
+                                .tooltip(|window, cx| Tooltip::new("New session").build(window, cx))
+                                .child(Icon::new(IconName::Plus).with_size(px(13.)))
+                                .on_click(move |_, _, cx| {
+                                    store.update(cx, |store, cx| {
+                                        store.show_welcome();
+                                        cx.notify();
+                                    });
+                                })
+                        }),
+                );
+                if open {
+                    if members.is_empty() {
+                        list = list.child(
+                            div()
+                                .pt(px(2.))
+                                .pl(px(32.))
+                                .pr(px(8.))
+                                .pb(px(6.))
+                                .text_size(px(FS_SM))
+                                .text_color(p.faint)
+                                .child("No conversations yet"),
+                        );
+                    } else {
+                        for item in members {
+                            list = list.child(self.session_row(
+                                &item.id,
+                                item.title.as_deref(),
+                                item.updated_at.as_deref(),
+                                item.state,
+                                item.active,
+                                true,
+                                now,
+                                &p,
+                            ));
+                        }
+                    }
+                }
+            }
+        } else {
+            for item in &items {
+                list = list.child(self.session_row(
+                    &item.id,
+                    item.title.as_deref(),
+                    item.updated_at.as_deref(),
+                    item.state,
+                    item.active,
+                    false,
+                    now,
+                    &p,
+                ));
+            }
         }
 
         let version = state.agent.as_ref().and_then(|agent| agent.version.clone());
@@ -430,7 +585,7 @@ impl Render for SidebarView {
                         )
                         .on_click(move |_, _, cx| {
                             new_session.update(cx, |store, cx| {
-                                store.new_session();
+                                store.show_welcome();
                                 cx.notify();
                             });
                         }),
@@ -454,18 +609,43 @@ impl Render for SidebarView {
                     .text_size(px(FS_XS))
                     .font_weight(WEIGHT_SEMIBOLD)
                     .text_color(p.faint)
-                    .child(div().flex_1().child("SESSIONS")),
+                    .child(div().flex_1().child("SESSIONS"))
+                    .child({
+                        let this = this.clone();
+                        let grouped = self.group_by_project;
+                        div()
+                            .id("side-group-toggle")
+                            .size(px(20.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(R_MD))
+                            .text_color(p.faint)
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(if grouped {
+                                    "Show as one list"
+                                } else {
+                                    "Group by project"
+                                })
+                                .build(window, cx)
+                            })
+                            .child(
+                                Icon::new(if grouped {
+                                    IconName::List
+                                } else {
+                                    IconName::Folder
+                                })
+                                .with_size(px(13.)),
+                            )
+                            .on_click(move |_, _, cx| {
+                                this.update(cx, |this, cx| {
+                                    this.group_by_project = !this.group_by_project;
+                                    cx.notify();
+                                });
+                            })
+                    }),
             )
-            .child(
-                v_flex()
-                    .id("side-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px(px(8.))
-                    .pb(px(12.))
-                    .children(rows),
-            )
+            .child(list)
             .child(
                 h_flex()
                     .flex_none()

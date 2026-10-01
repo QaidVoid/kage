@@ -437,10 +437,18 @@ fn two_clients_initialize_open_sessions_and_prompt() {
         );
         thread::sleep(Duration::from_millis(20));
     };
+    // Connection ids are process-wide, so a test running beside this one
+    // may hold the low ones; the first client's id is in its attach line.
+    let first_id = lines
+        .iter()
+        .find_map(|l| l.strip_prefix("attach ")?.split_once("(connection "))
+        .map(|(_, id)| id.trim_end_matches(')'))
+        .expect("an attach line");
     assert!(
         lines
             .iter()
-            .any(|l| l.starts_with("disconnect ") && l.contains("connection 0")),
+            .any(|l| l.starts_with("disconnect ")
+                && l.ends_with(&format!("(connection {first_id})"))),
         "{lines:?}"
     );
     assert!(

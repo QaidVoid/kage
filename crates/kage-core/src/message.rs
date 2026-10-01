@@ -283,8 +283,11 @@ pub fn cap_tool_result(text: String) -> String {
         }
         at
     };
-    let head = boundary(MAX_TOOL_RESULT_BYTES * 2 / 3);
-    let tail = boundary(text.len() - MAX_TOOL_RESULT_BYTES / 3);
+    // Room is left for the note, so a capped result is within the limit
+    // and capping it again changes nothing.
+    let budget = MAX_TOOL_RESULT_BYTES - 128;
+    let head = boundary(budget * 2 / 3);
+    let tail = boundary(text.len() - budget / 3);
     let omitted = tail - head;
     format!(
         "{}\n\n[... {omitted} bytes of output omitted; narrow the request to see them ...]\n\n{}",
@@ -312,6 +315,8 @@ mod tests {
         );
         assert!(capped.starts_with("aaa") && capped.ends_with("\u{e9}"));
         assert!(capped.contains("bytes of output omitted"));
+        assert!(capped.len() <= super::MAX_TOOL_RESULT_BYTES);
+        assert_eq!(super::cap_tool_result(capped.clone()), capped, "capping is idempotent");
     }
 
     use super::*;

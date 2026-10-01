@@ -116,7 +116,7 @@ are part of your prompt, not tool calls.
 |---|---|
 | TUI | an approval panel replaces the input box. See [approving in the TUI](#approving-in-the-tui). |
 | print (`kage -p`) | the call is denied with an error telling you to add an allow rule. There is no interactive prompt. For an MCP tool the error names both the `[permissions.mcp]` and the per-tool fix. |
-| ACP (`kage rpc`) | the editor client is asked through `session/request_permission`, with the options allow, allow for this session, and reject. Every tool without a config entry asks here, built-ins included, unless the client asks for the TUI's rules (the kage desktop app does): then tools without an entry run, as they do in the TUI. A config `allow` skips the round-trip, and a config `deny` refuses locally. |
+| ACP (`kage rpc`) | the editor client is asked through `session/request_permission`, with the options allow, allow for this session, and reject. Every tool without a config entry asks here, built-ins included, unless the client asks for the TUI's rules (the kage desktop app does): then tools without an entry run, as they do in the TUI. A config `allow` skips the round-trip, and a config `deny` refuses locally. When the last client holding the session disconnects while a request is open, the request is denied, so the run goes on. |
 | MCP server (`kage mcp serve`) | the call is refused, since there is no one to ask. |
 
 Over ACP, "Allow for this session" works like the TUI's session

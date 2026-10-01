@@ -106,10 +106,11 @@ pub(super) struct Ask {
 
 impl Ask {
     /// Stops the ask and waits until its thread is done. A withdrawn ask
-    /// sends no decision.
-    pub(super) fn stop(self) {
+    /// sends no decision. Returns the engine request it was for.
+    pub(super) fn stop(self) -> RequestId {
         self.withdraw.cancel();
         let _ = self.thread.join();
+        self.request_id
     }
 }
 

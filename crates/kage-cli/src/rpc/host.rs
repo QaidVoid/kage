@@ -219,6 +219,12 @@ impl Host {
         lock(&self.live).release(id);
     }
 
+    /// Whether some connection still holds `session` or the session its
+    /// agent tree hangs under.
+    pub(super) fn held(&self, session: SessionId) -> bool {
+        lock(&self.live).held(session)
+    }
+
     /// The next connection's id on this host.
     pub(super) fn next_connection(&self) -> u64 {
         self.next_connection.fetch_add(1, Ordering::Relaxed)

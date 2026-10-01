@@ -303,23 +303,37 @@ impl CliAcpAgent {
     }
 
     /// The connection ended: stop delivering engine events to it, free
-    /// what its prompts wait on, withdraw its open asks without
-    /// answering them, and release every session it held. The engine
-    /// and its runs keep going for the connections that stay.
+    /// what its prompts wait on, withdraw its open asks, and release
+    /// every session it held. An ask whose session no other connection
+    /// holds is denied, so the run goes on instead of waiting for a
+    /// client that may never come back. The engine and its runs keep
+    /// going for the connections that stay.
     fn detach(&self) {
         self.host.engine.unsubscribe(self.subscription);
         self.host.release_prompts_of(self.connection);
         lock(&self.waiters).clear();
-        let asks: Vec<Ask> = lock(&self.asks)
+        let asks: Vec<(SessionId, Ask)> = lock(&self.asks)
             .drain()
-            .flat_map(|(_, asks)| asks)
+            .flat_map(|(session, asks)| asks.into_iter().map(move |ask| (session, ask)))
             .collect();
-        for ask in asks {
-            ask.stop();
-        }
+        let withdrawn: Vec<(SessionId, kage_core::protocol::RequestId)> = asks
+            .into_iter()
+            .map(|(session, ask)| (session, ask.stop()))
+            .collect();
         let sessions: Vec<SessionId> = lock(&self.ids).by_engine.keys().copied().collect();
         for id in sessions {
             self.host.release(id);
+        }
+        for (session, request_id) in withdrawn {
+            if !self.host.held(session) {
+                self.host.engine.send(Command::to(
+                    session,
+                    CommandKind::ResolvePermission {
+                        request_id,
+                        decision: kage_core::protocol::PermissionDecision::Deny,
+                    },
+                ));
+            }
         }
     }
 }

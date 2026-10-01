@@ -547,6 +547,13 @@ impl Live {
         self.owners.get(&id).copied()
     }
 
+    /// Whether some connection holds the session `session` hangs under:
+    /// the session itself, or the root of the agent tree it is part of.
+    pub(super) fn held(&self, session: SessionId) -> bool {
+        let root = self.tree.root_of(session);
+        self.attached.get(&root).is_some_and(|count| *count > 0)
+    }
+
     /// Whether a close was sent for `id` and not refused, so a load
     /// reopens its file instead of attaching to a dropped session.
     pub(super) fn is_closing(&self, id: SessionId) -> bool {

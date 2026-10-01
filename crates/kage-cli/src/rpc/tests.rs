@@ -4217,7 +4217,7 @@ fn an_ask_opened_before_attach_is_re_asked_of_a_late_connection() {
 }
 
 #[test]
-fn a_connection_that_drops_during_an_ask_gets_the_ask_again() {
+fn an_ask_whose_last_client_drops_is_denied_and_the_run_goes_on() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().display().to_string();
     let h = serve_paused(
@@ -4242,7 +4242,18 @@ fn a_connection_that_drops_during_an_ask_gets_the_ask_again() {
         dir.path(),
         dir.path(),
     );
-    let prompt_end = prompt_async(&h.client, &h.session, "go");
+    // The prompt gives up on its answer, so its clone of the client
+    // goes and dropping the harness's own closes the connection.
+    let (done, prompt_end) = mpsc::channel();
+    let prompter = h.client.clone();
+    let params = serde_json::json!({
+        "sessionId": h.session,
+        "prompt": [{"type": "text", "text": "go"}],
+    });
+    std::thread::spawn(move || {
+        let _ =
+            done.send(prompter.request_timeout("session/prompt", params, Duration::from_secs(2)));
+    });
     until(|| h.paused.is_parked());
     h.release.send(()).unwrap();
     until_ask(&h.inbox, &mut Vec::new());
@@ -4250,31 +4261,24 @@ fn a_connection_that_drops_during_an_ask_gets_the_ask_again() {
     let PausedHarness {
         client,
         inbox,
-        host,
-        id,
-        session,
-        resume,
+        paused,
         ..
     } = h;
     drop(client);
     drop(inbox);
-    std::thread::sleep(Duration::from_millis(200));
-    assert!(
-        host.engine
-            .hosted_sessions()
-            .iter()
-            .any(|(sid, _)| *sid == id),
-        "the session with an open ask stays hosted"
-    );
-
-    let c2 = connect(&host);
-    c2.client.request("session/load", resume).unwrap();
-    let (ask_2, params) = until_ask(&c2.inbox, &mut Vec::new());
-    assert_eq!(params["sessionId"], session);
-    assert_eq!(params["toolCall"]["toolCallId"], "call_1");
-    allow(&c2.client, &ask_2);
-    let seen = updates_until(&c2.inbox, &session, "agent_message_chunk");
-    assert_eq!(chunk_texts(&seen).last().unwrap(), "done");
+    until(|| lock(&paused.requests).len() >= 2);
+    let request = lock(&paused.requests)[1].clone();
+    let denied = request
+        .messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .find_map(|c| match c {
+            Content::ToolResultBlock {
+                call_id, is_error, ..
+            } if *call_id == ToolCallId::new("call_1") => Some(*is_error),
+            _ => None,
+        });
+    assert_eq!(denied, Some(true), "the ask was answered with a deny");
     let response = prompt_end.recv_timeout(WAIT).unwrap();
     assert!(response.is_err(), "the dropped client got an answer");
 }

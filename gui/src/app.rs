@@ -37,6 +37,7 @@ use crate::views::chrome::{
 use crate::views::deferred::Deferred;
 use crate::views::dialog::{DialogKind, DialogView};
 use crate::views::settings::{Section, SettingsView};
+use crate::views::sidebar::{RowState, row_state};
 use crate::views::{
     ApprovalCard, ApprovalEvent, ComposerView, DockEvent, DockRow, SidebarView, TranscriptEvent,
     TranscriptView, WorkbenchEvent, WorkbenchView,
@@ -219,6 +220,9 @@ pub struct Shell {
     rename: Option<Rename>,
     /// The preferences revision last stored.
     saved_prefs: u64,
+    /// Where each open session stood at the last store change, so a
+    /// session out of view that moves raises its toast once.
+    statuses: BTreeMap<String, RowState>,
     streamed: usize,
 }
 
@@ -342,6 +346,7 @@ impl Shell {
             shell.flush_outgoing(cx);
             shell.save_prefs(cx);
             shell.raise_notes(cx);
+            shell.watch_away(cx);
             let active = shell
                 .store
                 .read(cx)
@@ -407,6 +412,7 @@ impl Shell {
             last_active: None,
             rename: None,
             saved_prefs: 0,
+            statuses: BTreeMap::new(),
             streamed: 0,
         }
     }
@@ -756,6 +762,45 @@ impl Shell {
                 dialog.open(DialogKind::ConfirmSwarm, window, cx);
             });
         }
+    }
+
+    /// Toasts a session out of view that now needs an answer, has a
+    /// plan to review, finished its turn or failed; a click opens it.
+    fn watch_away(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        let active = store.active_id().map(str::to_owned);
+        let mut drafts = Vec::new();
+        for (id, session) in &store.state().sessions {
+            if !session.opened || session.parent.is_some() {
+                continue;
+            }
+            let now = row_state(session);
+            let was = self.statuses.insert(id.clone(), now);
+            if was.is_none() || was == Some(now) || active.as_deref() == Some(id.as_str()) {
+                continue;
+            }
+            let (tone, what) = match (was, now) {
+                (_, RowState::Approve) => (NoticeTone::Info, "needs your approval"),
+                (_, RowState::Review) => (NoticeTone::Info, "has a plan to review"),
+                (_, RowState::Failed) => (NoticeTone::Error, "turn failed"),
+                (Some(RowState::Running), RowState::Idle) => (NoticeTone::Success, "turn finished"),
+                _ => continue,
+            };
+            let title = session.title.as_deref().unwrap_or("untitled session");
+            drafts.push(ToastDraft {
+                tone,
+                text: format!("{title}: {what}"),
+                action: ToastAction::ActivateSession(id.clone()),
+            });
+        }
+        if drafts.is_empty() {
+            return;
+        }
+        self.toasts.update(cx, |toasts, cx| {
+            for draft in drafts {
+                toasts.push(draft, cx);
+            }
+        });
     }
 
     /// Toasts the messages the store left for the user.

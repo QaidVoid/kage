@@ -82,8 +82,8 @@ fn ago(iso: Option<&str>, now: i64) -> Option<SharedString> {
 }
 
 /// What a session row leads or badges with.
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum RowState {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RowState {
     /// A permission ask waits; the row badges Approve.
     Approve,
     /// A plan waits for review; the row badges Review.
@@ -181,7 +181,8 @@ fn placed(rows: &[&RowItem]) -> Vec<Place> {
     forest(&parents, &ids)
 }
 
-fn row_state(session: &kage_client::Session) -> RowState {
+/// Where session `session` stands, as its sidebar row shows it.
+pub(crate) fn row_state(session: &kage_client::Session) -> RowState {
     if crate::store::plan_review(session).is_some() {
         RowState::Review
     } else if !session.permissions.is_empty() {

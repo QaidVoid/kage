@@ -75,15 +75,16 @@ impl Host {
         model_override: Option<&str>,
         system_role: &str,
     ) -> Result<Arc<Self>, String> {
-        let registry = crate::build_provider_registry()?;
-        if !crate::has_usable_provider(&registry) && model_override.is_none() {
+        let mut registry = crate::build_provider_registry()?;
+        merge_plugin_providers(&mut registry, model_override, system_role);
+        let default_model =
+            model_override.map_or_else(|| crate::default_model(&registry), str::to_owned);
+        if !crate::has_usable_provider(&registry) && registry.resolve(&default_model).is_err() {
             return Err(
                 "no provider credentials found; run `kage auth login` or set an API-key env var"
                     .to_owned(),
             );
         }
-        let default_model =
-            model_override.map_or_else(|| crate::default_model(&registry), str::to_owned);
         registry
             .resolve(&default_model)
             .map_err(|e| format!("cannot resolve model {default_model}: {e}"))?;
@@ -239,6 +240,37 @@ impl Host {
     /// Forgets every prompt `connection` owns, after it disconnected.
     pub(super) fn release_prompts_of(&self, connection: u64) {
         lock(&self.live).release_prompts_of(connection);
+    }
+}
+
+/// Load the plugins of the server's directory once and add the
+/// providers they register, so a model only a plugin provides passes
+/// the startup checks and resolves for every session, as it does in the
+/// TUI and print mode. The runtime is kept for the process, which keeps
+/// the merged providers' Lua state alive.
+fn merge_plugin_providers(
+    registry: &mut ProviderRegistry,
+    model_override: Option<&str>,
+    system_role: &str,
+) {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let model = model_override.map_or_else(|| crate::default_model(registry), str::to_owned);
+    let bare = crate::runtime_env::build_system_prompt(system_role, &cwd, &model, &[], None);
+    let runtime = match crate::plugins_dir() {
+        Ok(dir) => crate::plugins::setup_runtime(&dir, &cwd, &model, &bare).unwrap_or_else(|e| {
+            eprintln!("kage: {e}");
+            None
+        }),
+        Err(e) => {
+            eprintln!("kage: {e}");
+            None
+        }
+    };
+    if let Some(runtime) = runtime {
+        for id in crate::plugins::merge_plugin_providers(&runtime, registry) {
+            eprintln!("kage: plugin provider `{id}` shadows the built-in registration");
+        }
+        crate::acp_glue::set_runtime(&runtime);
     }
 }
 

@@ -16,6 +16,12 @@ use serde::Deserialize;
 use crate::{Tool, ToolContext, ToolError, schema_for};
 
 const DEFAULT_MAX_MATCHES: u64 = 1_000;
+/// The most characters of one matching line the output keeps. Minified
+/// bundles put a whole file on one line, so a single hit could otherwise
+/// carry megabytes.
+const MAX_LINE_CHARS: usize = 300;
+/// Characters of context kept before the match in a cut line.
+const LEAD_CHARS: usize = 100;
 
 /// Input shape for the `grep` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -96,6 +102,7 @@ impl Tool for GrepTool {
             let path = entry.path().to_path_buf();
             let mut searcher = Searcher::new();
             let mut sink = MatchSink {
+                matcher: &matcher,
                 hits: &mut hits,
                 total: &mut total,
                 max,
@@ -132,6 +139,7 @@ struct Hit {
 }
 
 struct MatchSink<'a> {
+    matcher: &'a grep::regex::RegexMatcher,
     hits: &'a mut Vec<Hit>,
     total: &'a mut u64,
     max: u64,
@@ -149,7 +157,11 @@ impl Sink for MatchSink<'_> {
             return Ok(false);
         }
         let line = mat.line_number().unwrap_or(0);
-        let text = String::from_utf8_lossy(mat.bytes()).trim_end().to_owned();
+        let at = grep::matcher::Matcher::find(self.matcher, mat.bytes())
+            .ok()
+            .flatten()
+            .map_or(0, |found| found.start());
+        let text = clip_line(mat.bytes(), at);
         let rel = self
             .path
             .strip_prefix(self.root)
@@ -164,6 +176,38 @@ impl Sink for MatchSink<'_> {
         *self.total += 1;
         Ok(true)
     }
+}
+
+/// The matching line as text, cut to [`MAX_LINE_CHARS`] around the
+/// match starting at byte `at` when it is longer, with markers saying how
+/// much was cut on each side.
+fn clip_line(bytes: &[u8], at: usize) -> String {
+    let full = String::from_utf8_lossy(bytes);
+    let full = full.trim_end();
+    let count = full.chars().count();
+    if count <= MAX_LINE_CHARS {
+        return full.to_owned();
+    }
+    let at_char = full
+        .char_indices()
+        .take_while(|(byte, _)| *byte < at)
+        .count();
+    let start = at_char
+        .saturating_sub(LEAD_CHARS)
+        .min(count - MAX_LINE_CHARS);
+    let end = start + MAX_LINE_CHARS;
+    let window: String = full.chars().skip(start).take(MAX_LINE_CHARS).collect();
+    let before = if start > 0 {
+        format!("[+{start} chars] ")
+    } else {
+        String::new()
+    };
+    let after = if end < count {
+        format!(" [+{} chars]", count - end)
+    } else {
+        String::new()
+    };
+    format!("{before}{window}{after}")
 }
 
 fn format_hits(hits: &[Hit], truncated: bool, max: u64, total: u64) -> String {
@@ -202,6 +246,17 @@ mod tests {
         fs::write(dir.join("b.txt"), "kage\nshadow\n").unwrap();
         fs::create_dir(dir.join("sub")).unwrap();
         fs::write(dir.join("sub/c.txt"), "alphabet").unwrap();
+    }
+
+    #[test]
+    fn a_huge_line_keeps_a_window_around_the_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = format!("{}needle{}", "x".repeat(50_000), "y".repeat(50_000));
+        fs::write(dir.path().join("bundle.js"), line).unwrap();
+        let out = run(dir.path(), serde_json::json!({"pattern":"needle"})).unwrap();
+        assert!(out.text.len() < 600, "{}", out.text.len());
+        assert!(out.text.contains("needle"));
+        assert!(out.text.contains("[+49900 chars]"), "{}", out.text);
     }
 
     #[test]

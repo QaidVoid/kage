@@ -188,9 +188,12 @@ the parent a question without blocking on an answer:
 {"to": "parent", "message": "Found a failing test in kage-loop; fixing it before the summary."}
 ```
 
-`to` is `parent` or the session id of another session of the same
-conversation, for example a sibling id a swarm result named; a
-session under another main session refuses the message. The message
+`to` is `parent` or the session id of another running session of the
+same conversation, for example a sibling still at work. A session
+under another main session refuses the message, and so does an agent
+that has finished: its result already reached its parent, so a reply
+or a change it made would never get there. Continue a finished swarm
+child with a `swarm` resume instead, whose result does come back. The message
 becomes the target's next prompt: it runs at once when the target is
 idle, else right after its current run ends, through the same queue
 as a queued prompt. An idle agent also waits for a free slot under
@@ -204,9 +207,9 @@ before continuing, make an `agent` call or a `swarm` resume instead,
 both of which block on the result.
 
 An agent that delivered its result is dropped from memory, and its
-transcript stays in its session file. A message from another agent
-or a `swarm` resume reopens it from that file with its history
-intact, so finished agents cost no memory until they are used again.
+transcript stays in its session file, and a `swarm` resume reopens a
+swarm child from that file with its history intact, so finished
+agents cost no memory.
 
 ## built-in agents
 

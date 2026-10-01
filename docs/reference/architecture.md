@@ -121,8 +121,7 @@ attached. A hosted child gets its reply channel re-armed and the
 prompt queued; a child no longer hosted is reopened from its session
 file with its history, model and definition intact. Every agent that
 records is dropped once its result is delivered and it goes quiet, so
-idle agents hold no context in memory; a mailbox message to one
-reopens it the same way, parents first. Swarm mode
+idle agents hold no context in memory. Swarm mode
 (`/swarm`) injects a workflow block into the session's pending
 history on the way up and an exit note on the way down, once per
 switch. Plan mode (`/plan`) works the same way and also lives in the
@@ -134,8 +133,9 @@ approval turns the mode off mid-run.
 `send_message` tool, whatever its depth, because sending does not
 nest; an agent whose definition lists tools gets it only when the
 list names it, like `agent` and `swarm`. It delivers fire-and-forget:
-the engine resolves `parent` or a session id to a hosted session
-under the sender's own main session, and wraps the text with a sender
+the engine resolves `parent` or a session id to a running session
+under the sender's own main session, refusing an agent whose result
+was already delivered, and wraps the text with a sender
 header naming the agent and its session id. A busy target queues it
 behind its run, an idle agent goes through the same launch as a
 spawn, so it waits for a slot under `agent_max_running`, and an idle

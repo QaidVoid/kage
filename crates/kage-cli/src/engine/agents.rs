@@ -21,10 +21,6 @@ use super::{
     AgentSetup, Attach, CONTINUE_PROMPT, Recorder, ResumeChild, Session, SessionSpec, notice,
 };
 
-/// How many unhosted ancestors `reopen_agent` reopens
-/// before giving up, which also stops a marker loop.
-const MAX_REOPEN_DEPTH: u8 = 8;
-
 /// Tells a forked child that the conversation it starts with is
 /// inherited reference material, not its own past. Ported from
 /// kimi-code's `FORK_CONTEXT_NOTICE`.
@@ -271,7 +267,7 @@ impl super::Dispatcher {
         };
         let reopened = !self.sessions.contains_key(&id);
         if reopened {
-            match self.reopen_agent(id) {
+            match self.reopen_agent(parent, id) {
                 Ok(warnings) => self.warn_all(id, warnings),
                 Err(text) => return fail(text),
             }
@@ -298,29 +294,20 @@ impl super::Dispatcher {
         self.launch_agent(id, setup.max_running, content);
     }
 
-    /// Host the agent session `id` again from its session file. Agents
-    /// are dropped once their result is delivered, and a resumed
-    /// session hosts none, so a later prompt or message reopens them
-    /// here, parents first. The agent keeps its definition, history and
-    /// model, appends to its own file and owes no call a result.
-    /// Returns the warnings to show on it.
-    pub(super) fn reopen_agent(&mut self, id: SessionId) -> Result<Vec<String>, String> {
-        self.reopen_within(id, MAX_REOPEN_DEPTH)
-    }
-
-    fn reopen_within(&mut self, id: SessionId, hops: u8) -> Result<Vec<String>, String> {
-        let no_session = || {
-            format!(
-                "no live session {id}. Only sessions hosted right now and the agents of \
-                 their conversations take messages"
-            )
-        };
+    /// Host the swarm child `id` of the hosted session `parent` again
+    /// from its session file, for a swarm resume. Agents are dropped
+    /// once their result is delivered, and a resumed session hosts
+    /// none. The child keeps its definition, history and model, appends
+    /// to its own file and owes no call a result until the caller arms
+    /// one. Returns the warnings to show on it.
+    fn reopen_agent(&mut self, parent: SessionId, id: SessionId) -> Result<Vec<String>, String> {
+        let no_session = || format!("session {id} is not a swarm child of this session");
         let path = self
             .sessions
-            .values()
-            .filter_map(|s| s.path.as_deref()?.parent())
+            .get(&parent)
+            .and_then(|s| s.path.as_deref())
+            .and_then(Path::parent)
             .map(|dir| crate::build_session_path(dir, id))
-            .find(|path| path.exists())
             .ok_or_else(no_session)?;
         let marker = agent_marker(&path).ok_or_else(no_session)?;
         let text = |key: &str| {
@@ -330,13 +317,8 @@ impl super::Dispatcher {
                 .unwrap_or_default()
                 .to_owned()
         };
-        let parent = ulid::Ulid::from_string(&text("parent"))
-            .map(SessionId)
-            .map_err(|_| no_session())?;
-        if !self.sessions.contains_key(&parent) {
-            let hops = hops.checked_sub(1).ok_or_else(no_session)?;
-            let warnings = self.reopen_within(parent, hops)?;
-            self.warn_all(parent, warnings);
+        if text("parent") != parent.to_string() {
+            return Err(no_session());
         }
         let replay = kage_session::replay(&path)
             .map_err(|err| format!("cannot read session {id}: {err}"))?;

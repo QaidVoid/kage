@@ -2673,7 +2673,7 @@ fn a_message_to_a_missing_target_or_parent_is_refused() {
     let stranger = tool_output(&events, parent, "call_m2");
     assert!(stranger.is_error);
     assert!(
-        stranger.text.contains("no live session"),
+        stranger.text.contains("is not running"),
         "{}",
         stranger.text
     );
@@ -3653,13 +3653,14 @@ fn finishing_a_swarm_child_reaps_it() {
 #[test]
 fn a_reaped_swarm_child_resumes_from_its_file() {
     let dir = tempfile::tempdir().unwrap();
-    let h = harness(MockProvider::sequence(vec![
+    let mock = MockProvider::sequence(vec![
         swarm_turn(&[("call_s", swarm_task(&["a", "b"]))]),
         text_turn("a reply"),
         text_turn("b reply"),
         text_turn("parent done"),
         text_turn("resumed reply"),
-    ]));
+    ]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
     let parent = SessionId::new();
     let (recorder, _) = recorder_in(dir.path(), parent);
     h.engine.open(SessionSpec {
@@ -3702,6 +3703,18 @@ fn a_reaped_swarm_child_resumes_from_its_file() {
     let output = reply_rx.recv_timeout(WAIT).expect("no reply");
     assert!(!output.is_error, "{}", output.text);
     assert!(output.text.contains("resumed reply"), "{}", output.text);
+    let request = mock.last_request().unwrap();
+    let texts: Vec<String> = request
+        .messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|c| match c {
+            Content::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts.last().map(String::as_str), Some("continue"));
+    assert_eq!(texts.len(), 3, "the recorded history came back: {texts:?}");
     assert!(
         !h.engine
             .hosted_sessions()
@@ -4083,7 +4096,7 @@ fn cancelling_an_idle_session_leaves_its_agents_free_to_run() {
 }
 
 #[test]
-fn a_message_to_an_idle_agent_waits_for_a_free_slot() {
+fn a_message_to_a_finished_agent_is_refused() {
     let mock = MockProvider::sequence(vec![
         agent_turn(&[("call_a", task("first"))]),
         text_turn("a done"),
@@ -4107,28 +4120,19 @@ fn a_message_to_an_idle_agent_waits_for_a_free_slot() {
     ));
     mock.push_script(text_turn("b done"));
     mock.push_script(text_turn("ok"));
-    mock.push_script(text_turn("ok"));
     prompt(&h.engine, parent, "again", Delivery::Steer);
-    let events = until_runs_end(&h.events, 3);
+    let events = until_runs_end(&h.events, 2);
     h.engine.shutdown();
 
     let (second, _) = spawned(&events)[0].clone();
-    let ack = tool_output(&events, second, "call_m");
-    assert!(
-        ack.text.contains("it runs when an agent slot frees"),
-        "{}",
-        ack.text
+    let refused = tool_output(&events, second, "call_m");
+    assert!(refused.is_error);
+    assert!(refused.text.contains("is not running"), "{}", refused.text);
+    assert_eq!(
+        outcome_of(&events, first),
+        [],
+        "the finished agent stays put"
     );
-    let position = |session: SessionId, pred: &dyn Fn(&HostEvent) -> bool| {
-        events
-            .iter()
-            .position(|e| e.session == session && matches!(&e.event, Event::Host(h) if pred(h)))
-            .unwrap()
-    };
-    let second_ended = position(second, &|e| matches!(e, HostEvent::RunEnded { .. }));
-    let first_started = position(first, &|e| matches!(e, HostEvent::RunStarted));
-    assert!(second_ended < first_started, "{events:?}");
-    assert_eq!(outcome_of(&events, first), [RunOutcome::Completed]);
 }
 
 #[test]
@@ -4270,7 +4274,7 @@ fn a_forked_child_reports_only_its_own_work() {
 }
 
 #[test]
-fn a_delivered_agent_is_dropped_and_reopens_when_prompted_or_messaged() {
+fn a_delivered_agent_is_dropped_and_takes_no_more_prompts() {
     let dir = tempfile::tempdir().unwrap();
     let mock = MockProvider::sequence(vec![
         agent_turn(&[("call_a", task("work"))]),
@@ -4288,43 +4292,17 @@ fn a_delivered_agent_is_dropped_and_reopens_when_prompted_or_messaged() {
     prompt(&h.engine, parent, "go", Delivery::Steer);
     let events = until_runs_end(&h.events, 2);
     let child = spawned(&events)[0].0;
-    let hosted = |h: &Harness| -> Vec<SessionId> {
-        h.engine
-            .hosted_sessions()
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect()
-    };
-    assert_eq!(hosted(&h), [parent], "the delivered child is dropped");
-
-    mock.push_script(text_turn("child again"));
-    prompt(&h.engine, child, "more", Delivery::Steer);
-    let events = until_runs_end(&h.events, 1);
-    assert_eq!(outcome_of(&events, child), [RunOutcome::Completed]);
-    let request = mock.last_request().unwrap();
-    let texts: Vec<String> = request
-        .messages
-        .iter()
-        .flat_map(|m| &m.content)
-        .filter_map(|c| match c {
-            Content::Text { text } => Some(text.clone()),
-            _ => None,
-        })
+    let hosted: Vec<SessionId> = h
+        .engine
+        .hosted_sessions()
+        .into_iter()
+        .map(|(id, _)| id)
         .collect();
-    assert_eq!(
-        texts,
-        ["work", "child reply", "more"],
-        "its history came back"
-    );
-    assert_eq!(hosted(&h), [parent], "and it is dropped again");
+    assert_eq!(hosted, [parent], "the delivered child is dropped");
 
-    mock.push_script(send_message_turn("call_m", &child.to_string(), "and this"));
-    mock.push_script(text_turn("ok"));
-    mock.push_script(text_turn("ok"));
-    prompt(&h.engine, parent, "tell it", Delivery::Steer);
-    let events = until_runs_end(&h.events, 2);
+    prompt(&h.engine, child, "more", Delivery::Steer);
+    let seen = wait_for(&h.events, is_notice);
     h.engine.shutdown();
-    let ack = tool_output(&events, parent, "call_m");
-    assert!(ack.text.contains("it runs now"), "{}", ack.text);
-    assert_eq!(outcome_of(&events, child), [RunOutcome::Completed]);
+    assert_eq!(notices(&seen), [format!("unknown session {child}")]);
+    assert_eq!(mock.call_count(), 3, "nothing ran");
 }

@@ -628,12 +628,6 @@ impl Dispatcher {
         let Some(id) = command.session.or(self.active) else {
             return;
         };
-        if !self.sessions.contains_key(&id)
-            && matches!(command.kind, CommandKind::Prompt { .. })
-            && let Ok(warnings) = self.reopen_agent(id)
-        {
-            self.warn_all(id, warnings);
-        }
         if !self.sessions.contains_key(&id) {
             notice(
                 &self.bus,

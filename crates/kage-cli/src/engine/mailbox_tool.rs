@@ -48,8 +48,8 @@ impl MailboxTool {
              to you; it lands in the target's own transcript, so ask it to report back \
              another way, such as a follow-up `swarm` resume or a message of its own.\n\n\
              `to` is `parent` (the session that started you) or the id of another \
-             session of this conversation, for example one of the sibling ids a swarm \
-             result named. Your own id is {from}.\n\n\
+             running session of this conversation, for example a sibling still at \
+             work; an agent that has finished takes no messages. Your own id is {from}.\n\n\
              Use it to hand findings to a sibling, ask the parent a question mid-task \
              or answer the parent without being asked. For work you must wait on, \
              make an `agent` call instead."
@@ -149,8 +149,9 @@ impl Tool for MailboxTool {
 impl super::Dispatcher {
     /// Resolve and queue one mailbox message. `None` targets address
     /// the sender's parent, and a target must share the sender's main
-    /// session; an agent no longer hosted is reopened from its file. The message is wrapped so the target knows who sent it
-    /// and where to answer. An idle main session runs it at once; an
+    /// session and still be running: the main session or an agent
+    /// whose result is not delivered yet. The message is wrapped so the
+    /// target knows who sent it and where to answer. An idle main session runs it at once; an
     /// idle agent runs it once the running limit allows; a busy target
     /// runs it after its current run ends.
     pub(super) fn deliver_message(
@@ -176,15 +177,22 @@ impl super::Dispatcher {
                 || "the main session".to_owned(),
                 |l| format!("the {} agent", l.agent),
             );
-        let reopened = !self.sessions.contains_key(&to);
-        if reopened {
-            let warnings = self.reopen_agent(to)?;
-            self.warn_all(to, warnings);
+        // A finished agent already delivered its result, so a reply to
+        // a later message, and anything it changed, would never reach
+        // its parent.
+        let finished = self.sessions.get(&to).is_none_or(|target| {
+            target
+                .link
+                .as_ref()
+                .is_some_and(|link| link.reply.is_none())
+        });
+        if finished {
+            return Err(format!(
+                "session {to} is not running. A finished agent takes no messages; start a \
+                 new agent, or continue a swarm child with a swarm resume"
+            ));
         }
         if self.root_of(to) != self.root_of(from) {
-            if reopened {
-                self.sessions.remove(&to);
-            }
             return Err(format!(
                 "session {to} belongs to another conversation; message sessions of your own"
             ));

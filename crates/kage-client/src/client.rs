@@ -16,9 +16,11 @@ use kage_acp_wire::{
     CancelNotification, ClientCapabilities, CloseSessionRequest, ConfigGetRequest, ContentBlock,
     FsOp, FsRequest, Implementation, InitializeRequest, KageMeta, ListSessionsRequest,
     LoadSessionRequest, McpServer, NewSessionRequest, PROTOCOL_VERSION, PermissionOptionKind,
-    PermissionOutcome, PlanReview, PromptDelivery, PromptRequest, PromptResponse, RequestMeta,
-    RequestPermissionRequest, RequestPermissionResult, ResumeSessionRequest, SelectedOption,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SwarmResumeRequest,
+    PermissionOutcome, PlanReview, PromptDelivery, PromptRef, PromptRequest, PromptResponse,
+    RequestMeta, RequestPermissionRequest, RequestPermissionResult, ResumeSessionRequest,
+    SelectedOption, SessionExportResponse, SessionForkRequest, SessionForkResponse,
+    SessionNotification, SessionRequest, SessionUpdate, SetSessionConfigOptionRequest,
+    SwarmResumeRequest,
 };
 
 use crate::change::Change;
@@ -124,6 +126,15 @@ enum Pending {
         session_id: String,
     },
     SwarmResume {
+        session_id: String,
+    },
+    Fork {
+        session_id: String,
+    },
+    Export {
+        session_id: String,
+    },
+    Compact {
         session_id: String,
     },
 }
@@ -489,6 +500,50 @@ impl Client {
         )
     }
 
+    /// Copies `session_id` into a new recorded session, whole or up to
+    /// the prompt `before` names. The copy's id arrives as
+    /// [`Change::Forked`]; the copy is not opened.
+    pub fn fork_session(&mut self, session_id: &str, before: Option<PromptRef>) -> u64 {
+        self.request(
+            "_kage/session/fork",
+            params(&SessionForkRequest {
+                session_id: session_id.to_owned(),
+                before,
+            }),
+            Pending::Fork {
+                session_id: session_id.to_owned(),
+            },
+        )
+    }
+
+    /// Renders the recorded `session_id` as Markdown. The text arrives
+    /// as [`Change::Exported`].
+    pub fn export_session(&mut self, session_id: &str) -> u64 {
+        self.request(
+            "_kage/session/export",
+            params(&SessionRequest {
+                session_id: session_id.to_owned(),
+            }),
+            Pending::Export {
+                session_id: session_id.to_owned(),
+            },
+        )
+    }
+
+    /// Asks the agent to summarize the older turns of `session_id` now.
+    /// The result arrives as the session's compaction update.
+    pub fn compact_session(&mut self, session_id: &str) -> u64 {
+        self.request(
+            "_kage/session/compact",
+            params(&SessionRequest {
+                session_id: session_id.to_owned(),
+            }),
+            Pending::Compact {
+                session_id: session_id.to_owned(),
+            },
+        )
+    }
+
     /// Lists or reads a path under the session workdir. The answer
     /// arrives as [`Change::Fs`].
     pub fn fs(&mut self, session_id: &str, op: FsOp, path: &str) -> u64 {
@@ -748,31 +803,7 @@ impl Client {
                     }
                 }
             }
-            Pending::List { cwd } => match answer::<kage_acp_wire::ListSessionsResponse>(
-                id,
-                result,
-                "session/list result",
-            ) {
-                Err(failed) => failed,
-                Ok(page) => {
-                    for info in page.sessions {
-                        if let Some(listed) = self
-                            .state
-                            .directory
-                            .iter_mut()
-                            .find(|listed| listed.session_id == info.session_id)
-                        {
-                            *listed = info;
-                        } else {
-                            self.state.directory.push(info);
-                        }
-                    }
-                    if let Some(cursor) = page.next_cursor {
-                        self.list_sessions(cwd.as_deref(), Some(&cursor));
-                    }
-                    vec![Change::Directory]
-                }
-            },
+            Pending::List { cwd } => self.apply_list_page(id, cwd.as_deref(), result),
             Pending::Prompt {
                 session_id,
                 owns_run,
@@ -795,7 +826,27 @@ impl Client {
                 vec![Change::Session { id: session_id }]
             }
             Pending::ConfigGet => vec![Change::Config { config: result }],
-            Pending::SwarmResume { session_id } => vec![Change::Session { id: session_id }],
+            Pending::SwarmResume { session_id } | Pending::Compact { session_id } => {
+                vec![Change::Session { id: session_id }]
+            }
+            Pending::Fork { session_id } => {
+                match answer::<SessionForkResponse>(id, result, "_kage/session/fork result") {
+                    Err(failed) => failed,
+                    Ok(fork) => vec![Change::Forked {
+                        from: session_id,
+                        to: fork.session_id,
+                    }],
+                }
+            }
+            Pending::Export { session_id } => {
+                match answer::<SessionExportResponse>(id, result, "_kage/session/export result") {
+                    Err(failed) => failed,
+                    Ok(export) => vec![Change::Exported {
+                        session_id,
+                        markdown: export.markdown,
+                    }],
+                }
+            }
             Pending::Fs { session_id } => {
                 match answer::<kage_acp_wire::FsResult>(id, result, "_kage/fs result") {
                     Err(failed) => failed,
@@ -806,6 +857,35 @@ impl Client {
                 }
             }
         }
+    }
+
+    /// Merges a `session/list` page into the directory and asks for
+    /// the next one.
+    fn apply_list_page(&mut self, id: u64, cwd: Option<&str>, result: Value) -> Vec<Change> {
+        let page = match answer::<kage_acp_wire::ListSessionsResponse>(
+            id,
+            result,
+            "session/list result",
+        ) {
+            Err(failed) => return failed,
+            Ok(page) => page,
+        };
+        for info in page.sessions {
+            if let Some(listed) = self
+                .state
+                .directory
+                .iter_mut()
+                .find(|listed| listed.session_id == info.session_id)
+            {
+                *listed = info;
+            } else {
+                self.state.directory.push(info);
+            }
+        }
+        if let Some(cursor) = page.next_cursor {
+            self.list_sessions(cwd, Some(&cursor));
+        }
+        vec![Change::Directory]
     }
 
     /// Records the session a `session/new` answer created.

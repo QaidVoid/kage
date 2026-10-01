@@ -67,6 +67,22 @@ pub enum Change {
         /// The listing or file read.
         result: FsResult,
     },
+    /// A `_kage/session/fork` answer arrived: `to` is a new recorded
+    /// session copied from `from`, ready to open.
+    Forked {
+        /// The session that was copied.
+        from: String,
+        /// The copy.
+        to: String,
+    },
+    /// A `_kage/session/export` answer arrived. The Markdown is
+    /// delivered here and not kept in state.
+    Exported {
+        /// The session that was rendered.
+        session_id: String,
+        /// The transcript as Markdown.
+        markdown: String,
+    },
     /// A request the client sent was answered with an error. The
     /// client keeps no error log; a host surfaces this where it fits.
     Failed {
@@ -87,7 +103,8 @@ impl Change {
             | Self::Permission { id }
             | Self::AnsweredElsewhere { id, .. }
             | Self::Agents { id } => Some(id),
-            Self::Fs { session_id, .. } => Some(session_id),
+            Self::Fs { session_id, .. } | Self::Exported { session_id, .. } => Some(session_id),
+            Self::Forked { from, .. } => Some(from),
             Self::Connection | Self::Directory | Self::Config { .. } | Self::Failed { .. } => None,
         }
     }

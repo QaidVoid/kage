@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use kage_acp_wire::{
     AgentCapabilities, ContentBlock, Cost, Implementation, McpServerStatus, PermissionOption,
-    PermissionOptionKind, SessionConfigOption, SessionInfo, StopReason,
+    PermissionOptionKind, PromptRef, SessionConfigOption, SessionInfo, StopReason,
     SubagentSessionCapabilities, SubagentState, SubagentSwarm, SwarmMeta, ToolCallContent,
     ToolCallStatus, ToolCallUpdate, ToolKind, TurnReason,
 };
@@ -168,6 +168,22 @@ impl Session {
             id: id.into(),
             ..Session::default()
         }
+    }
+
+    /// The prompt at transcript `index` as the agent finds it again: its
+    /// first text block and how many earlier prompts carried the same.
+    /// `None` when the item is not a prompt with text.
+    #[must_use]
+    pub fn prompt_ref(&self, index: usize) -> Option<PromptRef> {
+        let text = prompt_text(self.items.get(index)?)?;
+        let occurrence = self.items[..index]
+            .iter()
+            .filter(|item| prompt_text(item) == Some(text))
+            .count();
+        Some(PromptRef {
+            text: text.to_owned(),
+            occurrence: u32::try_from(occurrence).unwrap_or(u32::MAX),
+        })
     }
 
     /// Appends a streamed message or thought chunk, merging it into
@@ -467,6 +483,14 @@ impl ToolCallItem {
         {
             self.swarm = Some(swarm);
         }
+    }
+}
+
+/// The first text block of a prompt item.
+fn prompt_text(item: &TranscriptItem) -> Option<&str> {
+    match item {
+        TranscriptItem::User { content, .. } => content.iter().find_map(ContentBlock::as_text),
+        _ => None,
     }
 }
 

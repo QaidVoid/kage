@@ -1068,3 +1068,57 @@ fn a_failed_prompt_answer_releases_the_run_and_flushes_the_queue() {
     let outgoing = client.take_outgoing();
     assert!(matches!(&outgoing[0], Frame::Request { id: 4, .. }));
 }
+
+#[test]
+fn a_fork_names_its_prompt_by_text_and_occurrence() {
+    let mut client = connected(false);
+    for (request, prompt) in [(3, "again"), (4, "next"), (5, "again")] {
+        client.prompt("s1", text(prompt));
+        client.handle(stop(request, "end_turn"));
+    }
+    let _ = client.take_outgoing();
+    let session = client.state().session("s1").unwrap();
+    let last = session
+        .items
+        .iter()
+        .rposition(|item| matches!(item, TranscriptItem::User { .. }))
+        .unwrap();
+    let before = session.prompt_ref(last).unwrap();
+    assert_eq!((before.text.as_str(), before.occurrence), ("again", 1));
+    assert_eq!(session.prompt_ref(last + 1), None);
+
+    let id = client.fork_session("s1", Some(before));
+    let outgoing = client.take_outgoing();
+    let Frame::Request { method, params, .. } = &outgoing[0] else {
+        panic!("a fork is a request: {outgoing:?}");
+    };
+    assert_eq!(method, "_kage/session/fork");
+    assert_eq!(
+        params,
+        &serde_json::json!({"sessionId": "s1", "before": {"text": "again", "occurrence": 1}})
+    );
+    let changes = client.handle(Frame::Success {
+        id,
+        result: serde_json::json!({"sessionId": "s2"}),
+    });
+    assert_eq!(
+        changes,
+        [Change::Forked {
+            from: "s1".into(),
+            to: "s2".into()
+        }]
+    );
+
+    let id = client.export_session("s1");
+    let changes = client.handle(Frame::Success {
+        id,
+        result: serde_json::json!({"markdown": "# s1"}),
+    });
+    assert_eq!(
+        changes,
+        [Change::Exported {
+            session_id: "s1".into(),
+            markdown: "# s1".into()
+        }]
+    );
+}

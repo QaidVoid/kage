@@ -414,13 +414,14 @@ pub trait Agent: Send + Sync + 'static {
         Err(RpcError::method_not_found("_kage/models/list"))
     }
 
-    /// The engine options a client can change (`_kage/options/list`).
-    /// The default rejects.
+    /// The engine options a client can change (`_kage/options/list`),
+    /// read for the request's session when it names one. The default
+    /// rejects.
     ///
     /// # Errors
     ///
     /// Returns an [`RpcError`] if the configuration cannot be read.
-    fn options_list(&self) -> Result<OptionsResponse, RpcError> {
+    fn options_list(&self, _req: ConfigGetRequest) -> Result<OptionsResponse, RpcError> {
         Err(RpcError::method_not_found("_kage/options/list"))
     }
 
@@ -697,7 +698,10 @@ fn handle_kage_request<A: Agent>(
             Ok(req) => spawn_op(peer, agent, id, move |a| a.session_compact(req)),
             Err(e) => return parse_failed(peer, &id, e),
         },
-        "_kage/options/list" => spawn_op(peer, agent, id, |a| a.options_list().map(jval)),
+        "_kage/options/list" => match parse::<ConfigGetRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.options_list(req).map(jval)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
         "_kage/models/list" => spawn_op(peer, agent, id, |a| a.models_list().map(jval)),
         "_kage/options/set" => match parse::<OptionSetRequest>(params) {
             Ok(req) => spawn_op(peer, agent, id, move |a| a.option_set(req).map(jval)),

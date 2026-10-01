@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn config_get_shapes() {
-        roundtrip(&ConfigGetRequest {}, serde_json::json!({}));
+        roundtrip(&ConfigGetRequest::default(), serde_json::json!({}));
         let value = serde_json::to_value(ConfigGetResult::default()).unwrap();
         for section in ["providers", "mcp", "permissions", "plugins", "ui"] {
             assert!(value.get(section).is_some(), "{section} must be present");

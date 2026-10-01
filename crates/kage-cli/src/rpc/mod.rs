@@ -280,6 +280,20 @@ impl CliAcpAgent {
         options
     }
 
+    /// The layered config for the request's session workdir, or for the
+    /// server's directory when the request names no known session.
+    fn load_config(&self, req: &ConfigGetRequest) -> Result<Config, RpcError> {
+        let workdir = req
+            .session_id
+            .as_deref()
+            .and_then(|client_id| self.engine_id(client_id).ok())
+            .and_then(|id| self.host.workdir(id));
+        let dir = workdir.unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
+        Config::load_layered(&dir).map_err(|e| RpcError::internal(e.to_string()))
+    }
+
     fn engine_id(&self, client_id: &str) -> Result<SessionId, RpcError> {
         lock(&self.ids)
             .by_client
@@ -458,10 +472,8 @@ impl Agent for CliAcpAgent {
         Ok(SetSessionConfigOptionResponse { config_options })
     }
 
-    fn config_get(&self, _req: ConfigGetRequest) -> Result<ConfigGetResult, RpcError> {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let mut config =
-            Config::load_layered(&cwd).map_err(|e| RpcError::internal(e.to_string()))?;
+    fn config_get(&self, req: ConfigGetRequest) -> Result<ConfigGetResult, RpcError> {
+        let mut config = self.load_config(&req)?;
         redact_secrets(&mut config);
         Ok(ConfigGetResult {
             providers: config.providers,
@@ -492,10 +504,8 @@ impl Agent for CliAcpAgent {
         Ok(models::catalog(&self.host.registry))
     }
 
-    fn options_list(&self) -> Result<OptionsResponse, RpcError> {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let config = Config::load_layered(&cwd).map_err(|e| RpcError::internal(e.to_string()))?;
-        Ok(registry::entries(&config))
+    fn options_list(&self, req: ConfigGetRequest) -> Result<OptionsResponse, RpcError> {
+        Ok(registry::entries(&self.load_config(&req)?))
     }
 
     /// Writes the option into the user config. A project config that
@@ -504,7 +514,7 @@ impl Agent for CliAcpAgent {
         let path =
             Config::default_path().ok_or_else(|| RpcError::internal("no user config directory"))?;
         registry::set(&path, &req)?;
-        self.options_list()
+        self.options_list(ConfigGetRequest::default())
     }
 
     fn session_rename(&self, req: SessionRenameRequest) -> Result<serde_json::Value, RpcError> {

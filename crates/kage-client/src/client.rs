@@ -481,7 +481,19 @@ impl Client {
     pub fn config_get(&mut self) -> u64 {
         self.request(
             "_kage/config/get",
-            params(&ConfigGetRequest {}),
+            params(&ConfigGetRequest::default()),
+            Pending::ConfigGet,
+        )
+    }
+
+    /// Asks for the read-only configuration as `session_id`'s workdir
+    /// layers it. The answer arrives as [`Change::Config`].
+    pub fn config_get_for(&mut self, session_id: &str) -> u64 {
+        self.request(
+            "_kage/config/get",
+            params(&ConfigGetRequest {
+                session_id: Some(session_id.to_owned()),
+            }),
             Pending::ConfigGet,
         )
     }
@@ -576,7 +588,19 @@ impl Client {
     pub fn options_list(&mut self) -> u64 {
         self.request(
             "_kage/options/list",
-            serde_json::json!({}),
+            params(&ConfigGetRequest::default()),
+            Pending::Options,
+        )
+    }
+
+    /// Asks for the engine options as `session_id`'s workdir config
+    /// sets them. The answer arrives as [`Change::Options`].
+    pub fn options_list_for(&mut self, session_id: &str) -> u64 {
+        self.request(
+            "_kage/options/list",
+            params(&ConfigGetRequest {
+                session_id: Some(session_id.to_owned()),
+            }),
             Pending::Options,
         )
     }

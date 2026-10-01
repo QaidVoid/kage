@@ -2755,6 +2755,47 @@ fn config_get_serves_the_read_only_sections_without_writing_config() {
 }
 
 #[test]
+fn config_get_and_options_list_read_the_session_workdir() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".kage")).unwrap();
+    std::fs::write(
+        dir.path().join(".kage/config.toml"),
+        "[ui]\ntheme = \"session-workdir-theme\"\n",
+    )
+    .unwrap();
+    let h = serve(vec![], dir.path(), dir.path());
+    let theme = |options: &serde_json::Value| {
+        options["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|option| option["name"] == "theme")
+            .unwrap()["value"]
+            .clone()
+    };
+
+    let session = serde_json::json!({"sessionId": h.session});
+    let config = h
+        .client
+        .request("_kage/config/get", session.clone())
+        .unwrap();
+    assert_eq!(config["ui"]["theme"], "session-workdir-theme");
+    let options = h.client.request("_kage/options/list", session).unwrap();
+    assert_eq!(theme(&options), "session-workdir-theme");
+
+    let config = h
+        .client
+        .request("_kage/config/get", serde_json::json!({}))
+        .unwrap();
+    assert_ne!(config["ui"]["theme"], "session-workdir-theme");
+    let options = h
+        .client
+        .request("_kage/options/list", serde_json::json!({}))
+        .unwrap();
+    assert_ne!(theme(&options), "session-workdir-theme");
+}
+
+#[test]
 fn config_get_names_headers_and_env_without_their_values() {
     let mut config = kage_core::config::Config::default();
     config.mcp.servers.insert(
@@ -3358,6 +3399,49 @@ fn a_finished_edit_carries_its_changes_as_diffs() {
     assert_eq!(diffs[0].path, "src/a.rs");
     assert_eq!(diffs[0].old_text.as_deref(), Some("a"));
     assert_eq!(diffs[0].new_text, "b");
+}
+
+#[test]
+fn a_streamed_swarm_call_sends_its_meta_only_when_it_changes() {
+    let id = ToolCallId::new("call_swarm");
+    let inputs = [
+        serde_json::json!({"description": "fan"}),
+        serde_json::json!({"description": "fan", "items": ["a"]}),
+        serde_json::json!({"description": "fan", "items": ["a"], "agent": "general"}),
+        serde_json::json!({"description": "fan", "items": ["a"], "agent": "general", "fork": true}),
+        serde_json::json!({"description": "fan", "items": ["a", "b"], "agent": "general", "fork": true}),
+    ];
+    let mut seen = HashMap::new();
+    let members: Vec<Option<Vec<String>>> = inputs
+        .into_iter()
+        .map(|input_partial| {
+            let update = to_update(
+                &mut seen,
+                &LoopEvent::ToolCallArgsDelta {
+                    id: id.clone(),
+                    name: "swarm".into(),
+                    input_partial,
+                },
+            );
+            let meta = match update {
+                Some(SessionUpdate::ToolCall(call)) => call.meta,
+                Some(SessionUpdate::ToolCallUpdate(update)) => update.meta,
+                other => panic!("expected a tool call update, got {other:?}"),
+            };
+            meta.and_then(|meta| meta.kage.swarm)
+                .map(|swarm| swarm.members)
+        })
+        .collect();
+    assert_eq!(
+        members,
+        [
+            None,
+            Some(vec!["a".to_owned()]),
+            None,
+            None,
+            Some(vec!["a".to_owned(), "b".to_owned()]),
+        ]
+    );
 }
 
 #[test]

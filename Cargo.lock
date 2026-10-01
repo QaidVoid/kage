@@ -1760,6 +1760,7 @@ dependencies = [
  "crossbeam-channel",
  "dirs",
  "figment",
+ "ignore",
  "kage-acp",
  "kage-core",
  "kage-jsonrpc",

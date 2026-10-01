@@ -822,8 +822,9 @@ fn describe_call(name: &str, input: &serde_json::Value) -> String {
 /// Translate a loop event into the matching ACP `session/update`. The
 /// first sighting of a tool call id sends `tool_call`. After it, streamed
 /// input for that id sends a `tool_call_update` only when the input
-/// changed, and the later steps always do. `seen` holds the input last
-/// sent for each call.
+/// changed, and the later steps always do. `seen` holds the input and
+/// the swarm meta last sent for each call, so the meta goes out only
+/// when it changes.
 pub(super) fn to_update(
     seen: &mut HashMap<String, SeenCall>,
     event: &LoopEvent,
@@ -848,30 +849,7 @@ pub(super) fn to_update(
             id,
             name,
             input_partial,
-        } => match seen.insert(
-            id.to_string(),
-            SeenCall {
-                name: name.clone(),
-                input: input_partial.clone(),
-            },
-        ) {
-            None => Some(SessionUpdate::ToolCall(ToolCall {
-                tool_call_id: id.to_string(),
-                title: tool_title(name),
-                kind: tool_kind(name),
-                status: ToolCallStatus::Pending,
-                content: Vec::new(),
-                raw_input: Some(input_partial.clone()),
-                meta: swarm_meta(name, input_partial),
-            })),
-            Some(last) if last.input == *input_partial => None,
-            Some(_) => Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
-                tool_call_id: id.to_string(),
-                raw_input: Some(input_partial.clone()),
-                meta: swarm_meta(name, input_partial),
-                ..ToolCallUpdate::default()
-            })),
-        },
+        } => streamed_call(seen, id, name, input_partial),
         LoopEvent::ToolExecutionStart { id } => {
             Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
                 tool_call_id: id.to_string(),
@@ -928,12 +906,59 @@ pub(super) fn to_update(
     }
 }
 
-/// What a tool call announced so far: the tool it calls and its input
-/// as last streamed.
+/// The update a streamed tool call input sends: `tool_call` on the
+/// first sighting, then a `tool_call_update` when the input changed,
+/// carrying the swarm meta only when it differs from the one last sent.
+fn streamed_call(
+    seen: &mut HashMap<String, SeenCall>,
+    id: &ToolCallId,
+    name: &str,
+    input_partial: &serde_json::Value,
+) -> Option<SessionUpdate> {
+    let key = id.to_string();
+    let last = seen.get(&key);
+    if last.is_some_and(|last| last.input == *input_partial) {
+        return None;
+    }
+    let sent = last.and_then(|last| last.meta.clone());
+    let meta = swarm_meta(name, input_partial).filter(|meta| sent.as_ref() != Some(meta));
+    let first = seen
+        .insert(
+            key,
+            SeenCall {
+                name: name.to_owned(),
+                input: input_partial.clone(),
+                meta: meta.clone().or(sent),
+            },
+        )
+        .is_none();
+    Some(if first {
+        SessionUpdate::ToolCall(ToolCall {
+            tool_call_id: id.to_string(),
+            title: tool_title(name),
+            kind: tool_kind(name),
+            status: ToolCallStatus::Pending,
+            content: Vec::new(),
+            raw_input: Some(input_partial.clone()),
+            meta,
+        })
+    } else {
+        SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+            tool_call_id: id.to_string(),
+            raw_input: Some(input_partial.clone()),
+            meta,
+            ..ToolCallUpdate::default()
+        })
+    })
+}
+
+/// What a tool call announced so far: the tool it calls, its input as
+/// last streamed and the swarm meta last sent for it.
 #[derive(Debug, Clone)]
 pub(super) struct SeenCall {
     name: String,
     input: serde_json::Value,
+    meta: Option<ToolCallMeta>,
 }
 
 /// The `diff` content a finished `edit` or `write` call carries, read

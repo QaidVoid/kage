@@ -9,6 +9,7 @@ use std::fs;
 use std::io::Read as _;
 use std::path::Path;
 
+use ignore::WalkBuilder;
 use kage_acp::acp::{FsEntry, FsKind, FsListResult, FsOp, FsReadResult, FsRequest, FsResult};
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
 use kage_jsonrpc::RpcError;
@@ -48,35 +49,42 @@ pub(crate) fn handle(
 
 /// Lists `root` as a subtree of `workdir`, parents directly before
 /// their children, sorted by name, until the entry or depth cap cuts
-/// it short.
+/// it short. Hidden entries are listed, but `.git` and paths the
+/// ignore files exclude are not.
 fn list(workdir: &Path, root: &Path) -> FsListResult {
     let mut result = FsListResult::default();
-    walk(workdir, root, 0, &mut result);
-    result
-}
-
-fn walk(workdir: &Path, dir: &Path, depth: usize, result: &mut FsListResult) {
-    if result.truncated {
-        return;
-    }
-    let Ok(children) = fs::read_dir(dir) else {
-        result.truncated = true;
-        return;
-    };
-    let mut children: Vec<_> = children.filter_map(std::result::Result::ok).collect();
-    children.sort_by_key(std::fs::DirEntry::file_name);
-    for entry in children {
-        if result.entries.len() >= MAX_ENTRIES || depth >= MAX_DEPTH {
+    let walker = WalkBuilder::new(root)
+        .hidden(false)
+        .require_git(false)
+        .add_custom_ignore_filename(".kageignore")
+        .filter_entry(|entry| entry.file_name() != ".git")
+        .sort_by_file_name(std::ffi::OsStr::cmp)
+        .max_depth(Some(MAX_DEPTH + 1))
+        .build();
+    for entry in walker {
+        let Ok(entry) = entry else {
             result.truncated = true;
-            return;
-        }
-        let Ok(file_type) = entry.file_type() else {
-            result.truncated = true;
-            return;
+            continue;
         };
-        let kind = if file_type.is_dir() {
+        if entry.depth() == 0 {
+            continue;
+        }
+        if result.entries.len() >= MAX_ENTRIES {
+            result.truncated = true;
+            break;
+        }
+        if entry.depth() > MAX_DEPTH {
+            result.truncated = true;
+            continue;
+        }
+        let Ok(path) = entry.path().strip_prefix(workdir) else {
+            result.truncated = true;
+            break;
+        };
+        let file_type = entry.file_type();
+        let kind = if file_type.is_some_and(|t| t.is_dir()) {
             FsKind::Directory
-        } else if file_type.is_file() {
+        } else if file_type.is_some_and(|t| t.is_file()) {
             FsKind::File
         } else {
             FsKind::Other
@@ -86,20 +94,13 @@ fn walk(workdir: &Path, dir: &Path, depth: usize, result: &mut FsListResult) {
         } else {
             0
         };
-        let entry_path = entry.path();
-        let Ok(path) = entry_path.strip_prefix(workdir) else {
-            result.truncated = true;
-            return;
-        };
         result.entries.push(FsEntry {
             path: path.display().to_string(),
             kind,
             size,
         });
-        if kind == FsKind::Directory {
-            walk(workdir, &entry.path(), depth + 1, result);
-        }
     }
+    result
 }
 
 /// Reads `file` as UTF-8 text capped at [`READ_CAP`] bytes. A file
@@ -204,6 +205,30 @@ mod tests {
         assert_eq!(src.kind, FsKind::Directory);
         assert_eq!(src.size, 0);
         assert_eq!(list.entries[2].size, 1);
+    }
+
+    #[test]
+    fn list_skips_git_and_gitignored_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".git/objects")).unwrap();
+        fs::write(dir.path().join(".git/HEAD"), "ref").unwrap();
+        fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+        fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+        fs::write(dir.path().join("target/debug/kage"), "bin").unwrap();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "lib").unwrap();
+
+        let out = handle(
+            dir.path(),
+            &PermissionsConfig::default(),
+            &request(FsOp::List, ""),
+        )
+        .unwrap();
+        let FsResult::List(list) = out else {
+            panic!("expected a list result");
+        };
+        let paths: Vec<&str> = list.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, [".gitignore", "src", "src/lib.rs"]);
     }
 
     #[test]

@@ -394,11 +394,15 @@ pub struct SetSessionConfigOptionResponse {
     pub config_options: Vec<SessionConfigOption>,
 }
 
-/// `_kage/config/get` request params. Empty: the answer is the live
-/// configuration of the running process.
+/// `_kage/config/get` and `_kage/options/list` request params.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConfigGetRequest {}
+pub struct ConfigGetRequest {
+    /// The session whose workdir the configuration is read for. Without
+    /// one, or for an unknown session, the server's own directory is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
 
 /// Whether an MCP server is usable, as reported by the
 /// `_kage/mcp_status` update.
@@ -2039,7 +2043,13 @@ mod tests {
 
     #[test]
     fn config_get_request_shapes() {
-        roundtrip(&ConfigGetRequest {}, serde_json::json!({}));
+        roundtrip(&ConfigGetRequest::default(), serde_json::json!({}));
+        roundtrip(
+            &ConfigGetRequest {
+                session_id: Some("s1".into()),
+            },
+            serde_json::json!({"sessionId": "s1"}),
+        );
     }
 
     #[test]

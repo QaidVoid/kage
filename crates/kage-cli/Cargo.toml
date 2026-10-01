@@ -25,6 +25,7 @@ clap.workspace = true
 clap_complete.workspace = true
 clap_mangen.workspace = true
 dirs.workspace = true
+ignore.workspace = true
 kage-acp.workspace = true
 kage-core.workspace = true
 kage-jsonrpc.workspace = true

@@ -765,11 +765,7 @@ impl Store {
         let Some((from, plan)) = self.forked.remove(id) else {
             return;
         };
-        let source = self
-            .state()
-            .session(&from)
-            .and_then(|session| session.title.clone())
-            .unwrap_or_else(|| "untitled session".to_owned());
+        let source = self.display_title(&from);
         match plan {
             ForkPlan::Fork => self.notes.push(Note::new(
                 NoticeTone::Success,
@@ -958,6 +954,35 @@ impl Store {
             })
     }
 
+    /// The name session `id` shows under: its title, else its first
+    /// prompt until the engine titles it, else "untitled session".
+    #[must_use]
+    pub fn display_title(&self, id: &str) -> String {
+        if let Some(title) = self.session_title(id) {
+            return title.to_owned();
+        }
+        self.state()
+            .session(id)
+            .and_then(|session| {
+                session.items.iter().find_map(|item| match item {
+                    TranscriptItem::User { content, .. } => {
+                        content.iter().find_map(ContentBlock::as_text)
+                    }
+                    _ => None,
+                })
+            })
+            .map(|text| {
+                let line = text.lines().next().unwrap_or_default().trim();
+                let mut short: String = line.chars().take(60).collect();
+                if line.chars().count() > 60 {
+                    short.push('\u{2026}');
+                }
+                short
+            })
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| "untitled session".to_owned())
+    }
+
     /// Pins session `id` to the top of the sidebar, or unpins it.
     pub fn toggle_pin(&mut self, id: &str) {
         self.update_prefs(|prefs| {
@@ -971,10 +996,7 @@ impl Store {
     /// welcome shows when it was the active one. The toast that says so
     /// restores it on click.
     pub fn archive(&mut self, id: &str) {
-        let title = self
-            .session_title(id)
-            .unwrap_or("untitled session")
-            .to_owned();
+        let title = self.display_title(id);
         self.update_prefs(|prefs| {
             prefs.archived.insert(id.to_owned());
         });

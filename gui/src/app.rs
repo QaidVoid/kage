@@ -711,7 +711,7 @@ impl Shell {
                 bar.child(
                     Button::new("show-sidebar")
                         .icon(IconName::PanelLeft)
-                        .xsmall()
+                        .small()
                         .ghost()
                         .tooltip("Show sidebar (Ctrl \\)")
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
@@ -719,10 +719,7 @@ impl Shell {
             })
             .children(session.map(|session| {
                 let name = project_name(session.cwd.as_deref());
-                let title = session
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| "untitled session".to_owned());
+                let title = self.store.read(cx).display_title(&session.id);
                 h_flex()
                     .id("topbar-crumbs")
                     .min_w_0()
@@ -776,7 +773,7 @@ impl Shell {
             .child(
                 Button::new("toggle-workbench")
                     .icon(IconName::PanelRight)
-                    .xsmall()
+                    .small()
                     .ghost()
                     .selected(workbench_visible)
                     .tooltip("Workbench (Ctrl B)")
@@ -1158,7 +1155,7 @@ impl Shell {
                 (Some(RowState::Running), RowState::Idle) => (NoticeTone::Success, "turn finished"),
                 _ => continue,
             };
-            let title = session.title.as_deref().unwrap_or("untitled session");
+            let title = store.display_title(id);
             drafts.push(ToastDraft {
                 tone,
                 text: format!("{title}: {what}"),
@@ -1325,7 +1322,7 @@ impl Shell {
         let shell = cx.entity();
         Button::new("session-menu")
             .icon(IconName::Ellipsis)
-            .xsmall()
+            .small()
             .ghost()
             .tooltip("Session actions")
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {

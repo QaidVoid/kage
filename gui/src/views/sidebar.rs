@@ -492,7 +492,7 @@ impl Render for SidebarView {
             let active = store.active_id() == Some(id.as_str());
             items.push(RowItem {
                 id: id.clone(),
-                title: session.title.clone(),
+                title: Some(store.display_title(id)),
                 updated_at: session.updated_at.clone(),
                 state: row_state(session),
                 active,
@@ -716,7 +716,7 @@ impl Render for SidebarView {
                     .child(
                         Button::new("collapse-sidebar")
                             .icon(IconName::PanelLeft)
-                            .xsmall()
+                            .small()
                             .ghost()
                             .tooltip("Collapse sidebar (Ctrl \\)")
                             .on_click(|_, window, cx| {
@@ -831,7 +831,7 @@ impl Render for SidebarView {
                     .child(
                         Button::new("open-settings")
                             .icon(IconName::Settings)
-                            .xsmall()
+                            .small()
                             .ghost()
                             .tooltip("Settings (Ctrl ,)")
                             .on_click(|_, window, cx| {

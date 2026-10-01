@@ -294,6 +294,8 @@ pub struct Subagent {
     pub swarm: Option<SubagentSwarm>,
     /// Why the child paused, while it is paused.
     pub reason: Option<String>,
+    /// The parent's `agent` or `swarm` call that started the child.
+    pub tool_call_id: Option<String>,
 }
 
 impl Subagent {
@@ -318,6 +320,9 @@ impl Subagent {
         }
         if update.swarm.is_some() {
             self.swarm.clone_from(&update.swarm);
+        }
+        if update.tool_call_id.is_some() {
+            self.tool_call_id.clone_from(&update.tool_call_id);
         }
         if update.reason.is_some() {
             self.reason.clone_from(&update.reason);

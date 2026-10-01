@@ -18,7 +18,7 @@ use kage_acp_wire::{
     LoadSessionRequest, McpServer, NewSessionRequest, PROTOCOL_VERSION, PermissionOptionKind,
     PermissionOutcome, PlanReview, PromptDelivery, PromptRequest, PromptResponse, RequestMeta,
     RequestPermissionRequest, RequestPermissionResult, ResumeSessionRequest, SelectedOption,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, SwarmResumeRequest,
 };
 
 use crate::change::Change;
@@ -121,6 +121,9 @@ enum Pending {
     },
     ConfigGet,
     Fs {
+        session_id: String,
+    },
+    SwarmResume {
         session_id: String,
     },
 }
@@ -466,6 +469,26 @@ impl Client {
         )
     }
 
+    /// Continues swarm children of `session_id`: each member id maps to
+    /// a follow-up prompt, and an empty prompt continues the child's
+    /// task. The children report back through `subagent_update`.
+    pub fn swarm_resume(
+        &mut self,
+        session_id: &str,
+        members: std::collections::BTreeMap<String, String>,
+    ) -> u64 {
+        self.request(
+            "_kage/swarm/resume",
+            params(&SwarmResumeRequest {
+                session_id: session_id.to_owned(),
+                members,
+            }),
+            Pending::SwarmResume {
+                session_id: session_id.to_owned(),
+            },
+        )
+    }
+
     /// Lists or reads a path under the session workdir. The answer
     /// arrives as [`Change::Fs`].
     pub fn fs(&mut self, session_id: &str, op: FsOp, path: &str) -> u64 {
@@ -772,6 +795,7 @@ impl Client {
                 vec![Change::Session { id: session_id }]
             }
             Pending::ConfigGet => vec![Change::Config { config: result }],
+            Pending::SwarmResume { session_id } => vec![Change::Session { id: session_id }],
             Pending::Fs { session_id } => {
                 match answer::<kage_acp_wire::FsResult>(id, result, "_kage/fs result") {
                     Err(failed) => failed,

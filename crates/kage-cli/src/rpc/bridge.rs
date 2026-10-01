@@ -432,7 +432,7 @@ impl Bridge {
     /// Announces an agent as a subagent of its parent's client session,
     /// then shows its activity on its own session until it ends. A
     /// requeued child reports `paused` with its reason to the parent
-    /// instead of ending.
+    /// instead of ending, and `running` again when its next run starts.
     fn handle_subagent(&mut self, session: SessionId, event: &Event) {
         if let Event::Host(HostEvent::AgentSpawned {
             parent,
@@ -463,7 +463,9 @@ impl Bridge {
                         total: member.total,
                     })
                 }),
-                state: None,
+                // Explicit, so a member announced again for a resume
+                // leaves the state its last run ended in.
+                state: Some(SubagentState::Running),
                 reason: None,
                 tool_call_id: Some(tool_call_id.to_string()),
             };
@@ -493,6 +495,26 @@ impl Bridge {
                 &parent_id,
                 SessionUpdate::SubagentUpdate(update),
             );
+        } else if let Event::Host(HostEvent::RunStarted) = event
+            && self.paused.remove(&session)
+        {
+            if let Some(parent_id) = self
+                .tree
+                .get(session)
+                .and_then(|node| self.client_of(node.parent))
+            {
+                let update = SubagentUpdate {
+                    subagent_session_id: session.to_string(),
+                    state: Some(SubagentState::Running),
+                    ..SubagentUpdate::default()
+                };
+                send_update(
+                    &self.peer,
+                    &parent_id,
+                    SessionUpdate::SubagentUpdate(update),
+                );
+            }
+            self.handle_client(session, session.to_string(), event);
         } else if self.streaming.contains(&session) {
             self.handle_client(session, session.to_string(), event);
         }
@@ -524,7 +546,8 @@ impl Bridge {
         let Some(end) = self.ended.remove(&session) else {
             return;
         };
-        let requeued = self.paused.remove(&session)
+        // A requeued child stays paused until its next run starts.
+        let requeued = self.paused.contains(&session)
             && matches!(
                 &end.outcome,
                 RunOutcome::Failed {
@@ -534,6 +557,7 @@ impl Bridge {
         if requeued {
             return;
         }
+        self.paused.remove(&session);
         if !self.streaming.remove(&session) {
             for waiter in lock(&self.waiters).remove(&session).unwrap_or_default() {
                 let _ = waiter.send(end.clone());

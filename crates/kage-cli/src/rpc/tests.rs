@@ -661,7 +661,11 @@ fn prompt_async_with(
 }
 
 fn is_terminal(params: &serde_json::Value) -> bool {
-    params["update"]["sessionUpdate"] == "subagent_update" && !params["update"]["state"].is_null()
+    let state = &params["update"]["state"];
+    params["update"]["sessionUpdate"] == "subagent_update"
+        && !state.is_null()
+        && state != "running"
+        && state != "paused"
 }
 
 /// Collects notifications with their methods until a subagent's
@@ -710,7 +714,7 @@ fn subagents_stream_and_ask_on_their_own_sessions() {
     assert_eq!(announced["update"]["name"], "general");
     assert_eq!(announced["update"]["task"], "list files");
     assert_eq!(announced["update"]["capabilities"]["cancel"], true);
-    assert!(announced["update"].get("state").is_none());
+    assert_eq!(announced["update"]["state"], "running");
     assert_eq!(params["sessionId"], child);
     assert_eq!(params["toolCall"]["toolCallId"], "call_child");
     assert_eq!(params["toolCall"]["title"], "ls");
@@ -953,13 +957,16 @@ fn a_rate_limited_swarm_child_pauses_with_a_reason_and_finishes() {
     assert!(reason.contains("rate limited"), "{reason}");
     let terminal_at = updates
         .iter()
-        .position(|p| {
-            is_terminal(p)
-                && p["update"]["subagentSessionId"] == b
-                && p["update"]["state"] != "paused"
-        })
+        .position(|p| is_terminal(p) && p["update"]["subagentSessionId"] == b)
         .expect("b ends");
     assert!(paused_at < terminal_at, "{updates:#?}");
+    let running_again = updates
+        .iter()
+        .skip(paused_at)
+        .position(|p| p["update"]["subagentSessionId"] == b && p["update"]["state"] == "running")
+        .map(|at| at + paused_at)
+        .expect("b reports running again");
+    assert!(running_again < terminal_at, "{updates:#?}");
     assert_eq!(updates[terminal_at]["update"]["state"], "completed");
     let failed = updates.iter().any(|p| {
         is_terminal(p) && p["update"]["subagentSessionId"] == b && p["update"]["state"] == "failed"

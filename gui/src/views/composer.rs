@@ -411,37 +411,81 @@ pub(crate) struct SlashItem {
     pub badge: Option<&'static str>,
 }
 
+/// The commands the client runs itself, ahead of the agent's: name,
+/// argument hint and what it does.
+const BUILTINS: [(&str, &str, &str); 4] = [
+    (
+        "swarm",
+        "on | off | <task>",
+        "Toggle swarm mode, or run one task as a swarm",
+    ),
+    ("plan", "on | off", "Toggle plan mode"),
+    (
+        "goal",
+        "<text> | clear",
+        "Set a goal the agent keeps pursuing",
+    ),
+    ("new", "", "Start a new session"),
+];
+
+/// A built-in command as typed: its name and the rest of the line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Builtin<'a> {
+    pub name: &'a str,
+    pub args: &'a str,
+}
+
+/// The built-in command `text` runs, if it names one.
+pub(crate) fn builtin(text: &str) -> Option<Builtin<'_>> {
+    let rest = text.trim().strip_prefix('/')?;
+    let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    BUILTINS
+        .iter()
+        .any(|(known, ..)| *known == name)
+        .then(|| Builtin {
+            name,
+            args: args.trim(),
+        })
+}
+
 /// The slash menu rows the session's available commands deliver for
 /// `query`, in the order the agent listed them.
 #[must_use]
 pub(crate) fn slash_items(commands: &[Value], query: &str) -> Vec<SlashItem> {
-    commands
+    let builtins = BUILTINS
         .iter()
-        .filter_map(|command| {
-            let name = command.get("name")?.as_str()?;
-            if !name.starts_with(query) {
-                return None;
-            }
-            Some(SlashItem {
-                name: name.to_owned(),
-                description: command
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                hint: command
-                    .get("input")
-                    .and_then(|input| input.get("hint"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                badge: if name.contains(':') {
-                    None
-                } else {
-                    Some("agent")
-                },
-            })
+        .filter(|(name, ..)| name.starts_with(query))
+        .map(|(name, hint, description)| SlashItem {
+            name: (*name).to_owned(),
+            description: (*description).to_owned(),
+            hint: (!hint.is_empty()).then(|| (*hint).to_owned()),
+            badge: None,
+        });
+    let agent = commands.iter().filter_map(|command| {
+        let name = command.get("name")?.as_str()?;
+        if !name.starts_with(query) {
+            return None;
+        }
+        Some(SlashItem {
+            name: name.to_owned(),
+            description: command
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            hint: command
+                .get("input")
+                .and_then(|input| input.get("hint"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            badge: if name.contains(':') {
+                None
+            } else {
+                Some("agent")
+            },
         })
-        .collect()
+    });
+    builtins.chain(agent).collect()
 }
 
 /// One mention menu row.
@@ -768,6 +812,12 @@ impl ComposerView {
         if text.is_empty() {
             return;
         }
+        if let Some(command) = builtin(text)
+            && self.run_builtin(&command, window, cx)
+        {
+            self.clear_input(window, cx);
+            return;
+        }
         let accepted = if self.loaded.is_none() && !self.store.read(cx).pending_prompt() {
             self.store.act(cx, |store| store.open_with_prompt(text));
             true
@@ -779,6 +829,11 @@ impl ComposerView {
         if !accepted {
             return;
         }
+        self.clear_input(window, cx);
+    }
+
+    /// Empties the textarea and the session draft after a send.
+    fn clear_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let loaded = self.loaded.clone();
         self.store
             .update(cx, |store, _| store.set_draft(loaded.as_deref(), ""));
@@ -787,6 +842,63 @@ impl ComposerView {
         self.esc_armed = None;
         self.sync_placeholder(window, cx);
         cx.notify();
+    }
+
+    /// Runs a built-in command. Reports whether it ran; one that needs a
+    /// session waits for one, and its text stays in the composer.
+    fn run_builtin(
+        &mut self,
+        command: &Builtin<'_>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let has_session = self.store.read(cx).active_session().is_some();
+        let dialog = self.dialog.clone();
+        match (command.name, command.args) {
+            ("new", _) => {
+                self.store.act(cx, Store::show_welcome);
+                true
+            }
+            (_, _) if !has_session => false,
+            ("plan", "on") => {
+                self.store.act(cx, Store::enter_plan);
+                true
+            }
+            ("plan", "off") => {
+                self.store.act(cx, Store::exit_plan);
+                true
+            }
+            ("plan", _) => {
+                self.store.act(cx, |store| {
+                    if store.plan_on() {
+                        store.exit_plan()
+                    } else {
+                        store.enter_plan()
+                    }
+                });
+                true
+            }
+            ("goal", "") => {
+                dialog.update(cx, |dialog, cx| dialog.open(DialogKind::Goal, window, cx));
+                true
+            }
+            ("goal", "clear") => self.store.act(cx, |store| store.set_option("goal", "")),
+            ("goal", text) => self.store.act(cx, |store| store.set_option("goal", text)),
+            ("swarm", "off") => self.store.act(cx, |store| store.set_option("swarm", "off")),
+            ("swarm", "on" | "") => {
+                dialog.update(cx, |dialog, cx| {
+                    dialog.open(DialogKind::ConfirmSwarm, window, cx)
+                });
+                true
+            }
+            ("swarm", task) => {
+                let task = task.to_owned();
+                self.store.act(cx, |store| {
+                    store.set_option("swarm", "on") && store.submit(&task).is_some()
+                })
+            }
+            _ => false,
+        }
     }
 
     /// One Esc press, per the interrupt window.
@@ -1991,6 +2103,20 @@ mod tests {
     }
 
     #[test]
+    fn built_in_commands_parse_their_name_and_arguments() {
+        let parsed = super::builtin("/swarm review each crate").unwrap();
+        assert_eq!((parsed.name, parsed.args), ("swarm", "review each crate"));
+        let parsed = super::builtin("  /plan on ").unwrap();
+        assert_eq!((parsed.name, parsed.args), ("plan", "on"));
+        assert_eq!(super::builtin("/new").unwrap().args, "");
+        assert!(
+            super::builtin("/review").is_none(),
+            "agent commands go to the agent"
+        );
+        assert!(super::builtin("plan on").is_none());
+    }
+
+    #[test]
     fn slash_items_split_agent_and_server_commands() {
         let commands = vec![
             serde_json::json!({
@@ -2004,8 +2130,13 @@ mod tests {
             }),
         ];
         let items = slash_items(&commands, "");
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].name, "fs:list");
+        let names: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["swarm", "plan", "goal", "new", "fs:list", "review"],
+            "the client's own commands come first"
+        );
+        let items = &items[4..];
         assert_eq!(items[0].badge, None, "a colon names a server command");
         assert_eq!(items[0].hint.as_deref(), Some("<path>"));
         assert_eq!(items[1].name, "review");

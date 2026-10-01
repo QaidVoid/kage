@@ -149,6 +149,58 @@ fn find_call<'a>(
     })
 }
 
+/// The shell calls `session` and the subagents under it ran: the
+/// session's own, then each child's, named by its agent.
+fn session_runs(store: &Store, session: &kage_client::Session) -> Vec<TermEntry> {
+    let mut out = term_entries(&session.items);
+    for (id, agent) in &session.agents {
+        let Some(child) = store.state().session(id) else {
+            continue;
+        };
+        out.extend(term_entries(&child.items).into_iter().map(|mut run| {
+            run.who = agent.name.clone();
+            run
+        }));
+    }
+    out
+}
+
+/// `text` without its ANSI escape sequences: a run of styled output
+/// shows as its plain characters, never as markup.
+pub(crate) fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            // CSI: parameters, then one final byte in @..~.
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC: up to BEL or ST.
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' || (c == '\u{1b}' && chars.peek() == Some(&'\\')) {
+                        if c == '\u{1b}' {
+                            chars.next();
+                        }
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// One shell call's facts, collected from the transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TermEntry {
@@ -160,6 +212,8 @@ pub(crate) struct TermEntry {
     pub exit: Option<i64>,
     /// Whether the call failed.
     pub failed: bool,
+    /// The subagent that ran it, when one did.
+    pub who: Option<String>,
 }
 
 /// The shell calls the transcript holds, in transcript order.
@@ -191,6 +245,7 @@ pub(crate) fn term_entries(items: &[TranscriptItem]) -> Vec<TermEntry> {
             output: call.text(),
             exit,
             failed: call.status == kage_client::wire::ToolCallStatus::Failed,
+            who: None,
         });
     }
     out
@@ -216,8 +271,15 @@ pub(crate) fn fetch_entries(items: &[TranscriptItem]) -> Vec<FetchEntry> {
         if call.kind != ToolKind::Fetch {
             continue;
         }
+        // The final URL after redirects, when the call reported one.
+        let url = call
+            .raw_output
+            .as_ref()
+            .and_then(|output| output.get("url"))
+            .and_then(serde_json::Value::as_str)
+            .map_or_else(|| change_path(call), str::to_owned);
         out.push(FetchEntry {
-            url: change_path(call),
+            url,
             text: call.text(),
         });
     }
@@ -365,6 +427,19 @@ fn chip(text: String, fg: gpui_kit::Hsla, bg: gpui_kit::Hsla) -> Div {
         .text_size(px(FS_2XS))
         .text_color(fg)
         .child(SharedString::from(text))
+}
+
+/// A byte count as the design writes it: `812 B`, `4.2 KB`, `1.2 MB`.
+fn bytes(n: usize) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let n = n as f64;
+    if n < 1024.0 {
+        format!("{n} B")
+    } else if n < 1024.0 * 1024.0 {
+        format!("{:.1} KB", n / 1024.0)
+    } else {
+        format!("{:.1} MB", n / (1024.0 * 1024.0))
+    }
 }
 
 /// The empty-state block of the design: a faint icon over one line.
@@ -1259,13 +1334,19 @@ impl WorkbenchView {
         row.into_any_element()
     }
 
-    /// The terminal pane: the shell calls with their commands and
-    /// output tails, oldest first.
-    fn terminal_section(&self, p: &crate::theme::Palette, cx: &Context<Self>) -> Vec<AnyElement> {
-        let Some(session) = self.store.read(cx).active_session() else {
+    /// The terminal pane: every shell call of the session and its
+    /// subagents, each as its command with the agent that ran it, the
+    /// exit chip or a spinner, and the output as plain text.
+    fn terminal_section(
+        &self,
+        p: &'static crate::theme::Palette,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let store = self.store.read(cx);
+        let Some(session) = store.active_session() else {
             return Vec::new();
         };
-        let runs = term_entries(&session.items);
+        let runs = session_runs(store, session);
         if runs.is_empty() {
             return vec![
                 empty_block(
@@ -1278,23 +1359,18 @@ impl WorkbenchView {
         }
         let mut out = Vec::new();
         for run in runs {
-            let (chip, chip_color) = match run.exit {
-                Some(0) => ("exit 0".to_owned(), p.ok),
-                Some(code) => (format!("exit {code}"), p.danger),
-                None if run.failed => ("failed".to_owned(), p.danger),
-                None => (String::new(), p.faint),
-            };
-            let head = h_flex()
+            let mut head = h_flex()
                 .items_center()
                 .gap(px(8.))
                 .px(px(14.))
-                .py(px(5.))
+                .pt(px(10.))
+                .pb(px(4.))
                 .child(
                     div()
                         .flex_none()
                         .font_family(FONT_MONO)
-                        .text_size(px(FS_SM))
-                        .text_color(p.muted)
+                        .text_size(px(FS_XS))
+                        .text_color(p.accent)
                         .child("$"),
                 )
                 .child(
@@ -1307,45 +1383,48 @@ impl WorkbenchView {
                         .text_color(p.ink)
                         .child(run.command.clone()),
                 );
-            let head = if chip.is_empty() {
-                head.child(
+            if let Some(who) = &run.who {
+                head = head.child(
+                    div()
+                        .px(px(7.))
+                        .py(px(1.))
+                        .rounded(px(R_FULL))
+                        .border_1()
+                        .border_color(p.line)
+                        .bg(p.fill)
+                        .text_size(px(10.5))
+                        .text_color(p.muted)
+                        .child(SharedString::from(who.clone())),
+                );
+            }
+            head = match run.exit {
+                Some(0) => head.child(chip("exit 0".to_owned(), p.ok, p.ok_soft)),
+                Some(code) => head.child(chip(format!("exit {code}"), p.danger, p.danger_soft)),
+                None if run.failed => {
+                    head.child(chip("failed".to_owned(), p.danger, p.danger_soft))
+                }
+                None => head.child(
                     Spinner::new()
                         .icon(IconName::LoaderCircle)
                         .color(p.accent)
                         .with_size(px(12.)),
-                )
-            } else {
-                head.child(
-                    div()
-                        .flex_none()
-                        .text_size(px(FS_2XS))
-                        .font_family(FONT_MONO)
-                        .text_color(chip_color)
-                        .child(chip),
-                )
+                ),
             };
             out.push(head.into_any_element());
             if !run.output.is_empty() {
-                let tail: String = {
-                    let lines: Vec<&str> = run.output.lines().collect();
-                    let start = lines.len().saturating_sub(8);
-                    lines[start..].join("\n")
-                };
                 out.push(
                     div()
                         .mx(px(14.))
                         .mb(px(6.))
-                        .px(px(8.))
-                        .py(px(6.))
+                        .px(px(10.))
+                        .py(px(8.))
                         .rounded(px(R_MD))
-                        .bg(p.raised)
-                        .max_h(px(160.))
-                        .overflow_hidden()
+                        .bg(p.deep)
                         .font_family(FONT_MONO)
-                        .text_size(px(FS_2XS))
-                        .line_height(px(16.))
+                        .text_size(px(12.))
+                        .line_height(px(18.))
                         .text_color(p.muted)
-                        .child(tail)
+                        .child(SharedString::from(strip_ansi(&run.output)))
                         .into_any_element(),
                 );
             }
@@ -1353,46 +1432,77 @@ impl WorkbenchView {
         out
     }
 
-    /// The browser pane: the fetched pages as reader text.
-    fn browser_section(&self, p: &crate::theme::Palette, cx: &Context<Self>) -> Vec<AnyElement> {
+    /// The browser pane: the latest fetched page as reader text, its
+    /// title from the first heading, its URL, its paragraphs and its
+    /// size. Nothing on the page ever loads.
+    fn browser_section(
+        &self,
+        p: &'static crate::theme::Palette,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
         let Some(session) = self.store.read(cx).active_session() else {
             return Vec::new();
         };
-        let pages = fetch_entries(&session.items);
-        if pages.is_empty() {
-            return vec![empty_block(
-                IconName::Globe,
-                "Pages the agent fetches open here as reader text. No scripts, no remote images.",
-                p,
+        let Some(page) = fetch_entries(&session.items).pop() else {
+            return vec![
+                empty_block(
+                    IconName::Globe,
+                    "Pages the agent fetches open here as reader text. No scripts, no remote images.",
+                    p,
+                )
+                .into_any_element(),
+            ];
+        };
+        let text = strip_ansi(&page.text);
+        let title = text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("# "))
+            .unwrap_or(page.url.as_str())
+            .to_owned();
+        let mut reader = v_flex()
+            .px(px(18.))
+            .py(px(14.))
+            .gap(px(10.))
+            .child(
+                div()
+                    .text_size(px(18.))
+                    .font_weight(WEIGHT_SEMIBOLD)
+                    .text_color(p.ink_strong)
+                    .child(SharedString::from(title)),
             )
-            .into_any_element()];
-        }
-        let mut out = Vec::new();
-        for page in pages {
-            out.push(
-                v_flex()
-                    .px(px(14.))
-                    .py(px(8.))
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .text_size(px(FS_SM))
-                            .font_weight(WEIGHT_SEMIBOLD)
-                            .text_color(p.ink_strong)
-                            .child(page.url.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(FS_XS))
-                            .text_color(p.muted)
-                            .max_h(px(220.))
-                            .overflow_hidden()
-                            .child(page.text.clone()),
-                    )
-                    .into_any_element(),
+            .child(
+                div()
+                    .font_family(FONT_MONO)
+                    .text_size(px(11.))
+                    .text_color(p.faint)
+                    .child(SharedString::from(page.url.clone())),
+            );
+        for paragraph in text
+            .split("\n\n")
+            .map(str::trim)
+            .filter(|para| !para.is_empty())
+        {
+            reader = reader.child(
+                div()
+                    .text_size(px(FS_SM))
+                    .line_height(px(21.))
+                    .text_color(p.ink)
+                    .child(SharedString::from(paragraph.to_owned())),
             );
         }
-        out
+        reader = reader.child(
+            div()
+                .pt(px(8.))
+                .border_t_1()
+                .border_color(p.subtle)
+                .text_size(px(FS_2XS))
+                .text_color(p.faint)
+                .child(SharedString::from(format!(
+                    "{} fetched \u{b7} reader text only, remote content never loads",
+                    bytes(page.text.len())
+                ))),
+        );
+        vec![reader.into_any_element()]
     }
 }
 
@@ -1443,7 +1553,7 @@ impl Render for WorkbenchView {
                         }
                     }
                     Tab::Terminal => {
-                        let runs = term_entries(&session.items);
+                        let runs = session_runs(self.store.read(cx), session);
                         (!runs.is_empty()).then(|| runs.len().to_string())
                     }
                     Tab::Browser => {
@@ -1571,6 +1681,17 @@ mod tests {
             content: Vec::new(),
             raw_output: None,
         }
+    }
+
+    #[test]
+    fn ansi_escapes_leave_only_the_text() {
+        assert_eq!(
+            super::strip_ansi(
+                "\u{1b}[1;31merror\u{1b}[0m: \u{1b}]8;;http://x\u{7}link\u{1b}]8;;\u{7}"
+            ),
+            "error: link"
+        );
+        assert_eq!(super::strip_ansi("plain"), "plain");
     }
 
     #[test]

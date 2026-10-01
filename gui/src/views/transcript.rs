@@ -1837,7 +1837,7 @@ impl TranscriptView {
                     text: format!("$ {}", input_str(call.input.as_ref(), "command")),
                     action: None,
                 };
-                let shown = lines[hidden..].join("\n");
+                let shown = crate::views::workbench::strip_ansi(&lines[hidden..].join("\n"));
                 let more = (hidden > 0).then(|| {
                     let view = cx.entity();
                     let label = SharedString::from(format!("{hidden} earlier lines"));

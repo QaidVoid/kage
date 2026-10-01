@@ -225,6 +225,8 @@ pub struct Store {
     fs_preview: Option<(String, String, FsReadResult)>,
     /// The last `_kage/config/get` answer, raw as the wire carried it.
     config: Option<serde_json::Value>,
+    /// The last `_kage/options` answer: the engine options in effect.
+    engine_options: Option<Vec<kage_client::wire::OptionEntry>>,
     /// Forks waiting for their copy, by source session.
     forking: HashMap<String, ForkPlan>,
     /// Copies waiting to open, with their source, by copy.
@@ -265,6 +267,7 @@ impl Store {
             fs_reading: None,
             fs_preview: None,
             config: None,
+            engine_options: None,
             forking: HashMap::new(),
             forked: HashMap::new(),
             notes: Vec::new(),
@@ -486,6 +489,7 @@ impl Store {
             match change {
                 Change::Forked { from, to } => self.open_fork(from, to),
                 Change::Config { config } => self.config = Some(config.clone()),
+                Change::Options { options } => self.engine_options = Some(options.clone()),
                 Change::Session { id } => self.settle_fork(id),
                 Change::Fs {
                     session_id,
@@ -852,6 +856,24 @@ impl Store {
     /// replaces [`Store::config`].
     pub fn ask_config(&mut self) {
         self.client.config_get();
+    }
+
+    /// Asks the engine for its options; the answer replaces
+    /// [`Store::engine_options`].
+    pub fn ask_engine_options(&mut self) {
+        self.client.options_list();
+    }
+
+    /// The engine options as the engine last answered.
+    #[must_use]
+    pub fn engine_options(&self) -> Option<&[kage_client::wire::OptionEntry]> {
+        self.engine_options.as_deref()
+    }
+
+    /// Stores engine option `name` in the user config; the answer
+    /// refreshes [`Store::engine_options`], a refusal toasts.
+    pub fn set_engine_option(&mut self, name: &str, value: serde_json::Value) {
+        self.client.set_engine_option(name, value);
     }
 
     /// The last configuration snapshot the engine answered with.

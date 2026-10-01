@@ -30,6 +30,8 @@ gpui_kit::actions!(kage_desktop, [SettingsClose]);
 pub enum Section {
     /// Theme and input behavior.
     General,
+    /// The engine's agent, swarm and session defaults.
+    Agents,
     /// The providers and their models.
     Providers,
     /// The MCP servers and their status.
@@ -52,8 +54,9 @@ pub enum Section {
 
 impl Section {
     /// Every section, in nav order.
-    pub const ALL: [Section; 10] = [
+    pub const ALL: [Section; 11] = [
         Section::General,
+        Section::Agents,
         Section::Providers,
         Section::Mcp,
         Section::Permissions,
@@ -70,6 +73,7 @@ impl Section {
     pub fn label(self) -> &'static str {
         match self {
             Section::General => "General",
+            Section::Agents => "Agent & Sessions",
             Section::Providers => "Model Providers",
             Section::Mcp => "MCP Servers",
             Section::Permissions => "Permissions",
@@ -85,6 +89,7 @@ impl Section {
     fn icon(self) -> IconName {
         match self {
             Section::General => IconName::Settings2,
+            Section::Agents => IconName::Bot,
             Section::Providers => IconName::Zap,
             Section::Mcp => IconName::Server,
             Section::Permissions => IconName::ShieldCheck,
@@ -255,6 +260,9 @@ impl SettingsView {
         ) {
             self.store.act(cx, Store::ask_config);
         }
+        if section == Section::Agents {
+            self.store.act(cx, Store::ask_engine_options);
+        }
         cx.notify();
     }
 
@@ -326,6 +334,7 @@ impl SettingsView {
         let mut out = vec![title(self.section.label(), pal).into_any_element()];
         match self.section {
             Section::General => out.extend(self.general(window, pal, cx)),
+            Section::Agents => out.extend(self.agents(pal, cx)),
             Section::Providers | Section::Mcp | Section::Permissions | Section::Plugins => {
                 out.extend(self.config_page(pal, cx));
             }
@@ -694,6 +703,192 @@ impl SettingsView {
             )
             .into_any_element(),
         ]
+    }
+
+    /// The engine's agent, swarm and session defaults, written into the
+    /// user `config.toml` through the engine.
+    fn agents(&self, pal: &Palette, cx: &Context<Self>) -> Vec<AnyElement> {
+        let Some(options) = self.store.read(cx).engine_options() else {
+            return vec![note("Reading the engine's options\u{2026}", pal).into_any_element()];
+        };
+        let find = |name: &str| options.iter().find(|option| option.name == name);
+        let group_box = |title: &'static str, rows: Vec<AnyElement>| {
+            vec![
+                group(title, pal).into_any_element(),
+                boxed(pal).children(rows).into_any_element(),
+            ]
+        };
+        let mut out = Vec::new();
+        let defaults: Vec<AnyElement> = [
+            ("thinking_level", "Thinking by default"),
+            ("compaction_threshold", "Compact at"),
+        ]
+        .into_iter()
+        .filter_map(|(name, label)| find(name).map(|option| self.option_row(label, option, pal)))
+        .collect();
+        out.extend(group_box("Session defaults", defaults));
+        let agents: Vec<AnyElement> = [
+            ("agent_max_depth", "Max depth"),
+            ("agent_max_running", "Max running"),
+        ]
+        .into_iter()
+        .filter_map(|(name, label)| find(name).map(|option| self.option_row(label, option, pal)))
+        .collect();
+        out.extend(group_box("Subagents", agents));
+        let swarm: Vec<AnyElement> = [
+            ("swarm_max_items", "Max items per swarm"),
+            ("swarm_timeout_ms", "Worker timeout"),
+        ]
+        .into_iter()
+        .filter_map(|(name, label)| find(name).map(|option| self.option_row(label, option, pal)))
+        .collect();
+        out.extend(group_box("Swarm", swarm));
+        out.push(
+            note(
+                "These live in the user config.toml; a project config that sets the same key still wins. Changes apply to sessions started afterwards.",
+                pal,
+            )
+            .into_any_element(),
+        );
+        out
+    }
+
+    /// One engine option as a labeled row with the control its kind
+    /// takes: a stepper for numbers, segments for a choice.
+    fn option_row(
+        &self,
+        label: &'static str,
+        option: &kage_client::wire::OptionEntry,
+        pal: &Palette,
+    ) -> AnyElement {
+        let store = self.store.clone();
+        let name = option.name.clone();
+        let hint = SharedString::from(option.doc.clone());
+        let control = match option.kind.as_str() {
+            "choice" => {
+                let current = option.value.as_str().unwrap_or_default().to_owned();
+                let mut seg = h_flex()
+                    .p(px(2.))
+                    .gap(px(2.))
+                    .rounded(px(R_MD))
+                    .bg(pal.fill);
+                for value in &option.values {
+                    let on = *value == current;
+                    let store = store.clone();
+                    let name = name.clone();
+                    let chosen = value.clone();
+                    let label = match value.as_str() {
+                        "" => "Auto".to_owned(),
+                        "xhigh" => "Max".to_owned(),
+                        other => {
+                            let mut word = other.to_owned();
+                            if let Some(first) = word.get_mut(0..1) {
+                                first.make_ascii_uppercase();
+                            }
+                            word
+                        }
+                    };
+                    seg = seg.child(
+                        div()
+                            .id(SharedString::from(format!("opt-{name}-{value}")))
+                            .h(px(24.))
+                            .px(px(9.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(6.))
+                            .text_size(px(FS_XS))
+                            .text_color(if on { pal.ink_strong } else { pal.muted })
+                            .when(on, |seg| seg.bg(pal.raised))
+                            .on_click(move |_, _, cx| {
+                                let value = serde_json::Value::from(chosen.as_str());
+                                store.act(cx, |store| store.set_engine_option(&name, value));
+                            })
+                            .child(label),
+                    );
+                }
+                seg.into_any_element()
+            }
+            "int" | "fraction" => {
+                let (step, shown) = match (option.kind.as_str(), name.as_str()) {
+                    ("fraction", _) => (
+                        0.05,
+                        format!("{}%", (option.value.as_f64().unwrap_or(0.) * 100.).round()),
+                    ),
+                    (_, "swarm_timeout_ms") => (
+                        60_000.,
+                        format!("{} min", option.value.as_i64().unwrap_or(0) / 60_000),
+                    ),
+                    _ => (1., option.value.as_i64().unwrap_or(0).to_string()),
+                };
+                let (min, max) = match option.kind.as_str() {
+                    "fraction" => (0., 1.),
+                    _ => (
+                        option.min.unwrap_or(i64::MIN) as f64,
+                        option.max.unwrap_or(i64::MAX) as f64,
+                    ),
+                };
+                let current = option.value.as_f64().unwrap_or(0.);
+                let fraction = option.kind == "fraction";
+                let stepper = |id: &str, delta: f64, icon: IconName| {
+                    let store = store.clone();
+                    let name = name.clone();
+                    let next = (current + delta).clamp(min, max);
+                    let disabled = (next - current).abs() < f64::EPSILON;
+                    div()
+                        .id(SharedString::from(format!("opt-{name}-{id}")))
+                        .size(px(26.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(R_MD))
+                        .text_color(if disabled { pal.ghost } else { pal.muted })
+                        .when(!disabled, |button| {
+                            button.on_click(move |_, _, cx| {
+                                let value = if fraction {
+                                    serde_json::Value::from((next * 100.).round() / 100.)
+                                } else {
+                                    serde_json::Value::from(next as i64)
+                                };
+                                store.act(cx, |store| store.set_engine_option(&name, value));
+                            })
+                        })
+                        .child(Icon::new(icon).with_size(px(12.)))
+                };
+                h_flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .rounded(px(R_MD))
+                    .border_1()
+                    .border_color(pal.line)
+                    .bg(pal.bg)
+                    .child(stepper("down", -step, IconName::Minus))
+                    .child(
+                        div()
+                            .min_w(px(64.))
+                            .flex()
+                            .justify_center()
+                            .font_family(FONT_MONO)
+                            .text_size(px(FS_XS))
+                            .text_color(pal.ink)
+                            .child(shown),
+                    )
+                    .child(stepper("up", step, IconName::Plus))
+                    .into_any_element()
+            }
+            _ => badge(SharedString::from(option.value.to_string()), pal).into_any_element(),
+        };
+        row_el(
+            h_flex()
+                .gap(px(8.))
+                .child(label)
+                .when(option.configured, |line| {
+                    line.child(badge("set in config", pal))
+                }),
+            hint,
+            control,
+            pal,
+        )
+        .into_any_element()
     }
 
     fn lab(&self, pal: &Palette, cx: &Context<Self>) -> Vec<AnyElement> {

@@ -10,16 +10,13 @@
 //! model and thinking pickers, the context ring with the fuel gauge,
 //! and the send and stop pair.
 
-use std::cell::Cell;
-use std::rc::Rc;
 use std::time::Duration;
 
 use web_time::Instant;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable;
-use gpui_kit::component::button::Button;
-use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Escape, InputEvent, Textarea, TextareaState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::progress::ProgressCircle;
@@ -44,6 +41,7 @@ use crate::theme::{
     SP_2, WEIGHT_SEMIBOLD,
 };
 use crate::views::deferred::{Deferred, LaidOut};
+use crate::views::dialog::{DialogKind, DialogView};
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::base::TestSupportExt as _;
 
@@ -525,11 +523,22 @@ pub(crate) fn next_mode_value(session: &Session, current: &str) -> Option<String
     Some(values[index].value.clone())
 }
 
+/// The goal text option of `session`, when one is set.
+fn session_goal(session: Option<&Session>) -> Option<String> {
+    session?
+        .config_options
+        .iter()
+        .find(|option| option.id == "goal")
+        .map(|option| option.current_value.clone())
+        .filter(|goal| !goal.is_empty())
+}
+
 /// The composer view.
 pub struct ComposerView {
     store: Entity<Store>,
     input: Entity<TextareaState>,
-    goal_input: Entity<InputState>,
+    /// The dialog layer the goal and swarm entries open.
+    dialog: Entity<DialogView>,
     /// The session the textarea currently mirrors.
     loaded: Option<String>,
     /// When the first Esc of an interrupt gesture landed, while the
@@ -549,13 +558,16 @@ pub struct ComposerView {
     /// write before that asks the text system for a family the web cannot
     /// resolve and takes the frame down. See [`crate::views::deferred`].
     draft_mirror: Deferred,
-    /// The goal mirror, held for the same reason and the same moment.
-    goal_mirror: Deferred,
 }
 
 impl ComposerView {
     /// A composer following `store`, focused and bound to its keys.
-    pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        store: Entity<Store>,
+        dialog: Entity<DialogView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Ask kage anything, @ to mention, / for commands")
@@ -563,9 +575,6 @@ impl ComposerView {
                 .submit_on_enter(true)
         });
         input.update(cx, |state, cx| state.focus(window, cx));
-        let goal_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Set the goal option; empty clears it")
-        });
         // A store change may land before the composer has ever been laid
         // out, so the mirror of the active session's draft is held until
         // then rather than written; see [`crate::views::deferred`].
@@ -588,18 +597,6 @@ impl ComposerView {
             },
         )
         .detach();
-        cx.subscribe_in(
-            &goal_input,
-            window,
-            |this, goal, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    let text = goal.read(cx).value().trim().to_owned();
-                    this.set_goal(&text, cx);
-                    goal.update(cx, |state, cx| state.set_value("", window, cx));
-                }
-            },
-        )
-        .detach();
         // The mirror is recomputed on every store change and written by
         // the next render once the textarea can take it, so a draft
         // change never waits on further traffic.
@@ -612,14 +609,13 @@ impl ComposerView {
         Self {
             store,
             input,
-            goal_input,
+            dialog,
             loaded: None,
             esc_armed: None,
             plus_open: false,
             fs_asked: false,
             placeholder: String::new(),
             draft_mirror: Deferred::new(),
-            goal_mirror: Deferred::new(),
         }
     }
 
@@ -675,17 +671,6 @@ impl ComposerView {
             .and_then(|id| self.store.read(cx).draft(id))
             .unwrap_or_default()
             .to_owned();
-        let goal = active
-            .as_deref()
-            .and_then(|id| self.store.read(cx).state().session(id))
-            .and_then(|session| {
-                session
-                    .config_options
-                    .iter()
-                    .find(|option| option.id == "goal")
-                    .map(|option| option.current_value.clone())
-            })
-            .unwrap_or_default();
         self.loaded = active;
         self.esc_armed = None;
         self.fs_asked = false;
@@ -695,10 +680,6 @@ impl ComposerView {
             input.update(cx, |state, cx| state.set_value(draft, window, cx));
         });
         input.update(cx, |state, cx| state.focus(window, cx));
-        let goal_input = self.goal_input.clone();
-        self.goal_mirror.set(goal, |goal| {
-            goal_input.update(cx, |state, cx| state.set_value(goal, window, cx));
-        });
         cx.notify();
     }
 
@@ -855,14 +836,6 @@ impl ComposerView {
             if let Some(value) = next {
                 store.set_permission(&value);
             }
-        });
-    }
-
-    /// Sets the goal text option. An empty value clears it.
-    fn set_goal(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.store.update(cx, |store, cx| {
-            store.set_option("goal", text);
-            cx.notify();
         });
     }
 
@@ -1138,19 +1111,12 @@ impl ComposerView {
     /// The plus popover: attach, mention, commands, goal, plan and
     /// swarm, as sections of rows over the shared config options.
     ///
-    /// `goal_laid_out` releases the goal mirror: that input mounts only
-    /// while this popover is open, so its element's prepaint is the first
-    /// moment a goal write can land.
-    fn plus_button(
-        &self,
-        cx: &Context<Self>,
-        pal: &'static Palette,
-        goal_laid_out: Rc<Cell<bool>>,
-    ) -> AnyElement {
+    /// Goal opens its dialog, and turning swarm mode on asks first.
+    fn plus_button(&self, cx: &Context<Self>, pal: &'static Palette) -> AnyElement {
         let this = cx.entity();
         let store = self.store.clone();
-        let goal_input = self.goal_input.clone();
-        let release = cx.entity().downgrade();
+        let dialog = self.dialog.clone();
+        let goal = session_goal(self.store.read(cx).active_session());
         let session = self.store.read(cx).active_session();
         let plan_on = session
             .and_then(active_mode)
@@ -1187,8 +1153,6 @@ impl ComposerView {
                 });
             })
             .content(move |_, _, _| {
-                let goal_laid_out = goal_laid_out.clone();
-                let release = release.clone();
                 let menu = v_flex()
                     .w(px(440.))
                     .child(pop_label("Attach", pal))
@@ -1245,35 +1209,23 @@ impl ComposerView {
                     )
                     .child(pop_label("Modes", pal))
                     .child(
-                        add_row("plus-goal", IconName::Target, pal).child(plus_row_body(
-                            "Goal",
-                            "Set a goal to keep pursuing",
-                            None,
-                            pal,
-                        )),
-                    )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .px(px(7.))
-                            .pb(px(6.))
-                            .on_prepaint(move |_, _, cx| {
-                                goal_laid_out.set(true);
-                                let _ = release.update(cx, |_, cx| cx.notify());
-                            })
-                            .child(Input::new(&goal_input).flex_1())
-                            .child(Button::new("goal-set").label("Set").xsmall().on_click({
+                        add_row("plus-goal", IconName::Target, pal)
+                            .on_click({
                                 let this = this.clone();
-                                let goal_input = goal_input.clone();
+                                let dialog = dialog.clone();
                                 move |_, window, cx| {
-                                    let text = goal_input.read(cx).value().trim().to_owned();
-                                    this.update(cx, |this, cx| {
-                                        this.set_goal(&text, cx);
+                                    close(&this, cx);
+                                    dialog.update(cx, |dialog, cx| {
+                                        dialog.open(DialogKind::Goal, window, cx);
                                     });
-                                    goal_input
-                                        .update(cx, |state, cx| state.set_value("", window, cx));
                                 }
-                            })),
+                            })
+                            .child(plus_row_body(
+                                "Goal",
+                                "Set a goal to keep pursuing",
+                                Some(add_kbd(if goal.is_some() { "set" } else { "none" }, pal)),
+                                pal,
+                            )),
                     )
                     .child(
                         add_row("plus-plan", IconName::PenLine, pal)
@@ -1308,13 +1260,16 @@ impl ComposerView {
                             .on_click({
                                 let this = this.clone();
                                 let store = store.clone();
-                                let target = if swarm_on { "off" } else { "on" };
-                                move |_, _, cx| {
+                                let dialog = dialog.clone();
+                                move |_, window, cx| {
                                     close(&this, cx);
-                                    store.update(cx, |store, cx| {
-                                        store.set_option("swarm", target);
-                                        cx.notify();
-                                    });
+                                    if swarm_on {
+                                        store.act(cx, |store| store.set_option("swarm", "off"));
+                                    } else {
+                                        dialog.update(cx, |dialog, cx| {
+                                            dialog.open(DialogKind::ConfirmSwarm, window, cx);
+                                        });
+                                    }
                                 }
                             })
                             .child(plus_row_body(
@@ -1693,12 +1648,7 @@ impl ComposerView {
     }
 
     /// The toolbar row under the input.
-    fn toolbar(
-        &self,
-        cx: &Context<Self>,
-        pal: &'static Palette,
-        goal_laid_out: Rc<Cell<bool>>,
-    ) -> Div {
+    fn toolbar(&self, cx: &Context<Self>, pal: &'static Palette) -> Div {
         let session = self.store.read(cx).active_session();
         let plan_on = session
             .and_then(active_mode)
@@ -1714,7 +1664,7 @@ impl ComposerView {
             .pt(px(6.))
             .px(px(8.))
             .pb(px(8.))
-            .child(self.plus_button(cx, pal, goal_laid_out))
+            .child(self.plus_button(cx, pal))
             .child(self.mode_button(cx, pal))
             .when(plan_on, |row| {
                 row.child(self.mode_chip(
@@ -1756,14 +1706,7 @@ impl Render for ComposerView {
         self.draft_mirror.flush(|draft| {
             input.update(cx, |state, cx| state.set_value(draft, window, cx));
         });
-        let goal_input = self.goal_input.clone();
-        self.goal_mirror.flush(|goal| {
-            goal_input.update(cx, |state, cx| state.set_value(goal, window, cx));
-        });
         let draft_laid_out = self.draft_mirror.laid_out().flag();
-        // The goal input mounts inside the plus popover, so the popover's
-        // element is what releases the goal mirror.
-        let goal_laid_out = self.goal_mirror.laid_out().flag();
         let release = cx.entity().downgrade();
         let theme = cx.theme().colors;
         let pal = Palette::active(cx);
@@ -1822,7 +1765,7 @@ impl Render for ComposerView {
                                     .line_height(relative(LINE_HEIGHT)),
                             ),
                     )
-                    .child(self.toolbar(cx, pal, goal_laid_out)),
+                    .child(self.toolbar(cx, pal)),
             )
             .child(self.hint_line(pal, cx))
     }
@@ -1868,7 +1811,16 @@ mod tests {
         let store = store_with_session(cx);
         let composer = cx.update(|app| {
             gpui_kit::open_window(Default::default(), app, |window, cx| {
-                cx.new(|cx| ComposerView::new(store.clone(), window, cx))
+                cx.new(|cx| {
+                    ComposerView::new(
+                        store.clone(),
+                        cx.new(|cx| {
+                            crate::views::dialog::DialogView::new(store.clone(), window, cx)
+                        }),
+                        window,
+                        cx,
+                    )
+                })
             })
             .expect("the window opens")
             .1
@@ -1918,7 +1870,16 @@ mod tests {
         let store = store_with_session(cx);
         let (handle, composer) = cx.update(|app| {
             gpui_kit::open_window(Default::default(), app, |window, cx| {
-                cx.new(|cx| ComposerView::new(store.clone(), window, cx))
+                cx.new(|cx| {
+                    ComposerView::new(
+                        store.clone(),
+                        cx.new(|cx| {
+                            crate::views::dialog::DialogView::new(store.clone(), window, cx)
+                        }),
+                        window,
+                        cx,
+                    )
+                })
             })
             .expect("the window opens")
         });

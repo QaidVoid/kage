@@ -10,6 +10,7 @@ pub mod chrome;
 pub mod composer;
 pub(crate) mod constellation;
 pub mod deferred;
+pub mod dialog;
 pub mod dock;
 pub(crate) mod kit;
 pub mod sidebar;

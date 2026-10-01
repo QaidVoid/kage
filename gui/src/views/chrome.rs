@@ -2302,7 +2302,14 @@ mod tests {
         let cap = captured.clone();
         cx.update(gpui_kit::init);
         let (_, visual) = cx.add_window_view(move |window: &mut Window, cx| {
-            let composer_view = cx.new(|cx| ComposerView::new(store.clone(), window, cx));
+            let composer_view = cx.new(|cx| {
+                ComposerView::new(
+                    store.clone(),
+                    cx.new(|cx| crate::views::dialog::DialogView::new(store.clone(), window, cx)),
+                    window,
+                    cx,
+                )
+            });
             let composer = composer_view.read(cx).input().clone();
             let composer_laid_out = composer_view.read(cx).input_laid_out();
             let welcome = cx.new(|_| {

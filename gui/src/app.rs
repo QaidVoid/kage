@@ -28,6 +28,7 @@ use crate::transport::{Event, Transport};
 use crate::views::chrome::{
     FindBar, FindEvent, NoticeWatch, PaletteView, Toasts, WelcomeView, toasts_for_changes,
 };
+use crate::views::dialog::DialogView;
 use crate::views::{
     ApprovalCard, ComposerView, DockEvent, DockRow, SidebarView, TranscriptEvent, TranscriptView,
     WorkbenchEvent, WorkbenchView,
@@ -115,6 +116,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("down", PaletteDown, Some("Palette")),
         KeyBinding::new("enter", PaletteRun, Some("Palette")),
         KeyBinding::new("escape", PaletteClose, Some("Palette")),
+        KeyBinding::new("escape", crate::views::dialog::DialogClose, Some("Dialog")),
         // Inside the input's own context, so it wins over the toolkit's
         // outdent binding while the composer is focused.
         KeyBinding::new(
@@ -155,6 +157,8 @@ pub struct Shell {
     approval: Entity<ApprovalCard>,
     find: Entity<FindBar>,
     palette: Entity<PaletteView>,
+    /// The modal dialog layer.
+    dialog: Entity<DialogView>,
     toasts: Entity<Toasts>,
     welcome: Entity<WelcomeView>,
     /// Counts the notice items each session held, so frames that add
@@ -191,7 +195,8 @@ impl Shell {
         let link = args.transport.link();
         let store = cx.new(|_| Store::new(cwd, args.replay).with_link(link));
         let sidebar = cx.new(|_| SidebarView::new(store.clone()));
-        let composer = cx.new(|cx| ComposerView::new(store.clone(), window, cx));
+        let dialog = cx.new(|cx| DialogView::new(store.clone(), window, cx));
+        let composer = cx.new(|cx| ComposerView::new(store.clone(), dialog.clone(), window, cx));
         let input = composer.read(cx).input().clone();
         // The other views that write this same textarea wait on the
         // composer's element laying out, because the composer is what
@@ -321,6 +326,7 @@ impl Shell {
             approval,
             find,
             palette,
+            dialog,
             toasts,
             welcome,
             notices: NoticeWatch::default(),
@@ -782,6 +788,7 @@ impl Render for Shell {
                 )
             })
             .child(self.palette.clone())
+            .child(self.dialog.clone())
             .child(self.toasts.clone())
     }
 }

@@ -250,6 +250,13 @@ impl Store {
         self.client.initialize(
             kage_client::wire::ClientCapabilities {
                 subagents: Some(serde_json::json!({})),
+                // The app runs routine work like the TUI: tools without
+                // a rule run, and configured asks and MCP tools ask.
+                meta: Some(kage_client::wire::ClientMeta {
+                    kage: Some(kage_client::wire::KageClientCapabilities {
+                        unconfigured_tools: Some(kage_client::wire::UnconfiguredTools::Allow),
+                    }),
+                }),
                 ..kage_client::wire::ClientCapabilities::default()
             },
             Some(kage_client::wire::Implementation {

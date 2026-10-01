@@ -39,6 +39,8 @@ pub struct Prefs {
     pub vim: bool,
     /// Sessions pinned to the top of the sidebar.
     pub pinned: BTreeSet<String>,
+    /// Models starred in the model picker, as `provider/model`.
+    pub starred_models: BTreeSet<String>,
     /// Sessions left out of the sidebar until restored.
     pub archived: BTreeSet<String>,
     /// The `kage` binary the setup screen chose, when the PATH has none.
@@ -60,6 +62,7 @@ impl Default for Prefs {
             rail: true,
             vim: false,
             pinned: BTreeSet::new(),
+            starred_models: BTreeSet::new(),
             archived: BTreeSet::new(),
             kage_path: None,
             template: Vec::new(),

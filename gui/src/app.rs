@@ -96,6 +96,7 @@ gpui_kit::actions!(
         OpenFind,
         OpenPalette,
         OpenSettings,
+        OpenProviders,
         ToggleSwarm,
         TogglePlan,
         SetGoal,
@@ -137,6 +138,10 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("enter", PaletteRun, Some("Palette")),
         KeyBinding::new("escape", PaletteClose, Some("Palette")),
         KeyBinding::new("escape", crate::views::dialog::DialogClose, Some("Dialog")),
+        KeyBinding::new("up", crate::views::pickers::PickerUp, Some("Picker")),
+        KeyBinding::new("down", crate::views::pickers::PickerDown, Some("Picker")),
+        KeyBinding::new("enter", crate::views::pickers::PickerRun, Some("Picker")),
+        KeyBinding::new("escape", crate::views::pickers::PickerClose, Some("Picker")),
         KeyBinding::new(
             "escape",
             crate::views::settings::SettingsClose,
@@ -1506,6 +1511,9 @@ impl Render for Shell {
             .on_action(cx.listener(|shell, _: &OpenFind, window, cx| shell.open_find(window, cx)))
             .on_action(cx.listener(|shell, _: &OpenSettings, window, cx| {
                 shell.open_settings(Section::General, window, cx);
+            }))
+            .on_action(cx.listener(|shell, _: &OpenProviders, window, cx| {
+                shell.open_settings(Section::Providers, window, cx);
             }))
             .on_action(cx.listener(|shell, _: &VimLeaveInsert, window, cx| {
                 if shell.store.read(cx).prefs().vim {

@@ -14,6 +14,7 @@ pub mod dialog;
 pub mod dock;
 pub(crate) mod eclipse;
 pub(crate) mod kit;
+pub mod pickers;
 pub mod settings;
 pub(crate) mod settings_config;
 #[cfg(not(target_arch = "wasm32"))]

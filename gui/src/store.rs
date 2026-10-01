@@ -227,6 +227,8 @@ pub struct Store {
     config: Option<serde_json::Value>,
     /// The last `_kage/options` answer: the engine options in effect.
     engine_options: Option<Vec<kage_client::wire::OptionEntry>>,
+    /// The models the engine can run, from `_kage/models/list`.
+    models: Option<Vec<kage_client::wire::ModelProvider>>,
     /// Forks waiting for their copy, by source session.
     forking: HashMap<String, ForkPlan>,
     /// Copies waiting to open, with their source, by copy.
@@ -268,6 +270,7 @@ impl Store {
             fs_preview: None,
             config: None,
             engine_options: None,
+            models: None,
             forking: HashMap::new(),
             forked: HashMap::new(),
             notes: Vec::new(),
@@ -490,6 +493,7 @@ impl Store {
                 Change::Forked { from, to } => self.open_fork(from, to),
                 Change::Config { config } => self.config = Some(config.clone()),
                 Change::Options { options } => self.engine_options = Some(options.clone()),
+                Change::Models { providers } => self.models = Some(providers.clone()),
                 Change::Session { id } => self.settle_fork(id),
                 Change::Fs {
                     session_id,
@@ -852,6 +856,27 @@ impl Store {
     /// replaces [`Store::config`].
     pub fn ask_config(&mut self) {
         self.client.config_get();
+    }
+
+    /// Asks the engine for the models it can run; the answer lands in
+    /// [`Store::models`].
+    pub fn ask_models(&mut self) {
+        self.client.models_list();
+    }
+
+    /// The models the engine can run, by provider, once asked.
+    #[must_use]
+    pub fn models(&self) -> Option<&[kage_client::wire::ModelProvider]> {
+        self.models.as_deref()
+    }
+
+    /// Stars `model` in the model picker, or unstars it.
+    pub fn toggle_star(&mut self, model: &str) {
+        self.update_prefs(|prefs| {
+            if !prefs.starred_models.remove(model) {
+                prefs.starred_models.insert(model.to_owned());
+            }
+        });
     }
 
     /// Asks the engine for its options; the answer replaces

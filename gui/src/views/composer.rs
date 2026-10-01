@@ -10,6 +10,8 @@
 //! model and thinking pickers, the context ring with the fuel gauge,
 //! and the send and stop pair.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use web_time::Instant;
@@ -17,7 +19,7 @@ use web_time::Instant;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable;
 use gpui_kit::component::input::{Escape, InputEvent, Textarea, TextareaState};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::component::theme::ActiveTheme;
@@ -25,9 +27,10 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, AnyElement, App, AppContext as _, Context, Div, Entity, Focusable, FontWeight, Hsla,
-    InteractiveElement, Interactivity, IntoElement, ParentElement, Render, SharedString, Stateful,
-    StatefulInteractiveElement, StyleRefinement, Styled, Window, div, px, relative,
+    Anchor, AnyElement, AnyView, App, AppContext as _, Bounds, Context, Div, Entity, Focusable,
+    FontWeight, Hsla, InteractiveElement, Interactivity, IntoElement, ParentElement, Pixels,
+    Render, SharedString, Stateful, StatefulInteractiveElement, StyleRefinement, Styled, Window,
+    anchored, deferred, div, point, px, relative,
 };
 use kage_client::Session;
 use kage_client::wire::{
@@ -43,6 +46,7 @@ use crate::theme::{
 use crate::views::agents::tokens;
 use crate::views::deferred::{Deferred, LaidOut};
 use crate::views::dialog::{DialogKind, DialogView};
+use crate::views::pickers::{ModePicker, ModelPicker, PickerEvent, mode_icon, mode_tone};
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::base::TestSupportExt as _;
 
@@ -126,6 +130,56 @@ fn toolbar_pill(id: &'static str, open: bool, pal: &'static Palette, cx: &App) -
         .text_color(muted)
         .hover(move |style| style.bg(hover).text_color(ink))
         .when(open, |pill| pill.bg(hover).text_color(ink))
+}
+
+/// A pill's bounds, as it last prepainted.
+type PillBounds = Rc<Cell<Option<Bounds<Pixels>>>>;
+
+/// The two pickers the toolbar opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Picker {
+    Mode,
+    Model,
+}
+
+/// The surface a picker opens on, above the pill at `at` and aligned
+/// to its `corner`. A press anywhere but the surface or its own pill
+/// closes it; the pill's own press toggles it instead.
+fn picker_overlay(
+    composer: Entity<ComposerView>,
+    picker: AnyView,
+    at: Bounds<Pixels>,
+    corner: Anchor,
+    pal: &Palette,
+) -> AnyElement {
+    let x = match corner {
+        Anchor::BottomRight => at.right(),
+        _ => at.left(),
+    };
+    let mut surface = div()
+        .occlude()
+        .bg(pal.bg)
+        .border_1()
+        .border_color(pal.line)
+        .rounded(px(R_LG))
+        .overflow_hidden()
+        .on_mouse_down_out(move |event, window, cx| {
+            if at.contains(&event.position) {
+                return;
+            }
+            composer.update(cx, |this, cx| this.close_pickers(window, cx));
+        })
+        .child(picker);
+    surface.style().box_shadow = Some(pal.shadow_menu.clone());
+    deferred(
+        anchored()
+            .anchor(corner)
+            .position(point(x, at.top() - px(6.)))
+            .snap_to_window_with_margin(px(8.))
+            .child(surface),
+    )
+    .with_priority(1)
+    .into_any_element()
 }
 
 /// The context fill the engine compacts at on its own.
@@ -443,36 +497,6 @@ fn add_row(id: &'static str, icon: IconName, pal: &Palette) -> Stateful<Div> {
         )
 }
 
-/// The icon the permission mode pill shows for one mode id, closest
-/// to the design's per-mode glyphs.
-fn mode_icon(mode: &str) -> IconName {
-    if mode.contains("allow") {
-        IconName::ShieldAlert
-    } else if mode.contains("deny") || mode.contains("read") {
-        IconName::Eye
-    } else if mode.contains("ask") || mode.contains("rules") {
-        IconName::ShieldQuestionMark
-    } else if mode.contains("plan") {
-        IconName::PenLine
-    } else {
-        IconName::Hand
-    }
-}
-
-/// The text tone one mode id paints with: warn for ask and rules,
-/// danger for allow, the accent for read-only, plain otherwise.
-fn mode_tone(mode: &str, pal: &Palette) -> Option<Hsla> {
-    if mode.contains("allow") {
-        Some(pal.danger)
-    } else if mode.contains("deny") || mode.contains("read") {
-        Some(pal.accent)
-    } else if mode.contains("ask") || mode.contains("rules") {
-        Some(pal.warn)
-    } else {
-        None
-    }
-}
-
 /// What one Esc press means, given the interrupt window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EscStep {
@@ -730,6 +754,16 @@ pub struct ComposerView {
     esc_armed: Option<Instant>,
     /// Whether the plus popover shows.
     plus_open: bool,
+    /// Whether the permission mode picker shows.
+    mode_open: bool,
+    /// Whether the model picker shows.
+    model_open: bool,
+    mode_picker: Entity<ModePicker>,
+    model_picker: Entity<ModelPicker>,
+    /// Where the mode and model pills sit, recorded as they prepaint,
+    /// so their pickers open over them.
+    mode_bounds: PillBounds,
+    model_bounds: PillBounds,
     /// Whether a listing for the loaded session was already asked, so
     /// typing an at-mention does not ask twice.
     fs_asked: bool,
@@ -799,6 +833,20 @@ impl ComposerView {
             this.sync_placeholder(window, cx);
         })
         .detach();
+        let mode_picker = cx.new(|cx| ModePicker::new(store.clone(), window, cx));
+        let model_picker = cx.new(|cx| ModelPicker::new(store.clone(), window, cx));
+        cx.subscribe_in(
+            &mode_picker,
+            window,
+            |this, _, _: &PickerEvent, window, cx| this.close_pickers(window, cx),
+        )
+        .detach();
+        cx.subscribe_in(
+            &model_picker,
+            window,
+            |this, _, _: &PickerEvent, window, cx| this.close_pickers(window, cx),
+        )
+        .detach();
         Self {
             store,
             input,
@@ -806,6 +854,12 @@ impl ComposerView {
             loaded: None,
             esc_armed: None,
             plus_open: false,
+            mode_open: false,
+            model_open: false,
+            mode_picker,
+            model_picker,
+            mode_bounds: PillBounds::default(),
+            model_bounds: PillBounds::default(),
             fs_asked: false,
             placeholder: String::new(),
             draft_mirror: Deferred::new(),
@@ -1603,8 +1657,7 @@ impl ComposerView {
             .map(|value| value.name.clone())
             .unwrap_or_else(|| active.clone());
         let tone = mode_tone(&active, pal);
-        let store = self.store.clone();
-        let mut pill = toolbar_pill("composer-mode", false, pal, cx)
+        let mut pill = toolbar_pill("composer-mode", self.mode_open, pal, cx)
             .tooltip(|window, cx| {
                 Tooltip::new("Permission mode (Shift+Tab cycles)").build(window, cx)
             })
@@ -1618,22 +1671,22 @@ impl ComposerView {
         if let Some(tone) = tone {
             pill = pill.text_color(tone);
         }
-        pill.dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-            let mut built = menu.label("Permission mode");
-            for value in &values {
-                let store = store.clone();
-                let value = value.clone();
-                built = built.item(
-                    PopupMenuItem::new(value.name.clone())
-                        .checked(value.value == active)
-                        .on_click(move |_, _, cx| {
-                            store.act(cx, |store| store.set_permission(&value.value));
-                        }),
-                );
-            }
-            built
-        })
-        .into_any_element()
+        let bounds = self.mode_bounds.clone();
+        let pill = pill
+            .on_prepaint(move |at, _, _| bounds.set(Some(at)))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.toggle_picker(Picker::Mode, window, cx);
+            }));
+        let overlay = self.mode_bounds.get().filter(|_| self.mode_open).map(|at| {
+            picker_overlay(
+                cx.entity(),
+                self.mode_picker.clone().into(),
+                at,
+                Anchor::BottomLeft,
+                pal,
+            )
+        });
+        div().child(pill).children(overlay).into_any_element()
     }
 
     /// One active-mode chip: the colored pill with its exit button.
@@ -1732,7 +1785,7 @@ impl ComposerView {
                     .map(|value| value.name.clone())
                     .unwrap_or_else(|| option.current_value.clone())
             });
-        let mut pill = toolbar_pill("composer-model", false, pal, cx)
+        let mut pill = toolbar_pill("composer-model", self.model_open, pal, cx)
             .tooltip(|window, cx| Tooltip::new("Model and thinking").build(window, cx))
             .child(SharedString::from(model_label));
         if let Some(level) = think_label {
@@ -1749,46 +1802,66 @@ impl ComposerView {
                 .with_size(px(12.))
                 .opacity(0.7),
         );
-        let store = self.store.clone();
-        pill.dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
-            let mut built = menu;
-            if let Some(model) = &model {
-                built = built.label("Model");
-                for value in &model.options {
-                    let store = store.clone();
-                    let value = value.clone();
-                    built = built.item(
-                        PopupMenuItem::new(value.name.clone())
-                            .checked(value.value == model.current_value)
-                            .on_click(move |_, _, cx| {
-                                store.update(cx, |store, cx| {
-                                    store.set_option("model", &value.value);
-                                    cx.notify();
-                                });
-                            }),
-                    );
-                }
+        let bounds = self.model_bounds.clone();
+        let pill = pill
+            .on_prepaint(move |at, _, _| bounds.set(Some(at)))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.toggle_picker(Picker::Model, window, cx);
+            }));
+        let overlay = self
+            .model_bounds
+            .get()
+            .filter(|_| self.model_open)
+            .map(|at| {
+                picker_overlay(
+                    cx.entity(),
+                    self.model_picker.clone().into(),
+                    at,
+                    Anchor::BottomRight,
+                    pal,
+                )
+            });
+        div().child(pill).children(overlay).into_any_element()
+    }
+
+    /// Opens the `which` picker over its pill, closing the other, or
+    /// closes it when it shows.
+    fn toggle_picker(&mut self, which: Picker, window: &mut Window, cx: &mut Context<Self>) {
+        let opening = match which {
+            Picker::Mode => !self.mode_open,
+            Picker::Model => !self.model_open,
+        };
+        self.close_pickers(window, cx);
+        if !opening {
+            return;
+        }
+        let handle = match which {
+            Picker::Mode => {
+                self.mode_open = true;
+                self.mode_picker
+                    .update(cx, |picker, cx| picker.open(window, cx));
+                self.mode_picker.read(cx).focus_handle(cx)
             }
-            if let Some(thinking) = &thinking {
-                built = built.label("Thinking");
-                for value in &thinking.options {
-                    let store = store.clone();
-                    let value = value.clone();
-                    built = built.item(
-                        PopupMenuItem::new(value.name.clone())
-                            .checked(value.value == thinking.current_value)
-                            .on_click(move |_, _, cx| {
-                                store.update(cx, |store, cx| {
-                                    store.set_option("thinking", &value.value);
-                                    cx.notify();
-                                });
-                            }),
-                    );
-                }
+            Picker::Model => {
+                self.model_open = true;
+                self.model_picker
+                    .update(cx, |picker, cx| picker.open(window, cx));
+                self.model_picker.read(cx).focus_handle(cx)
             }
-            built
-        })
-        .into_any_element()
+        };
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// Closes both pickers and gives the composer the keys back.
+    fn close_pickers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.mode_open && !self.model_open {
+            return;
+        }
+        self.mode_open = false;
+        self.model_open = false;
+        self.input.update(cx, |state, cx| state.focus(window, cx));
+        cx.notify();
     }
 
     /// The context ring with its percent, shown only while a session

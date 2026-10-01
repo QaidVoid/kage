@@ -820,7 +820,7 @@ fn the_breadcrumb_names_the_agent_and_the_main_view_has_no_header() {
 }
 
 #[test]
-fn the_placeholder_steers_a_running_agent_and_messages_a_finished_one() {
+fn a_running_agent_takes_steering_and_a_finished_one_is_read_only() {
     let (mut app, rx, events, child) = focused_app();
     let rows = rendered(&mut app, 80, 16);
     assert!(rows.iter().any(|r| r == " > Steer explore"), "{rows:#?}");
@@ -836,23 +836,17 @@ fn the_placeholder_steers_a_running_agent_and_messages_a_finished_one() {
     );
     let rows = rendered(&mut app, 80, 16);
     assert!(
-        rows.iter()
-            .any(|r| r == " > Message explore (the reply stays in this agent)"),
-        "{rows:#?}"
+        !rows
+            .iter()
+            .any(|r| r.contains("explore") && r.starts_with(" > ")),
+        "no input box shows: {rows:#?}"
     );
-    assert_eq!(app.footer_hint(), "enter to send \u{b7} esc to go back");
+    assert_eq!(app.agent_placeholder(), None);
+    assert_eq!(app.footer_hint(), "esc to go back");
     type_text(&mut app, "one more");
     app.handle_key(code(KeyCode::Enter));
-    assert_eq!(
-        rx.try_recv(),
-        Ok(RunRequest::Submit {
-            text: "one more".into(),
-            images: Vec::new(),
-            queue: false,
-            session: Some(child),
-        })
-    );
-    assert!(app.pending.is_empty(), "an idle agent starts a run at once");
+    assert!(rx.try_recv().is_err(), "nothing reaches the engine");
+    assert_eq!(app.input.text(), "");
 }
 
 #[test]
@@ -1497,10 +1491,7 @@ fn a_resumed_session_lists_its_agents_and_opens_them_read_only() {
     assert!(lock(&app.buffer).blocks().iter().any(
         |b| matches!(b.as_ref(), crate::buffer::Block::User { text } if text == "map everything under src")
     ));
-    assert_eq!(
-        app.agent_placeholder().as_deref(),
-        Some("explore cannot be messaged after a resume")
-    );
+    assert_eq!(app.agent_placeholder(), None);
     assert_eq!(app.footer_hint(), "esc to go back");
     assert_eq!(app.breadcrumb().unwrap().tool_calls, 0);
     type_text(&mut app, "more please");

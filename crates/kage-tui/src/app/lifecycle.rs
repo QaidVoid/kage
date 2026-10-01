@@ -404,8 +404,8 @@ impl App {
             .map(|(_, p)| p.clone())
             .collect();
         let breadcrumb = self.breadcrumb();
-        // An agent of a resumed session cannot be messaged, so its view
-        // gives the input's rows to the transcript.
+        // A finished agent cannot be messaged, so its view gives the
+        // input's rows to the transcript.
         let read_only = self.focused_read_only();
         let placeholder = self.agent_placeholder().or(plan_placeholder);
         let agents_total = self.agents_under_view();

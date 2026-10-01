@@ -180,23 +180,19 @@ impl App {
     }
 
     /// The footer hint of an agent view with an empty draft: how to
-    /// steer or message the agent, how to go back, and how to stop it
-    /// while `working`. An agent of a resumed session only goes back.
-    /// `None` in the main view and in visual mode.
+    /// steer the agent, go back and stop it while `working`. A finished
+    /// agent is read-only and only goes back. `None` in the main view
+    /// and in visual mode.
     fn agent_hint(&self, working: bool) -> Option<String> {
         self.focus?;
         let stop = "ctrl+c to stop";
-        let read_only = self.focused_read_only();
         let parts = match (self.input.is_modeless(), self.input.mode(), working) {
-            (true, _, _) | (false, Mode::Normal, _) if read_only => vec!["esc to go back"],
-            (false, Mode::Insert, _) if read_only => vec!["ctrl+c to go back"],
-            (true, _, true) => vec!["enter steers", "esc back", "ctrl+c stops"],
-            (true, _, false) => vec!["enter to send", "esc to go back"],
-            (false, Mode::Insert, true) => vec!["enter to steer", stop],
-            (false, Mode::Insert, false) => vec!["enter to send", "ctrl+c to go back"],
-            (false, Mode::Normal, true) => vec!["ctrl+c stops", "esc back", "i to type"],
-            (false, Mode::Normal, false) => vec!["esc to go back", "i to type"],
             (false, Mode::Visual, _) => return None,
+            (true, _, false) | (false, Mode::Normal, false) => vec!["esc to go back"],
+            (false, Mode::Insert, false) => vec!["ctrl+c to go back"],
+            (true, _, true) => vec!["enter steers", "esc back", "ctrl+c stops"],
+            (false, Mode::Insert, true) => vec!["enter to steer", stop],
+            (false, Mode::Normal, true) => vec!["ctrl+c stops", "esc back", "i to type"],
         };
         Some(parts.join(HINT_SEP))
     }
@@ -572,13 +568,7 @@ impl App {
     /// resumed session cannot be messaged. `None` in the main view.
     pub(crate) fn agent_placeholder(&self) -> Option<String> {
         let agent = self.focused_agent()?;
-        Some(if self.focused_read_only() {
-            format!("{agent} cannot be messaged after a resume")
-        } else if self.is_run_in_flight() {
-            format!("Steer {agent}")
-        } else {
-            format!("Message {agent} (the reply stays in this agent)")
-        })
+        (!self.focused_read_only()).then(|| format!("Steer {agent}"))
     }
 
     /// The active model's id: the engine's last report, else the

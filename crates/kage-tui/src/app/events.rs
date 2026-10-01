@@ -29,7 +29,7 @@ impl App {
         if self.focused_read_only() {
             self.input.splice(0, 0, &text);
             let agent = self.focused_agent().unwrap_or("the agent");
-            let text = format!("{agent} cannot be messaged after a resume");
+            let text = format!("{agent} has finished; only a running agent can be steered");
             self.notify(text);
             return;
         }

@@ -204,9 +204,9 @@ before continuing, make an `agent` call or a `swarm` resume instead,
 both of which block on the result.
 
 An agent that delivered its result is dropped from memory, and its
-transcript stays in its session file. Prompting it from its view or
-messaging it reopens it from that file with its history intact, so
-finished agents cost no memory until they are used again.
+transcript stays in its session file. A message from another agent
+or a `swarm` resume reopens it from that file with its history
+intact, so finished agents cost no memory until they are used again.
 
 ## built-in agents
 
@@ -420,24 +420,27 @@ count:
 ```
 
 The first message in the transcript is the task the parent wrote. The
-footer's model, context and token figures stay the main session's.
+footer's model and context figures are the agent's own, and its tokens
+and cost count the agent with every agent under it. In the main view
+the same totals cover the whole conversation.
 
 | Key | In an agent view |
 | --- | --- |
-| `enter` | While the agent runs, steer it at its next turn boundary. When it has finished, send it a new message. |
+| `enter` | While the agent runs, steer it at its next turn boundary. |
 | `tab` | Queue the prompt until the agent's run ends |
 | `esc` | On an empty prompt, go back one level: to the parent agent, or to the main view. It never stops the agent. |
 | `ctrl+c` | On an empty prompt, stop the agent while it runs, else go back |
 
 The footer shows the keys that apply, such as `enter to steer . esc to
-go back . ctrl+c to stop`. An agent restored from a resumed session
-has no run behind it, so you can read it and go back, but not message
-it.
+go back . ctrl+c to stop`.
 
-A finished agent can still take messages. Its reply to those stays in
-the agent, because the parent's `agent` call already returned. The
-placeholder says so: `Message explore (the reply stays in this agent)`.
-Going back restores the main view at the scroll position you left.
+Only a running agent takes input. Once an agent finishes, live or
+restored from a resumed session, its view is read-only: the input
+goes away and you can read the transcript and go back. Its result
+already reached the parent, so a reply to a later message, and any
+change that message made, would never reach the main conversation.
+Ask the main session instead, or start a new agent. Going back
+restores the main view at the scroll position you left.
 Quitting with `ctrl+c` twice only works from the main view.
 
 ### the agents overlay

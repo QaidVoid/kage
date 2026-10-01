@@ -191,7 +191,7 @@ with a breadcrumb in the header.
 | Key | Where | Effect |
 | --- | --- | --- |
 | `ctrl+t` | anywhere | Open the agents overlay (also `/agents`) |
-| `enter` | agent view | Steer the running agent, or message a finished one |
+| `enter` | agent view | Steer the running agent; a finished agent is read-only |
 | `tab` | agent view | Queue the prompt until the agent's run ends |
 | `esc` | agent view, empty prompt | Go back one level, to the parent agent or the main view |
 | `ctrl+c` | agent view, empty prompt | Stop the agent while it runs, else go back |

@@ -156,12 +156,12 @@ impl App {
         self.focus.or(self.active_session)
     }
 
-    /// Whether the agent on screen came from a resumed session's
-    /// history, so no engine runs it and it cannot be messaged.
+    /// Whether an agent on screen has finished, live or restored from
+    /// a resumed session. Only a running agent can be steered: a
+    /// finished one already delivered its result, so a message's reply
+    /// and any changes it made would never reach its parent.
     pub(crate) fn focused_read_only(&self) -> bool {
-        self.focus
-            .and_then(|session| self.agents.get(session))
-            .is_some_and(|node| node.restored)
+        self.focus.is_some() && !self.is_run_in_flight()
     }
 
     /// The name of the agent on screen. `None` in the main view.

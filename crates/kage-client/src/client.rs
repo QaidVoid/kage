@@ -111,6 +111,10 @@ enum Pending {
     },
     SetConfigOption {
         session_id: String,
+        config_id: String,
+        /// The value shown before the change, restored if the agent
+        /// refuses it.
+        previous: Option<String>,
     },
     Close {
         session_id: String,
@@ -327,6 +331,7 @@ impl Client {
     /// Changes one config option of a session. The answer replaces the
     /// session's config options.
     pub fn set_config_option(&mut self, session_id: &str, config_id: &str, value: &str) -> u64 {
+        let previous = self.set_shown_option(session_id, config_id, value);
         self.request(
             "session/set_config_option",
             params(&SetSessionConfigOptionRequest {
@@ -336,8 +341,31 @@ impl Client {
             }),
             Pending::SetConfigOption {
                 session_id: session_id.to_owned(),
+                config_id: config_id.to_owned(),
+                previous,
             },
         )
+    }
+
+    /// Shows `value` for option `config_id` of `session_id` at once,
+    /// ahead of the agent's answer, and returns the value it replaced.
+    /// The mode option moves the current mode with it.
+    fn set_shown_option(
+        &mut self,
+        session_id: &str,
+        config_id: &str,
+        value: &str,
+    ) -> Option<String> {
+        let session = self.state.sessions.get_mut(session_id)?;
+        let option = session
+            .config_options
+            .iter_mut()
+            .find(|option| option.id == config_id)?;
+        let previous = std::mem::replace(&mut option.current_value, value.to_owned());
+        if config_id == "mode" {
+            session.mode = Some(value.to_owned());
+        }
+        Some(previous)
     }
 
     /// Answers the ask `request_id` of `session_id`. The ask leaves
@@ -726,7 +754,7 @@ impl Client {
                 session_id,
                 owns_run,
             } => self.apply_prompt_answer(session_id, owns_run, result),
-            Pending::SetConfigOption { session_id } => {
+            Pending::SetConfigOption { session_id, .. } => {
                 match answer::<kage_acp_wire::SetSessionConfigOptionResponse>(
                     id,
                     result,
@@ -805,13 +833,22 @@ impl Client {
         let Some(pending) = self.pending.remove(&id) else {
             return Vec::new();
         };
-        if let Pending::Prompt {
-            session_id,
-            owns_run: true,
-        } = pending
-        {
-            self.session_mut(&session_id).running = false;
-            self.flush_queue(&session_id);
+        match pending {
+            Pending::Prompt {
+                session_id,
+                owns_run: true,
+            } => {
+                self.session_mut(&session_id).running = false;
+                self.flush_queue(&session_id);
+            }
+            Pending::SetConfigOption {
+                session_id,
+                config_id,
+                previous: Some(previous),
+            } => {
+                self.set_shown_option(&session_id, &config_id, &previous);
+            }
+            _ => {}
         }
         vec![Change::Failed { request: id, error }]
     }

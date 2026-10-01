@@ -220,3 +220,40 @@ fn a_reload_replays_history_but_keeps_what_only_the_client_holds() {
     assert_eq!(session.draft.as_deref(), Some("typing"));
     assert_eq!(session.cwd.as_deref(), Some("/srv/proj"));
 }
+
+#[test]
+fn an_option_change_shows_at_once_and_a_refusal_restores_it() {
+    let mut client = opened();
+    client.handle(update(
+        "s1",
+        &json!({
+            "sessionUpdate": "config_option_update",
+            "configOptions": [{
+                "id": "mode", "name": "Mode", "type": "select", "currentValue": "default",
+                "options": [{"value": "default", "name": "Default"}, {"value": "plan", "name": "Plan"}],
+            }],
+        }),
+    ));
+    let mode = |client: &Client| {
+        let session = client.state().session("s1").unwrap();
+        (
+            session.config_options[0].current_value.clone(),
+            session.mode.clone(),
+        )
+    };
+    let id = client.set_config_option("s1", "mode", "plan");
+    assert_eq!(mode(&client), ("plan".into(), Some("plan".into())));
+    client.handle(Frame::Failure {
+        id,
+        error: kage_client::RpcError {
+            code: -32602,
+            message: "no".into(),
+            data: None,
+        },
+    });
+    assert_eq!(
+        mode(&client),
+        ("default".into(), Some("default".into())),
+        "the refused value is taken back"
+    );
+}

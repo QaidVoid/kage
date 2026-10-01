@@ -31,6 +31,9 @@ pub(crate) struct ChangeEntry {
     pub add: usize,
     /// Lines only the old text has.
     pub del: usize,
+    /// Whether the first change made the file: its diff named no old
+    /// text.
+    pub created: bool,
 }
 
 /// The path one change names: the diff content's path first, then the
@@ -83,11 +86,15 @@ pub(crate) fn change_entries(items: &[TranscriptItem]) -> Vec<ChangeEntry> {
             entry.del += del;
             continue;
         }
+        let created = call.content.iter().any(
+            |content| matches!(content, ToolCallContent::Diff(diff) if diff.old_text.is_none()),
+        );
         out.push(ChangeEntry {
             call_id: call.tool_call_id.clone(),
             path,
             add,
             del,
+            created,
         });
     }
     out

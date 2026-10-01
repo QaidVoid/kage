@@ -36,6 +36,7 @@ use crate::store::{EXIT_PLAN_TOOL, PlanChoice, Store, StoreHandle as _, plan_rev
 use crate::theme::{FS_2XS, FS_SM, FS_XS, R_FULL, R_LG, R_MD, R_SM, SP_1, SP_2, SP_3, SP_4, SP_5};
 use crate::timing::RunEnd;
 use crate::views::kit::{self, BtnTone};
+use crate::views::workbench::{ChangeEntry, change_entries};
 use kage_client::wire::{NoticeTone, ToolCallContent, ToolCallStatus, TurnReason};
 use kage_client::{Session, ToolCallItem, TranscriptItem};
 
@@ -100,6 +101,7 @@ fn margins(row: &Row) -> (f32, f32) {
             if *expanded { DETAIL_BOTTOM } else { ROW_MARGIN },
         ),
         Row::TurnEnd { .. } => (6.0, 22.0),
+        Row::Changes { .. } => (10.0, 10.0),
         Row::Notice { .. } | Row::Compaction { .. } => (10.0, 10.0),
         Row::Plan { .. } => (ROW_MARGIN, 12.0),
         Row::Decision { .. } => (4.0, 4.0),
@@ -580,6 +582,8 @@ pub enum RowKey {
     Item(usize),
     /// The collapse group whose first member sits at this index.
     Group(usize),
+    /// The files the run ending at this turn-end index changed.
+    Changes(usize),
 }
 
 /// The last sentence of a thinking text, for the live peek.
@@ -649,6 +653,11 @@ enum Row {
         /// Whether the nested rows are listed.
         expanded: bool,
     },
+    /// The files a run changed, just before the run's end.
+    Changes {
+        /// The turn-end item index the run ends at.
+        end: usize,
+    },
     /// The end of a run: the turn boundary no tool calls follow.
     TurnEnd {
         /// The item index.
@@ -683,6 +692,7 @@ impl Row {
     fn key(&self) -> RowKey {
         match self {
             Row::Group { key, .. } => *key,
+            Row::Changes { end } => RowKey::Changes(*end),
             Row::User { ix, .. }
             | Row::Assistant { ix, .. }
             | Row::Thinking { ix, .. }
@@ -704,6 +714,7 @@ impl Row {
             Row::Thinking { .. } => "thinking",
             Row::Tool { .. } => "tool",
             Row::Group { .. } => "group",
+            Row::Changes { .. } => "changes",
             Row::TurnEnd { .. } => "turn-end",
             Row::Notice { .. } => "notice",
             Row::Compaction { .. } => "compaction",
@@ -800,6 +811,11 @@ fn row_search_text(session: &Session, row: &Row) -> String {
             text
         }
         Row::TurnEnd { .. } => "turn ended".to_owned(),
+        Row::Changes { end } => run_changes(session, *end)
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
         Row::Compaction { .. } => "context compacted".to_owned(),
         Row::Plan { ix } => match session.items.get(*ix) {
             Some(TranscriptItem::Plan { entries }) => entries
@@ -851,6 +867,9 @@ fn row_model(session: &Session, ui: &UiState) -> RowModel {
         };
         let Some(family) = family else {
             if let Some(row) = plain_row(session, index, ui, last) {
+                if matches!(row, Row::TurnEnd { .. }) && !run_changes(session, index).is_empty() {
+                    rows.push(Row::Changes { end: index });
+                }
                 rows.push(row);
             }
             index += 1;
@@ -1259,6 +1278,10 @@ impl TranscriptView {
                 _ => blank_row(*ix).into_any_element(),
             },
             Row::Group { .. } => self.render_group(row, cx).into_any_element(),
+            Row::Changes { end } => match session {
+                Some(session) => self.render_changes(&run_changes(session, *end), *end, cx),
+                None => blank_row(*end).into_any_element(),
+            },
             Row::TurnEnd { ix, outcome } => match session {
                 Some(session) => self
                     .render_turn_end(
@@ -1951,6 +1974,145 @@ impl TranscriptView {
             .child(card)
     }
 
+    /// The files a run changed, as the design's changes card: the count
+    /// and line totals with Review, then one row per file. Any row opens
+    /// that change in the workbench.
+    fn render_changes(
+        &self,
+        entries: &[ChangeEntry],
+        end: usize,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let ink = crate::theme::Palette::active(cx);
+        let mono = cx.theme().mono_font_family.clone();
+        let view = cx.entity();
+        let open = |call: String| {
+            let view = view.clone();
+            move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
+                let call = call.clone();
+                view.update(cx, |_, cx| cx.emit(TranscriptEvent::OpenChange(call)));
+            }
+        };
+        let add: usize = entries.iter().map(|entry| entry.add).sum();
+        let del: usize = entries.iter().map(|entry| entry.del).sum();
+        let count = entries.len();
+        let mut head = h_flex()
+            .gap(px(10.))
+            .items_center()
+            .min_h(px(44.))
+            .px(px(12.))
+            .py(px(SP_4))
+            .child(icon(IconName::FileDiff, ink.faint))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(FS_SM))
+                    .text_color(ink.ink_strong)
+                    .child(format!(
+                        "{count} file{} changed",
+                        if count == 1 { "" } else { "s" }
+                    )),
+            )
+            .child(chip(
+                format!("+{add}"),
+                ink.diff_add,
+                ink.diff_add_bg,
+                mono.clone(),
+            ));
+        if del > 0 {
+            head = head.child(chip(
+                format!("-{del}"),
+                ink.diff_del,
+                ink.diff_del_bg,
+                mono.clone(),
+            ));
+        }
+        if let Some(first) = entries.first() {
+            head = head.child(
+                kit::btn_sm(format!("changes-review-{end}"), BtnTone::Plain, ink)
+                    .on_click(open(first.call_id.clone()))
+                    .child("Review"),
+            );
+        }
+        let mut body = v_flex().border_t_1().border_color(ink.subtle);
+        for (n, entry) in entries.iter().enumerate() {
+            let hover = ink.hover;
+            let mut row = h_flex()
+                .id(ElementId::named_usize("changed-file", end * 1000 + n))
+                .h(px(32.))
+                .px(px(12.))
+                .gap(px(SP_4))
+                .items_center()
+                .cursor_pointer()
+                .text_size(px(FS_SM))
+                .hover(move |style| style.bg(hover))
+                .when(n > 0, |row| row.border_t_1().border_color(ink.subtle))
+                .on_click(open(entry.call_id.clone()))
+                .child(icon(
+                    if entry.created {
+                        IconName::FilePlus
+                    } else {
+                        IconName::File
+                    },
+                    ink.faint,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(mono.clone())
+                        .text_size(px(DETAIL_SIZE))
+                        .text_color(ink.ink)
+                        .child(SharedString::from(entry.path.clone())),
+                );
+            if entry.created {
+                row = row.child(
+                    div()
+                        .px(px(7.))
+                        .py(px(1.))
+                        .rounded(px(R_FULL))
+                        .border_1()
+                        .border_color(ink.ok_bd)
+                        .bg(ink.ok_soft)
+                        .text_size(px(10.5))
+                        .text_color(ink.ok)
+                        .child("new"),
+                );
+            }
+            row = row.child(chip(
+                format!("+{}", entry.add),
+                ink.diff_add,
+                ink.diff_add_bg,
+                mono.clone(),
+            ));
+            if entry.del > 0 {
+                row = row.child(chip(
+                    format!("-{}", entry.del),
+                    ink.diff_del,
+                    ink.diff_del_bg,
+                    mono.clone(),
+                ));
+            }
+            body = body.child(row);
+        }
+        v_flex()
+            .id(ElementId::named_usize("row-changes", end))
+            .test_support()
+            .w_full()
+            .border_1()
+            .border_color(ink.line)
+            .rounded(px(R_LG))
+            .bg(ink.surface)
+            .overflow_hidden()
+            .child(head)
+            .child(body)
+            .into_any_element()
+    }
+
     /// A collapsed run of same-family tool calls.
     fn render_group(&self, row: &Row, cx: &Context<Self>) -> Stateful<Div> {
         let Row::Group {
@@ -2155,6 +2317,19 @@ impl TranscriptView {
             .text_color(theme.muted_foreground)
             .child(text)
     }
+}
+
+/// The files the run ending at the turn end `end` changed: the edits
+/// after the run's prompt, folded onto their paths.
+fn run_changes(session: &Session, end: usize) -> Vec<ChangeEntry> {
+    let start = session.items[..end]
+        .iter()
+        .rposition(|item| matches!(item, TranscriptItem::User { steered: false, .. }))
+        .map_or(0, |ix| ix + 1);
+    change_entries(&session.items[start..end])
+        .into_iter()
+        .filter(|entry| entry.add + entry.del > 0)
+        .collect()
 }
 
 /// The prompt that started the run ending at `end`, and the reply text
@@ -2835,6 +3010,9 @@ fn signatures(session: &Session, rows: &[Row], ui: &UiState) -> Vec<u64> {
                     item_fingerprint(session, item, &mut hasher);
                     ui.full_output.contains(&item).hash(&mut hasher);
                 }
+                RowKey::Changes(end) => {
+                    format!("{:?}", run_changes(session, end)).hash(&mut hasher);
+                }
                 RowKey::Group(_) => {
                     for item in members {
                         item_fingerprint(session, *item, &mut hasher);
@@ -3434,6 +3612,41 @@ mod tests {
         assert_eq!(
             super::plan_decision(&session, 0),
             Some(crate::store::PlanChoice::Revise)
+        );
+    }
+
+    #[test]
+    fn a_run_that_changed_files_lists_them_before_its_end() {
+        let edit = call(
+            "call_edit",
+            "edit",
+            ToolKind::Edit,
+            ToolCallStatus::Completed,
+            vec![ToolCallContent::Diff(DiffContent {
+                path: "src/retry.rs".into(),
+                old_text: Some("a".into()),
+                new_text: "b".into(),
+            })],
+            None,
+            Some(serde_json::json!({"path": "src/retry.rs"})),
+        );
+        let session = session_with(vec![
+            TranscriptItem::User {
+                content: vec![ContentBlock::text("fix")],
+                steered: false,
+            },
+            edit,
+            TranscriptItem::TurnEnd {
+                reason: Some(TurnReason::NoToolCalls),
+            },
+        ]);
+        let model = row_model(&session, &UiState::default());
+        assert_eq!(model.kinds(), vec!["user", "tool", "changes", "turn-end"]);
+        let entries = super::run_changes(&session, 2);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            (entries[0].add, entries[0].del, entries[0].created),
+            (1, 1, false)
         );
     }
 

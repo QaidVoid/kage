@@ -25,10 +25,10 @@ use gpui_kit::component::theme::{ActiveTheme, ThemeColor};
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Animation, AnimationExt as _, AnyElement, App, Context, Div, ElementId, Entity, FollowMode,
-    Hsla, InteractiveElement as _, IntoElement, ListAlignment, ListState, ParentElement as _,
-    Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
-    TestSupportExt as _, Window, div, list, px, radians, relative,
+    Animation, AnimationExt as _, AnyElement, App, Context, Div, ElementId, Entity, EventEmitter,
+    FollowMode, Hsla, InteractiveElement as _, IntoElement, ListAlignment, ListState,
+    ParentElement as _, Render, SharedString, Stateful, StatefulInteractiveElement as _,
+    Styled as _, TestSupportExt as _, Window, div, list, px, radians, relative,
 };
 
 use crate::store::{Store, StoreHandle as _};
@@ -54,6 +54,11 @@ const DETAIL_SIZE: f32 = 12.0;
 const LIST_OVERDRAW: f32 = 800.0;
 /// The small icon size of the design (`.ico.sm`).
 const ICON_SM: f32 = 14.0;
+/// The shell output lines a detail shows before its earlier-lines
+/// toggle.
+const SHELL_TAIL: usize = 12;
+/// The tallest a detail body grows before it scrolls.
+const DETAIL_MAX_H: f32 = 320.0;
 /// The extra small icon size of the design (`.ico.xs`).
 const ICON_XS: f32 = 12.0;
 /// The user bubble's corner radius.
@@ -620,8 +625,6 @@ enum Row {
     Tool {
         /// The item index.
         ix: usize,
-        /// Whether the row sits inside an expanded group.
-        nested: bool,
         /// Whether the detail is expanded.
         expanded: bool,
     },
@@ -712,6 +715,19 @@ impl Row {
 struct UiState {
     /// Row keys whose detail, body or nested list is expanded.
     expanded: HashSet<RowKey>,
+    /// Shell calls whose whole output shows, not only its tail.
+    full_output: HashSet<usize>,
+}
+
+/// What the transcript asks the shell to open elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TranscriptEvent {
+    /// Show this file in the workbench.
+    OpenFile(String),
+    /// Show the change this tool call made in the workbench.
+    OpenChange(String),
+    /// Show the fetched pages in the workbench.
+    OpenBrowser,
 }
 
 /// The find state the transcript tints rows with: the matching row
@@ -882,19 +898,9 @@ fn row_model(session: &Session, ui: &UiState) -> RowModel {
                 running,
                 expanded: ui.expanded.contains(&key),
             });
-            if ui.expanded.contains(&key) {
-                for ix in &run {
-                    rows.push(Row::Tool {
-                        ix: *ix,
-                        nested: true,
-                        expanded: ui.expanded.contains(&RowKey::Item(*ix)),
-                    });
-                }
-            }
         } else {
             rows.push(Row::Tool {
                 ix: index,
-                nested: false,
                 expanded: ui.expanded.contains(&RowKey::Item(index)),
             });
         }
@@ -921,7 +927,6 @@ fn plain_row(session: &Session, ix: usize, ui: &UiState, last: usize) -> Option<
         },
         TranscriptItem::ToolCall(_) => Row::Tool {
             ix,
-            nested: false,
             expanded: ui.expanded.contains(&RowKey::Item(ix)),
         },
         TranscriptItem::TurnEnd {
@@ -985,6 +990,8 @@ pub struct TranscriptView {
     /// The find marks the find bar last set, tinting matching rows.
     find: Option<FindMarks>,
 }
+
+impl EventEmitter<TranscriptEvent> for TranscriptView {}
 
 impl TranscriptView {
     /// A transcript following `store`, filling `composer` on edit.
@@ -1157,7 +1164,12 @@ impl TranscriptView {
         let session = store.active_session();
         let times = session.and_then(|session| store.timings(&session.id));
         let element = match row {
-            Row::User { ix, text } => self.render_user(*ix, text, cx).into_any_element(),
+            Row::User { ix, text } => match session.and_then(|s| s.items.get(*ix)) {
+                Some(TranscriptItem::User { content, steered }) => self
+                    .render_user(*ix, text, &attachments(content), *steered, cx)
+                    .into_any_element(),
+                _ => blank_row(*ix).into_any_element(),
+            },
             Row::Assistant { ix, live } => match session.and_then(|s| s.items.get(*ix)) {
                 Some(TranscriptItem::Assistant { text }) => self
                     .render_assistant(*ix, text, *live, cx)
@@ -1177,34 +1189,31 @@ impl TranscriptView {
                     .into_any_element(),
                 _ => blank_row(*ix).into_any_element(),
             },
-            Row::Tool { ix, nested, .. } => {
-                let first_nested = matches!(prev, Some(Row::Group { .. }));
-                match session.and_then(|s| s.items.get(*ix)) {
-                    Some(TranscriptItem::ToolCall(call))
-                        if call.status == ToolCallStatus::Completed
-                            && let Some(todos) = todos_of_call(call) =>
-                    {
-                        render_todos(
-                            *ix,
-                            &todos,
-                            self.ui.expanded.contains(&RowKey::Item(*ix)),
-                            cx,
-                        )
-                        .into_any_element()
-                    }
-                    Some(TranscriptItem::ToolCall(call)) => self
-                        .render_tool(
-                            *ix,
-                            call,
-                            *nested,
-                            first_nested,
-                            times.and_then(|t| t.tool(&call.tool_call_id)),
-                            cx,
-                        )
-                        .into_any_element(),
-                    _ => blank_row(*ix).into_any_element(),
+            Row::Tool { ix, .. } => match session.and_then(|s| s.items.get(*ix)) {
+                Some(TranscriptItem::ToolCall(call))
+                    if call.status == ToolCallStatus::Completed
+                        && let Some(todos) = todos_of_call(call) =>
+                {
+                    render_todos(
+                        *ix,
+                        &todos,
+                        self.ui.expanded.contains(&RowKey::Item(*ix)),
+                        cx,
+                    )
+                    .into_any_element()
                 }
-            }
+                Some(TranscriptItem::ToolCall(call)) => self
+                    .render_tool(
+                        *ix,
+                        call,
+                        false,
+                        false,
+                        times.and_then(|t| t.tool(&call.tool_call_id)),
+                        cx,
+                    )
+                    .into_any_element(),
+                _ => blank_row(*ix).into_any_element(),
+            },
             Row::Group { .. } => self.render_group(row, cx).into_any_element(),
             Row::TurnEnd { ix, outcome } => match session {
                 Some(session) => self
@@ -1263,9 +1272,17 @@ impl TranscriptView {
         cell.child(element).into_any_element()
     }
 
-    /// A user message: a right-aligned bubble over hover actions.
-    fn render_user(&self, ix: usize, text: &str, cx: &Context<Self>) -> Stateful<Div> {
-        let theme = cx.theme().colors;
+    /// A user message: its attachments, a right-aligned bubble, the
+    /// steered tag when it rode into a running turn, and hover actions.
+    fn render_user(
+        &self,
+        ix: usize,
+        text: &str,
+        attached: &[String],
+        steered: bool,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let ink = crate::theme::Palette::active(cx);
         let composer = self.composer.clone();
         let edit_text = text.to_owned();
         let copy_text = edit_text.clone();
@@ -1276,16 +1293,59 @@ impl TranscriptView {
             .flex_col()
             .items_end()
             .group("user-msg")
+            .when(!attached.is_empty(), |row| {
+                row.child(
+                    h_flex()
+                        .flex_wrap()
+                        .justify_end()
+                        .gap(px(SP_3))
+                        .mb(px(SP_3))
+                        .children(attached.iter().map(|name| {
+                            h_flex()
+                                .items_center()
+                                .gap(px(SP_2))
+                                .h(px(24.))
+                                .px(px(SP_4))
+                                .rounded(px(R_FULL))
+                                .border_1()
+                                .border_color(ink.line)
+                                .text_size(px(FS_XS))
+                                .text_color(ink.muted)
+                                .child(Icon::new(IconName::Paperclip).with_size(px(ICON_XS)))
+                                .child(SharedString::from(name.clone()))
+                        })),
+                )
+            })
             .child(
                 div()
                     .max_w(relative(BUBBLE_MAX))
                     .rounded(px(BUBBLE_R))
                     .px(px(BUBBLE_PX))
                     .py(px(BUBBLE_PY))
-                    .bg(theme.secondary)
-                    .text_color(theme.secondary_foreground)
+                    .when(steered, |bubble| {
+                        bubble
+                            .border_1()
+                            .border_dashed()
+                            .border_color(ink.line_strong)
+                            .text_color(ink.ink)
+                    })
+                    .when(!steered, |bubble| {
+                        bubble.bg(ink.bubble).text_color(ink.ink_strong)
+                    })
                     .child(SharedString::from(text.to_owned())),
             )
+            .when(steered, |row| {
+                row.child(
+                    h_flex()
+                        .mt(px(SP_2))
+                        .gap(px(SP_2))
+                        .items_center()
+                        .text_size(px(FS_2XS))
+                        .text_color(ink.faint)
+                        .child(Icon::new(IconName::CornerDownRight).with_size(px(ICON_XS)))
+                        .child("steered into the running turn"),
+                )
+            })
             .child(
                 h_flex()
                     .mt(px(SP_2))
@@ -1560,28 +1620,88 @@ impl TranscriptView {
             .flex_col()
             .child(head);
         if expanded {
+            let path = input_str(call.input.as_ref(), "path").to_owned();
             if let Some(lines) = diff {
-                unit = unit.child(render_detail(None, render_diff(&lines, cx), ix, cx));
-            } else if !output.is_empty() {
-                let detail_head = if call.title == "read" {
-                    Some((
-                        IconName::File,
-                        input_str(call.input.as_ref(), "path").to_owned(),
-                    ))
-                } else if call.title == "shell" {
-                    Some((
-                        IconName::Terminal,
-                        format!("$ {}", input_str(call.input.as_ref(), "command")),
-                    ))
-                } else if call.title == "edit" || call.title == "write" {
-                    Some((
-                        IconName::FileDiff,
-                        input_str(call.input.as_ref(), "path").to_owned(),
-                    ))
-                } else {
-                    None
+                let head = DetailHead {
+                    icon: if call.title == "write" {
+                        IconName::FilePlus
+                    } else {
+                        IconName::FileDiff
+                    },
+                    text: path,
+                    action: Some((
+                        "Review",
+                        TranscriptEvent::OpenChange(call.tool_call_id.clone()),
+                    )),
                 };
-                unit = unit.child(render_detail(detail_head, render_pre(&output, cx), ix, cx));
+                unit = unit.child(render_detail(
+                    Some(head),
+                    render_diff(&lines, cx),
+                    None,
+                    ix,
+                    cx,
+                ));
+            } else if call.title == "shell" && !output.is_empty() {
+                let lines: Vec<&str> = output.lines().collect();
+                let all = self.ui.full_output.contains(&ix);
+                let hidden = if all {
+                    0
+                } else {
+                    lines.len().saturating_sub(SHELL_TAIL)
+                };
+                let head = DetailHead {
+                    icon: IconName::Terminal,
+                    text: format!("$ {}", input_str(call.input.as_ref(), "command")),
+                    action: None,
+                };
+                let shown = lines[hidden..].join("\n");
+                let more = (hidden > 0).then(|| {
+                    let view = cx.entity();
+                    let label = SharedString::from(format!("{hidden} earlier lines"));
+                    div()
+                        .id(ElementId::named_usize("shell-more", ix))
+                        .test_support()
+                        .aria_label(label.clone())
+                        .w_full()
+                        .px(px(SP_5))
+                        .py(px(SP_3))
+                        .border_t_1()
+                        .border_color(ink.subtle)
+                        .text_size(px(FS_XS))
+                        .text_color(ink.faint)
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(theme.list_hover).text_color(theme.foreground))
+                        .on_click(move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                this.ui.full_output.insert(ix);
+                                cx.notify();
+                            });
+                        })
+                        .child(label)
+                        .into_any_element()
+                });
+                unit = unit.child(render_detail(
+                    Some(head),
+                    render_pre(&shown, cx),
+                    more,
+                    ix,
+                    cx,
+                ));
+            } else if !output.is_empty() {
+                let head = match call.title.as_str() {
+                    "read" => Some(DetailHead {
+                        icon: IconName::File,
+                        text: path.clone(),
+                        action: Some(("Open", TranscriptEvent::OpenFile(path))),
+                    }),
+                    "web_fetch" => Some(DetailHead {
+                        icon: IconName::Globe,
+                        text: input_str(call.input.as_ref(), "url").to_owned(),
+                        action: Some(("Reader", TranscriptEvent::OpenBrowser)),
+                    }),
+                    _ => None,
+                };
+                unit = unit.child(render_detail(head, render_pre(&output, cx), None, ix, cx));
             }
         }
         unit
@@ -1593,10 +1713,10 @@ impl TranscriptView {
             key,
             label,
             family,
+            members,
             failed,
             running,
             expanded,
-            ..
         } = row
         else {
             return blank_row(0);
@@ -1659,12 +1779,36 @@ impl TranscriptView {
             );
         }
         head = head.child(chevron(expanded, ink.faint));
-        div()
+        let mut unit = div()
             .id(ElementId::named_usize("row-group", group_ix))
             .w_full()
             .flex()
             .flex_col()
-            .child(head)
+            .child(head);
+        if expanded {
+            let store = self.store.read(cx);
+            let session = store.active_session();
+            let times = session.and_then(|session| store.timings(&session.id));
+            let mut list = div()
+                .id("members")
+                .mt(px(SP_2))
+                .ml(px(DETAIL_INDENT))
+                .border_1()
+                .border_color(theme.border)
+                .rounded(px(R_LG))
+                .bg(ink.surface)
+                .overflow_hidden();
+            for (n, member) in members.iter().enumerate() {
+                if let Some(TranscriptItem::ToolCall(call)) =
+                    session.and_then(|session| session.items.get(*member))
+                {
+                    let took = times.and_then(|t| t.tool(&call.tool_call_id));
+                    list = list.child(self.render_tool(*member, call, true, n == 0, took, cx));
+                }
+            }
+            unit = unit.child(list);
+        }
+        unit
     }
 
     /// The end of a run: when it ended and how long it ran, when this
@@ -1789,6 +1933,27 @@ fn run_texts(session: &Session, end: usize) -> (Option<String>, String) {
         .collect::<Vec<_>>()
         .join("\n\n");
     (prompt.filter(|text| !text.is_empty()), reply)
+}
+
+/// The names of a prompt's non-text blocks, for its attachment chips.
+fn attachments(content: &[kage_client::wire::ContentBlock]) -> Vec<String> {
+    use kage_client::wire::ContentBlock;
+
+    content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Image(_) => Some("image".to_owned()),
+            ContentBlock::Audio(_) => Some("audio".to_owned()),
+            ContentBlock::ResourceLink(link) => Some(link.name.clone()),
+            ContentBlock::Resource(resource) => Some(
+                resource.resource["uri"]
+                    .as_str()
+                    .map_or("resource", |uri| basename(uri))
+                    .to_owned(),
+            ),
+            _ => None,
+        })
+        .collect()
 }
 
 /// An empty row, shown only when the model names an item that is gone.
@@ -2131,14 +2296,20 @@ fn render_decision(
         .into_any_element()
 }
 
-/// The design's detail box: a bordered surface with an optional head
-/// naming the path or command, indented under the row that opened it.
-/// It carries no bottom margin of its own: [`margins`] reports the
-/// design's 10px as the row's closing margin and [`gap`] seats the next
-/// row on it, so a margin here too would double it.
+/// The head line of a detail box: an icon, a mono path or command, and
+/// the action the box offers, if any.
+struct DetailHead {
+    icon: IconName,
+    text: String,
+    action: Option<(&'static str, TranscriptEvent)>,
+}
+
+/// One detail box under a tool row: the head, the body capped at the
+/// design's 320px and scrolling past it, and an optional footer.
 fn render_detail(
-    head: Option<(IconName, String)>,
+    head: Option<DetailHead>,
     body: Div,
+    footer: Option<AnyElement>,
     ix: usize,
     cx: &Context<TranscriptView>,
 ) -> impl IntoElement {
@@ -2154,30 +2325,51 @@ fn render_detail(
         .rounded(px(R_LG))
         .bg(theme.muted)
         .overflow_hidden();
-    if let Some((icon_name, path)) = head {
-        box_ = box_.child(
-            h_flex()
-                .w_full()
-                .items_center()
-                .gap(px(SP_4))
-                .px(px(SP_5))
-                .py(px(DETAIL_HEAD_PY))
-                .border_b_1()
-                .border_color(crate::theme::Palette::active(cx).subtle)
-                .text_size(px(FS_XS))
-                .text_color(theme.muted_foreground)
-                .child(Icon::new(icon_name).with_size(px(ICON_XS)))
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .font_family(mono.clone())
-                        .text_color(theme.foreground)
-                        .child(SharedString::from(path)),
-                ),
-        );
+    if let Some(head) = head {
+        let mut line = h_flex()
+            .w_full()
+            .items_center()
+            .gap(px(SP_4))
+            .px(px(SP_5))
+            .py(px(DETAIL_HEAD_PY))
+            .border_b_1()
+            .border_color(crate::theme::Palette::active(cx).subtle)
+            .text_size(px(FS_XS))
+            .text_color(theme.muted_foreground)
+            .child(Icon::new(head.icon).with_size(px(ICON_XS)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .font_family(mono.clone())
+                    .text_color(theme.foreground)
+                    .child(SharedString::from(head.text)),
+            );
+        if let Some((label, event)) = head.action {
+            let view = cx.entity();
+            line = line.child(
+                Button::new(ElementId::named_usize("detail-action", ix))
+                    .label(label)
+                    .xsmall()
+                    .ghost()
+                    .on_click(move |_, _, cx| {
+                        let event = event.clone();
+                        view.update(cx, |_, cx| cx.emit(event));
+                    }),
+            );
+        }
+        box_ = box_.child(line);
     }
-    box_.child(body).into_any_element()
+    box_.child(
+        div()
+            .id("body")
+            .max_h(px(DETAIL_MAX_H))
+            .overflow_y_scroll()
+            .child(body),
+    )
+    .children(footer)
+    .into_any_element()
 }
 
 /// The mono body of a detail box: the design's deep well at its 12px
@@ -2263,7 +2455,7 @@ impl Render for TranscriptView {
             }
         };
         let signatures = match self.store.read(cx).active_session() {
-            Some(session) => signatures(session, &model.rows),
+            Some(session) => signatures(session, &model.rows, &self.ui),
             None => Vec::new(),
         };
         self.sync_list(signatures);
@@ -2340,7 +2532,7 @@ fn following_list() -> ListState {
 
 /// One signature per row: what decides its laid-out height. A row whose
 /// signature is unchanged keeps its measurement.
-fn signatures(session: &Session, rows: &[Row]) -> Vec<u64> {
+fn signatures(session: &Session, rows: &[Row], ui: &UiState) -> Vec<u64> {
     use std::hash::{Hash as _, Hasher as _};
 
     let last = rows.len().saturating_sub(1);
@@ -2357,10 +2549,15 @@ fn signatures(session: &Session, rows: &[Row]) -> Vec<u64> {
                 _ => &[],
             };
             match row.key() {
-                RowKey::Item(item) => item_fingerprint(session, item, &mut hasher),
+                RowKey::Item(item) => {
+                    item_fingerprint(session, item, &mut hasher);
+                    ui.full_output.contains(&item).hash(&mut hasher);
+                }
                 RowKey::Group(_) => {
                     for item in members {
                         item_fingerprint(session, *item, &mut hasher);
+                        ui.expanded.contains(&RowKey::Item(*item)).hash(&mut hasher);
+                        ui.full_output.contains(item).hash(&mut hasher);
                     }
                 }
             }
@@ -2727,19 +2924,14 @@ mod tests {
         let session = session_with(vec![read("1"), read("2"), read("3")]);
         let ui = UiState {
             expanded: HashSet::from([RowKey::Group(0)]),
+            ..UiState::default()
         };
         let model = row_model(&session, &ui);
-        assert_eq!(model.kinds(), vec!["group", "tool", "tool", "tool"]);
-        let nested: Vec<usize> = model.rows[1..]
-            .iter()
-            .map(|row| match row {
-                Row::Tool {
-                    ix, nested: true, ..
-                } => *ix,
-                other => panic!("expected a nested tool row, got {other:?}"),
-            })
-            .collect();
-        assert_eq!(nested, vec![0, 1, 2]);
+        assert_eq!(model.kinds(), vec!["group"], "the members render inside it");
+        assert!(matches!(
+            &model.rows[0],
+            Row::Group { expanded: true, members, .. } if members == &[0, 1, 2]
+        ));
     }
 
     #[test]
@@ -2936,11 +3128,11 @@ mod tests {
             TranscriptItem::Assistant { text: "a".into() },
         ]);
         let ui = UiState::default();
-        let before = super::signatures(&session, &row_model(&session, &ui).rows);
+        let before = super::signatures(&session, &row_model(&session, &ui).rows, &ui);
         session.items[1] = TranscriptItem::Assistant {
             text: "a longer reply".into(),
         };
-        let after = super::signatures(&session, &row_model(&session, &ui).rows);
+        let after = super::signatures(&session, &row_model(&session, &ui).rows, &ui);
         assert_eq!(before[0], after[0], "the prompt row keeps its measurement");
         assert_ne!(before[1], after[1], "the growing reply is measured again");
     }
@@ -3409,5 +3601,47 @@ mod tests {
                 },
             }),
         }
+    }
+
+    #[gpui_kit::test]
+    fn a_long_shell_output_shows_its_tail_and_offers_the_rest(cx: &mut TestAppContext) {
+        let output: Vec<String> = (1..=30).map(|n| format!("line {n}")).collect();
+        let mut store = booted_store();
+        store.absorb(Frame::Notification {
+            method: "session/update".to_owned(),
+            params: serde_json::json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call-shell",
+                    "title": "shell",
+                    "kind": "execute",
+                    "status": "completed",
+                    "rawInput": {"command": "cargo test"},
+                    "content": [{
+                        "type": "content",
+                        "content": {"type": "text", "text": output.join("\n")},
+                    }],
+                },
+            }),
+        });
+        let store = cx.new(|_| store);
+        let (view, visual) = window_on(cx, store.clone());
+        visual.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.ui.expanded.insert(RowKey::Item(0));
+                cx.notify();
+            });
+        });
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let more = ElementId::named_usize("shell-more", 0);
+        let label = visual.update(|window, _| window.find(more.clone()).label().map(str::to_owned));
+        assert_eq!(label.as_deref(), Some("18 earlier lines"));
+        visual.update(|window, cx| window.click(more.clone(), cx));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            visual.update(|window, _| window.try_find(more.clone()).is_none()),
+            "the whole output shows once asked for"
+        );
     }
 }

@@ -29,8 +29,8 @@ use crate::views::chrome::{
     FindBar, FindEvent, NoticeWatch, PaletteView, Toasts, WelcomeView, toasts_for_changes,
 };
 use crate::views::{
-    ApprovalCard, ComposerView, DockEvent, DockRow, SidebarView, TranscriptView, WorkbenchEvent,
-    WorkbenchView,
+    ApprovalCard, ComposerView, DockEvent, DockRow, SidebarView, TranscriptEvent, TranscriptView,
+    WorkbenchEvent, WorkbenchView,
 };
 use kage_client::{Change, Frame};
 
@@ -230,6 +230,16 @@ impl Shell {
                     .update(cx, |transcript, cx| transcript.scroll_to_plan(cx)),
             },
         )
+        .detach();
+        cx.subscribe(&transcript, |shell, _, event: &TranscriptEvent, cx| {
+            shell.workbench_visible = true;
+            shell.workbench.update(cx, |workbench, cx| match event {
+                TranscriptEvent::OpenFile(_) => workbench.open_files(cx),
+                TranscriptEvent::OpenChange(call) => workbench.open_change(call.clone(), cx),
+                TranscriptEvent::OpenBrowser => workbench.open_browser(cx),
+            });
+            cx.notify();
+        })
         .detach();
         cx.subscribe_in(
             &find,

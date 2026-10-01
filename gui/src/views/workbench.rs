@@ -356,6 +356,25 @@ impl WorkbenchView {
         }
     }
 
+    /// Shows the change tool call `call_id` made in the changes pane.
+    pub fn open_change(&mut self, call_id: String, cx: &mut Context<Self>) {
+        self.tab = Tab::Changes;
+        self.selected = Some(call_id);
+        cx.notify();
+    }
+
+    /// Shows the files pane.
+    pub fn open_files(&mut self, cx: &mut Context<Self>) {
+        self.tab = Tab::Files;
+        cx.notify();
+    }
+
+    /// Shows the fetched pages.
+    pub fn open_browser(&mut self, cx: &mut Context<Self>) {
+        self.tab = Tab::Browser;
+        cx.notify();
+    }
+
     /// A tab styled as the design's workbench tabs: the icon always,
     /// the label and count only while the tab is on.
     fn tab_button(

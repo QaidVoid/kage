@@ -18,5 +18,5 @@ pub use chrome::{FindBar, PaletteView, Toasts, WelcomeView};
 pub use composer::ComposerView;
 pub use dock::{DockEvent, DockRow};
 pub use sidebar::SidebarView;
-pub use transcript::TranscriptView;
+pub use transcript::{TranscriptEvent, TranscriptView};
 pub use workbench::{WorkbenchEvent, WorkbenchView};

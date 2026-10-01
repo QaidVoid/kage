@@ -188,7 +188,7 @@ fn first_line(text: &str) -> Option<String> {
 }
 
 /// A short token count: `840`, `2.3k`, `1.2M`.
-fn tokens(n: u64) -> String {
+pub(crate) fn tokens(n: u64) -> String {
     #[allow(clippy::cast_precision_loss)]
     match n {
         0..1_000 => n.to_string(),

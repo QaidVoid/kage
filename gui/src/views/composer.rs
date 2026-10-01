@@ -40,6 +40,7 @@ use crate::theme::{
     FONT_MONO, FS_2XS, FS_BASE, FS_SM, FS_XS, LINE_HEIGHT, Palette, R_COMPOSER, R_FULL, R_LG, R_MD,
     SP_2, WEIGHT_SEMIBOLD,
 };
+use crate::views::agents::tokens;
 use crate::views::deferred::{Deferred, LaidOut};
 use crate::views::dialog::{DialogKind, DialogView};
 use gpui_kit::base::ElementExt as _;
@@ -125,6 +126,145 @@ fn toolbar_pill(id: &'static str, open: bool, pal: &'static Palette, cx: &App) -
         .text_color(muted)
         .hover(move |style| style.bg(hover).text_color(ink))
         .when(open, |pill| pill.bg(hover).text_color(ink))
+}
+
+/// The context fill the engine compacts at on its own.
+const COMPACT_AT: f64 = 0.8;
+
+/// What the context gauge shows, read when its trigger renders.
+#[derive(Debug, Clone)]
+struct Gauge {
+    used: u64,
+    size: u64,
+    cost: Option<String>,
+    model: Option<String>,
+    turns: usize,
+    running: bool,
+}
+
+impl Gauge {
+    /// The gauge: twenty cells filled to the context in use with the
+    /// compaction mark at the sixteenth, the totals, and Compact now.
+    fn render(&self, store: &Entity<Store>, pal: &'static Palette) -> Div {
+        let fill = if self.size > 0 {
+            self.used as f64 / self.size as f64
+        } else {
+            0.0
+        };
+        let percent = (fill * 100.0).round() as i64;
+        let hot = fill >= COMPACT_AT;
+        let cells = h_flex().gap(px(3.)).children((0..20).map(|cell| {
+            let mid = (cell as f64 + 0.5) / 20.0;
+            let lit = mid <= fill;
+            div()
+                .flex_1()
+                .h(px(14.))
+                .rounded(px(3.))
+                .bg(match (lit, hot) {
+                    (false, _) => pal.fill_hover,
+                    (true, true) => pal.warn,
+                    (true, false) => pal.accent,
+                })
+                .when(cell == 16, |cell| {
+                    cell.border_l_2().border_color(pal.ink_strong)
+                })
+        }));
+        let stat = |label: &'static str, value: String| {
+            v_flex()
+                .flex_1()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .text_size(px(FS_2XS))
+                        .text_color(pal.faint)
+                        .child(label),
+                )
+                .child(div().text_size(px(FS_SM)).text_color(pal.ink).child(value))
+        };
+        let store = store.clone();
+        let running = self.running;
+        v_flex()
+            .w(px(400.))
+            .px(px(14.))
+            .py(px(12.))
+            .gap(px(10.))
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(pal.ink_strong)
+                            .child("Context"),
+                    )
+                    .child(
+                        div()
+                            .font_family(FONT_MONO)
+                            .text_size(px(FS_XS))
+                            .text_color(pal.muted)
+                            .child(format!("{} / {}", tokens(self.used), tokens(self.size))),
+                    )
+                    .child(
+                        div()
+                            .px(px(7.))
+                            .rounded(px(R_FULL))
+                            .text_size(px(FS_2XS))
+                            .bg(if hot { pal.warn_soft } else { pal.fill })
+                            .text_color(if hot { pal.warn } else { pal.muted })
+                            .child(format!("{percent}%")),
+                    ),
+            )
+            .child(cells)
+            .child(
+                h_flex()
+                    .justify_between()
+                    .text_size(px(FS_2XS))
+                    .text_color(pal.faint)
+                    .child("0")
+                    .child("compacts at 80%")
+                    .child(tokens(self.size)),
+            )
+            .child(
+                v_flex()
+                    .gap(px(10.))
+                    .pt(px(10.))
+                    .border_t_1()
+                    .border_color(pal.subtle)
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .child(stat("Spent", self.cost.clone().unwrap_or_else(|| "unknown".into())))
+                            .child(stat("Model", self.model.clone().unwrap_or_else(|| "unknown".into())))
+                            .child(stat("Turns", self.turns.to_string())),
+                    )
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(FS_2XS))
+                                    .text_color(pal.faint)
+                                    .child("The engine compacts on its own at 80%, summarizing older turns."),
+                            )
+                            .child(
+                                crate::views::kit::btn_sm("gauge-compact", crate::views::kit::BtnTone::Plain, pal)
+                                    .when(running, |btn| btn.opacity(0.45))
+                                    .when(!running, |btn| {
+                                        btn.on_click(move |_, _, cx| {
+                                            store.act(cx, Store::compact);
+                                        })
+                                    })
+                                    .child(Icon::new(IconName::Layers).with_size(px(12.)))
+                                    .child("Compact now"),
+                            ),
+                    ),
+            )
+    }
 }
 
 /// The one-word labels inside the hint line.
@@ -1657,47 +1797,115 @@ impl ComposerView {
     }
 
     /// The context ring with its percent, shown only while a session
-    /// exists, as the web client's `ring-wrap` draws it. At 80 percent
-    /// the ring turns warn and the tooltip says what the wire cannot
-    /// do about it: no compaction control exists, so none is offered.
-    fn fuel(&self, cx: &Context<Self>, pal: &'static Palette) -> Option<Stateful<Div>> {
+    /// exists, as the web client's `ring-wrap` draws it. The ring turns
+    /// warn at 80 percent, where the engine compacts on its own. With
+    /// the Lab context gauge on, a click opens the gauge.
+    fn fuel(&self, cx: &Context<Self>, pal: &'static Palette) -> Option<AnyElement> {
         let session = self.store.read(cx).active_session()?;
         let fill = session.usage.fill();
         let (used, size) = (session.usage.used, session.usage.size);
         let percent = (fill * 100.0).round() as i64;
-        let hot = fill >= 0.8;
-        let ring = if hot { pal.warn } else { pal.accent };
-        let mut tooltip = if size > 0 {
-            format!("Context: {used} of {size} tokens ({percent}%)")
+        let ring = if fill >= COMPACT_AT {
+            pal.warn
         } else {
-            "Context: the agent sent no usage yet".to_owned()
+            pal.accent
         };
-        if hot {
-            tooltip.push_str("; no compaction control exists on the wire");
-        }
-        let (faint, ink, hover) = (pal.faint, pal.ink, pal.hover);
-        let tip: SharedString = tooltip.into();
-        Some(
-            h_flex()
-                .id("composer-fuel")
-                .h(px(30.))
-                .px(px(6.))
-                .gap(px(6.))
-                .flex_none()
-                .items_center()
-                .rounded(px(R_FULL))
-                .font_family(FONT_MONO)
-                .text_size(px(FS_2XS))
-                .text_color(faint)
-                .hover(move |style| style.bg(hover).text_color(ink))
-                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                .child(
-                    ProgressCircle::new("ring")
-                        .value(fill as f32 * 100.0)
-                        .color(ring)
-                        .with_size(px(22.)),
+        let label = SharedString::from(format!("{percent}%"));
+        let circle = ProgressCircle::new("ring")
+            .value(fill as f32 * 100.0)
+            .color(ring)
+            .with_size(px(22.));
+        if !self.store.read(cx).prefs().fuel {
+            let tip: SharedString = if size > 0 {
+                format!(
+                    "Context: {} of {} tokens ({percent}%)",
+                    tokens(used),
+                    tokens(size)
                 )
-                .child(SharedString::from(format!("{percent}%"))),
+                .into()
+            } else {
+                "Context: the agent sent no usage yet".into()
+            };
+            let (faint, ink, hover) = (pal.faint, pal.ink, pal.hover);
+            return Some(
+                h_flex()
+                    .id("composer-fuel")
+                    .h(px(30.))
+                    .px(px(6.))
+                    .gap(px(6.))
+                    .flex_none()
+                    .items_center()
+                    .rounded(px(R_FULL))
+                    .font_family(FONT_MONO)
+                    .text_size(px(FS_2XS))
+                    .text_color(faint)
+                    .hover(move |style| style.bg(hover).text_color(ink))
+                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                    .child(circle)
+                    .child(label)
+                    .into_any_element(),
+            );
+        }
+        let gauge = Gauge {
+            used,
+            size,
+            cost: session
+                .usage
+                .cost
+                .as_ref()
+                .map(|cost| format!("{} {:.2}", cost.currency, cost.amount)),
+            model: select_option(session, "model").and_then(|option| {
+                option
+                    .options
+                    .iter()
+                    .find(|choice| choice.value == option.current_value)
+                    .map(|choice| choice.name.clone())
+            }),
+            turns: session
+                .items
+                .iter()
+                .filter(|item| matches!(item, kage_client::TranscriptItem::User { .. }))
+                .count(),
+            running: self.running(cx),
+        };
+        let store = self.store.clone();
+        Some(
+            Popover::new("composer-gauge")
+                .trigger(
+                    toolbar_pill("composer-fuel", false, pal, cx)
+                        .px(px(6.))
+                        .font_family(FONT_MONO)
+                        .text_size(px(FS_2XS))
+                        .tooltip(|window, cx| Tooltip::new("Context").build(window, cx))
+                        .child(circle)
+                        .child(label),
+                )
+                .anchor(Anchor::BottomRight)
+                .rounded(px(R_LG))
+                .content(move |_, _, _| gauge.render(&store, pal))
+                .into_any_element(),
+        )
+    }
+
+    /// Compact, offered in the toolbar once the context passes the
+    /// 80 percent the engine compacts at, while no turn runs.
+    fn compact_button(&self, cx: &Context<Self>, pal: &'static Palette) -> Option<Pill> {
+        let session = self.store.read(cx).active_session()?;
+        if session.usage.fill() < COMPACT_AT || self.running(cx) {
+            return None;
+        }
+        let store = self.store.clone();
+        Some(
+            toolbar_pill("composer-compact", false, pal, cx)
+                .text_color(pal.warn)
+                .tooltip(|window, cx| {
+                    Tooltip::new("Summarize older turns to free context").build(window, cx)
+                })
+                .on_click(move |_, _, cx| {
+                    store.act(cx, Store::compact);
+                })
+                .child(Icon::new(IconName::Layers).with_size(px(14.)))
+                .child("Compact"),
         )
     }
 
@@ -1821,6 +2029,7 @@ impl ComposerView {
                 ))
             })
             .child(div().flex_1().min_w(px(4.)))
+            .children(self.compact_button(cx, pal))
             .children(self.fuel(cx, pal))
             .child(self.model_button(cx, pal))
             .child(self.send_button(cx, pal))

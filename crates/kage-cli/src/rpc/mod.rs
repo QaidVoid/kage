@@ -72,6 +72,34 @@ use sessions::list_page;
 
 use crate::engine::{Recorder, SessionSpec, SubscriptionId};
 
+/// What a redacted config value reads as.
+const REDACTED: &str = "<redacted>";
+
+/// Blanks the config values that may carry credentials before they leave
+/// the process: provider and MCP header values, MCP environment values
+/// and plugin settings. The names stay, so a client can still say what
+/// is configured.
+fn redact_secrets(config: &mut Config) {
+    let blank = |map: &mut BTreeMap<String, String>| {
+        for value in map.values_mut() {
+            REDACTED.clone_into(value);
+        }
+    };
+    for provider in config.providers.custom.values_mut() {
+        blank(&mut provider.headers);
+    }
+    for provider in config.providers.overrides.values_mut() {
+        blank(&mut provider.headers);
+    }
+    for server in config.mcp.servers.values_mut() {
+        blank(&mut server.headers);
+        blank(&mut server.env);
+    }
+    for settings in config.plugins.config.values_mut() {
+        *settings = serde_json::Value::String(REDACTED.to_owned());
+    }
+}
+
 /// Entry point for the `Rpc` subcommand.
 pub(crate) fn run(model_override: Option<&str>, system_role: &str) -> ExitCode {
     let served = Host::start(model_override, system_role)
@@ -423,7 +451,9 @@ impl Agent for CliAcpAgent {
 
     fn config_get(&self, _req: ConfigGetRequest) -> Result<ConfigGetResult, RpcError> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let config = Config::load_layered(&cwd).map_err(|e| RpcError::internal(e.to_string()))?;
+        let mut config =
+            Config::load_layered(&cwd).map_err(|e| RpcError::internal(e.to_string()))?;
+        redact_secrets(&mut config);
         Ok(ConfigGetResult {
             providers: config.providers,
             mcp: config.mcp,
@@ -433,9 +463,6 @@ impl Agent for CliAcpAgent {
         })
     }
 
-    /// Continues swarm children of the session. The engine verifies the
-    /// members once the command lands; one that is not a swarm child of
-    /// the session refuses the whole request with a notice.
     fn session_fork(&self, req: SessionForkRequest) -> Result<SessionForkResponse, RpcError> {
         self.fork_recorded(&req)
     }
@@ -467,6 +494,9 @@ impl Agent for CliAcpAgent {
         Ok(serde_json::json!({}))
     }
 
+    /// Continues swarm children of the session. The engine verifies the
+    /// members once the command lands; one that is not a swarm child of
+    /// the session refuses the whole request with a notice.
     fn swarm_resume(&self, req: SwarmResumeRequest) -> Result<SwarmResumeResponse, RpcError> {
         let id = self.engine_id(&req.session_id)?;
         let mut members = BTreeMap::new();

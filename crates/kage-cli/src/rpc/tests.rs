@@ -2737,6 +2737,32 @@ fn config_get_serves_the_read_only_sections_without_writing_config() {
 }
 
 #[test]
+fn config_get_names_headers_and_env_without_their_values() {
+    let mut config = kage_core::config::Config::default();
+    config.mcp.servers.insert(
+        "gh".into(),
+        McpSpec {
+            command: None,
+            args: Vec::new(),
+            url: Some("https://mcp.example".into()),
+            headers: [("Authorization".to_owned(), "Bearer sk-live".to_owned())].into(),
+            env: [("TOKEN".to_owned(), "t0ps3cret".to_owned())].into(),
+            disabled: false,
+            oauth: None,
+        },
+    );
+    config.plugins.config.insert(
+        "notify".into(),
+        serde_json::json!({"webhook": "https://hook"}),
+    );
+    super::redact_secrets(&mut config);
+    let server = &config.mcp.servers["gh"];
+    assert_eq!(server.headers["Authorization"], super::REDACTED);
+    assert_eq!(server.env["TOKEN"], super::REDACTED);
+    assert_eq!(config.plugins.config["notify"], super::REDACTED);
+}
+
+#[test]
 fn mcp_status_arrives_per_server_and_only_carries_changes() {
     let dir = tempfile::tempdir().unwrap();
     let h = serve_with(

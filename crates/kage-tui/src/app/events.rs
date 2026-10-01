@@ -166,19 +166,15 @@ impl App {
                 buf.focus_next_any();
             }
             InputAction::OpenSessionPicker => {
-                // Default to this directory's sessions. If there are
-                // none here but some elsewhere, open in all-dirs
-                // scope so Ctrl+S is never a dead key in a fresh dir.
+                // Always this directory's sessions first. A directory
+                // with none still opens the empty picker when other
+                // directories have some, so Ctrl+A is one key away
+                // instead of the picker silently listing every project.
                 if let Some(lister) = self.session_lister.as_ref() {
                     let items = lister(false);
-                    let (scope, items) = if items.is_empty() {
-                        let all = lister(true);
-                        (!all.is_empty(), all)
-                    } else {
-                        (false, items)
-                    };
-                    self.session_scope_all = scope;
-                    self.show_session_picker(items, false);
+                    let elsewhere = items.is_empty() && !lister(true).is_empty();
+                    self.session_scope_all = false;
+                    self.show_session_picker(items, elsewhere);
                 }
             }
             InputAction::BeginCommand => {
@@ -262,6 +258,16 @@ impl App {
     /// gesture.
     pub(crate) fn handle_mouse_event(&mut self, mouse: ratatui::crossterm::event::MouseEvent) {
         use ratatui::crossterm::event::MouseButton;
+        // The agents overlay scrolls with the wheel; nothing else under
+        // it sees the mouse.
+        if let Some(overlay) = self.agents_overlay.as_mut() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => overlay.wheel(false),
+                MouseEventKind::ScrollDown => overlay.wheel(true),
+                _ => {}
+            }
+            return;
+        }
         if self.context_menu.is_none() && self.modal_open() {
             return;
         }

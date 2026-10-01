@@ -283,6 +283,34 @@ fn session_picker_defaults_to_cwd_and_ctrl_a_toggles_all() {
 }
 
 #[test]
+fn a_directory_without_sessions_opens_its_own_empty_scope() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    app.set_session_lister(Box::new(|all| {
+        if all {
+            vec![PickItem::simple("elsewhere")]
+        } else {
+            Vec::new()
+        }
+    }));
+    let _ = app.apply(InputAction::OpenSessionPicker);
+    assert_eq!(app.picker_kind, Some(PickerKind::Session));
+    assert!(
+        !app.session_scope_all,
+        "other projects stay out of this list"
+    );
+    assert!(app.dispatch_picker_key(ctrl('a')).is_none());
+    assert!(app.session_scope_all, "Ctrl+A still reaches them");
+
+    app.picker = None;
+    app.picker_kind = None;
+    app.set_session_lister(Box::new(|_| Vec::new()));
+    let _ = app.apply(InputAction::OpenSessionPicker);
+    assert_eq!(app.picker_kind, None, "nothing anywhere opens nothing");
+}
+
+#[test]
 fn paste_routes_to_the_active_overlay() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();

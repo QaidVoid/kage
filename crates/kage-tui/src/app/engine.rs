@@ -227,8 +227,7 @@ impl App {
                 self.agents.clear();
                 self.agent_buffers.clear();
                 self.swarm_oneshot = None;
-                self.agents
-                    .restore(self.active_session.unwrap_or_default(), &messages);
+                self.restore_agents(self.active_session.unwrap_or_default(), &messages);
                 let durations = crate::events::tool_durations(&messages);
                 {
                     let mut buf = lock(&self.root_buffer);
@@ -417,6 +416,40 @@ impl App {
         self.agent_buffers
             .get(&session)
             .map_or_else(|| Arc::clone(&self.root_buffer), Arc::clone)
+    }
+
+    /// Lists the agents a resumed conversation started, at every depth:
+    /// `root`'s own agents come from `messages`, and each agent's own
+    /// agents from that agent's stored transcript, read through the
+    /// agent loader. Their transcripts are not kept; opening one reads
+    /// it again.
+    fn restore_agents(&mut self, root: SessionId, messages: &[Arc<kage_core::Message>]) {
+        self.agents.restore(root, messages);
+        let Some(load) = self.agent_loader.as_ref() else {
+            return;
+        };
+        let mut pending: Vec<SessionId> = self
+            .agents
+            .under(root)
+            .into_iter()
+            .map(|(_, node)| node.session)
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        while let Some(session) = pending.pop() {
+            if !seen.insert(session) {
+                continue;
+            }
+            let Some(own) = load(session) else {
+                continue;
+            };
+            self.agents.restore(session, &own);
+            pending.extend(
+                self.agents
+                    .under(session)
+                    .into_iter()
+                    .map(|(_, node)| node.session),
+            );
+        }
     }
 
     /// Point the transcript, the working row, the header and the input

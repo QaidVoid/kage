@@ -1065,7 +1065,7 @@ fn the_agents_overlay_fits_80_by_24_and_stays_live() {
     assert!(rows[top + 1].contains("idle"), "{rows:#?}");
     assert!(rows[top + 2].contains("general task"), "{rows:#?}");
     assert!(rows[top + 3].contains("test "), "{rows:#?}");
-    assert!(rows[top + 4].contains("\u{2022} explore"), "{rows:#?}");
+    assert!(rows[top + 4].contains("\u{2022}   explore"), "{rows:#?}");
     assert!(rows[top + 4].contains("done"), "{rows:#?}");
     assert!(rows[top + 5].contains("enter to open"), "{rows:#?}");
 
@@ -1507,4 +1507,92 @@ fn a_resumed_session_lists_its_agents_and_opens_them_read_only() {
     app.handle_key(code(KeyCode::Enter));
     assert!(resolutions(&rx).is_empty(), "nothing reaches the engine");
     assert_eq!(app.input.text(), "more please");
+}
+
+#[test]
+fn a_resume_lists_agents_at_every_depth_with_their_recorded_stats() {
+    let (mut app, _rx, events) = app_with_events();
+    let (child, grandchild) = (kage_core::SessionId::new(), kage_core::SessionId::new());
+    let call = |id: &str, description: &str| {
+        kage_core::Message::new(
+            kage_core::Role::Assistant,
+            vec![kage_core::Content::ToolCall {
+                id: kage_core::ToolCallId::new(id),
+                name: "agent".into(),
+                input: serde_json::json!({ "agent": "explore", "description": description }),
+            }],
+            None,
+        )
+    };
+    let result = |id: &str, session: kage_core::SessionId| {
+        kage_core::Message::new(
+            kage_core::Role::ToolResult,
+            vec![kage_core::Content::ToolResultBlock {
+                call_id: kage_core::ToolCallId::new(id),
+                output: format!(
+                    "<agent name=\"explore\" session=\"{session}\" state=\"completed\" in=\"1200\" out=\"300\" run_ms=\"4000\">\ndone\n</agent>"
+                ),
+                is_error: false,
+            }],
+            None,
+        )
+    };
+    let nested = vec![
+        std::sync::Arc::new(call("b1", "map the tests")),
+        std::sync::Arc::new(result("b1", grandchild)),
+    ];
+    app.set_agent_loader(Box::new(move |session| {
+        (session == child).then(|| nested.clone())
+    }));
+    feed(
+        &mut app,
+        &events,
+        vec![
+            kage_core::protocol::HostEvent::SessionChanged {
+                path: std::path::PathBuf::from("/tmp/s.jsonl"),
+                title: None,
+                messages: vec![
+                    std::sync::Arc::new(call("a1", "map src")),
+                    std::sync::Arc::new(result("a1", child)),
+                ],
+                compaction: None,
+            }
+            .into(),
+        ],
+    );
+    let rows = app.agents_overlay_rows();
+    let deep = rows
+        .iter()
+        .find(|row| row.session == Some(grandchild))
+        .expect("the agent the child started is listed");
+    assert_eq!(deep.depth, 2);
+    assert_eq!(deep.title, "map the tests");
+    assert_eq!(deep.tokens, 1_500);
+    assert_eq!(deep.elapsed_ms, Some(4_000));
+}
+
+#[test]
+fn the_wheel_moves_the_agents_overlay_and_not_the_transcript() {
+    use ratatui::crossterm::event::{MouseEvent, MouseEventKind};
+    let (mut app, _rx, _events, [_, _, explore]) = agents_app();
+    app.set_scroll(2);
+    app.handle_key(ctrl('t'));
+    let wheel = |kind| MouseEvent {
+        kind,
+        column: 5,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    };
+    app.handle_mouse_event(wheel(MouseEventKind::ScrollDown));
+    assert_eq!(
+        app.agents_overlay.as_ref().unwrap().selected(),
+        Some(explore)
+    );
+    app.handle_mouse_event(wheel(MouseEventKind::ScrollUp));
+    assert_eq!(app.agents_overlay.as_ref().unwrap().selected(), None);
+    assert_eq!(
+        lock(&app.buffer).scroll(),
+        Some(2),
+        "the transcript stays put"
+    );
 }

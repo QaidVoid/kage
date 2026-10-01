@@ -2,11 +2,16 @@
 //!
 //! A modal list of the main session and every agent under it, live or
 //! finished, as a tree in spawn order. Enter opens the selected agent,
-//! or the main view from the main session's row. `x` stops the selected
-//! agent with the agents under it, and Esc closes. Other keys propagate,
+//! or the main view from the main session's row. A row with agents under
+//! it folds: Left or `h` folds it (or moves to its parent), Right or `l`
+//! unfolds it (or moves into it), Space toggles. Page Up and Page Down
+//! move a page, the mouse wheel a few rows. `x` stops the selected agent
+//! with the agents under it, and Esc closes. Other keys propagate,
 //! so an approval panel under the overlay keeps its answers. The App hands in
 //! fresh rows every frame, so states and times stay live, and the
 //! selection follows its session when rows move.
+
+use std::collections::HashSet;
 
 use kage_core::SessionId;
 use ratatui::Frame;
@@ -28,7 +33,10 @@ const GAP: usize = 2;
 /// Extra indent per level below the main session's own agents.
 const INDENT: &str = "  ";
 /// The footer hint in the bottom border.
-const HINT: &str = " enter to open \u{b7} x to stop \u{b7} esc to close ";
+const HINT: &str =
+    " enter to open \u{b7} \u{2190}\u{2192} to fold \u{b7} x to stop \u{b7} esc to close ";
+/// Rows the mouse wheel moves per notch.
+const WHEEL_ROWS: usize = 3;
 
 /// Where a row's session is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,7 +94,12 @@ pub struct AgentsRow {
 #[derive(Debug)]
 pub struct AgentsOverlay {
     rows: Vec<AgentsRow>,
+    /// The selected row, as an index into `rows`; always a shown row.
     selected: usize,
+    /// Agents whose subtree is folded away.
+    folded: HashSet<SessionId>,
+    /// Rows the body showed at the last paint, the size of a page.
+    page: usize,
 }
 
 impl AgentsOverlay {
@@ -95,7 +108,108 @@ impl AgentsOverlay {
     #[must_use]
     pub fn new(rows: Vec<AgentsRow>, focus: Option<SessionId>) -> Self {
         let selected = rows.iter().position(|r| r.session == focus).unwrap_or(0);
-        Self { rows, selected }
+        Self {
+            rows,
+            selected,
+            folded: HashSet::new(),
+            page: 10,
+        }
+    }
+
+    /// How many rows sit under row `ix` in the tree.
+    fn descendants(&self, ix: usize) -> usize {
+        let depth = self.rows[ix].depth;
+        self.rows[ix + 1..]
+            .iter()
+            .take_while(|row| row.depth > depth)
+            .count()
+    }
+
+    /// Whether row `ix` is folded away.
+    fn is_folded(&self, ix: usize) -> bool {
+        self.rows[ix]
+            .session
+            .is_some_and(|session| self.folded.contains(&session))
+    }
+
+    /// The rows shown, as indexes into `rows`: every row but those
+    /// under a folded one.
+    fn shown(&self) -> Vec<usize> {
+        let mut shown = Vec::with_capacity(self.rows.len());
+        let mut ix = 0;
+        while ix < self.rows.len() {
+            shown.push(ix);
+            ix += if self.is_folded(ix) {
+                1 + self.descendants(ix)
+            } else {
+                1
+            };
+        }
+        shown
+    }
+
+    /// Moves the selection by `delta` shown rows, stopping at the ends.
+    fn step(&mut self, delta: isize) {
+        let shown = self.shown();
+        let at = shown
+            .iter()
+            .position(|&ix| ix == self.selected)
+            .unwrap_or(0);
+        let to = at
+            .saturating_add_signed(delta)
+            .min(shown.len().saturating_sub(1));
+        if let Some(&ix) = shown.get(to) {
+            self.selected = ix;
+        }
+    }
+
+    /// Moves the selection by the mouse wheel: `down` a few rows down,
+    /// else up.
+    pub fn wheel(&mut self, down: bool) {
+        let rows = isize::try_from(WHEEL_ROWS).unwrap_or(1);
+        self.step(if down { rows } else { -rows });
+    }
+
+    /// Folds the selected row when it has agents under it and is open;
+    /// otherwise moves to its parent row.
+    fn fold(&mut self) {
+        let ix = self.selected;
+        if let Some(session) = self.rows[ix].session
+            && self.descendants(ix) > 0
+            && !self.folded.contains(&session)
+        {
+            self.folded.insert(session);
+            return;
+        }
+        let depth = self.rows[ix].depth;
+        if let Some(parent) = self.rows[..ix].iter().rposition(|row| row.depth < depth) {
+            self.selected = parent;
+        }
+    }
+
+    /// Unfolds the selected row when folded; otherwise moves into its
+    /// first agent.
+    fn unfold(&mut self) {
+        let ix = self.selected;
+        if let Some(session) = self.rows[ix].session
+            && self.folded.remove(&session)
+        {
+            return;
+        }
+        if self.descendants(ix) > 0 {
+            self.selected = ix + 1;
+        }
+    }
+
+    /// Folds or unfolds the selected row.
+    fn toggle(&mut self) {
+        let ix = self.selected;
+        if let Some(session) = self.rows[ix].session
+            && self.descendants(ix) > 0
+            && !self.folded.remove(&session)
+        {
+            self.folded.insert(session);
+        }
     }
 
     /// Replace the rows, keeping the selection on the same session
@@ -106,6 +220,17 @@ impl AgentsOverlay {
             .and_then(|s| rows.iter().position(|r| r.session == s))
             .unwrap_or_else(|| self.selected.min(rows.len().saturating_sub(1)));
         self.rows = rows;
+        // A selection inside a subtree that is folded now climbs to the
+        // folded row, so it is always on screen.
+        let shown = self.shown();
+        if !shown.contains(&self.selected) {
+            self.selected = shown
+                .iter()
+                .rev()
+                .find(|&&ix| ix < self.selected)
+                .copied()
+                .unwrap_or(0);
+        }
     }
 
     /// The selected row's session. `None` for the main session.
@@ -165,7 +290,24 @@ impl AgentsOverlay {
 fn name_offset(row: &AgentsRow) -> usize {
     match row.depth {
         0 => 2,
-        depth => 2 + INDENT.len() * (depth - 1) + 2,
+        depth => 2 + INDENT.len() * (depth - 1) + 4,
+    }
+}
+
+/// How a row's subtree shows: no agents under it, open, or folded with
+/// this many rows hidden.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fold {
+    Leaf,
+    Open,
+    Folded(usize),
+}
+
+/// The name a row shows: a folded row says how many agents it hides.
+fn shown_name(row: &AgentsRow, fold: Fold) -> String {
+    match fold {
+        Fold::Folded(hidden) => format!("{} (+{hidden})", row.name),
+        _ => row.name.clone(),
     }
 }
 
@@ -211,9 +353,14 @@ impl Columns {
     /// Fit the columns of `rows` into `width`. The activity gets what
     /// it needs up to a third of the room and the description the rest,
     /// so agents with similar tasks stay apart on narrow screens.
-    fn fit(rows: &[AgentsRow], width: usize) -> Self {
-        let widest = |f: &dyn Fn(&AgentsRow) -> usize| rows.iter().map(f).max().unwrap_or(0);
-        let name_end = widest(&|r| name_offset(r) + r.name.width());
+    fn fit(rows: &[(&AgentsRow, Fold)], width: usize) -> Self {
+        let name_end = rows
+            .iter()
+            .map(|(r, fold)| name_offset(r) + shown_name(r, *fold).width())
+            .max()
+            .unwrap_or(0);
+        let widest =
+            |f: &dyn Fn(&AgentsRow) -> usize| rows.iter().map(|(r, _)| f(r)).max().unwrap_or(0);
         let time = widest(&|r| time_label(r).width());
         let tokens = widest(&|r| tokens_label(r.tokens).width());
         let room = width.saturating_sub(name_end + 4 * GAP + time + tokens);
@@ -233,6 +380,7 @@ impl Columns {
 /// what the session does, its time and its tokens.
 fn row_line(
     row: &AgentsRow,
+    fold: Fold,
     selected: bool,
     cols: &Columns,
     width: usize,
@@ -273,13 +421,23 @@ fn row_line(
         row.item.as_str()
     };
     let name_room = cols.name_end - name_offset(row) + GAP;
+    let marker = match (row.depth, fold) {
+        (0, _) => "",
+        (_, Fold::Leaf) => "  ",
+        (_, Fold::Open) => "\u{25be} ",
+        (_, Fold::Folded(_)) => "\u{25b8} ",
+    };
     let time = time_label(row);
     let tokens = tokens_label(row.tokens);
     let mut line = Line::from(vec![
         Span::styled(if selected { "> " } else { "  " }, text),
         Span::raw(INDENT.repeat(row.depth.saturating_sub(1))),
         Span::styled(glyph, glyph_style.add_modifier(Modifier::BOLD)),
-        Span::styled(fit(&row.name, name_room), text.add_modifier(Modifier::BOLD)),
+        Span::styled(marker, muted),
+        Span::styled(
+            fit(&shown_name(row, fold), name_room),
+            text.add_modifier(Modifier::BOLD),
+        ),
         Span::styled(fit(title, cols.title), text),
         Span::raw(" ".repeat(GAP)),
         Span::styled(fit(doing(row), cols.doing), doing_style),
@@ -346,22 +504,39 @@ impl OverlayWidget for AgentsOverlay {
             return;
         }
         let width = usize::from(body.width);
-        let cols = Columns::fit(&self.rows, width);
         let height = usize::from(body.height);
-        let offset = crate::view::scroll_offset_centered(self.selected, self.rows.len(), height);
-        let lines: Vec<Line<'static>> = self
-            .rows
+        self.page = height.max(1);
+        let shown: Vec<(usize, &AgentsRow, Fold)> = self
+            .shown()
+            .into_iter()
+            .map(|ix| {
+                let hidden = self.descendants(ix);
+                let fold = match (hidden, self.is_folded(ix)) {
+                    (0, _) => Fold::Leaf,
+                    (_, false) => Fold::Open,
+                    (hidden, true) => Fold::Folded(hidden),
+                };
+                (ix, &self.rows[ix], fold)
+            })
+            .collect();
+        let fitted: Vec<(&AgentsRow, Fold)> = shown.iter().map(|(_, r, f)| (*r, *f)).collect();
+        let cols = Columns::fit(&fitted, width);
+        let at = shown
             .iter()
-            .enumerate()
+            .position(|(ix, _, _)| *ix == self.selected)
+            .unwrap_or(0);
+        let offset = crate::view::scroll_offset_centered(at, shown.len(), height);
+        let lines: Vec<Line<'static>> = shown
+            .iter()
             .skip(offset)
             .take(height)
-            .map(|(i, row)| row_line(row, i == self.selected, &cols, width, ctx))
+            .map(|(ix, row, fold)| row_line(row, *fold, *ix == self.selected, &cols, width, ctx))
             .collect();
         Widget::render(Paragraph::new(lines), body, buf);
     }
 
     fn footer_hint(&self) -> &'static str {
-        "enter to open \u{b7} x to stop \u{b7} esc to close"
+        "enter to open \u{b7} \u{2190}\u{2192} to fold \u{b7} x to stop \u{b7} esc to close"
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> OverlayAction {
@@ -373,14 +548,24 @@ impl OverlayWidget for AgentsOverlay {
         }
         match key.code {
             KeyCode::Esc => OverlayAction::Close,
+            _ if self.rows.is_empty() && key.code != KeyCode::Enter => match key.code {
+                KeyCode::Char('x') => OverlayAction::Stay,
+                _ => OverlayAction::PropagateKey,
+            },
             KeyCode::Up | KeyCode::Char('k') => {
-                self.selected = self.selected.saturating_sub(1);
+                self.step(-1);
                 OverlayAction::Stay
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if self.selected + 1 < self.rows.len() {
-                    self.selected += 1;
-                }
+                self.step(1);
+                OverlayAction::Stay
+            }
+            KeyCode::PageUp => {
+                self.step(-isize::try_from(self.page).unwrap_or(1));
+                OverlayAction::Stay
+            }
+            KeyCode::PageDown => {
+                self.step(isize::try_from(self.page).unwrap_or(1));
                 OverlayAction::Stay
             }
             KeyCode::Home => {
@@ -388,7 +573,19 @@ impl OverlayWidget for AgentsOverlay {
                 OverlayAction::Stay
             }
             KeyCode::End => {
-                self.selected = self.rows.len().saturating_sub(1);
+                self.selected = self.shown().last().copied().unwrap_or(0);
+                OverlayAction::Stay
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.fold();
+                OverlayAction::Stay
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                self.unfold();
+                OverlayAction::Stay
+            }
+            KeyCode::Char(' ') => {
+                self.toggle();
                 OverlayAction::Stay
             }
             KeyCode::Enter if !self.rows.is_empty() => OverlayAction::Resolve("open".into()),
@@ -517,14 +714,53 @@ mod tests {
         let main = rows.iter().position(|r| r.contains("kage")).unwrap();
         assert!(rows[main].contains("> kage"), "{rows:#?}");
         assert!(rows[main].contains("running"), "{rows:#?}");
-        assert!(rows[main + 1].contains("  ! general"), "{rows:#?}");
+        assert!(rows[main + 1].contains("  ! \u{25be} general"), "{rows:#?}");
         assert!(rows[main + 1].contains("waiting for approval"), "{rows:#?}");
         assert!(rows[main + 2].contains("    "), "{rows:#?}");
         assert!(rows[main + 2].contains(" test "), "{rows:#?}");
-        assert!(rows[main + 3].contains("\u{2022} explore"), "{rows:#?}");
+        assert!(rows[main + 3].contains("\u{2022}   explore"), "{rows:#?}");
         assert!(rows[main + 3].contains("done"), "{rows:#?}");
         assert!(rows[main + 3].contains("41s  22k tok"), "{rows:#?}");
         assert!(rows.iter().any(|r| r.contains(HINT.trim())), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_subtree_folds_and_unfolds_and_pages_skip_folded_rows() {
+        let (mut overlay, ids) = tree();
+        overlay.handle_key(key(KeyCode::Down));
+        assert_eq!(overlay.selected(), Some(ids[0]));
+        overlay.handle_key(key(KeyCode::Left));
+        let painted = paint(&mut overlay, 120, 10);
+        assert!(
+            painted.iter().any(|r| r.contains("\u{25b8} general (+1)")),
+            "{painted:#?}"
+        );
+        assert!(
+            !painted.iter().any(|r| r.contains(" test ")),
+            "{painted:#?}"
+        );
+        overlay.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            overlay.selected(),
+            Some(ids[2]),
+            "the folded child is skipped"
+        );
+        overlay.handle_key(key(KeyCode::Up));
+        overlay.handle_key(key(KeyCode::Right));
+        overlay.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            overlay.selected(),
+            Some(ids[1]),
+            "right on an open row steps in"
+        );
+        overlay.handle_key(key(KeyCode::Left));
+        assert_eq!(overlay.selected(), Some(ids[0]), "left on a leaf climbs");
+        overlay.handle_key(key(KeyCode::PageDown));
+        assert_eq!(overlay.selected(), Some(ids[2]), "a page stops at the end");
+        overlay.handle_key(key(KeyCode::PageUp));
+        assert_eq!(overlay.selected(), None, "and at the top");
+        overlay.wheel(true);
+        assert_eq!(overlay.selected(), Some(ids[2]));
     }
 
     #[test]

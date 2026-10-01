@@ -494,6 +494,12 @@ pub enum CommandKind {
     },
     /// Compact the conversation now.
     Compact,
+    /// Name the session. The name replaces any generated title, and no
+    /// title is generated after it.
+    SetTitle {
+        /// The new title.
+        title: String,
+    },
     /// Run a shell command in the session directory and share its output
     /// with the model on the next turn.
     Shell {

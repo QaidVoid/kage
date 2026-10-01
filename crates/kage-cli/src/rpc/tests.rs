@@ -1750,6 +1750,23 @@ fn session_export_renders_the_recorded_transcript() {
 }
 
 #[test]
+fn session_rename_names_the_session_for_every_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(Vec::new(), dir.path(), dir.path());
+    let rename = |title: &str| {
+        h.client.request(
+            "_kage/session/rename",
+            serde_json::json!({ "sessionId": h.session, "title": title }),
+        )
+    };
+
+    assert_eq!(rename("  Parser work ").unwrap(), serde_json::json!({}));
+    let updates = updates_until(&h.inbox, &h.session, "session_info_update");
+    assert_eq!(updates.last().unwrap()["update"]["title"], "Parser work");
+    assert_eq!(rename(" ").unwrap_err().code, -32602);
+}
+
+#[test]
 fn session_compact_needs_an_open_session() {
     let dir = tempfile::tempdir().unwrap();
     let h = serve(Vec::new(), dir.path(), dir.path());

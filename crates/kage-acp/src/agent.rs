@@ -31,8 +31,9 @@ use crate::acp::{
     PromptRequest, PromptResponse, RequestMeta, RequestPermissionRequest,
     RequestPermissionResponse, RequestPermissionResult, ResumeSessionRequest,
     ResumeSessionResponse, SessionExportResponse, SessionForkRequest, SessionForkResponse,
-    SessionNotification, SessionRequest, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, SwarmResumeRequest, SwarmResumeResponse, ToolCallUpdate,
+    SessionNotification, SessionRenameRequest, SessionRequest, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SwarmResumeRequest,
+    SwarmResumeResponse, ToolCallUpdate,
 };
 
 /// The client's answer to a `session/request_permission`.
@@ -393,6 +394,16 @@ pub trait Agent: Send + Sync + 'static {
         Err(RpcError::method_not_found("_kage/session/compact"))
     }
 
+    /// Name a session (`_kage/session/rename`). The new title reaches
+    /// every client as a `session_info_update`. The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session is unknown.
+    fn session_rename(&self, _req: SessionRenameRequest) -> Result<serde_json::Value, RpcError> {
+        Err(RpcError::method_not_found("_kage/session/rename"))
+    }
+
     /// Run one prompt turn to completion, streaming `session/update`
     /// notifications through `ctx`.
     ///
@@ -631,6 +642,10 @@ fn handle_request<A: Agent>(
         },
         "_kage/session/compact" => match parse::<SessionRequest>(params) {
             Ok(req) => spawn_op(peer, agent, id, move |a| a.session_compact(req)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/session/rename" => match parse::<SessionRenameRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.session_rename(req)),
             Err(e) => return parse_failed(peer, &id, e),
         },
         other => {

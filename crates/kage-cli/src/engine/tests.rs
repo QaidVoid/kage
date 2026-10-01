@@ -1116,6 +1116,39 @@ fn first_exchange_records_a_title() {
 }
 
 #[test]
+fn a_named_session_keeps_its_name_over_a_generated_title() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::replaying(text_turn("hello")));
+    let id = SessionId::new();
+    let (recorder, path) = recorder_in(dir.path(), id);
+    h.engine.open(SessionSpec {
+        recorder: Some(recorder),
+        title: true,
+        ..h.spec(id)
+    });
+    h.engine.send(Command::to(
+        id,
+        CommandKind::SetTitle {
+            title: "Mine".into(),
+        },
+    ));
+    prompt(&h.engine, id, "hi", Delivery::Queue);
+    h.release.send(()).unwrap();
+    let events = until_runs_end(&h.events, 1);
+    h.engine.shutdown();
+    let titles: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            Event::Host(HostEvent::TitleChanged { title }) => Some(title.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(titles, ["Mine"]);
+    let file = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(file.matches("\"type\":\"title\"").count(), 1, "{file}");
+}
+
+#[test]
 fn a_title_that_arrives_during_the_next_run_is_recorded_when_it_ends() {
     let dir = tempfile::tempdir().unwrap();
     let h = harness(MockProvider::sequence(vec![

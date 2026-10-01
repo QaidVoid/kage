@@ -459,7 +459,11 @@ impl Dispatcher {
                 }
                 Input::McpDone(done) => self.mcp_done(*done),
                 Input::ShellDone(done) => self.shell_done(*done),
-                Input::Title { session, title } => self.record_title(session, title),
+                Input::Title { session, title } => {
+                    if self.sessions.get(&session).is_some_and(|s| s.title) {
+                        self.record_title(session, title);
+                    }
+                }
                 Input::GoalMet { session, goal } => notice(
                     &self.bus,
                     session,
@@ -637,6 +641,12 @@ impl Dispatcher {
                 if self.ensure_idle(id, "compact") {
                     self.start_run(id, Work::Compact);
                 }
+            }
+            CommandKind::SetTitle { title } => {
+                let session = self.sessions.get_mut(&id).expect("session checked");
+                session.title = false;
+                session.title_pending = false;
+                self.record_title(id, title);
             }
             CommandKind::Shell { command } => self.shell(id, command),
             CommandKind::NewSession => self.new_session(id),

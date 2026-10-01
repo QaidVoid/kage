@@ -33,7 +33,7 @@ pub use kage_acp_wire::schema::{
     ResumeSessionRequest, ResumeSessionResponse, SelectedOption, SessionCapabilities,
     SessionConfigCategory, SessionConfigKind, SessionConfigOption, SessionConfigSelectOption,
     SessionExportResponse, SessionForkRequest, SessionForkResponse, SessionInfo, SessionInfoKage,
-    SessionInfoMeta, SessionInfoUpdate, SessionNotification, SessionRequest,
+    SessionInfoMeta, SessionInfoUpdate, SessionNotification, SessionRenameRequest, SessionRequest,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
     SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate, Supported,
     SwarmMeta, SwarmResumeRequest, SwarmResumeResponse, TerminalRef, TextContent, ToolCall,

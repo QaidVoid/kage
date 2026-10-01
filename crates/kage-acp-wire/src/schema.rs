@@ -495,6 +495,16 @@ pub struct SessionRequest {
     pub session_id: String,
 }
 
+/// `_kage/session/rename` request params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRenameRequest {
+    /// The session to name.
+    pub session_id: String,
+    /// The new title.
+    pub title: String,
+}
+
 /// `_kage/session/export` result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

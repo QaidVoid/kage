@@ -19,8 +19,8 @@ use kage_acp_wire::{
     PermissionOutcome, PlanReview, PromptDelivery, PromptRef, PromptRequest, PromptResponse,
     RequestMeta, RequestPermissionRequest, RequestPermissionResult, ResumeSessionRequest,
     SelectedOption, SessionExportResponse, SessionForkRequest, SessionForkResponse,
-    SessionNotification, SessionRequest, SessionUpdate, SetSessionConfigOptionRequest,
-    SwarmResumeRequest,
+    SessionNotification, SessionRenameRequest, SessionRequest, SessionUpdate,
+    SetSessionConfigOptionRequest, SwarmResumeRequest,
 };
 
 use crate::change::Change;
@@ -135,6 +135,9 @@ enum Pending {
         session_id: String,
     },
     Compact {
+        session_id: String,
+    },
+    Rename {
         session_id: String,
     },
 }
@@ -544,6 +547,21 @@ impl Client {
         )
     }
 
+    /// Names `session_id`. The title arrives as the session's
+    /// `session_info_update`, for every client.
+    pub fn rename_session(&mut self, session_id: &str, title: &str) -> u64 {
+        self.request(
+            "_kage/session/rename",
+            params(&SessionRenameRequest {
+                session_id: session_id.to_owned(),
+                title: title.to_owned(),
+            }),
+            Pending::Rename {
+                session_id: session_id.to_owned(),
+            },
+        )
+    }
+
     /// Lists or reads a path under the session workdir. The answer
     /// arrives as [`Change::Fs`].
     pub fn fs(&mut self, session_id: &str, op: FsOp, path: &str) -> u64 {
@@ -826,7 +844,9 @@ impl Client {
                 vec![Change::Session { id: session_id }]
             }
             Pending::ConfigGet => vec![Change::Config { config: result }],
-            Pending::SwarmResume { session_id } | Pending::Compact { session_id } => {
+            Pending::SwarmResume { session_id }
+            | Pending::Compact { session_id }
+            | Pending::Rename { session_id } => {
                 vec![Change::Session { id: session_id }]
             }
             Pending::Fork { session_id } => {

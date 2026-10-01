@@ -50,7 +50,7 @@ use kage_acp::acp::{
     LoadSessionResponse, McpCapabilities, NewSessionRequest, NewSessionResponse, PROTOCOL_VERSION,
     PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse, ResumeSessionRequest,
     ResumeSessionResponse, SessionCapabilities, SessionConfigOption, SessionExportResponse,
-    SessionForkRequest, SessionForkResponse, SessionRequest, SessionUpdate,
+    SessionForkRequest, SessionForkResponse, SessionRenameRequest, SessionRequest, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, Supported,
     SwarmResumeRequest, SwarmResumeResponse,
 };
@@ -449,6 +449,21 @@ impl Agent for CliAcpAgent {
     fn session_compact(&self, req: SessionRequest) -> Result<serde_json::Value, RpcError> {
         let id = self.engine_id(&req.session_id)?;
         self.host.engine.send(Command::to(id, CommandKind::Compact));
+        Ok(serde_json::json!({}))
+    }
+
+    fn session_rename(&self, req: SessionRenameRequest) -> Result<serde_json::Value, RpcError> {
+        let id = self.engine_id(&req.session_id)?;
+        let title = req.title.trim();
+        if title.is_empty() {
+            return Err(RpcError::new(-32602, "a title needs text"));
+        }
+        self.host.engine.send(Command::to(
+            id,
+            CommandKind::SetTitle {
+                title: title.to_owned(),
+            },
+        ));
         Ok(serde_json::json!({}))
     }
 

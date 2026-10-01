@@ -2,6 +2,8 @@
 name = "kage-client"
 description = "Sans-IO Agent Client Protocol client: frames in, state changes out."
 version.workspace = true
+# Internal to the client train (D9): it rides the desktop tag.
+publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

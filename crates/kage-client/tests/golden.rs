@@ -28,6 +28,20 @@ fn fixtures() -> PathBuf {
         .join("fixtures")
 }
 
+/// The transcript after the prompt this client sent, which comes
+/// first: the agent echoes a prompt only to the other clients, so the
+/// client records its own.
+fn own_prompt(items: &[TranscriptItem]) -> &[TranscriptItem] {
+    assert!(
+        matches!(
+            items.first(),
+            Some(TranscriptItem::User { steered: false, .. })
+        ),
+        "the own prompt comes first: {items:#?}"
+    );
+    &items[1..]
+}
+
 /// The parsed frames of one fixture, in file order.
 fn fixture(name: &str) -> Vec<Frame> {
     let text = fs::read_to_string(fixtures().join(name)).unwrap();
@@ -180,7 +194,7 @@ fn the_fix_fixture_replays_to_the_asserted_state() {
     );
     assert_eq!((session.usage.used, session.usage.size), (12480, 200_000));
 
-    let items = &session.items;
+    let items = own_prompt(&session.items);
     assert_eq!(items.len(), 10, "{items:#?}");
     let read = match &items[0] {
         TranscriptItem::ToolCall(call) => call,
@@ -292,7 +306,7 @@ fn the_approval_fixture_round_trips_a_permission_ask() {
         let session = client.state().session(PARENT).unwrap();
         assert!(
             matches!(
-                &session.items[1],
+                &own_prompt(&session.items)[1],
                 TranscriptItem::Decision {
                     subject,
                     label,
@@ -301,7 +315,7 @@ fn the_approval_fixture_round_trips_a_permission_ask() {
                 } if subject == "shell" && label == "Allow shell"
             ),
             "the reply appended the decision record: {:?}",
-            session.items[1]
+            own_prompt(&session.items)[1]
         );
     }
 
@@ -309,7 +323,7 @@ fn the_approval_fixture_round_trips_a_permission_ask() {
     let session = client.state().session(PARENT).unwrap();
     assert_eq!(session.title.as_deref(), Some("cargo test green"));
     assert_eq!(session.last_stop, Some(StopReason::EndTurn));
-    let call = match &session.items[0] {
+    let call = match &own_prompt(&session.items)[0] {
         TranscriptItem::ToolCall(call) => call,
         other => panic!("expected the shell call, got {other:?}"),
     };
@@ -319,7 +333,10 @@ fn the_approval_fixture_round_trips_a_permission_ask() {
             .ends_with("test result: ok. 12 passed; 0 failed")
     );
     assert_eq!(call.raw_output, Some(serde_json::json!({"exit_code": 0})));
-    assert!(matches!(&session.items[2], TranscriptItem::TurnEnd { .. }));
+    assert!(matches!(
+        own_prompt(&session.items)[2],
+        TranscriptItem::TurnEnd { .. }
+    ));
 }
 
 #[test]
@@ -348,7 +365,7 @@ fn the_cancel_fixture_withdraws_the_ask_and_ends_cancelled() {
         "the withdraw emptied the ask queue"
     );
     assert_eq!(
-        match &session.items[0] {
+        match &own_prompt(&session.items)[0] {
             TranscriptItem::ToolCall(call) => call.status,
             other => panic!("expected the shell call, got {other:?}"),
         },
@@ -493,7 +510,7 @@ fn feedback_rides_the_meta_channel_and_the_record_quotes_it() {
     let session = client.state().session(PARENT).unwrap();
     assert!(
         matches!(
-            &session.items[1],
+            &own_prompt(&session.items)[1],
             TranscriptItem::Decision {
                 subject,
                 label,
@@ -502,7 +519,7 @@ fn feedback_rides_the_meta_channel_and_the_record_quotes_it() {
             } if subject == "shell" && label == "Reject shell" && text == "use rustfmt first"
         ),
         "the decision record quotes the feedback: {:?}",
-        session.items[1]
+        own_prompt(&session.items)[1]
     );
 }
 
@@ -531,7 +548,7 @@ fn a_dismissal_answers_cancelled_and_records_no_choice() {
     let session = client.state().session(PARENT).unwrap();
     assert!(
         matches!(
-            &session.items[1],
+            &own_prompt(&session.items)[1],
             TranscriptItem::Decision {
                 label,
                 allowed: false,
@@ -540,7 +557,7 @@ fn a_dismissal_answers_cancelled_and_records_no_choice() {
             } if label == "cancelled"
         ),
         "{:?}",
-        session.items[1]
+        own_prompt(&session.items)[1]
     );
 }
 
@@ -601,7 +618,7 @@ fn the_subagent_fixture_builds_the_agent_tree_and_the_child_transcript() {
     );
     assert_eq!(parent.title.as_deref(), Some("List the project files"));
     assert_eq!(parent.last_stop, Some(StopReason::EndTurn));
-    let call = match &parent.items[0] {
+    let call = match &own_prompt(&parent.items)[0] {
         TranscriptItem::ToolCall(call) => call,
         other => panic!("expected the agent call, got {other:?}"),
     };
@@ -611,7 +628,7 @@ fn the_subagent_fixture_builds_the_agent_tree_and_the_child_transcript() {
         ToolCallStatus::Pending,
         "the parent call stays honest"
     );
-    assert_eq!(parent.items.len(), 4, "{:#?}", parent.items);
+    assert_eq!(own_prompt(&parent.items).len(), 4, "{:#?}", parent.items);
 
     let child = client.state().session(CHILD).unwrap();
     assert!(!child.running);

@@ -13,8 +13,8 @@ use serde_json::Value;
 use kage_acp_wire::{
     AgentCapabilities, ContentBlock, Cost, Implementation, McpServerStatus, PermissionOption,
     PermissionOptionKind, SessionConfigOption, SessionInfo, StopReason,
-    SubagentSessionCapabilities, SubagentState, ToolCallContent, ToolCallStatus, ToolCallUpdate,
-    ToolKind, TurnReason,
+    SubagentSessionCapabilities, SubagentState, SubagentSwarm, SwarmMeta, ToolCallContent,
+    ToolCallStatus, ToolCallUpdate, ToolKind, TurnReason,
 };
 
 /// What the client knows after the frames it handled.
@@ -26,6 +26,9 @@ pub struct State {
     pub agent: Option<Implementation>,
     /// The agent's capabilities, once `initialize` answered.
     pub capabilities: Option<AgentCapabilities>,
+    /// The directory a session opened with an empty `cwd` runs in, as
+    /// a kage agent reported it at `initialize`.
+    pub agent_cwd: Option<String>,
     /// The sessions this connection holds or hears updates for, by id.
     pub sessions: BTreeMap<String, Session>,
     /// The recorded sessions a `session/list` answered with, in page
@@ -116,6 +119,9 @@ pub struct Session {
     /// `session/load` or `session/resume`, as opposed to hearing about
     /// it through updates alone.
     pub opened: bool,
+    /// The session that announced this one as its subagent. A child
+    /// session is reached through its parent, never listed on its own.
+    pub parent: Option<String>,
     /// The working directory the session was opened with.
     pub cwd: Option<String>,
     /// The display title, as `session_info_update` last set it.
@@ -230,6 +236,9 @@ pub struct PermissionAsk {
     pub tool_call: ToolCallUpdate,
     /// The choices offered.
     pub options: Vec<PermissionOption>,
+    /// The plan document a plan-mode review asks about, from the
+    /// request's `_meta.kage.planReview`.
+    pub plan: Option<String>,
 }
 
 impl PermissionAsk {
@@ -263,6 +272,11 @@ pub struct Subagent {
     pub capabilities: Option<SubagentSessionCapabilities>,
     /// Lifecycle state. A child never given one is running.
     pub state: Option<SubagentState>,
+    /// The swarm batch the child belongs to, when a `swarm` call started
+    /// it: batch id, item, launch index and batch size.
+    pub swarm: Option<SubagentSwarm>,
+    /// Why the child paused, while it is paused.
+    pub reason: Option<String>,
 }
 
 impl Subagent {
@@ -280,6 +294,16 @@ impl Subagent {
         }
         if update.state.is_some() {
             self.state.clone_from(&update.state);
+            // A reason belongs to the pause it explained.
+            if update.state != Some(SubagentState::Paused) {
+                self.reason = None;
+            }
+        }
+        if update.swarm.is_some() {
+            self.swarm.clone_from(&update.swarm);
+        }
+        if update.reason.is_some() {
+            self.reason.clone_from(&update.reason);
         }
     }
 }
@@ -289,10 +313,13 @@ impl Subagent {
 /// they name, and a plan update replaces the plan item before it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranscriptItem {
-    /// A user message block the agent echoed.
+    /// One user prompt: the blocks this client sent, or the blocks an
+    /// echo or a replay carried, text first.
     User {
-        /// The echoed block.
-        content: ContentBlock,
+        /// The prompt's blocks.
+        content: Vec<ContentBlock>,
+        /// Whether it steered a run in flight instead of starting one.
+        steered: bool,
     },
     /// Assistant reply text.
     Assistant {
@@ -364,6 +391,9 @@ pub struct ToolCallItem {
     pub status: ToolCallStatus,
     /// The tool input, as last reported.
     pub input: Option<Value>,
+    /// The swarm batch a `swarm` call announced under
+    /// `_meta.kage.swarm`: its members and prompt template.
+    pub swarm: Option<SwarmMeta>,
     /// Rich content, replaced by every update that carries content:
     /// streamed output tails, diffs, terminal references.
     pub content: Vec<ToolCallContent>,
@@ -407,6 +437,13 @@ impl ToolCallItem {
         }
         if update.raw_output.is_some() {
             self.raw_output.clone_from(&update.raw_output);
+        }
+        if let Some(swarm) = update
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.kage.swarm.clone())
+        {
+            self.swarm = Some(swarm);
         }
     }
 }
@@ -465,6 +502,7 @@ mod tests {
             kind: ToolKind::Execute,
             status: ToolCallStatus::InProgress,
             input: None,
+            swarm: None,
             content: vec![ToolCallContent::Content(MessageChunk {
                 content: ContentBlock::text("line 1\nline 2"),
             })],
@@ -514,6 +552,7 @@ mod tests {
                     kind: PermissionOptionKind::RejectOnce,
                 },
             ],
+            plan: None,
         };
         assert_eq!(
             ask.option_of(PermissionOptionKind::AllowOnce),

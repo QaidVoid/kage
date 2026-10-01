@@ -99,7 +99,10 @@ enum Pending {
     Open {
         session_id: String,
     },
-    List,
+    List {
+        /// The directory filter of the first page, kept for the next.
+        cwd: Option<String>,
+    },
     Prompt {
         session_id: String,
         /// Whether the answer ends the run: false for a prompt that
@@ -218,6 +221,8 @@ impl Client {
 
     /// Asks for one page of recorded sessions. Pages land in
     /// [`State::directory`], entries a page repeats are refreshed.
+    /// A page that names a next cursor asks for that page itself, so
+    /// the directory ends up whole.
     pub fn list_sessions(&mut self, cwd: Option<&str>, cursor: Option<&str>) -> u64 {
         self.request(
             "session/list",
@@ -225,7 +230,9 @@ impl Client {
                 cwd: cwd.map(str::to_owned),
                 cursor: cursor.map(str::to_owned),
             }),
-            Pending::List,
+            Pending::List {
+                cwd: cwd.map(str::to_owned),
+            },
         )
     }
 
@@ -483,9 +490,27 @@ impl Client {
                 mcp_servers: mcp_servers.to_vec(),
             })
         };
-        self.state
-            .sessions
-            .insert(session_id.to_owned(), Session::new(session_id));
+        // The replay that follows streams the whole history again, so
+        // what it carries starts over; what only this client holds (the
+        // draft, the held queue, the place in the forest) stays. A run
+        // that was in flight answers on the old connection, which is
+        // gone, so the session reads idle until the replay says
+        // otherwise.
+        let session = self.session_mut(session_id);
+        let kept = Session {
+            id: session_id.to_owned(),
+            cwd: if cwd.is_empty() {
+                session.cwd.take()
+            } else {
+                Some(cwd.to_owned())
+            },
+            title: session.title.take(),
+            parent: session.parent.take(),
+            draft: session.draft.take(),
+            queue: std::mem::take(&mut session.queue),
+            ..Session::default()
+        };
+        *session = kept;
         self.request(
             method,
             request,
@@ -510,7 +535,14 @@ impl Client {
                 owns_run,
             },
         );
-        self.session_mut(session_id).running = true;
+        let session = self.session_mut(session_id);
+        session.running = true;
+        // The agent echoes a prompt only to the other clients, so the
+        // transcript gets its own copy here.
+        session.items.push(TranscriptItem::User {
+            content: prompt.clone(),
+            steered: delivery == Some(PromptDelivery::Steer),
+        });
         self.outgoing.push(Frame::Request {
             id,
             method: "session/prompt".into(),
@@ -557,10 +589,15 @@ impl Client {
         };
         let session_id = request.session_id;
         let session = self.session_mut(&session_id);
+        let plan = request
+            .meta
+            .and_then(|meta| meta.kage.plan_review)
+            .and_then(|review| review.plan);
         let ask = PermissionAsk {
             request_id: id,
             tool_call: request.tool_call,
             options: request.options,
+            plan,
         };
         // A re-attach makes the agent raise its open asks again, so a
         // frame whose id is already queued replaces its echo instead
@@ -636,6 +673,10 @@ impl Client {
                         self.state.protocol_version = Some(response.protocol_version);
                         self.state.capabilities = Some(response.agent_capabilities);
                         self.state.agent = response.agent_info;
+                        self.state.agent_cwd = response
+                            .meta
+                            .and_then(|meta| meta.kage)
+                            .and_then(|kage| kage.cwd);
                         vec![Change::Connection]
                     }
                 }
@@ -656,7 +697,7 @@ impl Client {
                     }
                 }
             }
-            Pending::List => match answer::<kage_acp_wire::ListSessionsResponse>(
+            Pending::List { cwd } => match answer::<kage_acp_wire::ListSessionsResponse>(
                 id,
                 result,
                 "session/list result",
@@ -674,6 +715,9 @@ impl Client {
                         } else {
                             self.state.directory.push(info);
                         }
+                    }
+                    if let Some(cursor) = page.next_cursor {
+                        self.list_sessions(cwd.as_deref(), Some(&cursor));
                     }
                     vec![Change::Directory]
                 }
@@ -719,7 +763,12 @@ impl Client {
             Ok(response) => {
                 let mut session = Session::new(&response.session_id);
                 session.opened = true;
-                session.cwd = Some(cwd);
+                // An empty cwd ran in the agent's own directory.
+                session.cwd = if cwd.is_empty() {
+                    self.state.agent_cwd.clone()
+                } else {
+                    Some(cwd)
+                };
                 session.config_options = response.config_options;
                 let session_id = session.id.clone();
                 self.state.sessions.insert(session_id.clone(), session);
@@ -827,12 +876,11 @@ impl Client {
                 }]
             }
             SessionUpdate::SubagentUpdate(update) => {
+                let child = update.subagent_session_id.clone();
                 let session = self.session_mut(session_id);
-                let agent = session
-                    .agents
-                    .entry(update.subagent_session_id.clone())
-                    .or_default();
+                let agent = session.agents.entry(child.clone()).or_default();
                 agent.merge(&update);
+                self.session_mut(&child).parent = Some(session_id.to_owned());
                 vec![Change::Agents {
                     id: session_id.into(),
                 }]
@@ -877,9 +925,19 @@ impl Client {
 fn apply_item(session: &mut Session, update: SessionUpdate) -> bool {
     match update {
         SessionUpdate::UserMessageChunk(chunk) => {
-            session.items.push(TranscriptItem::User {
-                content: chunk.content,
-            });
+            // A prompt arrives as one chunk per block, text first, and
+            // the wire names no message: a text chunk starts a prompt,
+            // and an image or resource chunk belongs to the prompt
+            // before it.
+            match session.items.last_mut() {
+                Some(TranscriptItem::User { content, .. }) if chunk.content.as_text().is_none() => {
+                    content.push(chunk.content);
+                }
+                _ => session.items.push(TranscriptItem::User {
+                    content: vec![chunk.content],
+                    steered: false,
+                }),
+            }
             true
         }
         SessionUpdate::AgentMessageChunk(chunk) => {
@@ -897,6 +955,7 @@ fn apply_item(session: &mut Session, update: SessionUpdate) -> bool {
                 kind: call.kind,
                 status: call.status,
                 input: call.raw_input,
+                swarm: call.meta.and_then(|meta| meta.kage.swarm),
                 content: call.content,
                 raw_output: None,
             }));

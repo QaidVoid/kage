@@ -262,8 +262,58 @@ impl ShellRun {
     }
 }
 
+/// The most bytes of output one tool result keeps in a conversation,
+/// about 25k tokens. Every turn resends the whole history, so one
+/// unbounded result (a grep over minified bundles, a read of a
+/// generated file) costs its size on every request, in memory and in
+/// the session file.
+pub const MAX_TOOL_RESULT_BYTES: usize = 100_000;
+
+/// `text` cut to at most [`MAX_TOOL_RESULT_BYTES`]: the first two
+/// thirds and the last third, joined by a line saying how much was left
+/// out. Text within the limit comes back unchanged.
+#[must_use]
+pub fn cap_tool_result(text: String) -> String {
+    if text.len() <= MAX_TOOL_RESULT_BYTES {
+        return text;
+    }
+    let boundary = |mut at: usize| {
+        while !text.is_char_boundary(at) {
+            at -= 1;
+        }
+        at
+    };
+    let head = boundary(MAX_TOOL_RESULT_BYTES * 2 / 3);
+    let tail = boundary(text.len() - MAX_TOOL_RESULT_BYTES / 3);
+    let omitted = tail - head;
+    format!(
+        "{}\n\n[... {omitted} bytes of output omitted; narrow the request to see them ...]\n\n{}",
+        &text[..head],
+        &text[tail..]
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tool_results_over_the_limit_keep_their_head_and_tail() {
+        let short = "fine".to_owned();
+        assert_eq!(super::cap_tool_result(short.clone()), short);
+        let long = format!(
+            "{}{}",
+            "a".repeat(super::MAX_TOOL_RESULT_BYTES),
+            "\u{e9}".repeat(50_000)
+        );
+        let capped = super::cap_tool_result(long.clone());
+        assert!(
+            capped.len() < super::MAX_TOOL_RESULT_BYTES + 200,
+            "{}",
+            capped.len()
+        );
+        assert!(capped.starts_with("aaa") && capped.ends_with("\u{e9}"));
+        assert!(capped.contains("bytes of output omitted"));
+    }
+
     use super::*;
 
     #[test]

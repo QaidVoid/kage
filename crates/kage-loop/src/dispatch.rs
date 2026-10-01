@@ -324,6 +324,10 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
                 synthesized_output(error.as_ref().unwrap_or(&LoopError::Cancelled)),
             ),
         };
+        let output = ToolOutput {
+            text: kage_core::cap_tool_result(output.text),
+            ..output
+        };
         all_terminate &= output.terminate;
 
         emit(LoopEvent::ToolCallEnd {
@@ -413,6 +417,10 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
                 record_batch_error(&mut error, &kind);
                 hooks.after_tool_call(&call.name, synthesized_output(&kind))
             }
+        };
+        let output = ToolOutput {
+            text: kage_core::cap_tool_result(output.text),
+            ..output
         };
         all_terminate &= output.terminate;
         emit(LoopEvent::ToolCallEnd {

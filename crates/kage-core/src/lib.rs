@@ -33,7 +33,10 @@ pub use error::{Error, Result};
 pub use event::{
     LoopError, LoopEvent, ModelCost, StopReason, TokenCost, TokenUsage, ToolOutput, ToolUpdate,
 };
-pub use message::{Content, ImageSource, Message, MessageId, Role, ThinkingSignature, ToolCallId};
+pub use message::{
+    Content, ImageSource, MAX_TOOL_RESULT_BYTES, Message, MessageId, Role, ThinkingSignature,
+    ToolCallId, cap_tool_result,
+};
 pub use modality::{Input, Inputs};
 pub use protocol::SessionId;
 pub use risk::Risk;

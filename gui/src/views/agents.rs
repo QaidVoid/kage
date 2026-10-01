@@ -21,6 +21,7 @@ use kage_client::{Session, Subagent, ToolCallItem, TranscriptItem};
 
 use crate::store::{Store, StoreHandle as _};
 use crate::theme::{FONT_MONO, FS_SM, FS_XS, Palette, R_FULL, R_LG, R_MD, SP_4};
+use crate::views::constellation::{Star, constellation};
 use crate::views::kit::{self, BtnTone};
 use crate::views::transcript::{TranscriptEvent, TranscriptView, tool_verb};
 
@@ -463,6 +464,8 @@ pub(crate) struct SwarmView<'a> {
     pub template_open: bool,
     /// How long this client watched the batch run, once it ended.
     pub took: Option<Duration>,
+    /// The clock the constellation twinkles on, when it draws.
+    pub field: Option<web_time::Instant>,
 }
 
 /// The card a `swarm` call renders as: the batch head with live counts,
@@ -616,8 +619,42 @@ pub(crate) fn swarm_card(
         .rounded(px(R_LG))
         .bg(pal.surface)
         .overflow_hidden()
-        .child(head)
-        .child(bar);
+        .child(head);
+    card = match swarm.field {
+        Some(origin) => {
+            let stars = swarm
+                .members
+                .iter()
+                .map(|member| Star {
+                    id: member.id.clone(),
+                    item: member
+                        .item
+                        .as_ref()
+                        .map_or_else(|| member.name.clone(), |(item, _)| item.clone()),
+                    phase: member.phase,
+                })
+                .collect();
+            let open_view = view.clone();
+            card.child(
+                div()
+                    .px(px(10.))
+                    .pt(px(2.))
+                    .pb(px(6.))
+                    .border_t_1()
+                    .border_color(pal.subtle)
+                    .child(constellation(
+                        stars,
+                        None,
+                        origin,
+                        move |id, _, cx| {
+                            open_view.update(cx, |_, cx| cx.emit(TranscriptEvent::OpenAgent(id)));
+                        },
+                        cx,
+                    )),
+            )
+        }
+        None => card.child(bar),
+    };
     if !swarm.open {
         return card.into_any_element();
     }

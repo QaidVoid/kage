@@ -16,6 +16,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
+use web_time::Instant;
+
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
@@ -1003,6 +1005,9 @@ fn plain_row(session: &Session, ix: usize, ui: &UiState, last: usize) -> Option<
 pub struct TranscriptView {
     store: Entity<Store>,
     composer: Entity<TextareaState>,
+    /// When the view was made: the clock swarm constellations twinkle
+    /// on, so a repaint continues their animation.
+    born: Instant,
     /// The revise field of the plan card under review.
     revise: Entity<InputState>,
     /// The plan card whose revise field shows, by item index.
@@ -1057,6 +1062,7 @@ impl TranscriptView {
         Self {
             store,
             composer,
+            born: Instant::now(),
             revise,
             revising: None,
             list: following_list(),
@@ -1121,6 +1127,7 @@ impl TranscriptView {
                 open,
                 template_open: self.ui.templates.contains(&ix),
                 took,
+                field: store.constellation().then_some(self.born),
             },
             &self.store,
             &view,

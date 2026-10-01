@@ -161,6 +161,9 @@ pub struct Store {
     /// The options a welcome card chose, set on the session the welcome
     /// prompt opens before the prompt goes out.
     held_options: Vec<(String, String)>,
+    /// Whether swarm cards draw the constellation rather than the bar,
+    /// the Lab setting of the same name.
+    constellation: bool,
     /// Per session, the permission mode under plan mode. The wire shows
     /// only `plan` while plan mode is on; the engine keeps the
     /// permission mode underneath, and leaving plan mode restores it.
@@ -196,6 +199,7 @@ impl Store {
             returned_prompt: None,
             held_options: Vec::new(),
             permissions: HashMap::new(),
+            constellation: true,
             fs_listing: None,
             commands: Vec::new(),
         }
@@ -629,6 +633,12 @@ impl Store {
         };
         self.client
             .reply_permission(&session_id, review.request_id, &decision)
+    }
+
+    /// Whether swarm cards draw the constellation.
+    #[must_use]
+    pub fn constellation(&self) -> bool {
+        self.constellation
     }
 
     /// Whether the active session is in plan mode.

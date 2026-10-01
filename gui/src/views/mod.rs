@@ -8,6 +8,7 @@ pub(crate) mod agents;
 pub mod approval;
 pub mod chrome;
 pub mod composer;
+pub(crate) mod constellation;
 pub mod deferred;
 pub mod dock;
 pub(crate) mod kit;

@@ -25,6 +25,7 @@ use serde::Deserialize;
 use crate::store::{Store, StoreHandle as _};
 use crate::theme::{FONT_MONO, FS_SM, FS_XS, Palette, R_FULL, R_LG};
 use crate::views::kit::{BtnTone, btn_sm, switch};
+use crate::views::provider_form::Target;
 
 /// The parts of the snapshot the pages read. Every field defaults, so a
 /// section the engine leaves out reads as empty.
@@ -37,6 +38,19 @@ pub(crate) struct Snapshot {
     plugins: Plugins,
     #[serde(rename = "installedPlugins")]
     installed_plugins: Vec<InstalledPlugin>,
+    #[serde(rename = "providerKeys")]
+    provider_keys: BTreeMap<String, KeyState>,
+}
+
+/// Where one provider finds its key, as the snapshot says.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub(crate) struct KeyState {
+    /// The environment variable the key is read from; empty when the
+    /// provider needs none.
+    pub env: String,
+    /// `env`, `auth`, `missing` or `unneeded`.
+    pub source: String,
 }
 
 impl Snapshot {
@@ -44,6 +58,21 @@ impl Snapshot {
     #[must_use]
     pub(crate) fn parse(value: &serde_json::Value) -> Self {
         serde_json::from_value(value.clone()).unwrap_or_default()
+    }
+
+    /// Where provider `id` finds its key, when the snapshot says.
+    #[must_use]
+    pub(crate) fn key_state(&self, id: &str) -> Option<&KeyState> {
+        self.provider_keys.get(id)
+    }
+
+    /// The providers kage registers itself, by id: the ones a key makes
+    /// usable without defining them.
+    pub(crate) fn registered(&self) -> impl Iterator<Item = &str> {
+        self.provider_keys
+            .keys()
+            .map(String::as_str)
+            .filter(|id| !self.providers.custom.contains_key(*id))
     }
 
     /// The MCP server configured as `name`.
@@ -241,6 +270,21 @@ pub(crate) fn provider_rows(
         }
         row.headers.extend(over.headers.keys().cloned());
     }
+    // A provider kage registers is usable once its key is somewhere.
+    for (id, key) in &snapshot.provider_keys {
+        if matches!(key.source.as_str(), "env" | "auth") && !rows.iter().any(|row| &row.id == id) {
+            rows.push(ProviderRow {
+                id: id.clone(),
+                label: id.clone(),
+                protocol: None,
+                base_url: None,
+                key_env: Some(key.env.clone()),
+                headers: Vec::new(),
+                models: Vec::new(),
+                custom: false,
+            });
+        }
+    }
     rows
 }
 
@@ -353,76 +397,214 @@ pub(crate) fn waiting(pal: &Palette) -> Vec<AnyElement> {
     vec![note("Reading the engine's configuration\u{2026}", pal).into_any_element()]
 }
 
-/// The Model Providers page.
+/// Where the Providers page sends the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProviderNav {
+    /// The providers to add from.
+    Choose,
+    /// Back to the list.
+    Back,
+    /// The form on a provider.
+    Open(Target),
+}
+
+/// The Model Providers page: the providers, grouped by whether their
+/// key is there, each opening its form; or, while adding, the providers
+/// to start from. `on_open` goes where the user clicked.
 #[must_use]
 pub(crate) fn providers_page(
     snapshot: &Snapshot,
     model: Option<&SessionConfigOption>,
+    choosing: bool,
+    on_open: impl Fn(ProviderNav, &mut Window, &mut App) + Clone + 'static,
     pal: &Palette,
 ) -> Vec<AnyElement> {
     let rows = provider_rows(snapshot, model);
-    let mut list = boxed(pal);
-    for row in &rows {
-        let mut name = h_flex().gap(px(6.)).items_center().child(
-            div()
-                .text_size(px(FS_SM))
-                .text_color(pal.ink)
-                .child(row.label.clone()),
-        );
-        if let Some(protocol) = &row.protocol {
-            name = name.child(plain_badge(protocol.clone(), pal));
-        }
-        if row.custom {
-            name = name.child(plain_badge("config.toml", pal));
-        }
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(url) = &row.base_url {
-            parts.push(url.clone());
-        }
-        parts.push(match row.models.len() {
-            0 => "no models listed".to_owned(),
-            1 => "1 model".to_owned(),
-            n => format!("{n} models"),
-        });
-        if !row.headers.is_empty() {
-            parts.push(format!("headers: {}", row.headers.join(", ")));
-        }
-        let key = match &row.key_env {
-            Some(env) if env.is_empty() => plain_badge("no key needed", pal),
-            Some(env) => plain_badge(format!("key from {env}"), pal),
-            None => badge("key source unknown", pal.faint, pal.fill, pal.subtle),
-        };
-        list = list.child(
-            list_row(
-                initials(&row.id, pal),
-                name,
-                Some(SharedString::from(parts.join(" \u{b7} "))),
-                pal,
-            )
-            .child(key),
-        );
+    if choosing {
+        return provider_chooser(snapshot, &rows, on_open, pal);
     }
-    let mut out = vec![];
-    if rows.is_empty() {
-        out.push(
-            note(
-                "No providers configured and no session open to list its models.",
-                pal,
+    let add = on_open.clone();
+    let mut out = vec![
+        group("Providers", pal)
+            .justify_between()
+            .child(
+                btn_sm("provider-add", BtnTone::Plain, pal)
+                    .on_click(move |_, window, cx| add(ProviderNav::Choose, window, cx))
+                    .child(Icon::new(IconName::Plus).with_size(px(12.)))
+                    .child("Add provider"),
             )
             .into_any_element(),
+    ];
+    let missing = |row: &ProviderRow| {
+        snapshot
+            .key_state(&row.id)
+            .is_some_and(|key| key.source == "missing")
+    };
+    for (title, needs) in [("Ready", false), ("Needs a key", true)] {
+        let group_rows: Vec<&ProviderRow> =
+            rows.iter().filter(|row| missing(row) == needs).collect();
+        if group_rows.is_empty() {
+            continue;
+        }
+        out.push(
+            div()
+                .mt(px(4.))
+                .mb(px(6.))
+                .text_size(px(FS_XS))
+                .text_color(pal.faint)
+                .child(format!("{title} \u{b7} {}", group_rows.len()))
+                .into_any_element(),
         );
-    } else {
-        out.push(group(format!("Providers \u{b7} {}", rows.len()), pal).into_any_element());
+        let mut list = boxed(pal);
+        for row in group_rows {
+            list = list.child(provider_row(snapshot, row, on_open.clone(), pal));
+        }
         out.push(list.into_any_element());
+    }
+    if rows.is_empty() {
+        out.push(note("No providers configured yet.", pal).into_any_element());
     }
     out.push(
         note(
-            "Custom providers and overrides come from config.toml; the others are the ones the session's model picker offers. Whether a key is present stays with the engine. Adding and editing providers waits for _kage/config/set.",
+            "Providers kage registers itself become usable with a key; edits to them are saved as overrides. Custom providers are saved whole under [providers.custom] in config.toml. Keys stay with the engine.",
             pal,
         )
         .into_any_element(),
     );
     out
+}
+
+/// One provider's row: initials, name, protocol and origin badges, the
+/// endpoint and models, and where its key is. A click opens its form.
+fn provider_row(
+    snapshot: &Snapshot,
+    row: &ProviderRow,
+    on_open: impl Fn(ProviderNav, &mut Window, &mut App) + 'static,
+    pal: &Palette,
+) -> AnyElement {
+    let mut name = h_flex().gap(px(6.)).items_center().child(
+        div()
+            .text_size(px(FS_SM))
+            .text_color(pal.ink)
+            .child(row.label.clone()),
+    );
+    if let Some(protocol) = &row.protocol {
+        name = name.child(plain_badge(protocol.clone(), pal));
+    }
+    if row.custom {
+        name = name.child(plain_badge("config.toml", pal));
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(url) = &row.base_url {
+        parts.push(url.clone());
+    }
+    parts.push(match row.models.len() {
+        0 => "no models listed".to_owned(),
+        1 => "1 model".to_owned(),
+        n => format!("{n} models"),
+    });
+    if !row.headers.is_empty() {
+        parts.push(format!("headers: {}", row.headers.join(", ")));
+    }
+    let key = match snapshot.key_state(&row.id) {
+        Some(state) => match state.source.as_str() {
+            "env" => badge(
+                format!("key from {}", state.env),
+                pal.ok,
+                pal.ok_soft,
+                pal.ok_bd,
+            ),
+            "auth" => badge("key in auth.json", pal.ok, pal.ok_soft, pal.ok_bd),
+            "unneeded" => plain_badge("no key needed", pal),
+            _ => badge(
+                format!("{} not set", state.env),
+                pal.warn,
+                pal.warn_soft,
+                pal.warn_bd,
+            ),
+        },
+        None => badge("key source unknown", pal.faint, pal.fill, pal.subtle),
+    };
+    let target = if row.custom {
+        Target::Custom(Some(row.id.clone()))
+    } else {
+        Target::Registered(row.id.clone())
+    };
+    let hover = pal.fill_hover;
+    list_row(
+        initials(&row.id, pal),
+        name,
+        Some(SharedString::from(parts.join(" \u{b7} "))),
+        pal,
+    )
+    .child(key)
+    .id(SharedString::from(format!("provider-row-{}", row.id)))
+    .cursor_pointer()
+    .hover(move |row| row.bg(hover))
+    .on_click(move |_, window, cx| on_open(ProviderNav::Open(target.clone()), window, cx))
+    .into_any_element()
+}
+
+/// The providers to start a new one from: each registered provider not
+/// listed yet, a local server, and a custom endpoint.
+fn provider_chooser(
+    snapshot: &Snapshot,
+    rows: &[ProviderRow],
+    on_open: impl Fn(ProviderNav, &mut Window, &mut App) + Clone + 'static,
+    pal: &Palette,
+) -> Vec<AnyElement> {
+    let chip = |id: String, label: String, target: Target| {
+        let on_open = on_open.clone();
+        div()
+            .id(SharedString::from(format!("provider-pick-{id}")))
+            .px(px(10.))
+            .h(px(28.))
+            .flex()
+            .items_center()
+            .rounded(px(R_FULL))
+            .border_1()
+            .border_color(pal.line)
+            .bg(pal.surface)
+            .text_size(px(FS_XS))
+            .text_color(pal.ink)
+            .cursor_pointer()
+            .child(label)
+            .on_click(move |_, window, cx| on_open(ProviderNav::Open(target.clone()), window, cx))
+    };
+    let mut registered = h_flex().gap(px(6.)).flex_wrap();
+    for id in snapshot
+        .registered()
+        .filter(|id| !rows.iter().any(|row| row.id == *id))
+    {
+        registered = registered.child(chip(
+            id.to_owned(),
+            id.to_owned(),
+            Target::Registered(id.to_owned()),
+        ));
+    }
+    let back = on_open.clone();
+    vec![
+        group("Add provider", pal)
+            .justify_between()
+            .child(
+                btn_sm("provider-choose-back", BtnTone::Plain, pal)
+                    .on_click(move |_, window, cx| back(ProviderNav::Back, window, cx))
+                    .child("Cancel"),
+            )
+            .into_any_element(),
+        note("A provider kage knows: give it a key.", pal).into_any_element(),
+        registered.into_any_element(),
+        note("Or an endpoint of your own.", pal).into_any_element(),
+        h_flex()
+            .gap(px(6.))
+            .child(chip(
+                "local".into(),
+                "Local server (Ollama)".into(),
+                Target::Local,
+            ))
+            .child(chip("custom".into(), "Custom".into(), Target::Custom(None)))
+            .into_any_element(),
+    ]
 }
 
 /// The MCP Servers page: configured servers with the live status the

@@ -2022,6 +2022,24 @@ mod tests {
     }
 
     #[test]
+    fn a_provider_test_answer_lands_under_its_id() {
+        let mut store = welcome_store();
+        let id = store.config_test(kage_client::wire::ProviderProbe {
+            id: "lab".into(),
+            ..Default::default()
+        });
+        let _ = store.take_outgoing();
+        store.absorb(Frame::Success {
+            id,
+            result: serde_json::json!({"ok": false, "message": "refused", "millis": 1, "models": []}),
+        });
+        assert_eq!(
+            store.test_result(id).map(|r| r.message.as_str()),
+            Some("refused")
+        );
+    }
+
+    #[test]
     fn a_fresh_welcome_offers_the_options_a_new_session_opens_with() {
         let mut store = Store::new("/w", false);
         store.set_connect(State::Connected);

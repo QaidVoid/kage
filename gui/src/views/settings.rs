@@ -24,6 +24,7 @@ use crate::theme::{
 };
 use crate::transport::State;
 use crate::views::mcp_form::{FormDone, McpForm};
+use crate::views::provider_form::ProviderForm;
 use crate::views::settings_config as config;
 
 gpui_kit::actions!(kage_desktop, [SettingsClose]);
@@ -223,6 +224,10 @@ pub struct SettingsView {
     rule_input: Option<Entity<InputState>>,
     /// The MCP server form, while one is open.
     mcp_form: Option<Entity<McpForm>>,
+    /// Whether the Providers page shows the providers to add from.
+    provider_choosing: bool,
+    /// The provider form, while one is open.
+    provider_form: Option<Entity<ProviderForm>>,
 }
 
 impl Focusable for SettingsView {
@@ -244,6 +249,8 @@ impl SettingsView {
             rule_add: None,
             rule_input: None,
             mcp_form: None,
+            provider_choosing: false,
+            provider_form: None,
         }
     }
 
@@ -258,6 +265,35 @@ impl SettingsView {
         self.open = true;
         self.go(section, cx);
         window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Follows a click on the Providers page: to the providers to add
+    /// from, back to the list, or into a provider's form.
+    fn open_provider(
+        &mut self,
+        nav: config::ProviderNav,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = match nav {
+            config::ProviderNav::Choose | config::ProviderNav::Back => {
+                self.provider_choosing = nav == config::ProviderNav::Choose;
+                cx.notify();
+                return;
+            }
+            config::ProviderNav::Open(target) => target,
+        };
+        let config = self.store.read(cx).config().cloned().unwrap_or_default();
+        let store = self.store.clone();
+        let form = cx.new(|cx| ProviderForm::new(store, target, &config, window, cx));
+        cx.subscribe(&form, |this, _, _: &FormDone, cx| {
+            this.provider_form = None;
+            this.provider_choosing = false;
+            cx.notify();
+        })
+        .detach();
+        self.provider_form = Some(form);
         cx.notify();
     }
 
@@ -349,6 +385,8 @@ impl SettingsView {
     fn go(&mut self, section: Section, cx: &mut Context<Self>) {
         self.section = section;
         self.mcp_form = None;
+        self.provider_choosing = false;
+        self.provider_form = None;
         if matches!(
             section,
             Section::Providers | Section::Mcp | Section::Permissions | Section::Plugins
@@ -588,7 +626,21 @@ impl SettingsView {
             session.and_then(|session| session.config_options.iter().find(|o| o.id == id))
         };
         match self.section {
-            Section::Providers => config::providers_page(&snapshot, option("model"), pal),
+            Section::Providers => {
+                if let Some(form) = &self.provider_form {
+                    return vec![form.clone().into_any_element()];
+                }
+                let view = cx.entity();
+                config::providers_page(
+                    &snapshot,
+                    option("model"),
+                    self.provider_choosing,
+                    move |target, window, cx| {
+                        view.update(cx, |this, cx| this.open_provider(target, window, cx));
+                    },
+                    pal,
+                )
+            }
             Section::Mcp => {
                 let live = session
                     .map(|session| session.mcp.clone())

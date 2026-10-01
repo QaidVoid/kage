@@ -35,6 +35,11 @@ const CANCEL_GRACE: Duration = Duration::from_secs(2);
 /// children's status lines out.
 const RESULT_CAP: usize = kage_core::MAX_TOOL_RESULT_BYTES - 256;
 
+/// Longest item or description an aggregate repeats per child, in
+/// characters. Both land in every `<swarm>` element, so a long one
+/// would eat the bodies' share of the result cap.
+const ATTR_CHARS: usize = 160;
+
 /// Marks a body the result cap cut.
 const BODY_CUT: &str = "\n[body truncated to fit the result cap]";
 
@@ -469,13 +474,16 @@ fn expand(input: &SwarmInput, defs: &AgentDefs, max_items: usize) -> Result<Call
             items.push((item.clone(), prompt));
         }
     }
-    let mut resume = Vec::with_capacity(input.resume.len());
+    let mut resume: Vec<(SessionId, String)> = Vec::with_capacity(input.resume.len());
     for (key, prompt) in &input.resume {
         let id = Ulid::from_string(key)
             .map(SessionId)
             .map_err(|_| format!("resume: `{key}` is not a session id"))?;
         if prompt.trim().is_empty() {
             return Err(format!("resume: the prompt for {key} is empty"));
+        }
+        if resume.iter().any(|(seen, _)| *seen == id) {
+            return Err(format!("resume: {key} names session {id} twice"));
         }
         resume.push((id, prompt.clone()));
     }
@@ -504,9 +512,10 @@ struct Block {
 }
 
 impl Block {
-    /// The characters the block costs beyond its body.
+    /// The bytes the block costs beyond its body, with the newline
+    /// that sets it apart from the one before.
     fn overhead(&self) -> usize {
-        self.open.len() + self.close.len() + 1
+        self.open.len() + self.close.len() + 2
     }
 
     fn render(&self, body: &str) -> String {
@@ -519,56 +528,36 @@ impl Block {
 /// never reported render as cancelled, session id included, and a
 /// hint names the resume path. The call is an error only when every
 /// child failed.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one linear pass over the members: slot results, blocks, cap"
-)]
 fn render(cap: usize, description: &str, members: &[Member], results: &[ToolOutput]) -> ToolOutput {
-    // Place each result on the child it names; a result naming no
-    // known child lands on the first free slot, in arrival order.
+    // Every result is an `<agent>` element naming its child, engine
+    // refusals included.
     let mut slots: Vec<Option<&ToolOutput>> = vec![None; members.len()];
-    let mut spare = 0;
-    for result in results {
+    for result in results.iter().filter(|result| is_agent(result)) {
         let at =
             session_in(result).and_then(|id| members.iter().position(|member| member.id == id));
         if let Some(at) = at {
             slots[at] = Some(result);
-        } else {
-            while spare < slots.len() && slots[spare].is_some() {
-                spare += 1;
-            }
-            if spare < slots.len() {
-                slots[spare] = Some(result);
-                spare += 1;
-            }
         }
     }
+    let description = escape(&clip(description));
     let mut completed = 0;
     let mut failed = 0;
     let mut cancelled = 0;
     let mut blocks = Vec::with_capacity(members.len());
-    for (index, member) in members.iter().enumerate() {
+    for (member, slot) in members.iter().zip(slots) {
         let swarm_open = format!(
-            "<swarm description=\"{}\" item=\"{}\">",
-            escape(description),
-            escape(&member.item)
+            "<swarm description=\"{description}\" item=\"{}\">",
+            escape(&clip(&member.item))
         );
-        let (open, body) = match slots[index] {
-            Some(result) if is_agent(result) => {
+        let (open, body, state) = match slot {
+            Some(result) => {
                 let (header, rest) = result.text.split_once('\n').unwrap_or((&result.text, ""));
                 (
                     format!("{swarm_open}\n{header}"),
                     rest.strip_suffix("\n</agent>").unwrap_or(rest).to_owned(),
+                    state_in(result).unwrap_or("failed"),
                 )
             }
-            Some(result) => (
-                format!(
-                    "{swarm_open}\n<agent name=\"{}\" session=\"{}\" state=\"failed\">",
-                    escape(&member.agent),
-                    member.id
-                ),
-                result.text.clone(),
-            ),
             None => (
                 format!(
                     "{swarm_open}\n<agent name=\"{}\" session=\"{}\" state=\"cancelled\">",
@@ -576,14 +565,8 @@ fn render(cap: usize, description: &str, members: &[Member], results: &[ToolOutp
                     member.id
                 ),
                 "no result arrived".to_owned(),
+                "cancelled",
             ),
-        };
-        let state = match slots[index] {
-            Some(result) if is_agent(result) => state_in(result).unwrap_or("failed"),
-            // A result without an agent header is the engine refusing
-            // the spawn, which is a failure of this child.
-            Some(_) => "failed",
-            None => "cancelled",
         };
         match state {
             "completed" => completed += 1,
@@ -598,28 +581,15 @@ fn render(cap: usize, description: &str, members: &[Member], results: &[ToolOutp
     }
     let summary = format!("completed: {completed}, failed: {failed}, cancelled: {cancelled}");
     let hint = (failed + cancelled > 0).then_some(RESUME_HINT);
-    let mut out = summary.clone();
     let mut budget = cap
         .saturating_sub(summary.len())
-        .saturating_sub(hint.map_or(0, str::len));
+        .saturating_sub(hint.map_or(0, |hint| hint.len() + 1));
     for block in &blocks {
         budget = budget.saturating_sub(block.overhead());
     }
-    let mut left = blocks.len();
-    for block in &blocks {
-        let allowance = budget / left.max(1);
-        let (body, used) = if block.body.len() > allowance {
-            let body_cap = allowance.saturating_sub(BODY_CUT.len());
-            (
-                format!("{}{BODY_CUT}", truncate(&block.body, body_cap)),
-                allowance,
-            )
-        } else {
-            (block.body.clone(), block.body.len())
-        };
-        budget -= used;
+    let mut out = summary;
+    for (block, body) in blocks.iter().zip(fit_bodies(&blocks, budget)) {
         let _ = write!(out, "\n{}", block.render(&body));
-        left -= 1;
     }
     if let Some(hint) = hint {
         let _ = write!(out, "\n{hint}");
@@ -628,6 +598,37 @@ fn render(cap: usize, description: &str, members: &[Member], results: &[ToolOutp
         text: out,
         is_error: !members.is_empty() && failed == members.len(),
         ..ToolOutput::default()
+    }
+}
+
+/// Each block's body within `budget` bytes in all. Short bodies go
+/// first and whole, so the long ones split what they leave; a body cut
+/// to its share ends with [`BODY_CUT`], or is dropped when the share
+/// cannot hold even that.
+fn fit_bodies(blocks: &[Block], mut budget: usize) -> Vec<String> {
+    let mut order: Vec<usize> = (0..blocks.len()).collect();
+    order.sort_by_key(|&at| blocks[at].body.len());
+    let mut bodies = vec![String::new(); blocks.len()];
+    for (done, &at) in order.iter().enumerate() {
+        let share = budget / (blocks.len() - done);
+        let body = &blocks[at].body;
+        bodies[at] = if body.len() <= share {
+            body.clone()
+        } else if share >= BODY_CUT.len() {
+            format!("{}{BODY_CUT}", truncate(body, share - BODY_CUT.len()))
+        } else {
+            String::new()
+        };
+        budget -= bodies[at].len();
+    }
+    bodies
+}
+
+/// `value` cut to [`ATTR_CHARS`] characters, marked when cut.
+fn clip(value: &str) -> String {
+    match value.char_indices().nth(ATTR_CHARS) {
+        Some((at, _)) => format!("{}...", &value[..at]),
+        None => value.to_owned(),
     }
 }
 
@@ -672,12 +673,14 @@ fn state_in(result: &ToolOutput) -> Option<&'static str> {
     }
 }
 
-/// Make `value` safe inside a double-quoted attribute.
+/// Make `value` safe inside a double-quoted attribute on one line.
 fn escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
         .replace('<', "&lt;")
+        .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\n', "&#10;")
 }
 
 #[cfg(test)]
@@ -920,33 +923,99 @@ mod tests {
     }
 
     #[test]
-    fn a_result_without_an_agent_header_still_renders() {
+    fn a_result_without_an_agent_header_is_left_out() {
         let (members, _children) = two_members();
-        let odd = ToolOutput {
-            text: "the engine stopped".into(),
-            is_error: true,
-            ..ToolOutput::default()
-        };
+        let odd = agent_tool::error_output("the engine stopped".into());
         let out = render(RESULT_CAP, "d", &members, &[odd]);
-        assert!(out.text.contains("state=\"failed\""));
-        assert!(out.text.contains("the engine stopped"));
+        assert!(
+            out.text
+                .starts_with("completed: 0, failed: 0, cancelled: 2\n")
+        );
+        assert!(!out.text.contains("the engine stopped"));
     }
 
     #[test]
-    fn engine_refusals_count_as_failed_and_can_error_the_call() {
-        let (members, _children) = two_members();
-        let refusal = ToolOutput {
-            text: "cannot fork: this session is not recorded".into(),
-            is_error: true,
-            ..ToolOutput::default()
-        };
-        let out = render(RESULT_CAP, "d", &members, &[refusal.clone(), refusal]);
+    fn an_engine_refusal_lands_on_the_child_it_names() {
+        let (members, children) = two_members();
+        let refusal = agent_tool::refused(children[1], "general", "cannot fork: not recorded");
+        let results = [refusal, agent_block(children[0], "completed", "did a")];
+        let out = render(RESULT_CAP, "d", &members, &results);
         assert!(
             out.text
-                .starts_with("completed: 0, failed: 2, cancelled: 0\n"),
+                .starts_with("completed: 1, failed: 1, cancelled: 0\n"),
             "{}",
             out.text
         );
-        assert!(out.is_error);
+        let second = out.text.split("item=\"b\"").nth(1).unwrap();
+        assert!(second.contains("cannot fork"), "{}", out.text);
+        assert!(!out.is_error);
+
+        let both = [
+            agent_tool::refused(children[0], "general", "no"),
+            agent_tool::refused(children[1], "general", "no"),
+        ];
+        assert!(render(RESULT_CAP, "d", &members, &both).is_error);
+    }
+
+    #[test]
+    fn long_items_are_cut_and_escaped_onto_one_line() {
+        let id = SessionId::new();
+        let item = format!("a\"b>\nc{}", "x".repeat(500));
+        let members = [Member {
+            id,
+            item,
+            agent: "general".into(),
+        }];
+        let out = render(
+            RESULT_CAP,
+            "d",
+            &members,
+            &[agent_block(id, "completed", "ok")],
+        );
+        let open = out.text.lines().nth(1).unwrap();
+        assert!(
+            open.starts_with("<swarm description=\"d\" item=\"a&quot;b&gt;&#10;cxx"),
+            "{open}"
+        );
+        assert!(open.ends_with("...\">"), "{open}");
+        assert!(open.len() < ATTR_CHARS + 60, "{open}");
+    }
+
+    #[test]
+    fn a_large_fleet_stays_within_the_cap_and_keeps_short_bodies_whole() {
+        let members: Vec<Member> = (0..128)
+            .map(|n| Member {
+                id: SessionId::new(),
+                item: format!("item {n} {}", "y".repeat(400)),
+                agent: "general".into(),
+            })
+            .collect();
+        let results: Vec<ToolOutput> = members
+            .iter()
+            .enumerate()
+            .map(|(n, m)| {
+                let body = if n == 0 {
+                    "short".to_owned()
+                } else {
+                    "z".repeat(5_000)
+                };
+                agent_block(m.id, "completed", &body)
+            })
+            .collect();
+        let out = render(RESULT_CAP, &"d".repeat(400), &members, &results);
+        assert!(out.text.len() <= RESULT_CAP, "{}", out.text.len());
+        assert_eq!(out.text.matches("<swarm ").count(), 128);
+        assert!(out.text.contains(">\nshort\n</agent>"));
+    }
+
+    #[test]
+    fn a_resume_map_may_not_name_a_session_twice() {
+        let id = SessionId::new();
+        let mut call = input(&[]);
+        call.resume.insert(id.to_string(), "go on".into());
+        call.resume
+            .insert(id.to_string().to_lowercase(), "go on too".into());
+        let err = expand(&call, &AgentDefs::builtin(), 32).unwrap_err();
+        assert!(err.contains("twice"), "{err}");
     }
 }

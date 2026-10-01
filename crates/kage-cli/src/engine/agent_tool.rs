@@ -175,6 +175,14 @@ pub(super) fn error_output(text: String) -> ToolOutput {
     }
 }
 
+/// The engine refusing to start or resume the child `session`: a
+/// failed `<agent>` element, so a swarm places it on that child.
+pub(super) fn refused(session: SessionId, agent: &str, text: &str) -> ToolOutput {
+    error_output(format!(
+        "<agent name=\"{agent}\" session=\"{session}\" state=\"failed\">\n{text}\n</agent>"
+    ))
+}
+
 /// The result an `agent` call returns: the text of the agent's last
 /// assistant message wrapped in an `<agent>` element that names the agent,
 /// its session and how its run ended. A cancelled run passes its partial

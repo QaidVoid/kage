@@ -8,14 +8,15 @@ use std::time::Duration;
 use kage_core::agents::AgentDef;
 use kage_core::protocol::{HostEvent, NoticeLevel, RunOutcome, SwarmMember, Usage};
 use kage_core::sync::lock;
-use kage_core::{Content, Message, Role, SessionId, ToolCallId, ToolOutput};
+use kage_core::{Content, Message, MessageId, Role, SessionId, ToolCallId, ToolOutput};
 use kage_loop::{AgentContext, TokenBudget};
 use kage_provider::ProviderRegistry;
 use kage_tools::ToolRegistry;
 
 use super::agent_tool::{self, AGENT_TOOL, Spawn};
+use super::mailbox_tool::MAILBOX_TOOL;
 use super::runner::Work;
-use super::swarm_tool::SwarmInfo;
+use super::swarm_tool::{SWARM_TOOL, SwarmInfo};
 use super::{
     AgentSetup, Attach, CONTINUE_PROMPT, Recorder, ResumeChild, Session, SessionSpec, notice,
 };
@@ -47,6 +48,23 @@ pub(super) struct AgentLink {
     /// their copied transcript would otherwise sit in RAM, possibly
     /// for the whole batch, while the child waits for a run slot.
     pub(super) lazy_history: Option<PathBuf>,
+    /// The last message of a forked child's inherited snapshot, set
+    /// when the snapshot loads. The child's result reads only what
+    /// comes after it, so the parent's own reply never passes as the
+    /// child's.
+    pub(super) inherited_until: Option<MessageId>,
+    /// The definition's tool list. `None` allows every tool, the
+    /// delegation and mailbox tools included.
+    pub(super) tools: Option<Vec<String>>,
+}
+
+impl AgentLink {
+    /// Whether the agent's definition allows the tool `name`.
+    pub(super) fn allows(&self, name: &str) -> bool {
+        self.tools
+            .as_deref()
+            .is_none_or(|only| only.iter().any(|n| n == name))
+    }
 }
 
 impl super::Dispatcher {
@@ -63,8 +81,13 @@ impl super::Dispatcher {
             fork,
             swarm,
         } = spawn;
+        let child = swarm.as_ref().map(|info| info.id);
         let fail = |text: String| {
-            let _ = reply.send(agent_tool::error_output(text));
+            let output = match child {
+                Some(id) => agent_tool::refused(id, &agent, &text),
+                None => agent_tool::error_output(text),
+            };
+            let _ = reply.send(output);
         };
         let Some(from) = self.sessions.get(&parent) else {
             return fail(format!("session {parent} is gone"));
@@ -111,6 +134,8 @@ impl super::Dispatcher {
             batch_id,
             reply: Some(reply),
             lazy_history,
+            inherited_until: None,
+            tools: def.tools.clone(),
         };
         let mut marker = serde_json::json!({
             "parent": parent,
@@ -170,7 +195,7 @@ impl super::Dispatcher {
 
     /// Start `content` as the first run of the agent session `id`, or
     /// queue it past the running limit.
-    fn launch_agent(&mut self, id: SessionId, max: usize, content: Vec<Content>) {
+    pub(super) fn launch_agent(&mut self, id: SessionId, max: usize, content: Vec<Content>) {
         if self.running_agents() < max {
             self.start_run(id, Work::Prompt(Message::new(Role::User, content, None)));
         } else {
@@ -239,7 +264,7 @@ impl super::Dispatcher {
             swarm,
         } = attach;
         let fail = |text: String| {
-            let _ = reply.send(agent_tool::error_output(text));
+            let _ = reply.send(agent_tool::refused(id, &agent, &text));
         };
         let Some(setup) = self.sessions.get(&parent).and_then(|s| s.agents.clone()) else {
             return fail("agents are turned off".to_owned());
@@ -251,6 +276,12 @@ impl super::Dispatcher {
             };
             if link.parent != parent || link.batch_id.is_none() {
                 return fail(format!("session {id} is not a swarm child of this session"));
+            }
+            if session.idle.is_none() || link.reply.is_some() || self.waiting.contains(&id) {
+                return fail(format!(
+                    "session {id} is still working on an earlier call; resume it once that \
+                     call has its result"
+                ));
             }
             link.reply = Some(reply);
             let max = setup.max_running;
@@ -296,6 +327,8 @@ impl super::Dispatcher {
                 batch_id: Some(batch_id.clone()),
                 reply: Some(reply),
                 lazy_history: None,
+                inherited_until: None,
+                tools: def.tools.clone(),
             };
             (spec, missing, note, cancel, link)
         };
@@ -440,16 +473,20 @@ impl super::Dispatcher {
         let link = self.sessions.get_mut(&id)?.link.as_mut()?;
         let reply = link.reply.take()?;
         self.swarm_requeues.remove(&id);
+        let own = link
+            .inherited_until
+            .and_then(|last| history.iter().position(|m| m.id == last))
+            .map_or(history, |at| &history[at + 1..]);
         Some((
             reply,
-            agent_tool::agent_result(id, &link.agent, outcome, history, &usage, run_time),
+            agent_tool::agent_result(id, &link.agent, outcome, own, &usage, run_time),
         ))
     }
 
     /// Agent runs in flight that hold a slot of the running limit. An
     /// agent waiting on its own agents holds none, so nesting cannot
     /// deadlock the limit.
-    fn running_agents(&self) -> usize {
+    pub(super) fn running_agents(&self) -> usize {
         let waits_on_agents = |id: &SessionId| {
             self.sessions.values().any(|s| {
                 s.link
@@ -507,6 +544,32 @@ impl super::Dispatcher {
             Usage::default(),
             Duration::ZERO,
         );
+    }
+
+    /// End an idle agent that still owes its call a result, such as a
+    /// swarm child backing off a rate limit, as cancelled. Its pending
+    /// requeue then finds nothing to continue.
+    pub(super) fn end_paused(&mut self, id: SessionId) {
+        let Some(session) = self.sessions.get(&id) else {
+            return;
+        };
+        let Some(idle) = session
+            .idle
+            .as_ref()
+            .filter(|_| session.link.as_ref().is_some_and(|l| l.reply.is_some()))
+        else {
+            return;
+        };
+        let history = idle.cx.history.clone();
+        let usage = session.usage;
+        self.bus.publish(
+            id,
+            HostEvent::RunEnded {
+                outcome: RunOutcome::Cancelled,
+            },
+        );
+        self.deliver(id, &RunOutcome::Cancelled, &history, usage, Duration::ZERO);
+        self.reap_swarm_child(id);
     }
 
     pub(super) fn parent_of(&self, id: SessionId) -> Option<SessionId> {
@@ -806,6 +869,6 @@ fn agent_tools(parent: &ToolRegistry, only: Option<&[String]>) -> (ToolRegistry,
         return (parent.clone(), Vec::new());
     };
     let (tools, mut missing) = parent.retain_named(only);
-    missing.retain(|name| name != AGENT_TOOL);
+    missing.retain(|name| ![AGENT_TOOL, SWARM_TOOL, MAILBOX_TOOL].contains(&name.as_str()));
     (tools, missing)
 }

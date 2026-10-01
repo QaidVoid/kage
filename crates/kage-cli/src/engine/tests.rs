@@ -4022,3 +4022,249 @@ fn closing_the_active_session_clears_active() {
     );
     h.engine.shutdown();
 }
+
+#[test]
+fn an_agent_without_delegation_tools_in_its_list_cannot_delegate() {
+    let mock = MockProvider::sequence(vec![
+        agent_turn(&[(
+            "call_a",
+            serde_json::json!({"agent": "explore", "description": "d", "prompt": "look"}),
+        )]),
+        text_turn("found it"),
+        text_turn("parent done"),
+    ]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(2, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    until_runs_end(&h.events, 2);
+    h.engine.shutdown();
+
+    let names = |at: usize| -> Vec<String> {
+        mock.requests()[at]
+            .tools
+            .iter()
+            .map(|t| t.name.clone())
+            .collect()
+    };
+    for tool in ["agent", "swarm", "send_message"] {
+        assert!(
+            names(0).iter().any(|n| n == tool),
+            "the main session has {tool}"
+        );
+        assert!(!names(1).iter().any(|n| n == tool), "explore lacks {tool}");
+    }
+}
+
+#[test]
+fn cancelling_an_idle_session_leaves_its_agents_free_to_run() {
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("work"))]),
+        text_turn("child reply"),
+        text_turn("parent done"),
+        text_turn("child again"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 2);
+    let (child, _) = spawned(&events)[0].clone();
+    h.engine.send(Command::to(parent, CommandKind::Cancel));
+    prompt(&h.engine, child, "again", Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+    h.engine.shutdown();
+    assert_eq!(outcome_of(&events, child), [RunOutcome::Completed]);
+}
+
+#[test]
+fn a_message_to_an_idle_agent_waits_for_a_free_slot() {
+    let mock = MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("first"))]),
+        text_turn("a done"),
+        text_turn("parent done"),
+    ]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 2);
+    let (first, _) = spawned(&events)[0].clone();
+
+    mock.push_script(agent_turn(&[("call_b", task("second"))]));
+    mock.push_script(send_message_turn(
+        "call_m",
+        &first.to_string(),
+        "over to you",
+    ));
+    mock.push_script(text_turn("b done"));
+    mock.push_script(text_turn("ok"));
+    mock.push_script(text_turn("ok"));
+    prompt(&h.engine, parent, "again", Delivery::Steer);
+    let events = until_runs_end(&h.events, 3);
+    h.engine.shutdown();
+
+    let (second, _) = spawned(&events)[0].clone();
+    let ack = tool_output(&events, second, "call_m");
+    assert!(
+        ack.text.contains("it runs when an agent slot frees"),
+        "{}",
+        ack.text
+    );
+    let position = |session: SessionId, pred: &dyn Fn(&HostEvent) -> bool| {
+        events
+            .iter()
+            .position(|e| e.session == session && matches!(&e.event, Event::Host(h) if pred(h)))
+            .unwrap()
+    };
+    let second_ended = position(second, &|e| matches!(e, HostEvent::RunEnded { .. }));
+    let first_started = position(first, &|e| matches!(e, HostEvent::RunStarted));
+    assert!(second_ended < first_started, "{events:?}");
+    assert_eq!(outcome_of(&events, first), [RunOutcome::Completed]);
+}
+
+#[test]
+fn a_message_to_another_conversation_is_refused() {
+    let mock = MockProvider::sequence(vec![]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let gate = || PermissionGate::new(PermissionsConfig::default());
+    let other = h.open_parent(None, gate(), Some(agent_setup(1, 1)));
+    let parent = h.open_parent(None, gate(), Some(agent_setup(1, 1)));
+    mock.push_script(send_message_turn("call_m", &other.to_string(), "psst"));
+    mock.push_script(text_turn("done"));
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+    h.engine.shutdown();
+
+    let refused = tool_output(&events, parent, "call_m");
+    assert!(refused.is_error);
+    assert!(
+        refused.text.contains("belongs to another conversation"),
+        "{}",
+        refused.text
+    );
+    assert_eq!(outcome_of(&events, other), []);
+}
+
+#[test]
+fn resuming_a_busy_swarm_child_leaves_its_running_call_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::sequence(vec![
+        swarm_turn(&[("call_s", swarm_task(&["a", "b"]))]),
+        tool_turn("gate"),
+        tool_turn("gate"),
+        text_turn("child done"),
+        text_turn("child done"),
+        text_turn("parent done"),
+    ]));
+    let parent = SessionId::new();
+    let (recorder, _) = recorder_in(dir.path(), parent);
+    h.engine.open(SessionSpec {
+        recorder: Some(recorder),
+        agents: Some(swarm_setup(2, 60_000)),
+        ..h.spec(parent)
+    });
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let mut seen = wait_for(&h.events, is_tool_start_outside(parent));
+    seen.extend(wait_for(&h.events, is_tool_start_outside(parent)));
+    let busy = spawned(&seen)[0].0;
+    h.engine.send(Command::to(
+        parent,
+        CommandKind::SwarmResume {
+            members: [(busy, "start over".to_owned())].into(),
+        },
+    ));
+    h.release.send(()).unwrap();
+    h.release.send(()).unwrap();
+    let events = until_runs_end(&h.events, 3);
+    h.engine.shutdown();
+
+    let output = tool_output(&events, parent, "call_s");
+    assert!(
+        output
+            .text
+            .starts_with("completed: 2, failed: 0, cancelled: 0\n"),
+        "{}",
+        output.text
+    );
+}
+
+#[test]
+fn cancelling_the_parent_ends_a_rate_limited_child_for_good() {
+    let mut scripts = vec![swarm_turn(&[("call_s", swarm_task(&["a", "b"]))])];
+    for _ in 0..5 {
+        scripts.push(rate_limited());
+    }
+    scripts.push(tool_turn("gate"));
+    let mock = MockProvider::sequence(scripts);
+    let h = harness(mock.clone());
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(swarm_setup(1, 60_000)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let seen = wait_for(&h.events, is_tool_start_outside(parent));
+    let paused = seen
+        .iter()
+        .find(|e| matches!(e.event, Event::Host(HostEvent::AgentPaused { .. })))
+        .expect("the first child paused")
+        .session;
+    h.engine.send(Command::to(parent, CommandKind::Cancel));
+    let events = until_runs_end(&h.events, 3);
+
+    let output = tool_output(&events, parent, "call_s");
+    assert!(
+        output
+            .text
+            .starts_with("completed: 0, failed: 0, cancelled: 2\n"),
+        "{}",
+        output.text
+    );
+    assert_eq!(outcome_of(&events, paused), [RunOutcome::Cancelled]);
+    let calls = mock.call_count();
+    std::thread::sleep(REQUEUE_BASE + Duration::from_millis(500));
+    assert_eq!(mock.call_count(), calls, "the requeue found nothing to run");
+    h.engine.shutdown();
+}
+
+#[test]
+fn a_forked_child_reports_only_its_own_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let mock = MockProvider::sequence(vec![tool_turn("gate"), text_turn("parent says hi")]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let parent = SessionId::new();
+    let (recorder, _) = recorder_in(dir.path(), parent);
+    h.engine.open(SessionSpec {
+        recorder: Some(recorder),
+        agents: Some(swarm_setup(1, 60_000)),
+        ..h.spec(parent)
+    });
+    h.release.send(()).unwrap();
+    prompt(&h.engine, parent, "hello", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+
+    mock.push_script(swarm_turn(&[("call_s", forked_swarm_task(&["a", "b"]))]));
+    mock.push_script(text_turn("child a"));
+    mock.push_script(text_turn("child b"));
+    mock.push_script(text_turn("parent done"));
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 3);
+    h.engine.shutdown();
+
+    let output = tool_output(&events, parent, "call_s");
+    assert_eq!(
+        output.text.matches("tools=\"0\"").count(),
+        2,
+        "the parent's gate call is not the children's: {}",
+        output.text
+    );
+}

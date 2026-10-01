@@ -129,12 +129,16 @@ approval turns the mode off mid-run.
 
 **The mailbox.** Every agent-enabled session also gets a
 `send_message` tool, whatever its depth, because sending does not
-nest. It delivers fire-and-forget: the engine resolves `parent` or a
-session id to a hosted session, wraps the text with a sender header
-naming the agent and its session id, and prompts the target with
-`Delivery::Queue`, which starts an idle target at once and queues
-behind a busy one. The ack tells the sender when the message will
-run; the target's reply lands only in the target's own transcript.
+nest; an agent whose definition lists tools gets it only when the
+list names it, like `agent` and `swarm`. It delivers fire-and-forget:
+the engine resolves `parent` or a session id to a hosted session
+under the sender's own main session, and wraps the text with a sender
+header naming the agent and its session id. A busy target queues it
+behind its run, an idle agent goes through the same launch as a
+spawn, so it waits for a slot under `agent_max_running`, and an idle
+main session runs it at once. The ack tells the sender which
+happened; the target's reply lands only in the target's own
+transcript.
 
 **Forked children.** A `swarm` call with `fork: true` gives each new
 child the parent's conversation instead of zero context. The

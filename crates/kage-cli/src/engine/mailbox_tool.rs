@@ -43,13 +43,13 @@ impl MailboxTool {
         let description = format!(
             "Send a message to another agent session's mailbox and continue without \
              waiting. The message becomes the target's next prompt: it runs at once \
-             when the target is idle, else after its current run ends. The target's \
-             reply never comes back to you; it lands in the target's own transcript, \
-             so ask it to report back another way, such as a follow-up `swarm` resume \
-             or a message of its own.\n\n\
-             `to` is `parent` (the session that started you) or a session id, for \
-             example one of the sibling ids a swarm result named. Your own id is \
-             {from}.\n\n\
+             when the target is idle and the agent running limit allows, else after \
+             its current run ends or a slot frees. The target's reply never comes back \
+             to you; it lands in the target's own transcript, so ask it to report back \
+             another way, such as a follow-up `swarm` resume or a message of its own.\n\n\
+             `to` is `parent` (the session that started you) or the id of another \
+             session of this conversation, for example one of the sibling ids a swarm \
+             result named. Your own id is {from}.\n\n\
              Use it to hand findings to a sibling, ask the parent a question mid-task \
              or answer the parent without being asked. For work you must wait on, \
              make an `agent` call instead."
@@ -148,10 +148,11 @@ impl Tool for MailboxTool {
 
 impl super::Dispatcher {
     /// Resolve and queue one mailbox message. `None` targets address
-    /// the sender's parent. The message is wrapped so the target knows
-    /// who sent it and where to answer, then prompted with
-    /// [`Delivery::Queue`]: an idle target starts a run at once, a
-    /// busy one after its current run ends.
+    /// the sender's parent, and a target must share the sender's main
+    /// session. The message is wrapped so the target knows who sent it
+    /// and where to answer. An idle main session runs it at once; an
+    /// idle agent runs it once the running limit allows; a busy target
+    /// runs it after its current run ends.
     pub(super) fn deliver_message(
         &mut self,
         from: SessionId,
@@ -175,19 +176,44 @@ impl super::Dispatcher {
                 || "the main session".to_owned(),
                 |l| format!("the {} agent", l.agent),
             );
-        let Some(target) = self.sessions.get_mut(&to) else {
+        let Some(target) = self.sessions.get(&to) else {
             return Err(format!(
                 "no live session {to}. Only sessions hosted right now take messages; \
                  resume the session that owns it first"
             ));
         };
-        let idle = target.idle.is_some();
-        let text = format!("[message from {label} session {from}]\n\n{message}");
-        self.prompt(to, vec![Content::Text { text }], Delivery::Queue);
-        Ok(if idle {
+        if self.root_of(to) != self.root_of(from) {
+            return Err(format!(
+                "session {to} belongs to another conversation; message sessions of your own"
+            ));
+        }
+        let content = vec![Content::Text {
+            text: format!("[message from {label} session {from}]\n\n{message}"),
+        }];
+        let busy = target.idle.is_none() || self.waiting.contains(&to);
+        let max = target.agents.as_ref().map_or(usize::MAX, |a| a.max_running);
+        if busy || target.link.is_none() {
+            self.prompt(to, content, Delivery::Queue);
+            return Ok(if busy {
+                format!("message queued for session {to}; it runs when its current work ends")
+            } else {
+                format!("message delivered to session {to}; it runs now")
+            });
+        }
+        let starts = self.running_agents() < max;
+        self.launch_agent(to, max, content);
+        Ok(if starts {
             format!("message delivered to session {to}; it runs now")
         } else {
-            format!("message queued for session {to}; it runs when the current run ends")
+            format!("message queued for session {to}; it runs when an agent slot frees")
         })
+    }
+
+    /// The main session `id` hangs under, or `id` itself.
+    fn root_of(&self, mut id: SessionId) -> SessionId {
+        while let Some(parent) = self.parent_of(id) {
+            id = parent;
+        }
+        id
     }
 }

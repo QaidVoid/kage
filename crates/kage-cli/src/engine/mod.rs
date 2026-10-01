@@ -53,16 +53,16 @@ pub(crate) use bus::{Subscriber, SubscriptionId};
 pub(crate) use recorder::Recorder;
 pub(crate) use sessions::render_session_markdown;
 
-use agent_tool::{AgentTool, Spawn};
+use agent_tool::{AGENT_TOOL, AgentTool, Spawn};
 use agents::{AgentLink, depth_of};
 use bus::Bus;
-use mailbox_tool::MailboxTool;
+use mailbox_tool::{MAILBOX_TOOL, MailboxTool};
 use mcp::{McpDone, restart_failed};
 use plan_tool::ExitPlanTool;
 use plugin_tools::PluginTools;
 use runner::{Finished, McpLease, Run, Steering, Work};
 use shell::ShellDone;
-use swarm_tool::SwarmTool;
+use swarm_tool::{SWARM_TOOL, SwarmTool};
 
 use crate::permissions::{Asker, PermissionGate, PermissionPrompt};
 
@@ -636,7 +636,15 @@ impl Dispatcher {
             CommandKind::Prompt { content, delivery } => self.prompt(id, content, delivery),
             CommandKind::WithdrawPrompt { delivery } => self.withdraw_prompt(id, delivery),
             CommandKind::Cancel if self.waiting.contains(&id) => self.end_waiting(id),
-            CommandKind::Cancel => self.sessions[&id].cancel.cancel(),
+            // An idle session's flag would stay set and cancel every
+            // run its agents start, so only a run or a shell command
+            // in flight takes it.
+            CommandKind::Cancel
+                if self.sessions[&id].idle.is_none() || self.sessions[&id].shells > 0 =>
+            {
+                self.sessions[&id].cancel.cancel();
+            }
+            CommandKind::Cancel => self.end_paused(id),
             CommandKind::Compact => {
                 if self.ensure_idle(id, "compact") {
                     self.start_run(id, Work::Compact);
@@ -920,8 +928,11 @@ impl Dispatcher {
         else {
             return;
         };
-        if let Some(path) = session.link.as_mut().and_then(|l| l.lazy_history.take()) {
+        if let Some(link) = session.link.as_mut()
+            && let Some(path) = link.lazy_history.take()
+        {
             apply_forked_snapshot(&self.bus, id, &path, &mut cx);
+            link.inherited_until = cx.history.last().map(|m| m.id);
         }
         cx.model = bare_model;
         fit_context(&mut cx, &self.registry, &model);
@@ -1098,15 +1109,11 @@ impl Dispatcher {
             // the context fill, unlike the budget's raw counters.
             self.take_reply(id, &outcome, &cx.history, usage, run_time)
         };
-        // Children may not have seen the cancel yet, and this session's
-        // own flag resets below, so they get their own.
-        if outcome == RunOutcome::Cancelled {
-            for child in self.sessions.values() {
-                if child.link.as_ref().is_some_and(|l| l.parent == id) && child.idle.is_none() {
-                    child.cancel.cancel();
-                }
-            }
-        }
+        let paused = if outcome == RunOutcome::Cancelled {
+            self.cancel_children(id)
+        } else {
+            Vec::new()
+        };
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
@@ -1146,8 +1153,28 @@ impl Dispatcher {
         for orphan in orphans {
             self.end_waiting(orphan);
         }
+        for child in paused {
+            self.end_paused(child);
+        }
         self.start_waiting();
         self.reap_swarm_child(id);
+    }
+
+    /// Cancel the running children of `id`, whose run was cancelled,
+    /// and return its idle ones for the caller to end once `id` is
+    /// idle. Children may not have seen the cancel yet, and `id`'s own
+    /// flag resets when it goes idle, so they get their own.
+    fn cancel_children(&self, id: SessionId) -> Vec<SessionId> {
+        let mut idle = Vec::new();
+        for (child_id, child) in &self.sessions {
+            if child.link.as_ref().is_some_and(|l| l.parent == id) {
+                match child.idle {
+                    None => child.cancel.cancel(),
+                    Some(_) => idle.push(*child_id),
+                }
+            }
+        }
+        idle
     }
 
     /// Deny every permission ask the ended run of `session` still has
@@ -1376,12 +1403,15 @@ impl Dispatcher {
 fn run_tools(session: &Session, id: SessionId, tx: &mpsc::Sender<Input>) -> ToolRegistry {
     let mut tools = session.tools.clone();
     if let Some(setup) = &session.agents {
+        let allows = |name: &str| session.link.as_ref().is_none_or(|l| l.allows(name));
         if depth_of(session) < setup.max_depth {
-            register_delegation_tools(&mut tools, id, tx, setup);
+            register_delegation_tools(&mut tools, id, tx, setup, allows);
         }
         // Mailboxing does not nest, so every agent-enabled session
         // gets it whatever its depth.
-        tools.register(Arc::new(MailboxTool::new(id, tx.clone())));
+        if allows(MAILBOX_TOOL) {
+            tools.register(Arc::new(MailboxTool::new(id, tx.clone())));
+        }
     }
     if session.gate.plan() {
         tools.register(Arc::new(ExitPlanTool::new(
@@ -1400,21 +1430,27 @@ fn run_tools(session: &Session, id: SessionId, tx: &mpsc::Sender<Input>) -> Tool
 }
 
 /// Register the delegation tools a session may call while its depth
-/// is under the limit: the single `agent` tool and the `swarm` tool.
+/// is under the limit: the single `agent` tool and the `swarm` tool,
+/// each when the session's agent definition `allows` it.
 fn register_delegation_tools(
     tools: &mut ToolRegistry,
     id: SessionId,
     tx: &mpsc::Sender<Input>,
     setup: &AgentSetup,
+    allows: impl Fn(&str) -> bool,
 ) {
-    tools.register(Arc::new(AgentTool::new(id, tx.clone(), &setup.defs)));
-    tools.register(Arc::new(SwarmTool::new(
-        id,
-        tx.clone(),
-        &setup.defs,
-        setup.swarm_max_items,
-        Duration::from_millis(setup.swarm_timeout_ms),
-    )));
+    if allows(AGENT_TOOL) {
+        tools.register(Arc::new(AgentTool::new(id, tx.clone(), &setup.defs)));
+    }
+    if allows(SWARM_TOOL) {
+        tools.register(Arc::new(SwarmTool::new(
+            id,
+            tx.clone(),
+            &setup.defs,
+            setup.swarm_max_items,
+            Duration::from_millis(setup.swarm_timeout_ms),
+        )));
+    }
 }
 
 /// Route a run's permission questions onto the bus. The answer arrives

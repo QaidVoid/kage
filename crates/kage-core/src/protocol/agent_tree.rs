@@ -317,6 +317,16 @@ fn attr_value<'a>(attrs: &'a str, key: &str) -> Option<&'a str> {
     value.split_once('"').map(|(value, _)| value)
 }
 
+/// An attribute value as written before the swarm tool escaped it.
+fn unescape(value: &str) -> String {
+    value
+        .replace("&#10;", "\n")
+        .replace("&quot;", "\"")
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&amp;", "&")
+}
+
 /// One `<agent ...>` header of a stored result: who ran, how it
 /// ended, and the stats the engine recorded on the header.
 struct RestoredAgent {
@@ -377,7 +387,7 @@ fn wrapped_agents(output: &str) -> Vec<(RestoredAgent, String)> {
         let Some((attrs, after)) = rest.split_once(">\n") else {
             break;
         };
-        let item = attr_value(attrs, "item").unwrap_or_default().to_owned();
+        let item = unescape(attr_value(attrs, "item").unwrap_or_default());
         let Some((line, remainder)) = after.split_once('\n') else {
             break;
         };
@@ -693,6 +703,20 @@ mod tests {
         assert_eq!(node.usage.context_used, 248_000);
         assert_eq!(node.usage.context_window, 1_000_000);
         assert_eq!(node.took, Some(Duration::from_millis(4_200)));
+    }
+
+    #[test]
+    fn an_escaped_swarm_item_reads_back_as_written() {
+        let session = SessionId::new();
+        let aggregate = format!(
+            "completed: 1, failed: 0, cancelled: 0\n<swarm description=\"d\" \
+             item=\"a&gt;&#10;b &quot;c&quot; &amp;d\">\n<agent name=\"general\" \
+             session=\"{session}\" state=\"completed\">\nok\n</agent>\n</swarm>"
+        );
+        let found = wrapped_agents(&aggregate);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0.session, session);
+        assert_eq!(found[0].1, "a>\nb \"c\" &d");
     }
 
     #[test]

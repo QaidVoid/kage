@@ -275,7 +275,8 @@ pub const MAX_TOOL_RESULT_BYTES: usize = 100_000;
 /// back out of them, so they are never cut.
 #[must_use]
 pub fn is_agent_result(output: &str) -> bool {
-    output.starts_with("<agent ") || output.contains("\n<swarm ")
+    output.starts_with("<agent ")
+        || (output.starts_with("completed: ") && output.contains("\n<swarm description=\""))
 }
 
 /// `text` cut to at most [`MAX_TOOL_RESULT_BYTES`]: the first two
@@ -333,6 +334,19 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn only_agent_and_swarm_results_count_as_agent_results() {
+        assert!(is_agent_result(
+            "<agent name=\"general\" session=\"s\" state=\"completed\">\nhi\n</agent>"
+        ));
+        assert!(is_agent_result(
+            "completed: 1, failed: 0, cancelled: 0\n<swarm description=\"d\" item=\"a\">"
+        ));
+        assert!(!is_agent_result(
+            "notes.md:\n<swarm description=\"d\" item=\"a\">"
+        ));
+    }
 
     #[test]
     fn message_roundtrips_through_json() {

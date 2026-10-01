@@ -188,11 +188,13 @@ the parent a question without blocking on an answer:
 {"to": "parent", "message": "Found a failing test in kage-loop; fixing it before the summary."}
 ```
 
-`to` is `parent` or the session id of another agent, for example a
-sibling id a swarm result named. The message becomes the target's
-next prompt: it runs at once when the target is idle, else right
-after its current run ends, through the same queue as a queued
-prompt. The target sees a header naming the sender and its session
+`to` is `parent` or the session id of another session of the same
+conversation, for example a sibling id a swarm result named; a
+session under another main session refuses the message. The message
+becomes the target's next prompt: it runs at once when the target is
+idle, else right after its current run ends, through the same queue
+as a queued prompt. An idle agent also waits for a free slot under
+`agent_max_running`, and the sender's ack says which happened. The target sees a header naming the sender and its session
 id, so it can answer with a `send_message` call of its own.
 
 Delivery is fire-and-forget: the caller learns when the message was
@@ -248,7 +250,7 @@ Saved as `~/.config/kage/agents/reviewer.md`, this defines the agent
 | Key | Required | Value |
 | --- | --- | --- |
 | `description` | yes | What the agent is for, at most 1024 characters. The model picks agents by it, so say when to use this one and what to give it. |
-| `tools` | no | A comma list of tool names. Without it the agent gets every tool its parent has. A listed name that matches no tool of the parent shows a warning when the agent starts. |
+| `tools` | no | A comma list of tool names. Without it the agent gets every tool its parent has. With it, the agent may start agents, swarms or send messages only when the list names `agent`, `swarm` or `send_message`. A listed name that matches no tool of the parent shows a warning when the agent starts. |
 | `model` | no | The model, as `provider:model`, or `inherit` (the default) for the parent's current model. A model that is not available fails the agent's run. |
 | `thinking` | no | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `inherit` (the default) for the parent's current level. The level is fitted to the agent's model like the main session's. |
 | `name` | no | Must equal the file stem when present. |

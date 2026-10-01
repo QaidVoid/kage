@@ -131,6 +131,23 @@ impl Server {
         self.lines.lock().unwrap().clone()
     }
 
+    /// The collected lines once one satisfies `wanted`. The server logs
+    /// after it replied, so a line can trail the reply a test just read.
+    fn wait_line(&self, wanted: impl Fn(&str) -> bool) -> Vec<String> {
+        let deadline = std::time::Instant::now() + WAIT;
+        loop {
+            let lines = self.lines();
+            if lines.iter().any(|l| wanted(l)) {
+                return lines;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the line never came: {lines:?}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Stops the accept loop. The serving threads outlive the test,
     /// like the pipe threads of the rpc tests.
     fn stop(&self) {
@@ -425,18 +442,7 @@ fn two_clients_initialize_open_sessions_and_prompt() {
 
     drop(first);
     drop(second);
-    let deadline = std::time::Instant::now() + WAIT;
-    let lines = loop {
-        let lines = server.lines();
-        if lines.iter().any(|l| l.starts_with("disconnect ")) {
-            break lines;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no disconnect line: {lines:?}"
-        );
-        thread::sleep(Duration::from_millis(20));
-    };
+    let lines = server.wait_line(|l| l.starts_with("disconnect "));
     // Connection ids are process-wide, so a test running beside this one
     // may hold the low ones; the first client's id is in its attach line.
     let first_id = lines
@@ -493,14 +499,8 @@ fn wrong_token_gets_401_and_is_never_logged() {
     let (_, missing) = http_request(server.addr, &format!("GET /acp HTTP/1.1\r\n{host}\r\n"));
     assert!(missing.starts_with("HTTP/1.1 401 "), "{missing}");
 
-    let lines = server.lines();
     let peer = local.to_string();
-    assert!(
-        lines
-            .iter()
-            .any(|l| l.starts_with("refuse ") && l.contains(peer.as_str())),
-        "the refusal must name the peer address: {lines:?}"
-    );
+    let lines = server.wait_line(|l| l.starts_with("refuse ") && l.contains(peer.as_str()));
     assert!(
         !lines.iter().any(|l| l.contains(&presented)),
         "the presented value must never be logged: {lines:?}"
@@ -525,8 +525,7 @@ fn the_seventeenth_concurrent_connection_gets_503() {
     let (_, reply) = open_upgrade(server.addr, &server.token);
     assert!(reply.starts_with("HTTP/1.1 503 "), "{reply}");
 
-    let lines = server.lines();
-    assert!(lines.iter().any(|l| l.contains("(503)")), "{lines:?}");
+    server.wait_line(|l| l.contains("(503)"));
     server.stop();
 }
 
@@ -667,11 +666,7 @@ fn unknown_paths_are_404_and_acp_is_unchanged_with_a_web_dir() {
     );
     assert!(unauthorized.starts_with("HTTP/1.1 401 "), "{unauthorized}");
 
-    let lines = server.lines();
-    assert!(
-        lines.iter().any(|l| l.contains("(404)")),
-        "asset 404s are logged: {lines:?}"
-    );
+    server.wait_line(|l| l.contains("(404)"));
     server.stop();
 }
 
@@ -711,14 +706,8 @@ fn traversal_attempts_are_refused() {
             !reply.contains(secret),
             "{target} must not leak the file: {reply}"
         );
-        let lines = server.lines();
         let peer = local.to_string();
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("(traversal)") && l.contains(peer.as_str())),
-            "{target}: {lines:?}"
-        );
+        server.wait_line(|l| l.contains("(traversal)") && l.contains(peer.as_str()));
     }
     server.stop();
 }

@@ -285,6 +285,36 @@ pub(crate) fn todos_state(session: &Session) -> Option<TodosState> {
     })
 }
 
+/// The latest plan's entries as text and status, in plan order.
+#[must_use]
+pub(crate) fn todo_entries(session: &Session) -> Vec<(String, String)> {
+    session
+        .items
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            TranscriptItem::Plan { entries } => Some(entries),
+            _ => None,
+        })
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| {
+                    let text = entry
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let status = entry
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("pending");
+                    (text.to_owned(), status.to_owned())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// One queue row: a held prompt and its place in the queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct QueueRow {
@@ -654,6 +684,7 @@ impl DockRow {
             );
         let members = swarm.members.clone();
         Popover::new("dock-swarm")
+            .appearance(false)
             .trigger(trigger)
             .anchor(Anchor::BottomLeft)
             .content(move |_, _, _| {
@@ -699,17 +730,83 @@ impl DockRow {
             .into_any_element()
     }
 
-    /// The todos pill with done/total and its mini bar. It only
-    /// reports: the todos themselves live in the transcript, so the
-    /// pill keeps the pointer off.
-    fn todos_pill(&self, todos: &TodosState, pal: &'static Palette) -> AnyElement {
-        pill(div().id("dock-todos-pill"), pal)
-            .cursor_default()
-            .tooltip(|window, cx| Tooltip::new("the plan's todos, done of total").build(window, cx))
+    /// The todos pill with done/total and its mini bar, opening the
+    /// todo list above it.
+    fn todos_pill(
+        &self,
+        todos: &TodosState,
+        entries: Vec<(String, String)>,
+        pal: &'static Palette,
+    ) -> AnyElement {
+        let (raised, line_strong) = (pal.raised, pal.line_strong);
+        let trigger = Pill::new("dock-todos-pill")
+            .h(px(28.))
+            .px(px(10.))
+            .gap(px(SP_3))
+            .flex_none()
+            .items_center()
+            .rounded(px(R_FULL))
+            .border_1()
+            .border_color(pal.line)
+            .bg(pal.surface)
+            .text_size(px(FS_XS))
+            .text_color(pal.muted)
+            .hover(move |style| style.bg(raised).border_color(line_strong))
             .child(Icon::new(IconName::ListTodo).with_size(px(12.)))
             .child("Progress")
             .child(pill_count(format!("{}/{}", todos.done, todos.total), pal))
-            .child(mini_bar(todos.done, todos.total, pal))
+            .child(mini_bar(todos.done, todos.total, pal));
+        Popover::new("dock-todos")
+            .appearance(false)
+            .trigger(trigger)
+            .anchor(Anchor::BottomLeft)
+            .content(move |_, _, _| {
+                v_flex()
+                    .w(px(340.))
+                    .p(px(5.))
+                    .bg(pal.menu)
+                    .border_1()
+                    .border_color(pal.line)
+                    .rounded(px(R_LG))
+                    .shadow(pal.shadow_menu.clone())
+                    .child(
+                        div()
+                            .px(px(9.))
+                            .pt(px(6.))
+                            .pb(px(4.))
+                            .text_size(px(FS_2XS))
+                            .text_color(pal.faint)
+                            .child("TODOS"),
+                    )
+                    .children(entries.iter().map(|(text, status)| {
+                        let (icon, color, ink) = match status.as_str() {
+                            "completed" => (IconName::CircleCheck, pal.ok, pal.muted),
+                            "in_progress" => (IconName::LoaderCircle, pal.accent, pal.ink_strong),
+                            _ => (IconName::Circle, pal.faint, pal.ink),
+                        };
+                        h_flex()
+                            .w_full()
+                            .px(px(9.))
+                            .py(px(5.))
+                            .gap(px(SP_4))
+                            .items_start()
+                            .child(
+                                Icon::new(icon)
+                                    .mt(px(2.))
+                                    .with_size(px(13.))
+                                    .text_color(color),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .text_size(px(FS_SM))
+                                    .text_color(ink)
+                                    .when(status == "completed", |line| line.line_through())
+                                    .child(SharedString::from(text.clone())),
+                            )
+                    }))
+            })
             .into_any_element()
     }
 
@@ -864,7 +961,13 @@ impl Render for DockRow {
                 pills = pills.child(self.swarm_pill(swarm, pal));
             }
             if let Some(todos) = &todos {
-                pills = pills.child(self.todos_pill(todos, pal));
+                let entries = self
+                    .store
+                    .read(cx)
+                    .active_session()
+                    .map(todo_entries)
+                    .unwrap_or_default();
+                pills = pills.child(self.todos_pill(todos, entries, pal));
             }
             dock = dock.child(pills);
         }

@@ -529,9 +529,11 @@ mod tests {
                 .to_owned();
             ctx.update(SessionUpdate::AgentThoughtChunk(MessageChunk {
                 content: ContentBlock::text("thinking"),
+                meta: None,
             }));
             ctx.update(SessionUpdate::AgentMessageChunk(MessageChunk {
                 content: ContentBlock::text(format!("echo: {text}")),
+                meta: None,
             }));
             Ok(PromptResponse {
                 stop_reason: crate::acp::StopReason::EndTurn,
@@ -574,6 +576,7 @@ mod tests {
             }));
             ctx.update(SessionUpdate::AgentMessageChunk(MessageChunk {
                 content: ContentBlock::text("still here"),
+                meta: None,
             }));
             Ok(PromptResponse {
                 stop_reason: crate::acp::StopReason::EndTurn,
@@ -643,6 +646,7 @@ mod tests {
                 .unwrap();
             ctx.update(SessionUpdate::AgentMessageChunk(MessageChunk {
                 content: ContentBlock::text("after unknown block"),
+                meta: None,
             }));
             Ok(PromptResponse {
                 stop_reason: crate::acp::StopReason::EndTurn,
@@ -781,6 +785,7 @@ mod tests {
             };
             ctx.update(SessionUpdate::AgentMessageChunk(MessageChunk {
                 content: ContentBlock::text(verdict),
+                meta: None,
             }));
             Ok(PromptResponse {
                 stop_reason: crate::acp::StopReason::EndTurn,

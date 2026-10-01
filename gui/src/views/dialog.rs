@@ -756,6 +756,7 @@ mod tests {
             swarm: None,
             content: Vec::new(),
             raw_output: None,
+            took_ms: None,
         })
     }
 

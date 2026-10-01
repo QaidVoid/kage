@@ -1688,6 +1688,7 @@ mod tests {
             swarm: None,
             content: Vec::new(),
             raw_output: None,
+            took_ms: None,
         }
     }
 
@@ -1773,6 +1774,7 @@ mod tests {
             content: kage_client::wire::ContentBlock::Text(kage_client::wire::TextContent {
                 text: "reader text".into(),
             }),
+            meta: None,
         })];
         let pages = fetch_entries(&[TranscriptItem::ToolCall(fetch)]);
         assert_eq!(pages.len(), 1);

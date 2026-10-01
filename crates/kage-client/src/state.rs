@@ -199,7 +199,8 @@ impl Session {
         };
         if extends {
             if let Some(
-                TranscriptItem::Assistant { text: held } | TranscriptItem::Thinking { text: held },
+                TranscriptItem::Assistant { text: held }
+                | TranscriptItem::Thinking { text: held, .. },
             ) = self.items.last_mut()
             {
                 held.push_str(text);
@@ -212,6 +213,7 @@ impl Session {
             } else {
                 TranscriptItem::Thinking {
                     text: text.to_owned(),
+                    took_ms: None,
                 }
             });
         }
@@ -378,6 +380,8 @@ pub enum TranscriptItem {
     Thinking {
         /// The text so far.
         text: String,
+        /// How long it took, as recorded, on a replayed thought.
+        took_ms: Option<u64>,
     },
     /// A tool call, with everything reported about it since.
     ToolCall(ToolCallItem),
@@ -385,6 +389,11 @@ pub enum TranscriptItem {
     TurnEnd {
         /// Why the turn ended: whether tool calls follow.
         reason: Option<TurnReason>,
+        /// When the run ended, in seconds since the Unix epoch, as
+        /// recorded on a replayed run end.
+        at: Option<i64>,
+        /// How long the run took, as recorded on a replayed run end.
+        took_ms: Option<u64>,
     },
     /// A message for the user outside the conversation.
     Notice {
@@ -447,6 +456,8 @@ pub struct ToolCallItem {
     pub content: Vec<ToolCallContent>,
     /// Structured output, when the call finished with one.
     pub raw_output: Option<Value>,
+    /// How long it ran, as recorded, on a replayed call.
+    pub took_ms: Option<u64>,
 }
 
 impl ToolCallItem {
@@ -486,12 +497,13 @@ impl ToolCallItem {
         if update.raw_output.is_some() {
             self.raw_output.clone_from(&update.raw_output);
         }
-        if let Some(swarm) = update
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.kage.swarm.clone())
-        {
-            self.swarm = Some(swarm);
+        if let Some(meta) = &update.meta {
+            if meta.kage.swarm.is_some() {
+                self.swarm.clone_from(&meta.kage.swarm);
+            }
+            if meta.kage.duration_ms.is_some() {
+                self.took_ms = meta.kage.duration_ms;
+            }
         }
     }
 }
@@ -541,7 +553,8 @@ mod tests {
                     text: "Hello".into()
                 },
                 TranscriptItem::Thinking {
-                    text: "thinking more".into()
+                    text: "thinking more".into(),
+                    took_ms: None,
                 },
                 TranscriptItem::Assistant {
                     text: "again".into()
@@ -561,8 +574,10 @@ mod tests {
             swarm: None,
             content: vec![ToolCallContent::Content(MessageChunk {
                 content: ContentBlock::text("line 1\nline 2"),
+                meta: None,
             })],
             raw_output: None,
+            took_ms: None,
         };
         assert_eq!(call.text(), "line 1\nline 2");
         call.merge(&ToolCallUpdate {
@@ -570,6 +585,7 @@ mod tests {
             status: Some(ToolCallStatus::Completed),
             content: vec![ToolCallContent::Content(MessageChunk {
                 content: ContentBlock::text("line 2\nline 3"),
+                meta: None,
             })],
             raw_output: Some(serde_json::json!({"exit_code": 0})),
             ..ToolCallUpdate::default()

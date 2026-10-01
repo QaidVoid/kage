@@ -9,7 +9,8 @@ use kage_acp::acp::{
     ContentBlock, ListSessionsRequest, ListSessionsResponse, McpServer, PromptRef,
     SessionConfigOption, SessionExportResponse, SessionForkRequest, SessionForkResponse,
     SessionInfo, SessionInfoKage, SessionInfoMeta, SessionInfoUpdate, SessionUpdate,
-    SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate,
+    SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate, TurnPhase,
+    TurnReason, TurnUpdate,
 };
 use kage_acp::agent::{PromptContext, send_update};
 use kage_core::protocol::{AgentNode, AgentState, AgentTree};
@@ -310,12 +311,27 @@ fn restored_update(node: &AgentNode) -> SubagentUpdate {
 
 /// The `session/update`s that show `history` as the live bridge showed
 /// it: user chunks, then each assistant block and tool result mapped
-/// through [`to_update`]. No `plan` update: the todo list lives in
-/// memory only, so a resumed session starts with an empty plan.
+/// through [`to_update`]. Thoughts and tool calls carry the durations
+/// the file recorded, and each run that ended closes with a `_kage/turn`
+/// end saying when and how long. No `plan` update: the todo list lives
+/// in memory only, so a resumed session starts with an empty plan.
 pub(super) fn replay_updates(history: &[Message]) -> Vec<SessionUpdate> {
     let mut seen = HashMap::new();
+    let mut called = HashMap::new();
+    let mut run: Option<(&Message, Option<&Message>)> = None;
     let mut updates = Vec::new();
     for message in history {
+        let prompt = message.role == Role::User
+            && message
+                .content
+                .iter()
+                .any(|block| matches!(block, Content::Text { .. } | Content::Image { .. }));
+        if prompt {
+            updates.extend(run.and_then(|(start, last)| run_end(start, last?)));
+            run = Some((message, None));
+        } else if let Some((_, last)) = &mut run {
+            *last = Some(message);
+        }
         for block in &message.content {
             let update = match (message.role, block) {
                 (_, Content::Text { text } | Content::Thinking { text, .. }) if text.is_empty() => {
@@ -325,14 +341,79 @@ pub(super) fn replay_updates(history: &[Message]) -> Vec<SessionUpdate> {
                 (Role::User, Content::Image { source, mime }) => {
                     Some(user_chunk(image_block(source, mime)))
                 }
-                (_, block) => {
-                    replay_event(message.id, block).and_then(|e| to_update(&mut seen, &e))
-                }
+                (_, block) => replay_event(message.id, block)
+                    .and_then(|e| to_update(&mut seen, &e))
+                    .map(|update| timed(update, recorded_ms(message, block, &mut called))),
             };
             updates.extend(update);
         }
     }
+    // A run whose last word is a reply without calls has ended; any
+    // other may still be in flight.
+    if let Some((start, Some(last))) = run
+        && last.role == Role::Assistant
+        && !last
+            .content
+            .iter()
+            .any(|block| matches!(block, Content::ToolCall { .. }))
+    {
+        updates.extend(run_end(start, last));
+    }
     updates
+}
+
+/// The `_kage/turn` end of the run `start` prompted and `last` closed,
+/// with when it ended and how long it took.
+fn run_end(start: &Message, last: &Message) -> Option<SessionUpdate> {
+    let took = (last.ts - start.ts).to_std().ok()?;
+    Some(SessionUpdate::Turn(TurnUpdate {
+        phase: TurnPhase::End,
+        reason: Some(TurnReason::NoToolCalls),
+        at: Some(last.ts.timestamp()),
+        took_ms: Some(u64::try_from(took.as_millis()).unwrap_or(u64::MAX)),
+    }))
+}
+
+/// How long `block` of `message` took, as recorded: a thought's own
+/// duration, or for a tool result the time since its call's message.
+/// `called` holds when each call was made.
+fn recorded_ms(
+    message: &Message,
+    block: &Content,
+    called: &mut HashMap<String, chrono::DateTime<chrono::Utc>>,
+) -> Option<u64> {
+    match block {
+        Content::Thinking { duration_ms, .. } => *duration_ms,
+        Content::ToolCall { id, .. } => {
+            called.insert(id.to_string(), message.ts);
+            None
+        }
+        Content::ToolResultBlock { call_id, .. } => {
+            let took = (message.ts - called.remove(&call_id.to_string())?)
+                .to_std()
+                .ok()?;
+            Some(u64::try_from(took.as_millis()).unwrap_or(u64::MAX))
+        }
+        _ => None,
+    }
+}
+
+/// `update` with the recorded duration `ms` on its thought chunk or
+/// tool call update.
+fn timed(mut update: SessionUpdate, ms: Option<u64>) -> SessionUpdate {
+    if ms.is_none() {
+        return update;
+    }
+    match &mut update {
+        SessionUpdate::AgentThoughtChunk(chunk) => {
+            chunk.meta.get_or_insert_default().kage.duration_ms = ms;
+        }
+        SessionUpdate::ToolCallUpdate(call) => {
+            call.meta.get_or_insert_default().kage.duration_ms = ms;
+        }
+        _ => {}
+    }
+    update
 }
 
 /// The loop event that streamed `block` of message `id`, if it shows.

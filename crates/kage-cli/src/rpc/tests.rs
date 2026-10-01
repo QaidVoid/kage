@@ -1905,6 +1905,7 @@ fn session_load_replays_the_whole_transcript_and_restores_the_session() {
             "tool_call",
             "tool_call_update",
             "agent_message_chunk",
+            "_kage/turn",
             "session_info_update",
             "usage_update",
         ]
@@ -1917,9 +1918,9 @@ fn session_load_replays_the_whole_transcript_and_restores_the_session() {
     assert_eq!(update(4)["status"], "completed");
     assert_eq!(update(4)["content"][0]["content"]["text"], "a.txt");
     assert_eq!(update(5)["content"]["text"], "Found a.txt.");
-    assert_eq!(update(6)["title"], "Listing files");
-    assert_eq!(update(7)["used"], 410);
-    assert_eq!(update(7)["size"], WINDOW);
+    assert_eq!(update(7)["title"], "Listing files");
+    assert_eq!(update(8)["used"], 410);
+    assert_eq!(update(8)["size"], WINDOW);
 
     assert_eq!(
         prompt(&h.client, &session, "again")["stopReason"],
@@ -1929,6 +1930,93 @@ fn session_load_replays_the_whole_transcript_and_restores_the_session() {
     assert_eq!(request.model, "recorded");
     assert_eq!(request.level, Some(kage_core::ThinkingLevel::High));
     assert_eq!(request.messages.len(), 5);
+}
+
+#[test]
+fn a_loaded_session_replays_the_recorded_times() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let t0 = chrono::Utc::now() - chrono::Duration::minutes(5);
+    let at = |secs: i64, role: Role, content: Vec<Content>| {
+        let mut message = Message::new(role, content, None);
+        message.ts = t0 + chrono::Duration::seconds(secs);
+        SessionEntry::Message(MessageEntry {
+            id: EntryId::new(),
+            ts: message.ts,
+            message: Arc::new(message),
+            usage: None,
+        })
+    };
+    let call = |id: &str| Content::ToolCall {
+        id: ToolCallId::new(id),
+        name: "ls".into(),
+        input: serde_json::json!({ "path": "." }),
+    };
+    let session = record(
+        dir.path(),
+        &cwd,
+        "mock/recorded",
+        1,
+        &[
+            at(0, Role::User, vec![text("list files")]),
+            at(
+                3,
+                Role::Assistant,
+                vec![
+                    Content::Thinking {
+                        text: "look around".into(),
+                        signature: None,
+                        duration_ms: Some(2_400),
+                    },
+                    call("call_1"),
+                ],
+            ),
+            at(
+                5,
+                Role::ToolResult,
+                vec![Content::ToolResultBlock {
+                    call_id: ToolCallId::new("call_1"),
+                    output: "a.txt".into(),
+                    is_error: false,
+                }],
+            ),
+            at(6, Role::Assistant, vec![text("Found a.txt.")]),
+            at(10, Role::User, vec![text("again")]),
+            at(11, Role::Assistant, vec![call("call_2")]),
+        ],
+    );
+    let h = serve(vec![text_turn("ok")], dir.path(), dir.path());
+
+    let params = serde_json::json!({"sessionId": session, "cwd": cwd, "mcpServers": []});
+    h.client.request("session/load", params).unwrap();
+    let updates = updates_until(&h.inbox, &session, "usage_update");
+    let of = |kind: &str| -> Vec<&serde_json::Value> {
+        updates
+            .iter()
+            .map(|p| &p["update"])
+            .filter(|u| u["sessionUpdate"] == kind)
+            .collect()
+    };
+    assert_eq!(
+        of("agent_thought_chunk")[0]["_meta"]["kage"]["durationMs"],
+        2_400
+    );
+    let ended = of("tool_call_update");
+    assert_eq!(ended[0]["toolCallId"], "call_1");
+    assert_eq!(ended[0]["_meta"]["kage"]["durationMs"], 2_000);
+    let ends = of("_kage/turn");
+    assert_eq!(ends.len(), 1, "the run in flight has no end: {ends:?}");
+    assert_eq!(ends[0]["phase"], "end");
+    assert_eq!(ends[0]["reason"], "no_tool_calls");
+    assert_eq!(ends[0]["tookMs"], 6_000);
+    assert_eq!(
+        ends[0]["at"],
+        (t0 + chrono::Duration::seconds(6)).timestamp()
+    );
+    let kinds = update_kinds(&updates);
+    let end_at = kinds.iter().position(|k| *k == "_kage/turn").unwrap();
+    assert_eq!(kinds[end_at - 1], "agent_message_chunk");
+    assert_eq!(kinds[end_at + 1], "user_message_chunk");
 }
 
 #[test]
@@ -3269,6 +3357,7 @@ fn held_updates_stop_at_a_hard_cap() {
     let chunk = |n: u64| {
         SessionUpdate::AgentMessageChunk(MessageChunk {
             content: ContentBlock::text(n.to_string()),
+            meta: None,
         })
     };
     let kept = (0..HELD_CAP as u64 + 100)

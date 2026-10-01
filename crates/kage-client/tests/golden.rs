@@ -151,6 +151,14 @@ fn every_fixture_line_parses_against_the_wire_types() {
     }
 }
 
+/// The reason of a turn end item, or `None` for any other item.
+fn turn_reason(item: &TranscriptItem) -> Option<kage_acp_wire::TurnReason> {
+    match item {
+        TranscriptItem::TurnEnd { reason, .. } => *reason,
+        _ => None,
+    }
+}
+
 #[test]
 fn the_fix_fixture_replays_to_the_asserted_state() {
     let frames = fixture("fix-tools.jsonl");
@@ -204,15 +212,13 @@ fn the_fix_fixture_replays_to_the_asserted_state() {
     assert_eq!(read.status, ToolCallStatus::Completed);
     assert_eq!(read.input, Some(serde_json::json!({"path": "src/main.rs"})));
     assert!(read.text().starts_with("fn main()"));
-    assert!(matches!(
-        &items[1],
-        TranscriptItem::TurnEnd {
-            reason: Some(kage_acp_wire::TurnReason::ToolCalls)
-        }
-    ));
+    assert_eq!(
+        turn_reason(&items[1]),
+        Some(kage_acp_wire::TurnReason::ToolCalls)
+    );
     assert_eq!(
         match &items[2] {
-            TranscriptItem::Thinking { text } => text.as_str(),
+            TranscriptItem::Thinking { text, .. } => text.as_str(),
             other => panic!("expected thinking, got {other:?}"),
         },
         "The read confirms main dereferences an Option, so the fix is a match."
@@ -246,12 +252,10 @@ fn the_fix_fixture_replays_to_the_asserted_state() {
         },
         "The null check is in; cargo test passes."
     );
-    assert!(matches!(
-        &items[9],
-        TranscriptItem::TurnEnd {
-            reason: Some(kage_acp_wire::TurnReason::NoToolCalls)
-        }
-    ));
+    assert_eq!(
+        turn_reason(&items[9]),
+        Some(kage_acp_wire::TurnReason::NoToolCalls)
+    );
     assert!(client.take_outgoing().is_empty());
     assert!(
         transcript >= 6,

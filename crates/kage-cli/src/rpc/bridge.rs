@@ -800,7 +800,10 @@ impl Bridge {
 /// The `user_message_chunk` showing `content` to a client that did not
 /// send it.
 pub(super) fn user_chunk(content: kage_acp::acp::ContentBlock) -> SessionUpdate {
-    SessionUpdate::UserMessageChunk(kage_acp::acp::MessageChunk { content })
+    SessionUpdate::UserMessageChunk(kage_acp::acp::MessageChunk {
+        content,
+        meta: None,
+    })
 }
 
 /// Buffers `update` for an unannounced session, keeping the first/// [`HELD_CAP`] and dropping later ones. The early updates are the
@@ -864,11 +867,13 @@ pub(super) fn to_update(
         LoopEvent::TextDelta { delta, .. } => {
             Some(SessionUpdate::AgentMessageChunk(MessageChunk {
                 content: ContentBlock::text(delta.clone()),
+                meta: None,
             }))
         }
         LoopEvent::ThinkingDelta { delta, .. } => {
             Some(SessionUpdate::AgentThoughtChunk(MessageChunk {
                 content: ContentBlock::text(delta.clone()),
+                meta: None,
             }))
         }
         LoopEvent::ToolCallArgsDelta {
@@ -917,10 +922,14 @@ pub(super) fn to_update(
         LoopEvent::TurnStarted { .. } => Some(SessionUpdate::Turn(TurnUpdate {
             phase: TurnPhase::Start,
             reason: None,
+            at: None,
+            took_ms: None,
         })),
         LoopEvent::TurnEnded { had_tool_calls, .. } => Some(SessionUpdate::Turn(TurnUpdate {
             phase: TurnPhase::End,
             reason: Some(turn_reason(*had_tool_calls)),
+            at: None,
+            took_ms: None,
         })),
         LoopEvent::ProviderRetry {
             attempt,
@@ -1148,6 +1157,7 @@ pub(super) fn usage_update(usage: &Usage) -> Option<SessionUpdate> {
 fn text_content(text: String) -> ToolCallContent {
     ToolCallContent::Content(MessageChunk {
         content: ContentBlock::text(text),
+        meta: None,
     })
 }
 

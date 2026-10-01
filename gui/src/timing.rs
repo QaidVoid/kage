@@ -1,10 +1,9 @@
 //! What the app measures itself about each session's runs.
 //!
-//! The wire carries no times: a thinking block, a tool call and a run
-//! end arrive without a clock. The store stamps them as their frames
-//! arrive, so a row can say how long it took. Only what this client
-//! watched live is timed; a loaded history arrives complete and shows
-//! no durations rather than invented ones.
+//! A live thinking block, tool call and run end arrive without a clock.
+//! The store stamps them as their frames arrive, so a row can say how
+//! long it took. A loaded history carries the durations the engine
+//! recorded instead, and those seed the same spans.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -98,6 +97,11 @@ impl SessionTimes {
         let last = items.len().checked_sub(1);
         for (ix, item) in items.iter().enumerate() {
             match item {
+                TranscriptItem::Thinking {
+                    took_ms: Some(ms), ..
+                } => {
+                    self.thinking.entry(ix).or_insert(recorded(now, *ms));
+                }
                 TranscriptItem::Thinking { .. } => {
                     if Some(ix) == last && session.running {
                         self.thinking.entry(ix).or_insert(Span {
@@ -117,9 +121,26 @@ impl SessionTimes {
                             });
                         }
                     }
-                    _ => close(self.tools.get_mut(&call.tool_call_id), now),
+                    _ => match call.took_ms {
+                        Some(ms) => {
+                            self.tools
+                                .entry(call.tool_call_id.clone())
+                                .or_insert(recorded(now, ms));
+                        }
+                        None => close(self.tools.get_mut(&call.tool_call_id), now),
+                    },
                 },
-                TranscriptItem::TurnEnd { reason } if ix >= self.seen => {
+                TranscriptItem::TurnEnd {
+                    at: Some(at),
+                    took_ms: Some(ms),
+                    ..
+                } => {
+                    self.run_ends.entry(ix).or_insert(RunEnd {
+                        at: *at,
+                        took: Duration::from_millis(*ms),
+                    });
+                }
+                TranscriptItem::TurnEnd { reason, .. } if ix >= self.seen => {
                     if *reason != Some(TurnReason::ToolCalls)
                         && let Some(started) = self.run_started
                     {
@@ -155,6 +176,14 @@ impl SessionTimes {
             self.run_started = None;
         }
         self.seen = items.len();
+    }
+}
+
+/// A span that took `ms` milliseconds, as recorded, seen at `now`.
+fn recorded(now: Instant, ms: u64) -> Span {
+    Span {
+        start: now,
+        took: Some(Duration::from_millis(ms)),
     }
 }
 
@@ -209,6 +238,7 @@ mod tests {
             swarm: None,
             content: Vec::new(),
             raw_output: None,
+            took_ms: None,
         })
     }
 
@@ -220,21 +250,26 @@ mod tests {
         let mut times = SessionTimes::default();
 
         session.running = true;
-        session
-            .items
-            .push(TranscriptItem::Thinking { text: "hm".into() });
+        session.items.push(TranscriptItem::Thinking {
+            text: "hm".into(),
+            took_ms: None,
+        });
         times.observe(&session, at(0), 100);
         session.items.push(call("c1", ToolCallStatus::InProgress));
         times.observe(&session, at(1_500), 101);
         session.items[1] = call("c1", ToolCallStatus::Completed);
         session.items.push(TranscriptItem::TurnEnd {
             reason: Some(TurnReason::ToolCalls),
+            at: None,
+            took_ms: None,
         });
         session.items.push(TranscriptItem::Assistant {
             text: "done".into(),
         });
         session.items.push(TranscriptItem::TurnEnd {
             reason: Some(TurnReason::NoToolCalls),
+            at: None,
+            took_ms: None,
         });
         times.observe(&session, at(4_000), 104);
         session.running = false;
@@ -249,13 +284,18 @@ mod tests {
     }
 
     #[test]
-    fn a_loaded_history_is_not_timed() {
+    fn a_history_without_records_is_not_timed() {
         let mut session = Session::new("s1");
         session.items = vec![
-            TranscriptItem::Thinking { text: "old".into() },
+            TranscriptItem::Thinking {
+                text: "old".into(),
+                took_ms: None,
+            },
             call("c1", ToolCallStatus::Completed),
             TranscriptItem::TurnEnd {
                 reason: Some(TurnReason::NoToolCalls),
+                at: None,
+                took_ms: None,
             },
         ];
         let mut times = SessionTimes::default();
@@ -263,5 +303,33 @@ mod tests {
         assert_eq!(times.thinking(0), None);
         assert_eq!(times.tool("c1"), None);
         assert_eq!(times.run_end(2), None);
+    }
+
+    #[test]
+    fn a_loaded_history_shows_the_recorded_times() {
+        let mut session = Session::new("s1");
+        let mut done = call("c1", ToolCallStatus::Completed);
+        if let TranscriptItem::ToolCall(call) = &mut done {
+            call.took_ms = Some(2_000);
+        }
+        session.items = vec![
+            TranscriptItem::Thinking {
+                text: "old".into(),
+                took_ms: Some(2_400),
+            },
+            done,
+            TranscriptItem::TurnEnd {
+                reason: Some(TurnReason::NoToolCalls),
+                at: Some(90),
+                took_ms: Some(6_000),
+            },
+        ];
+        let mut times = SessionTimes::default();
+        times.observe(&session, Instant::now(), 100);
+        assert_eq!(times.thinking(0), Some(Duration::from_millis(2_400)));
+        assert_eq!(times.tool("c1"), Some(Duration::from_millis(2_000)));
+        let end = times.run_end(2).expect("recorded");
+        assert_eq!(end.at, 90);
+        assert_eq!(end.took, Duration::from_millis(6_000));
     }
 }

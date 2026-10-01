@@ -774,6 +774,7 @@ mod tests {
                 .to_owned();
             ctx.update(SessionUpdate::AgentMessageChunk(MessageChunk {
                 content: ContentBlock::text(format!("echo: {echoed}")),
+                meta: None,
             }));
             Ok(PromptResponse {
                 stop_reason: StopReason::EndTurn,
@@ -926,6 +927,7 @@ mod tests {
         ) -> Result<LoadSessionResponse, RpcError> {
             ctx.update(SessionUpdate::AgentMessageChunk(MessageChunk {
                 content: ContentBlock::text(format!("history of {}", req.session_id)),
+                meta: None,
             }));
             Ok(LoadSessionResponse::default())
         }

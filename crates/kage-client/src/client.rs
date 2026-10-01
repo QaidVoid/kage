@@ -1052,6 +1052,26 @@ impl Client {
         vec![Change::Failed { request: id, error }]
     }
 
+    /// Marks a turn of `session_id` begun, or records its end.
+    fn apply_turn(&mut self, session_id: &str, turn: kage_acp_wire::TurnUpdate) -> Vec<Change> {
+        let session = self.session_mut(session_id);
+        session.in_turn = turn.phase == kage_acp_wire::TurnPhase::Start;
+        let mut changes = vec![Change::Session {
+            id: session_id.into(),
+        }];
+        if turn.phase == kage_acp_wire::TurnPhase::End {
+            session.items.push(TranscriptItem::TurnEnd {
+                reason: turn.reason,
+                at: turn.at,
+                took_ms: turn.took_ms,
+            });
+            changes.push(Change::Transcript {
+                id: session_id.into(),
+            });
+        }
+        changes
+    }
+
     fn apply_update(&mut self, session_id: &str, update: SessionUpdate) -> Vec<Change> {
         let transcript = || Change::Transcript {
             id: session_id.into(),
@@ -1121,27 +1141,7 @@ impl Client {
                     id: session_id.into(),
                 }]
             }
-            SessionUpdate::Turn(turn) => match turn.phase {
-                kage_acp_wire::TurnPhase::Start => {
-                    self.session_mut(session_id).in_turn = true;
-                    vec![Change::Session {
-                        id: session_id.into(),
-                    }]
-                }
-                kage_acp_wire::TurnPhase::End => {
-                    let session = self.session_mut(session_id);
-                    session.in_turn = false;
-                    session.items.push(TranscriptItem::TurnEnd {
-                        reason: turn.reason,
-                    });
-                    vec![
-                        Change::Session {
-                            id: session_id.into(),
-                        },
-                        transcript(),
-                    ]
-                }
-            },
+            SessionUpdate::Turn(turn) => self.apply_turn(session_id, turn),
             SessionUpdate::McpStatus(status) => {
                 self.session_mut(session_id)
                     .mcp
@@ -1182,18 +1182,25 @@ fn apply_item(session: &mut Session, update: SessionUpdate) -> bool {
         }
         SessionUpdate::AgentThoughtChunk(chunk) => {
             session.append_chunk(&chunk.content, false);
+            if let Some(ms) = chunk.meta.and_then(|meta| meta.kage.duration_ms)
+                && let Some(TranscriptItem::Thinking { took_ms, .. }) = session.items.last_mut()
+            {
+                *took_ms = Some(ms);
+            }
             true
         }
         SessionUpdate::ToolCall(call) => {
+            let kage = call.meta.map(|meta| meta.kage).unwrap_or_default();
             session.items.push(TranscriptItem::ToolCall(ToolCallItem {
                 tool_call_id: call.tool_call_id,
                 title: call.title,
                 kind: call.kind,
                 status: call.status,
                 input: call.raw_input,
-                swarm: call.meta.and_then(|meta| meta.kage.swarm),
+                swarm: kage.swarm,
                 content: call.content,
                 raw_output: None,
+                took_ms: kage.duration_ms,
             }));
             true
         }

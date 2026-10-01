@@ -799,7 +799,7 @@ fn tool_search_text(call: &ToolCallItem) -> String {
 /// titles, targets and notice text included.
 fn row_search_text(session: &Session, row: &Row) -> String {
     let item_text = |ix: usize| match session.items.get(ix) {
-        Some(TranscriptItem::Assistant { text } | TranscriptItem::Thinking { text }) => {
+        Some(TranscriptItem::Assistant { text } | TranscriptItem::Thinking { text, .. }) => {
             text.clone()
         }
         Some(TranscriptItem::Notice { text, .. }) => text.clone(),
@@ -897,6 +897,7 @@ fn row_model(session: &Session, ui: &UiState) -> RowModel {
                 }
                 TranscriptItem::TurnEnd {
                     reason: Some(TurnReason::ToolCalls),
+                    ..
                 } => {}
                 _ => break,
             }
@@ -967,6 +968,7 @@ fn plain_row(session: &Session, ix: usize, ui: &UiState, last: usize) -> Option<
         },
         TranscriptItem::TurnEnd {
             reason: Some(TurnReason::ToolCalls),
+            ..
         } => return None,
         TranscriptItem::TurnEnd { .. } => Row::TurnEnd {
             ix,
@@ -988,7 +990,8 @@ fn plain_row(session: &Session, ix: usize, ui: &UiState, last: usize) -> Option<
                     !matches!(
                         item,
                         TranscriptItem::TurnEnd {
-                            reason: Some(TurnReason::ToolCalls)
+                            reason: Some(TurnReason::ToolCalls),
+                            ..
                         }
                     )
                 })
@@ -1523,7 +1526,7 @@ impl TranscriptView {
                 _ => blank_row(*ix).into_any_element(),
             },
             Row::Thinking { ix, live, expanded } => match session.and_then(|s| s.items.get(*ix)) {
-                Some(TranscriptItem::Thinking { text }) => self
+                Some(TranscriptItem::Thinking { text, .. }) => self
                     .render_thinking(
                         *ix,
                         text,
@@ -3499,7 +3502,7 @@ fn item_fingerprint(session: &Session, ix: usize, hasher: &mut impl std::hash::H
     use std::hash::Hash as _;
 
     match session.items.get(ix) {
-        Some(TranscriptItem::Assistant { text } | TranscriptItem::Thinking { text }) => {
+        Some(TranscriptItem::Assistant { text } | TranscriptItem::Thinking { text, .. }) => {
             text.len().hash(hasher);
         }
         Some(TranscriptItem::User { content, .. }) => content.len().hash(hasher),
@@ -3578,6 +3581,7 @@ mod tests {
             swarm: None,
             content,
             raw_output,
+            took_ms: None,
         })
     }
 
@@ -3593,6 +3597,7 @@ mod tests {
     fn text_chunk(text: &str) -> ToolCallContent {
         ToolCallContent::Content(MessageChunk {
             content: ContentBlock::text(text),
+            meta: None,
         })
     }
 
@@ -3918,6 +3923,8 @@ mod tests {
         };
         let boundary = || TranscriptItem::TurnEnd {
             reason: Some(TurnReason::ToolCalls),
+            at: None,
+            took_ms: None,
         };
         let session = session_with(vec![shell("a"), boundary(), shell("b"), boundary()]);
         let model = row_model(&session, &UiState::default());
@@ -3974,9 +3981,13 @@ mod tests {
         let mut session = session_with(vec![
             TranscriptItem::TurnEnd {
                 reason: Some(TurnReason::ToolCalls),
+                at: None,
+                took_ms: None,
             },
             TranscriptItem::TurnEnd {
                 reason: Some(TurnReason::NoToolCalls),
+                at: None,
+                took_ms: None,
             },
         ]);
         session.last_stop = Some(kage_client::wire::StopReason::Cancelled);
@@ -4116,6 +4127,8 @@ mod tests {
             edit,
             TranscriptItem::TurnEnd {
                 reason: Some(TurnReason::NoToolCalls),
+                at: None,
+                took_ms: None,
             },
         ]);
         let model = row_model(&session, &UiState::default());

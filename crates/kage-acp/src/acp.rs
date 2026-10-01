@@ -20,7 +20,7 @@ use kage_core::protocol::McpServerStatus;
 
 pub use kage_acp_wire::schema::{
     AgentCapabilities, AgentMeta, AvailableCommandsUpdate, BlobContent, CancelNotification,
-    ClientCapabilities, CloseSessionRequest, CloseSessionResponse, CompactionUpdate,
+    ChunkMeta, ClientCapabilities, CloseSessionRequest, CloseSessionResponse, CompactionUpdate,
     ConfigGetRequest, ConfigOptionUpdate, ContentBlock, Cost, CurrentModeUpdate, DiffContent,
     EmbeddedResource, EnvVariable, FsCapability, FsEntry, FsKind, FsListResult, FsOp, FsReadResult,
     FsRequest, FsResult, HttpHeader, Implementation, InitializeRequest, InitializeResponse,

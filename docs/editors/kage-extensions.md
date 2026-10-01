@@ -37,10 +37,14 @@ value but `false`) turns on `subagent_update` and child sessions.
 
 | `sessionUpdate` | Fields | Meaning |
 | --- | --- | --- |
-| `_kage/turn` | `phase` (`start`, `end`), `reason?` (`tool_calls`, `no_tool_calls`) | One provider round trip of the running prompt. |
+| `_kage/turn` | `phase` (`start`, `end`), `reason?` (`tool_calls`, `no_tool_calls`), `at?`, `tookMs?` | One provider round trip of the running prompt. A loaded session's history closes each run that ended with an `end` carrying when it ended (`at`, Unix seconds) and how long it took. |
 | `_kage/notice` | `tone` (`info`, `warn`, `error`, `success`), `text` | A message for the user that is not part of the conversation, such as `goal met: ...`. |
 | `_kage/compaction` | `kept`, `before`, `after` | Older turns were summarized: turns kept verbatim and context tokens before and after. |
 | `_kage/mcp_status` | `name`, `status` (`connected`, `starting`, `needs_auth`, or `{ failed: { error } }`) | One MCP server's reachability changed. |
+
+A loaded session's history also carries the durations the engine
+recorded: `_meta.kage.durationMs` on each `agent_thought_chunk` and on
+the `tool_call_update` that ends each tool call.
 
 `session/list` entries carry `_meta.kage.parentSessionId` for a
 session forked from another, so a client can draw the fork tree.

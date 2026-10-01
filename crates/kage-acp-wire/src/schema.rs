@@ -1020,6 +1020,19 @@ pub enum SessionUpdate {
 pub struct MessageChunk {
     /// The chunk content.
     pub content: ContentBlock,
+    /// Kage extension fields. A replayed thought carries how long it
+    /// took under `_meta.kage.durationMs`.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<ChunkMeta>,
+}
+
+/// The `_meta` extension object kage adds to a message chunk.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChunkMeta {
+    /// The kage-namespaced fields.
+    #[serde(default)]
+    pub kage: KageMeta,
 }
 
 /// Tool kind hint.
@@ -1344,6 +1357,14 @@ pub struct TurnUpdate {
     /// Why the turn ended. Present on `end`, absent on `start`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<TurnReason>,
+    /// When the prompt's run ended, in seconds since the Unix epoch.
+    /// Present on the replayed end of a run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<i64>,
+    /// How long the prompt's run took, in milliseconds. Present on the
+    /// replayed end of a run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub took_ms: Option<u64>,
 }
 
 /// Severity of a `_kage/notice` update.
@@ -1496,7 +1517,7 @@ pub struct SwarmMeta {
     pub template: Option<String>,
 }
 
-/// The `kage` extension fields of a permission exchange's `_meta`.
+/// The `kage` extension fields of a `_meta`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KageMeta {
@@ -1509,6 +1530,10 @@ pub struct KageMeta {
     /// on the update that carries its whole input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swarm: Option<SwarmMeta>,
+    /// How long a replayed thought or tool call took, in milliseconds,
+    /// as recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// One plan review's payload. Exactly one field is set per message:
@@ -1985,6 +2010,7 @@ mod tests {
                 session_id: "s1".into(),
                 update: SessionUpdate::AgentMessageChunk(MessageChunk {
                     content: ContentBlock::text("hi"),
+                    meta: None,
                 }),
             },
             serde_json::json!({
@@ -2349,6 +2375,8 @@ mod tests {
             &SessionUpdate::Turn(TurnUpdate {
                 phase: TurnPhase::Start,
                 reason: None,
+                at: None,
+                took_ms: None,
             }),
             serde_json::json!({"sessionUpdate": "_kage/turn", "phase": "start"}),
         );
@@ -2360,6 +2388,8 @@ mod tests {
                 &SessionUpdate::Turn(TurnUpdate {
                     phase: TurnPhase::End,
                     reason: Some(reason),
+                    at: None,
+                    took_ms: None,
                 }),
                 serde_json::json!({
                     "sessionUpdate": "_kage/turn",

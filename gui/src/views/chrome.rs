@@ -157,7 +157,8 @@ pub fn tone_color(tone: NoticeTone, colors: ThemeColor) -> Hsla {
 
 /// The toasts a handled frame's changes raise. An ask withdrawn
 /// through `$/cancel_request` was answered by another client; its
-/// toast follows the session on click.
+/// toast follows the session on click. A request the agent refused
+/// toasts its error.
 #[must_use]
 pub fn toasts_for_changes(changes: &[Change]) -> Vec<ToastDraft> {
     changes
@@ -174,6 +175,11 @@ pub fn toasts_for_changes(changes: &[Change]) -> Vec<ToastDraft> {
                     action,
                 })
             }
+            Change::Failed { error, .. } => Some(ToastDraft {
+                tone: NoticeTone::Error,
+                text: error.message.clone(),
+                action: ToastAction::None,
+            }),
             _ => None,
         })
         .collect()
@@ -181,7 +187,8 @@ pub fn toasts_for_changes(changes: &[Change]) -> Vec<ToastDraft> {
 
 /// Tracks how many notice items each session held at the last scan,
 /// so a frame that adds notices raises its toast once. A session's
-/// existing notices are history at first sight and stay quiet.
+/// existing notices are history at first sight and stay quiet, and so
+/// are the ones a load replays before the session opens.
 #[derive(Debug, Default)]
 pub struct NoticeWatch {
     seen: HashMap<String, usize>,
@@ -198,6 +205,10 @@ impl NoticeWatch {
                 .filter(|item| matches!(item, TranscriptItem::Notice { .. }))
                 .collect();
             let entry = self.seen.entry(id.clone()).or_insert(notices.len());
+            if !session.opened {
+                *entry = notices.len();
+                continue;
+            }
             if notices.len() > *entry {
                 for item in notices[(*entry)..].iter() {
                     if let TranscriptItem::Notice { tone, text } = item {
@@ -1097,16 +1108,6 @@ impl Render for Toasts {
     }
 }
 
-/// One suggestion card's effect: the config option it sets once a
-/// session offers it, and the draft it fills.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingCard {
-    /// The option to set, when the card carries one.
-    option: Option<(&'static str, String)>,
-    /// The draft still to fill; taken once a session carried it.
-    draft: Option<String>,
-}
-
 /// One suggestion card: what it fills the draft with and the one
 /// config option it sets, when the card carries a mode.
 struct Suggestion {
@@ -1159,9 +1160,9 @@ const SUGGESTIONS: [Suggestion; 4] = [
 /// composer, then suggestion cards over the real config options. The
 /// composer is the shell's own entity mounted here rather than in the
 /// bottom band, which is where it goes once a session exists, so the
-/// draft survives the move. A card clicked before any session exists
-/// applies to the first session that opens, and only the option the
-/// agent actually advertised.
+/// draft survives the move. A card fills the composer and holds its
+/// option for the session the send opens, which sets it before the
+/// prompt runs when the agent advertised it.
 pub struct WelcomeView {
     store: Entity<Store>,
     composer: Entity<TextareaState>,
@@ -1173,8 +1174,6 @@ pub struct WelcomeView {
     /// otherwise reach an engine still holding its construction font; see
     /// [`crate::views::deferred`].
     fill_mirror: Deferred,
-    /// A card clicked while no session could carry it.
-    pending: Option<PendingCard>,
 }
 
 impl WelcomeView {
@@ -1184,21 +1183,12 @@ impl WelcomeView {
         composer: Entity<TextareaState>,
         composer_view: Entity<crate::views::composer::ComposerView>,
         composer_laid_out: LaidOut,
-        window: &mut Window,
-        cx: &mut Context<Self>,
     ) -> Self {
-        cx.observe_in(&store, window, |this, _, window, cx| {
-            if let Some(card) = this.pending.take() {
-                this.pending = this.apply_card(card, window, cx);
-            }
-        })
-        .detach();
         Self {
             store,
             composer,
             composer_view,
             fill_mirror: Deferred::after(composer_laid_out),
-            pending: None,
         }
     }
 
@@ -1208,74 +1198,19 @@ impl WelcomeView {
         &self.composer
     }
 
-    /// Applies what `card` can carry now: the draft once a session
-    /// exists, the option once that session offers it. Returns
-    /// whatever still waits. A card without an option is done once
-    /// its draft landed; keeping it would refill the draft the user
-    /// is already typing over.
-    fn apply_card(
-        &mut self,
-        mut card: PendingCard,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<PendingCard> {
-        if self.store.read(cx).active_session().is_none() {
-            return Some(card);
-        }
-        if let Some(draft) = card.draft.take() {
-            let active = self.store.read(cx).active_id().map(str::to_owned);
-            self.store
-                .update(cx, |store, _| store.set_draft(active.as_deref(), &draft));
-            let composer = self.composer.clone();
-            self.fill_mirror.set(draft, |text| {
-                composer.update(cx, |state, cx| state.set_value(text, window, cx));
-            });
-            composer.update(cx, |state, cx| state.focus(window, cx));
-            cx.notify();
-        }
-        let (option_id, value) = card.option.take()?;
-        if !self.offers(option_id, &value, cx) {
-            card.option = Some((option_id, value));
-            return Some(card);
-        }
-        self.store.update(cx, |store, cx| {
-            store.set_option(option_id, &value);
-            cx.notify();
-        });
-        None
-    }
-
-    /// Whether the active session advertises the option, and a select
-    /// option lists the card's value.
-    fn offers(&self, option_id: &str, option_value: &str, cx: &App) -> bool {
-        self.store.read(cx).active_session().is_some_and(|session| {
-            session.config_options.iter().any(|option| {
-                option.id == option_id
-                    && (option.options.is_empty()
-                        || option
-                            .options
-                            .iter()
-                            .any(|value| value.value == option_value))
-            })
-        })
-    }
-
-    /// Applies a card now when it can, else holds it for the session
-    /// that opens or advertises next.
-    fn raise(&mut self, card: PendingCard, window: &mut Window, cx: &mut Context<Self>) {
-        self.pending = self.apply_card(card, window, cx);
-        cx.notify();
-    }
-
+    /// Fills the composer with the card's text and holds its option for
+    /// the session the send opens.
     fn suggestion(&mut self, card: &Suggestion, window: &mut Window, cx: &mut Context<Self>) {
-        self.raise(
-            PendingCard {
-                option: card.option.map(|(id, value)| (id, value.to_owned())),
-                draft: Some(card.text.to_owned()),
-            },
-            window,
-            cx,
-        );
+        if let Some((id, value)) = card.option {
+            self.store
+                .update(cx, |store, _| store.hold_option(id, value));
+        }
+        let composer = self.composer.clone();
+        self.fill_mirror.set(card.text.to_owned(), |text| {
+            composer.update(cx, |state, cx| state.set_value(text, window, cx));
+        });
+        composer.update(cx, |state, cx| state.focus(window, cx));
+        cx.notify();
     }
 }
 
@@ -1526,7 +1461,7 @@ mod tests {
         ToastDraft, Toasts, WelcomeView, counter_text, find_matches, palette_entries, step_match,
         toasts_for_changes,
     };
-    use crate::store::{Command, Store};
+    use crate::store::{Command, Store, StoreHandle as _};
     use crate::theme::{WELCOME_PAD_BOTTOM_SHARE, WELCOME_PAD_TOP, WELCOME_W};
     use crate::transport::State;
     use crate::views::composer::ComposerView;
@@ -1610,29 +1545,6 @@ mod tests {
     fn notice(tone: &str, text: &str) -> Frame {
         update(serde_json::json!({
             "sessionUpdate": "_kage/notice", "tone": tone, "text": text,
-        }))
-    }
-
-    /// A config option update advertising the mode, swarm and goal
-    /// options.
-    fn options_frame() -> Frame {
-        update(serde_json::json!({
-            "sessionUpdate": "config_option_update",
-            "configOptions": [
-                {"id": "mode", "name": "Mode", "category": "mode", "type": "select",
-                 "currentValue": "default",
-                 "options": [
-                     {"value": "default", "name": "Default"},
-                     {"value": "plan", "name": "Plan"},
-                 ]},
-                {"id": "swarm", "name": "Swarm", "type": "select", "currentValue": "off",
-                 "options": [
-                     {"value": "off", "name": "Off"},
-                     {"value": "on", "name": "On"},
-                 ]},
-                {"id": "goal", "name": "Goal", "type": "text", "currentValue": "",
-                 "options": []},
-            ],
         }))
     }
 
@@ -1780,6 +1692,51 @@ mod tests {
         assert_eq!(drafts[1].tone, NoticeTone::Success);
     }
 
+    #[test]
+    fn a_loaded_history_toasts_nothing_and_later_notices_toast() {
+        let mut store = booted_store();
+        let mut watch = NoticeWatch::default();
+        let _ = watch.scan(store.state());
+        store.set_active("r1");
+        let Some(Frame::Request { id: load, .. }) = store.take_outgoing().pop() else {
+            panic!("the recorded session loads");
+        };
+        let notice_on = |text: &str| Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({
+                "sessionId": "r1",
+                "update": {"sessionUpdate": "_kage/notice", "tone": "warn", "text": text},
+            }),
+        };
+        store.absorb(notice_on("an old warning"));
+        assert!(watch.scan(store.state()).is_empty(), "a replayed notice");
+        store.absorb(Frame::Success {
+            id: load,
+            result: serde_json::json!({}),
+        });
+        assert!(watch.scan(store.state()).is_empty());
+        store.absorb(notice_on("a new warning"));
+        let drafts = watch.scan(store.state());
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].text, "a new warning");
+    }
+
+    #[test]
+    fn a_refused_request_toasts_its_error() {
+        let changes = vec![Change::Failed {
+            request: 7,
+            error: kage_client::RpcError {
+                code: -32603,
+                message: "no provider configured".into(),
+                data: None,
+            },
+        }];
+        let drafts = toasts_for_changes(&changes);
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].tone, NoticeTone::Error);
+        assert_eq!(drafts[0].text, "no provider configured");
+    }
+
     /// A test root that mounts the find bar over its transcript.
     struct FindHost {
         find: Entity<FindBar>,
@@ -1910,6 +1867,7 @@ mod tests {
             id: 4,
             result: serde_json::json!({"sessionId": "s2"}),
         });
+        store.set_active("s1");
         let _ = store.take_outgoing();
         store.absorb(commands_frame());
         store
@@ -2248,14 +2206,20 @@ mod tests {
         drop(welcome);
     }
 
-    #[gpui_kit::test]
-    fn welcome_cards_render_and_a_card_sets_its_option_and_fills_the_draft(
-        cx: &mut TestAppContext,
-    ) {
-        let mut store = booted_store();
-        store.absorb(options_frame());
+    /// A connected store on the welcome pane, with no session yet.
+    fn welcome_store() -> Store {
+        let mut store = Store::new("/w", false);
+        store.set_connect(State::Connected);
+        run_commands(&mut store);
         let _ = store.take_outgoing();
-        let store = cx.new(|_| store);
+        store.absorb(init_answer());
+        let _ = store.take_outgoing();
+        store
+    }
+
+    #[gpui_kit::test]
+    fn welcome_cards_render_and_a_card_fills_the_composer(cx: &mut TestAppContext) {
+        let store = cx.new(|_| welcome_store());
         let (welcome, visual) = welcome_window(cx, store.clone());
         visual.update(|window, cx| window.render_frame(cx));
         visual.update(|window, _| {
@@ -2267,77 +2231,64 @@ mod tests {
         });
 
         visual.update(|window, cx| window.click("welcome-card-plan", cx));
-        // The fill waits on the composer's element having prepainted, and
-        // the composer mounts after the card is clicked, so the host takes
-        // a frame for the write to land.
         visual.update(|window, cx| window.render_frame(cx));
-        let frames = drain_requests(&store, visual);
-        assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].0, "session/set_config_option");
-        assert_eq!(frames[0].1["configId"], "mode");
-        assert_eq!(frames[0].1["value"], "plan");
+        assert!(
+            drain_requests(&store, visual).is_empty(),
+            "no session yet, so nothing goes out"
+        );
         visual.update(|_, cx| {
-            let draft = SUGGESTIONS[2].text;
-            assert_eq!(
-                store.read(cx).draft("s1"),
-                Some(draft),
-                "the card filled the session draft"
-            );
             assert_eq!(
                 welcome.read(cx).textarea().read(cx).value(),
-                draft,
+                SUGGESTIONS[2].text,
                 "the card filled the composer"
             );
         });
     }
 
     #[gpui_kit::test]
-    fn a_card_clicked_before_a_session_applies_to_the_first_one(cx: &mut TestAppContext) {
-        let store = cx.new(|_| Store::new("/w", false));
+    fn a_card_option_is_set_before_the_prompt_it_rides_with(cx: &mut TestAppContext) {
+        let store = cx.new(|_| welcome_store());
         let (welcome, visual) = welcome_window(cx, store.clone());
         visual.update(|window, cx| window.render_frame(cx));
-        visual.update(|window, cx| window.click("welcome-card-swarm", cx));
-        assert!(
-            drain_requests(&store, visual).is_empty(),
-            "no session, no option frame yet"
-        );
-
+        visual.update(|window, cx| window.click("welcome-card-plan", cx));
         visual.update(|_, cx| {
-            store.update(cx, |store, cx| {
-                store.set_connect(State::Connected);
-                for command in store.take_commands() {
-                    match command {
-                        Command::Handshake { replay_sessions } => store.handshake(replay_sessions),
-                        Command::NewSession => store.new_session(),
-                        Command::ReplayPrompt => {
-                            let _ = store.prompt("fix the null check");
-                        }
-                    }
-                }
-                let _ = store.take_outgoing();
-                store.absorb(init_answer());
-                let _ = store.take_outgoing();
-                store.new_session();
-                let _ = store.take_outgoing();
+            store.act(cx, |store| store.open_with_prompt(SUGGESTIONS[2].text));
+        });
+        let opened = visual.update(|_, cx| {
+            store.update(cx, |store, _| {
+                store
+                    .take_outgoing()
+                    .into_iter()
+                    .find_map(|frame| match frame {
+                        Frame::Request { id, method, .. } if method == "session/new" => Some(id),
+                        _ => None,
+                    })
+                    .expect("the send opens a session")
+            })
+        });
+        visual.update(|_, cx| {
+            store.act(cx, |store| {
                 store.absorb(Frame::Success {
-                    id: 3,
-                    result: serde_json::json!({"sessionId": "s1"}),
-                });
-                store.absorb(options_frame());
-                cx.notify();
+                    id: opened,
+                    result: serde_json::json!({
+                        "sessionId": "s1",
+                        "configOptions": [{
+                            "id": "mode", "name": "Mode", "type": "select",
+                            "currentValue": "default",
+                            "options": [
+                                {"value": "default", "name": "Default"},
+                                {"value": "plan", "name": "Plan"},
+                            ],
+                        }],
+                    }),
+                })
             });
         });
         let frames = drain_requests(&store, visual);
-        assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].1["configId"], "swarm");
-        assert_eq!(frames[0].1["value"], "on");
-        visual.update(|_, cx| {
-            assert_eq!(
-                store.read(cx).draft("s1"),
-                Some(SUGGESTIONS[1].text),
-                "the held card filled the first session's draft"
-            );
-        });
+        let methods: Vec<&str> = frames.iter().map(|(method, _)| method.as_str()).collect();
+        assert_eq!(methods, ["session/set_config_option", "session/prompt"]);
+        assert_eq!(frames[0].1["configId"], "mode");
+        assert_eq!(frames[0].1["value"], "plan");
         drop(welcome);
     }
 
@@ -2354,14 +2305,12 @@ mod tests {
             let composer_view = cx.new(|cx| ComposerView::new(store.clone(), window, cx));
             let composer = composer_view.read(cx).input().clone();
             let composer_laid_out = composer_view.read(cx).input_laid_out();
-            let welcome = cx.new(|cx| {
+            let welcome = cx.new(|_| {
                 WelcomeView::new(
                     store.clone(),
                     composer.clone(),
                     composer_view.clone(),
                     composer_laid_out.clone(),
-                    window,
-                    cx,
                 )
             });
             cap.borrow_mut().replace(welcome.clone());

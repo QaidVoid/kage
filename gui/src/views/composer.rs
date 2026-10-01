@@ -584,6 +584,7 @@ impl ComposerView {
         // change never waits on further traffic.
         cx.observe_in(&store, window, |this, _, window, cx| {
             this.follow_active(window, cx);
+            this.take_back_prompt(window, cx);
             this.sync_placeholder(window, cx);
         })
         .detach();
@@ -676,6 +677,25 @@ impl ComposerView {
         let goal_input = self.goal_input.clone();
         self.goal_mirror.set(goal, |goal| {
             goal_input.update(cx, |state, cx| state.set_value(goal, window, cx));
+        });
+        cx.notify();
+    }
+
+    /// Puts a welcome prompt whose session failed to open back in an
+    /// empty textarea, so the text is not lost with the session.
+    fn take_back_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = self
+            .store
+            .update(cx, |store, _| store.take_returned_prompt())
+        else {
+            return;
+        };
+        if !self.input_value(cx).trim().is_empty() {
+            return;
+        }
+        let input = self.input.clone();
+        self.draft_mirror.set(text, |text| {
+            input.update(cx, |state, cx| state.set_value(text, window, cx));
         });
         cx.notify();
     }
@@ -1833,6 +1853,7 @@ mod tests {
                 let request = store
                     .take_outgoing()
                     .into_iter()
+                    .rev()
                     .find_map(|frame| match frame {
                         Frame::Request { id, method, .. } if method == "session/new" => Some(id),
                         _ => None,

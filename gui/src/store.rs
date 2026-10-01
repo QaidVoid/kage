@@ -82,6 +82,16 @@ pub struct Store {
     /// The prompt typed on the welcome pane, waiting for the session
     /// it opens.
     pending_prompt: Option<String>,
+    /// The `session/new` request the user asked for, until it answers.
+    /// Only its session becomes active; a session that opens on its own
+    /// leaves the welcome pane where it is.
+    opening: Option<u64>,
+    /// A welcome prompt whose session failed to open, for the composer
+    /// to take back.
+    returned_prompt: Option<String>,
+    /// The options a welcome card chose, set on the session the welcome
+    /// prompt opens before the prompt goes out.
+    held_options: Vec<(String, String)>,
     /// The last `_kage/fs` listing answer, held with the session it
     /// ran against for the picker that asked. A later answer replaces
     /// it.
@@ -108,6 +118,9 @@ impl Store {
             link: Link::serve(""),
             active: None,
             pending_prompt: None,
+            opening: None,
+            returned_prompt: None,
+            held_options: Vec::new(),
             fs_listing: None,
             commands: Vec::new(),
         }
@@ -199,13 +212,30 @@ impl Store {
     pub fn show_welcome(&mut self) {
         self.active = None;
         self.pending_prompt = None;
+        self.opening = None;
+        self.held_options.clear();
+    }
+
+    /// Holds config option `id` at `value` for the session the welcome
+    /// prompt opens. A later hold of the same option replaces it.
+    pub fn hold_option(&mut self, id: &str, value: &str) {
+        self.held_options.retain(|(held, _)| held != id);
+        self.held_options.push((id.to_owned(), value.to_owned()));
     }
 
     /// Accepts one incoming frame and reports what moved. The gate is
     /// rechecked on every initialize answer, and the boot flow reacts
     /// to the changes it has been waiting for.
     pub fn absorb(&mut self, frame: Frame) -> Vec<Change> {
+        let answered = match &frame {
+            Frame::Success { id, .. } | Frame::Failure { id, .. } => Some(*id),
+            _ => None,
+        };
         let changes = self.client.handle(frame);
+        if answered.is_some() && answered == self.opening {
+            self.opening = None;
+            self.settle_opening(&changes);
+        }
         if changes.contains(&Change::Connection) {
             self.gate = gate::check(self.client.state());
             self.gate_dismissed = false;
@@ -230,15 +260,9 @@ impl Store {
         for change in &changes {
             if let Change::Session { id } = change {
                 let opened = self.state().session(id).is_some_and(|s| s.opened);
-                if self.active.is_none() && opened {
-                    self.active = Some(id.clone());
-                }
-                if self.replay && !self.prompted && opened {
+                if self.replay && !self.prompted && opened && self.active.as_deref() == Some(id) {
                     self.prompted = true;
                     self.commands.push(Command::ReplayPrompt);
-                }
-                if self.active.as_deref() == Some(id.as_str()) {
-                    self.flush_pending_prompt(id);
                 }
             }
             if let Change::Fs {
@@ -252,12 +276,40 @@ impl Store {
         changes
     }
 
-    /// Sends the prompt the welcome pane held, once the session it
-    /// opened is live.
-    fn flush_pending_prompt(&mut self, id: &str) {
-        if let Some(text) = self.pending_prompt.take() {
-            let _ = self.client.prompt(id, vec![ContentBlock::text(text)]);
+    /// Lands the answer to the user's `session/new`: the session it
+    /// made becomes active and takes the welcome prompt, or, when the
+    /// open failed, the prompt goes back to the composer.
+    fn settle_opening(&mut self, changes: &[Change]) {
+        let opened = changes.iter().find_map(|change| match change {
+            Change::Session { id } => Some(id.clone()),
+            _ => None,
+        });
+        match opened {
+            Some(id) => {
+                for (option, value) in std::mem::take(&mut self.held_options) {
+                    let offered = self.state().session(&id).is_some_and(|session| {
+                        session.config_options.iter().any(|offer| {
+                            offer.id == option
+                                && (offer.options.is_empty()
+                                    || offer.options.iter().any(|choice| choice.value == value))
+                        })
+                    });
+                    if offered {
+                        self.client.set_config_option(&id, &option, &value);
+                    }
+                }
+                if let Some(text) = self.pending_prompt.take() {
+                    let _ = self.client.prompt(&id, vec![ContentBlock::text(text)]);
+                }
+                self.active = Some(id);
+            }
+            None => self.returned_prompt = self.pending_prompt.take(),
         }
+    }
+
+    /// The welcome prompt whose session failed to open, taken once.
+    pub fn take_returned_prompt(&mut self) -> Option<String> {
+        self.returned_prompt.take()
     }
 
     /// Records a connect-state move and returns what the shell must
@@ -309,7 +361,7 @@ impl Store {
 
     /// Opens a fresh session in the store's directory.
     pub fn new_session(&mut self) {
-        self.client.new_session(&self.cwd, &[]);
+        self.opening = Some(self.client.new_session(&self.cwd, &[]));
     }
 
     /// Opens a fresh session to carry `text`, the prompt a welcome
@@ -317,7 +369,7 @@ impl Store {
     /// until then [`Store::pending_prompt`] tells whether one waits.
     pub fn open_with_prompt(&mut self, text: &str) {
         self.pending_prompt = Some(text.to_owned());
-        self.client.new_session(&self.cwd, &[]);
+        self.new_session();
     }
 
     /// Whether a welcome-typed prompt waits for its session.
@@ -949,5 +1001,64 @@ mod tests {
         assert_eq!(params["sessionId"], "rec-1");
         assert_eq!(params["cwd"], "/w", "the store's directory carries it");
         assert_eq!(store.active_id(), Some("rec-1"));
+    }
+
+    /// A connected store on the welcome pane.
+    fn welcome_store() -> Store {
+        let mut store = Store::new("/w", false);
+        store.set_connect(State::Connected);
+        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store.absorb(init_answer(Some("0.1.0"), true, true));
+        let _ = store.take_outgoing();
+        store
+    }
+
+    #[test]
+    fn a_session_moving_in_the_background_leaves_the_welcome_alone() {
+        let mut store = welcome_store();
+        open_session(&mut store, 3, "s1");
+        store.show_welcome();
+        // A reconnect reopens every open session behind the welcome.
+        store.handshake(true);
+        let load = store
+            .take_outgoing()
+            .into_iter()
+            .find_map(|frame| match frame {
+                Frame::Request { id, method, .. } if method == "session/load" => Some(id),
+                _ => None,
+            })
+            .expect("the open session reloads");
+        store.absorb(Frame::Success {
+            id: load,
+            result: serde_json::json!({}),
+        });
+        assert!(store.state().session("s1").unwrap().opened);
+        assert_eq!(store.active_id(), None, "the welcome stays up");
+    }
+
+    #[test]
+    fn a_failed_open_hands_the_welcome_prompt_back() {
+        let mut store = welcome_store();
+        store.open_with_prompt("fix the flake");
+        let outgoing = store.take_outgoing();
+        let Frame::Request { id, .. } = &outgoing[0] else {
+            panic!("expected a request, got {:?}", outgoing[0]);
+        };
+        store.absorb(Frame::Failure {
+            id: *id,
+            error: kage_client::RpcError {
+                code: -32603,
+                message: "no provider".into(),
+                data: None,
+            },
+        });
+        assert!(!store.pending_prompt(), "nothing waits on a failed open");
+        assert_eq!(store.active_id(), None);
+        assert_eq!(
+            store.take_returned_prompt().as_deref(),
+            Some("fix the flake")
+        );
+        assert!(store.take_outgoing().is_empty(), "no prompt went out");
     }
 }

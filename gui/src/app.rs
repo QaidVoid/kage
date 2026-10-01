@@ -22,7 +22,7 @@ use gpui_kit::{
 };
 
 use crate::clock::unix_seconds;
-use crate::store::{Command, Store};
+use crate::store::{Command, Store, StoreHandle as _};
 use crate::theme::{CONTENT_W, FS_SM, FS_XS, PANEL_HEAD_H, R_FULL, SIDE_W, SP_4, SP_6, SP_8};
 use crate::transport::{Event, Transport};
 use crate::views::chrome::{
@@ -212,14 +212,12 @@ impl Shell {
             )
         });
         let toasts = cx.new(|_| Toasts::new(store.clone()));
-        let welcome = cx.new(|cx| {
+        let welcome = cx.new(|_| {
             WelcomeView::new(
                 store.clone(),
                 input.clone(),
                 composer.clone(),
                 input_laid_out,
-                window,
-                cx,
             )
         });
 
@@ -349,7 +347,7 @@ impl Shell {
         if commands.is_empty() {
             return;
         }
-        self.store.update(cx, |store, _| {
+        self.store.act(cx, |store| {
             for command in commands {
                 match command {
                     Command::Handshake { replay_sessions } => store.handshake(replay_sessions),

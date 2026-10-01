@@ -44,13 +44,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use kage_acp::acp::{
-    AgentCapabilities, CloseSessionRequest, CloseSessionResponse, ConfigGetRequest,
+    AgentCapabilities, AgentMeta, CloseSessionRequest, CloseSessionResponse, ConfigGetRequest,
     ConfigGetResult, FsRequest, FsResult, Implementation, InitializeRequest, InitializeResponse,
-    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
-    McpCapabilities, NewSessionRequest, NewSessionResponse, PROTOCOL_VERSION, PromptCapabilities,
-    PromptDelivery, PromptRequest, PromptResponse, ResumeSessionRequest, ResumeSessionResponse,
-    SessionCapabilities, SessionConfigOption, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, StopReason, Supported, SwarmResumeRequest, SwarmResumeResponse,
+    KageAgentInfo, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    LoadSessionResponse, McpCapabilities, NewSessionRequest, NewSessionResponse, PROTOCOL_VERSION,
+    PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse, ResumeSessionRequest,
+    ResumeSessionResponse, SessionCapabilities, SessionConfigOption, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, Supported,
+    SwarmResumeRequest, SwarmResumeResponse,
 };
 use kage_acp::agent::{Agent, PromptContext, send_update};
 use kage_core::config::{Config, McpServer as McpSpec};
@@ -310,6 +311,13 @@ impl Agent for CliAcpAgent {
                 version: Some(env!("CARGO_PKG_VERSION").to_owned()),
             }),
             auth_methods: vec![],
+            meta: Some(AgentMeta {
+                kage: Some(KageAgentInfo {
+                    cwd: std::env::current_dir()
+                        .ok()
+                        .map(|dir| dir.display().to_string()),
+                }),
+            }),
         }
     }
 

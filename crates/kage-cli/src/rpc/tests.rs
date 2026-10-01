@@ -1165,6 +1165,11 @@ fn initialize_advertises_image_and_embedded_context() {
     assert_eq!(caps["embeddedContext"], true);
     assert_eq!(caps["audio"], false);
     assert_eq!(init["agentCapabilities"]["steer"], true);
+    let cwd = std::env::current_dir().unwrap().display().to_string();
+    assert_eq!(
+        init["_meta"]["kage"]["cwd"], cwd,
+        "a client without a directory learns the server's"
+    );
 }
 
 #[test]

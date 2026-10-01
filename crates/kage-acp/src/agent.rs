@@ -626,6 +626,7 @@ mod tests {
                     version: None,
                 }),
                 auth_methods: vec![],
+                meta: None,
             }
         }
 
@@ -772,6 +773,7 @@ mod tests {
                 },
                 agent_info: None,
                 auth_methods: vec![],
+                meta: None,
             }
         }
 

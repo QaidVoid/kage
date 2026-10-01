@@ -505,6 +505,7 @@ mod tests {
                 agent_capabilities: AgentCapabilities::default(),
                 agent_info: None,
                 auth_methods: vec![],
+                meta: None,
             }
         }
 
@@ -745,6 +746,7 @@ mod tests {
                 agent_capabilities: AgentCapabilities::default(),
                 agent_info: None,
                 auth_methods: vec![],
+                meta: None,
             }
         }
 

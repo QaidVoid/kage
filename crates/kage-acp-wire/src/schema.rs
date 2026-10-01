@@ -212,6 +212,29 @@ pub struct InitializeResponse {
     /// Supported auth methods (empty: no auth).
     #[serde(default)]
     pub auth_methods: Vec<serde_json::Value>,
+    /// Extension facts; kage's own live under `kage`.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<AgentMeta>,
+}
+
+/// The `_meta` of [`InitializeResponse`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AgentMeta {
+    /// What a kage agent tells its clients about itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kage: Option<KageAgentInfo>,
+}
+
+/// What a kage agent tells its clients about itself, under
+/// `_meta.kage` of the `initialize` result.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KageAgentInfo {
+    /// The directory a session opened with an empty `cwd` runs in: the
+    /// server's working directory. A client that knows no directory of
+    /// its own, such as a browser, names its sessions' project by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 /// `session/new` request params.
@@ -1346,6 +1369,7 @@ mod tests {
                     version: Some("0.1.0".into()),
                 }),
                 auth_methods: vec![],
+                meta: None,
             },
             serde_json::json!({
                 "protocolVersion": 1,

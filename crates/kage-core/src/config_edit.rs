@@ -54,48 +54,118 @@ pub fn edited(path: &Path, keys: &[&str], value: Option<&serde_json::Value>) -> 
         table.remove(last);
         return Ok(doc.to_string());
     };
-    // Inside an inline table, or over an inline entry, the new entry
-    // stays inline too.
-    let item = if inline || table.get(last).is_some_and(Item::is_inline_table) {
-        Item::Value(to_value(value)?)
-    } else {
-        to_item(value)?
-    };
-    match (table.get_mut(last), item) {
-        (Some(Item::Table(old)), Item::Table(new)) => merge(old, new),
-        (_, item) => {
+    match table.get_mut(last) {
+        Some(Item::Table(old)) if value.is_object() => merge(old, value)?,
+        Some(Item::Value(old)) => {
+            let mut new = value_like(value, Some(old))?;
+            *new.decor_mut() = old.decor().clone();
+            *old = new;
+        }
+        _ => {
+            // Inside an inline table the new entry stays inline too.
+            let item = if inline {
+                Item::Value(to_value(value)?)
+            } else {
+                to_item(value)?
+            };
             table.insert(last, item);
         }
     }
     Ok(doc.to_string())
 }
 
-/// Makes `old` hold what `new` holds while keeping its key order, the
+/// Makes `old` hold the object `new` while keeping its key order, the
 /// comments on its keys and its own header comments: a key `new` lacks
-/// goes, a key both hold changes in place, and a new key goes last.
-fn merge(old: &mut Table, new: Table) {
+/// goes, a key both hold changes in place, a key written inline stays
+/// inline, and a new key goes last.
+fn merge(old: &mut Table, new: &serde_json::Value) -> Result<()> {
+    let Some(new) = new.as_object() else {
+        return Ok(());
+    };
     let gone: Vec<String> = old
         .iter()
         .map(|(key, _)| key.to_owned())
-        .filter(|key| !new.contains_key(key))
+        .filter(|key| new.get(key).is_none_or(serde_json::Value::is_null))
         .collect();
     for key in gone {
         old.remove(&key);
     }
-    for (key, item) in new {
-        match (old.get_mut(&key), item) {
-            (Some(Item::Table(old)), Item::Table(new)) => merge(old, new),
-            // A key written inline stays inline.
-            (Some(Item::Value(old)), item) => {
-                if let Ok(mut new) = item.into_value() {
-                    *new.decor_mut() = old.decor().clone();
-                    *old = new;
+    for (key, value) in new {
+        if value.is_null() {
+            continue;
+        }
+        match old.get_mut(key) {
+            Some(Item::Table(table)) if value.is_object() => merge(table, value)?,
+            Some(Item::Value(held)) => {
+                let mut fresh = value_like(value, Some(held))?;
+                *fresh.decor_mut() = held.decor().clone();
+                *held = fresh;
+            }
+            Some(Item::ArrayOfTables(tables)) if value.is_array() => {
+                let items = value.as_array().map(Vec::as_slice).unwrap_or_default();
+                if !items.iter().all(serde_json::Value::is_object) {
+                    old.insert(key, to_item(value)?);
+                    continue;
+                }
+                while tables.len() > items.len() {
+                    tables.remove(tables.len() - 1);
+                }
+                for (ix, item) in items.iter().enumerate() {
+                    match tables.get_mut(ix) {
+                        Some(table) => merge(table, item)?,
+                        None => {
+                            if let Item::Table(table) = to_item(item)? {
+                                tables.push(table);
+                            }
+                        }
+                    }
                 }
             }
-            (_, item) => {
-                old.insert(&key, item);
+            _ => {
+                old.insert(key, to_item(value)?);
             }
         }
+    }
+    Ok(())
+}
+
+/// `value` as an inline TOML value shaped like `old`: an inline table
+/// keeps the keys `old` holds in their order and their spacing, and an
+/// array follows `old` element by element.
+fn value_like(value: &serde_json::Value, old: Option<&Value>) -> Result<Value> {
+    match (value, old) {
+        (serde_json::Value::Object(map), Some(Value::InlineTable(held))) => {
+            let mut table = InlineTable::new();
+            for (key, old) in held {
+                if let Some(value) = map.get(key).filter(|value| !value.is_null()) {
+                    let mut fresh = value_like(value, Some(old))?;
+                    *fresh.decor_mut() = old.decor().clone();
+                    table.insert(key, fresh);
+                }
+            }
+            for (key, value) in map {
+                if !value.is_null() && !held.contains_key(key) {
+                    table.insert(key, to_value(value)?);
+                }
+            }
+            *table.decor_mut() = held.decor().clone();
+            Ok(Value::InlineTable(table))
+        }
+        (serde_json::Value::Array(items), Some(Value::Array(held))) => {
+            let mut array = Array::new();
+            for (ix, item) in items.iter().enumerate() {
+                match held.get(ix) {
+                    Some(old) => {
+                        let mut fresh = value_like(item, Some(old))?;
+                        *fresh.decor_mut() = old.decor().clone();
+                        array.push_formatted(fresh);
+                    }
+                    None => array.push(to_value(item)?),
+                }
+            }
+            Ok(Value::Array(array))
+        }
+        (value, _) => to_value(value),
     }
 }
 
@@ -271,6 +341,27 @@ mod tests {
         assert_eq!(
             parse(&text).unwrap().providers.custom["lab"].models.len(),
             2
+        );
+    }
+
+    #[test]
+    fn an_inline_model_list_keeps_its_key_order() {
+        let (_dir, path) = file(
+            "[providers.custom.lab]\nbase_url = \"http://l\"\nmodels = [{ id = \"tiny\", name = \"Lab Tiny\", context = 32000 }]\n",
+        );
+        let value = json!({
+            "base_url": "http://l",
+            "models": [
+                { "context": 64_000, "id": "tiny", "name": "Lab Tiny" },
+                { "id": "b", "name": "B" },
+            ],
+        });
+        let text = edited(&path, &["providers", "custom", "lab"], Some(&value)).unwrap();
+        assert!(
+            text.contains(
+                "models = [{ id = \"tiny\", name = \"Lab Tiny\", context = 64000 }, { id = \"b\", name = \"B\" }]"
+            ),
+            "{text}"
         );
     }
 

@@ -248,6 +248,13 @@ impl CliAcpAgent {
         }
     }
 
+    /// The config options a new session opens with: the default model,
+    /// its automatic thinking level and no permission mode.
+    fn default_options(&self) -> Vec<SessionConfigOption> {
+        let settings = Settings::fresh(&self.host.default_model, &self.host.registry);
+        config_options(&self.host.models, &settings)
+    }
+
     /// What a session of this connection runs with: the host's spec,
     /// with the permission fallback the client asked for at
     /// `initialize`. Agents the session starts inherit its gate.
@@ -381,6 +388,7 @@ impl Agent for CliAcpAgent {
                     cwd: std::env::current_dir()
                         .ok()
                         .map(|dir| dir.display().to_string()),
+                    config_options: self.default_options(),
                 }),
             }),
         }

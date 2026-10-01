@@ -1194,6 +1194,15 @@ fn initialize_advertises_image_and_embedded_context() {
         init["_meta"]["kage"]["cwd"], cwd,
         "a client without a directory learns the server's"
     );
+    let defaults = init["_meta"]["kage"]["configOptions"].as_array().unwrap();
+    let current = |id: &str| {
+        defaults
+            .iter()
+            .find(|option| option["id"] == id)
+            .map(|option| option["currentValue"].clone())
+    };
+    assert_eq!(current("model"), Some(serde_json::json!("mock/m")));
+    assert_eq!(current("mode"), Some(serde_json::json!("default")));
 }
 
 #[test]

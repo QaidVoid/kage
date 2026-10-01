@@ -235,6 +235,11 @@ pub struct KageAgentInfo {
     /// its own, such as a browser, names its sessions' project by it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// The config options a new session opens with, so a client can
+    /// show the default model, thinking level and mode before it opens
+    /// one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_options: Vec<SessionConfigOption>,
 }
 
 /// `session/new` request params.

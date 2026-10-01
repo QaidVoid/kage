@@ -1009,8 +1009,9 @@ impl Store {
     }
 
     /// The config options the composer shows for `id`: the active
-    /// session's, or on the welcome pane the last session's with the
-    /// choices held for the next session applied.
+    /// session's, or on the welcome pane the last session's, or before
+    /// any the ones a new session opens with, with the choices held for
+    /// the next session applied.
     #[must_use]
     pub fn composer_option(&self, id: &str) -> Option<SessionConfigOption> {
         if let Some(session) = self.active_session() {
@@ -1024,6 +1025,7 @@ impl Store {
             .prefs
             .template
             .iter()
+            .chain(&self.state().agent_defaults)
             .find(|option| option.id == id)
             .cloned()?;
         if let Some((_, value)) = self.held_options.iter().find(|(held, _)| held == id) {
@@ -1960,6 +1962,25 @@ mod tests {
         store.absorb(init_answer(Some("0.1.0"), true, true));
         let _ = store.take_outgoing();
         store
+    }
+
+    #[test]
+    fn a_fresh_welcome_offers_the_options_a_new_session_opens_with() {
+        let mut store = Store::new("/w", false);
+        store.set_connect(State::Connected);
+        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        let Frame::Success { id, mut result } = init_answer(Some("0.1.0"), true, true) else {
+            unreachable!()
+        };
+        result["_meta"] = serde_json::json!({ "kage": { "configOptions": [{
+            "id": "model", "name": "Model", "type": "select",
+            "currentValue": "demo/script", "options": [],
+        }] } });
+        store.absorb(Frame::Success { id, result });
+        let model = store.composer_option("model").expect("the default model");
+        assert_eq!(model.current_value, "demo/script");
+        assert!(store.composer_option("mode").is_none());
     }
 
     #[test]

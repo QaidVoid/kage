@@ -29,6 +29,9 @@ pub struct State {
     /// The directory a session opened with an empty `cwd` runs in, as
     /// a kage agent reported it at `initialize`.
     pub agent_cwd: Option<String>,
+    /// The config options a new session opens with, as a kage agent
+    /// reported them at `initialize`.
+    pub agent_defaults: Vec<kage_acp_wire::SessionConfigOption>,
     /// The sessions this connection holds or hears updates for, by id.
     pub sessions: BTreeMap<String, Session>,
     /// The recorded sessions a `session/list` answered with, in page

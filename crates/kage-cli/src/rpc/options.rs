@@ -65,6 +65,16 @@ impl Settings {
         Self::from(&state)
     }
 
+    /// The settings a new session on `model` opens with.
+    pub(super) fn fresh(model: &str, registry: &ProviderRegistry) -> Self {
+        let mut state = SessionState {
+            model: model.to_owned(),
+            ..SessionState::default()
+        };
+        crate::engine::fit_to_model(&mut state, registry);
+        Self::from(&state)
+    }
+
     /// Sets option `id` to `value` and returns the engine commands that
     /// make the same change, in order. `models` are the models the
     /// client may pick. Leaving plan mode for a regular mode needs two

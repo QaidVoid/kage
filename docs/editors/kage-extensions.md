@@ -11,7 +11,9 @@ kage desktop app uses. Field names are camelCase on the wire.
 The `initialize` result carries `_meta.kage.cwd`: the directory a
 session opened with an empty `cwd` runs in. A client with no
 directory of its own, such as a browser, names its sessions' project
-by it.
+by it. `_meta.kage.configOptions` lists the config options a new
+session opens with, so a client can show the default model, thinking
+level and mode before it opens one.
 
 A client may send `_meta.kage.unconfiguredTools: "allow"` in its
 `clientCapabilities` to get the TUI's permission rules: tools without

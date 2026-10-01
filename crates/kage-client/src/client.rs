@@ -945,10 +945,9 @@ impl Client {
                 self.state.protocol_version = Some(response.protocol_version);
                 self.state.capabilities = Some(response.agent_capabilities);
                 self.state.agent = response.agent_info;
-                self.state.agent_cwd = response
-                    .meta
-                    .and_then(|meta| meta.kage)
-                    .and_then(|kage| kage.cwd);
+                let kage = response.meta.and_then(|meta| meta.kage).unwrap_or_default();
+                self.state.agent_cwd = kage.cwd;
+                self.state.agent_defaults = kage.config_options;
                 vec![Change::Connection]
             }
         }

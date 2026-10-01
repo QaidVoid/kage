@@ -35,7 +35,7 @@ use kage_client::Session;
 use kage_client::wire::{FsKind, FsListResult, SessionConfigKind, SessionConfigOption};
 use serde_json::Value;
 
-use crate::store::Store;
+use crate::store::{Store, StoreHandle as _};
 use crate::theme::{
     FONT_MONO, FS_2XS, FS_BASE, FS_SM, FS_XS, LINE_HEIGHT, Palette, R_COMPOSER, R_FULL, R_LG, R_MD,
     SP_2, WEIGHT_SEMIBOLD,
@@ -737,7 +737,7 @@ impl ComposerView {
                 .is_some();
             if !asked && !has_listing {
                 self.fs_asked = true;
-                self.store.update(cx, |store, _| {
+                self.store.act(cx, |store| {
                     store.fs_list("");
                 });
             }
@@ -756,14 +756,12 @@ impl ComposerView {
             return;
         }
         let accepted = if self.loaded.is_none() && !self.store.read(cx).pending_prompt() {
-            self.store
-                .update(cx, |store, _| store.open_with_prompt(text));
+            self.store.act(cx, |store| store.open_with_prompt(text));
             true
         } else if steer {
-            self.store.update(cx, |store, _| store.steer(text).is_ok())
+            self.store.act(cx, |store| store.steer(text).is_ok())
         } else {
-            self.store
-                .update(cx, |store, _| store.submit(text).is_some())
+            self.store.act(cx, |store| store.submit(text).is_some())
         };
         if !accepted {
             return;

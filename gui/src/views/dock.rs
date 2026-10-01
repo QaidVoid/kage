@@ -36,7 +36,7 @@ use kage_client::wire::{
 use kage_client::{PermissionDecision, Session, TranscriptItem};
 use serde_json::Value;
 
-use crate::store::Store;
+use crate::store::{Store, StoreHandle as _};
 use crate::theme::{
     CTL_ICO, FONT_MONO, FS_2XS, FS_BASE, FS_SM, FS_XS, Palette, R_FULL, R_LG, R_MD, R_SM, SP_3,
     SP_4, SP_5,
@@ -532,7 +532,7 @@ impl DockRow {
     /// Saves `text` into the goal option; an empty text clears it.
     fn save_goal(&mut self, text: &str, cx: &mut Context<Self>) {
         self.store
-            .update(cx, |store, _| store.set_option(GOAL_OPTION, text));
+            .act(cx, |store| store.set_option(GOAL_OPTION, text));
         self.goal_open = false;
         cx.notify();
     }
@@ -567,7 +567,7 @@ impl DockRow {
             },
             None => PermissionDecision::Option(option_id),
         };
-        store.update(cx, |store, _| {
+        store.act(cx, |store| {
             store.reply_permission(&session_id, review.request_id, &decision);
         });
         self.revise_open = false;
@@ -617,7 +617,7 @@ impl DockRow {
     /// Sends the queued prompt at `index` as a steer on the run in
     /// flight.
     fn steer_row(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.store.update(cx, |store, _| {
+        self.store.act(cx, |store| {
             let _ = store.steer_queued(index);
         });
         cx.notify();
@@ -637,7 +637,7 @@ impl DockRow {
 
     /// Removes the queued prompt at `index`.
     fn remove_row(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.store.update(cx, |store, _| {
+        self.store.act(cx, |store| {
             store.withdraw_queued(index);
         });
         cx.notify();

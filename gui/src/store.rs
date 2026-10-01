@@ -10,8 +10,30 @@
 use kage_client::wire::{ContentBlock, FsListResult, FsOp};
 use kage_client::{Change, Client, Frame, PromptOutcome, Session, SteerError};
 
+use gpui_kit::{App, Entity};
+
 use crate::gate::{self, Report};
 use crate::transport::State;
+
+/// Store mutations that queue frames or move state go through
+/// [`StoreHandle::act`], which notifies the store's observers: the
+/// shell flushes the outgoing frames on that notify, and the views
+/// redraw. A bare `update` that skips the notify leaves the frames in
+/// the client until something unrelated notifies.
+pub trait StoreHandle {
+    /// Runs `f` on the store, then notifies its observers.
+    fn act<R>(&self, cx: &mut App, f: impl FnOnce(&mut Store) -> R) -> R;
+}
+
+impl StoreHandle for Entity<Store> {
+    fn act<R>(&self, cx: &mut App, f: impl FnOnce(&mut Store) -> R) -> R {
+        self.update(cx, |store, cx| {
+            let result = f(store);
+            cx.notify();
+            result
+        })
+    }
+}
 
 /// What the store asks the shell to carry out.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,7 +193,10 @@ impl Store {
                     // The recorded sessions fill the sidebar's project
                     // groups, and a live connection lands on the
                     // welcome pane, the way the web client boots.
-                    self.client.list_sessions(Some(&self.cwd), None);
+                    // A browser knows no directory of its own, so it
+                    // lists every recorded session the server holds.
+                    let cwd = (!self.cwd.is_empty()).then_some(self.cwd.as_str());
+                    self.client.list_sessions(cwd, None);
                 }
             }
         }
@@ -396,7 +421,7 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, Store};
+    use super::{Command, Store, StoreHandle as _};
     use crate::transport::State;
     use kage_client::{Frame, PromptOutcome, SteerError};
 
@@ -476,6 +501,21 @@ mod tests {
         assert_eq!(outgoing.len(), 1, "the directory page is asked");
         assert!(matches!(&outgoing[0], Frame::Request { method, .. } if method == "session/list"));
         assert_eq!(store.take_outgoing(), vec![]);
+    }
+
+    #[test]
+    fn a_browser_without_a_directory_lists_every_session() {
+        let mut store = Store::new("", false);
+        store.set_connect(State::Connected);
+        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store.absorb(init_answer(Some("0.1.0"), true, true));
+        let outgoing = store.take_outgoing();
+        let Frame::Request { method, params, .. } = &outgoing[0] else {
+            panic!("expected the list, got {:?}", outgoing[0]);
+        };
+        assert_eq!(method, "session/list");
+        assert!(params.get("cwd").is_none(), "no cwd filter: {params}");
     }
 
     /// Opens a session the way the shell does, answering its
@@ -766,6 +806,29 @@ mod tests {
             store.fs_listing("other").is_none(),
             "the listing is per session"
         );
+    }
+
+    /// The shell flushes frames when the store notifies, so a welcome
+    /// prompt that opens its session through `act` reaches the wire at
+    /// once instead of waiting for an unrelated redraw.
+    #[gpui_kit::test]
+    fn act_notifies_so_queued_frames_flush(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::AppContext as _;
+        let store = cx.new(|_| Store::new("/w", false));
+        let flushed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            let flushed = flushed.clone();
+            cx.observe(&store, move |store, cx| {
+                let frames = store.update(cx, |store, _| store.take_outgoing());
+                flushed.borrow_mut().extend(frames);
+            })
+            .detach();
+        });
+        cx.update(|cx| store.act(cx, |store| store.open_with_prompt("fix the flake")));
+        cx.run_until_parked();
+        let flushed = flushed.borrow();
+        assert_eq!(flushed.len(), 1, "the session/new went out on the notify");
+        assert!(matches!(&flushed[0], Frame::Request { method, .. } if method == "session/new"));
     }
 
     #[test]

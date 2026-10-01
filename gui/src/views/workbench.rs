@@ -19,7 +19,7 @@ use kage_client::wire::{ToolCallContent, ToolKind};
 use kage_client::{ToolCallItem, TranscriptItem};
 
 use crate::app::ToggleWorkbench;
-use crate::store::Store;
+use crate::store::{Store, StoreHandle as _};
 use crate::theme::{FONT_MONO, FS_2XS, FS_SM, FS_XS, PANEL_HEAD_H, R_FULL, R_MD, WEIGHT_SEMIBOLD};
 
 /// What a file change row reports, collected from one tool call.
@@ -539,7 +539,7 @@ impl WorkbenchView {
                 ];
             }
             self.files_asked = true;
-            self.store.update(cx, |store, _| {
+            self.store.act(cx, |store| {
                 store.fs_list("");
             });
             return vec![

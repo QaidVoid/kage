@@ -54,7 +54,7 @@ use kage_client::wire::PermissionOptionKind;
 use kage_client::{PermissionAsk, PermissionDecision};
 use serde_json::Value;
 
-use crate::store::Store;
+use crate::store::{Store, StoreHandle as _};
 use crate::theme::{
     FONT_MONO, FS_2XS, FS_BASE, FS_XS, Palette, R_FULL, R_MD, R_XL, SP_3, SP_4, WEIGHT_SEMIBOLD,
 };
@@ -289,7 +289,7 @@ impl ApprovalCard {
                         if text.is_empty() {
                             return;
                         }
-                        let answered = store.update(cx, |store, _| {
+                        let answered = store.act(cx, |store| {
                             let reject = store
                                 .state()
                                 .session(&session_id)

@@ -7,7 +7,9 @@
 //! shell, which owns the transport. Views read the store and call its
 //! command methods; they never see frames.
 
-use kage_client::wire::{ContentBlock, FsListResult, FsOp, PermissionOption, PermissionOptionKind};
+use kage_client::wire::{
+    ContentBlock, FsListResult, FsOp, FsReadResult, PermissionOption, PermissionOptionKind,
+};
 use kage_client::{Change, Client, Frame, PermissionAsk, PromptOutcome, Session, SteerError};
 
 use gpui_kit::{App, Entity};
@@ -172,6 +174,10 @@ pub struct Store {
     /// ran against for the picker that asked. A later answer replaces
     /// it.
     fs_listing: Option<(String, FsListResult)>,
+    /// The path the last `_kage/fs` read asked for, until it answers.
+    fs_reading: Option<String>,
+    /// The last file read: the session, the path and the answer.
+    fs_preview: Option<(String, String, FsReadResult)>,
     /// Commands waiting for the shell.
     commands: Vec<Command>,
 }
@@ -201,6 +207,8 @@ impl Store {
             permissions: HashMap::new(),
             constellation: true,
             fs_listing: None,
+            fs_reading: None,
+            fs_preview: None,
             commands: Vec::new(),
         }
     }
@@ -393,12 +401,20 @@ impl Store {
                     self.commands.push(Command::ReplayPrompt);
                 }
             }
-            if let Change::Fs {
-                session_id,
-                result: kage_client::wire::FsResult::List(listing),
-            } = change
-            {
-                self.fs_listing = Some((session_id.clone(), listing.clone()));
+            match change {
+                Change::Fs {
+                    session_id,
+                    result: kage_client::wire::FsResult::List(listing),
+                } => self.merge_listing(session_id, listing),
+                Change::Fs {
+                    session_id,
+                    result: kage_client::wire::FsResult::Read(read),
+                } => {
+                    if let Some(path) = self.fs_reading.take() {
+                        self.fs_preview = Some((session_id.clone(), path, read.clone()));
+                    }
+                }
+                _ => {}
             }
         }
         changes
@@ -543,6 +559,24 @@ impl Store {
         };
         self.client.cancel(&id);
         true
+    }
+
+    /// Loads subagent `id`'s transcript when this client holds none of
+    /// it: a child that ran before this client attached replays through
+    /// `session/load`, while a live one already streams here.
+    pub fn load_child(&mut self, id: &str) {
+        if self
+            .state()
+            .session(id)
+            .is_some_and(|session| !session.items.is_empty())
+        {
+            return;
+        }
+        let cwd = self
+            .active_session()
+            .and_then(|session| session.cwd.clone())
+            .unwrap_or_else(|| self.cwd.clone());
+        self.client.load_session(id, &cwd, &[]);
     }
 
     /// Stops session `id`: a subagent's stop button.
@@ -710,12 +744,48 @@ impl Store {
         true
     }
 
-    /// The last `_kage/fs` listing answer for `session`, for the
-    /// picker that asked.
+    /// The workdir entries `_kage/fs` listed for `session` so far, every
+    /// answer merged, for the mention menu and the files pane. Truncated
+    /// while a listed subtree was cut short and not yet continued.
     #[must_use]
     pub fn fs_listing(&self, session: &str) -> Option<&FsListResult> {
         let (id, listing) = self.fs_listing.as_ref()?;
         (id == session).then_some(listing)
+    }
+
+    /// Folds one listing answer into the session's merged listing.
+    fn merge_listing(&mut self, session: &str, listing: &FsListResult) {
+        match &mut self.fs_listing {
+            Some((id, merged)) if id == session => {
+                for entry in &listing.entries {
+                    if !merged.entries.iter().any(|known| known.path == entry.path) {
+                        merged.entries.push(entry.clone());
+                    }
+                }
+                merged.entries.sort_by(|a, b| a.path.cmp(&b.path));
+                merged.truncated = listing.truncated;
+            }
+            _ => self.fs_listing = Some((session.to_owned(), listing.clone())),
+        }
+    }
+
+    /// Reads `path` under the active session's workdir through
+    /// `_kage/fs`; the answer lands in [`Store::fs_preview`].
+    pub fn fs_read(&mut self, path: &str) -> bool {
+        let Some(session) = self.active.clone() else {
+            return false;
+        };
+        self.fs_reading = Some(path.to_owned());
+        self.client.fs(&session, FsOp::Read, path);
+        true
+    }
+
+    /// The last file `_kage/fs` read for `session`: its path and the
+    /// answer.
+    #[must_use]
+    pub fn fs_preview(&self, session: &str) -> Option<(&str, &FsReadResult)> {
+        let (id, path, read) = self.fs_preview.as_ref()?;
+        (id == session).then_some((path.as_str(), read))
     }
 
     /// Removes the queued prompt at `index` of the active session

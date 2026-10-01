@@ -6,12 +6,14 @@
 use gpui_kit::AnyElement;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::TextareaState;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Context, Div, Entity, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    AppContext as _, Context, Div, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, Stateful, StatefulInteractiveElement as _,
+    Styled as _, Window, div, px,
 };
 use kage_client::wire::{ToolCallContent, ToolKind};
 use kage_client::{ToolCallItem, TranscriptItem};
@@ -19,6 +21,9 @@ use kage_client::{ToolCallItem, TranscriptItem};
 use crate::app::ToggleWorkbench;
 use crate::store::{Store, StoreHandle as _};
 use crate::theme::{FONT_MONO, FS_2XS, FS_SM, FS_XS, PANEL_HEAD_H, R_FULL, R_MD, WEIGHT_SEMIBOLD};
+use crate::views::agents::{agent_facts, avatar, meta_line, state_chip};
+use crate::views::kit::{self, BtnTone};
+use crate::views::transcript::TranscriptView;
 
 /// What a file change row reports, collected from one tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +39,8 @@ pub(crate) struct ChangeEntry {
     /// Whether the first change made the file: its diff named no old
     /// text.
     pub created: bool,
+    /// The subagent that made the change, when one did.
+    pub by: Option<String>,
 }
 
 /// The path one change names: the diff content's path first, then the
@@ -95,9 +102,51 @@ pub(crate) fn change_entries(items: &[TranscriptItem]) -> Vec<ChangeEntry> {
             add,
             del,
             created,
+            by: None,
         });
     }
     out
+}
+
+/// The files `session` and the subagents under it changed: the
+/// session's own edits, then each child's, a child's named by its agent.
+/// A path two of them touched keeps its first author and sums the lines.
+pub(crate) fn session_changes(store: &Store, session: &kage_client::Session) -> Vec<ChangeEntry> {
+    let mut out = change_entries(&session.items);
+    for (id, agent) in &session.agents {
+        let Some(child) = store.state().session(id) else {
+            continue;
+        };
+        for mut entry in change_entries(&child.items) {
+            if let Some(known) = out.iter_mut().find(|known| known.path == entry.path) {
+                known.add += entry.add;
+                known.del += entry.del;
+                continue;
+            }
+            entry.by = agent.name.clone();
+            out.push(entry);
+        }
+    }
+    out
+}
+
+/// The tool call `id` of `session` or of a child under it.
+fn find_call<'a>(
+    store: &'a Store,
+    session: &'a kage_client::Session,
+    id: &str,
+) -> Option<&'a ToolCallItem> {
+    let own = std::iter::once(session);
+    let children = session
+        .agents
+        .keys()
+        .filter_map(|child| store.state().session(child));
+    own.chain(children).find_map(|session| {
+        session.items.iter().find_map(|item| match item {
+            TranscriptItem::ToolCall(call) if call.tool_call_id == id => Some(call),
+            _ => None,
+        })
+    })
 }
 
 /// One shell call's facts, collected from the transcript.
@@ -196,6 +245,8 @@ enum Tab {
     Terminal,
     /// The pages the session fetched.
     Browser,
+    /// One subagent and its transcript.
+    Agent,
 }
 
 impl Tab {
@@ -218,6 +269,8 @@ impl Tab {
             Tab::Agents => "Agents",
             Tab::Terminal => "Terminal",
             Tab::Browser => "Browser",
+            // The detail tab names its agent instead.
+            Tab::Agent => "",
         }
     }
 
@@ -229,6 +282,7 @@ impl Tab {
             Tab::Agents => IconName::Users,
             Tab::Terminal => IconName::Terminal,
             Tab::Browser => IconName::Globe,
+            Tab::Agent => IconName::Bot,
         }
     }
 }
@@ -264,10 +318,13 @@ impl Filter {
     fn keeps(self, agent: &kage_client::Subagent) -> bool {
         match self {
             Filter::All => true,
-            Filter::Running => {
-                agent.state.is_none()
-                    || agent.state == Some(kage_client::wire::SubagentState::Running)
-            }
+            Filter::Running => matches!(
+                agent.state,
+                None | Some(
+                    kage_client::wire::SubagentState::Running
+                        | kage_client::wire::SubagentState::Paused
+                )
+            ),
             Filter::Done => matches!(
                 agent.state,
                 Some(
@@ -292,6 +349,22 @@ fn section_head(text: &str, p: &crate::theme::Palette) -> Div {
         .font_weight(WEIGHT_SEMIBOLD)
         .text_color(p.faint)
         .child(SharedString::from(text.to_owned()))
+}
+
+/// A diff count chip on its tint.
+fn chip(text: String, fg: gpui_kit::Hsla, bg: gpui_kit::Hsla) -> Div {
+    div()
+        .flex_none()
+        .h(px(20.))
+        .px(px(7.))
+        .flex()
+        .items_center()
+        .rounded(px(R_FULL))
+        .bg(bg)
+        .font_family(FONT_MONO)
+        .text_size(px(FS_2XS))
+        .text_color(fg)
+        .child(SharedString::from(text))
 }
 
 /// The empty-state block of the design: a faint icon over one line.
@@ -323,20 +396,16 @@ fn tab_count(count: &str, p: &crate::theme::Palette) -> Div {
         .child(SharedString::from(count.to_owned()))
 }
 
-/// The `+N` and `-N` chip a change row carries.
-fn diff_chip(label: String, color: gpui_kit::Hsla) -> Div {
-    div()
-        .flex_none()
-        .text_size(px(FS_2XS))
-        .font_family(FONT_MONO)
-        .text_color(color)
-        .child(SharedString::from(label))
-}
-
 /// The right panel.
 pub struct WorkbenchView {
     store: Entity<Store>,
+    /// The composer a subagent transcript's actions write into.
+    composer: Entity<TextareaState>,
     tab: Tab,
+    /// The file the files pane previews.
+    file: Option<String>,
+    /// The subagent the detail tab shows, with its transcript.
+    agent: Option<(String, Entity<TranscriptView>)>,
     filter: Filter,
     /// The change entry the pane shows a diff for, by call id.
     selected: Option<String>,
@@ -352,10 +421,21 @@ impl EventEmitter<WorkbenchEvent> for WorkbenchView {}
 impl WorkbenchView {
     /// A workbench following `store`.
     #[must_use]
-    pub fn new(store: Entity<Store>) -> Self {
+    pub fn new(
+        store: Entity<Store>,
+        composer: Entity<TextareaState>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // A request made while drawing waits for the next event to go
+        // out, so the listing is asked for here, as the store moves.
+        cx.observe(&store, |this, _, cx| this.ask_listing(cx))
+            .detach();
         Self {
             store,
+            composer,
             tab: Tab::default(),
+            agent: None,
+            file: None,
             filter: Filter::default(),
             selected: None,
             files_asked: false,
@@ -370,10 +450,190 @@ impl WorkbenchView {
         cx.notify();
     }
 
-    /// Shows the files pane.
-    pub fn open_files(&mut self, cx: &mut Context<Self>) {
+    /// Asks for the workdir listing while the files pane shows and the
+    /// active session has none yet, once per session.
+    fn ask_listing(&mut self, cx: &mut Context<Self>) {
+        if self.tab != Tab::Files {
+            return;
+        }
+        let active = self.store.read(cx).active_id().map(str::to_owned);
+        if active != self.loaded {
+            self.loaded = active.clone();
+            self.files_asked = false;
+        }
+        let Some(active) = active else {
+            return;
+        };
+        if self.files_asked || self.store.read(cx).fs_listing(&active).is_some() {
+            return;
+        }
+        self.files_asked = true;
+        self.store.act(cx, |store| store.fs_list(""));
+    }
+
+    /// Shows `path` in the files pane, its contents read for the
+    /// preview.
+    pub fn open_file(&mut self, path: &str, cx: &mut Context<Self>) {
         self.tab = Tab::Files;
+        self.ask_listing(cx);
+        self.file = Some(path.to_owned());
+        self.store.act(cx, |store| store.fs_read(path));
         cx.notify();
+    }
+
+    /// Shows subagent `id` in the detail tab, its transcript loaded
+    /// when this client holds none of it.
+    pub fn open_agent(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.agent.as_ref().map(|(open, _)| open) != Some(&id) {
+            let store = self.store.clone();
+            let composer = self.composer.clone();
+            let child = id.clone();
+            let view = cx.new(|cx| TranscriptView::pinned(store, composer, child, window, cx));
+            self.agent = Some((id.clone(), view));
+        }
+        self.store.act(cx, |store| store.load_child(&id));
+        self.tab = Tab::Agent;
+        cx.notify();
+    }
+
+    /// Closes the subagent detail tab.
+    fn close_agent(&mut self, cx: &mut Context<Self>) {
+        self.agent = None;
+        if self.tab == Tab::Agent {
+            self.tab = Tab::Agents;
+        }
+        cx.notify();
+    }
+
+    /// The subagent detail: back, the avatar, name, kind and state with
+    /// Stop while it runs, the task and the measured facts, then the
+    /// child's transcript.
+    fn agent_detail(&self, p: &'static crate::theme::Palette, cx: &Context<Self>) -> AnyElement {
+        let Some((id, transcript)) = &self.agent else {
+            return empty_block(IconName::Bot, "Agent not found.", p).into_any_element();
+        };
+        let store = self.store.read(cx);
+        let Some(parent) = store.active_session() else {
+            return empty_block(IconName::Bot, "Agent not found.", p).into_any_element();
+        };
+        let Some(agent) = parent.agents.get(id) else {
+            return empty_block(IconName::Bot, "Agent not found.", p).into_any_element();
+        };
+        let facts = agent_facts(store, parent, id, agent);
+        let this = cx.entity();
+        let kind = match &facts.item {
+            Some((_, index)) => format!("swarm #{:02}", index + 1),
+            None => facts.name.clone(),
+        };
+        let mut line = h_flex()
+            .gap(px(8.))
+            .items_center()
+            .child(
+                Button::new("wb-agent-back")
+                    .icon(IconName::ChevronLeft)
+                    .xsmall()
+                    .ghost()
+                    .tooltip("Back to agents")
+                    .on_click({
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |this, cx| {
+                                this.tab = Tab::Agents;
+                                cx.notify();
+                            });
+                        }
+                    }),
+            )
+            .child(avatar(&facts.name, p))
+            .child(
+                div()
+                    .font_weight(WEIGHT_SEMIBOLD)
+                    .text_size(px(FS_SM))
+                    .text_color(p.ink_strong)
+                    .child(SharedString::from(facts.name.clone())),
+            )
+            .child(
+                div()
+                    .px(px(7.))
+                    .py(px(1.))
+                    .rounded(px(R_FULL))
+                    .bg(p.fill)
+                    .text_size(px(11.))
+                    .text_color(p.muted)
+                    .child(SharedString::from(kind)),
+            )
+            .child(div().flex_1())
+            .child(state_chip(&facts, p));
+        if facts.stoppable {
+            let store = self.store.clone();
+            let child = id.clone();
+            line = line.child(
+                kit::btn_sm("wb-agent-stop", BtnTone::Danger, p)
+                    .on_click(move |_, _, cx| {
+                        store.act(cx, |store| store.cancel_session(&child));
+                    })
+                    .child(Icon::new(IconName::Square).with_size(px(11.)))
+                    .child("Stop"),
+            );
+        }
+        let calls = store.state().session(id).map_or(0, |child| {
+            child
+                .items
+                .iter()
+                .filter(|item| matches!(item, TranscriptItem::ToolCall(_)))
+                .count()
+        });
+        let facts_line = [
+            Some(facts.name.clone()),
+            facts.elapsed.map(crate::clock::span),
+            facts.tokens.map(|n| format!("{n} tok")),
+            Some(format!("{calls} tool calls")),
+            facts.item.as_ref().map(|(item, _)| format!("item: {item}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ");
+        let mut head = v_flex()
+            .gap(px(6.))
+            .px(px(14.))
+            .py(px(10.))
+            .border_b_1()
+            .border_color(p.line)
+            .child(line)
+            .child(
+                div()
+                    .text_size(px(FS_SM))
+                    .text_color(p.ink)
+                    .child(SharedString::from(facts.task.clone())),
+            )
+            .child(
+                div()
+                    .font_family(FONT_MONO)
+                    .text_size(px(11.))
+                    .text_color(p.faint)
+                    .child(SharedString::from(facts_line)),
+            );
+        if let Some(reason) = &facts.reason {
+            head = head.child(
+                div()
+                    .text_size(px(FS_XS))
+                    .text_color(p.warn)
+                    .child(SharedString::from(reason.clone())),
+            );
+        }
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .child(head)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .px(px(10.))
+                    .child(transcript.clone()),
+            )
+            .into_any_element()
     }
 
     /// Shows the agents list.
@@ -424,13 +684,19 @@ impl WorkbenchView {
             .children(count.map(|count| tab_count(&count, p)))
     }
 
-    /// The changes pane: one row per changed file, then the selected
-    /// file's diff, as the web client's changes pane draws them.
-    fn changes_section(&self, p: &crate::theme::Palette, cx: &Context<Self>) -> Vec<AnyElement> {
-        let Some(session) = self.store.read(cx).active_session() else {
+    /// The changes pane: the count and line totals, one row per changed
+    /// file with its author when a subagent made it, then the selected
+    /// file's diff under its path and Open file.
+    fn changes_section(
+        &self,
+        p: &'static crate::theme::Palette,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let store = self.store.read(cx);
+        let Some(session) = store.active_session() else {
             return Vec::new();
         };
-        let entries = change_entries(&session.items);
+        let entries = session_changes(store, session);
         if entries.is_empty() {
             return vec![
                 empty_block(
@@ -443,155 +709,51 @@ impl WorkbenchView {
         }
         let add: usize = entries.iter().map(|entry| entry.add).sum();
         let del: usize = entries.iter().map(|entry| entry.del).sum();
-        let summary = h_flex()
-            .items_center()
-            .justify_between()
-            .px(px(14.))
-            .py(px(4.))
-            .child(
-                div()
-                    .text_size(px(FS_XS))
-                    .text_color(p.muted)
-                    .child(SharedString::from(format!(
-                        "{} files changed",
-                        entries.len()
-                    ))),
-            )
-            .child(
-                h_flex()
-                    .gap(px(6.))
-                    .child(diff_chip(format!("+{add}"), p.diff_add))
-                    .child(diff_chip(format!("-{del}"), p.diff_del)),
-            )
-            .into_any_element();
+        let count = entries.len();
+        let mut head = section_head(
+            &format!("{count} FILE{} CHANGED", if count == 1 { "" } else { "S" }),
+            p,
+        )
+        .gap(px(6.))
+        .child(div().flex_1())
+        .child(chip(format!("+{add}"), p.diff_add, p.diff_add_bg));
+        if del > 0 {
+            head = head.child(chip(format!("-{del}"), p.diff_del, p.diff_del_bg));
+        }
         let selected = self
             .selected
             .clone()
+            .filter(|id| entries.iter().any(|entry| &entry.call_id == id))
             .or_else(|| entries.first().map(|entry| entry.call_id.clone()));
-        let mut calls = std::collections::BTreeMap::new();
-        for item in &session.items {
-            if let TranscriptItem::ToolCall(call) = item {
-                calls.insert(call.tool_call_id.clone(), call);
-            }
-        }
-        let mut out = vec![summary];
+        let mut out = vec![head.into_any_element()];
         for entry in &entries {
             let on = selected.as_deref() == Some(entry.call_id.as_str());
-            out.push(
-                h_flex()
-                    .id(SharedString::from(format!("wb-change-{}", entry.call_id)))
-                    .w_full()
-                    .px(px(14.))
-                    .py(px(6.))
-                    .gap(px(8.))
-                    .items_center()
-                    .text_size(px(FS_SM))
-                    .when(on, |row| row.bg(p.selected))
-                    .hover(move |row| row.bg(if on { p.selected_hover } else { p.hover }))
-                    .on_click({
-                        let this = cx.entity();
-                        let call_id = entry.call_id.clone();
-                        move |_, _, cx| {
-                            this.update(cx, |this, cx| {
-                                this.selected = Some(call_id.clone());
-                                cx.notify();
-                            });
-                        }
-                    })
-                    .child(
-                        Icon::new(IconName::File)
-                            .with_size(px(13.))
-                            .text_color(p.faint),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .truncate()
-                            .font_family(FONT_MONO)
-                            .text_size(px(FS_XS))
-                            .text_color(p.ink)
-                            .child(entry.path.clone()),
-                    )
-                    .child(diff_chip(format!("+{}", entry.add), p.diff_add))
-                    .when(entry.del > 0, |row| {
-                        row.child(diff_chip(format!("-{}", entry.del), p.diff_del))
-                    })
-                    .into_any_element(),
-            );
-        }
-        let diff = selected
-            .as_deref()
-            .and_then(|id| calls.get(id))
-            .and_then(|call| crate::views::transcript::diff_lines(call));
-        if let Some(lines) = diff {
-            out.push(
-                div()
-                    .px(px(14.))
-                    .pt(px(8.))
-                    .child(crate::views::transcript::render_diff(&lines, cx))
-                    .into_any_element(),
-            );
-        }
-        out
-    }
-
-    /// The files pane: the session workdir listing, one row per entry;
-    /// a file row mentions the file in the composer.
-    fn files_section(
-        &mut self,
-        p: &crate::theme::Palette,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let active = self.store.read(cx).active_id().map(str::to_owned);
-        if active != self.loaded {
-            self.loaded = active.clone();
-            self.files_asked = false;
-        }
-        let listing = active
-            .as_deref()
-            .and_then(|id| self.store.read(cx).fs_listing(id));
-        if listing.is_none() {
-            if self.files_asked {
-                return vec![
-                    empty_block(IconName::Folder, "No file listing yet.", p).into_any_element(),
-                ];
-            }
-            self.files_asked = true;
-            self.store.act(cx, |store| {
-                store.fs_list("");
-            });
-            return vec![
-                empty_block(
-                    IconName::Folder,
-                    "Asking the session for its workdir listing...",
-                    p,
-                )
-                .into_any_element(),
-            ];
-        }
-        let listing = listing.expect("the listing was Some above");
-        let mut out = vec![section_head("WORKDIR", p).into_any_element()];
-        let this = cx.entity();
-        for entry in &listing.entries {
-            let is_dir = entry.kind == kage_client::wire::FsKind::Directory;
-            let path = entry.path.clone();
-            let row = h_flex()
-                .id(SharedString::from(format!("wb-file-{}", entry.path)))
+            let this = cx.entity();
+            let call_id = entry.call_id.clone();
+            let mut row = h_flex()
+                .id(SharedString::from(format!("wb-change-{}", entry.call_id)))
                 .w_full()
+                .h(px(34.))
                 .px(px(14.))
-                .py(px(5.))
                 .gap(px(8.))
                 .items_center()
                 .text_size(px(FS_SM))
-                .hover(move |row| row.bg(p.hover))
+                .cursor_pointer()
+                .when(on, |row| row.bg(p.selected))
+                .hover(move |row| row.bg(if on { p.selected_hover } else { p.hover }))
+                .on_click(move |_, _, cx| {
+                    this.update(cx, |this, cx| {
+                        this.selected = Some(call_id.clone());
+                        cx.notify();
+                    });
+                })
                 .child(
-                    Icon::new(if is_dir {
-                        IconName::Folder
+                    Icon::new(if entry.created {
+                        IconName::FilePlus
                     } else {
                         IconName::File
                     })
-                    .with_size(px(13.))
+                    .with_size(px(14.))
                     .text_color(p.faint),
                 )
                 .child(
@@ -602,57 +764,303 @@ impl WorkbenchView {
                         .font_family(FONT_MONO)
                         .text_size(px(FS_XS))
                         .text_color(p.ink)
-                        .child(path.clone()),
+                        .child(entry.path.clone()),
                 );
-            out.push(
-                if is_dir {
-                    row.cursor_default()
-                } else {
-                    let this = this.clone();
-                    row.on_click(move |_, _, cx| {
-                        this.update(cx, |_, cx| {
-                            cx.emit(WorkbenchEvent::Mention(path.clone()));
-                        });
-                    })
-                }
+            if let Some(by) = &entry.by {
+                row = row.child(
+                    div()
+                        .px(px(7.))
+                        .py(px(1.))
+                        .rounded(px(R_FULL))
+                        .border_1()
+                        .border_color(p.line)
+                        .bg(p.fill)
+                        .text_size(px(10.5))
+                        .text_color(p.muted)
+                        .child(SharedString::from(by.clone())),
+                );
+            }
+            row = row.child(chip(format!("+{}", entry.add), p.diff_add, p.diff_add_bg));
+            if entry.del > 0 {
+                row = row.child(chip(format!("-{}", entry.del), p.diff_del, p.diff_del_bg));
+            }
+            out.push(row.into_any_element());
+        }
+        let Some(call) = selected
+            .as_deref()
+            .and_then(|id| find_call(store, session, id))
+        else {
+            return out;
+        };
+        let path = change_path(call);
+        let this = cx.entity();
+        let open = path.clone();
+        out.push(
+            h_flex()
+                .mt(px(8.))
+                .h(px(36.))
+                .px(px(14.))
+                .gap(px(8.))
+                .items_center()
+                .border_y_1()
+                .border_color(p.subtle)
+                .text_size(px(FS_SM))
+                .child(
+                    Icon::new(IconName::FileDiff)
+                        .with_size(px(14.))
+                        .text_color(p.faint),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(FONT_MONO)
+                        .text_size(px(FS_XS))
+                        .text_color(p.ink)
+                        .child(SharedString::from(path)),
+                )
+                .child(
+                    Button::new("wb-open-file")
+                        .label("Open file")
+                        .xsmall()
+                        .ghost()
+                        .on_click(move |_, _, cx| {
+                            let open = open.clone();
+                            this.update(cx, |this, cx| this.open_file(&open, cx));
+                        }),
+                )
                 .into_any_element(),
-            );
+        );
+        if let Some(lines) = crate::views::transcript::diff_lines(call) {
+            out.push(crate::views::transcript::render_diff(&lines, cx).into_any_element());
         }
         out
     }
 
-    /// The agents pane: the announced subagents, one row each, under
-    /// the design's filter chips.
-    fn agents_section(&self, p: &crate::theme::Palette, cx: &Context<Self>) -> Vec<AnyElement> {
-        let Some(session) = self.store.read(cx).active_session() else {
+    /// The files pane: the workdir tree `_kage/fs` listed, indented by
+    /// depth; a directory the listing cut short lists itself on click,
+    /// and a file previews under the tree with Mention.
+    fn files_section(
+        &mut self,
+        p: &'static crate::theme::Palette,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(active) = self.store.read(cx).active_id().map(str::to_owned) else {
+            return Vec::new();
+        };
+        if self.store.read(cx).fs_listing(&active).is_none() {
+            return vec![
+                empty_block(IconName::Folder, "Listing the session workdir\u{2026}", p)
+                    .into_any_element(),
+            ];
+        }
+        let store = self.store.read(cx);
+        let listing = store
+            .fs_listing(&active)
+            .expect("the listing was checked above");
+        let project =
+            crate::app::project_name(store.active_session().and_then(|s| s.cwd.as_deref()));
+        let mut out = vec![section_head(&project.to_uppercase(), p).into_any_element()];
+        let this = cx.entity();
+        let selected = self.file.clone();
+        for entry in &listing.entries {
+            let is_dir = entry.kind == kage_client::wire::FsKind::Directory;
+            let depth = entry.path.matches('/').count();
+            let name = entry
+                .path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&entry.path)
+                .to_owned();
+            let path = entry.path.clone();
+            let on = selected.as_deref() == Some(entry.path.as_str());
+            let unlisted = is_dir
+                && listing.truncated
+                && !listing
+                    .entries
+                    .iter()
+                    .any(|other| other.path.starts_with(&format!("{}/", entry.path)));
+            let this = this.clone();
+            out.push(
+                h_flex()
+                    .id(SharedString::from(format!("wb-file-{}", entry.path)))
+                    .w_full()
+                    .h(px(26.))
+                    .pl(px(14. + depth as f32 * 14.))
+                    .pr(px(14.))
+                    .gap(px(7.))
+                    .items_center()
+                    .text_size(px(FS_SM))
+                    .text_color(if is_dir { p.muted } else { p.ink })
+                    .cursor_pointer()
+                    .when(on, |row| row.bg(p.selected))
+                    .hover(move |row| row.bg(if on { p.selected_hover } else { p.hover }))
+                    .on_click(move |_, _, cx| {
+                        let path = path.clone();
+                        this.update(cx, |this, cx| {
+                            if is_dir {
+                                if unlisted {
+                                    this.store.act(cx, |store| store.fs_list(&path));
+                                }
+                            } else {
+                                this.open_file(&path, cx);
+                            }
+                        });
+                    })
+                    .child(
+                        Icon::new(if is_dir {
+                            IconName::Folder
+                        } else {
+                            IconName::File
+                        })
+                        .with_size(px(12.))
+                        .text_color(p.faint),
+                    )
+                    .child(div().min_w_0().truncate().child(SharedString::from(name)))
+                    .when(unlisted, |row| {
+                        row.child(
+                            div()
+                                .text_size(px(FS_2XS))
+                                .text_color(p.faint)
+                                .child("\u{2026}"),
+                        )
+                    })
+                    .into_any_element(),
+            );
+        }
+        if let Some((path, read)) = store.fs_preview(&active)
+            && selected.as_deref() == Some(path)
+        {
+            let mention = path.to_owned();
+            let this = this.clone();
+            out.push(
+                h_flex()
+                    .mt(px(10.))
+                    .h(px(36.))
+                    .px(px(14.))
+                    .gap(px(8.))
+                    .items_center()
+                    .border_y_1()
+                    .border_color(p.subtle)
+                    .child(
+                        Icon::new(IconName::File)
+                            .with_size(px(14.))
+                            .text_color(p.faint),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(FONT_MONO)
+                            .text_size(px(FS_XS))
+                            .text_color(p.ink)
+                            .child(SharedString::from(path.to_owned())),
+                    )
+                    .child(
+                        Button::new("wb-file-mention")
+                            .icon(IconName::AtSign)
+                            .xsmall()
+                            .ghost()
+                            .tooltip("Mention in composer")
+                            .on_click(move |_, _, cx| {
+                                let path = mention.clone();
+                                this.update(cx, |_, cx| cx.emit(WorkbenchEvent::Mention(path)));
+                            }),
+                    )
+                    .into_any_element(),
+            );
+            if read.binary {
+                out.push(
+                    div()
+                        .px(px(14.))
+                        .py(px(8.))
+                        .text_size(px(FS_XS))
+                        .text_color(p.faint)
+                        .child("Binary file; not shown.")
+                        .into_any_element(),
+                );
+            } else {
+                let mut code = v_flex()
+                    .py(px(6.))
+                    .bg(p.deep)
+                    .font_family(FONT_MONO)
+                    .text_size(px(12.))
+                    .line_height(px(19.));
+                for (n, line) in read.content.lines().enumerate() {
+                    code = code.child(
+                        h_flex()
+                            .px(px(10.))
+                            .gap(px(12.))
+                            .child(
+                                div()
+                                    .w(px(28.))
+                                    .flex_none()
+                                    .text_right()
+                                    .text_color(p.ghost)
+                                    .child((n + 1).to_string()),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_color(p.ink)
+                                    .child(SharedString::from(line.to_owned())),
+                            ),
+                    );
+                }
+                out.push(code.into_any_element());
+                if read.truncated {
+                    out.push(
+                        div()
+                            .px(px(14.))
+                            .py(px(6.))
+                            .text_size(px(FS_XS))
+                            .text_color(p.faint)
+                            .child("Truncated: the file is longer than the preview.")
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    /// The agents pane: the subagents, then each swarm's workers under
+    /// its description and done count, as the design's agent rows, under
+    /// the filter chips. A row opens the agent's detail tab.
+    fn agents_section(
+        &self,
+        p: &'static crate::theme::Palette,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let store = self.store.read(cx);
+        let Some(session) = store.active_session() else {
             return Vec::new();
         };
         let this = cx.entity();
-        let seg = h_flex()
-            .gap(px(2.))
-            .children(Filter::all().map(|filter| {
-                let this = this.clone();
-                let on = self.filter == filter;
-                div()
-                    .id(SharedString::from(format!("wb-filter-{}", filter.label())))
-                    .px(px(8.))
-                    .h(px(20.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(R_FULL))
-                    .text_size(px(FS_2XS))
-                    .text_color(if on { p.ink_strong } else { p.faint })
-                    .when(on, |chip| chip.bg(p.selected))
-                    .hover(move |chip| chip.bg(p.hover))
-                    .on_click(move |_, _, cx| {
-                        this.update(cx, |this, cx| {
-                            this.filter = filter;
-                            cx.notify();
-                        });
-                    })
-                    .child(filter.label())
-            }))
-            .into_any_element();
+        let seg = h_flex().gap(px(2.)).children(Filter::all().map(|filter| {
+            let this = this.clone();
+            let on = self.filter == filter;
+            div()
+                .id(SharedString::from(format!("wb-filter-{}", filter.label())))
+                .px(px(8.))
+                .h(px(20.))
+                .flex()
+                .items_center()
+                .rounded(px(R_FULL))
+                .text_size(px(FS_2XS))
+                .text_color(if on { p.ink_strong } else { p.faint })
+                .when(on, |chip| chip.bg(p.selected))
+                .hover(move |chip| chip.bg(p.hover))
+                .on_click(move |_, _, cx| {
+                    this.update(cx, |this, cx| {
+                        this.filter = filter;
+                        cx.notify();
+                    });
+                })
+                .child(filter.label())
+        }));
         let mut out = vec![
             h_flex()
                 .items_center()
@@ -681,100 +1089,174 @@ impl WorkbenchView {
             );
             return out;
         }
-        let agents: Vec<&kage_client::Subagent> = session
+        let group = |icon: IconName, label: String, count: Option<String>| {
+            h_flex()
+                .gap(px(6.))
+                .items_center()
+                .px(px(14.))
+                .pt(px(10.))
+                .pb(px(4.))
+                .text_size(px(FS_2XS))
+                .text_color(p.faint)
+                .child(Icon::new(icon).with_size(px(12.)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(SharedString::from(label)),
+                )
+                .children(count.map(|count| div().font_family(FONT_MONO).child(count)))
+                .into_any_element()
+        };
+        let solo: Vec<_> = session
             .agents
-            .values()
-            .filter(|agent| self.filter.keeps(agent))
+            .iter()
+            .filter(|(_, agent)| agent.swarm.is_none() && self.filter.keeps(agent))
             .collect();
-        if agents.is_empty() {
+        if !solo.is_empty() {
+            out.push(group(IconName::Bot, "Subagents".to_owned(), None));
+            for (id, agent) in solo {
+                out.push(self.agent_row(&agent_facts(store, session, id, agent), p, cx));
+            }
+        }
+        for item in &session.items {
+            let TranscriptItem::ToolCall(call) = item else {
+                continue;
+            };
+            if call.title != "swarm" {
+                continue;
+            }
+            let members = crate::views::agents::children_of(session, &call.tool_call_id);
+            let ended = members
+                .iter()
+                .filter(|(_, agent)| Filter::Done.keeps(agent))
+                .count();
+            let total = members.len();
+            let shown: Vec<_> = members
+                .into_iter()
+                .filter(|(_, agent)| self.filter.keeps(agent))
+                .collect();
+            if shown.is_empty() {
+                continue;
+            }
+            let description = call
+                .input
+                .as_ref()
+                .and_then(|input| input.get("description"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Swarm")
+                .to_owned();
+            out.push(group(
+                IconName::Waypoints,
+                description,
+                Some(format!("{ended}/{total}")),
+            ));
+            for (id, agent) in shown {
+                out.push(self.agent_row(&agent_facts(store, session, id, agent), p, cx));
+            }
+        }
+        if out.len() == 1 {
             out.push(
                 empty_block(IconName::Users, "No agents match this filter.", p).into_any_element(),
             );
-            return out;
-        }
-        for agent in agents {
-            let name = agent.name.clone().unwrap_or_else(|| "agent".to_owned());
-            let live = agent.state.is_none()
-                || agent.state == Some(kage_client::wire::SubagentState::Running);
-            let (state, color) = match agent.state {
-                None | Some(kage_client::wire::SubagentState::Running) => ("running", p.accent),
-                Some(kage_client::wire::SubagentState::Completed) => ("completed", p.ok),
-                Some(kage_client::wire::SubagentState::Failed) => ("failed", p.danger),
-                Some(kage_client::wire::SubagentState::Cancelled) => ("cancelled", p.faint),
-                Some(_) => ("paused", p.warn),
-            };
-            let initial: SharedString = name
-                .chars()
-                .next()
-                .map(String::from)
-                .unwrap_or_else(|| "?".to_owned())
-                .into();
-            out.push(
-                h_flex()
-                    .id(SharedString::from(format!("wb-agent-{name}")))
-                    .w_full()
-                    .px(px(14.))
-                    .py(px(7.))
-                    .gap(px(9.))
-                    .items_center()
-                    .text_size(px(FS_SM))
-                    .hover(move |row| row.bg(p.hover))
-                    .child(
-                        div()
-                            .size(px(22.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(R_FULL))
-                            .bg(p.fill)
-                            .text_size(px(FS_2XS))
-                            .font_weight(WEIGHT_SEMIBOLD)
-                            .text_color(p.muted)
-                            .child(initial),
-                    )
-                    .child(
-                        v_flex()
-                            .min_w_0()
-                            .flex_1()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(p.ink)
-                                    .child(name.clone()),
-                            )
-                            .children(agent.task.clone().map(|task| {
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(px(FS_XS))
-                                    .text_color(p.faint)
-                                    .child(task)
-                            })),
-                    )
-                    .child(if live {
-                        div()
-                            .flex_none()
-                            .child(
-                                Spinner::new()
-                                    .icon(IconName::LoaderCircle)
-                                    .color(p.accent)
-                                    .with_size(px(13.)),
-                            )
-                            .into_any_element()
-                    } else {
-                        div()
-                            .flex_none()
-                            .text_size(px(FS_XS))
-                            .text_color(color)
-                            .child(state)
-                            .into_any_element()
-                    })
-                    .into_any_element(),
-            );
         }
         out
+    }
+
+    /// One agent row: avatar, the swarm index and name, the latest tool
+    /// line or the result or the task, the state with elapsed time and
+    /// tokens, and Stop while it runs.
+    fn agent_row(
+        &self,
+        facts: &crate::views::agents::AgentFacts,
+        p: &'static crate::theme::Palette,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let this = cx.entity();
+        let id = facts.id.clone();
+        let line = if facts.phase.live() {
+            facts.last.clone().unwrap_or_else(|| facts.task.clone())
+        } else {
+            facts.result.clone().unwrap_or_else(|| facts.task.clone())
+        };
+        let mut name = h_flex().gap(px(6.)).items_center().min_w_0();
+        if let Some((item, index)) = &facts.item {
+            name = name
+                .child(
+                    div()
+                        .font_family(FONT_MONO)
+                        .text_size(px(11.))
+                        .text_color(p.faint)
+                        .child(format!("{:02}", index + 1)),
+                )
+                .child(div().truncate().child(SharedString::from(item.clone())));
+        } else {
+            name = name.child(
+                div()
+                    .truncate()
+                    .child(SharedString::from(facts.name.clone())),
+            );
+        }
+        let mut row = h_flex()
+            .id(SharedString::from(format!("wb-agent-{}", facts.id)))
+            .w_full()
+            .px(px(14.))
+            .py(px(7.))
+            .gap(px(9.))
+            .items_center()
+            .text_size(px(FS_SM))
+            .cursor_pointer()
+            .hover(move |row| row.bg(p.hover))
+            .on_click(move |_, window, cx| {
+                let id = id.clone();
+                this.update(cx, |this, cx| this.open_agent(id, window, cx));
+            })
+            .child(avatar(&facts.name, p))
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .flex_1()
+                    .child(name.text_color(p.ink))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(FS_XS))
+                            .text_color(p.faint)
+                            .child(SharedString::from(line.replace('`', ""))),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .items_end()
+                    .gap(px(2.))
+                    .flex_none()
+                    .child(state_chip(facts, p))
+                    .child(
+                        div()
+                            .font_family(FONT_MONO)
+                            .text_size(px(11.))
+                            .text_color(p.faint)
+                            .child(meta_line(facts)),
+                    ),
+            );
+        if facts.stoppable {
+            let store = self.store.clone();
+            let child = facts.id.clone();
+            row = row.child(
+                Button::new(SharedString::from(format!("wb-agent-stop-{}", facts.id)))
+                    .icon(IconName::Square)
+                    .xsmall()
+                    .ghost()
+                    .tooltip("Stop")
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        store.act(cx, |store| store.cancel_session(&child));
+                    }),
+            );
+        }
+        row.into_any_element()
     }
 
     /// The terminal pane: the shell calls with their commands and
@@ -937,7 +1419,7 @@ impl Render for WorkbenchView {
                 .active_session()
                 .and_then(|session| match tab {
                     Tab::Changes => {
-                        let entries = change_entries(&session.items);
+                        let entries = session_changes(self.store.read(cx), session);
                         (!entries.is_empty()).then(|| entries.len().to_string())
                     }
                     Tab::Files => None,
@@ -968,15 +1450,51 @@ impl Render for WorkbenchView {
                         let pages = fetch_entries(&session.items);
                         (!pages.is_empty()).then(|| pages.len().to_string())
                     }
+                    Tab::Agent => None,
                 });
             head = head.child(self.tab_button(tab, self.tab == tab, count, p).on_click(
                 move |_, _, cx| {
                     this.update(cx, |this, cx| {
                         this.tab = tab;
+                        this.ask_listing(cx);
                         cx.notify();
                     });
                 },
             ));
+        }
+        if let Some((id, _)) = &self.agent {
+            let name = self
+                .store
+                .read(cx)
+                .active_session()
+                .and_then(|session| session.agents.get(id))
+                .and_then(|agent| agent.name.clone())
+                .unwrap_or_else(|| "agent".to_owned());
+            let on = self.tab == Tab::Agent;
+            let open = this.clone();
+            let close = this.clone();
+            head = head.child(
+                self.tab_button(Tab::Agent, true, None, p)
+                    .when(!on, |tab| tab.bg(gpui_kit::transparent_black()))
+                    .child(SharedString::from(name))
+                    .child(
+                        div()
+                            .id("wb-agent-close")
+                            .rounded(px(R_FULL))
+                            .hover(move |style| style.bg(p.fill_hover))
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                close.update(cx, |this, cx| this.close_agent(cx));
+                            })
+                            .child(Icon::new(IconName::X).with_size(px(11.))),
+                    )
+                    .on_click(move |_, _, cx| {
+                        open.update(cx, |this, cx| {
+                            this.tab = Tab::Agent;
+                            cx.notify();
+                        });
+                    }),
+            );
         }
         head = head.child(div().flex_1()).child(
             Button::new("close-workbench")
@@ -989,7 +1507,13 @@ impl Render for WorkbenchView {
                 }),
         );
 
-        let body = if has_session {
+        let body = if has_session && self.tab == Tab::Agent {
+            v_flex()
+                .id("wb-body")
+                .flex_1()
+                .min_h_0()
+                .child(self.agent_detail(p, cx))
+        } else if has_session {
             v_flex()
                 .id("wb-body")
                 .flex_1()
@@ -1002,6 +1526,7 @@ impl Render for WorkbenchView {
                     Tab::Agents => self.agents_section(p, cx),
                     Tab::Terminal => self.terminal_section(p, cx),
                     Tab::Browser => self.browser_section(p, cx),
+                    Tab::Agent => Vec::new(),
                 })
         } else {
             v_flex().id("wb-body").child(

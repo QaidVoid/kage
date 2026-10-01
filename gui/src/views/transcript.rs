@@ -1005,6 +1005,9 @@ fn plain_row(session: &Session, ix: usize, ui: &UiState, last: usize) -> Option<
 pub struct TranscriptView {
     store: Entity<Store>,
     composer: Entity<TextareaState>,
+    /// The session this view always shows, for a subagent's transcript
+    /// in the workbench; `None` follows the active session.
+    pinned: Option<String>,
     /// When the view was made: the clock swarm constellations twinkle
     /// on, so a repaint continues their animation.
     born: Instant,
@@ -1062,6 +1065,7 @@ impl TranscriptView {
         Self {
             store,
             composer,
+            pinned: None,
             born: Instant::now(),
             revise,
             revising: None,
@@ -1073,6 +1077,36 @@ impl TranscriptView {
             session_key: None,
             render_counts: HashMap::new(),
             find: None,
+        }
+    }
+
+    /// A transcript that always shows session `id`, such as a
+    /// subagent's in the workbench.
+    #[must_use]
+    pub fn pinned(
+        store: Entity<Store>,
+        composer: Entity<TextareaState>,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut view = Self::new(store, composer, window, cx);
+        view.pinned = Some(id);
+        view
+    }
+
+    /// The id of the session this view shows.
+    fn target(&self, store: &Store) -> Option<String> {
+        self.pinned
+            .clone()
+            .or_else(|| store.active_id().map(str::to_owned))
+    }
+
+    /// The session this view shows.
+    fn session<'a>(&self, store: &'a Store) -> Option<&'a Session> {
+        match &self.pinned {
+            Some(id) => store.state().session(id),
+            None => store.active_session(),
         }
     }
 
@@ -1184,7 +1218,8 @@ impl TranscriptView {
     /// included.
     #[must_use]
     pub fn searchable_rows(&self, cx: &App) -> Vec<(RowKey, String)> {
-        let Some(session) = self.store.read(cx).active_session() else {
+        let store = self.store.read(cx);
+        let Some(session) = self.session(store) else {
             return Vec::new();
         };
         row_model(session, &self.ui)
@@ -1223,7 +1258,8 @@ impl TranscriptView {
     /// Brings the plan card into view: the dock's review pill asks for
     /// this through the shell.
     pub fn scroll_to_plan(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.store.read(cx).active_session() else {
+        let store = self.store.read(cx);
+        let Some(session) = self.session(store) else {
             return;
         };
         let Some(ix) = session
@@ -1288,7 +1324,7 @@ impl TranscriptView {
         cx: &Context<Self>,
     ) -> AnyElement {
         let store = self.store.read(cx);
-        let session = store.active_session();
+        let session = self.session(store);
         let times = session.and_then(|session| store.timings(&session.id));
         let element = match row {
             Row::User { ix, text } => match session.and_then(|s| s.items.get(*ix)) {
@@ -2272,7 +2308,7 @@ impl TranscriptView {
             .child(head);
         if expanded {
             let store = self.store.read(cx);
-            let session = store.active_session();
+            let session = self.session(store);
             let times = session.and_then(|session| store.timings(&session.id));
             let mut list = div()
                 .id("members")
@@ -2381,7 +2417,7 @@ impl TranscriptView {
     /// The placeholder shown while the session has nothing to show.
     fn placeholder(&self, cx: &Context<Self>) -> Div {
         let theme = cx.theme().colors;
-        let text = match self.store.read(cx).active_session() {
+        let text = match self.session(self.store.read(cx)) {
             None => "no session yet; the agent answers here once one opens",
             Some(session) if session.items.is_empty() => {
                 "say hello to start the run; the transcript plays out here"
@@ -2967,7 +3003,7 @@ pub(crate) fn render_diff(lines: &[DiffLine], cx: &App) -> Div {
 
 impl Render for TranscriptView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.store.read(cx).active_id().map(str::to_owned);
+        let active = self.target(self.store.read(cx));
         if active != self.session_key {
             let left = std::mem::take(&mut self.ui);
             if let Some(key) = self.session_key.take() {
@@ -2984,13 +3020,13 @@ impl Render for TranscriptView {
             self.signatures.clear();
         }
         let model = {
-            let session = self.store.read(cx).active_session();
+            let session = self.session(self.store.read(cx));
             match session {
                 Some(session) => Rc::new(row_model(session, &self.ui)),
                 None => Rc::default(),
             }
         };
-        let signatures = match self.store.read(cx).active_session() {
+        let signatures = match self.session(self.store.read(cx)) {
             Some(session) => signatures(session, &model.rows, &self.ui),
             None => Vec::new(),
         };

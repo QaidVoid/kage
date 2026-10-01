@@ -203,7 +203,7 @@ impl Shell {
         // renders that element.
         let input_laid_out = composer.read(cx).input_laid_out();
         let transcript = cx.new(|cx| TranscriptView::new(store.clone(), input.clone(), window, cx));
-        let workbench = cx.new(|_| WorkbenchView::new(store.clone()));
+        let workbench = cx.new(|cx| WorkbenchView::new(store.clone(), input.clone(), cx));
         let dock = cx.new(|cx| DockRow::new(store.clone(), window, cx));
         let approval = cx.new(|cx| ApprovalCard::new(store.clone(), window, cx));
         let find = cx.new(|cx| FindBar::new(store.clone(), transcript.clone(), window, cx));
@@ -247,20 +247,21 @@ impl Shell {
             },
         )
         .detach();
-        cx.subscribe(&transcript, |shell, _, event: &TranscriptEvent, cx| {
-            shell.workbench_visible = true;
-            shell.workbench.update(cx, |workbench, cx| match event {
-                TranscriptEvent::OpenFile(_) => workbench.open_files(cx),
-                TranscriptEvent::OpenChange(call) => workbench.open_change(call.clone(), cx),
-                TranscriptEvent::OpenBrowser => workbench.open_browser(cx),
-                // The child transcript tab lands with the workbench rework;
-                // until then a card opens the agents list it is part of.
-                TranscriptEvent::OpenAgent(_) | TranscriptEvent::OpenAgents => {
-                    workbench.open_agents(cx);
-                }
-            });
-            cx.notify();
-        })
+        cx.subscribe_in(
+            &transcript,
+            window,
+            |shell, _, event: &TranscriptEvent, window, cx| {
+                shell.workbench_visible = true;
+                shell.workbench.update(cx, |workbench, cx| match event {
+                    TranscriptEvent::OpenFile(path) => workbench.open_file(path, cx),
+                    TranscriptEvent::OpenChange(call) => workbench.open_change(call.clone(), cx),
+                    TranscriptEvent::OpenBrowser => workbench.open_browser(cx),
+                    TranscriptEvent::OpenAgent(id) => workbench.open_agent(id.clone(), window, cx),
+                    TranscriptEvent::OpenAgents => workbench.open_agents(cx),
+                });
+                cx.notify();
+            },
+        )
         .detach();
         cx.subscribe_in(
             &find,

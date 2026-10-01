@@ -207,7 +207,7 @@ fn hash(text: &str) -> u32 {
 }
 
 /// The avatar: the name's first letter on the fill, in the name's hue.
-fn avatar(name: &str, pal: &Palette) -> Div {
+pub(crate) fn avatar(name: &str, pal: &Palette) -> Div {
     let hues = &pal.avatars;
     let hue = match hash(name) % 8 {
         0 => hues.amber,
@@ -241,7 +241,7 @@ fn avatar(name: &str, pal: &Palette) -> Div {
 }
 
 /// The state label with its icon, in the state's color.
-fn state_chip(facts: &AgentFacts, pal: &Palette) -> Div {
+pub(crate) fn state_chip(facts: &AgentFacts, pal: &Palette) -> Div {
     h_flex()
         .gap(px(5.))
         .items_center()
@@ -253,7 +253,7 @@ fn state_chip(facts: &AgentFacts, pal: &Palette) -> Div {
 }
 
 /// `4s · 2.3k tok`, from what was measured.
-fn meta_line(facts: &AgentFacts) -> String {
+pub(crate) fn meta_line(facts: &AgentFacts) -> String {
     [
         facts.elapsed.map(crate::clock::span),
         facts.tokens.map(|n| format!("{} tok", tokens(n))),

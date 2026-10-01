@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 pub const FONT_DISPLAY: &str = "Schibsted Grotesk";
 
 /// The body family for everything read as prose or UI text.
-pub const FONT_BODY: &str = "Inter";
+pub const FONT_BODY: &str = "Schibsted Grotesk";
 
 /// The monospace family for code, identifiers and paths.
 pub const FONT_MONO: &str = "JetBrains Mono";
@@ -938,7 +938,7 @@ mod tests {
     #[test]
     fn families_and_weights_are_the_design_families() {
         assert_eq!(FONT_DISPLAY, "Schibsted Grotesk");
-        assert_eq!(FONT_BODY, "Inter");
+        assert_eq!(FONT_BODY, "Schibsted Grotesk");
         assert_eq!(FONT_MONO, "JetBrains Mono");
         assert_eq!(WEIGHT_EXTRABOLD, FontWeight(800.0));
     }

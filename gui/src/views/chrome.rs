@@ -1071,7 +1071,7 @@ impl Render for PaletteView {
                             let _ = release.update(cx, |_, cx| cx.notify());
                         }
                     })
-                    .child(Icon::new(IconName::Search))
+                    .child(Icon::new(IconName::Search).with_size(px(16.)))
                     .child(
                         Input::new(&self.query)
                             .flex_1()

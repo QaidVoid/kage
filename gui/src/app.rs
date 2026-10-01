@@ -716,7 +716,6 @@ impl Shell {
                 bar.child(
                     Button::new("show-sidebar")
                         .icon(IconName::PanelLeft)
-                        .small()
                         .ghost()
                         .tooltip("Show sidebar (Ctrl \\)")
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
@@ -778,7 +777,6 @@ impl Shell {
             .child(
                 Button::new("toggle-workbench")
                     .icon(IconName::PanelRight)
-                    .small()
                     .ghost()
                     .selected(workbench_visible)
                     .tooltip("Workbench (Ctrl B)")
@@ -1327,7 +1325,6 @@ impl Shell {
         let shell = cx.entity();
         Button::new("session-menu")
             .icon(IconName::Ellipsis)
-            .small()
             .ghost()
             .tooltip("Session actions")
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {

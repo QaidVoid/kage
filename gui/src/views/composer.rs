@@ -1464,7 +1464,7 @@ impl ComposerView {
                     .px(px(0.))
                     .justify_center()
                     .tooltip(|window, cx| Tooltip::new("Add").build(window, cx))
-                    .child(Icon::new(IconName::Plus)),
+                    .child(Icon::new(IconName::Plus).with_size(px(16.))),
             )
             .anchor(Anchor::BottomLeft)
             .open(self.plus_open)

@@ -468,7 +468,7 @@ impl SidebarView {
             .text_size(px(FS_BASE))
             .text_color(p.ink)
             .hover(move |row| row.bg(p.hover))
-            .child(Icon::new(icon))
+            .child(Icon::new(icon).with_size(px(16.)))
             .child(div().flex_1().child(label))
             .child(kbd_chip(keys, p))
     }
@@ -716,7 +716,6 @@ impl Render for SidebarView {
                     .child(
                         Button::new("collapse-sidebar")
                             .icon(IconName::PanelLeft)
-                            .small()
                             .ghost()
                             .tooltip("Collapse sidebar (Ctrl \\)")
                             .on_click(|_, window, cx| {
@@ -831,7 +830,6 @@ impl Render for SidebarView {
                     .child(
                         Button::new("open-settings")
                             .icon(IconName::Settings)
-                            .small()
                             .ghost()
                             .tooltip("Settings (Ctrl ,)")
                             .on_click(|_, window, cx| {

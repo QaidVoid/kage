@@ -2067,7 +2067,15 @@ impl Render for ComposerView {
             .test_support()
             .w_full()
             .on_action(cx.listener(|this, _: &CycleMode, _, cx| this.cycle_mode(cx)))
-            .on_action(cx.listener(|this, _: &Escape, _, cx| this.on_escape(cx)))
+            .on_action(cx.listener(|this, _: &Escape, window, cx| {
+                // In vim mode Esc leaves the composer for normal mode,
+                // where a second Esc interrupts a running turn.
+                if this.store.read(cx).prefs().vim && this.esc_armed.is_none() {
+                    window.dispatch_action(Box::new(crate::views::vim::VimLeaveInsert), cx);
+                    return;
+                }
+                this.on_escape(cx);
+            }))
             .children(suggestion)
             .child(
                 v_flex()

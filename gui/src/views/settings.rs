@@ -418,6 +418,12 @@ impl SettingsView {
             group("Input", pal).into_any_element(),
             boxed(pal)
                 .child(row(
+                    "Vim mode",
+                    "Normal-mode motions over the transcript (j k gg G za / n), a : command line and a modeline. Esc leaves the composer.",
+                    self.toggle("set-vim", prefs.vim, |p| &mut p.vim, pal, cx),
+                    pal,
+                ))
+                .child(row(
                     "Enter sends",
                     "Off: Enter adds a newline and Ctrl+Enter sends",
                     self.toggle(
@@ -636,6 +642,38 @@ impl SettingsView {
                     .into_iter()
                     .map(|(a, b)| (a.to_owned(), b.to_owned()))
                     .collect(),
+            )
+            .into_any_element(),
+            group(
+                if self.store.read(cx).prefs().vim {
+                    "Vim mode (on)"
+                } else {
+                    "Vim mode (off; turn it on under General)"
+                },
+                pal,
+            )
+            .into_any_element(),
+            table(
+                [
+                    ("Leave the composer", "Esc"),
+                    ("Move between rows", "j k"),
+                    ("First row", "g g"),
+                    ("Last row", "Shift G"),
+                    ("Half a page", "Ctrl D Ctrl U"),
+                    ("Open or close a row", "z a"),
+                    ("Open all, close all", "z R z M"),
+                    ("Find, next, previous", "/ n N"),
+                    ("Back to the composer", "i"),
+                    ("Command line", ":"),
+                ]
+                .into_iter()
+                .map(|(a, b)| (a.to_owned(), b.to_owned()))
+                .collect(),
+            )
+            .into_any_element(),
+            note(
+                "Commands for the : line: theme <name>, model <name>, swarm on|off, plan on|off, goal <text>, new, settings, compact, noh, q, vim off.",
+                pal,
             )
             .into_any_element(),
         ]

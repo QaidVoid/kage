@@ -32,6 +32,9 @@ pub struct Prefs {
     pub constellation: bool,
     /// Lab: the context ring opens the gauge with a Compact action.
     pub fuel: bool,
+    /// Vim mode: normal-mode motions over the transcript, a `:` line
+    /// and a modeline. Off by default.
+    pub vim: bool,
     /// Sessions pinned to the top of the sidebar.
     pub pinned: BTreeSet<String>,
     /// Sessions left out of the sidebar until restored.
@@ -50,6 +53,7 @@ impl Default for Prefs {
             confirm_swarm: true,
             constellation: true,
             fuel: true,
+            vim: false,
             pinned: BTreeSet::new(),
             archived: BTreeSet::new(),
             template: Vec::new(),

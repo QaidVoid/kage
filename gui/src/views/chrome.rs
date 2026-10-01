@@ -360,7 +360,7 @@ impl FindBar {
     }
 
     /// Steps to the next or previous match and brings it into view.
-    fn step(&mut self, back: bool, cx: &mut Context<Self>) {
+    pub fn step(&mut self, back: bool, cx: &mut Context<Self>) {
         if self.matches.is_empty() {
             return;
         }

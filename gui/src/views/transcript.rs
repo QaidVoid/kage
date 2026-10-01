@@ -1034,6 +1034,8 @@ pub struct TranscriptView {
     render_counts: HashMap<RowKey, u32>,
     /// The find marks the find bar last set, tinting matching rows.
     find: Option<FindMarks>,
+    /// The row the vim cursor sits on, while vim mode moves one.
+    vim_cursor: Option<usize>,
 }
 
 impl EventEmitter<TranscriptEvent> for TranscriptView {}
@@ -1079,6 +1081,7 @@ impl TranscriptView {
             session_key: None,
             render_counts: HashMap::new(),
             find: None,
+            vim_cursor: None,
         }
     }
 
@@ -1245,6 +1248,51 @@ impl TranscriptView {
             return Some(colors.list_active);
         }
         find.keys.contains(&key).then_some(colors.list_hover)
+    }
+
+    /// The rows the vim cursor moves over.
+    #[must_use]
+    pub fn row_count(&self) -> usize {
+        self.model.rows.len()
+    }
+
+    /// The row the vim cursor sits on.
+    #[must_use]
+    pub fn vim_cursor(&self) -> Option<usize> {
+        self.vim_cursor
+    }
+
+    /// Puts the vim cursor on row `ix`, clamped to the rows, and brings
+    /// it into view by scrolling the transcript alone. `None` removes it.
+    pub fn set_vim_cursor(&mut self, ix: Option<usize>, cx: &mut Context<Self>) {
+        let count = self.model.rows.len();
+        self.vim_cursor = ix.filter(|_| count > 0).map(|ix| ix.min(count - 1));
+        if let Some(ix) = self.vim_cursor {
+            self.list.scroll_to_reveal_item(ix);
+            self.list.pause_following_tail();
+        }
+        cx.notify();
+    }
+
+    /// Opens or closes the row under the vim cursor, as a click on its
+    /// header does.
+    pub fn toggle_vim_row(&mut self, cx: &mut Context<Self>) {
+        let Some(row) = self.vim_cursor.and_then(|ix| self.model.rows.get(ix)) else {
+            return;
+        };
+        self.toggle(row.key());
+        cx.notify();
+    }
+
+    /// Opens every row, or closes them all.
+    pub fn fold_all(&mut self, open: bool, cx: &mut Context<Self>) {
+        if open {
+            let keys: Vec<RowKey> = self.model.rows.iter().map(Row::key).collect();
+            self.ui.expanded.extend(keys);
+        } else {
+            self.ui.expanded.clear();
+        }
+        cx.notify();
     }
 
     /// Brings the row `key` into view and stops following the bottom.
@@ -3059,6 +3107,7 @@ impl Render for TranscriptView {
             self.session_key = active;
             self.render_counts.clear();
             self.find = None;
+            self.vim_cursor = None;
             self.list = following_list();
             self.signatures.clear();
         }
@@ -3102,7 +3151,25 @@ impl Render for TranscriptView {
                             *this.render_counts.entry(row.key()).or_insert(0) += 1;
                             let prev = ix.checked_sub(1).and_then(|p| model.rows.get(p));
                             let last = ix + 1 == model.rows.len();
-                            let element = this.render_row(ix, row, prev, last, cx);
+                            let mut element = this.render_row(ix, row, prev, last, cx);
+                            if this.vim_cursor == Some(ix) {
+                                let accent = crate::theme::Palette::active(cx).accent;
+                                element = div()
+                                    .relative()
+                                    .w_full()
+                                    .child(element)
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .top_0()
+                                            .bottom_0()
+                                            .left(px(-10.))
+                                            .w(px(3.))
+                                            .rounded(px(2.))
+                                            .bg(accent),
+                                    )
+                                    .into_any_element();
+                            }
                             match this.row_tint(row.key(), colors) {
                                 Some(tint) => div()
                                     .id(ElementId::named_usize("find-hit", ix))

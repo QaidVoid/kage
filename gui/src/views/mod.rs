@@ -18,6 +18,7 @@ pub mod settings;
 pub(crate) mod settings_config;
 pub mod sidebar;
 pub mod transcript;
+pub mod vim;
 pub mod workbench;
 
 pub use approval::{ApprovalCard, ApprovalEvent};

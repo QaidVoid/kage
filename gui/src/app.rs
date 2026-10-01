@@ -12,6 +12,7 @@ use std::time::Duration;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::base::Selectable as _;
+use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape as InputEscape, Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -20,9 +21,9 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, Sizable as _, h_flex, h_resizable, resizable_panel, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, AnyElement, App, AppContext, ClickEvent, ClipboardItem, Context, Entity,
-    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    Anchor, AnyElement, App, AppContext, ClickEvent, ClipboardItem, Context, Entity, FocusHandle,
+    Focusable as _, InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 
 use crate::clock::unix_seconds;
@@ -38,6 +39,7 @@ use crate::views::deferred::Deferred;
 use crate::views::dialog::{DialogKind, DialogView};
 use crate::views::settings::{Section, SettingsView};
 use crate::views::sidebar::{RowState, row_state};
+use crate::views::vim::{self, Modeline, VimLeaveInsert};
 use crate::views::{
     ApprovalCard, ApprovalEvent, ComposerView, DockEvent, DockRow, SidebarView, TranscriptEvent,
     TranscriptView, WorkbenchEvent, WorkbenchView,
@@ -108,7 +110,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
     use crate::views::chrome::{
         FindClose, FindNext, FindPrev, PaletteClose, PaletteDown, PaletteRun, PaletteUp,
     };
-    vec![
+    let mut bindings = vec![
         KeyBinding::new("ctrl-q", Quit, None),
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("ctrl-n", NewSession, None),
@@ -147,7 +149,9 @@ pub fn key_bindings() -> Vec<KeyBinding> {
             crate::views::composer::CycleMode,
             Some("Input"),
         ),
-    ]
+    ];
+    bindings.extend(crate::views::vim::bindings());
+    bindings
 }
 
 /// Routes the actions that need no window. The shell's root element
@@ -223,6 +227,10 @@ pub struct Shell {
     /// Where each open session stood at the last store change, so a
     /// session out of view that moves raises its toast once.
     statuses: BTreeMap<String, RowState>,
+    /// Normal mode's focus, on the chat column, while vim mode is on.
+    vim_focus: FocusHandle,
+    /// The open `:` line.
+    vim_line: Option<(Entity<InputState>, Subscription)>,
     streamed: usize,
 }
 
@@ -413,6 +421,8 @@ impl Shell {
             rename: None,
             saved_prefs: 0,
             statuses: BTreeMap::new(),
+            vim_focus: cx.focus_handle(),
+            vim_line: None,
             streamed: 0,
         }
     }
@@ -541,7 +551,9 @@ impl Shell {
     /// Hands the focus back to the composer after the find bar closed
     /// itself, unless an approval ask holds the focus.
     fn on_find_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.store.read(cx).active_asks().is_empty() {
+        if self.store.read(cx).prefs().vim {
+            window.focus(&self.vim_focus, cx);
+        } else if self.store.read(cx).active_asks().is_empty() {
             let input = self.composer.read(cx).input().clone();
             input.update(cx, |state, cx| state.focus(window, cx));
         }
@@ -762,6 +774,307 @@ impl Shell {
                 dialog.open(DialogKind::ConfirmSwarm, window, cx);
             });
         }
+    }
+
+    /// Moves the vim cursor by `delta` rows.
+    fn vim_move(&mut self, delta: isize, cx: &mut Context<Self>) {
+        self.transcript.update(cx, |transcript, cx| {
+            let to = vim::step(transcript.vim_cursor(), transcript.row_count(), delta);
+            transcript.set_vim_cursor(to, cx);
+        });
+    }
+
+    /// Puts the vim cursor on the first or the last row.
+    fn vim_jump(&mut self, last: bool, cx: &mut Context<Self>) {
+        self.transcript.update(cx, |transcript, cx| {
+            let to = if last {
+                transcript.row_count().checked_sub(1)
+            } else {
+                Some(0)
+            };
+            transcript.set_vim_cursor(to, cx);
+        });
+    }
+
+    /// Opens the `:` line and focuses it.
+    fn open_vim_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let line = cx.new(|cx| InputState::new(window, cx));
+        line.update(cx, |state, cx| state.focus(window, cx));
+        let events = cx.subscribe_in(
+            &line,
+            window,
+            |shell, line, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => {
+                    let text = line.read(cx).value().to_string();
+                    shell.close_vim_line(window, cx);
+                    shell.run_vim(vim::parse(&text), window, cx);
+                }
+                InputEvent::Blur => shell.close_vim_line(window, cx),
+                _ => {}
+            },
+        );
+        self.vim_line = Some((line, events));
+        cx.notify();
+    }
+
+    /// Closes the `:` line and hands the keys back to normal mode.
+    fn close_vim_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.vim_line.take().is_some() {
+            window.focus(&self.vim_focus, cx);
+            cx.notify();
+        }
+    }
+
+    /// Runs one `:` command through the action its palette entry or
+    /// control uses.
+    fn run_vim(&mut self, command: vim::Command, window: &mut Window, cx: &mut Context<Self>) {
+        let warn = |shell: &mut Self, text: String, cx: &mut Context<Self>| {
+            shell.toasts.update(cx, |toasts, cx| {
+                toasts.push(
+                    ToastDraft {
+                        tone: NoticeTone::Warn,
+                        text,
+                        action: ToastAction::None,
+                    },
+                    cx,
+                );
+            });
+        };
+        match command {
+            vim::Command::Theme(Some(choice)) => {
+                self.store
+                    .act(cx, |store| store.update_prefs(|prefs| prefs.theme = choice));
+                cx.set_global(choice);
+                crate::theme::apply_choice(cx, window.appearance());
+                window.refresh();
+            }
+            vim::Command::Theme(None) => {
+                warn(self, "Unknown theme; try system, shadow or dawn".into(), cx);
+            }
+            vim::Command::Model(name) => {
+                let wanted = name.to_lowercase();
+                let choice = self
+                    .store
+                    .read(cx)
+                    .composer_option("model")
+                    .and_then(|option| {
+                        option
+                            .options
+                            .into_iter()
+                            .find(|choice| {
+                                choice.value.to_lowercase() == wanted
+                                    || choice.name.to_lowercase().contains(&wanted)
+                            })
+                            .filter(|_| !wanted.is_empty())
+                    });
+                match choice {
+                    Some(choice) => {
+                        self.store
+                            .act(cx, |store| store.set_option("model", &choice.value));
+                    }
+                    None => warn(self, format!("No model matches \"{name}\""), cx),
+                }
+            }
+            vim::Command::Swarm(on) => {
+                let current = self
+                    .store
+                    .read(cx)
+                    .composer_option("swarm")
+                    .is_some_and(|option| option.current_value == "on");
+                if on != current {
+                    self.toggle_swarm(window, cx);
+                }
+            }
+            vim::Command::Plan(on) => {
+                self.store.act(cx, |store| {
+                    if on {
+                        store.enter_plan()
+                    } else {
+                        store.exit_plan()
+                    }
+                });
+            }
+            vim::Command::Goal(goal) => {
+                let goal = goal.unwrap_or_default();
+                self.store.act(cx, |store| store.set_option("goal", &goal));
+            }
+            vim::Command::New => self.show_welcome(cx),
+            vim::Command::Settings => self.open_settings(Section::General, window, cx),
+            vim::Command::Help => self.open_settings(Section::Keyboard, window, cx),
+            vim::Command::Compact => {
+                self.store.act(cx, Store::compact);
+            }
+            vim::Command::NoHighlight => {
+                self.find.update(cx, |find, cx| find.close(window, cx));
+            }
+            vim::Command::Quit => {
+                self.workbench_visible = false;
+                cx.notify();
+            }
+            vim::Command::Vim(on) => {
+                self.store
+                    .act(cx, |store| store.update_prefs(|prefs| prefs.vim = on));
+            }
+            vim::Command::Nothing => {}
+            vim::Command::Unknown(word) => {
+                warn(self, format!("Not an editor command: {word}"), cx);
+            }
+        }
+    }
+
+    /// The `:` line and the modeline, while vim mode is on.
+    fn vim_bar(&self, window: &Window, cx: &Context<Self>) -> Option<impl IntoElement> {
+        let store = self.store.read(cx);
+        if !store.prefs().vim {
+            return None;
+        }
+        let p = crate::theme::Palette::active(cx);
+        let session = store.active_session();
+        let composer_focused = self
+            .composer
+            .read(cx)
+            .input()
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
+        let mode = if !store.active_asks().is_empty() {
+            vim::Mode::Approval
+        } else if composer_focused {
+            vim::Mode::Insert
+        } else {
+            vim::Mode::Normal
+        };
+        let option = |id: &str| store.composer_option(id).map(|o| o.current_value);
+        let model = option("model").map(|model| match option("thinking") {
+            Some(level) => format!("{model}@{level}"),
+            None => model,
+        });
+        let transcript = self.transcript.read(cx);
+        let line = Modeline {
+            mode: Some(mode),
+            model,
+            swarm: option("swarm").as_deref() == Some("on"),
+            plan: store.plan_on(),
+            todos: session
+                .and_then(crate::views::dock::todos_state)
+                .map(|todos| (todos.done, todos.total)),
+            path: session.and_then(|session| session.cwd.clone()),
+            cursor: transcript
+                .vim_cursor()
+                .map(|row| (row + 1, transcript.row_count())),
+            usage: session.filter(|s| s.usage.size > 0).map(|session| {
+                let usage = &session.usage;
+                format!(
+                    "{}% ({}/{})",
+                    (usage.fill() * 100.0).round() as i64,
+                    crate::views::agents::tokens(usage.used),
+                    crate::views::agents::tokens(usage.size)
+                )
+            }),
+            cost: session
+                .and_then(|session| session.usage.cost.as_ref())
+                .map(|cost| format!("{} {:.2}", cost.currency, cost.amount)),
+            link: if store.connect().is_connected() {
+                store.link().name.to_string()
+            } else {
+                store.connect().label().to_owned()
+            },
+        };
+        let command_line = self.vim_line.as_ref().map(|(input, _)| {
+            h_flex()
+                .flex_none()
+                .h(px(28.))
+                .px(px(12.))
+                .items_center()
+                .font_family(crate::theme::FONT_MONO)
+                .text_size(px(12.5))
+                .bg(p.deep)
+                .border_t_1()
+                .border_color(p.line)
+                .on_action(cx.listener(|shell, _: &InputEscape, window, cx| {
+                    shell.close_vim_line(window, cx);
+                }))
+                .on_key_down(
+                    cx.listener(|shell, event: &gpui_kit::KeyDownEvent, window, cx| {
+                        let empty = shell
+                            .vim_line
+                            .as_ref()
+                            .is_some_and(|(input, _)| input.read(cx).value().is_empty());
+                        if event.keystroke.key == "backspace" && empty {
+                            shell.close_vim_line(window, cx);
+                        }
+                    }),
+                )
+                .child(div().text_color(p.muted).child(":"))
+                .child(
+                    div()
+                        .flex_1()
+                        .child(Input::new(input).appearance(false).small()),
+                )
+        });
+        // Normal mode's keys answer on this bar, which holds no text
+        // field, so no field inside it can lose a letter to a motion.
+        Some(
+            v_flex().flex_none().w_full().children(command_line).child(
+                div()
+                    .id("vim-bar")
+                    .test_support()
+                    .w_full()
+                    .track_focus(&self.vim_focus)
+                    .key_context(vim::NORMAL)
+                    .on_action(cx.listener(|shell, _: &vim::VimDown, _, cx| shell.vim_move(1, cx)))
+                    .on_action(cx.listener(|shell, _: &vim::VimUp, _, cx| shell.vim_move(-1, cx)))
+                    .on_action(cx.listener(|shell, _: &vim::VimPageDown, _, cx| {
+                        shell.vim_move(vim::PAGE as isize, cx);
+                    }))
+                    .on_action(cx.listener(|shell, _: &vim::VimPageUp, _, cx| {
+                        shell.vim_move(-(vim::PAGE as isize), cx);
+                    }))
+                    .on_action(
+                        cx.listener(|shell, _: &vim::VimTop, _, cx| shell.vim_jump(false, cx)),
+                    )
+                    .on_action(
+                        cx.listener(|shell, _: &vim::VimBottom, _, cx| shell.vim_jump(true, cx)),
+                    )
+                    .on_action(cx.listener(|shell, _: &vim::VimToggle, _, cx| {
+                        shell.transcript.update(cx, |t, cx| t.toggle_vim_row(cx));
+                    }))
+                    .on_action(cx.listener(|shell, _: &vim::VimOpenAll, _, cx| {
+                        shell.transcript.update(cx, |t, cx| t.fold_all(true, cx));
+                    }))
+                    .on_action(cx.listener(|shell, _: &vim::VimCloseAll, _, cx| {
+                        shell.transcript.update(cx, |t, cx| t.fold_all(false, cx));
+                    }))
+                    .on_action(cx.listener(|shell, _: &vim::VimInsert, window, cx| {
+                        let input = shell.composer.read(cx).input().clone();
+                        input.update(cx, |state, cx| state.focus(window, cx));
+                        cx.notify();
+                    }))
+                    .on_action(cx.listener(|shell, _: &vim::VimFind, window, cx| {
+                        shell.open_find(window, cx);
+                    }))
+                    .on_action(cx.listener(|shell, _: &vim::VimNext, _, cx| {
+                        shell.find.update(cx, |find, cx| find.step(false, cx));
+                    }))
+                    .on_action(cx.listener(|shell, _: &vim::VimPrev, _, cx| {
+                        shell.find.update(cx, |find, cx| find.step(true, cx));
+                    }))
+                    .on_action(cx.listener(|shell, _: &vim::VimCommand, window, cx| {
+                        shell.open_vim_line(window, cx);
+                    }))
+                    .on_action(cx.listener(|shell, _: &vim::VimEscape, _, cx| {
+                        let running = shell
+                            .store
+                            .read(cx)
+                            .active_session()
+                            .is_some_and(|session| session.running || session.in_turn);
+                        if running {
+                            shell.store.act(cx, Store::cancel);
+                        }
+                    }))
+                    .child(line.render(p)),
+            ),
+        )
     }
 
     /// Toasts a session out of view that now needs an answer, has a
@@ -1138,6 +1451,12 @@ impl Render for Shell {
             .on_action(cx.listener(|shell, _: &OpenSettings, window, cx| {
                 shell.open_settings(Section::General, window, cx);
             }))
+            .on_action(cx.listener(|shell, _: &VimLeaveInsert, window, cx| {
+                if shell.store.read(cx).prefs().vim {
+                    window.focus(&shell.vim_focus, cx);
+                    cx.notify();
+                }
+            }))
             .on_action(cx.listener(|shell, _: &ToggleSwarm, window, cx| {
                 shell.toggle_swarm(window, cx);
             }))
@@ -1193,7 +1512,8 @@ impl Render for Shell {
                                 .child(self.topbar(cx))
                                 .child(self.find.clone())
                                 .child(self.content_column(cx))
-                                .child(self.bottom_band(cx)),
+                                .child(self.bottom_band(cx))
+                                .children(self.vim_bar(window, cx)),
                         ),
                     )
                     .child(
@@ -1356,5 +1676,78 @@ mod tests {
         visual.simulate_keystrokes("ctrl-b");
         let workbench = visual.update(|_, cx| shell.read(cx).workbench_visible);
         assert!(workbench, "Ctrl+B opens the workbench");
+    }
+
+    /// Opens a shell with `vim` set, the keys bound and the actions
+    /// routed, and draws it once.
+    fn keyed_shell(
+        cx: &mut TestAppContext,
+        vim: bool,
+    ) -> (gpui_kit::Entity<Shell>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.bind_keys(super::key_bindings());
+        });
+        let mut args = args();
+        args.prefs.vim = vim;
+        let (shell, visual) =
+            cx.add_window_view(move |window: &mut Window, cx| Shell::new(args, window, cx));
+        visual.update(|_, cx| super::route_actions(cx));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        (shell, visual)
+    }
+
+    /// The composer's text as typed.
+    fn composer_text(shell: &gpui_kit::Entity<Shell>, visual: &mut VisualTestContext) -> String {
+        visual.update(|_, cx| {
+            shell
+                .read(cx)
+                .composer
+                .read(cx)
+                .input()
+                .read(cx)
+                .value()
+                .to_string()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn with_vim_off_nothing_of_it_mounts_and_no_letter_is_taken(cx: &mut TestAppContext) {
+        let (shell, visual) = keyed_shell(cx, false);
+        assert!(
+            visual.update(|window, _| window.try_find("vim-bar").is_none()),
+            "no modeline without vim mode"
+        );
+        visual.simulate_input("jank");
+        assert_eq!(composer_text(&shell, visual), "jank");
+    }
+
+    #[gpui_kit::test]
+    fn with_vim_on_letters_still_type_and_esc_then_q_closes_the_workbench(cx: &mut TestAppContext) {
+        let (shell, visual) = keyed_shell(cx, true);
+        assert!(visual.update(|window, _| window.try_find("vim-bar").is_some()));
+        visual.simulate_input("jank");
+        assert_eq!(
+            composer_text(&shell, visual),
+            "jank",
+            "insert mode types every letter, motions included"
+        );
+        visual.simulate_keystrokes("ctrl-b");
+        assert!(visual.update(|_, cx| shell.read(cx).workbench_visible));
+        visual.simulate_keystrokes("escape");
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.simulate_keystrokes("shift-;");
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            visual.update(|_, cx| shell.read(cx).vim_line.is_some()),
+            ": opens the command line from normal mode"
+        );
+        visual.simulate_input("q");
+        visual.simulate_keystrokes("enter");
+        assert!(
+            visual.update(|_, cx| !shell.read(cx).workbench_visible),
+            ":q closes the workbench"
+        );
+        assert!(visual.update(|_, cx| shell.read(cx).vim_line.is_none()));
     }
 }

@@ -29,6 +29,7 @@
 //! tree, on that session's top-level `agent` call.
 
 mod bridge;
+mod config_set;
 mod content;
 mod fs;
 pub(crate) mod host;
@@ -50,11 +51,11 @@ use std::sync::{Arc, Mutex, mpsc};
 
 use kage_acp::acp::{
     AgentCapabilities, AgentMeta, CloseSessionRequest, CloseSessionResponse, ConfigGetRequest,
-    ConfigGetResult, FsRequest, FsResult, Implementation, InitializeRequest, InitializeResponse,
-    InstalledPlugin, KageAgentInfo, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, McpCapabilities, ModelsResponse, NewSessionRequest, NewSessionResponse,
-    OptionSetRequest, OptionsResponse, PROTOCOL_VERSION, PromptCapabilities, PromptDelivery,
-    PromptRequest, PromptResponse, ResumeSessionRequest, ResumeSessionResponse,
+    ConfigGetResult, ConfigSetRequest, FsRequest, FsResult, Implementation, InitializeRequest,
+    InitializeResponse, InstalledPlugin, KageAgentInfo, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, LoadSessionResponse, McpCapabilities, ModelsResponse, NewSessionRequest,
+    NewSessionResponse, OptionSetRequest, OptionsResponse, PROTOCOL_VERSION, PromptCapabilities,
+    PromptDelivery, PromptRequest, PromptResponse, ResumeSessionRequest, ResumeSessionResponse,
     SessionCapabilities, SessionConfigOption, SessionExportResponse, SessionForkRequest,
     SessionForkResponse, SessionRenameRequest, SessionRequest, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, Supported,
@@ -232,7 +233,7 @@ impl CliAcpAgent {
             live: Arc::clone(&host.live),
             ids: Arc::clone(&ids),
             waiters: Arc::clone(&waiters),
-            models: Arc::clone(&host.models),
+            models: host.models(),
             shown: Arc::clone(&shown),
             aliases: host.aliases.clone(),
             seen: HashMap::new(),
@@ -275,8 +276,8 @@ impl CliAcpAgent {
     /// The config options a new session opens with: the default model,
     /// its automatic thinking level and no permission mode.
     fn default_options(&self) -> Vec<SessionConfigOption> {
-        let settings = Settings::fresh(&self.host.default_model, &self.host.registry);
-        config_options(&self.host.models, &settings)
+        let settings = Settings::fresh(&self.host.default_model, &self.host.registry());
+        config_options(&self.host.models(), &settings)
     }
 
     /// What a session of this connection runs with: the host's spec,
@@ -289,7 +290,7 @@ impl CliAcpAgent {
         model: &str,
         servers: BTreeMap<String, McpSpec>,
     ) -> Result<SessionSpec, RpcError> {
-        let mut spec = (self.host.spec)(id, cwd, model, servers)?;
+        let mut spec = (self.host.spec)(&self.host.registry(), id, cwd, model, servers)?;
         if self.unconfigured_run.load(Ordering::SeqCst) {
             spec.gate = spec.gate.with_fallback(PermissionAction::Allow);
         }
@@ -300,8 +301,8 @@ impl CliAcpAgent {
     /// config options. Updates for it wait for
     /// [`Agent::session_announced`].
     fn open(&self, client_id: String, spec: SessionSpec) -> Vec<SessionConfigOption> {
-        let settings = Settings::of(&spec, &self.host.registry);
-        let options = config_options(&self.host.models, &settings);
+        let settings = Settings::of(&spec, &self.host.registry());
+        let options = config_options(&self.host.models(), &settings);
         let shown = Shown {
             settings: settings.clone(),
             catching_up: false,
@@ -510,9 +511,12 @@ impl Agent for CliAcpAgent {
             })?;
             let commands = shown
                 .settings
-                .apply(&self.host.models, &req.config_id, &req.value)?;
+                .apply(&self.host.models(), &req.config_id, &req.value)?;
             shown.catching_up = true;
-            (commands, config_options(&self.host.models, &shown.settings))
+            (
+                commands,
+                config_options(&self.host.models(), &shown.settings),
+            )
         };
         for command in commands {
             self.host.engine.send(Command::to(id, command));
@@ -536,6 +540,26 @@ impl Agent for CliAcpAgent {
         })
     }
 
+    /// Writes the entry into the user config and answers with the
+    /// snapshot after it. An edited `[providers]` section is reloaded
+    /// at once; MCP servers, permissions and plugins apply to sessions
+    /// opened after the write.
+    fn config_set(&self, req: ConfigSetRequest) -> Result<ConfigGetResult, RpcError> {
+        let path =
+            Config::default_path().ok_or_else(|| RpcError::internal("no user config directory"))?;
+        config_set::set(&path, &req.path, req.value.as_ref())?;
+        if req
+            .path
+            .first()
+            .is_some_and(|section| section == "providers")
+        {
+            self.host.reload_providers().map_err(RpcError::internal)?;
+        }
+        self.config_get(ConfigGetRequest {
+            session_id: req.session_id,
+        })
+    }
+
     fn session_fork(&self, req: SessionForkRequest) -> Result<SessionForkResponse, RpcError> {
         self.fork_recorded(&req)
     }
@@ -553,7 +577,7 @@ impl Agent for CliAcpAgent {
     }
 
     fn models_list(&self) -> Result<ModelsResponse, RpcError> {
-        Ok(models::catalog(&self.host.registry))
+        Ok(models::catalog(&self.host.registry()))
     }
 
     fn options_list(&self, req: ConfigGetRequest) -> Result<OptionsResponse, RpcError> {

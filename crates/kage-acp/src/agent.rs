@@ -24,8 +24,8 @@ use kage_core::CancelFlag;
 use kage_jsonrpc::{CancelNotice, Inbound, Peer, RpcError, connect_with};
 
 use crate::acp::{
-    CloseSessionRequest, CloseSessionResponse, ConfigGetRequest, ConfigGetResult, FsRequest,
-    FsResult, InitializeRequest, InitializeResponse, KageMeta, ListSessionsRequest,
+    CloseSessionRequest, CloseSessionResponse, ConfigGetRequest, ConfigGetResult, ConfigSetRequest,
+    FsRequest, FsResult, InitializeRequest, InitializeResponse, KageMeta, ListSessionsRequest,
     ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, ModelsResponse,
     NewSessionRequest, NewSessionResponse, OptionSetRequest, OptionsResponse, PermissionOption,
     PermissionOptionKind, PermissionOutcome, PlanReview, PromptRequest, PromptResponse,
@@ -437,6 +437,19 @@ pub trait Agent: Send + Sync + 'static {
         Err(RpcError::method_not_found("_kage/options/set"))
     }
 
+    /// Replaces or removes one entry of the user config
+    /// (`_kage/config/set`), answering with the snapshot after the
+    /// write. The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the entry is outside the settable
+    /// sections, the edited config does not load or validate, or the
+    /// config cannot be written.
+    fn config_set(&self, _req: ConfigSetRequest) -> Result<ConfigGetResult, RpcError> {
+        Err(RpcError::method_not_found("_kage/config/set"))
+    }
+
     /// Run one prompt turn to completion, streaming `session/update`
     /// notifications through `ctx`.
     ///
@@ -705,6 +718,10 @@ fn handle_kage_request<A: Agent>(
         "_kage/models/list" => spawn_op(peer, agent, id, |a| a.models_list().map(jval)),
         "_kage/options/set" => match parse::<OptionSetRequest>(params) {
             Ok(req) => spawn_op(peer, agent, id, move |a| a.option_set(req).map(jval)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/config/set" => match parse::<ConfigSetRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.config_set(req).map(jval)),
             Err(e) => return parse_failed(peer, &id, e),
         },
         "_kage/session/rename" => match parse::<SessionRenameRequest>(params) {

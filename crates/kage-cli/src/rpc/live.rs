@@ -733,7 +733,7 @@ impl CliAcpAgent {
     ) -> Result<Vec<SessionConfigOption>, RpcError> {
         self.host.engine.hold_events(|| {
             self.attach_inside(id, client_id, path, settings, replay_file, ctx)?;
-            Ok(config_options(&self.host.models, settings))
+            Ok(config_options(&self.host.models(), settings))
         })
     }
 

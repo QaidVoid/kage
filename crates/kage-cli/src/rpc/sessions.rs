@@ -73,7 +73,7 @@ impl super::CliAcpAgent {
             let shown = lock(&self.shown);
             return Ok(shown
                 .get(&id)
-                .map(|shown| config_options(&self.host.models, &shown.settings))
+                .map(|shown| config_options(&self.host.models(), &shown.settings))
                 .unwrap_or_default());
         }
         if let Some(settings) = self.host.open_settings(id) {
@@ -93,7 +93,7 @@ impl super::CliAcpAgent {
             }
         }
         let writer = SessionWriter::open(&path).map_err(|e| RpcError::internal(e.to_string()))?;
-        let model = if self.host.registry.resolve(&replay.model).is_ok() {
+        let model = if self.host.registry().resolve(&replay.model).is_ok() {
             replay.model
         } else {
             eprintln!(

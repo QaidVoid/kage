@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use kage_acp::acp::SessionConfigSelectOption;
 use kage_acp::agent::serve_agent;
@@ -15,7 +15,7 @@ use kage_core::protocol::{Command, CommandKind, Event, HostEvent, SessionId};
 use kage_core::sync::lock;
 use kage_jsonrpc::RpcError;
 use kage_loop::{AgentContext, LoopConfig};
-use kage_provider::ProviderRegistry;
+use kage_provider::{Provider, ProviderRegistry};
 use kage_tools::{ToolRegistry, builtin_registry};
 
 use super::options::{Settings, choice};
@@ -23,11 +23,17 @@ use super::{CliAcpAgent, live::Live, mcp};
 use crate::engine::{AgentSetup, Engine, SessionSpec};
 use crate::permissions::PermissionGate;
 
-/// Builds the engine session for a client session from its id, working
-/// directory, model and the MCP servers the client passed. The caller
-/// fills in the history and recorder.
+/// Builds the engine session for a client session from the providers
+/// in effect, its id, working directory, model and the MCP servers the
+/// client passed. The caller fills in the history and recorder.
 pub(crate) type SpecBuilder = Box<
-    dyn Fn(SessionId, &str, &str, BTreeMap<String, McpSpec>) -> Result<SessionSpec, RpcError>
+    dyn Fn(
+            &ProviderRegistry,
+            SessionId,
+            &str,
+            &str,
+            BTreeMap<String, McpSpec>,
+        ) -> Result<SessionSpec, RpcError>
         + Send
         + Sync,
 >;
@@ -43,11 +49,16 @@ pub(super) struct Open {
 /// connection served on the host.
 pub(crate) struct Host {
     pub(super) engine: Engine,
-    pub(super) registry: Arc<ProviderRegistry>,
+    /// The providers in effect, replaced when the config's change.
+    registry: RwLock<Arc<ProviderRegistry>>,
     pub(super) default_model: String,
     pub(super) sessions: PathBuf,
     pub(super) spec: SpecBuilder,
-    pub(super) models: Arc<[SessionConfigSelectOption]>,
+    /// The model choices `registry` offers.
+    models: RwLock<Arc<[SessionConfigSelectOption]>>,
+    /// The providers the server's plugins registered at startup, kept
+    /// over every rebuild of `registry`.
+    plugin_providers: Mutex<Vec<Arc<dyn Provider>>>,
     /// Advertised name to real name for tools the host renamed, for the
     /// bridges' card titles and kind hints. Loaded once at startup, like
     /// the TUI does.
@@ -76,7 +87,7 @@ impl Host {
         system_role: &str,
     ) -> Result<Arc<Self>, String> {
         let mut registry = crate::build_provider_registry()?;
-        merge_plugin_providers(&mut registry, model_override, system_role);
+        let plugin_providers = merge_plugin_providers(&mut registry, model_override, system_role);
         let default_model =
             model_override.map_or_else(|| crate::default_model(&registry), str::to_owned);
         if !crate::has_usable_provider(&registry) && registry.resolve(&default_model).is_err() {
@@ -98,13 +109,16 @@ impl Host {
             ToolRegistry::new().with_renames(&renames).alias_map()
         };
         let spec: SpecBuilder = {
-            let registry = Arc::clone(&registry);
             let system_role = system_role.to_owned();
-            Box::new(move |id, cwd: &str, model: &str, servers| {
-                session_spec(&registry, &system_role, id, cwd, model, servers)
-            })
+            Box::new(
+                move |registry: &ProviderRegistry, id, cwd: &str, model: &str, servers| {
+                    session_spec(registry, &system_role, id, cwd, model, servers)
+                },
+            )
         };
-        Ok(Self::new(registry, default_model, sessions, spec, aliases))
+        let host = Self::new(registry, default_model, sessions, spec, aliases);
+        *lock(&host.plugin_providers) = plugin_providers;
+        Ok(host)
     }
 
     /// The engine and shared setup every connection works through. The
@@ -116,20 +130,17 @@ impl Host {
         spec: SpecBuilder,
         aliases: BTreeMap<String, String>,
     ) -> Arc<Self> {
-        let models: Arc<[SessionConfigSelectOption]> =
-            crate::tui::available_model_items(&registry, "")
-                .into_iter()
-                .map(|item| choice(&item.value, &item.label, item.group.as_deref()))
-                .collect();
+        let models = model_choices(&registry);
         let engine = Engine::start(Arc::clone(&registry));
         let live = Arc::new(Mutex::new(Live::new(engine.commander())));
         let host = Arc::new(Self {
             engine,
-            registry,
+            registry: RwLock::new(registry),
             default_model,
             sessions,
             spec,
-            models,
+            models: RwLock::new(models),
+            plugin_providers: Mutex::default(),
             aliases,
             live,
             open: Arc::default(),
@@ -148,6 +159,48 @@ impl Host {
         host.engine
             .subscribe(Box::new(move |envelope| lock(&live).observe(envelope)));
         host
+    }
+
+    /// The providers in effect.
+    pub(super) fn registry(&self) -> Arc<ProviderRegistry> {
+        Arc::clone(
+            &self
+                .registry
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// The model choices the providers in effect offer.
+    pub(super) fn models(&self) -> Arc<[SessionConfigSelectOption]> {
+        Arc::clone(
+            &self
+                .models
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// Rebuilds the providers from the user config, keeping the ones
+    /// plugins registered, so the next session and the engine's next
+    /// run use an edited `[providers]` section.
+    pub(super) fn reload_providers(&self) -> Result<(), String> {
+        let mut registry = crate::build_provider_registry()?;
+        for provider in lock(&self.plugin_providers).iter() {
+            registry.register(Arc::clone(provider));
+        }
+        let registry = Arc::new(registry);
+        let models = model_choices(&registry);
+        *self
+            .registry
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::clone(&registry);
+        *self
+            .models
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = models;
+        self.engine.commander().set_registry(registry);
+        Ok(())
     }
 
     /// Serves one connection: a fresh agent on this host for `reader`
@@ -258,7 +311,7 @@ fn merge_plugin_providers(
     registry: &mut ProviderRegistry,
     model_override: Option<&str>,
     system_role: &str,
-) {
+) -> Vec<Arc<dyn Provider>> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let model = model_override.map_or_else(|| crate::default_model(registry), str::to_owned);
     let bare = crate::runtime_env::build_system_prompt(system_role, &cwd, &model, &[], None);
@@ -272,12 +325,26 @@ fn merge_plugin_providers(
             None
         }
     };
-    if let Some(runtime) = runtime {
-        for id in crate::plugins::merge_plugin_providers(&runtime, registry) {
-            eprintln!("kage: plugin provider `{id}` shadows the built-in registration");
-        }
-        crate::acp_glue::set_runtime(&runtime);
+    let Some(runtime) = runtime else {
+        return Vec::new();
+    };
+    for id in crate::plugins::merge_plugin_providers(&runtime, registry) {
+        eprintln!("kage: plugin provider `{id}` shadows the built-in registration");
     }
+    crate::acp_glue::set_runtime(&runtime);
+    runtime
+        .registered_providers()
+        .into_iter()
+        .map(|provider| provider as Arc<dyn Provider>)
+        .collect()
+}
+
+/// The model choices `registry` offers a client.
+fn model_choices(registry: &ProviderRegistry) -> Arc<[SessionConfigSelectOption]> {
+    crate::tui::available_model_items(registry, "")
+        .into_iter()
+        .map(|item| choice(&item.value, &item.label, item.group.as_deref()))
+        .collect()
 }
 
 /// Everything an engine session for `cwd` on `model` runs with, including

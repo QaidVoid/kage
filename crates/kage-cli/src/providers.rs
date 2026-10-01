@@ -24,6 +24,21 @@ fn overridable_provider_ids() -> Vec<&'static str> {
     ids
 }
 
+/// Checks the `[providers]` cross-references serde cannot: custom ids
+/// that shadow a registered provider, overrides of unknown ones and bad
+/// model prices.
+///
+/// # Errors
+///
+/// The first problem found, ready for a `kage: ` line.
+pub(crate) fn validate_providers(
+    providers: &kage_core::config::ProvidersConfig,
+) -> Result<(), String> {
+    providers
+        .validate(BUILTIN_PROVIDER_IDS, &overridable_provider_ids())
+        .map_err(|e| e.to_string())
+}
+
 /// Build a registry holding every configured provider: builtins and
 /// catalog entries whose API key is reachable through either an env var
 /// (priority) or the saved auth store, with `[providers.<id>]`
@@ -42,10 +57,7 @@ fn overridable_provider_ids() -> Vec<&'static str> {
 pub(crate) fn build_provider_registry() -> Result<ProviderRegistry, String> {
     static WARN_REPLACED: std::sync::Once = std::sync::Once::new();
     let config = kage_core::config::Config::load_default().map_err(|e| e.to_string())?;
-    config
-        .providers
-        .validate(BUILTIN_PROVIDER_IDS, &overridable_provider_ids())
-        .map_err(|e| e.to_string())?;
+    validate_providers(&config.providers)?;
     let store = auth::AuthStore::load().unwrap_or_else(|_| auth::AuthStore::empty());
     let mut registry = ProviderRegistry::new();
     register_openai_family(&config, &store, &mut registry);

@@ -239,7 +239,9 @@ fn serve_inner(
     std::thread::spawn(move || {
         standing
             .serve_with(BufReader::new(srv_r), srv_w, move |agent| {
-                let mut spec = (agent.host.spec)(id, "", "mock/m", BTreeMap::new()).unwrap();
+                let mut spec =
+                    (agent.host.spec)(&agent.host.registry(), id, "", "mock/m", BTreeMap::new())
+                        .unwrap();
                 if record {
                     let path = sessions.join(format!("{id}.jsonl"));
                     let header = Header {
@@ -315,41 +317,43 @@ fn test_host_agents(
 ) -> Arc<Host> {
     let registry = Arc::new(ProviderRegistry::new().with(provider));
     let agents = Arc::new(agents);
-    let spec = Box::new(move |id, _cwd: &str, model: &str, servers| {
-        let agents = Arc::clone(&agents);
-        let mut rules = PermissionsConfig::default();
-        rules.tools.insert(
-            "ls".into(),
-            ToolPermissionRules {
-                default: PermissionAction::Ask,
-                allow: Vec::new(),
-                deny: Vec::new(),
-            },
-        );
-        let mut tools = builtin_registry();
-        let mcp = mcp_manager(&mut tools, servers, mcp);
-        let names = mcp.iter().flat_map(kage_mcp::McpManager::server_names);
-        let gate = PermissionGate::new(rules)
-            .with_fallback(fallback)
-            .with_mcp_servers(names.map(str::to_owned).collect());
-        Ok(SessionSpec {
-            id,
-            model: model.to_owned(),
-            cx: AgentContext::new(model, "")
-                .with_workdir(&workdir)
-                .with_context_window(WINDOW),
-            recorder: None,
-            tools,
-            gate,
-            loop_cfg: LoopConfig::default(),
-            plugins: None,
-            mcp,
-            interactive: true,
-            title: true,
-            shell: None,
-            agents: Some((*agents).clone()),
-        })
-    });
+    let spec = Box::new(
+        move |_: &ProviderRegistry, id, _cwd: &str, model: &str, servers| {
+            let agents = Arc::clone(&agents);
+            let mut rules = PermissionsConfig::default();
+            rules.tools.insert(
+                "ls".into(),
+                ToolPermissionRules {
+                    default: PermissionAction::Ask,
+                    allow: Vec::new(),
+                    deny: Vec::new(),
+                },
+            );
+            let mut tools = builtin_registry();
+            let mcp = mcp_manager(&mut tools, servers, mcp);
+            let names = mcp.iter().flat_map(kage_mcp::McpManager::server_names);
+            let gate = PermissionGate::new(rules)
+                .with_fallback(fallback)
+                .with_mcp_servers(names.map(str::to_owned).collect());
+            Ok(SessionSpec {
+                id,
+                model: model.to_owned(),
+                cx: AgentContext::new(model, "")
+                    .with_workdir(&workdir)
+                    .with_context_window(WINDOW),
+                recorder: None,
+                tools,
+                gate,
+                loop_cfg: LoopConfig::default(),
+                plugins: None,
+                mcp,
+                interactive: true,
+                title: true,
+                shell: None,
+                agents: Some((*agents).clone()),
+            })
+        },
+    );
     Host::new(registry, "mock/m".into(), sessions, spec, BTreeMap::new())
 }
 
@@ -4182,7 +4186,9 @@ fn serve_paused(
     std::thread::spawn(move || {
         standing
             .serve_with(BufReader::new(srv_r), srv_w, move |agent| {
-                let spec = (agent.host.spec)(id, "", "mock/m", BTreeMap::new()).unwrap();
+                let spec =
+                    (agent.host.spec)(&agent.host.registry(), id, "", "mock/m", BTreeMap::new())
+                        .unwrap();
                 agent.open(id.to_string(), spec);
                 agent.session_announced(&id.to_string());
                 let _ = opened_tx.send(());

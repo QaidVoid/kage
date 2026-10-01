@@ -62,7 +62,7 @@ pub(crate) use paths::{
 };
 pub(crate) use providers::{
     NO_CREDENTIALS_MESSAGE, NO_MODEL_MESSAGE, build_provider_registry, configured_default_model,
-    default_model, has_usable_provider,
+    default_model, has_usable_provider, validate_providers,
 };
 
 use crate::plugins::setup_runtime;

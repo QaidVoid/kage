@@ -854,6 +854,55 @@ fn drafts_round_trip_per_session() {
 }
 
 #[test]
+fn a_config_write_answers_with_the_snapshot_or_fails() {
+    let mut client = Client::new();
+    client.initialize(ClientCapabilities::default(), None);
+    let _ = client.take_outgoing();
+    let id = client.config_set(
+        Some("s1"),
+        &["mcp", "servers", "hub"],
+        Some(serde_json::json!({"url": "https://hub"})),
+    );
+    assert_eq!(
+        client.take_outgoing(),
+        vec![Frame::Request {
+            id,
+            method: "_kage/config/set".into(),
+            params: serde_json::json!({
+                "sessionId": "s1",
+                "path": ["mcp", "servers", "hub"],
+                "value": {"url": "https://hub"},
+            }),
+        }]
+    );
+    let snapshot = serde_json::json!({"mcp": {"servers": {"hub": {"url": "https://hub"}}}});
+    let changes = drive(
+        &mut client,
+        &[Frame::Success {
+            id,
+            result: snapshot.clone(),
+        }],
+    );
+    assert_eq!(changes, vec![Change::Config { config: snapshot }]);
+
+    let id = client.config_set(None, &["permissions", "tools", "shell"], None);
+    let sent = client.take_outgoing();
+    assert!(matches!(
+        &sent[0],
+        Frame::Request { params, .. } if params["value"].is_null() && params.get("sessionId").is_none()
+    ));
+    let error = kage_client::RpcError::new(-32602, "permissions: empty tool name");
+    let changes = drive(
+        &mut client,
+        &[Frame::Failure {
+            id,
+            error: error.clone(),
+        }],
+    );
+    assert_eq!(changes, vec![Change::Failed { request: id, error }]);
+}
+
+#[test]
 fn one_shot_answers_arrive_as_changes() {
     let mut client = Client::new();
     client.initialize(ClientCapabilities::default(), None);

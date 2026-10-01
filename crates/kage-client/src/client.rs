@@ -498,6 +498,28 @@ impl Client {
         )
     }
 
+    /// Replaces the user config entry at `path`, such as
+    /// `["mcp", "servers", "github"]`, with `value`, or removes it when
+    /// `value` is `None`. The snapshot after the write arrives as
+    /// [`Change::Config`], read for `session_id`'s workdir when given; a
+    /// refused edit arrives as [`Change::Failed`].
+    pub fn config_set(
+        &mut self,
+        session_id: Option<&str>,
+        path: &[&str],
+        value: Option<serde_json::Value>,
+    ) -> u64 {
+        self.request(
+            "_kage/config/set",
+            params(&kage_acp_wire::ConfigSetRequest {
+                session_id: session_id.map(str::to_owned),
+                path: path.iter().map(|key| (*key).to_owned()).collect(),
+                value,
+            }),
+            Pending::ConfigGet,
+        )
+    }
+
     /// Continues swarm children of `session_id`: each member id maps to
     /// a follow-up prompt, and an empty prompt continues the child's
     /// task. The children report back through `subagent_update`.

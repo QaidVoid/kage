@@ -17,6 +17,16 @@ pub mod autocomplete;
 pub mod block_renderers;
 pub mod bridge;
 pub(crate) mod capabilities;
+
+/// Checks that `name` is a capability `[plugins.capabilities]` may
+/// grant.
+///
+/// # Errors
+///
+/// The name is unknown; the message lists the known ones.
+pub fn check_capability(name: &str) -> Result<(), String> {
+    capabilities::Capability::parse(name).map(|_| ())
+}
 pub mod chrome;
 pub mod commands;
 pub(crate) mod crypto;

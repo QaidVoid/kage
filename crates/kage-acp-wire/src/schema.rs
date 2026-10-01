@@ -612,6 +612,24 @@ pub struct OptionSetRequest {
     pub value: serde_json::Value,
 }
 
+/// `_kage/config/set` request params.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigSetRequest {
+    /// The session whose workdir the answering snapshot is read for, as
+    /// in [`ConfigGetRequest`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The table names leading to the entry, such as
+    /// `["mcp", "servers", "github"]`. The first is `providers`, `mcp`,
+    /// `permissions` or `plugins`.
+    pub path: Vec<String>,
+    /// The entry's new value in the snapshot's shape; `null` removes the
+    /// entry. A string the snapshot redacted keeps the value on file.
+    #[serde(default)]
+    pub value: Option<serde_json::Value>,
+}
+
 /// `_kage/session/rename` request params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

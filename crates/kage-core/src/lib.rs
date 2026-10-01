@@ -5,6 +5,7 @@
 pub mod agents;
 pub mod cancel;
 pub mod config;
+pub mod config_edit;
 pub mod error;
 pub mod event;
 pub mod fsutil;

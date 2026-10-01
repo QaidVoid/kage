@@ -88,7 +88,11 @@ fn test_host(scripts: Vec<Script>, workdir: &Path) -> Arc<Host> {
     let registry = Arc::new(ProviderRegistry::new().with(Arc::new(Listed { mock })));
     let spec_workdir = workdir.to_path_buf();
     let spec = Box::new(
-        move |id, _cwd: &str, model: &str, _servers: BTreeMap<String, McpSpec>| {
+        move |_: &ProviderRegistry,
+              id,
+              _cwd: &str,
+              model: &str,
+              _servers: BTreeMap<String, McpSpec>| {
             Ok(SessionSpec {
                 id,
                 model: model.to_owned(),

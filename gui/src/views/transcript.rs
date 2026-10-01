@@ -20,7 +20,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::input::{Input, InputEvent, InputState, TextareaState};
-use gpui_kit::component::text::TextView;
+use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::component::theme::{ActiveTheme, ThemeColor};
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -28,8 +28,8 @@ use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, Div, ElementId,
     Entity, EventEmitter, FollowMode, FontWeight, Hsla, InteractiveElement as _, IntoElement,
     ListAlignment, ListState, ParentElement as _, Render, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div, list, px,
-    radians, relative,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, TestSupportExt as _, Window,
+    div, list, px, radians, relative, rems,
 };
 
 use crate::store::{EXIT_PLAN_TOOL, PlanChoice, Store, StoreHandle as _, plan_review};
@@ -1429,6 +1429,7 @@ impl TranscriptView {
             .text_color(theme.foreground)
             .child(
                 TextView::markdown(ElementId::named_usize("md", ix), text.to_owned())
+                    .style(markdown_style(cx))
                     .text_color(theme.foreground),
             );
         if live {
@@ -1881,10 +1882,10 @@ impl TranscriptView {
                     .py(px(12.))
                     .border_t_1()
                     .border_color(ink.subtle)
-                    .child(TextView::markdown(
-                        ElementId::named_usize("plan-md", ix),
-                        doc,
-                    )),
+                    .child(
+                        TextView::markdown(ElementId::named_usize("plan-md", ix), doc)
+                            .style(markdown_style(cx)),
+                    ),
             );
         }
         if pending {
@@ -2176,6 +2177,29 @@ fn run_texts(session: &Session, end: usize) -> (Option<String>, String) {
         .collect::<Vec<_>>()
         .join("\n\n");
     (prompt.filter(|text| !text.is_empty()), reply)
+}
+
+/// The design's markdown (`.md`): headings at 17, 15 and 14px for one,
+/// two and more hashes, 10px between blocks, and code blocks on the
+/// deepest fill in a hairline card.
+fn markdown_style(cx: &App) -> TextViewStyle {
+    let ink = crate::theme::Palette::active(cx);
+    let mut code = StyleRefinement::default()
+        .border_1()
+        .border_color(ink.line)
+        .rounded(px(R_LG))
+        .bg(ink.deep)
+        .px(px(12.))
+        .py(px(10.));
+    code.text.font_size = Some(px(12.5).into());
+    TextViewStyle::default()
+        .paragraph_gap(rems(0.625))
+        .heading_font_size(|level, _| match level {
+            1 => px(17.),
+            2 => px(15.),
+            _ => px(14.),
+        })
+        .code_block(code)
 }
 
 /// What the reviewer answered to the plan the `exit_plan` call at `ix`

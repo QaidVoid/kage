@@ -1576,8 +1576,7 @@ impl ComposerView {
     /// The permission mode pill, listing exactly the advertised
     /// values with the active one marked.
     fn mode_button(&self, cx: &Context<Self>, pal: &'static Palette) -> AnyElement {
-        let session = self.store.read(cx).active_session();
-        let Some(option) = session.and_then(|session| select_option(session, "mode")) else {
+        let Some(option) = self.store.read(cx).composer_option("mode") else {
             return toolbar_pill("composer-mode", false, pal, cx)
                 .opacity(0.45)
                 .cursor_default()
@@ -1587,17 +1586,16 @@ impl ComposerView {
                 .child("Mode")
                 .into_any_element();
         };
-        let values: Vec<SessionConfigSelectOption> = session
-            .map(permission_values)
-            .unwrap_or_default()
-            .into_iter()
+        let values: Vec<SessionConfigSelectOption> = option
+            .options
+            .iter()
+            .filter(|value| value.value != PLAN_MODE)
             .cloned()
             .collect();
         let active = self
             .store
             .read(cx)
             .permission_mode()
-            .or_else(|| values.first().map(|value| value.value.clone()))
             .unwrap_or_else(|| option.current_value.clone());
         let label = values
             .iter()
@@ -1697,11 +1695,8 @@ impl ComposerView {
     /// the thinking options the agent advertised; with neither the pill
     /// dims and names what is missing.
     fn model_button(&self, cx: &Context<Self>, pal: &'static Palette) -> AnyElement {
-        let session = self.store.read(cx).active_session();
-        let model = session.and_then(|session| select_option(session, "model"));
-        let thinking = session.and_then(|session| select_option(session, "thinking"));
-        let model = model.cloned();
-        let thinking = thinking.cloned();
+        let model = self.store.read(cx).composer_option("model");
+        let thinking = self.store.read(cx).composer_option("thinking");
         if model.is_none() && thinking.is_none() {
             return toolbar_pill("composer-model", false, pal, cx)
                 .opacity(0.45)

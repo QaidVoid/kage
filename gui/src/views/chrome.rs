@@ -2055,8 +2055,15 @@ mod tests {
                 .iter()
                 .filter(|entry| matches!(entry, PaletteEntry::Action { .. }))
                 .count();
-            assert_eq!(actions, 10, "the app commands lead, the session ones included");
-            assert_eq!(entries.len() - actions, 3, "then the command and both sessions");
+            assert_eq!(
+                actions, 10,
+                "the app commands lead, the session ones included"
+            );
+            assert_eq!(
+                entries.len() - actions,
+                3,
+                "then the command and both sessions"
+            );
         });
         visual.update(|window, cx| {
             palette.update(cx, |palette, cx| palette.open(window, cx));

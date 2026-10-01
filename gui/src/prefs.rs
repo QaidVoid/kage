@@ -10,6 +10,7 @@
 
 use std::collections::BTreeSet;
 
+use kage_client::wire::SessionConfigOption;
 use serde::{Deserialize, Serialize};
 
 use crate::theme::ThemeChoice;
@@ -35,6 +36,9 @@ pub struct Prefs {
     pub pinned: BTreeSet<String>,
     /// Sessions left out of the sidebar until restored.
     pub archived: BTreeSet<String>,
+    /// The model, thinking and mode options the last session showed,
+    /// which the welcome pane offers before a session exists.
+    pub template: Vec<SessionConfigOption>,
 }
 
 impl Default for Prefs {
@@ -48,6 +52,7 @@ impl Default for Prefs {
             fuel: true,
             pinned: BTreeSet::new(),
             archived: BTreeSet::new(),
+            template: Vec::new(),
         }
     }
 }

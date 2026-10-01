@@ -9,7 +9,7 @@
 
 use kage_client::wire::{
     ContentBlock, FsListResult, FsOp, FsReadResult, NoticeTone, PermissionOption,
-    PermissionOptionKind,
+    PermissionOptionKind, SessionConfigOption,
 };
 use kage_client::{
     Change, Client, Frame, PermissionAsk, PromptOutcome, Session, SteerError, TranscriptItem,
@@ -470,6 +470,11 @@ impl Store {
                 }
             }
         }
+        if let Some(active) = self.active.clone()
+            && changes.contains(&Change::Session { id: active.clone() })
+        {
+            self.keep_template(&active);
+        }
         for change in &changes {
             if let Change::Session { id } = change {
                 let opened = self.state().session(id).is_some_and(|s| s.opened);
@@ -855,6 +860,60 @@ impl Store {
         self.config.as_ref()
     }
 
+    /// The config options the composer shows for `id`: the active
+    /// session's, or on the welcome pane the last session's with the
+    /// choices held for the next session applied.
+    #[must_use]
+    pub fn composer_option(&self, id: &str) -> Option<SessionConfigOption> {
+        if let Some(session) = self.active_session() {
+            return session
+                .config_options
+                .iter()
+                .find(|option| option.id == id)
+                .cloned();
+        }
+        let mut option = self
+            .prefs
+            .template
+            .iter()
+            .find(|option| option.id == id)
+            .cloned()?;
+        if let Some((_, value)) = self.held_options.iter().find(|(held, _)| held == id) {
+            option.current_value.clone_from(value);
+        }
+        Some(option)
+    }
+
+    /// Remembers the model, thinking and mode options of session `id`,
+    /// the plan mode aside, for the welcome pane to offer.
+    fn keep_template(&mut self, id: &str) {
+        let Some(session) = self
+            .state()
+            .session(id)
+            .filter(|s| s.opened && s.parent.is_none())
+        else {
+            return;
+        };
+        let mut template: Vec<SessionConfigOption> = session
+            .config_options
+            .iter()
+            .filter(|option| matches!(option.id.as_str(), "model" | "thinking" | "mode"))
+            .cloned()
+            .collect();
+        for option in &mut template {
+            if option.id == "mode" && option.current_value == PLAN_MODE {
+                option.current_value = self
+                    .permissions
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| "default".to_owned());
+            }
+        }
+        if !template.is_empty() {
+            self.update_prefs(|prefs| prefs.template = template);
+        }
+    }
+
     /// The messages for the user since the last call, oldest first.
     pub fn take_notes(&mut self) -> Vec<Note> {
         std::mem::take(&mut self.notes)
@@ -943,7 +1002,8 @@ impl Store {
     /// Reports whether a session is open to carry it.
     pub fn set_option(&mut self, id: &str, value: &str) -> bool {
         let Some(session) = self.active.clone() else {
-            return false;
+            self.hold_option(id, value);
+            return true;
         };
         if id == "mode" && value != PLAN_MODE {
             self.permissions.insert(session.clone(), value.to_owned());
@@ -1046,7 +1106,8 @@ impl Store {
     /// mode on the wire.
     pub fn set_permission(&mut self, value: &str) -> bool {
         let Some(id) = self.active.clone() else {
-            return false;
+            self.hold_option("mode", value);
+            return true;
         };
         if self.plan_on() {
             self.permissions.insert(id, value.to_owned());
@@ -1913,5 +1974,49 @@ mod tests {
             .collect();
         assert_eq!(methods, ["session/close", "session/list"]);
         assert_eq!(store.active_id(), None);
+    }
+
+    #[test]
+    fn the_welcome_offers_the_last_sessions_options_and_holds_a_choice() {
+        let mut store = welcome_store();
+        store.new_session();
+        let (id, ..) = requests(store.take_outgoing()).remove(0);
+        store.absorb(Frame::Success {
+            id,
+            result: serde_json::json!({
+                "sessionId": "s1",
+                "configOptions": [
+                    {"id": "model", "name": "Model", "type": "select", "currentValue": "a:one",
+                     "options": [{"value": "a:one", "name": "One"}, {"value": "a:two", "name": "Two"}]},
+                    {"id": "swarm", "name": "Swarm", "type": "select", "currentValue": "off",
+                     "options": [{"value": "off", "name": "Off"}, {"value": "on", "name": "On"}]},
+                ],
+            }),
+        });
+        let ids: Vec<&str> = store
+            .prefs()
+            .template
+            .iter()
+            .map(|o| o.id.as_str())
+            .collect();
+        assert_eq!(ids, ["model"], "only the options a new session starts from");
+
+        store.show_welcome();
+        assert_eq!(
+            store.composer_option("model").unwrap().current_value,
+            "a:one"
+        );
+        assert!(
+            store.set_option("model", "a:two"),
+            "the welcome holds the choice"
+        );
+        assert_eq!(
+            store.composer_option("model").unwrap().current_value,
+            "a:two"
+        );
+        assert!(
+            requests(store.take_outgoing()).is_empty(),
+            "nothing goes out yet"
+        );
     }
 }

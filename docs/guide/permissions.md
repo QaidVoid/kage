@@ -221,7 +221,7 @@ Switch modes without touching the config file. In the TUI:
 
     /permission allow   # every call runs this session: the yolo switch
     /permission ask     # every tool call prompts this session
-    /permission deny    # every tool call is refused this session
+    /permission deny    # read-only: reads, searches and fetches run, the rest is refused
     /permission default # back to the configured rules (allow-all
                         # unless you configured [permissions])
 
@@ -231,15 +231,17 @@ included, so nothing prompts; only the tools' `deny` patterns and
 `/permission`. The `:` command line takes the same command. With no
 argument, `/permission` shows the current mode, such as
 `permission mode: ask`. An active override shows as `allow mode`, `ask mode` or
-`deny mode` in the footer, and as `ask mode for this session` on the
+`read-only mode` in the footer, and as `ask mode for this session` on the
 start card while the conversation is empty.
 
 The override lives for the current session only and is never written
 to the config file. `/new`, a session opened from the picker and a
 clone start with the configured rules again. It short-circuits the
 per-tool rules, except a configured deny still denies.
-While `deny` is active, even allow-listed tools and tools approved in
-the panel refuse. While `ask` is active, even never-configured tools
+While `deny` is active the session is read-only: `read`, `grep`,
+`find`, `ls`, `web_fetch` and other read or fetch tools keep their
+configured verdict, and everything else, even allow-listed tools and
+tools approved in the panel, is refused. While `ask` is active, even never-configured tools
 prompt, except the tools you approved for the session or always.
 
 ## plan mode

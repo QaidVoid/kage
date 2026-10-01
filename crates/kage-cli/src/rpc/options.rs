@@ -189,8 +189,8 @@ const MODES: [(&str, Option<PermissionAction>, &str, &str); 4] = [
     (
         "deny",
         Some(PermissionAction::Deny),
-        "Deny All",
-        "Every tool call is refused, reads included",
+        "Read Only",
+        "Reads, searches and fetches run; edits, commands and agents are refused",
     ),
 ];
 

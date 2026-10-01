@@ -9,8 +9,10 @@
 //! passes through, and ask blocks the run until an [`Asker`] delivers the
 //! answer, or, when there is none (print mode), denies with a message
 //! pointing at the config. A session mode short-circuits the rules, but
-//! a configured deny still denies. Tools approved for the session skip the
-//! ask, but never a deny mode or a configured deny.
+//! a configured deny still denies. The deny mode is read-only: reads,
+//! searches and fetches keep their configured verdict, everything else
+//! is refused. Tools approved for the session skip the ask, but never a
+//! deny mode or a configured deny.
 //!
 //! Plan mode comes first: write tools are refused, command tools and
 //! tools of unknown risk always ask, and `exit_plan` always asks without
@@ -395,7 +397,14 @@ impl Hooks for PermissionGate {
     ) -> Option<ToolOutput> {
         let name = self.canonical(name);
         let name = name.as_ref();
-        let mode = self.mode();
+        let reads = matches!(
+            lock(&self.risks).get(name),
+            Some(Risk::Read | Risk::Network)
+        );
+        // The deny mode is read-only, so it leaves reads to the rules.
+        let mode = self
+            .mode()
+            .filter(|mode| !(*mode == PermissionAction::Deny && reads));
         let subject = PermissionsConfig::subject_for(input);
         let configured = self.configured_action(name, &subject);
         let denied = mode == Some(PermissionAction::Deny) || configured.0 == PermissionAction::Deny;
@@ -430,7 +439,7 @@ impl Hooks for PermissionGate {
         {
             return None;
         }
-        // Deny wins both ways: a deny mode denies everything, and a
+        // Deny wins both ways: a deny mode denies all but reads, and a
         // configured deny survives an allow or ask session mode.
         let (action, rule) = match mode {
             None => configured,
@@ -442,7 +451,8 @@ impl Hooks for PermissionGate {
             (PermissionAction::Allow, _) => None,
             (PermissionAction::Deny, Rule::Mode) => Some(error_output(
                 name,
-                "permission mode is deny this session (`/permission default` restores rules)",
+                "the session is read-only (permission mode deny): only reads, searches \
+                 and fetches run (`/permission default` restores rules)",
             )),
             (PermissionAction::Deny, Rule::Mcp(server)) => Some(error_output(
                 name,
@@ -671,7 +681,7 @@ mod tests {
             .before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
             .unwrap();
         assert!(out.is_error);
-        assert!(out.text.contains("permission mode is deny"), "{}", out.text);
+        assert!(out.text.contains("permission mode deny"), "{}", out.text);
         gate.set_mode(None);
         assert!(
             gate.before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
@@ -993,6 +1003,28 @@ mod tests {
     }
 
     #[test]
+    fn deny_mode_is_read_only() {
+        let mut gate = PermissionGate::new(PermissionsConfig::default());
+        gate.set_risks(BTreeMap::from([
+            ("read".to_owned(), Risk::Read),
+            ("web_fetch".to_owned(), Risk::Network),
+            ("write".to_owned(), Risk::Write),
+        ]));
+        gate.set_mode(Some(PermissionAction::Deny));
+        let call = |gate: &mut PermissionGate, tool: &str| {
+            gate.before_tool_call(
+                &kage_core::ToolCallId::new("call"),
+                tool,
+                &serde_json::json!({}),
+            )
+        };
+        assert!(call(&mut gate, "read").is_none(), "reads run");
+        assert!(call(&mut gate, "web_fetch").is_none(), "fetches run");
+        let refused = call(&mut gate, "write").expect("writes are refused");
+        assert!(refused.text.contains("read-only"), "{}", refused.text);
+    }
+
+    #[test]
     fn deny_mode_denies_a_session_allowed_tool() {
         let gate = PermissionGate::new(rules_for(PermissionAction::Ask));
         assert!(answer_ask(&gate, PermissionDecision::AllowSession));
@@ -1001,7 +1033,7 @@ mod tests {
         let out = gate
             .before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
             .unwrap();
-        assert!(out.text.contains("permission mode is deny"), "{}", out.text);
+        assert!(out.text.contains("permission mode deny"), "{}", out.text);
     }
 
     #[test]

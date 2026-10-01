@@ -62,7 +62,7 @@ pub(super) fn mode_label(mode: kage_core::permissions::PermissionAction) -> &'st
     match mode {
         kage_core::permissions::PermissionAction::Allow => "allow",
         kage_core::permissions::PermissionAction::Ask => "ask",
-        kage_core::permissions::PermissionAction::Deny => "deny",
+        kage_core::permissions::PermissionAction::Deny => "read-only",
     }
 }
 

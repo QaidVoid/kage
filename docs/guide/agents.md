@@ -312,8 +312,8 @@ asks on the next start.
 | Session file | a file next to the parent's when the parent is recorded |
 
 An agent never gets more permission than its parent. It uses the same
-permission gate, so `/permission deny` in the main session refuses the
-agent's calls too, and approving a tool "for the rest of this session"
+permission gate, so `/permission deny` in the main session makes the
+agents read-only too, and approving a tool "for the rest of this session"
 covers every agent of the session.
 
 ## limits

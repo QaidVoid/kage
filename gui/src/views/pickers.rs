@@ -685,7 +685,7 @@ fn policy(mode: &str) -> Option<[Verdict; 6]> {
         "default" => [Runs, Runs, Rules, Runs, Runs, Asks],
         "ask" => [Asks; 6],
         "allow" => [Runs; 6],
-        "deny" => [Refused; 6],
+        "deny" => [Runs, Refused, Refused, Runs, Refused, Refused],
         _ => return None,
     })
 }

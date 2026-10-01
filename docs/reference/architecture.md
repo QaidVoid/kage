@@ -119,7 +119,10 @@ also re-prompt earlier children: a `resume` map of child session id
 to prompt is verified against the session markers first, then
 attached. A hosted child gets its reply channel re-armed and the
 prompt queued; a child no longer hosted is reopened from its session
-file with its history, model and definition intact. Swarm mode
+file with its history, model and definition intact. Every agent that
+records is dropped once its result is delivered and it goes quiet, so
+idle agents hold no context in memory; a prompt or a mailbox message
+to one reopens it the same way, parents first. Swarm mode
 (`/swarm`) injects a workflow block into the session's pending
 history on the way up and an exit note on the way down, once per
 switch. Plan mode (`/plan`) works the same way and also lives in the

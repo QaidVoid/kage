@@ -623,6 +623,12 @@ impl Dispatcher {
         let Some(id) = command.session.or(self.active) else {
             return;
         };
+        if !self.sessions.contains_key(&id)
+            && matches!(command.kind, CommandKind::Prompt { .. })
+            && let Ok(warnings) = self.reopen_agent(id)
+        {
+            self.warn_all(id, warnings);
+        }
         if !self.sessions.contains_key(&id) {
             notice(
                 &self.bus,
@@ -1157,7 +1163,7 @@ impl Dispatcher {
             self.end_paused(child);
         }
         self.start_waiting();
-        self.reap_swarm_child(id);
+        self.reap_agent(id);
     }
 
     /// Cancel the running children of `id`, whose run was cancelled,
@@ -1192,21 +1198,22 @@ impl Dispatcher {
         }
     }
 
-    /// Drop a finished swarm child whose result was already delivered.
+    /// Drop a finished agent whose result was already delivered.
     ///
-    /// The child's transcript stays in its session file and a later
-    /// `swarm resume` reopens the file (`attach`), so hosting the idle
-    /// session only pins its whole history in RAM for the engine's
-    /// life. Plain `agent` children stay hosted: they can still be
-    /// re-prompted in place, and their own agents keep finding them.
-    fn reap_swarm_child(&mut self, id: SessionId) {
+    /// The agent's transcript stays in its session file, and a later
+    /// prompt, message or `swarm resume` reopens it from there
+    /// (`reopen_agent`), so hosting the idle session would only pin its
+    /// whole history in RAM for the engine's life. An agent without a
+    /// file stays hosted, since nothing could bring it back.
+    fn reap_agent(&mut self, id: SessionId) {
         let Some(session) = self.sessions.get(&id) else {
             return;
         };
-        let delivered = session
-            .link
-            .as_ref()
-            .is_some_and(|link| link.batch_id.is_some() && link.reply.is_none());
+        let delivered = session.path.is_some()
+            && session
+                .link
+                .as_ref()
+                .is_some_and(|link| link.reply.is_none());
         let quiet = session.idle.is_some()
             && session.queued.is_empty()
             && session.pending_history.is_empty()

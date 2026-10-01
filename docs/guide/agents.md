@@ -127,10 +127,10 @@ The engine checks every id before anything runs, and refuses the
 whole call when one id is wrong: it must name a swarm child of this
 session, so a plain `agent` child, a stranger's session or a typo is
 rejected up front. A child still hosted gets the follow-up as its
-next run. A child that only exists on disk anymore (the session was
-resumed, or kage restarted) is reopened from its file with its
-history, model and agent definition intact, and keeps appending to
-the same file.
+next run. A child that only exists on disk anymore (it delivered its
+result, the session was resumed, or kage restarted) is reopened from
+its file with its history, model and agent definition intact, and
+keeps appending to the same file.
 
 ### forking children
 
@@ -201,9 +201,12 @@ Delivery is fire-and-forget: the caller learns when the message was
 queued, never what the target replied. The reply lands in the
 target's own transcript and card. When you need the answer in hand
 before continuing, make an `agent` call or a `swarm` resume instead,
-both of which block on the result. Only sessions hosted right now
-take messages; a child that only exists on disk after a resume is
-reachable again once a `swarm` resume reopens it.
+both of which block on the result.
+
+An agent that delivered its result is dropped from memory, and its
+transcript stays in its session file. Prompting it from its view or
+messaging it reopens it from that file with its history intact, so
+finished agents cost no memory until they are used again.
 
 ## built-in agents
 

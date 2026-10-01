@@ -21,6 +21,10 @@ use super::{
     AgentSetup, Attach, CONTINUE_PROMPT, Recorder, ResumeChild, Session, SessionSpec, notice,
 };
 
+/// How many unhosted ancestors `reopen_agent` reopens
+/// before giving up, which also stops a marker loop.
+const MAX_REOPEN_DEPTH: u8 = 8;
+
 /// Tells a forked child that the conversation it starts with is
 /// inherited reference material, not its own past. Ported from
 /// kimi-code's `FORK_CONTEXT_NOTICE`.
@@ -269,91 +273,127 @@ impl super::Dispatcher {
         let Some(setup) = self.sessions.get(&parent).and_then(|s| s.agents.clone()) else {
             return fail("agents are turned off".to_owned());
         };
+        let reopened = !self.sessions.contains_key(&id);
+        if reopened {
+            match self.reopen_agent(id) {
+                Ok(warnings) => self.warn_all(id, warnings),
+                Err(text) => return fail(text),
+            }
+        }
+        let session = self.sessions.get_mut(&id).expect("hosted above");
+        let Some(link) = session.link.as_mut() else {
+            return fail(format!("session {id} is not a swarm child of this session"));
+        };
+        if link.parent != parent || link.batch_id.is_none() {
+            return fail(format!("session {id} is not a swarm child of this session"));
+        }
+        if session.idle.is_none() || link.reply.is_some() || self.waiting.contains(&id) {
+            return fail(format!(
+                "session {id} is still working on an earlier call; resume it once that \
+                 call has its result"
+            ));
+        }
+        link.reply = Some(reply);
+        if reopened {
+            let member = swarm.as_ref().map(|info| SwarmMember {
+                batch: Some(info.batch_id.clone()),
+                item: info.item.clone(),
+                index: u32::try_from(info.index).unwrap_or(u32::MAX),
+                total: u32::try_from(info.total).unwrap_or(u32::MAX),
+            });
+            self.publish_agent_opened(id, parent, batch_id, agent, description, member);
+        }
         let content = vec![Content::Text { text: prompt }];
-        if let Some(session) = self.sessions.get_mut(&id) {
-            let Some(link) = session.link.as_mut() else {
-                return fail(format!("session {id} is not a swarm child of this session"));
-            };
-            if link.parent != parent || link.batch_id.is_none() {
-                return fail(format!("session {id} is not a swarm child of this session"));
-            }
-            if session.idle.is_none() || link.reply.is_some() || self.waiting.contains(&id) {
-                return fail(format!(
-                    "session {id} is still working on an earlier call; resume it once that \
-                     call has its result"
-                ));
-            }
-            link.reply = Some(reply);
-            let max = setup.max_running;
-            self.launch_agent(id, max, content);
-            return;
-        }
-        // Not hosted: open the child from its session file.
-        let Some(dir) = self
+        self.launch_agent(id, setup.max_running, content);
+    }
+
+    /// Host the agent session `id` again from its session file. Agents
+    /// are dropped once their result is delivered, and a resumed
+    /// session hosts none, so a later prompt or message reopens them
+    /// here, parents first. The agent keeps its definition, history and
+    /// model, appends to its own file and owes no call a result.
+    /// Returns the warnings to show on it.
+    pub(super) fn reopen_agent(&mut self, id: SessionId) -> Result<Vec<String>, String> {
+        self.reopen_within(id, MAX_REOPEN_DEPTH)
+    }
+
+    fn reopen_within(&mut self, id: SessionId, hops: u8) -> Result<Vec<String>, String> {
+        let no_session = || {
+            format!(
+                "no live session {id}. Only sessions hosted right now and the agents of \
+                 their conversations take messages"
+            )
+        };
+        let path = self
             .sessions
-            .get(&parent)
-            .and_then(|s| s.path.as_deref())
-            .and_then(Path::parent)
-            .map(Path::to_path_buf)
-        else {
-            return fail(format!("session {id} is not a swarm child of this session"));
+            .values()
+            .filter_map(|s| s.path.as_deref()?.parent())
+            .map(|dir| crate::build_session_path(dir, id))
+            .find(|path| path.exists())
+            .ok_or_else(no_session)?;
+        let marker = agent_marker(&path).ok_or_else(no_session)?;
+        let text = |key: &str| {
+            marker
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
         };
-        let path = dir.join(format!("{id}.jsonl"));
-        let replay = match kage_session::replay(&path) {
-            Ok(replay) => replay,
-            Err(err) => return fail(format!("cannot read session {id}: {err}")),
-        };
+        let parent = ulid::Ulid::from_string(&text("parent"))
+            .map(SessionId)
+            .map_err(|_| no_session())?;
+        if !self.sessions.contains_key(&parent) {
+            let hops = hops.checked_sub(1).ok_or_else(no_session)?;
+            let warnings = self.reopen_within(parent, hops)?;
+            self.warn_all(parent, warnings);
+        }
+        let replay = kage_session::replay(&path)
+            .map_err(|err| format!("cannot read session {id}: {err}"))?;
         if replay.header.session != id {
-            return fail(format!("session {id} is not a swarm child of this session"));
+            return Err(no_session());
         }
-        let writer = match kage_session::SessionWriter::open(&path) {
-            Ok(writer) => writer,
-            Err(err) => return fail(format!("cannot append to session {id}: {err}")),
+        let writer = kage_session::SessionWriter::open(&path)
+            .map_err(|err| format!("cannot append to session {id}: {err}"))?;
+        let from = &self.sessions[&parent];
+        let setup = from
+            .agents
+            .clone()
+            .ok_or_else(|| "agents are turned off".to_owned())?;
+        let agent = text("agent");
+        let def = setup.defs.get(&agent).ok_or_else(|| {
+            format!("agent definition `{agent}` is gone; cannot reopen session {id}")
+        })?;
+        let (spec, missing, note) =
+            resumed_spec(from, id, replay, def, &setup, writer, &self.registry);
+        let batch_id = Some(text("batch_id"))
+            .filter(|batch| !batch.is_empty())
+            .map(ToolCallId::new);
+        let link = AgentLink {
+            parent,
+            agent,
+            depth: depth_of(from) + 1,
+            batch_id,
+            reply: None,
+            lazy_history: None,
+            inherited_until: None,
+            tools: def.tools.clone(),
         };
-        let opened = {
-            let from = self.sessions.get(&parent).expect("checked above");
-            let Some(def) = setup.defs.get(&agent) else {
-                return fail(format!(
-                    "agent definition `{agent}` is gone; cannot resume session {id}"
-                ));
-            };
-            let (spec, missing, note) =
-                resumed_spec(from, id, &replay, def, &setup, writer, &self.registry);
-            let cancel = from.cancel.child();
-            let link = AgentLink {
-                parent,
-                agent: agent.clone(),
-                depth: depth_of(from) + 1,
-                batch_id: Some(batch_id.clone()),
-                reply: Some(reply),
-                lazy_history: None,
-                inherited_until: None,
-                tools: def.tools.clone(),
-            };
-            (spec, missing, note, cancel, link)
-        };
-        let (spec, missing, note, cancel, link) = opened;
-        let member = swarm.as_ref().map(|info| SwarmMember {
-            batch: Some(info.batch_id.clone()),
-            item: info.item.clone(),
-            index: u32::try_from(info.index).unwrap_or(u32::MAX),
-            total: u32::try_from(info.total).unwrap_or(u32::MAX),
-        });
-        self.publish_agent_opened(id, parent, batch_id, agent, description, member);
+        let cancel = from.cancel.child();
         self.open(spec, cancel, Some(link));
-        if let Some(note) = note {
-            notice(&self.bus, id, NoticeLevel::Warning, note);
+        let mut warnings: Vec<String> = note.into_iter().collect();
+        warnings.extend(
+            missing
+                .into_iter()
+                .map(|name| format!("agent tools: no tool named `{name}`")),
+        );
+        Ok(warnings)
+    }
+
+    /// Show each of `warnings` on session `id`.
+    pub(super) fn warn_all(&self, id: SessionId, warnings: Vec<String>) {
+        for text in warnings {
+            notice(&self.bus, id, NoticeLevel::Warning, text);
         }
-        for name in missing {
-            notice(
-                &self.bus,
-                id,
-                NoticeLevel::Warning,
-                format!("agent tools: no tool named `{name}`"),
-            );
-        }
-        let max = setup.max_running;
-        self.launch_agent(id, max, content);
     }
 
     /// Continue the named swarm children of `id`, the engine answer to
@@ -569,7 +609,7 @@ impl super::Dispatcher {
             },
         );
         self.deliver(id, &RunOutcome::Cancelled, &history, usage, Duration::ZERO);
-        self.reap_swarm_child(id);
+        self.reap_agent(id);
     }
 
     pub(super) fn parent_of(&self, id: SessionId) -> Option<SessionId> {
@@ -808,7 +848,7 @@ fn agent_marker(path: &Path) -> Option<serde_json::Value> {
 fn resumed_spec(
     from: &Session,
     id: SessionId,
-    replay: &kage_session::ReplayResult,
+    replay: kage_session::ReplayResult,
     def: &AgentDef,
     setup: &AgentSetup,
     writer: kage_session::SessionWriter,
@@ -832,6 +872,7 @@ fn resumed_spec(
         .thinking_level
         .as_deref()
         .and_then(kage_core::ThinkingLevel::parse);
+    cx.history = replay.history.into_iter().map(Arc::new).collect();
     cx.budget = TokenBudget {
         used_input: replay.usage_total.input,
         used_output: replay.usage_total.output,

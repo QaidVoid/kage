@@ -149,7 +149,7 @@ impl Tool for MailboxTool {
 impl super::Dispatcher {
     /// Resolve and queue one mailbox message. `None` targets address
     /// the sender's parent, and a target must share the sender's main
-    /// session. The message is wrapped so the target knows who sent it
+    /// session; an agent no longer hosted is reopened from its file. The message is wrapped so the target knows who sent it
     /// and where to answer. An idle main session runs it at once; an
     /// idle agent runs it once the running limit allows; a busy target
     /// runs it after its current run ends.
@@ -176,17 +176,20 @@ impl super::Dispatcher {
                 || "the main session".to_owned(),
                 |l| format!("the {} agent", l.agent),
             );
-        let Some(target) = self.sessions.get(&to) else {
-            return Err(format!(
-                "no live session {to}. Only sessions hosted right now take messages; \
-                 resume the session that owns it first"
-            ));
-        };
+        let reopened = !self.sessions.contains_key(&to);
+        if reopened {
+            let warnings = self.reopen_agent(to)?;
+            self.warn_all(to, warnings);
+        }
         if self.root_of(to) != self.root_of(from) {
+            if reopened {
+                self.sessions.remove(&to);
+            }
             return Err(format!(
                 "session {to} belongs to another conversation; message sessions of your own"
             ));
         }
+        let target = &self.sessions[&to];
         let content = vec![Content::Text {
             text: format!("[message from {label} session {from}]\n\n{message}"),
         }];

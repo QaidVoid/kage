@@ -4268,3 +4268,63 @@ fn a_forked_child_reports_only_its_own_work() {
         output.text
     );
 }
+
+#[test]
+fn a_delivered_agent_is_dropped_and_reopens_when_prompted_or_messaged() {
+    let dir = tempfile::tempdir().unwrap();
+    let mock = MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("work"))]),
+        text_turn("child reply"),
+        text_turn("parent done"),
+    ]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let parent = SessionId::new();
+    let (recorder, _) = recorder_in(dir.path(), parent);
+    h.engine.open(SessionSpec {
+        recorder: Some(recorder),
+        agents: Some(agent_setup(1, 1)),
+        ..h.spec(parent)
+    });
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 2);
+    let child = spawned(&events)[0].0;
+    let hosted = |h: &Harness| -> Vec<SessionId> {
+        h.engine
+            .hosted_sessions()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    };
+    assert_eq!(hosted(&h), [parent], "the delivered child is dropped");
+
+    mock.push_script(text_turn("child again"));
+    prompt(&h.engine, child, "more", Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+    assert_eq!(outcome_of(&events, child), [RunOutcome::Completed]);
+    let request = mock.last_request().unwrap();
+    let texts: Vec<String> = request
+        .messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|c| match c {
+            Content::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        ["work", "child reply", "more"],
+        "its history came back"
+    );
+    assert_eq!(hosted(&h), [parent], "and it is dropped again");
+
+    mock.push_script(send_message_turn("call_m", &child.to_string(), "and this"));
+    mock.push_script(text_turn("ok"));
+    mock.push_script(text_turn("ok"));
+    prompt(&h.engine, parent, "tell it", Delivery::Steer);
+    let events = until_runs_end(&h.events, 2);
+    h.engine.shutdown();
+    let ack = tool_output(&events, parent, "call_m");
+    assert!(ack.text.contains("it runs now"), "{}", ack.text);
+    assert_eq!(outcome_of(&events, child), [RunOutcome::Completed]);
+}

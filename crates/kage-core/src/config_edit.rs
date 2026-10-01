@@ -56,16 +56,47 @@ pub fn edited(path: &Path, keys: &[&str], value: Option<&serde_json::Value>) -> 
     };
     // Inside an inline table, or over an inline entry, the new entry
     // stays inline too.
-    let mut item = if inline || table.get(last).is_some_and(Item::is_inline_table) {
+    let item = if inline || table.get(last).is_some_and(Item::is_inline_table) {
         Item::Value(to_value(value)?)
     } else {
         to_item(value)?
     };
-    if let (Some(Item::Table(old)), Item::Table(new)) = (table.get(last), &mut item) {
-        *new.decor_mut() = old.decor().clone();
+    match (table.get_mut(last), item) {
+        (Some(Item::Table(old)), Item::Table(new)) => merge(old, new),
+        (_, item) => {
+            table.insert(last, item);
+        }
     }
-    table.insert(last, item);
     Ok(doc.to_string())
+}
+
+/// Makes `old` hold what `new` holds while keeping its key order, the
+/// comments on its keys and its own header comments: a key `new` lacks
+/// goes, a key both hold changes in place, and a new key goes last.
+fn merge(old: &mut Table, new: Table) {
+    let gone: Vec<String> = old
+        .iter()
+        .map(|(key, _)| key.to_owned())
+        .filter(|key| !new.contains_key(key))
+        .collect();
+    for key in gone {
+        old.remove(&key);
+    }
+    for (key, item) in new {
+        match (old.get_mut(&key), item) {
+            (Some(Item::Table(old)), Item::Table(new)) => merge(old, new),
+            // A key written inline stays inline.
+            (Some(Item::Value(old)), item) => {
+                if let Ok(mut new) = item.into_value() {
+                    *new.decor_mut() = old.decor().clone();
+                    *old = new;
+                }
+            }
+            (_, item) => {
+                old.insert(&key, item);
+            }
+        }
+    }
 }
 
 /// The entry at `keys` in the TOML file at `path`, as JSON. `None` when
@@ -206,6 +237,41 @@ mod tests {
         assert_eq!(hub.command.as_deref(), Some("npx"));
         assert_eq!(hub.args, ["-y", "hub"]);
         assert_eq!(hub.env["TOKEN"], "t");
+    }
+
+    #[test]
+    fn a_replaced_table_keeps_its_key_order_and_comments() {
+        let (_dir, path) = file(
+            "[permissions.tools.shell]\ndefault = \"ask\" # careful\nallow = [\"ls\"]\nold = 1\n",
+        );
+        let value = json!({ "default": "deny", "allow": ["ls", "pwd"], "deny": ["rm *"] });
+        let text = edited(&path, &["permissions", "tools", "shell"], Some(&value)).unwrap();
+        assert_eq!(
+            text,
+            "[permissions.tools.shell]\ndefault = \"deny\" # careful\nallow = [\"ls\", \"pwd\"]\ndeny = [\"rm *\"]\n"
+        );
+    }
+
+    #[test]
+    fn an_inline_key_of_a_replaced_table_stays_inline() {
+        let (_dir, path) = file(
+            "[providers.custom.lab]\nbase_url = \"http://lab\"\nheaders = { X = \"1\" }\nmodels = [{ id = \"a\", name = \"A\" }]\n",
+        );
+        let value = json!({
+            "base_url": "http://lab/v2",
+            "headers": { "X": "2" },
+            "models": [{ "id": "a", "name": "A" }, { "id": "b", "name": "B" }],
+        });
+        let text = edited(&path, &["providers", "custom", "lab"], Some(&value)).unwrap();
+        assert!(text.contains("headers = { X = \"2\" }"), "{text}");
+        assert!(
+            text.contains("models = [{ id = \"a\", name = \"A\" }, { id = \"b\", name = \"B\" }]"),
+            "{text}"
+        );
+        assert_eq!(
+            parse(&text).unwrap().providers.custom["lab"].models.len(),
+            2
+        );
     }
 
     #[test]

@@ -9,19 +9,22 @@
 use std::collections::BTreeMap;
 
 use gpui_kit::assets::IconName;
+use std::rc::Rc;
+
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Div, Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use kage_client::wire::{McpServerStatus, SessionConfigOption};
 use serde::Deserialize;
 
 use crate::store::{Store, StoreHandle as _};
 use crate::theme::{FONT_MONO, FS_SM, FS_XS, Palette, R_FULL, R_LG};
-use crate::views::kit::switch;
+use crate::views::kit::{BtnTone, btn_sm, switch};
 
 /// The parts of the snapshot the pages read. Every field defaults, so a
 /// section the engine leaves out reads as empty.
@@ -106,7 +109,7 @@ struct Permissions {
     mcp: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct ToolRules {
     default: String,
@@ -530,14 +533,99 @@ pub(crate) fn mcp_page(
     ]
 }
 
-/// The Permissions page: the session's mode cards and the configured
-/// rules. `on_mode` sets a mode by value.
+/// What is being added to the permission rules while the shared text
+/// field shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RuleAdd {
+    /// A rule for a tool, named in the field.
+    Tool,
+    /// A glob on tool `tool`'s allow list, or its deny list.
+    Glob {
+        /// The tool the rule is for.
+        tool: String,
+        /// Whether the glob refuses instead of allowing.
+        deny: bool,
+    },
+}
+
+/// What the permission rules edit with.
+pub(crate) struct RuleEdits {
+    /// The store writes go through.
+    pub store: Entity<Store>,
+    /// What is being added, while the text field shows.
+    pub adding: Option<RuleAdd>,
+    /// The text field a glob or a tool name is typed into.
+    pub input: Option<Entity<InputState>>,
+    /// Starts adding, or stops with `None`.
+    pub on_add: OnRuleAdd,
+}
+
+/// Starts adding to the permission rules, or stops with `None`.
+pub(crate) type OnRuleAdd = Rc<dyn Fn(Option<RuleAdd>, &mut Window, &mut App)>;
+
+/// The actions a rule's default may take.
+const ACTIONS: [&str; 3] = ["allow", "ask", "deny"];
+
+/// The config path and value an added `text` writes, read against the
+/// snapshot `config`: a new tool rule that asks, or the tool's rule with
+/// one more glob. `None` when `text` is blank.
+pub(crate) fn rule_added(
+    config: &serde_json::Value,
+    add: &RuleAdd,
+    text: &str,
+) -> Option<(Vec<String>, serde_json::Value)> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let path = |tool: &str| {
+        vec![
+            "permissions".to_owned(),
+            "tools".to_owned(),
+            tool.to_owned(),
+        ]
+    };
+    match add {
+        RuleAdd::Tool => Some((path(text), serde_json::json!({ "default": "ask" }))),
+        RuleAdd::Glob { tool, deny } => {
+            let snapshot = Snapshot::parse(config);
+            let mut rule = snapshot
+                .permissions
+                .tools
+                .get(tool)
+                .cloned()
+                .unwrap_or_default();
+            let list = if *deny {
+                &mut rule.deny
+            } else {
+                &mut rule.allow
+            };
+            if !list.iter().any(|glob| glob == text) {
+                list.push(text.to_owned());
+            }
+            Some((path(tool), rule_json(&rule)))
+        }
+    }
+}
+
+/// `rule` as `[permissions.tools.<tool>]` holds it.
+fn rule_json(rule: &ToolRules) -> serde_json::Value {
+    serde_json::json!({
+        "default": if rule.default.is_empty() { "allow" } else { rule.default.as_str() },
+        "allow": rule.allow,
+        "deny": rule.deny,
+    })
+}
+
+/// The Permissions page: the session's mode cards, then the configured
+/// rules, editable in place. `on_mode` sets a mode by value.
 #[must_use]
 pub(crate) fn permissions_page(
     snapshot: &Snapshot,
     modes: Option<&SessionConfigOption>,
     current: Option<&str>,
     on_mode: impl Fn(String, &mut gpui_kit::App) + Clone + 'static,
+    edits: &RuleEdits,
     pal: &'static Palette,
 ) -> Vec<AnyElement> {
     let mut out: Vec<AnyElement> = Vec::new();
@@ -591,86 +679,91 @@ pub(crate) fn permissions_page(
             note("Open a session to see and change its permission mode.", pal).into_any_element(),
         ),
     }
-    out.push(group("Tool rules", pal).into_any_element());
     let rules = &snapshot.permissions;
-    if rules.tools.is_empty() && rules.mcp.is_empty() {
-        out.push(
-            note(
-                "No rules configured: every tool follows the session's mode.",
-                pal,
+    let on_add = edits.on_add.clone();
+    out.push(
+        group("Tool rules", pal)
+            .justify_between()
+            .child(
+                btn_sm("rule-add", BtnTone::Plain, pal)
+                    .on_click(move |_, window, cx| on_add(Some(RuleAdd::Tool), window, cx))
+                    .child(Icon::new(IconName::Plus).with_size(px(12.)))
+                    .child("Add rule"),
             )
             .into_any_element(),
-        );
-    } else {
-        let header = h_flex()
-            .px(px(16.))
-            .py(px(8.))
-            .gap(px(12.))
-            .text_size(px(FS_XS))
-            .text_color(pal.faint)
-            .child(div().w(px(180.)).child("Tool"))
-            .child(div().w(px(64.)).child("Default"))
-            .child(div().flex_1().child("Allow"))
-            .child(div().flex_1().child("Deny"));
-        let mut table = boxed(pal).child(header);
-        let globs = |list: &[String], deny: bool| {
+    );
+    let store = edits.store.clone();
+    let confine = !rules.confine_paths;
+    let mut table = boxed(pal).child(
+        list_row(
+            Icon::new(IconName::FolderLock)
+                .with_size(px(14.))
+                .text_color(pal.faint),
+            div()
+                .text_size(px(FS_SM))
+                .text_color(pal.ink)
+                .child("Confine file tools to the working directory"),
+            Some("Reads and writes outside the session's directory are refused".into()),
+            pal,
+        )
+        .child(switch("rule-confine", rules.confine_paths, pal).on_click(
+            move |_, _, cx| {
+                store.act(cx, |store| {
+                    store.config_set(
+                        &["permissions", "confine_paths"],
+                        Some(serde_json::json!(confine)),
+                    );
+                });
+            },
+        )),
+    );
+    if edits.adding == Some(RuleAdd::Tool)
+        && let Some(input) = &edits.input
+    {
+        table = table.child(
             h_flex()
-                .flex_1()
-                .flex_wrap()
-                .gap(px(4.))
-                .children(list.iter().map(|glob| {
-                    if deny {
-                        badge(glob.clone(), pal.danger, pal.danger_soft, pal.danger_bd)
-                            .font_family(FONT_MONO)
-                    } else {
-                        plain_badge(glob.clone(), pal).font_family(FONT_MONO)
-                    }
-                }))
-        };
-        for (tool, rule) in &rules.tools {
-            table = table.child(
-                h_flex()
-                    .px(px(16.))
-                    .py(px(8.))
-                    .gap(px(12.))
-                    .items_center()
-                    .border_t_1()
-                    .border_color(pal.subtle)
-                    .child(div().w(px(180.)).child(mono(tool.clone(), pal)))
-                    .child(h_flex().w(px(64.)).child(action_badge(&rule.default, pal)))
-                    .child(globs(&rule.allow, false))
-                    .child(globs(&rule.deny, true)),
-            );
-        }
-        for (server, action) in &rules.mcp {
-            let label = if server == "*" {
-                "every MCP server".to_owned()
-            } else {
-                format!("mcp: {server}")
-            };
-            table = table.child(
-                h_flex()
-                    .px(px(16.))
-                    .py(px(8.))
-                    .gap(px(12.))
-                    .items_center()
-                    .border_t_1()
-                    .border_color(pal.subtle)
-                    .child(div().w(px(180.)).child(mono(label, pal)))
-                    .child(h_flex().w(px(64.)).child(action_badge(action, pal)))
-                    .child(div().flex_1())
-                    .child(div().flex_1()),
-            );
-        }
-        out.push(table.into_any_element());
+                .px(px(16.))
+                .py(px(8.))
+                .gap(px(12.))
+                .items_center()
+                .border_t_1()
+                .border_color(pal.subtle)
+                .child(div().w(px(180.)).child(Input::new(input).small()))
+                .child(
+                    div()
+                        .text_size(px(FS_XS))
+                        .text_color(pal.muted)
+                        .child("Name the tool, such as shell or github__create_issue, then Enter"),
+                ),
+        );
     }
+    if !rules.tools.is_empty() || !rules.mcp.is_empty() {
+        table = table.child(
+            h_flex()
+                .px(px(16.))
+                .py(px(8.))
+                .gap(px(12.))
+                .border_t_1()
+                .border_color(pal.subtle)
+                .text_size(px(FS_XS))
+                .text_color(pal.faint)
+                .child(div().w(px(180.)).child("Tool"))
+                .child(div().w(px(132.)).child("Default"))
+                .child(div().flex_1().child("Allow"))
+                .child(div().flex_1().child("Deny"))
+                .child(div().w(px(22.))),
+        );
+    }
+    for (tool, rule) in &rules.tools {
+        table = table.child(tool_rule_row(tool, rule, edits, pal));
+    }
+    for (server, action) in &rules.mcp {
+        table = table.child(server_rule_row(server, action, edits, pal));
+    }
+    out.push(table.into_any_element());
     out.push(
         note(
-            if rules.confine_paths {
-                "File tools are confined to the working directory. Rules live in config.toml under [permissions.tools.<tool>]; deny beats allow, and the mode decides what no rule matches."
-            } else {
-                "Rules live in config.toml under [permissions.tools.<tool>]; deny beats allow, and the mode decides what no rule matches."
-            },
+            "Rules are saved to config.toml under [permissions] and apply to sessions opened after. Deny beats allow, and the mode decides what no rule matches.",
             pal,
         )
         .into_any_element(),
@@ -678,12 +771,189 @@ pub(crate) fn permissions_page(
     out
 }
 
-fn action_badge(action: &str, pal: &Palette) -> Div {
-    match action {
-        "deny" => badge("deny", pal.danger, pal.danger_soft, pal.danger_bd),
-        "ask" => badge("ask", pal.warn, pal.warn_soft, pal.warn_bd),
-        _ => badge("allow", pal.ok, pal.ok_soft, pal.ok_bd),
+/// One tool's rule: its default, its allow and deny globs, and a remove
+/// button, each writing the rule back when clicked.
+fn tool_rule_row(tool: &str, rule: &ToolRules, edits: &RuleEdits, pal: &'static Palette) -> Div {
+    let write = |rule: ToolRules| {
+        let store = edits.store.clone();
+        let tool = tool.to_owned();
+        move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
+            let value = rule_json(&rule);
+            store.act(cx, |store| {
+                store.config_set(&["permissions", "tools", &tool], Some(value.clone()));
+            });
+        }
+    };
+    let mut defaults = h_flex().w(px(132.)).gap(px(2.));
+    for action in ACTIONS {
+        let on = rule.default == action || (rule.default.is_empty() && action == "allow");
+        let mut next = rule.clone();
+        action.clone_into(&mut next.default);
+        defaults = defaults.child(
+            action_chip(format!("rule-{tool}-{action}"), action, on, pal).on_click(write(next)),
+        );
     }
+    let globs = |deny: bool| {
+        let list = if deny { &rule.deny } else { &rule.allow };
+        let mut cell = h_flex().flex_1().flex_wrap().gap(px(4.)).items_center();
+        for (ix, glob) in list.iter().enumerate() {
+            let mut next = rule.clone();
+            if deny {
+                next.deny.remove(ix);
+            } else {
+                next.allow.remove(ix);
+            }
+            cell = cell.child(
+                glob_chip(format!("glob-{tool}-{deny}-{ix}"), glob, deny, pal)
+                    .on_click(write(next)),
+            );
+        }
+        let adding = RuleAdd::Glob {
+            tool: tool.to_owned(),
+            deny,
+        };
+        if edits.adding.as_ref() == Some(&adding)
+            && let Some(input) = &edits.input
+        {
+            cell.child(div().w(px(140.)).child(Input::new(input).small()))
+        } else {
+            let on_add = edits.on_add.clone();
+            cell.child(
+                div()
+                    .id(SharedString::from(format!("glob-add-{tool}-{deny}")))
+                    .px(px(6.))
+                    .rounded(px(R_FULL))
+                    .border_1()
+                    .border_dashed()
+                    .border_color(pal.line)
+                    .text_size(px(FS_XS))
+                    .text_color(pal.faint)
+                    .cursor_pointer()
+                    .child("+ glob")
+                    .on_click(move |_, window, cx| on_add(Some(adding.clone()), window, cx)),
+            )
+        }
+    };
+    let store = edits.store.clone();
+    let path_tool = tool.to_owned();
+    rule_row(pal)
+        .child(div().w(px(180.)).child(mono(tool.to_owned(), pal)))
+        .child(defaults)
+        .child(globs(false))
+        .child(globs(true))
+        .child(
+            remove_button(format!("rule-rm-{tool}"), pal).on_click(move |_, _, cx| {
+                store.act(cx, |store| {
+                    store.config_set(&["permissions", "tools", &path_tool], None);
+                });
+            }),
+        )
+}
+
+/// One MCP server's fallback action, with a remove button.
+fn server_rule_row(server: &str, action: &str, edits: &RuleEdits, pal: &'static Palette) -> Div {
+    let label = if server == "*" {
+        "every MCP server".to_owned()
+    } else {
+        format!("mcp: {server}")
+    };
+    let mut defaults = h_flex().w(px(132.)).gap(px(2.));
+    for choice in ACTIONS {
+        let store = edits.store.clone();
+        let server = server.to_owned();
+        defaults = defaults.child(
+            action_chip(
+                format!("mcp-rule-{server}-{choice}"),
+                choice,
+                action == choice,
+                pal,
+            )
+            .on_click(move |_, _, cx| {
+                store.act(cx, |store| {
+                    store.config_set(
+                        &["permissions", "mcp", &server],
+                        Some(serde_json::json!(choice)),
+                    );
+                });
+            }),
+        );
+    }
+    let store = edits.store.clone();
+    let path_server = server.to_owned();
+    rule_row(pal)
+        .child(div().w(px(180.)).child(mono(label, pal)))
+        .child(defaults)
+        .child(div().flex_1())
+        .child(div().flex_1())
+        .child(
+            remove_button(format!("mcp-rule-rm-{server}"), pal).on_click(move |_, _, cx| {
+                store.act(cx, |store| {
+                    store.config_set(&["permissions", "mcp", &path_server], None);
+                });
+            }),
+        )
+}
+
+fn rule_row(pal: &Palette) -> Div {
+    h_flex()
+        .px(px(16.))
+        .py(px(8.))
+        .gap(px(12.))
+        .items_center()
+        .border_t_1()
+        .border_color(pal.subtle)
+}
+
+/// One choice of a rule's default, filled in its tone when chosen.
+fn action_chip(id: String, action: &'static str, on: bool, pal: &Palette) -> Stateful<Div> {
+    let (fg, bg, line) = match action {
+        "deny" => (pal.danger, pal.danger_soft, pal.danger_bd),
+        "ask" => (pal.warn, pal.warn_soft, pal.warn_bd),
+        _ => (pal.ok, pal.ok_soft, pal.ok_bd),
+    };
+    div()
+        .id(SharedString::from(id))
+        .px(px(6.))
+        .rounded(px(R_FULL))
+        .border_1()
+        .text_size(px(FS_XS))
+        .cursor_pointer()
+        .map(|chip| {
+            if on {
+                chip.text_color(fg).bg(bg).border_color(line)
+            } else {
+                chip.text_color(pal.faint)
+                    .border_color(gpui_kit::transparent_black())
+            }
+        })
+        .child(action)
+}
+
+/// One glob of a rule, removed when clicked.
+fn glob_chip(id: String, glob: &str, deny: bool, pal: &Palette) -> Stateful<Div> {
+    let chip = if deny {
+        badge(glob.to_owned(), pal.danger, pal.danger_soft, pal.danger_bd)
+    } else {
+        plain_badge(glob.to_owned(), pal)
+    };
+    chip.id(SharedString::from(id))
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .font_family(FONT_MONO)
+        .cursor_pointer()
+        .child(Icon::new(IconName::X).with_size(px(10.)))
+}
+
+fn remove_button(id: String, pal: &Palette) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(id))
+        .w(px(22.))
+        .flex()
+        .justify_center()
+        .text_color(pal.faint)
+        .cursor_pointer()
+        .child(Icon::new(IconName::Trash).with_size(px(13.)))
 }
 
 /// The capabilities `[plugins.capabilities]` may grant, as kage-plugin
@@ -983,7 +1253,34 @@ pub(crate) fn plugins_page(
 
 #[cfg(test)]
 mod tests {
-    use super::{Snapshot, plugin_rows, provider_rows, toggled_allowlist};
+    use super::{RuleAdd, Snapshot, plugin_rows, provider_rows, rule_added, toggled_allowlist};
+
+    #[test]
+    fn an_added_glob_writes_the_whole_rule() {
+        let config = serde_json::json!({"permissions": {"tools": {
+            "shell": {"default": "ask", "allow": ["git status"], "deny": []}
+        }}});
+        let add = RuleAdd::Glob {
+            tool: "shell".into(),
+            deny: true,
+        };
+        let (path, value) = rule_added(&config, &add, " rm -rf * ").unwrap();
+        assert_eq!(path, ["permissions", "tools", "shell"]);
+        assert_eq!(
+            value,
+            serde_json::json!({"default": "ask", "allow": ["git status"], "deny": ["rm -rf *"]})
+        );
+        let (path, value) = rule_added(&config, &RuleAdd::Tool, "write").unwrap();
+        assert_eq!(path, ["permissions", "tools", "write"]);
+        assert_eq!(value, serde_json::json!({"default": "ask"}));
+        assert!(rule_added(&config, &RuleAdd::Tool, "  ").is_none());
+        let fresh = RuleAdd::Glob {
+            tool: "read".into(),
+            deny: false,
+        };
+        let (_, value) = rule_added(&config, &fresh, "src/**").unwrap();
+        assert_eq!(value["default"], "allow");
+    }
 
     #[test]
     fn plugins_join_the_installed_files_with_the_config() {

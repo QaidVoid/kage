@@ -10,10 +10,12 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, Div, ElementId, Entity, FocusHandle, Focusable, Hsla,
-    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render, SharedString,
-    Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    AnyElement, App, AppContext as _, Context, Div, ElementId, Entity, FocusHandle, Focusable,
+    Hsla, InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
+
+use gpui_kit::component::input::{Escape as InputEscape, InputEvent, InputState};
 
 use crate::prefs::Prefs;
 use crate::store::{Store, StoreHandle as _};
@@ -212,6 +214,12 @@ pub struct SettingsView {
     focus: FocusHandle,
     /// The plugin whose capabilities show on the Plugins page.
     plugin_open: Option<String>,
+    /// What is being added to the permission rules, while the rule
+    /// field shows.
+    rule_add: Option<config::RuleAdd>,
+    /// The text field a rule's glob or tool name is typed into, made
+    /// the first time one is added.
+    rule_input: Option<Entity<InputState>>,
 }
 
 impl Focusable for SettingsView {
@@ -230,6 +238,8 @@ impl SettingsView {
             section: Section::General,
             focus: cx.focus_handle(),
             plugin_open: None,
+            rule_add: None,
+            rule_input: None,
         }
     }
 
@@ -245,6 +255,61 @@ impl SettingsView {
         self.go(section, cx);
         window.focus(&self.focus, cx);
         cx.notify();
+    }
+
+    /// Starts adding `add` to the permission rules in the rule field,
+    /// or stops with `None`.
+    fn add_rule(
+        &mut self,
+        add: Option<config::RuleAdd>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.rule_add = add;
+        if self.rule_add.is_some() {
+            // A new field starts empty. Clearing one before its first
+            // render would lay its text out in the default font, which
+            // the web cannot resolve.
+            if let Some(input) = &self.rule_input {
+                input.update(cx, |state, cx| state.set_value("", window, cx));
+            } else {
+                let input = cx.new(|cx| InputState::new(window, cx).placeholder("glob or tool"));
+                cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
+                    match event {
+                        InputEvent::PressEnter { .. } => this.commit_rule(window, cx),
+                        InputEvent::Blur => this.add_rule(None, window, cx),
+                        _ => {}
+                    }
+                })
+                .detach();
+                self.rule_input = Some(input);
+            }
+            if let Some(input) = &self.rule_input {
+                input.update(cx, |state, cx| state.focus(window, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Writes what the rule field holds and closes it.
+    fn commit_rule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(add), Some(input)) = (self.rule_add.clone(), self.rule_input.clone()) else {
+            return;
+        };
+        let text = input.read(cx).value().to_string();
+        let added = self
+            .store
+            .read(cx)
+            .config()
+            .and_then(|config| config::rule_added(config, &add, &text));
+        if let Some((path, value)) = added {
+            self.store.update(cx, |store, cx| {
+                let path: Vec<&str> = path.iter().map(String::as_str).collect();
+                store.config_set(&path, Some(value));
+                cx.notify();
+            });
+        }
+        self.add_rule(None, window, cx);
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
@@ -516,6 +581,15 @@ impl SettingsView {
                     });
                 let current = store.permission_mode();
                 let handle = self.store.clone();
+                let view = cx.entity();
+                let edits = config::RuleEdits {
+                    store: self.store.clone(),
+                    adding: self.rule_add.clone(),
+                    input: self.rule_input.clone(),
+                    on_add: std::rc::Rc::new(move |add, window, cx| {
+                        view.update(cx, |this, cx| this.add_rule(add, window, cx));
+                    }),
+                };
                 config::permissions_page(
                     &snapshot,
                     modes.as_ref(),
@@ -523,6 +597,7 @@ impl SettingsView {
                     move |value, cx| {
                         handle.act(cx, |store| store.set_permission(&value));
                     },
+                    &edits,
                     pal,
                 )
             }
@@ -1204,6 +1279,9 @@ impl Render for SettingsView {
             .track_focus(&self.focus)
             .key_context("Settings")
             .on_action(cx.listener(|this, _: &SettingsClose, _, cx| this.close(cx)))
+            .on_action(cx.listener(|this, _: &InputEscape, window, cx| {
+                this.add_rule(None, window, cx);
+            }))
             .w(px(960.))
             .h(px(720.))
             .max_h(gpui_kit::relative(0.92))

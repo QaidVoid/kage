@@ -286,6 +286,13 @@ pub enum RunRequest {
         /// The mode to switch to.
         on: bool,
     },
+    /// Set the goal the session works toward, from `/goal`: the engine
+    /// keeps the session working until a judge finds it met. `None`
+    /// clears it.
+    SetGoal {
+        /// What done looks like.
+        goal: Option<String>,
+    },
     /// Turn the session's plan mode on or off, from `/plan` or the
     /// toggle key. While on, the agent investigates without changing
     /// anything and presents a plan for review.

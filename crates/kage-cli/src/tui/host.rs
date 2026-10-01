@@ -225,6 +225,7 @@ impl Host {
             },
             RunRequest::SetPermissionMode(mode) => self.set_permission_mode(mode),
             RunRequest::SwarmMode { on } => self.send(CommandKind::SwarmMode { on }),
+            RunRequest::SetGoal { goal } => self.send(CommandKind::SetGoal { goal }),
             RunRequest::PlanMode { on } => self.send(CommandKind::PlanMode { on }),
             RunRequest::CompactNow => self.send(CommandKind::Compact),
             RunRequest::RunShell(command) => self.send(CommandKind::Shell { command }),

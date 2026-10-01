@@ -4,6 +4,23 @@
 use super::*;
 
 #[test]
+fn goal_command_sets_and_clears_the_goal() {
+    let (mut app, rx, _events) = app_with_events();
+    app.dispatch_builtin("goal", "", &crate::command::ParsedArgs::new());
+    assert!(rx.try_recv().is_err(), "no argument is a usage error");
+    app.dispatch_builtin("goal", "tests pass", &crate::command::ParsedArgs::new());
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(RunRequest::SetGoal { goal: Some(goal) }) if goal == "tests pass"
+    ));
+    app.dispatch_builtin("goal", "clear", &crate::command::ParsedArgs::new());
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(RunRequest::SetGoal { goal: None })
+    ));
+}
+
+#[test]
 fn swarm_command_flips_the_mode_and_runs_one_shot_tasks() {
     let (mut app, rx, events) = app_with_events();
 

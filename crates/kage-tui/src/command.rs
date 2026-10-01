@@ -361,6 +361,18 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         subcommands: &[],
     },
     CommandSpec {
+        name: "goal",
+        aliases: &[],
+        description: "set what done looks like; kage keeps working until it is met",
+        category: CommandCategory::Both,
+        args: &[ArgSpec::Rest {
+            name: "goal",
+            optional: true,
+            hint: "<goal>|clear",
+        }],
+        subcommands: &[],
+    },
+    CommandSpec {
         name: "plan",
         aliases: &[],
         description: "turn plan mode on or off, or plan one task now",
@@ -736,7 +748,7 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 28);
+        assert_eq!(BUILTIN_COMMANDS.len(), 29);
     }
 
     #[test]

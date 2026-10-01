@@ -262,7 +262,7 @@ pub(super) fn config_options(
         text(
             "goal",
             "Goal",
-            Some("What done looks like; the session is told when a turn meets it"),
+            Some("What done looks like; the session keeps working until a turn meets it"),
             settings.goal.as_deref().unwrap_or_default(),
         ),
     ]

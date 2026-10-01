@@ -206,11 +206,12 @@ enum Input {
         session: SessionId,
         title: String,
     },
-    /// A session's finished turn met its goal. Published as a success
-    /// notice.
-    GoalMet {
+    /// The judge's verdict on whether a session's finished turn met its
+    /// goal.
+    GoalChecked {
         session: SessionId,
         goal: String,
+        met: bool,
     },
     Publish(HostEvent),
     SetRegistry(Arc<ProviderRegistry>),
@@ -417,6 +418,12 @@ struct Session {
     shell: Option<String>,
     title: bool,
     title_pending: bool,
+    /// Whether the judge found the goal met; no more checks run until
+    /// the goal changes.
+    goal_met: bool,
+    /// Turns the engine started on its own toward the goal since the
+    /// user last prompted or set it.
+    goal_turns: u32,
     /// A generated title that arrived while a run or an idle restart held
     /// the recorder, written when the recorder comes back.
     late_title: Option<String>,
@@ -524,12 +531,9 @@ impl Dispatcher {
                         self.record_title(session, title);
                     }
                 }
-                Input::GoalMet { session, goal } => notice(
-                    &self.bus,
-                    session,
-                    NoticeLevel::Success,
-                    format!("goal met: {goal}"),
-                ),
+                Input::GoalChecked { session, goal, met } => {
+                    self.goal_checked(session, &goal, met);
+                }
                 Input::Publish(event) => {
                     if let Some(id) = self.active {
                         self.bus.publish(id, event);
@@ -623,6 +627,8 @@ impl Dispatcher {
                 shells: 0,
                 title,
                 title_pending,
+                goal_met: false,
+                goal_turns: 0,
                 late_title: None,
                 plugin_tools: PluginTools::default(),
                 agents,
@@ -693,7 +699,13 @@ impl Dispatcher {
             return;
         }
         match command.kind {
-            CommandKind::Prompt { content, delivery } => self.prompt(id, content, delivery),
+            CommandKind::Prompt { content, delivery } => {
+                self.sessions
+                    .get_mut(&id)
+                    .expect("session checked")
+                    .goal_turns = 0;
+                self.prompt(id, content, delivery);
+            }
             CommandKind::WithdrawPrompt { delivery } => self.withdraw_prompt(id, delivery),
             CommandKind::Cancel if self.waiting.contains(&id) => self.end_waiting(id),
             // An idle session's flag would stay set and cancel every
@@ -828,7 +840,63 @@ impl Dispatcher {
         let goal = goal.filter(|g| !g.trim().is_empty());
         self.update_state(id, |s| {
             s.state.goal = goal;
+            s.goal_met = false;
+            s.goal_turns = 0;
         });
+    }
+
+    /// Act on the judge's verdict for `goal` on session `id`. A verdict
+    /// for a goal that changed since is dropped. A met goal is
+    /// announced once; an unmet one keeps the session working: a turn
+    /// toward it starts while the session is idle with nothing queued,
+    /// up to [`MAX_GOAL_TURNS`] in a row.
+    fn goal_checked(&mut self, id: SessionId, goal: &str, met: bool) {
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        if session.state.goal.as_deref() != Some(goal) || session.goal_met {
+            return;
+        }
+        if met {
+            session.goal_met = true;
+            notice(
+                &self.bus,
+                id,
+                NoticeLevel::Success,
+                format!("goal met: {goal}"),
+            );
+            return;
+        }
+        let busy =
+            session.idle.is_none() || !session.queued.is_empty() || self.waiting.contains(&id);
+        if busy {
+            return;
+        }
+        if session.goal_turns >= MAX_GOAL_TURNS {
+            notice(
+                &self.bus,
+                id,
+                NoticeLevel::Warning,
+                format!(
+                    "goal not met after {MAX_GOAL_TURNS} more turns; send a prompt to keep going"
+                ),
+            );
+            return;
+        }
+        session.goal_turns += 1;
+        let turn = session.goal_turns;
+        notice(
+            &self.bus,
+            id,
+            NoticeLevel::Info,
+            format!("goal not met yet; continuing ({turn}/{MAX_GOAL_TURNS})"),
+        );
+        let text = format!(
+            "[goal] The goal is not met yet: {goal}. Keep working toward it. If it \
+             cannot be met, say why and stop."
+        );
+        let prompt = Message::new(Role::User, vec![Content::Text { text }], None);
+        self.start_run(id, Work::Prompt(prompt));
     }
 
     /// Announce and persist a plan mode change the gate already holds.
@@ -1132,6 +1200,7 @@ impl Dispatcher {
             .then(|| {
                 self.sessions
                     .get(&id)
+                    .filter(|s| !s.goal_met)
                     .and_then(|s| s.state.goal.clone())
                     .filter(|g| !g.trim().is_empty())
             })
@@ -1417,16 +1486,19 @@ impl Dispatcher {
         let tx = self.tx.clone();
         let goal = goal.to_owned();
         thread::spawn(move || {
-            if crate::goal::met(
+            let met = crate::goal::met(
                 provider.as_ref(),
                 &bare_model,
                 &goal,
                 &user,
                 &reply,
                 &CancelFlag::new(),
-            ) {
-                let _ = tx.send(Input::GoalMet { session: id, goal });
-            }
+            );
+            let _ = tx.send(Input::GoalChecked {
+                session: id,
+                goal,
+                met,
+            });
         });
     }
 
@@ -1763,6 +1835,10 @@ fn thinking_entry(level: Option<ThinkingLevel>) -> kage_session::SessionEntry {
 /// How often a swarm timeout watchdog rechecks its run-end flag, so a
 /// disarmed or shutdown watchdog stops within this slice.
 const WATCHDOG_SLICE: Duration = Duration::from_millis(250);
+
+/// Most turns the engine starts on its own toward an unmet goal before
+/// it waits for the user.
+const MAX_GOAL_TURNS: u32 = 8;
 
 /// Most times a swarm child may be requeued after a rate limit
 /// before its next failure is delivered to the swarm call.

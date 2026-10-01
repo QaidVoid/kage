@@ -4378,3 +4378,75 @@ fn a_client_resume_keeps_the_member_on_its_card_and_reports_to_the_parent() {
         .expect("the parent reads the results");
     assert!(note.contains("a two"), "{note}");
 }
+
+#[test]
+fn an_unmet_goal_keeps_the_session_working_until_it_is_met() {
+    let mock = MockProvider::sequence(vec![
+        text_turn("working"),
+        text_turn("NO"),
+        text_turn("more"),
+        text_turn("YES"),
+    ]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let id = SessionId::new();
+    h.open(id, None);
+    h.engine.send(Command::to(
+        id,
+        CommandKind::SetGoal {
+            goal: Some("ship it".into()),
+        },
+    ));
+    prompt(&h.engine, id, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 2);
+    assert_eq!(
+        outcomes(&events),
+        [RunOutcome::Completed, RunOutcome::Completed]
+    );
+    let met = wait_for(&h.events, |e| {
+        notices(std::slice::from_ref(e))
+            .iter()
+            .any(|n| n.starts_with("goal met"))
+    });
+    h.engine.shutdown();
+    let mut seen = notices(&events);
+    seen.extend(notices(&met));
+    assert!(
+        seen.iter()
+            .any(|n| n == "goal not met yet; continuing (1/8)"),
+        "{seen:?}"
+    );
+    assert!(seen.iter().any(|n| n == "goal met: ship it"), "{seen:?}");
+    assert_eq!(mock.call_count(), 4, "no turn after the goal is met");
+}
+
+#[test]
+fn an_unmet_goal_stops_after_its_turn_cap() {
+    let mut scripts = Vec::new();
+    for _ in 0..=MAX_GOAL_TURNS {
+        scripts.push(text_turn("trying"));
+        scripts.push(text_turn("NO"));
+    }
+    let mock = MockProvider::sequence(scripts);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let id = SessionId::new();
+    h.open(id, None);
+    h.engine.send(Command::to(
+        id,
+        CommandKind::SetGoal {
+            goal: Some("impossible".into()),
+        },
+    ));
+    prompt(&h.engine, id, "go", Delivery::Steer);
+    let stopped = wait_for(&h.events, |e| {
+        notices(std::slice::from_ref(e))
+            .iter()
+            .any(|n| n.starts_with("goal not met after"))
+    });
+    h.engine.shutdown();
+    let runs = outcomes(&stopped).len();
+    assert_eq!(
+        runs,
+        1 + MAX_GOAL_TURNS as usize,
+        "the prompt plus the capped turns"
+    );
+}

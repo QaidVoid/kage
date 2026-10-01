@@ -229,6 +229,10 @@ impl App {
                 self.run_plan_command(rest);
                 None
             }
+            "goal" => {
+                self.run_goal_command(rest);
+                None
+            }
             "todo_list" => {
                 self.open_todo_list();
                 None
@@ -406,6 +410,26 @@ impl App {
                     queue: false,
                     session: None,
                 });
+            }
+        }
+    }
+
+    /// Handle `/goal <text>` and `/goal clear`: set the goal the session
+    /// works toward, or clear it.
+    pub(crate) fn run_goal_command(&mut self, rest: &str) {
+        match rest.trim() {
+            "" => self.push_error("goal: usage `/goal <what done looks like>` or `/goal clear`"),
+            "clear" => {
+                let _ = self.send_request(RunRequest::SetGoal { goal: None });
+                self.push_info("goal cleared".to_owned());
+            }
+            goal => {
+                let _ = self.send_request(RunRequest::SetGoal {
+                    goal: Some(goal.to_owned()),
+                });
+                self.push_info(format!(
+                    "goal set: {goal}. After each turn kage checks it and keeps going until it is met."
+                ));
             }
         }
     }

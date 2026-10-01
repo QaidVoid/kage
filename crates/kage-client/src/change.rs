@@ -55,6 +55,9 @@ pub enum Change {
     /// configuration is delivered here and not kept in state, because
     /// the wire carries it raw.
     Config {
+        /// The id of the request answered: a `_kage/config/get`, or the
+        /// `_kage/config/set` whose write this snapshot follows.
+        request: u64,
         /// The configuration sections as the wire answered.
         config: Value,
     },

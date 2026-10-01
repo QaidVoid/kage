@@ -210,6 +210,8 @@ pub struct SettingsView {
     open: bool,
     section: Section,
     focus: FocusHandle,
+    /// The plugin whose capabilities show on the Plugins page.
+    plugin_open: Option<String>,
 }
 
 impl Focusable for SettingsView {
@@ -227,6 +229,7 @@ impl SettingsView {
             open: false,
             section: Section::General,
             focus: cx.focus_handle(),
+            plugin_open: None,
         }
     }
 
@@ -523,7 +526,21 @@ impl SettingsView {
                     pal,
                 )
             }
-            _ => config::plugins_page(&snapshot, pal),
+            _ => {
+                let view = cx.entity();
+                config::plugins_page(
+                    &snapshot,
+                    &self.store,
+                    self.plugin_open.as_deref(),
+                    move |name, cx| {
+                        view.update(cx, |this, cx| {
+                            this.plugin_open = name;
+                            cx.notify();
+                        });
+                    },
+                    pal,
+                )
+            }
         }
     }
 
@@ -1062,27 +1079,9 @@ impl SettingsView {
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let view = cx.entity();
-        div()
-            .id(id)
-            .w(px(36.))
-            .h(px(20.))
-            .flex_none()
-            .rounded(px(R_FULL))
-            .bg(if on { pal.accent } else { pal.fill_hover })
-            .relative()
-            .cursor_pointer()
-            .on_click(move |_, _, cx| {
-                view.update(cx, |this, cx| this.flip(cx, field));
-            })
-            .child(
-                div()
-                    .absolute()
-                    .top(px(2.))
-                    .left(px(if on { 18. } else { 2. }))
-                    .size(px(16.))
-                    .rounded(px(R_FULL))
-                    .bg(gpui_kit::white()),
-            )
+        crate::views::kit::switch(id, on, pal).on_click(move |_, _, cx| {
+            view.update(cx, |this, cx| this.flip(cx, field));
+        })
     }
 }
 

@@ -883,7 +883,13 @@ fn a_config_write_answers_with_the_snapshot_or_fails() {
             result: snapshot.clone(),
         }],
     );
-    assert_eq!(changes, vec![Change::Config { config: snapshot }]);
+    assert_eq!(
+        changes,
+        vec![Change::Config {
+            request: id,
+            config: snapshot
+        }]
+    );
 
     let id = client.config_set(None, &["permissions", "tools", "shell"], None);
     let sent = client.take_outgoing();
@@ -963,6 +969,7 @@ fn one_shot_answers_arrive_as_changes() {
     assert_eq!(
         changes,
         vec![Change::Config {
+            request: 3,
             config: serde_json::json!({"providers": {}, "permissions": {}}),
         }]
     );

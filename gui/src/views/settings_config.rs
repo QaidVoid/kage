@@ -2,23 +2,26 @@
 //! snapshot: model providers, MCP servers, permissions and plugins.
 //!
 //! The pages say only what the snapshot and the live session carry. A
-//! fact the snapshot leaves out reads unknown rather than guessed, and
-//! nothing here writes config: the engine has no write method yet, so
-//! the controls that would need one are left out.
+//! fact the snapshot leaves out reads unknown rather than guessed. Edits
+//! go to the engine through `_kage/config/set`, and the snapshot it
+//! answers with redraws the page.
 
 use std::collections::BTreeMap;
 
 use gpui_kit::assets::IconName;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Div, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, div, px,
+    AnyElement, App, Div, Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use kage_client::wire::{McpServerStatus, SessionConfigOption};
 use serde::Deserialize;
 
+use crate::store::{Store, StoreHandle as _};
 use crate::theme::{FONT_MONO, FS_SM, FS_XS, Palette, R_FULL, R_LG};
+use crate::views::kit::switch;
 
 /// The parts of the snapshot the pages read. Every field defaults, so a
 /// section the engine leaves out reads as empty.
@@ -683,10 +686,36 @@ fn action_badge(action: &str, pal: &Palette) -> Div {
     }
 }
 
-/// Every plugin installed or named in the config, by name, with its
-/// capability grants and a line saying whether it loads, whether it has
-/// grants and whether it has settings.
-fn plugin_rows(snapshot: &Snapshot) -> Vec<(String, Vec<String>, String)> {
+/// The capabilities `[plugins.capabilities]` may grant, as kage-plugin
+/// names them.
+const CAPABILITIES: [&str; 8] = [
+    "session_write",
+    "exec",
+    "env",
+    "net",
+    "crypto",
+    "context",
+    "provider",
+    "fs_write",
+];
+
+/// One plugin as the Plugins page lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PluginRow {
+    /// The plugin's name, its file stem.
+    pub name: String,
+    /// The capabilities config.toml grants it.
+    pub caps: Vec<String>,
+    /// Whether it loads, whether it has grants and whether it has
+    /// settings.
+    pub detail: String,
+    /// Whether the allowlist lets it load; `None` when no file is
+    /// installed under the name.
+    pub enabled: Option<bool>,
+}
+
+/// Every plugin installed or named in the config, by name.
+fn plugin_rows(snapshot: &Snapshot) -> Vec<PluginRow> {
     let plugins = &snapshot.plugins;
     let mut names: Vec<&String> = snapshot
         .installed_plugins
@@ -701,13 +730,14 @@ fn plugin_rows(snapshot: &Snapshot) -> Vec<(String, Vec<String>, String)> {
         .into_iter()
         .map(|name| {
             let caps = plugins.capabilities.get(name).cloned().unwrap_or_default();
-            let installed = snapshot
+            let enabled = snapshot
                 .installed_plugins
                 .iter()
-                .find(|plugin| &plugin.name == name);
-            let state = match installed {
-                Some(plugin) if plugin.enabled => "loads",
-                Some(_) => "skipped by the allowlist",
+                .find(|plugin| &plugin.name == name)
+                .map(|plugin| plugin.enabled);
+            let state = match enabled {
+                Some(true) => "loads",
+                Some(false) => "skipped by the allowlist",
                 None => "not installed",
             };
             let detail = [
@@ -719,16 +749,173 @@ fn plugin_rows(snapshot: &Snapshot) -> Vec<(String, Vec<String>, String)> {
             .flatten()
             .collect::<Vec<_>>()
             .join(" \u{b7} ");
-            (name.clone(), caps, detail)
+            PluginRow {
+                name: name.clone(),
+                caps,
+                detail,
+                enabled,
+            }
         })
         .collect()
+}
+
+/// The `[plugins] enabled` allowlist after turning plugin `name` on or
+/// off. An empty list loads every plugin, so turning one off lists every
+/// other installed plugin; names the list holds stay. `None` when the
+/// list would end up empty, which would load every plugin instead of
+/// none.
+fn toggled_allowlist(snapshot: &Snapshot, name: &str, on: bool) -> Option<Vec<String>> {
+    let mut list = if snapshot.plugins.enabled.is_empty() {
+        snapshot
+            .installed_plugins
+            .iter()
+            .map(|plugin| plugin.name.clone())
+            .collect()
+    } else {
+        snapshot.plugins.enabled.clone()
+    };
+    list.retain(|entry| entry != name);
+    if on {
+        list.push(name.to_owned());
+    }
+    list.sort();
+    (!list.is_empty()).then_some(list)
+}
+
+/// One plugin's row: its name, grants and state, a switch for whether
+/// it loads, and once opened the capabilities it may be granted.
+fn plugin_row(
+    snapshot: &Snapshot,
+    row: &PluginRow,
+    expanded: bool,
+    store: &Entity<Store>,
+    on_open: impl Fn(Option<String>, &mut App) + Clone + 'static,
+    pal: &'static Palette,
+) -> AnyElement {
+    let mut line = h_flex()
+        .gap(px(6.))
+        .items_center()
+        .flex_wrap()
+        .child(mono(row.name.clone(), pal));
+    for cap in &row.caps {
+        line = line.child(plain_badge(cap.clone(), pal));
+    }
+    let name = row.name.clone();
+    let head = list_row(
+        Icon::new(if expanded {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        })
+        .with_size(px(14.))
+        .text_color(pal.faint),
+        line,
+        Some(SharedString::from(row.detail.clone())),
+        pal,
+    )
+    .id(SharedString::from(format!("plugin-{}", row.name)))
+    .cursor_pointer()
+    .on_click(move |_, _, cx| on_open((!expanded).then(|| name.clone()), cx))
+    .when_some(row.enabled, |head, on| {
+        let switch = switch(format!("plugin-on-{}", row.name), on, pal);
+        let Some(list) = toggled_allowlist(snapshot, &row.name, !on) else {
+            return head.child(
+                switch
+                    .opacity(0.45)
+                    .cursor_default()
+                    .tooltip(|window, cx| {
+                        Tooltip::new("the last plugin the allowlist names stays on: an empty [plugins] enabled loads every plugin")
+                            .build(window, cx)
+                    })
+                    .on_click(|_, _, cx| cx.stop_propagation()),
+            );
+        };
+        let store = store.clone();
+        head.child(switch.on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            let list = list.clone();
+            store.act(cx, |store| {
+                store.config_set(&["plugins", "enabled"], Some(serde_json::json!(list)));
+            });
+        }))
+    });
+    if !expanded {
+        return head.into_any_element();
+    }
+    let mut grants = h_flex().gap(px(6.)).flex_wrap();
+    for cap in CAPABILITIES {
+        let granted = row.caps.iter().any(|have| have == cap);
+        let mut next: Vec<String> = row
+            .caps
+            .iter()
+            .filter(|have| *have != cap)
+            .cloned()
+            .collect();
+        if !granted {
+            next.push(cap.to_owned());
+        }
+        let name = row.name.clone();
+        let store = store.clone();
+        grants = grants.child(
+            h_flex()
+                .id(SharedString::from(format!("grant-{}-{cap}", row.name)))
+                .gap(px(5.))
+                .px(px(8.))
+                .h(px(24.))
+                .items_center()
+                .rounded(px(R_FULL))
+                .border_1()
+                .border_color(if granted { pal.accent } else { pal.line })
+                .bg(if granted {
+                    pal.accent_soft
+                } else {
+                    pal.surface
+                })
+                .cursor_pointer()
+                .font_family(FONT_MONO)
+                .text_size(px(FS_XS))
+                .text_color(if granted { pal.ink_strong } else { pal.muted })
+                .when(granted, |chip| {
+                    chip.child(Icon::new(IconName::Check).with_size(px(12.)))
+                })
+                .child(cap)
+                .on_click(move |_, _, cx| {
+                    let value = (!next.is_empty()).then(|| serde_json::json!(next));
+                    store.act(cx, |store| {
+                        store.config_set(&["plugins", "capabilities", &name], value.clone());
+                    });
+                }),
+        );
+    }
+    v_flex()
+        .child(head)
+        .child(
+            v_flex()
+                .px(px(42.))
+                .pb(px(12.))
+                .gap(px(8.))
+                .child(
+                    div()
+                        .text_size(px(FS_XS))
+                        .text_color(pal.muted)
+                        .child("Capabilities granted in config.toml. A plugin still asks for each one before it gets it."),
+                )
+                .child(grants),
+        )
+        .into_any_element()
 }
 
 /// The Plugins page: the directory and the allowlist, then every plugin
 /// installed or named in the config, with whether it loads, its
 /// capability grants and whether it has settings.
 #[must_use]
-pub(crate) fn plugins_page(snapshot: &Snapshot, pal: &Palette) -> Vec<AnyElement> {
+pub(crate) fn plugins_page(
+    snapshot: &Snapshot,
+    store: &Entity<Store>,
+    open: Option<&str>,
+    on_open: impl Fn(Option<String>, &mut App) + Clone + 'static,
+    pal: &'static Palette,
+) -> Vec<AnyElement> {
     let plugins = &snapshot.plugins;
     let dir = plugins
         .dir
@@ -771,21 +958,14 @@ pub(crate) fn plugins_page(snapshot: &Snapshot, pal: &Palette) -> Vec<AnyElement
     if !rows.is_empty() {
         out.push(group("Plugins", pal).into_any_element());
         let mut list = boxed(pal);
-        for (name, caps, detail) in rows {
-            let mut line = h_flex()
-                .gap(px(6.))
-                .items_center()
-                .flex_wrap()
-                .child(mono(name, pal));
-            for cap in caps {
-                line = line.child(plain_badge(cap, pal));
-            }
-            list = list.child(list_row(
-                Icon::new(IconName::Zap)
-                    .with_size(px(14.))
-                    .text_color(pal.faint),
-                line,
-                Some(SharedString::from(detail)),
+        for row in rows {
+            let expanded = open == Some(row.name.as_str());
+            list = list.child(plugin_row(
+                snapshot,
+                &row,
+                expanded,
+                store,
+                on_open.clone(),
                 pal,
             ));
         }
@@ -793,7 +973,7 @@ pub(crate) fn plugins_page(snapshot: &Snapshot, pal: &Palette) -> Vec<AnyElement
     }
     out.push(
         note(
-            "Lua plugins load from the plugin directory when a session opens. Blocks and widgets a plugin draws carry its name as an owner badge. Enabling and installing wait for _kage/config/set.",
+            "Lua plugins load from the plugin directory when a session opens, so a change applies to the next session. Blocks and widgets a plugin draws carry its name as an owner badge.",
             pal,
         )
         .into_any_element(),
@@ -803,7 +983,7 @@ pub(crate) fn plugins_page(snapshot: &Snapshot, pal: &Palette) -> Vec<AnyElement
 
 #[cfg(test)]
 mod tests {
-    use super::{Snapshot, plugin_rows, provider_rows};
+    use super::{Snapshot, plugin_rows, provider_rows, toggled_allowlist};
 
     #[test]
     fn plugins_join_the_installed_files_with_the_config() {
@@ -821,7 +1001,7 @@ mod tests {
         let rows = plugin_rows(&snapshot);
         let lines: Vec<(&str, &str)> = rows
             .iter()
-            .map(|(name, _, detail)| (name.as_str(), detail.as_str()))
+            .map(|row| (row.name.as_str(), row.detail.as_str()))
             .collect();
         assert_eq!(
             lines,
@@ -831,7 +1011,17 @@ mod tests {
                 ("tokps", "loads \u{b7} capabilities granted in config.toml"),
             ]
         );
-        assert_eq!(rows[2].1, ["session_write"]);
+        assert_eq!(rows[2].caps, ["session_write"]);
+        assert_eq!(rows[1].enabled, None);
+        assert_eq!(
+            toggled_allowlist(&snapshot, "clock", true).unwrap(),
+            ["clock", "tokps"]
+        );
+        assert_eq!(toggled_allowlist(&snapshot, "tokps", false), None);
+        let open = Snapshot::parse(&serde_json::json!({
+            "installedPlugins": [{"name": "a", "enabled": true}, {"name": "b", "enabled": true}]
+        }));
+        assert_eq!(toggled_allowlist(&open, "a", false).unwrap(), ["b"]);
     }
 
     #[test]

@@ -232,6 +232,11 @@ pub struct Store {
     engine_options: Option<Vec<kage_client::wire::OptionEntry>>,
     /// The models the engine can run, from `_kage/models/list`.
     models: Option<Vec<kage_client::wire::ModelProvider>>,
+    /// Config writes by request id: `None` while in flight, then
+    /// whether the engine took the write.
+    writes: HashMap<u64, Option<Result<(), String>>>,
+    /// Provider tests by request id, once answered.
+    tests: HashMap<u64, kage_client::wire::ConfigTestResult>,
     /// Forks waiting for their copy, by source session.
     forking: HashMap<String, ForkPlan>,
     /// Copies waiting to open, with their source, by copy.
@@ -274,6 +279,8 @@ impl Store {
             fs_preview: None,
             config: None,
             engine_options: None,
+            writes: HashMap::new(),
+            tests: HashMap::new(),
             models: None,
             forking: HashMap::new(),
             forked: HashMap::new(),
@@ -590,7 +597,21 @@ impl Store {
             }
             match change {
                 Change::Forked { from, to } => self.open_fork(from, to),
-                Change::Config { config } => self.config = Some(config.clone()),
+                Change::Config { request, config } => {
+                    self.config = Some(config.clone());
+                    if let Some(outcome) = self.writes.get_mut(request) {
+                        *outcome = Some(Ok(()));
+                    }
+                }
+                Change::Failed { request, error } => {
+                    if let Some(outcome) = self.writes.get_mut(request) {
+                        *outcome = Some(Err(error.message.clone()));
+                    }
+                }
+                Change::Tested { request, result } => {
+                    self.tests.insert(*request, result.clone());
+                }
+                Change::KeySaved { .. } => self.ask_config(),
                 Change::Options { options } => self.engine_options = Some(options.clone()),
                 Change::Models { providers } => self.models = Some(providers.clone()),
                 Change::Session { id } => self.settle_fork(id),
@@ -1000,6 +1021,42 @@ impl Store {
     /// refreshes [`Store::engine_options`], a refusal toasts.
     pub fn set_engine_option(&mut self, name: &str, value: serde_json::Value) {
         self.client.set_engine_option(name, value);
+    }
+
+    /// Replaces the user config entry at `path` with `value`, or removes
+    /// it when `value` is `None`. The answer refreshes
+    /// [`Store::config`]; [`Store::write_outcome`] reports it under the
+    /// returned id.
+    pub fn config_set(&mut self, path: &[&str], value: Option<serde_json::Value>) -> u64 {
+        let id = self.client.config_set(self.active.as_deref(), path, value);
+        self.writes.insert(id, None);
+        id
+    }
+
+    /// Whether config write `id` landed, once the engine answered: the
+    /// engine's refusal on failure.
+    #[must_use]
+    pub fn write_outcome(&self, id: u64) -> Option<&Result<(), String>> {
+        self.writes.get(&id)?.as_ref()
+    }
+
+    /// Asks the engine to list `provider`'s models; the answer lands
+    /// under the returned id in [`Store::test_result`].
+    pub fn config_test(&mut self, provider: kage_client::wire::ProviderProbe) -> u64 {
+        self.client.config_test(provider)
+    }
+
+    /// The answer to provider test `id`, once it arrived.
+    #[must_use]
+    pub fn test_result(&self, id: u64) -> Option<&kage_client::wire::ConfigTestResult> {
+        self.tests.get(&id)
+    }
+
+    /// Saves `key` as `provider`'s API key in the engine's credential
+    /// store, or removes it when `key` is `None`. The snapshot refreshes
+    /// once the engine saved it.
+    pub fn save_key(&mut self, provider: &str, key: Option<String>) {
+        self.client.auth_set(provider, key);
     }
 
     /// The last configuration snapshot the engine answered with.

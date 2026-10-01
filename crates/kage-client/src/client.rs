@@ -1353,7 +1353,10 @@ fn params<T: serde::Serialize>(value: &T) -> Value {
 /// test, a saved key, the model list or the engine options.
 fn settings_answer(id: u64, pending: Pending, result: Value) -> Vec<Change> {
     match pending {
-        Pending::ConfigGet => vec![Change::Config { config: result }],
+        Pending::ConfigGet => vec![Change::Config {
+            request: id,
+            config: result,
+        }],
         Pending::ConfigTest => {
             match answer::<kage_acp_wire::ConfigTestResult>(id, result, "_kage/config/test result")
             {

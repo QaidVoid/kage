@@ -1,9 +1,12 @@
 //! Small controls more than one view draws the same way.
 
 use gpui_kit::component::h_flex;
-use gpui_kit::{Div, FontWeight, InteractiveElement as _, SharedString, Stateful, Styled as _, px};
+use gpui_kit::{
+    Div, FontWeight, InteractiveElement as _, ParentElement as _, SharedString, Stateful,
+    Styled as _, div, px,
+};
 
-use crate::theme::{FS_XS, Palette, R_MD, SP_3};
+use crate::theme::{FS_XS, Palette, R_FULL, R_MD, SP_3};
 
 /// The tones a small action button carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,4 +53,27 @@ pub(crate) fn btn_sm(id: impl Into<SharedString>, tone: BtnTone, pal: &Palette) 
             .text_color(pal.danger)
             .hover(move |style| style.bg(danger_soft)),
     }
+}
+
+/// An on/off switch as the design draws it: a 36 by 20 pill with its
+/// knob on the right when on. The click is the caller's.
+pub(crate) fn switch(id: impl Into<SharedString>, on: bool, pal: &Palette) -> Stateful<Div> {
+    div()
+        .id(id.into())
+        .w(px(36.))
+        .h(px(20.))
+        .flex_none()
+        .rounded(px(R_FULL))
+        .bg(if on { pal.accent } else { pal.fill_hover })
+        .relative()
+        .cursor_pointer()
+        .child(
+            div()
+                .absolute()
+                .top(px(2.))
+                .left(px(if on { 18. } else { 2. }))
+                .size(px(16.))
+                .rounded(px(R_FULL))
+                .bg(gpui_kit::white()),
+        )
 }

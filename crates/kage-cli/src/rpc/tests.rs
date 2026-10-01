@@ -3144,6 +3144,51 @@ fn a_tool_call_is_announced_once_then_updated_when_something_changed() {
 }
 
 #[test]
+fn a_finished_edit_carries_its_changes_as_diffs() {
+    let id = ToolCallId::new("call_edit");
+    let mut seen = HashMap::new();
+    let input = serde_json::json!({
+        "path": "src/a.rs",
+        "changes": [
+            {"old_str": "a", "new_str": "b"},
+            {"range": {"start": 2, "end": 2}, "text": "c\n"},
+        ],
+    });
+    to_update(
+        &mut seen,
+        &LoopEvent::ToolCallStart {
+            id: id.clone(),
+            name: "edit".into(),
+            input_partial: input,
+        },
+    );
+    let Some(SessionUpdate::ToolCallUpdate(update)) = to_update(
+        &mut seen,
+        &LoopEvent::ToolCallEnd {
+            id,
+            output: ToolOutput {
+                text: "edited".into(),
+                ..ToolOutput::default()
+            },
+        },
+    ) else {
+        panic!("the end is an update");
+    };
+    let diffs: Vec<_> = update
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            kage_acp::acp::ToolCallContent::Diff(diff) => Some(diff),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(diffs.len(), 1, "a line-range change names no old text");
+    assert_eq!(diffs[0].path, "src/a.rs");
+    assert_eq!(diffs[0].old_text.as_deref(), Some("a"));
+    assert_eq!(diffs[0].new_text, "b");
+}
+
+#[test]
 fn text_maps_to_agent_message_chunks() {
     let update = to_update(
         &mut HashMap::new(),

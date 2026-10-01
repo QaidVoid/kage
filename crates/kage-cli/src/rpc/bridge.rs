@@ -6,11 +6,11 @@ use std::sync::{Arc, Mutex};
 
 use kage_acp::acp::{
     AvailableCommandsUpdate, CompactionUpdate, ConfigOptionUpdate, ContentBlock, Cost,
-    CurrentModeUpdate, KageMeta, McpStatusUpdate, MessageChunk, NoticeTone, NoticeUpdate, Plan,
-    SessionConfigSelectOption, SessionInfoUpdate, SessionUpdate, SubagentSessionCapabilities,
-    SubagentState, SubagentSwarm, SubagentUpdate, SwarmMeta, ToolCall, ToolCallContent,
-    ToolCallMeta, ToolCallStatus, ToolCallUpdate, ToolKind, TurnPhase, TurnReason, TurnUpdate,
-    UsageUpdate,
+    CurrentModeUpdate, DiffContent, KageMeta, McpStatusUpdate, MessageChunk, NoticeTone,
+    NoticeUpdate, Plan, SessionConfigSelectOption, SessionInfoUpdate, SessionUpdate,
+    SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate, SwarmMeta, ToolCall,
+    ToolCallContent, ToolCallMeta, ToolCallStatus, ToolCallUpdate, ToolKind, TurnPhase, TurnReason,
+    TurnUpdate, UsageUpdate,
 };
 use kage_acp::agent::{PermissionDecision, PlanReviewDecision, request_plan_review, send_update};
 use kage_core::protocol::{
@@ -55,7 +55,7 @@ pub(super) struct Bridge {
     /// call the model makes under its advertised name still renders
     /// with the real tool's title, kind, and read-only grouping.
     pub(super) aliases: BTreeMap<String, String>,
-    pub(super) seen: HashMap<SessionId, HashMap<String, serde_json::Value>>,
+    pub(super) seen: HashMap<SessionId, HashMap<String, SeenCall>>,
     pub(super) stops: HashMap<SessionId, CoreStopReason>,
     pub(super) tree: AgentTree,
     /// Whether the client advertised the subagents capability.
@@ -799,7 +799,7 @@ fn describe_call(name: &str, input: &serde_json::Value) -> String {
 /// changed, and the later steps always do. `seen` holds the input last
 /// sent for each call.
 pub(super) fn to_update(
-    seen: &mut HashMap<String, serde_json::Value>,
+    seen: &mut HashMap<String, SeenCall>,
     event: &LoopEvent,
 ) -> Option<SessionUpdate> {
     match event {
@@ -822,7 +822,13 @@ pub(super) fn to_update(
             id,
             name,
             input_partial,
-        } => match seen.insert(id.to_string(), input_partial.clone()) {
+        } => match seen.insert(
+            id.to_string(),
+            SeenCall {
+                name: name.clone(),
+                input: input_partial.clone(),
+            },
+        ) {
             None => Some(SessionUpdate::ToolCall(ToolCall {
                 tool_call_id: id.to_string(),
                 title: tool_title(name),
@@ -832,7 +838,7 @@ pub(super) fn to_update(
                 raw_input: Some(input_partial.clone()),
                 meta: swarm_meta(name, input_partial),
             })),
-            Some(last) if last == *input_partial => None,
+            Some(last) if last.input == *input_partial => None,
             Some(_) => Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
                 tool_call_id: id.to_string(),
                 raw_input: Some(input_partial.clone()),
@@ -855,6 +861,12 @@ pub(super) fn to_update(
             }))
         }
         LoopEvent::ToolCallEnd { id, output } => {
+            let mut content = vec![text_content(output.text.clone())];
+            if !output.is_error
+                && let Some(call) = seen.get(&id.to_string())
+            {
+                content.extend(diff_contents(&call.name, &call.input));
+            }
             Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
                 tool_call_id: id.to_string(),
                 status: Some(if output.is_error {
@@ -862,7 +874,7 @@ pub(super) fn to_update(
                 } else {
                     ToolCallStatus::Completed
                 }),
-                content: vec![text_content(output.text.clone())],
+                content,
                 raw_output: output.structured.clone(),
                 ..ToolCallUpdate::default()
             }))
@@ -887,6 +899,56 @@ pub(super) fn to_update(
         )),
         LoopEvent::Error { kind } => Some(notice_update(NoticeLevel::Error, kind.to_string())),
         _ => None,
+    }
+}
+
+/// What a tool call announced so far: the tool it calls and its input
+/// as last streamed.
+#[derive(Debug, Clone)]
+pub(super) struct SeenCall {
+    name: String,
+    input: serde_json::Value,
+}
+
+/// The `diff` content a finished `edit` or `write` call carries, read
+/// from its own input: one diff per text replacement, and the whole new
+/// file for a write. A line-range change names no old text, so it
+/// carries none rather than a diff that would read as a new file.
+fn diff_contents(name: &str, input: &serde_json::Value) -> Vec<ToolCallContent> {
+    let Some(path) = input["path"].as_str() else {
+        return Vec::new();
+    };
+    match name {
+        "write" => input["content"]
+            .as_str()
+            .map(|content| {
+                ToolCallContent::Diff(DiffContent {
+                    path: path.to_owned(),
+                    old_text: None,
+                    new_text: content.to_owned(),
+                })
+            })
+            .into_iter()
+            .collect(),
+        "edit" => {
+            let changes = match input["changes"].as_array() {
+                Some(changes) => changes.iter().collect(),
+                None => vec![input],
+            };
+            changes
+                .into_iter()
+                .filter_map(|change| {
+                    let old = change["old_str"].as_str()?;
+                    let new = change["new_str"].as_str()?;
+                    Some(ToolCallContent::Diff(DiffContent {
+                        path: path.to_owned(),
+                        old_text: Some(old.to_owned()),
+                        new_text: new.to_owned(),
+                    }))
+                })
+                .collect()
+        }
+        _ => Vec::new(),
     }
 }
 

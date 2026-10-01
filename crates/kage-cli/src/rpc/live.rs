@@ -94,7 +94,7 @@ pub(super) struct Seed {
     /// fresh one from these.
     pub(super) spawns: Vec<Spawn>,
     /// Tool inputs the attach replay already showed, by call id.
-    pub(super) seen: HashMap<String, serde_json::Value>,
+    pub(super) seen: HashMap<String, super::bridge::SeenCall>,
     /// Running subagents the bridge streams and settles.
     pub(super) running: HashSet<SessionId>,
 }

@@ -404,6 +404,9 @@ impl App {
             .map(|(_, p)| p.clone())
             .collect();
         let breadcrumb = self.breadcrumb();
+        // An agent of a resumed session cannot be messaged, so its view
+        // gives the input's rows to the transcript.
+        let read_only = self.focused_read_only();
         let placeholder = self.agent_placeholder().or(plan_placeholder);
         let agents_total = self.agents_under_view();
         let status = view::StatusCtx {
@@ -479,13 +482,15 @@ impl App {
                 );
                 if let Some((panel, _)) = approval {
                     heights.input = panel.height(area.width).min(area.height * 3 / 5);
+                } else if read_only {
+                    heights.input = 0;
                 }
                 let regions = split(area, heights);
                 let mut view_regions = regions;
                 // The completion popup anchors to the
                 // input box, below the pinned agents and pending rows.
                 let mut box_regions = regions;
-                if approval.is_some() {
+                if approval.is_some() || read_only {
                     view_regions.input.height = 0;
                 } else {
                     let pinned_rows = view::pinned_area_rows(&agent_rows, agents_total);

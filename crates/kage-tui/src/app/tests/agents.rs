@@ -1506,7 +1506,18 @@ fn a_resumed_session_lists_its_agents_and_opens_them_read_only() {
     type_text(&mut app, "more please");
     app.handle_key(code(KeyCode::Enter));
     assert!(resolutions(&rx).is_empty(), "nothing reaches the engine");
-    assert_eq!(app.input.text(), "more please");
+    assert_eq!(app.input.text(), "", "the hidden input takes no text");
+    let rows = rendered(&mut app, 80, 24);
+    assert!(
+        !rows.iter().any(|r| r.contains("cannot be messaged")),
+        "no placeholder shows: {rows:#?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains('\u{2500}')),
+        "no input rules either: {rows:#?}"
+    );
+    app.handle_key(code(KeyCode::Esc));
+    assert_eq!(app.focus, None, "keys still act");
 }
 
 #[test]

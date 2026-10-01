@@ -300,6 +300,31 @@ impl App {
         key: ratatui::crossterm::event::KeyEvent,
         now: Instant,
     ) -> Vec<Routed> {
+        self.keeping_read_only_draft(|app| app.route_editor_key_unguarded(key, now))
+    }
+
+    /// Runs `route` and, on a read-only agent view, puts back the draft
+    /// it edited: that view shows no input, so keys still act (scroll,
+    /// go back, commands) but never type into a hidden draft.
+    fn keeping_read_only_draft<T>(&mut self, route: impl FnOnce(&mut Self) -> T) -> T {
+        let kept = self
+            .focused_read_only()
+            .then(|| self.input.text().to_owned());
+        let out = route(self);
+        if let Some(kept) = kept
+            && self.input.text() != kept
+        {
+            let end = self.input.text().len();
+            self.input.splice(0, end, &kept);
+        }
+        out
+    }
+
+    fn route_editor_key_unguarded(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+        now: Instant,
+    ) -> Vec<Routed> {
         let focus = self.focus;
         self.input
             .set_recallable(self.pending.iter().any(|(session, _)| *session == focus));
@@ -348,6 +373,10 @@ impl App {
     /// Resolve a pending key sequence whose timeout passed. A modal
     /// layer that opened meanwhile drops it instead.
     pub(crate) fn tick_keymap(&mut self, now: Instant) -> Vec<Routed> {
+        self.keeping_read_only_draft(|app| app.tick_keymap_unguarded(now))
+    }
+
+    fn tick_keymap_unguarded(&mut self, now: Instant) -> Vec<Routed> {
         if self.sequencer.deadline().is_none() {
             return Vec::new();
         }

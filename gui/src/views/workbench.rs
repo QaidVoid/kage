@@ -376,6 +376,12 @@ impl WorkbenchView {
         cx.notify();
     }
 
+    /// Shows the agents list.
+    pub fn open_agents(&mut self, cx: &mut Context<Self>) {
+        self.tab = Tab::Agents;
+        cx.notify();
+    }
+
     /// Shows the fetched pages.
     pub fn open_browser(&mut self, cx: &mut Context<Self>) {
         self.tab = Tab::Browser;

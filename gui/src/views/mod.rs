@@ -4,6 +4,7 @@
 //! sends commands back through it. No view parses frames or names
 //! wire types beyond the transcript items it renders.
 
+pub(crate) mod agents;
 pub mod approval;
 pub mod chrome;
 pub mod composer;

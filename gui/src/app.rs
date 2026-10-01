@@ -237,6 +237,11 @@ impl Shell {
                 TranscriptEvent::OpenFile(_) => workbench.open_files(cx),
                 TranscriptEvent::OpenChange(call) => workbench.open_change(call.clone(), cx),
                 TranscriptEvent::OpenBrowser => workbench.open_browser(cx),
+                // The child transcript tab lands with the workbench rework;
+                // until then a card opens the agents list it is part of.
+                TranscriptEvent::OpenAgent(_) | TranscriptEvent::OpenAgents => {
+                    workbench.open_agents(cx);
+                }
             });
             cx.notify();
         })

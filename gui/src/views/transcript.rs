@@ -35,6 +35,7 @@ use gpui_kit::{
 use crate::store::{EXIT_PLAN_TOOL, PlanChoice, Store, StoreHandle as _, plan_review};
 use crate::theme::{FS_2XS, FS_SM, FS_XS, R_FULL, R_LG, R_MD, R_SM, SP_1, SP_2, SP_3, SP_4, SP_5};
 use crate::timing::RunEnd;
+use crate::views::agents::{self, AgentFacts, SwarmCounts, SwarmView, agent_facts, children_of};
 use crate::views::kit::{self, BtnTone};
 use crate::views::workbench::{ChangeEntry, change_entries};
 use kage_client::wire::{NoticeTone, ToolCallContent, ToolCallStatus, TurnReason};
@@ -370,7 +371,7 @@ fn input_str<'a>(input: Option<&'a serde_json::Value>, key: &str) -> &'a str {
 
 /// The verb and target one tool call renders with: past tense once the
 /// call ended, otherwise in progress.
-fn tool_verb(call: &ToolCallItem) -> (String, String) {
+pub(crate) fn tool_verb(call: &ToolCallItem) -> (String, String) {
     let done = call.status == ToolCallStatus::Completed || call.status == ToolCallStatus::Failed;
     let input = call.input.as_ref();
     let (done_word, doing_word, target) = match call.title.as_str() {
@@ -732,6 +733,8 @@ struct UiState {
     expanded: HashSet<RowKey>,
     /// Shell calls whose whole output shows, not only its tail.
     full_output: HashSet<usize>,
+    /// Swarm cards whose prompt template shows.
+    templates: HashSet<usize>,
 }
 
 /// What the transcript asks the shell to open elsewhere.
@@ -743,6 +746,10 @@ pub enum TranscriptEvent {
     OpenChange(String),
     /// Show the fetched pages in the workbench.
     OpenBrowser,
+    /// Show this subagent in the workbench.
+    OpenAgent(String),
+    /// Show the agents list in the workbench.
+    OpenAgents,
 }
 
 /// The find state the transcript tints rows with: the matching row
@@ -1063,6 +1070,64 @@ impl TranscriptView {
         }
     }
 
+    /// Opens or closes a swarm card's member list.
+    pub(crate) fn toggle_swarm(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.toggle(RowKey::Item(ix));
+        cx.notify();
+    }
+
+    /// Shows or hides a swarm card's prompt template.
+    pub(crate) fn toggle_template(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if !self.ui.templates.remove(&ix) {
+            self.ui.templates.insert(ix);
+        }
+        cx.notify();
+    }
+
+    /// The card an `agent` or `swarm` call renders as, once the engine
+    /// announced the children it started; until then the call renders
+    /// as its plain row.
+    fn render_agents(
+        &self,
+        session: &Session,
+        ix: usize,
+        call: &ToolCallItem,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let store = self.store.read(cx);
+        let members: Vec<AgentFacts> = children_of(session, &call.tool_call_id)
+            .into_iter()
+            .map(|(id, agent)| agent_facts(store, session, id, agent))
+            .collect();
+        let view = cx.entity();
+        if call.title == "agent" {
+            let facts = members.first()?;
+            return Some(agents::agent_card(ix, facts, &self.store, &view, cx));
+        }
+        if members.is_empty() {
+            return None;
+        }
+        let live = SwarmCounts::of(&members).live();
+        // A running swarm opens by default; a click flips the default.
+        let open = live != self.ui.expanded.contains(&RowKey::Item(ix));
+        let took = store
+            .timings(&session.id)
+            .and_then(|times| times.tool(&call.tool_call_id));
+        Some(agents::swarm_card(
+            &SwarmView {
+                ix,
+                call,
+                members: &members,
+                open,
+                template_open: self.ui.templates.contains(&ix),
+                took,
+            },
+            &self.store,
+            &view,
+            cx,
+        ))
+    }
+
     /// Answers the plan review from its card.
     fn review(&mut self, choice: PlanChoice, revision: Option<&str>, cx: &mut Context<Self>) {
         self.store
@@ -1256,6 +1321,13 @@ impl TranscriptView {
                         cx,
                     )
                     .into_any_element()
+                }
+                Some(TranscriptItem::ToolCall(call))
+                    if (call.title == "agent" || call.title == "swarm")
+                        && let Some(card) = session
+                            .and_then(|session| self.render_agents(session, *ix, call, cx)) =>
+                {
+                    card
                 }
                 Some(TranscriptItem::ToolCall(call)) if call.title == EXIT_PLAN_TOOL => {
                     match session {
@@ -3036,6 +3108,16 @@ fn item_fingerprint(session: &Session, ix: usize, hasher: &mut impl std::hash::H
         }
         Some(TranscriptItem::User { content, .. }) => content.len().hash(hasher),
         Some(TranscriptItem::ToolCall(call)) => {
+            if call.title == "agent" || call.title == "swarm" {
+                // The card follows the children's records and their runs.
+                for (id, agent) in &session.agents {
+                    if agent.tool_call_id.as_deref() == Some(call.tool_call_id.as_str()) {
+                        id.hash(hasher);
+                        format!("{:?}", agent.state).hash(hasher);
+                        agent.reason.hash(hasher);
+                    }
+                }
+            }
             if call.title == EXIT_PLAN_TOOL {
                 // The card follows the open ask and the decision after it.
                 session.permissions.len().hash(hasher);

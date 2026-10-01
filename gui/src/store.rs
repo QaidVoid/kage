@@ -541,6 +541,28 @@ impl Store {
         true
     }
 
+    /// Stops session `id`: a subagent's stop button.
+    pub fn cancel_session(&mut self, id: &str) {
+        self.client.cancel(id);
+    }
+
+    /// Continues the given swarm children of the active session with
+    /// their own task. Reports whether a request went out.
+    pub fn resume_swarm(&mut self, members: &[String]) -> bool {
+        let Some(session) = self.active.clone() else {
+            return false;
+        };
+        if members.is_empty() {
+            return false;
+        }
+        let members = members
+            .iter()
+            .map(|id| (id.clone(), String::new()))
+            .collect();
+        self.client.swarm_resume(&session, members);
+        true
+    }
+
     /// Answers the open permission ask of `session`, by request id.
     /// Reports whether the ask was found and the answer queued.
     pub fn reply_permission(

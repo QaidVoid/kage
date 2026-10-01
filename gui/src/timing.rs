@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use kage_client::wire::{ToolCallStatus, TurnReason};
+use kage_client::wire::{SubagentState, ToolCallStatus, TurnReason};
 use kage_client::{Session, TranscriptItem};
 use web_time::Instant;
 
@@ -50,6 +50,8 @@ pub struct SessionTimes {
     tools: HashMap<String, Span>,
     /// Per turn-end item index that closed a run.
     run_ends: HashMap<usize, RunEnd>,
+    /// Per subagent session id.
+    agents: HashMap<String, Span>,
     /// How many items the last observation saw.
     seen: usize,
 }
@@ -65,6 +67,13 @@ impl SessionTimes {
     #[must_use]
     pub fn tool(&self, id: &str) -> Option<Duration> {
         self.tools.get(id).and_then(Span::took)
+    }
+
+    /// How long subagent `id` has run, or ran once it ended.
+    #[must_use]
+    pub fn agent(&self, id: &str) -> Option<Duration> {
+        let span = self.agents.get(id)?;
+        Some(span.took.unwrap_or_else(|| span.start.elapsed()))
     }
 
     /// The end of the run the turn-end item at `ix` closed.
@@ -124,6 +133,22 @@ impl SessionTimes {
                     }
                 }
                 _ => {}
+            }
+        }
+        for (id, agent) in &session.agents {
+            let live = matches!(
+                agent.state,
+                None | Some(SubagentState::Running | SubagentState::Paused)
+            );
+            if live {
+                if session.running {
+                    self.agents.entry(id.clone()).or_insert(Span {
+                        start: now,
+                        took: None,
+                    });
+                }
+            } else {
+                close(self.agents.get_mut(id), now);
             }
         }
         if !session.running {

@@ -685,6 +685,12 @@ impl SettingsView {
             note("Experiments that may change or go away.", pal).into_any_element(),
             boxed(pal)
                 .child(row(
+                    "Turn timeline rail",
+                    "A minimap beside the transcript with ticks for turns, edits, approvals, failures and swarms",
+                    self.toggle("set-rail", prefs.rail, |p| &mut p.rail, pal, cx),
+                    pal,
+                ))
+                .child(row(
                     "Swarm constellation",
                     "Swarm cards draw one star per worker, lit by state",
                     self.toggle(

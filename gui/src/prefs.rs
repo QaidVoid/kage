@@ -32,6 +32,8 @@ pub struct Prefs {
     pub constellation: bool,
     /// Lab: the context ring opens the gauge with a Compact action.
     pub fuel: bool,
+    /// Lab: the turn timeline rail beside the transcript.
+    pub rail: bool,
     /// Vim mode: normal-mode motions over the transcript, a `:` line
     /// and a modeline. Off by default.
     pub vim: bool,
@@ -53,6 +55,7 @@ impl Default for Prefs {
             confirm_swarm: true,
             constellation: true,
             fuel: true,
+            rail: true,
             vim: false,
             pinned: BTreeSet::new(),
             archived: BTreeSet::new(),

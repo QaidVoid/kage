@@ -12,6 +12,7 @@
 //! carries a stable element id, so element state such as the markdown
 //! parse cache stays with its item across frames.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
@@ -19,6 +20,7 @@ use std::time::Duration;
 use web_time::Instant;
 
 use gpui_kit::assets::IconName;
+use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::input::{Input, InputEvent, InputState, TextareaState};
@@ -1036,6 +1038,8 @@ pub struct TranscriptView {
     find: Option<FindMarks>,
     /// The row the vim cursor sits on, while vim mode moves one.
     vim_cursor: Option<usize>,
+    /// Where the rail last laid out, so a press on it maps to a row.
+    rail_bounds: Rc<Cell<Option<gpui_kit::Bounds<gpui_kit::Pixels>>>>,
 }
 
 impl EventEmitter<TranscriptEvent> for TranscriptView {}
@@ -1082,6 +1086,7 @@ impl TranscriptView {
             render_counts: HashMap::new(),
             find: None,
             vim_cursor: None,
+            rail_bounds: Rc::default(),
         }
     }
 
@@ -1293,6 +1298,134 @@ impl TranscriptView {
             self.ui.expanded.clear();
         }
         cx.notify();
+    }
+
+    /// Scrolls so the row at fraction `at` of the rows sits on top: a
+    /// press or drag on the rail.
+    fn rail_seek(&mut self, y: gpui_kit::Pixels, cx: &mut Context<Self>) {
+        let Some(bounds) = self.rail_bounds.get() else {
+            return;
+        };
+        let count = self.model.rows.len();
+        if count == 0 || bounds.size.height <= px(0.) {
+            return;
+        }
+        let at = f32::from(y - bounds.origin.y) / f32::from(bounds.size.height);
+        let ix = ((at.clamp(0., 1.) * count as f32) as usize).min(count - 1);
+        self.list.scroll_to(gpui_kit::ListOffset {
+            item_ix: ix,
+            offset_in_item: px(0.),
+        });
+        self.list.pause_following_tail();
+        cx.notify();
+    }
+
+    /// The turn timeline rail: a tick per marked row, placed by its
+    /// place in the rows, and the viewport's thumb. Hovering a tick names
+    /// it, a click scrolls to it, and a press or drag on the rail scrolls
+    /// there.
+    fn rail(&self, session: &Session, cx: &Context<Self>) -> Option<AnyElement> {
+        let rows = &self.model.rows;
+        let count = rows.len();
+        if !self.store.read(cx).prefs().rail || count == 0 || self.pinned.is_some() {
+            return None;
+        }
+        let pal = crate::theme::Palette::active(cx);
+        let viewport = f32::from(self.list.viewport_bounds().size.height);
+        let max = f32::from(self.list.max_offset_for_scrollbar().y);
+        let scrolled = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
+        let total = max + viewport;
+        let (thumb_top, thumb_h) = if total > 0. {
+            (scrolled / total, viewport / total)
+        } else {
+            (0., 1.)
+        };
+        let bounds = self.rail_bounds.clone();
+        let mut rail = div()
+            .id("rail")
+            .absolute()
+            .top(px(10.))
+            .bottom(px(10.))
+            .right(px(-20.))
+            .w(px(16.))
+            .cursor_pointer()
+            .on_prepaint(move |laid, _, _| bounds.set(Some(laid)))
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, event: &gpui_kit::MouseDownEvent, _, cx| {
+                    this.rail_seek(event.position.y, cx);
+                }),
+            )
+            .on_mouse_move(
+                cx.listener(|this, event: &gpui_kit::MouseMoveEvent, _, cx| {
+                    if event.dragging() {
+                        this.rail_seek(event.position.y, cx);
+                    }
+                }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(7.))
+                    .top_0()
+                    .bottom_0()
+                    .w(px(2.))
+                    .rounded(px(1.))
+                    .bg(pal.subtle),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(1.))
+                    .right(px(1.))
+                    .top(relative(thumb_top.clamp(0., 1.)))
+                    .h(relative(thumb_h.clamp(0., 1.)))
+                    .min_h(px(18.))
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(pal.line)
+                    .bg(pal.fill_hover),
+            );
+        for (ix, row) in rows.iter().enumerate() {
+            let Some((tick, label)) = rail_tick(session, row) else {
+                continue;
+            };
+            let at = (ix as f32 + 0.5) / count as f32;
+            let (left, w, h, color, round) = match tick {
+                Tick::Turn => (2., 12., 2., pal.muted, 2.),
+                Tick::Edit => (3., 10., 3., pal.ok, 2.),
+                Tick::Fail => (3., 10., 4., pal.danger, 2.),
+                Tick::Approval => (5., 6., 6., pal.ok, 3.),
+                Tick::Swarm => (4., 8., 8., pal.done, 4.),
+                Tick::Agent => (5., 6., 6., pal.info, 2.),
+                Tick::Plan => (3., 10., 4., pal.accent, 2.),
+            };
+            let label = SharedString::from(label);
+            rail = rail.child(
+                div()
+                    .id(ElementId::named_usize("rail-tick", ix))
+                    .absolute()
+                    .top(relative(at))
+                    .mt(px(-h / 2.))
+                    .left(px(left))
+                    .w(px(w))
+                    .h(px(h))
+                    .rounded(px(round))
+                    .bg(color)
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx)
+                    })
+                    .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.list.scroll_to_reveal_item(ix);
+                        this.list.pause_following_tail();
+                        cx.notify();
+                    })),
+            );
+        }
+        Some(rail.into_any_element())
     }
 
     /// Brings the row `key` into view and stops following the bottom.
@@ -3129,7 +3262,17 @@ impl Render for TranscriptView {
         let follow = self.following();
         let colors = cx.theme().colors;
 
-        let mut panel = v_flex().id("transcript").size_full().min_h_0();
+        // The rail hangs in the column's right gutter, outside the
+        // clipped list, so it never covers a row.
+        let rail = self
+            .session(self.store.read(cx))
+            .and_then(|session| self.rail(session, cx));
+        let mut panel = v_flex()
+            .id("transcript")
+            .size_full()
+            .min_h_0()
+            .relative()
+            .children(rail);
         if let Some(banner) = banner {
             panel = panel.child(banner);
         }
@@ -3202,6 +3345,106 @@ impl Render for TranscriptView {
         } else {
             self.placeholder(cx).into_any_element()
         })
+    }
+}
+
+/// What a rail tick marks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tick {
+    /// A prompt: a turn starts.
+    Turn,
+    /// A file changed.
+    Edit,
+    /// Something failed or was refused.
+    Fail,
+    /// An approval was given.
+    Approval,
+    /// A swarm ran.
+    Swarm,
+    /// A subagent ran.
+    Agent,
+    /// The plan.
+    Plan,
+}
+
+/// The rail tick a row carries, with its hover label, when it is one
+/// worth marking.
+fn rail_tick(session: &Session, row: &Row) -> Option<(Tick, String)> {
+    let item = |ix: usize| session.items.get(ix);
+    let short = |text: &str| text.chars().take(60).collect::<String>();
+    match row {
+        Row::User { text, .. } => Some((Tick::Turn, format!("You: {}", short(text)))),
+        Row::Tool { ix, .. } => {
+            let Some(TranscriptItem::ToolCall(call)) = item(*ix) else {
+                return None;
+            };
+            if call.status == ToolCallStatus::Failed {
+                return Some((Tick::Fail, format!("Failed: {}", short(&call.title))));
+            }
+            match call.title.as_str() {
+                "swarm" => return Some((Tick::Swarm, "Swarm".to_owned())),
+                "agent" => {
+                    let task = call
+                        .input
+                        .as_ref()
+                        .and_then(|input| input.get("description"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("subagent");
+                    return Some((Tick::Agent, format!("Agent: {}", short(task))));
+                }
+                _ => {}
+            }
+            let (add, del) = diff_lines(call)?
+                .iter()
+                .fold((0, 0), |(a, d), line| match line {
+                    DiffLine::Add(_) => (a + 1, d),
+                    DiffLine::Del(_) => (a, d + 1),
+                    _ => (a, d),
+                });
+            let path = call
+                .input
+                .as_ref()
+                .and_then(|input| input.get("path"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            Some((
+                Tick::Edit,
+                format!("Edited {}  +{add} -{del}", basename(path)),
+            ))
+        }
+        Row::Group {
+            failed, members, ..
+        } if *failed > 0 => Some((
+            Tick::Fail,
+            format!("{failed} of {} calls failed", members.len()),
+        )),
+        Row::Changes { end } => {
+            let count = run_changes(session, *end).len();
+            Some((Tick::Edit, format!("{count} files changed")))
+        }
+        Row::Decision { ix } => match item(*ix) {
+            Some(TranscriptItem::Decision {
+                subject, allowed, ..
+            }) => Some(if *allowed {
+                (Tick::Approval, format!("Approved: {}", short(subject)))
+            } else {
+                (Tick::Fail, format!("Rejected: {}", short(subject)))
+            }),
+            _ => None,
+        },
+        Row::Plan { .. } => Some((Tick::Plan, "Plan".to_owned())),
+        Row::Notice { ix } => match item(*ix) {
+            Some(TranscriptItem::Notice {
+                tone: kage_client::wire::NoticeTone::Error,
+                text,
+            }) => Some((Tick::Fail, short(text))),
+            _ => None,
+        },
+        Row::TurnEnd {
+            outcome: Some(Outcome::Failed),
+            ..
+        } => Some((Tick::Fail, "Turn failed".to_owned())),
+        _ => None,
     }
 }
 

@@ -260,8 +260,8 @@ runs the command. This works in modeless mode and in vim Insert mode.
 
 In vim mode there is also the `:` ex line on the bottom row, opened
 from Normal mode. It shares the prompt's command registry, parser,
-completion, and dispatch, so `:model anthropic:claude-sonnet-4-6` and
-`/model anthropic:claude-sonnet-4-6` have identical effect. `/model`
+completion, and dispatch, so `:model anthropic/claude-sonnet-4-6` and
+`/model anthropic/claude-sonnet-4-6` have identical effect. `/model`
 without an id opens the model picker, like `ctrl+p`.
 
 | Key   | From                       | Effect                          |

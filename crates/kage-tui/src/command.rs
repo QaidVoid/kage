@@ -56,7 +56,7 @@ pub enum ArgSpec {
         optional: bool,
     },
     /// One token chosen from a runtime-computed list
-    /// (e.g. `:model <provider:model>`).
+    /// (e.g. `:model <provider/model>`).
     DynamicChoice {
         /// Parameter name shown in completion hints.
         name: &'static str,
@@ -307,7 +307,7 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "model",
         aliases: &[],
-        description: "switch to provider:model (opens the picker without an id)",
+        description: "switch to provider/model (opens the picker without an id)",
         category: CommandCategory::Both,
         args: &[ArgSpec::DynamicChoice {
             name: "id",

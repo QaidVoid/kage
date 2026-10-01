@@ -430,6 +430,7 @@ pub(crate) fn available_model_items(
     registry: &ProviderRegistry,
     active: &str,
 ) -> Vec<kage_tui::PickItem> {
+    let active = kage_core::canonical_model(active);
     let row = |value: String, label: &str, group: &str, input: kage_core::Inputs| {
         let badge = if value == active { '*' } else { ' ' };
         with_inputs(
@@ -451,7 +452,7 @@ pub(crate) fn available_model_items(
         if !declared.is_empty() {
             let group = provider.metadata().display_name.as_str();
             for model in declared {
-                let value = format!("{provider_id}:{}", model.id);
+                let value = kage_core::qualify_model(provider_id, &model.id);
                 items.push(row(value, &model.name, group, model.input));
             }
             continue;
@@ -460,7 +461,7 @@ pub(crate) fn available_model_items(
             continue;
         };
         for model in catalog.models {
-            let value = format!("{provider_id}:{}", model.id);
+            let value = kage_core::qualify_model(provider_id, model.id);
             items.push(row(value, model.name, catalog.name, model.input));
         }
     }
@@ -570,7 +571,7 @@ fn default_model_notice(
     if registry.resolve(configured).is_ok() {
         return None;
     }
-    let provider = configured.split_once(':').map_or(configured, |(p, _)| p);
+    let provider = kage_core::split_model(configured).map_or(configured, |(p, _)| p);
     Some(format!(
         "default_model {configured} is unavailable (no credentials for {provider}). \
          Using {using}. Run /login {provider} to connect it."
@@ -648,7 +649,7 @@ mod tests {
     fn recorded_auth_failure_names_the_login_fix() {
         let mut state = State::empty();
         state.note_run(
-            "mock:glm-4.6",
+            "mock/glm-4.6",
             &RunOutcome::Failed {
                 error: LoopError::Auth {
                     message: "status 401".into(),
@@ -669,8 +670,8 @@ mod tests {
                 message: message.into(),
             },
         };
-        state.note_run("mock:m", &failed("status 401"));
-        state.note_run("zai-coding-plan:m", &failed("token expired"));
+        state.note_run("mock/m", &failed("status 401"));
+        state.note_run("zai-coding-plan/m", &failed("token expired"));
         let notices = credential_notices(&state, &AuthStore::empty(), &registry_with_mock(), now());
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert!(notices[0].starts_with("mock "), "{notices:?}");
@@ -684,8 +685,8 @@ mod tests {
                 message: "bad key".into(),
             },
         };
-        state.note_run("mock:glm-4.6", &failed);
-        state.note_run("mock:glm-4.6", &RunOutcome::Completed);
+        state.note_run("mock/glm-4.6", &failed);
+        state.note_run("mock/glm-4.6", &RunOutcome::Completed);
         assert!(
             credential_notices(&state, &AuthStore::empty(), &registry_with_mock(), now())
                 .is_empty()
@@ -728,7 +729,7 @@ mod tests {
             id: EntryId::new(),
             ts: Utc::now(),
             cwd: dir.to_path_buf(),
-            model: "mock:m".into(),
+            model: "mock/m".into(),
             system_prompt: String::new(),
             parent_session: parent,
             parent_entry: None,
@@ -850,7 +851,7 @@ mod tests {
         assert_eq!(items.len(), 2);
         let starred: Vec<_> = items.iter().filter(|i| i.badge == Some('*')).collect();
         assert_eq!(starred.len(), 1);
-        assert_eq!(starred[0].value, "p:b");
+        assert_eq!(starred[0].value, "p/b");
         // A stale active id badges nothing instead of the default row.
         let stale = available_model_items(&registry, "p:gone");
         assert!(stale.iter().all(|i| i.badge != Some('*')));
@@ -859,11 +860,11 @@ mod tests {
     #[test]
     fn default_model_notice_only_when_configured_model_does_not_resolve() {
         let registry = ProviderRegistry::new().with(Arc::new(MockProvider::replaying(Vec::new())));
-        assert!(default_model_notice(&registry, "mock:m", "mock:m").is_none());
-        let notice = default_model_notice(&registry, "anthropic:claude-sonnet-4-6", "mock:m")
+        assert!(default_model_notice(&registry, "mock/m", "mock/m").is_none());
+        let notice = default_model_notice(&registry, "anthropic/claude-sonnet-4-6", "mock/m")
             .expect("unresolved default warns");
-        assert!(notice.contains("anthropic:claude-sonnet-4-6"), "{notice}");
-        assert!(notice.contains("Using mock:m."), "{notice}");
+        assert!(notice.contains("anthropic/claude-sonnet-4-6"), "{notice}");
+        assert!(notice.contains("Using mock/m."), "{notice}");
         assert!(notice.contains("Run /login anthropic"), "{notice}");
     }
 }

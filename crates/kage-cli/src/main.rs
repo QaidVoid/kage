@@ -87,11 +87,11 @@ struct Cli {
     #[arg(short = 'p', long = "print")]
     print: Option<String>,
 
-    /// Provider-qualified model id (`provider:model`). Defaults to
+    /// Provider-qualified model id (`provider/model`). Defaults to
     /// `[provider] default_model` when its provider has credentials,
     /// then the last model you used, then the first available
     /// provider's preferred model.
-    #[arg(short = 'm', long = "model")]
+    #[arg(short = 'm', long = "model", value_parser = model_arg)]
     model: Option<String>,
 
     /// System prompt to prepend.
@@ -137,7 +137,7 @@ pub(crate) enum Command {
         print: Option<String>,
         /// Override the recorded model. Defaults to the model the session
         /// was last using.
-        #[arg(short = 'm', long = "model")]
+        #[arg(short = 'm', long = "model", value_parser = model_arg)]
         model: Option<String>,
         /// Emit one JSON object per event on stdout instead of plain
         /// text. Same format as the top-level `--json` flag.
@@ -212,9 +212,9 @@ pub(crate) enum Command {
     /// newline-delimited JSON. Each request is answered, and loop
     /// progress is streamed back as ACP `session/update` notifications.
     Rpc {
-        /// Provider-qualified model id (`provider:model`). Defaults
+        /// Provider-qualified model id (`provider/model`). Defaults
         /// the same way as the top-level `-m`.
-        #[arg(short = 'm', long = "model")]
+        #[arg(short = 'm', long = "model", value_parser = model_arg)]
         model: Option<String>,
         /// System-prompt role override forwarded to the agent loop.
         #[arg(long = "system", default_value = "")]
@@ -228,9 +228,9 @@ pub(crate) enum Command {
     /// the token. The startup output on stderr carries the connect
     /// URL, the only place the token is ever printed.
     Serve {
-        /// Provider-qualified model id (`provider:model`). Defaults
+        /// Provider-qualified model id (`provider/model`). Defaults
         /// the same way as the top-level `-m`.
-        #[arg(short = 'm', long = "model")]
+        #[arg(short = 'm', long = "model", value_parser = model_arg)]
         model: Option<String>,
         /// System-prompt role override forwarded to the agent loop.
         #[arg(long = "system", default_value = "")]
@@ -918,6 +918,16 @@ pub(crate) fn plan_session(model: &str, system_prompt: &str) -> Result<(PathBuf,
         parent_entry: None,
     };
     Ok((path, header))
+}
+
+/// A `--model` value in the `provider/model` form, an older
+/// `provider/model` value rewritten.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "clap value parsers return a Result"
+)]
+fn model_arg(value: &str) -> Result<String, String> {
+    Ok(kage_core::canonical_model(value))
 }
 
 pub(crate) fn build_session_path(dir: &std::path::Path, session: SessionId) -> PathBuf {

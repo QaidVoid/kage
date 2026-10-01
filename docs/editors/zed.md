@@ -13,7 +13,7 @@ kage rpc
 
 Optional flags:
 
-- `-m, --model <provider:model>` pins the model for the connection.
+- `-m, --model <provider/model>` pins the model for the connection.
 - `--system <text>` overrides the system-prompt role.
 
 Credentials resolve as for the TUI and print mode (OS keyring,
@@ -53,7 +53,7 @@ Add kage as an agent server in Zed's `settings.json`:
 ```
 
 Use an absolute `command` if `kage` is not on Zed's `PATH`. Pass a
-model with `"args": ["rpc", "-m", "anthropic:claude-sonnet-4-6"]`.
+model with `"args": ["rpc", "-m", "anthropic/claude-sonnet-4-6"]`.
 Pick kage from Zed's agent panel and prompt as usual. Tool calls
 surface as Zed permission prompts (kage never auto-approves), and the
 agent's text and reasoning stream in as it works.

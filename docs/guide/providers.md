@@ -1,8 +1,9 @@
 # providers
 
 kage talks to LLM providers through ids addressed as
-`provider-id:model-id`, e.g. `kage -m anthropic:claude-sonnet-4-6` or
-`kage -m deepseek:deepseek-v4-pro`. Every provider kage knows is either
+`provider-id/model-id`, e.g. `kage -m anthropic/claude-sonnet-4-6` or
+`kage -m deepseek/deepseek-v4-pro`. The older `provider-id:model-id`
+form still works anywhere a model is named. Every provider kage knows is either
 built in, part of the OpenAI-compatible catalog, or declared by you
 under `[providers.custom.*]`.
 
@@ -142,7 +143,7 @@ The inline form works too:
 
 `[providers.custom.<id>]` registers a provider kage does not know. The
 id must be lowercase letters, digits, and dashes. It becomes the
-`<provider-id>` half of `provider-id:model-id`:
+`<provider-id>` half of `provider-id/model-id`:
 
 ```toml
 [providers.custom.llama-local]
@@ -175,7 +176,7 @@ id = "sonnet-relay"
 name = "Sonnet via relay"
 ```
 
-Models are addressed as `llama-local:llama-3-70b` and
+Models are addressed as `llama-local/llama-3-70b` and
 `relay:sonnet-relay`, and appear in the model picker once their key is
 available. A provider whose `api_key_env` is set to a non-empty
 variable that is unset (and has no saved key) is skipped. With

@@ -32,8 +32,8 @@ const TYPE_STUB: &str = include_str!("../../../plugins/types/kage.lua");
 const STARTER_CONFIG: &str = r#"# kage configuration. See `kage doctor` for diagnostics.
 
 [provider]
-# Default `provider:model` to start each session with. Override per
-# session with `kage -m <provider:model> ...` or with the in-TUI
+# Default `provider/model` to start each session with. Override per
+# session with `kage -m <provider/model> ...` or with the in-TUI
 # model picker (ctrl+p).
 default_model = "anthropic:claude-sonnet-4-6"
 

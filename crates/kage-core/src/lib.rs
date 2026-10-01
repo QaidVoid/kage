@@ -12,6 +12,7 @@ pub mod highlight;
 pub mod keymap;
 pub mod message;
 pub mod modality;
+pub mod model_id;
 pub mod options;
 pub mod permissions;
 pub mod protocol;
@@ -38,6 +39,7 @@ pub use message::{
     ToolCallId, cap_tool_result, is_agent_result,
 };
 pub use modality::{Input, Inputs};
+pub use model_id::{canonical_model, qualify_model, split_model};
 pub use protocol::SessionId;
 pub use risk::Risk;
 pub use skills::{Skill, SkillError, load_skill_file, load_skills_dir};

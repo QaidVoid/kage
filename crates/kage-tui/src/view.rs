@@ -55,7 +55,7 @@ pub(crate) use crate::usage::SessionUsage;
 #[derive(Default)]
 pub struct StatusCtx<'a> {
     /// Friendly label of the active model (the model picker's label,
-    /// else the `provider:model` id), if known.
+    /// else the `provider/model` id), if known.
     pub model: Option<&'a str>,
     /// Short session id pill, if recording is active.
     pub session_id: Option<&'a str>,

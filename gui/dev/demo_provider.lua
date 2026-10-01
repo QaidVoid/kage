@@ -6,7 +6,7 @@
 -- Install: copy into the plugin dir and grant
 --   [plugins.capabilities]
 --   demo_provider = ["provider"]
--- then pick the model `demo:script`. Type `help` for the keyword list.
+-- then pick the model `demo/script`. Type `help` for the keyword list.
 --
 -- Each request is answered from its history alone: the scenario comes
 -- from the newest user prompt, and the step is the number of assistant

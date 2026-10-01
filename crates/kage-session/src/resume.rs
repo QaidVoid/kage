@@ -124,7 +124,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
     };
     ensure_supported_version(path, header.version)?;
 
-    let mut model = header.model.clone();
+    let mut model = kage_core::canonical_model(&header.model);
     let mut thinking_level: Option<String> = None;
     let mut title: Option<String> = None;
     let mut swarm_mode: Option<bool> = None;
@@ -189,7 +189,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
                 });
                 apply_compaction(&mut history, c);
             }
-            SessionEntry::ModelChange(mc) => model = mc.model,
+            SessionEntry::ModelChange(mc) => model = kage_core::canonical_model(&mc.model),
             SessionEntry::ThinkingLevelChange(t) => thinking_level = Some(t.level),
             SessionEntry::Title(t) => title = Some(t.title),
             SessionEntry::Custom(c) => {
@@ -434,7 +434,10 @@ mod tests {
         assert_eq!(result.history[0].role, Role::User);
         assert_eq!(result.history[1].role, Role::Assistant);
         assert_eq!(result.history[3].role, Role::ToolResult);
-        assert_eq!(result.model, "anthropic:claude");
+        assert_eq!(
+            result.model, "anthropic/claude",
+            "an older id reads with a slash"
+        );
     }
 
     #[test]
@@ -549,7 +552,7 @@ mod tests {
             ],
         );
         let result = replay(&path).unwrap();
-        assert_eq!(result.model, "openai:gpt-4o");
+        assert_eq!(result.model, "openai/gpt-4o");
         assert_eq!(result.history.len(), 2);
     }
 

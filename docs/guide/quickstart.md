@@ -220,7 +220,7 @@ For scripted use, run a single prompt and stream the response to
 stdout:
 
 ```bash
-kage -p "summarize this Cargo.toml" --model anthropic:claude-sonnet-4-6
+kage -p "summarize this Cargo.toml" --model anthropic/claude-sonnet-4-6
 ```
 
 ## next steps

@@ -16,7 +16,7 @@
 //! Returning a table or an iterator function still works; events are
 //! drained after the handler returns. The host registers each
 //! [`LuaProvider`] with its `ProviderRegistry` so the agent loop can
-//! route `provider:model` strings into Lua.
+//! route `provider/model` strings into Lua.
 //!
 //! The handler runs as one job on the runtime's Lua owner thread and
 //! occupies it for the whole stream; see [`crate::PluginRuntime`].

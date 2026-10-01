@@ -8,7 +8,7 @@
 //!
 //! The file stem is the name, with the skill name rules. Frontmatter
 //! keys are `description` (required), `tools` (a comma list, absent
-//! means every tool of the parent), `model` (`provider:model`) and
+//! means every tool of the parent), `model` (`provider/model`) and
 //! `thinking` (a thinking level). `model` and `thinking` also accept
 //! `inherit`, the default. Unknown keys are ignored, so agent files
 //! written for other tools load. The body is the agent's role text.
@@ -41,7 +41,7 @@ pub struct AgentDef {
     /// Tool names the agent may use. `None` means every tool the parent
     /// has.
     pub tools: Option<Vec<String>>,
-    /// Model in `provider:model` form. `None` inherits the parent's.
+    /// Model in `provider/model` form. `None` inherits the parent's.
     pub model: Option<String>,
     /// Thinking level. `None` inherits the parent's.
     pub thinking: Option<ThinkingLevel>,
@@ -183,13 +183,11 @@ fn from_frontmatter(
     });
     let model = match inherited(front, "model") {
         None => None,
-        Some(model) => match model.split_once(':') {
-            Some((provider, id)) if !provider.is_empty() && !id.is_empty() => {
-                Some(model.to_owned())
-            }
-            _ => {
+        Some(model) => match crate::split_model(model) {
+            Some((provider, id)) => Some(crate::qualify_model(provider, id)),
+            None => {
                 return Err(format!(
-                    "model {model:?} is not `provider:model` or `inherit`"
+                    "model {model:?} is not `provider/model` or `inherit`"
                 ));
             }
         },
@@ -296,7 +294,11 @@ mod tests {
         assert_eq!(def.name, "reviewer");
         assert_eq!(def.description, "Reviews a diff.");
         assert_eq!(def.tools, Some(vec!["read".to_owned(), "grep".to_owned()]));
-        assert_eq!(def.model.as_deref(), Some("anthropic:claude-sonnet-4-6"));
+        assert_eq!(
+            def.model.as_deref(),
+            Some("anthropic/claude-sonnet-4-6"),
+            "the older form reads and comes back with a slash"
+        );
         assert_eq!(def.thinking, Some(ThinkingLevel::High));
         assert_eq!(def.body, "You review code.");
         assert_eq!(def.source, AgentSource::User);
@@ -352,7 +354,7 @@ mod tests {
             (
                 "reviewer.md",
                 "---\ndescription: d\nmodel: sonnet\n---\n",
-                "provider:model",
+                "provider/model",
             ),
             (
                 "reviewer.md",

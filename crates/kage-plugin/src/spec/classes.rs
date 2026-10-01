@@ -774,7 +774,7 @@ pub(super) const CLASSES: &[Class] = &[
             Field {
                 name: "model",
                 ty: "string",
-                doc: "Active `provider:model` id.",
+                doc: "Active `provider/model` id.",
             },
             Field {
                 name: "thinking",

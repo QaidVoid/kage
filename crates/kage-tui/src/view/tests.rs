@@ -1198,7 +1198,7 @@ fn popup_truncates_description_in_narrow_viewport() {
     let completions = crate::cmdparse::Completions {
         items: vec![completion(
             "model",
-            Some("switch to a provider:model identifier from the catalog"),
+            Some("switch to a provider/model identifier from the catalog"),
         )],
         anchor: 0,
     };

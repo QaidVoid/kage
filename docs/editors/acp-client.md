@@ -15,7 +15,7 @@ Declare agents under `[acp.agents.<name>]` in
 ```toml
 [acp.agents.upstream]
 command = "kage"
-args = ["rpc", "-m", "anthropic:claude-sonnet-4-6"]
+args = ["rpc", "-m", "anthropic/claude-sonnet-4-6"]
 
 [acp.agents.upstream.env]
 ANTHROPIC_API_KEY = "sk-..."

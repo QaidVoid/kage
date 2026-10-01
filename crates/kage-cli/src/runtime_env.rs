@@ -13,13 +13,13 @@ use kage_loop::{EnvContext, compose_system_prompt, with_skills};
 use kage_provider::ProviderRegistry;
 
 /// The entry the provider itself declares for `qualified_model`
-/// (`provider:model`), for custom and plugin providers, else the catalog
+/// (`provider/model`), for custom and plugin providers, else the catalog
 /// entry, as a [`kage_provider::ProviderModel`].
 fn model_entry(
     registry: &ProviderRegistry,
     qualified_model: &str,
 ) -> Option<kage_provider::ProviderModel> {
-    let (provider_id, model_id) = qualified_model.split_once(':')?;
+    let (provider_id, model_id) = kage_core::split_model(qualified_model)?;
     let declared = registry
         .get(provider_id)
         .and_then(|p| p.models().into_iter().find(|m| m.id == model_id));
@@ -40,7 +40,7 @@ fn model_entry(
 }
 
 /// Look up how many tokens a prompt to `qualified_model`
-/// (`provider:model`) may fill: the provider's own `models()` entry when
+/// (`provider/model`) may fill: the provider's own `models()` entry when
 /// it declares one, so custom and plugin providers can surface a window,
 /// else the catalog's input limit or context window.
 #[must_use]
@@ -78,7 +78,7 @@ pub fn max_output_tokens_for(registry: &ProviderRegistry, qualified_model: &str)
 /// `<skills>` block listing every discovered skill (when `skills` is
 /// non-empty).
 ///
-/// `model` is the qualified `provider:model` id; `workdir` is the
+/// `model` is the qualified `provider/model` id; `workdir` is the
 /// agent's effective working directory (the host's cwd). `shell` is the
 /// program shell commands actually run with (`[shell] program`); when
 /// `None`, the user's `$SHELL` is reported.

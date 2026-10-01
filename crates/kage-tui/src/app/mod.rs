@@ -151,7 +151,7 @@ pub enum RunRequest {
         /// Which queue the prompt waits in.
         delivery: kage_core::protocol::Delivery,
     },
-    /// Switch to a different `provider:model` for subsequent turns.
+    /// Switch to a different `provider/model` for subsequent turns.
     SwitchModel(String),
     /// Replay the session at the given path into the conversation
     /// buffer and pre-load its history into the agent context. The
@@ -600,7 +600,7 @@ pub struct App {
     focus: Option<kage_core::SessionId>,
     input: InputState,
     requests: Sender<RunRequest>,
-    /// Available `provider:model` ids the model picker offers. Empty
+    /// Available `provider/model` ids the model picker offers. Empty
     /// when the host has not registered any models with the App.
     model_choices: Vec<PickItem>,
     /// Active modal overlay, if any. Drives both render and input

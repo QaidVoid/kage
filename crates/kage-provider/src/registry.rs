@@ -1,6 +1,6 @@
 //! Lookup of [`Provider`] implementations by id.
 //!
-//! Models are addressed as `provider:model` strings (for example
+//! Models are addressed as `provider/model` strings (for example
 //! `anthropic:claude-sonnet-4-6`). The registry holds one `Provider`
 //! per id; the model portion is forwarded to that provider as the
 //! [`StreamRequest::model`](crate::StreamRequest::model) field.
@@ -52,19 +52,20 @@ impl ProviderRegistry {
         self.providers.insert(id, provider);
     }
 
-    /// Look up a registered provider by id (no `provider:model` parsing).
+    /// Look up a registered provider by id (no `provider/model` parsing).
     #[must_use]
     pub fn get(&self, id: &str) -> Option<&Arc<dyn Provider>> {
         self.providers.get(id)
     }
 
-    /// Resolve a `provider:model` string into a provider plus the model id.
+    /// Resolve a `provider/model` string into a provider plus the model
+    /// id. The older `provider/model` form resolves too
+    /// ([`kage_core::split_model`]).
     ///
-    /// Returns [`ProviderError::UnknownModel`] when the input has no
-    /// `:` separator or when no provider is registered for the prefix.
+    /// Returns [`ProviderError::UnknownModel`] when the input names no
+    /// provider or no provider is registered for it.
     pub fn resolve(&self, model_id: &str) -> Result<ResolvedProvider<'_>, ProviderError> {
-        let (prefix, model) = model_id
-            .split_once(':')
+        let (prefix, model) = kage_core::split_model(model_id)
             .ok_or_else(|| ProviderError::UnknownModel(model_id.to_owned()))?;
         let provider = self
             .providers

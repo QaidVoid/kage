@@ -570,7 +570,7 @@ fn slash_descriptions_line_up_after_the_argument_hints() {
         Some(i) => i.detail.clone().unwrap_or_default(),
         None => panic!("{value}: {completion:?}"),
     };
-    assert!(detail("model").starts_with("[id] \u{b7} switch to provider:model"));
+    assert!(detail("model").starts_with("[id] \u{b7} switch to provider/model"));
     assert!(detail("mouse").starts_with("[on|off|toggle] \u{b7} toggle mouse capture"));
     assert!(detail("mcp").starts_with("[restart|login] \u{b7} list MCP servers"));
 }

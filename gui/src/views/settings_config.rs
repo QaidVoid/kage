@@ -171,7 +171,8 @@ pub(crate) fn provider_rows(
         .map(|option| option.options.as_slice())
         .unwrap_or_default();
     for choice in offered {
-        let Some((provider, _)) = choice.value.split_once(':') else {
+        // `provider/model`, or the older `provider:model`.
+        let Some(provider) = choice.value.find(['/', ':']).map(|at| &choice.value[..at]) else {
             continue;
         };
         let name = choice.name.clone();

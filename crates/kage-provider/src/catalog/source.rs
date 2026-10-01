@@ -21,7 +21,7 @@ pub const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 pub struct ProviderMap {
     /// Provider key in the models.dev catalog.
     pub api_id: &'static str,
-    /// kage provider id (the `provider` in `provider:model`).
+    /// kage provider id (the `provider` in `provider/model`).
     pub kage_id: &'static str,
 }
 

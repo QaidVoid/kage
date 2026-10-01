@@ -100,7 +100,7 @@ return M
 ## usage
 
 ```lua
-local kage = require("kage").start({ model = "anthropic:claude-sonnet-4-6" })
+local kage = require("kage").start({ model = "anthropic/claude-sonnet-4-6" })
 ```
 
 To make it usable, capture `sessionId` from the `session/new`

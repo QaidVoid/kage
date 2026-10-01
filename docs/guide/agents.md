@@ -241,7 +241,7 @@ later definition replaces an earlier one of the same name.
 ---
 description: Reviews a diff for bugs and missing tests. Give it the change to review.
 tools: read, grep, find, ls, shell
-model: anthropic:claude-sonnet-4-6
+model: anthropic/claude-sonnet-4-6
 thinking: high
 ---
 You review code changes. Read the files involved, run the tests that
@@ -257,7 +257,7 @@ Saved as `~/.config/kage/agents/reviewer.md`, this defines the agent
 | --- | --- | --- |
 | `description` | yes | What the agent is for, at most 1024 characters. The model picks agents by it, so say when to use this one and what to give it. |
 | `tools` | no | A comma list of tool names. Without it the agent gets every tool its parent has. With it, the agent may start agents, swarms or send messages only when the list names `agent`, `swarm` or `send_message`. A listed name that matches no tool of the parent shows a warning when the agent starts. |
-| `model` | no | The model, as `provider:model`, or `inherit` (the default) for the parent's current model. A model that is not available fails the agent's run. |
+| `model` | no | The model, as `provider/model`, or `inherit` (the default) for the parent's current model. A model that is not available fails the agent's run. |
 | `thinking` | no | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `inherit` (the default) for the parent's current level. The level is fitted to the agent's model like the main session's. |
 | `name` | no | Must equal the file stem when present. |
 

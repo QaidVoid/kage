@@ -140,7 +140,7 @@ impl Harness {
     fn spec(&self, id: SessionId) -> SessionSpec {
         SessionSpec {
             id,
-            model: "mock:m".into(),
+            model: "mock/m".into(),
             cx: AgentContext::new("m", "").with_workdir("/tmp"),
             recorder: None,
             tools: self.tools.clone(),
@@ -229,7 +229,7 @@ fn recorder_in(dir: &std::path::Path, id: SessionId) -> (Recorder, std::path::Pa
             id: EntryId::new(),
             ts: chrono::Utc::now(),
             cwd: "/tmp".into(),
-            model: "mock:m".into(),
+            model: "mock/m".into(),
             system_prompt: String::new(),
             parent_session: None,
             parent_entry: None,
@@ -760,9 +760,9 @@ fn a_model_switch_survives_a_reload() {
     let id = SessionId::new();
     let (recorder, path) = recorder_in(dir.path(), id);
     first.open(id, Some(recorder));
-    set_model(&first.engine, id, "mock:other");
+    set_model(&first.engine, id, "mock/other");
     wait_for(&first.events, |e| {
-        state_of(e).is_some_and(|s| s.model == "mock:other")
+        state_of(e).is_some_and(|s| s.model == "mock/other")
     });
     first.engine.shutdown();
 
@@ -774,7 +774,7 @@ fn a_model_switch_survives_a_reload() {
     let seen = wait_for(&h.events, is_session_changed);
     let loaded = seen.last().unwrap().session;
     let seen = wait_for(&h.events, |e| e.session == loaded && state_of(e).is_some());
-    assert_eq!(state_of(seen.last().unwrap()).unwrap().model, "mock:other");
+    assert_eq!(state_of(seen.last().unwrap()).unwrap().model, "mock/other");
 }
 
 #[test]
@@ -791,14 +791,14 @@ fn a_model_switch_during_a_run_is_recorded_at_the_next_run() {
     prompt(&h.engine, id, "go", Delivery::Steer);
     wait_for(&h.events, is_tool_start);
 
-    set_model(&h.engine, id, "mock:other");
+    set_model(&h.engine, id, "mock/other");
     h.release.send(()).unwrap();
     until_runs_end(&h.events, 1);
-    assert_eq!(kage_session::replay(&path).unwrap().model, "mock:m");
+    assert_eq!(kage_session::replay(&path).unwrap().model, "mock/m");
 
     prompt(&h.engine, id, "again", Delivery::Steer);
     until_runs_end(&h.events, 1);
-    assert_eq!(kage_session::replay(&path).unwrap().model, "mock:other");
+    assert_eq!(kage_session::replay(&path).unwrap().model, "mock/other");
 }
 
 #[test]
@@ -1089,7 +1089,7 @@ fn first_exchange_records_a_title() {
     let (recorder, path) = recorder_in(dir.path(), id);
     h.engine.open(SessionSpec {
         id,
-        model: "mock:m".into(),
+        model: "mock/m".into(),
         cx: AgentContext::new("m", "").with_workdir("/tmp"),
         recorder: Some(recorder),
         tools: h.tools.clone(),
@@ -1199,7 +1199,7 @@ fn plugin_turn_end_entries_land_in_the_session_file() {
     let writer = SessionWriter::open(&path).unwrap();
     h.engine.open(SessionSpec {
         id,
-        model: "mock:m".into(),
+        model: "mock/m".into(),
         cx: AgentContext::new("m", "").with_workdir("/tmp"),
         recorder: Some(Recorder::new(writer, Some(Arc::clone(&runtime)))),
         tools: h.tools.clone(),
@@ -3852,7 +3852,7 @@ fn an_image_only_prompt_to_a_text_only_model_ends_the_run_at_once() {
 
     assert_eq!(
         notices(&events),
-        ["mock:m does not accept images; nothing to send"]
+        ["mock/m does not accept images; nothing to send"]
     );
     let ends: Vec<RunOutcome> = events
         .iter()
@@ -3865,7 +3865,7 @@ fn an_image_only_prompt_to_a_text_only_model_ends_the_run_at_once() {
         ends,
         [RunOutcome::Failed {
             error: LoopError::InvalidPrompt {
-                message: "mock:m does not accept images; nothing to send".into(),
+                message: "mock/m does not accept images; nothing to send".into(),
             },
         }]
     );

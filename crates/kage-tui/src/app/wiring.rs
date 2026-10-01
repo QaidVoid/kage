@@ -440,7 +440,7 @@ impl App {
             .collect();
     }
 
-    /// Hand the App a shared handle on the active `provider:model`
+    /// Hand the App a shared handle on the active `provider/model`
     /// string so the status bar reflects model switches in real time.
     pub fn set_status_model(&mut self, model: Arc<Mutex<String>>) {
         self.status_model = Some(model);

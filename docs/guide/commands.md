@@ -36,7 +36,7 @@ The table lists every built-in command.
 
 | Command                   | What it does                                    |
 | ------------------------- | ----------------------------------------------- |
-| `/model [id]`             | Switch the active model (`provider:model`). Without an id, open the model picker. |
+| `/model [id]`             | Switch the active model (`provider/model`). Without an id, open the model picker. |
 | `/new`                    | Start a fresh empty session, keeping the current model |
 | `/compact`                | Run a compaction pass right now                 |
 | `/agents`                 | Open the agents overlay: every agent of the session, live or finished (see [agents](/guide/agents#the-agents-overlay)) |

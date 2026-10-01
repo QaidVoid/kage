@@ -23,7 +23,7 @@ pub struct State {
     /// Schema version so future bumps can migrate.
     #[serde(default = "default_version")]
     pub version: u32,
-    /// Last `provider:model` the user successfully ran.
+    /// Last `provider/model` the user successfully ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_model: Option<String>,
     /// Last `kage` binary version (`CARGO_PKG_VERSION`) that opened
@@ -60,7 +60,7 @@ impl State {
     /// against its provider and a completed run clears it. Returns
     /// whether anything changed.
     pub fn note_run(&mut self, model: &str, outcome: &RunOutcome) -> bool {
-        let provider = model.split_once(':').map_or(model, |(p, _)| p);
+        let provider = kage_core::split_model(model).map_or(model, |(p, _)| p);
         match outcome {
             RunOutcome::Completed => self.auth_failures.remove(provider).is_some(),
             RunOutcome::Failed {

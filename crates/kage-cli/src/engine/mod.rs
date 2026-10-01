@@ -573,7 +573,7 @@ impl Dispatcher {
         } = spec;
         let usage = usage_of(&cx);
         let mut state = SessionState {
-            model,
+            model: kage_core::canonical_model(&model),
             thinking: cx.thinking_level,
             permission_mode: gate.mode(),
             ..SessionState::default()
@@ -724,7 +724,7 @@ impl Dispatcher {
             CommandKind::Clone => self.clone_session(id),
             CommandKind::DeleteSession { path } => self.delete_session(id, &path),
             CommandKind::Export { path } => self.export(id, path),
-            CommandKind::SetModel { model } => self.set_model(id, model),
+            CommandKind::SetModel { model } => self.set_model(id, &model),
             CommandKind::SetThinking { level } => self.set_thinking(id, level),
             CommandKind::SetPermissionMode { mode } => self.update_state(id, |s| {
                 s.gate.set_mode(mode);
@@ -766,7 +766,8 @@ impl Dispatcher {
 
     /// Switch models and record the switch now when idle, or at the next
     /// run start otherwise.
-    fn set_model(&mut self, id: SessionId, model: String) {
+    fn set_model(&mut self, id: SessionId, model: &str) {
+        let model = kage_core::canonical_model(model);
         let session = self.sessions.get_mut(&id).expect("session checked");
         if session.state.model != model {
             session.state.model = model;
@@ -1809,7 +1810,7 @@ fn requeue_backoff(
 
 pub(crate) const AUTO_THINKING: &str = "default";
 
-/// Set what `cx` takes from `model` (`provider:model`): its prompt
+/// Set what `cx` takes from `model` (`provider/model`): its prompt
 /// window, output cap and thinking settings.
 fn fit_context(cx: &mut AgentContext, registry: &ProviderRegistry, model: &str) {
     if let Some(window) = crate::runtime_env::context_window_for(registry, model) {

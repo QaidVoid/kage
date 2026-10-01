@@ -5,7 +5,7 @@ use kage_core::{Inputs, ModelCost, Reasoning, ReasoningField};
 /// Description used by the registry, `kage doctor`, and the model picker UI.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderMetadata {
-    /// Stable id used as the prefix in `provider:model` strings.
+    /// Stable id used as the prefix in `provider/model` strings.
     pub id: String,
     /// Human-friendly display name.
     pub display_name: String,

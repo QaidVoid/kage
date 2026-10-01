@@ -19,7 +19,7 @@ use crate::openai::OpenAiProvider;
 /// and upstream base URL.
 #[derive(Clone, Copy, Debug)]
 pub struct CompatProvider {
-    /// kage id (the `provider` in `provider:model`).
+    /// kage id (the `provider` in `provider/model`).
     pub id: &'static str,
     /// Human-readable name for the model picker.
     pub display_name: &'static str,

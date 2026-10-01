@@ -239,7 +239,7 @@ fn serve_inner(
     std::thread::spawn(move || {
         standing
             .serve_with(BufReader::new(srv_r), srv_w, move |agent| {
-                let mut spec = (agent.host.spec)(id, "", "mock:m", BTreeMap::new()).unwrap();
+                let mut spec = (agent.host.spec)(id, "", "mock/m", BTreeMap::new()).unwrap();
                 if record {
                     let path = sessions.join(format!("{id}.jsonl"));
                     let header = Header {
@@ -248,7 +248,7 @@ fn serve_inner(
                         id: EntryId::new(),
                         ts: chrono::Utc::now(),
                         cwd: spec.cx.workdir.clone(),
-                        model: "mock:m".into(),
+                        model: "mock/m".into(),
                         system_prompt: spec.cx.system_prompt.clone(),
                         parent_session: None,
                         parent_entry: None,
@@ -350,7 +350,7 @@ fn test_host_agents(
             agents: Some((*agents).clone()),
         })
     });
-    Host::new(registry, "mock:m".into(), sessions, spec, BTreeMap::new())
+    Host::new(registry, "mock/m".into(), sessions, spec, BTreeMap::new())
 }
 
 /// An in-process MCP server with the prompt `p(a, b?)`, which answers
@@ -1332,7 +1332,7 @@ fn plan_mode_refuses_a_write_and_announces_entry_and_exit() {
     let set = set_option(&h, "mode", "plan").unwrap();
     assert_eq!(
         current_values(&set),
-        ["mock:m", "default", "plan", "off", ""]
+        ["mock/m", "default", "plan", "off", ""]
     );
     let updates = updates_until(&h.inbox, &h.session, "current_mode_update");
     assert_eq!(updates.last().unwrap()["update"]["currentModeId"], "plan");
@@ -1356,7 +1356,7 @@ fn plan_mode_refuses_a_write_and_announces_entry_and_exit() {
     let set = set_option(&h, "mode", "default").unwrap();
     assert_eq!(
         current_values(&set),
-        ["mock:m", "default", "default", "off", ""]
+        ["mock/m", "default", "default", "off", ""]
     );
     let updates = updates_until(&h.inbox, &h.session, "current_mode_update");
     assert_eq!(
@@ -1650,10 +1650,10 @@ fn session_list_hides_agents_filters_by_cwd_and_orders_newest_first() {
         kind: kage_session::list::AGENT_ENTRY_KIND.into(),
         data: serde_json::json!({ "agent": "explore" }),
     });
-    let recent = record(sessions, "/p", "mock:m", 30, &[title]);
-    let old = record(sessions, "/p", "mock:m", 10, &[]);
-    record(sessions, "/p", "mock:m", 0, &[marker]);
-    let elsewhere = record(sessions, "/q", "mock:m", 5, &[]);
+    let recent = record(sessions, "/p", "mock/m", 30, &[title]);
+    let old = record(sessions, "/p", "mock/m", 10, &[]);
+    record(sessions, "/p", "mock/m", 0, &[marker]);
+    let elsewhere = record(sessions, "/q", "mock/m", 5, &[]);
     let h = serve(Vec::new(), sessions, sessions);
 
     let page = h
@@ -1694,7 +1694,7 @@ fn session_fork_copies_up_to_the_named_prompt_and_links_its_parent() {
     .into_iter()
     .flatten()
     .collect();
-    let source = record(sessions, "/p", "mock:m", 1, &entries);
+    let source = record(sessions, "/p", "mock/m", 1, &entries);
     let h = serve(Vec::new(), sessions, sessions);
     let fork = |before: serde_json::Value| {
         let mut params = serde_json::json!({ "sessionId": source });
@@ -1738,7 +1738,7 @@ fn session_export_renders_the_recorded_transcript() {
     let source = record(
         sessions,
         "/p",
-        "mock:m",
+        "mock/m",
         1,
         &[
             message(Role::User, vec![text("explain the parser")], None),
@@ -1809,7 +1809,7 @@ fn session_list_pages_with_a_cursor() {
     let dir = tempfile::tempdir().unwrap();
     let sessions = dir.path();
     let ids: Vec<String> = (0..52)
-        .map(|age| record(sessions, "/p", "mock:m", age, &[]))
+        .map(|age| record(sessions, "/p", "mock/m", age, &[]))
         .collect();
     let h = serve(Vec::new(), sessions, sessions);
 
@@ -1834,7 +1834,7 @@ fn session_load_replays_the_whole_transcript_and_restores_the_session() {
     let session = record(
         dir.path(),
         &cwd,
-        "mock:recorded",
+        "mock/recorded",
         1,
         &[
             SessionEntry::ThinkingLevelChange(kage_session::ThinkingLevelChange {
@@ -1887,7 +1887,7 @@ fn session_load_replays_the_whole_transcript_and_restores_the_session() {
     let loaded = h.client.request("session/load", params).unwrap();
     assert_eq!(
         current_values(&loaded),
-        ["mock:recorded", "high", "default", "off", ""]
+        ["mock/recorded", "high", "default", "off", ""]
     );
     let updates = updates_until(&h.inbox, &session, "usage_update");
     assert_eq!(
@@ -1932,7 +1932,7 @@ fn session_resume_skips_the_replay_and_continues_the_history() {
     let session = record(
         dir.path(),
         &cwd,
-        "mock:m",
+        "mock/m",
         1,
         &[
             message(Role::User, vec![text("hello")], None),
@@ -1945,7 +1945,7 @@ fn session_resume_skips_the_replay_and_continues_the_history() {
     let resumed = h.client.request("session/resume", params).unwrap();
     assert_eq!(
         current_values(&resumed),
-        ["mock:m", "default", "default", "off", ""]
+        ["mock/m", "default", "default", "off", ""]
     );
     assert_eq!(
         prompt(&h.client, &session, "next")["stopReason"],
@@ -2007,7 +2007,7 @@ fn a_new_session_lists_model_thinking_and_mode() {
     let created = h.client.request("session/new", params).unwrap();
     assert_eq!(
         current_values(&created),
-        ["mock:m", "default", "default", "off", ""]
+        ["mock/m", "default", "default", "off", ""]
     );
     let options = created["configOptions"].as_array().unwrap();
     let ids: Vec<_> = options.iter().map(|o| o["id"].as_str().unwrap()).collect();
@@ -2030,7 +2030,7 @@ fn a_new_session_lists_model_thinking_and_mode() {
     assert_eq!(options[4]["type"], "text");
     assert!(options[4]["options"].as_array().unwrap().is_empty());
     assert!(options.iter().take(4).all(|o| o["type"] == "select"));
-    assert_eq!(values_of(&options[0], "value"), ["mock:m", "mock:other"]);
+    assert_eq!(values_of(&options[0], "value"), ["mock/m", "mock/other"]);
     assert_eq!(values_of(&options[0], "name"), ["Mock m", "Mock other"]);
     assert_eq!(options[0]["options"][0]["description"], "Mock");
     assert_eq!(
@@ -2120,13 +2120,13 @@ fn setting_options_changes_the_next_turn() {
     let set = set_option(&h, "thinking", "high").unwrap();
     assert_eq!(
         current_values(&set),
-        ["mock:m", "high", "default", "off", ""]
+        ["mock/m", "high", "default", "off", ""]
     );
-    set_option(&h, "model", "mock:other").unwrap();
+    set_option(&h, "model", "mock/other").unwrap();
     let set = set_option(&h, "mode", "ask").unwrap();
     assert_eq!(
         current_values(&set),
-        ["mock:other", "high", "ask", "off", ""]
+        ["mock/other", "high", "ask", "off", ""]
     );
 
     assert_eq!(
@@ -2147,7 +2147,7 @@ fn unknown_options_and_values_are_invalid_params() {
 
     for (id, value) in [
         ("colour", "red"),
-        ("model", "mock:missing"),
+        ("model", "mock/missing"),
         ("thinking", "extreme"),
         ("mode", "yolo"),
         ("swarm", "maybe"),
@@ -2171,15 +2171,15 @@ fn a_change_the_client_did_not_make_sends_config_option_update() {
         model: model.into(),
     };
 
-    h.command(model("mock:other"));
+    h.command(model("mock/other"));
     let updates = updates_until(&h.inbox, &h.session, "config_option_update");
     let update = &updates.last().unwrap()["update"];
     assert_eq!(
         current_values(update),
-        ["mock:other", "default", "default", "off", ""]
+        ["mock/other", "default", "default", "off", ""]
     );
 
-    h.command(model("mock:other"));
+    h.command(model("mock/other"));
     h.command(CommandKind::SetThinking {
         level: Some(ThinkingLevel::Low),
     });
@@ -2188,7 +2188,7 @@ fn a_change_the_client_did_not_make_sends_config_option_update() {
     let update = &updates[0]["update"];
     assert_eq!(
         current_values(update),
-        ["mock:other", "low", "default", "off", ""]
+        ["mock/other", "low", "default", "off", ""]
     );
 }
 
@@ -2204,15 +2204,15 @@ fn states_older_than_a_client_change_are_not_sent_back() {
         goal: None,
     };
     let mut shown = Shown {
-        settings: settings("mock:other", ThinkingLevel::High),
+        settings: settings("mock/other", ThinkingLevel::High),
         catching_up: true,
     };
-    assert!(!shown.observe(&settings("mock:other", ThinkingLevel::Off)));
-    assert!(!shown.observe(&settings("mock:m", ThinkingLevel::Off)));
-    assert!(!shown.observe(&settings("mock:other", ThinkingLevel::High)));
-    assert!(!shown.observe(&settings("mock:other", ThinkingLevel::High)));
-    assert!(shown.observe(&settings("mock:m", ThinkingLevel::High)));
-    assert_eq!(shown.settings.model, "mock:m");
+    assert!(!shown.observe(&settings("mock/other", ThinkingLevel::Off)));
+    assert!(!shown.observe(&settings("mock/m", ThinkingLevel::Off)));
+    assert!(!shown.observe(&settings("mock/other", ThinkingLevel::High)));
+    assert!(!shown.observe(&settings("mock/other", ThinkingLevel::High)));
+    assert!(shown.observe(&settings("mock/m", ThinkingLevel::High)));
+    assert_eq!(shown.settings.model, "mock/m");
 }
 
 #[test]
@@ -3037,7 +3037,7 @@ fn a_new_session_connects_the_editor_servers() {
 fn a_tool_of_an_editor_server_asks_and_sees_its_env() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().display().to_string();
-    let session = record(dir.path(), &cwd, "mock:m", 1, &[]);
+    let session = record(dir.path(), &cwd, "mock/m", 1, &[]);
     let h = serve(
         vec![
             tool_turn("call_1", "ed__show", serde_json::json!({})),
@@ -3495,7 +3495,7 @@ fn the_first_answer_wins_and_the_other_ask_is_cancelled() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().display().to_string();
     let path = dir.path().display().to_string();
-    let session = record(dir.path(), &cwd, "mock:m", 0, &[]);
+    let session = record(dir.path(), &cwd, "mock/m", 0, &[]);
     let h = serve(
         vec![
             tool_turn("call_1", "ls", serde_json::json!({ "path": path })),
@@ -3539,7 +3539,7 @@ fn a_connection_that_closes_while_asked_sends_no_decision() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().display().to_string();
     let path = dir.path().display().to_string();
-    let session = record(dir.path(), &cwd, "mock:m", 0, &[]);
+    let session = record(dir.path(), &cwd, "mock/m", 0, &[]);
     let h = serve(
         vec![
             tool_turn("call_1", "ls", serde_json::json!({ "path": path })),
@@ -3580,7 +3580,7 @@ fn a_prompt_from_another_client_is_refused_while_a_run_is_out() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().display().to_string();
     let path = dir.path().display().to_string();
-    let session = record(dir.path(), &cwd, "mock:m", 0, &[]);
+    let session = record(dir.path(), &cwd, "mock/m", 0, &[]);
     let h = serve(
         vec![
             tool_turn("call_1", "ls", serde_json::json!({ "path": path })),
@@ -3619,7 +3619,7 @@ fn a_prompt_from_another_client_is_refused_while_a_run_is_out() {
 fn the_non_owner_sees_the_prompt_and_the_owner_does_not() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().display().to_string();
-    let session = record(dir.path(), &cwd, "mock:m", 0, &[]);
+    let session = record(dir.path(), &cwd, "mock/m", 0, &[]);
     let h = serve(
         vec![
             text_turn("hi there"),
@@ -3686,7 +3686,7 @@ fn a_cancel_from_the_second_client_ends_the_owners_run() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().display().to_string();
     let path = dir.path().display().to_string();
-    let session = record(dir.path(), &cwd, "mock:m", 0, &[]);
+    let session = record(dir.path(), &cwd, "mock/m", 0, &[]);
     let h = serve(
         vec![
             tool_turn("call_1", "ls", serde_json::json!({ "path": path })),
@@ -3741,7 +3741,7 @@ fn two_connections_prompt_their_own_sessions() {
 fn a_second_connection_attaches_to_an_open_session() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().display().to_string();
-    let session = record(dir.path(), &cwd, "mock:m", 0, &[]);
+    let session = record(dir.path(), &cwd, "mock/m", 0, &[]);
     let h = serve(vec![text_turn("attached reply")], dir.path(), dir.path());
     let c2 = h.connect();
 
@@ -3750,7 +3750,7 @@ fn a_second_connection_attaches_to_an_open_session() {
     let loaded = c2.client.request("session/load", params).unwrap();
     assert_eq!(
         current_values(&loaded),
-        ["mock:m", "default", "default", "off", ""]
+        ["mock/m", "default", "default", "off", ""]
     );
 
     let prompt_end = prompt_async(&h.client, &session, "hello");
@@ -3775,7 +3775,7 @@ fn a_connection_that_ends_leaves_its_run_running() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().display().to_string();
     let path = dir.path().display().to_string();
-    let session = record(dir.path(), &cwd, "mock:m", 0, &[]);
+    let session = record(dir.path(), &cwd, "mock/m", 0, &[]);
     let h = serve(
         vec![
             tool_turn("call_1", "ls", serde_json::json!({ "path": path })),
@@ -3959,7 +3959,7 @@ fn serve_paused(
         sessions,
         id,
         &cwd,
-        "mock:m",
+        "mock/m",
         0,
         &[message(Role::User, vec![text("hello")], None)],
     );
@@ -3976,7 +3976,7 @@ fn serve_paused(
     std::thread::spawn(move || {
         standing
             .serve_with(BufReader::new(srv_r), srv_w, move |agent| {
-                let spec = (agent.host.spec)(id, "", "mock:m", BTreeMap::new()).unwrap();
+                let spec = (agent.host.spec)(id, "", "mock/m", BTreeMap::new()).unwrap();
                 agent.open(id.to_string(), spec);
                 agent.session_announced(&id.to_string());
                 let _ = opened_tx.send(());

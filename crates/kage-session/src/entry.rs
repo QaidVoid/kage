@@ -120,7 +120,7 @@ pub struct Header {
     pub ts: DateTime<Utc>,
     /// Working directory at session creation.
     pub cwd: PathBuf,
-    /// Provider-qualified model id (`provider:model`) at creation.
+    /// Provider-qualified model id (`provider/model`) at creation.
     pub model: String,
     /// System prompt at creation. Subsequent changes are not reflected here.
     pub system_prompt: String,
@@ -174,7 +174,7 @@ pub struct ModelChange {
     pub id: EntryId,
     /// Append time.
     pub ts: DateTime<Utc>,
-    /// New provider-qualified model id (`provider:model`).
+    /// New provider-qualified model id (`provider/model`).
     pub model: String,
 }
 

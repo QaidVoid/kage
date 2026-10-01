@@ -307,7 +307,7 @@ pub(crate) const NO_CREDENTIALS_MESSAGE: &str = "kage: no provider credentials f
 
 /// Printed when no model was requested and none could be picked.
 pub(crate) const NO_MODEL_MESSAGE: &str =
-    "kage: no model configured. Set [provider] default_model or pass -m provider:model";
+    "kage: no model configured. Set [provider] default_model or pass -m provider/model";
 
 /// Whether any provider other than the always-registered `acp` provider
 /// is available, meaning some credential or custom provider is wired up.
@@ -323,12 +323,12 @@ pub(crate) fn default_model(registry: &ProviderRegistry) -> String {
     if let Ok(cfg) = kage_core::config::Config::load_default()
         && registry.resolve(&cfg.provider.default_model).is_ok()
     {
-        return cfg.provider.default_model;
+        return kage_core::canonical_model(&cfg.provider.default_model);
     }
     if let Some(model) = state::State::load().last_model
         && registry.resolve(&model).is_ok()
     {
-        return model;
+        return kage_core::canonical_model(&model);
     }
     fallback_model(registry)
 }
@@ -352,14 +352,14 @@ fn fallback_model(registry: &ProviderRegistry) -> String {
                 kage_provider::catalog::preferred_model(candidate).map(|m| m.id.to_owned())
             });
         if let Some(model) = model {
-            return format!("{candidate}:{model}");
+            return kage_core::qualify_model(candidate, &model);
         }
     }
     let mut ids: Vec<&str> = registry.ids().filter(|id| *id != "acp").collect();
     ids.sort_unstable();
     for id in ids {
         if let Some(model) = registry.get(id).and_then(|p| p.models().into_iter().next()) {
-            return format!("{id}:{}", model.id);
+            return kage_core::qualify_model(id, &model.id);
         }
     }
     String::new()
@@ -377,7 +377,7 @@ pub(crate) fn configured_default_model() -> Option<String> {
     }
     kage_core::config::Config::load_default()
         .ok()
-        .map(|config| config.provider.default_model)
+        .map(|config| kage_core::canonical_model(&config.provider.default_model))
 }
 
 /// Whether the TOML file at `path` sets `[provider] default_model`.
@@ -422,8 +422,8 @@ mod tests {
         let mut registry = ProviderRegistry::new();
         let replaced = register_custom_providers(&config, &auth::AuthStore::empty(), &mut registry);
         assert!(replaced.is_empty());
-        assert!(registry.resolve("zhipu-anthropic:glm-5.3").is_ok());
-        assert!(registry.resolve("my-gemini:g-1").is_ok());
+        assert!(registry.resolve("zhipu-anthropic/glm-5.3").is_ok());
+        assert!(registry.resolve("my-gemini/g-1").is_ok());
         assert!(registry.get("anthropic").is_none());
         assert!(registry.get("gemini").is_none());
     }
@@ -471,7 +471,7 @@ mod tests {
         store.set_api_key("zai-coding-plan", "fake-shared-key");
         let mut registry = ProviderRegistry::new();
         register_compat_providers(&config, &store, &mut registry);
-        let resolved = registry.resolve("zhipuai-coding-plan:glm-5.3").unwrap();
+        let resolved = registry.resolve("zhipuai-coding-plan/glm-5.3").unwrap();
         let req = kage_provider::StreamRequest::new(
             resolved.model.clone(),
             vec![Arc::new(kage_core::Message::new(
@@ -568,22 +568,22 @@ mod tests {
         assert_eq!(replaced, ["deepseek"]);
 
         let rows: Vec<(String, Option<String>)> =
-            crate::tui::available_model_items(&registry, "deepseek:ds-local")
+            crate::tui::available_model_items(&registry, "deepseek/ds-local")
                 .into_iter()
                 .map(|item| (item.value, item.group))
                 .collect();
         assert_eq!(
             rows,
             [(
-                "deepseek:ds-local".to_owned(),
+                "deepseek/ds-local".to_owned(),
                 Some("My DeepSeek".to_owned())
             )]
         );
         assert_eq!(
-            crate::runtime_env::context_window_for(&registry, "deepseek:ds-local"),
+            crate::runtime_env::context_window_for(&registry, "deepseek/ds-local"),
             Some(4096)
         );
-        assert_eq!(fallback_model(&registry), "deepseek:ds-local");
+        assert_eq!(fallback_model(&registry), "deepseek/ds-local");
     }
 
     #[test]
@@ -645,7 +645,7 @@ mod tests {
             .with(stub("zeta", &["z-1"]))
             .with(stub("empty", &[]))
             .with(stub("local", &["llama-3", "qwen"]));
-        assert_eq!(fallback_model(&registry), "local:llama-3");
+        assert_eq!(fallback_model(&registry), "local/llama-3");
     }
 
     #[test]
@@ -658,7 +658,7 @@ mod tests {
     fn detects_explicit_default_model_key() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[provider]\ndefault_model = \"openai:gpt-4o\"\n").unwrap();
+        std::fs::write(&path, "[provider]\ndefault_model = \"openai/gpt-4o\"\n").unwrap();
         assert!(config_sets_default_model(&path));
         std::fs::write(&path, "[ui]\ntheme = \"dark\"\n[provider]\n").unwrap();
         assert!(!config_sets_default_model(&path));

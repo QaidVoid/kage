@@ -18,7 +18,7 @@ Keys are grouped into tables:
 # model used when -m/--model is absent. it beats the last-used model
 # but only while its provider has credentials. otherwise kage uses the
 # last model you ran, then the first provider with credentials.
-default_model = "anthropic:claude-sonnet-4-6"
+default_model = "anthropic/claude-sonnet-4-6"
 
 [ui]
 # bundled theme name, or a user theme under ~/.config/kage/themes/<name>.toml.

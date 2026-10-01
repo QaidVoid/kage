@@ -26,7 +26,7 @@ client (below) and names the page URL, never the token.
 
 Flags:
 
-- `-m, --model <provider:model>` pins the model, exactly as for
+- `-m, --model <provider/model>` pins the model, exactly as for
   `kage rpc`.
 - `--system <text>` overrides the system-prompt role.
 - `--host <addr>` changes the bind address. The default `127.0.0.1`

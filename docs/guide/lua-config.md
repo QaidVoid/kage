@@ -607,7 +607,7 @@ aborted.
 | Field | Value |
 | --- | --- |
 | `width` | terminal width in columns |
-| `model` | the active `provider:model` id |
+| `model` | the active `provider/model` id |
 | `thinking` | the thinking level the next run sends, `"off"` when it sends none |
 | `thinking_auto` | whether that level is automatic rather than chosen |
 | `permission_mode` | the session permission override, or `nil` |

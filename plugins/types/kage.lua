@@ -331,7 +331,7 @@
 --- What a `kage.SlotComponent` render receives.
 ---@class kage.SlotContext
 ---@field width integer Terminal width in columns.
----@field model string Active `provider:model` id.
+---@field model string Active `provider/model` id.
 ---@field thinking string Thinking level the next run sends, `off` when it sends none.
 ---@field thinking_auto boolean Whether the level is automatic rather than chosen.
 ---@field permission_mode? string Session permission override, if any.

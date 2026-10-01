@@ -299,14 +299,14 @@ impl Default for AgentsConfig {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderConfig {
-    /// Model identifier in `provider:model` form.
+    /// Model identifier in `provider/model` form.
     pub default_model: String,
 }
 
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
-            default_model: "anthropic:claude-sonnet-4-6".into(),
+            default_model: "anthropic/claude-sonnet-4-6".into(),
         }
     }
 }
@@ -838,7 +838,7 @@ mod tests {
     #[test]
     fn default_provider_model_is_anthropic_sonnet() {
         let cfg = Config::default();
-        assert_eq!(cfg.provider.default_model, "anthropic:claude-sonnet-4-6");
+        assert_eq!(cfg.provider.default_model, "anthropic/claude-sonnet-4-6");
     }
 
     #[test]

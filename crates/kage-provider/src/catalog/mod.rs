@@ -27,7 +27,7 @@ use source::{SourceModel, SourceProvider};
 /// Description of one provider in the catalog.
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderInfo {
-    /// Stable id used as the prefix in `provider:model` strings, and
+    /// Stable id used as the prefix in `provider/model` strings, and
     /// as the key in the auth credential store.
     pub id: &'static str,
     /// Human-friendly display name.

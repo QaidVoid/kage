@@ -2,7 +2,9 @@
 //!
 //! One view over the store, for the shell to mount where the dock
 //! renders the approval card; it draws nothing while no ask is open.
-//! With asks open it renders each exactly as the agent offered it:
+//! It shows the asks of the active session and the subagents under
+//! it, one at a time, oldest first. The card renders the ask exactly
+//! as the agent offered it:
 //! the shield glyph, or the swarm glyph when a child asked, the tool
 //! title, the asking session's byline, the subject and the remaining
 //! input detail the ask carried, and the options in offer order
@@ -238,8 +240,7 @@ impl ApprovalCard {
         let asks: Vec<(String, u64, bool)> = self
             .store
             .read(cx)
-            .state()
-            .open_asks()
+            .active_asks()
             .into_iter()
             .map(|(session_id, ask)| {
                 (
@@ -315,8 +316,7 @@ impl ApprovalCard {
     fn first_ask(&self, cx: &gpui_kit::App) -> Option<(String, PermissionAsk)> {
         self.store
             .read(cx)
-            .state()
-            .open_asks()
+            .active_asks()
             .into_iter()
             .next()
             .map(|(session_id, ask)| (session_id.to_owned(), ask.clone()))
@@ -523,9 +523,9 @@ impl Render for ApprovalCard {
         let asks: Vec<(String, PermissionAsk)> = self
             .store
             .read(cx)
-            .state()
-            .open_asks()
+            .active_asks()
             .into_iter()
+            .take(1)
             .map(|(session_id, ask)| (session_id.to_owned(), ask.clone()))
             .collect();
         let mut surface = v_flex()

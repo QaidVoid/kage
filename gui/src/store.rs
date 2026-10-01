@@ -8,7 +8,7 @@
 //! command methods; they never see frames.
 
 use kage_client::wire::{ContentBlock, FsListResult, FsOp};
-use kage_client::{Change, Client, Frame, PromptOutcome, Session, SteerError};
+use kage_client::{Change, Client, Frame, PermissionAsk, PromptOutcome, Session, SteerError};
 
 use gpui_kit::{App, Entity};
 
@@ -179,6 +179,37 @@ impl Store {
     pub fn active_session(&self) -> Option<&Session> {
         let id = self.active.as_deref()?;
         self.state().session(id)
+    }
+
+    /// The open asks of the active session and the subagents under it,
+    /// oldest session first. Asks of other sessions wait for the user
+    /// to open those.
+    #[must_use]
+    pub fn active_asks(&self) -> Vec<(&str, &PermissionAsk)> {
+        let Some(active) = self.active.as_deref() else {
+            return Vec::new();
+        };
+        let state = self.state();
+        state
+            .open_asks()
+            .into_iter()
+            .filter(|(id, _)| {
+                let mut at = Some(*id);
+                // A parent chain is short; the bound only guards a cycle.
+                for _ in 0..32 {
+                    match at {
+                        Some(id) if id == active => return true,
+                        Some(id) => {
+                            at = state
+                                .session(id)
+                                .and_then(|session| session.parent.as_deref());
+                        }
+                        None => return false,
+                    }
+                }
+                false
+            })
+            .collect()
     }
 
     /// The id of the session the transcript follows.
@@ -1060,5 +1091,37 @@ mod tests {
             Some("fix the flake")
         );
         assert!(store.take_outgoing().is_empty(), "no prompt went out");
+    }
+
+    #[test]
+    fn the_card_sees_the_asks_of_the_active_tree_only() {
+        let mut store = welcome_store();
+        open_session(&mut store, 3, "s1");
+        open_session(&mut store, 4, "s2");
+        store.set_active("s1");
+        store.absorb(Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({
+                "sessionId": "s1",
+                "update": {"sessionUpdate": "subagent_update", "subagentSessionId": "c1", "state": "running"},
+            }),
+        });
+        let ask = |id: u64, session: &str| Frame::Request {
+            id,
+            method: "session/request_permission".into(),
+            params: serde_json::json!({
+                "sessionId": session,
+                "toolCall": {"toolCallId": format!("call_{id}"), "title": "shell"},
+                "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}],
+            }),
+        };
+        store.absorb(ask(70, "s2"));
+        store.absorb(ask(71, "c1"));
+        store.absorb(ask(72, "s1"));
+        let mut asked: Vec<&str> = store.active_asks().into_iter().map(|(id, _)| id).collect();
+        asked.sort_unstable();
+        assert_eq!(asked, ["c1", "s1"], "a child's ask shows on its parent");
+        store.show_welcome();
+        assert!(store.active_asks().is_empty(), "the welcome shows no card");
     }
 }

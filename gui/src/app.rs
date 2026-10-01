@@ -436,7 +436,7 @@ impl Shell {
     /// Hands the focus back to the composer after the find bar closed
     /// itself, unless an approval ask holds the focus.
     fn on_find_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.store.read(cx).state().open_asks().is_empty() {
+        if self.store.read(cx).active_asks().is_empty() {
             let input = self.composer.read(cx).input().clone();
             input.update(cx, |state, cx| state.focus(window, cx));
         }

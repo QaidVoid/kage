@@ -28,10 +28,12 @@ const PLACEHOLDER: &str = "{{item}}";
 /// is cancelling, so their states land in the aggregate.
 const CANCEL_GRACE: Duration = Duration::from_secs(2);
 
-/// Longest whole swarm result, in characters. Per-child replies are
-/// already capped at the `agent` tool's limit; when the aggregate is
-/// still over this, bodies are cut before any status line.
-const RESULT_CAP: usize = 100_000;
+/// Longest whole swarm result, in bytes. Per-child replies are already
+/// capped at the `agent` tool's limit; when the aggregate is still over
+/// this, bodies are cut before any status line. It stays under the
+/// loop's own cap on tool results, which would otherwise cut the middle
+/// children's status lines out.
+const RESULT_CAP: usize = kage_core::MAX_TOOL_RESULT_BYTES - 256;
 
 /// Marks a body the result cap cut.
 const BODY_CUT: &str = "\n[body truncated to fit the result cap]";
@@ -504,7 +506,7 @@ struct Block {
 impl Block {
     /// The characters the block costs beyond its body.
     fn overhead(&self) -> usize {
-        self.open.chars().count() + self.close.chars().count() + 1
+        self.open.len() + self.close.len() + 1
     }
 
     fn render(&self, body: &str) -> String {
@@ -598,22 +600,22 @@ fn render(cap: usize, description: &str, members: &[Member], results: &[ToolOutp
     let hint = (failed + cancelled > 0).then_some(RESUME_HINT);
     let mut out = summary.clone();
     let mut budget = cap
-        .saturating_sub(summary.chars().count())
-        .saturating_sub(hint.map_or(0, |hint| hint.chars().count()));
+        .saturating_sub(summary.len())
+        .saturating_sub(hint.map_or(0, str::len));
     for block in &blocks {
         budget = budget.saturating_sub(block.overhead());
     }
     let mut left = blocks.len();
     for block in &blocks {
         let allowance = budget / left.max(1);
-        let (body, used) = if block.body.chars().count() > allowance {
-            let body_cap = allowance.saturating_sub(BODY_CUT.chars().count());
+        let (body, used) = if block.body.len() > allowance {
+            let body_cap = allowance.saturating_sub(BODY_CUT.len());
             (
                 format!("{}{BODY_CUT}", truncate(&block.body, body_cap)),
                 allowance,
             )
         } else {
-            (block.body.clone(), block.body.chars().count())
+            (block.body.clone(), block.body.len())
         };
         budget -= used;
         let _ = write!(out, "\n{}", block.render(&body));
@@ -629,14 +631,16 @@ fn render(cap: usize, description: &str, members: &[Member], results: &[ToolOutp
     }
 }
 
-/// Cut `text` to at most `cap` characters, on a char boundary.
+/// Cut `text` to at most `cap` bytes, on a char boundary.
 fn truncate(text: &str, cap: usize) -> String {
-    if text.chars().count() <= cap {
+    if text.len() <= cap {
         return text.to_owned();
     }
-    text.char_indices()
-        .nth(cap)
-        .map_or(text.to_owned(), |(at, _)| text[..at].to_owned())
+    let mut at = cap;
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    text[..at].to_owned()
 }
 
 /// Whether a result is an `<agent>` element the `agent` tool rendered.

@@ -87,6 +87,21 @@ pub struct ReplayUsage {
     pub last_context: u64,
 }
 
+/// `message` with each tool result cut to the size a live run keeps.
+/// Sessions recorded before tool results were capped can hold results
+/// of many megabytes. Agent and swarm results stay whole, since a
+/// resume reads every child back out of them.
+fn capped(mut message: Message) -> Message {
+    for block in &mut message.content {
+        if let Content::ToolResultBlock { output, .. } = block
+            && !kage_core::is_agent_result(output)
+        {
+            *output = kage_core::cap_tool_result(std::mem::take(output));
+        }
+    }
+    message
+}
+
 /// Replay every entry of `path`, returning the final history.
 pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
     let mut reader = SessionReader::iter(path)?;
@@ -161,16 +176,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
                         _ => {}
                     }
                 }
-                let mut message = Arc::unwrap_or_clone(m.message);
-                // Sessions recorded before tool results were capped can
-                // hold results of many megabytes; the loaded history
-                // keeps them to the size a live run would.
-                for block in &mut message.content {
-                    if let Content::ToolResultBlock { output, .. } = block {
-                        *output = kage_core::cap_tool_result(std::mem::take(output));
-                    }
-                }
-                history.push(message);
+                history.push(capped(Arc::unwrap_or_clone(m.message)));
             }
             SessionEntry::Compaction(c) => {
                 compaction = Some(CompactionCounts {

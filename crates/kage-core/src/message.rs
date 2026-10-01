@@ -269,6 +269,15 @@ impl ShellRun {
 /// the session file.
 pub const MAX_TOOL_RESULT_BYTES: usize = 100_000;
 
+/// Whether `output` is an `agent` call's `<agent>` element or a `swarm`
+/// call's aggregate of `<swarm>` elements. Their tools bound their size
+/// themselves, and resuming a session reads every child's header line
+/// back out of them, so they are never cut.
+#[must_use]
+pub fn is_agent_result(output: &str) -> bool {
+    output.starts_with("<agent ") || output.contains("\n<swarm ")
+}
+
 /// `text` cut to at most [`MAX_TOOL_RESULT_BYTES`]: the first two
 /// thirds and the last third, joined by a line saying how much was left
 /// out. Text within the limit comes back unchanged.
@@ -316,7 +325,11 @@ mod tests {
         assert!(capped.starts_with("aaa") && capped.ends_with("\u{e9}"));
         assert!(capped.contains("bytes of output omitted"));
         assert!(capped.len() <= super::MAX_TOOL_RESULT_BYTES);
-        assert_eq!(super::cap_tool_result(capped.clone()), capped, "capping is idempotent");
+        assert_eq!(
+            super::cap_tool_result(capped.clone()),
+            capped,
+            "capping is idempotent"
+        );
     }
 
     use super::*;

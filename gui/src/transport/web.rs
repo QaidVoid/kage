@@ -44,12 +44,10 @@ struct Inner {
     keepalive: Vec<Closure<dyn FnMut(JsValue)>>,
 }
 
-/// The browser transport to one `kage serve` endpoint.
-#[derive(Clone)]
+/// The browser transport to one `kage serve` endpoint. Dropping it
+/// closes the link.
 pub struct WebTransport {
-    url: String,
-    token: String,
-    inner: Rc<RefCell<Inner>>,
+    dialer: Dialer,
 }
 
 impl WebTransport {
@@ -58,19 +56,33 @@ impl WebTransport {
     #[must_use]
     pub fn new(url: impl Into<String>, token: impl Into<String>) -> Self {
         Self {
-            url: url.into(),
-            token: token.into(),
-            inner: Rc::new(RefCell::new(Inner {
-                events: None,
-                socket: None,
-                closed: false,
-                backoff: Backoff::new(),
-                attempt: 0,
-                keepalive: Vec::new(),
-            })),
+            dialer: Dialer {
+                url: url.into(),
+                token: token.into(),
+                inner: Rc::new(RefCell::new(Inner {
+                    events: None,
+                    socket: None,
+                    closed: false,
+                    backoff: Backoff::new(),
+                    attempt: 0,
+                    keepalive: Vec::new(),
+                })),
+            },
         }
     }
+}
 
+/// What the browser callbacks and the retry timer hold: the endpoint
+/// and the shared state. Unlike [`WebTransport`], dropping one leaves
+/// the link alone.
+#[derive(Clone)]
+struct Dialer {
+    url: String,
+    token: String,
+    inner: Rc<RefCell<Inner>>,
+}
+
+impl Dialer {
     /// Reports one state move into the event stream, best effort: the
     /// receiver is gone once the shell closed.
     fn report(inner: &Inner, state: State) {
@@ -177,15 +189,15 @@ impl WebTransport {
             return;
         }
         inner.socket = Some(socket);
-        inner
-            .keepalive
-            .extend([on_open, on_message, on_close, on_error]);
+        // The last link's socket is closed, so its callbacks never run
+        // again.
+        inner.keepalive = vec![on_open, on_message, on_close, on_error];
     }
 
     /// Builds one browser callback bound to this transport; the
     /// caller registers it with the socket and keeps it in
     /// `Inner::keepalive` so it outlives the dial.
-    fn bind(&self, run: impl Fn(&WebTransport, JsValue) + 'static) -> Closure<dyn FnMut(JsValue)> {
+    fn bind(&self, run: impl Fn(&Dialer, JsValue) + 'static) -> Closure<dyn FnMut(JsValue)> {
         let transport = self.clone();
         Closure::new(move |event: JsValue| run(&transport, event))
     }
@@ -215,10 +227,14 @@ impl WebTransport {
             return;
         }
         inner.closed = true;
-        inner.keepalive.clear();
         if let Some(socket) = inner.socket.take() {
+            socket.set_onopen(None);
+            socket.set_onmessage(None);
+            socket.set_onclose(None);
+            socket.set_onerror(None);
             let _ = socket.close();
         }
+        inner.keepalive.clear();
         drop(inner);
         let inner = self.inner.borrow();
         Self::report(&inner, State::Closed);
@@ -227,16 +243,16 @@ impl WebTransport {
 
 impl Transport for WebTransport {
     fn link(&self) -> Link {
-        Link::serve(&self.url)
+        Link::serve(&self.dialer.url)
     }
 
     fn start(&mut self, events: EventSender) {
-        self.inner.borrow_mut().events = Some(events);
-        self.dial();
+        self.dialer.inner.borrow_mut().events = Some(events);
+        self.dialer.dial();
     }
 
     fn send(&self, frame: Frame) {
-        let inner = self.inner.borrow();
+        let inner = self.dialer.inner.borrow();
         let Some(socket) = &inner.socket else {
             return;
         };
@@ -245,13 +261,13 @@ impl Transport for WebTransport {
     }
 
     fn close(&self) {
-        self.shutdown();
+        self.dialer.shutdown();
     }
 }
 
 impl Drop for WebTransport {
     fn drop(&mut self) {
-        self.shutdown();
+        self.dialer.shutdown();
     }
 }
 

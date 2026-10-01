@@ -1,0 +1,55 @@
+# kage extensions
+
+`kage rpc` and `kage serve` speak the Agent Client Protocol, plus a
+few kage-only methods and session updates under the `_kage/` prefix.
+An ACP client that knows nothing of them still works; a client that
+does gets the file tree, forks, the model catalog and the rest the
+kage desktop app uses. Field names are camelCase on the wire.
+
+## initialize
+
+The `initialize` result carries `_meta.kage.cwd`: the directory a
+session opened with an empty `cwd` runs in. A client with no
+directory of its own, such as a browser, names its sessions' project
+by it.
+
+A client may send `_meta.kage.unconfiguredTools: "allow"` in its
+`clientCapabilities` to get the TUI's permission rules: tools without
+a config rule run instead of asking. Advertising `subagents` (any
+value but `false`) turns on `subagent_update` and child sessions.
+
+## requests
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `_kage/config/get` | `sessionId?` | The configuration snapshot, read for the session's directory, with secret values redacted. Without a known session, the server's own directory. |
+| `_kage/options/list` | `sessionId?` | `{ options }`: every engine option a client can change, with its `toml` key, `kind` (`bool`, `int`, `fraction`, `choice`, `str`, `key`), bounds or `values`, `default`, `value`, `configured` and `live`. |
+| `_kage/options/set` | `name`, `value` | `{ options }` after the write, validated and stored in the user `config.toml` with its comments kept. A refused value is an error. |
+| `_kage/models/list` | none | `{ providers }`: each provider with credentials, `{ id, name, models }`, and each model `{ id, name, context?, inputCost?, outputCost?, thinking, images, released? }`. `id` is `provider/model`, the value the `model` config option takes; costs are USD per million tokens; `thinking` lists the `thinking` option values the model accepts. |
+| `_kage/fs` | `sessionId`, `op` (`list` or `read`), `path` | `list`: `{ entries, truncated }`, a capped subtree of the session's workdir that skips `.git` and gitignored paths; continue a truncated listing by listing a subdirectory. `read`: `{ content, truncated, binary }`, capped at 512 KB. Paths are relative to the workdir. |
+| `_kage/session/fork` | `sessionId`, `before?` | `{ sessionId }` of a recorded copy, whole or up to the prompt `before` names (`{ text, occurrence }`), which `session/load` opens. |
+| `_kage/session/export` | `sessionId` | `{ markdown }`: the transcript as Markdown. |
+| `_kage/session/compact` | `sessionId` | `{}`: summarizes older turns now. |
+| `_kage/session/rename` | `sessionId`, `title` | `{}`: a named session keeps its name over generated titles. |
+| `_kage/swarm/resume` | `sessionId`, `members` | `{ resumed }`: continues swarm children (child session id to a follow-up prompt; empty continues the task). It answers once every member is checked and attached, and refuses the whole request when one is not a swarm child of the session or is still working. Members report under the call that first spawned them. Once all have reported, the session gets a notice with the counts and its next turn reads their results. |
+
+## session updates
+
+| `sessionUpdate` | Fields | Meaning |
+| --- | --- | --- |
+| `_kage/turn` | `phase` (`start`, `end`), `reason?` (`tool_calls`, `no_tool_calls`) | One provider round trip of the running prompt. |
+| `_kage/notice` | `tone` (`info`, `warn`, `error`, `success`), `text` | A message for the user that is not part of the conversation, such as `goal met: ...`. |
+| `_kage/compaction` | `kept`, `before`, `after` | Older turns were summarized: turns kept verbatim and context tokens before and after. |
+| `_kage/mcp_status` | `name`, `status` (`connected`, `starting`, `needs_auth`, or `{ failed: { error } }`) | One MCP server's reachability changed. |
+
+`session/list` entries carry `_meta.kage.parentSessionId` for a
+session forked from another, so a client can draw the fork tree.
+
+## sessions an agent started
+
+A subagent's session streams on its own id while it runs. Loading a
+finished agent's session with `session/load` shows its transcript but
+does not open it in the engine: prompting it is refused, because an
+agent belongs to the call that started it. Loading a session rebuilds
+`subagent_update` records for the agents its history started, at
+every depth, from the results the engine recorded.

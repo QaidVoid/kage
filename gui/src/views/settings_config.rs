@@ -29,6 +29,8 @@ pub(crate) struct Snapshot {
     mcp: Mcp,
     permissions: Permissions,
     plugins: Plugins,
+    #[serde(rename = "installedPlugins")]
+    installed_plugins: Vec<InstalledPlugin>,
 }
 
 impl Snapshot {
@@ -116,6 +118,13 @@ struct Plugins {
     enabled: Vec<String>,
     capabilities: BTreeMap<String, Vec<String>>,
     config: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct InstalledPlugin {
+    name: String,
+    enabled: bool,
 }
 
 /// One provider row: a configured one, or one the session's model
@@ -674,9 +683,50 @@ fn action_badge(action: &str, pal: &Palette) -> Div {
     }
 }
 
-/// The Plugins page: what the config says about plugins. The snapshot
-/// carries no list of installed files, so the page shows the directory,
-/// the allowlist, the capability grants and which plugins have settings.
+/// Every plugin installed or named in the config, by name, with its
+/// capability grants and a line saying whether it loads, whether it has
+/// grants and whether it has settings.
+fn plugin_rows(snapshot: &Snapshot) -> Vec<(String, Vec<String>, String)> {
+    let plugins = &snapshot.plugins;
+    let mut names: Vec<&String> = snapshot
+        .installed_plugins
+        .iter()
+        .map(|plugin| &plugin.name)
+        .chain(plugins.capabilities.keys())
+        .chain(plugins.config.keys())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .map(|name| {
+            let caps = plugins.capabilities.get(name).cloned().unwrap_or_default();
+            let installed = snapshot
+                .installed_plugins
+                .iter()
+                .find(|plugin| &plugin.name == name);
+            let state = match installed {
+                Some(plugin) if plugin.enabled => "loads",
+                Some(_) => "skipped by the allowlist",
+                None => "not installed",
+            };
+            let detail = [
+                Some(state),
+                (!caps.is_empty()).then_some("capabilities granted in config.toml"),
+                plugins.config.contains_key(name).then_some("has settings"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" \u{b7} ");
+            (name.clone(), caps, detail)
+        })
+        .collect()
+}
+
+/// The Plugins page: the directory and the allowlist, then every plugin
+/// installed or named in the config, with whether it loads, its
+/// capability grants and whether it has settings.
 #[must_use]
 pub(crate) fn plugins_page(snapshot: &Snapshot, pal: &Palette) -> Vec<AnyElement> {
     let plugins = &snapshot.plugins;
@@ -717,38 +767,25 @@ pub(crate) fn plugins_page(snapshot: &Snapshot, pal: &Palette) -> Vec<AnyElement
             ))
             .into_any_element(),
     ];
-    let mut names: Vec<&String> = plugins
-        .capabilities
-        .keys()
-        .chain(plugins.config.keys())
-        .collect();
-    names.sort();
-    names.dedup();
-    if !names.is_empty() {
-        out.push(group("Configured plugins", pal).into_any_element());
+    let rows = plugin_rows(snapshot);
+    if !rows.is_empty() {
+        out.push(group("Plugins", pal).into_any_element());
         let mut list = boxed(pal);
-        for name in names {
-            let caps = plugins.capabilities.get(name).cloned().unwrap_or_default();
+        for (name, caps, detail) in rows {
             let mut line = h_flex()
                 .gap(px(6.))
                 .items_center()
                 .flex_wrap()
-                .child(mono(name.clone(), pal));
-            for cap in &caps {
-                line = line.child(plain_badge(cap.clone(), pal));
+                .child(mono(name, pal));
+            for cap in caps {
+                line = line.child(plain_badge(cap, pal));
             }
-            let detail = match (caps.is_empty(), plugins.config.contains_key(name)) {
-                (true, true) => "has settings",
-                (false, true) => "capabilities granted in config.toml \u{b7} has settings",
-                (false, false) => "capabilities granted in config.toml",
-                (true, false) => "",
-            };
             list = list.child(list_row(
                 Icon::new(IconName::Zap)
                     .with_size(px(14.))
                     .text_color(pal.faint),
                 line,
-                (!detail.is_empty()).then(|| SharedString::from(detail)),
+                Some(SharedString::from(detail)),
                 pal,
             ));
         }
@@ -756,7 +793,7 @@ pub(crate) fn plugins_page(snapshot: &Snapshot, pal: &Palette) -> Vec<AnyElement
     }
     out.push(
         note(
-            "Lua plugins load from the plugin directory. Blocks and widgets a plugin draws carry its name as an owner badge. Enabling and installing wait for _kage/config/set.",
+            "Lua plugins load from the plugin directory when a session opens. Blocks and widgets a plugin draws carry its name as an owner badge. Enabling and installing wait for _kage/config/set.",
             pal,
         )
         .into_any_element(),
@@ -766,7 +803,36 @@ pub(crate) fn plugins_page(snapshot: &Snapshot, pal: &Palette) -> Vec<AnyElement
 
 #[cfg(test)]
 mod tests {
-    use super::{Snapshot, provider_rows};
+    use super::{Snapshot, plugin_rows, provider_rows};
+
+    #[test]
+    fn plugins_join_the_installed_files_with_the_config() {
+        let snapshot = Snapshot::parse(&serde_json::json!({
+            "plugins": {
+                "enabled": ["tokps"],
+                "capabilities": {"tokps": ["session_write"]},
+                "config": {"gone": {"k": "<redacted>"}}
+            },
+            "installedPlugins": [
+                {"name": "tokps", "enabled": true},
+                {"name": "clock", "enabled": false}
+            ]
+        }));
+        let rows = plugin_rows(&snapshot);
+        let lines: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|(name, _, detail)| (name.as_str(), detail.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("clock", "skipped by the allowlist"),
+                ("gone", "not installed \u{b7} has settings"),
+                ("tokps", "loads \u{b7} capabilities granted in config.toml"),
+            ]
+        );
+        assert_eq!(rows[2].1, ["session_write"]);
+    }
 
     #[test]
     fn providers_join_the_snapshot_with_the_offered_models() {

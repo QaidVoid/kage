@@ -24,7 +24,7 @@ value but `false`) turns on `subagent_update` and child sessions.
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `_kage/config/get` | `sessionId?` | The configuration snapshot, read for the session's directory, with secret values redacted. Without a known session, the server's own directory. |
+| `_kage/config/get` | `sessionId?` | The configuration snapshot, read for the session's directory, with secret values redacted. Without a known session, the server's own directory. `installedPlugins` lists the plugin files as `{ name, enabled }`, where `enabled` says whether the `[plugins] enabled` allowlist lets one load. |
 | `_kage/options/list` | `sessionId?` | `{ options }`: every engine option a client can change, with its `toml` key, `kind` (`bool`, `int`, `fraction`, `choice`, `str`, `key`), bounds or `values`, `default`, `value`, `configured` and `live`. |
 | `_kage/options/set` | `name`, `value` | `{ options }` after the write, validated and stored in the user `config.toml` with its comments kept. A refused value is an error. |
 | `_kage/models/list` | none | `{ providers }`: each provider with credentials, `{ id, name, models }`, and each model `{ id, name, context?, inputCost?, outputCost?, thinking, images, released? }`. `id` is `provider/model`, the value the `model` config option takes; costs are USD per million tokens; `thinking` lists the `thinking` option values the model accepts. |

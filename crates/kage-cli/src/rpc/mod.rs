@@ -43,6 +43,7 @@ mod sessions;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufReader;
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -50,7 +51,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use kage_acp::acp::{
     AgentCapabilities, AgentMeta, CloseSessionRequest, CloseSessionResponse, ConfigGetRequest,
     ConfigGetResult, FsRequest, FsResult, Implementation, InitializeRequest, InitializeResponse,
-    KageAgentInfo, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    InstalledPlugin, KageAgentInfo, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, McpCapabilities, ModelsResponse, NewSessionRequest, NewSessionResponse,
     OptionSetRequest, OptionsResponse, PROTOCOL_VERSION, PromptCapabilities, PromptDelivery,
     PromptRequest, PromptResponse, ResumeSessionRequest, ResumeSessionResponse,
@@ -79,6 +80,29 @@ use crate::engine::{Recorder, SessionSpec, SubscriptionId};
 
 /// What a redacted config value reads as.
 const REDACTED: &str = "<redacted>";
+
+/// The `*.lua` plugin files in `dir`, by name, each marked with whether
+/// the `enabled` allowlist lets it load. A missing directory has none.
+fn installed_plugins(dir: &Path, enabled: &[String]) -> Vec<InstalledPlugin> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut plugins: Vec<InstalledPlugin> = entries
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension()? != "lua" {
+                return None;
+            }
+            let name = path.file_stem()?.to_str()?.to_owned();
+            (!name.starts_with('@')).then(|| InstalledPlugin {
+                enabled: enabled.is_empty() || enabled.contains(&name),
+                name,
+            })
+        })
+        .collect();
+    plugins.sort_by(|a, b| a.name.cmp(&b.name));
+    plugins
+}
 
 /// Blanks the config values that may carry credentials before they leave
 /// the process: provider and MCP header values, MCP environment values
@@ -499,12 +523,16 @@ impl Agent for CliAcpAgent {
     fn config_get(&self, req: ConfigGetRequest) -> Result<ConfigGetResult, RpcError> {
         let mut config = self.load_config(&req)?;
         redact_secrets(&mut config);
+        let installed_plugins = crate::plugins_dir()
+            .map(|dir| installed_plugins(&dir, &config.plugins.enabled))
+            .unwrap_or_default();
         Ok(ConfigGetResult {
             providers: config.providers,
             mcp: config.mcp,
             permissions: config.permissions,
             plugins: config.plugins,
             ui: config.ui,
+            installed_plugins,
         })
     }
 

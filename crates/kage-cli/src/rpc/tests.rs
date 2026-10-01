@@ -2843,6 +2843,24 @@ fn mcp_prompts_are_commands_that_expand_when_sent_back() {
 }
 
 #[test]
+fn installed_plugins_are_the_lua_files_the_allowlist_marks() {
+    let dir = tempfile::tempdir().unwrap();
+    for file in ["b.lua", "a.lua", "@kage.lua", "notes.txt"] {
+        std::fs::write(dir.path().join(file), "").unwrap();
+    }
+    let all = super::installed_plugins(dir.path(), &[]);
+    let names: Vec<_> = all.iter().map(|p| (p.name.as_str(), p.enabled)).collect();
+    assert_eq!(names, [("a", true), ("b", true)]);
+    let only_b = super::installed_plugins(dir.path(), &["b".to_owned()]);
+    let names: Vec<_> = only_b
+        .iter()
+        .map(|p| (p.name.as_str(), p.enabled))
+        .collect();
+    assert_eq!(names, [("a", false), ("b", true)]);
+    assert!(super::installed_plugins(&dir.path().join("missing"), &[]).is_empty());
+}
+
+#[test]
 fn config_get_serves_the_read_only_sections_without_writing_config() {
     let dir = tempfile::tempdir().unwrap();
     let h = serve(vec![], dir.path(), dir.path());

@@ -57,6 +57,19 @@ pub struct ConfigGetResult {
     pub plugins: PluginsConfig,
     /// User interface settings.
     pub ui: UiConfig,
+    /// The plugin files in the plugin directory, by name.
+    #[serde(default)]
+    pub installed_plugins: Vec<InstalledPlugin>,
+}
+
+/// One plugin file in the plugin directory.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledPlugin {
+    /// The file stem, which `config.toml` names the plugin by.
+    pub name: String,
+    /// Whether the `[plugins] enabled` allowlist lets it load.
+    pub enabled: bool,
 }
 
 /// One MCP server's reachability, as the kage engine reports it,

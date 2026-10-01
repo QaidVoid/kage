@@ -19,21 +19,23 @@ use std::time::Duration;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
-use gpui_kit::component::input::TextareaState;
+use gpui_kit::component::input::{Input, InputEvent, InputState, TextareaState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::theme::{ActiveTheme, ThemeColor};
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Animation, AnimationExt as _, AnyElement, App, Context, Div, ElementId, Entity, EventEmitter,
-    FollowMode, Hsla, InteractiveElement as _, IntoElement, ListAlignment, ListState,
-    ParentElement as _, Render, SharedString, Stateful, StatefulInteractiveElement as _,
-    Styled as _, TestSupportExt as _, Window, div, list, px, radians, relative,
+    Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, Div, ElementId,
+    Entity, EventEmitter, FollowMode, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    ListAlignment, ListState, ParentElement as _, Render, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div, list, px,
+    radians, relative,
 };
 
-use crate::store::{Store, StoreHandle as _};
-use crate::theme::{FS_2XS, FS_SM, FS_XS, R_FULL, R_LG, R_SM, SP_1, SP_2, SP_3, SP_4, SP_5};
+use crate::store::{EXIT_PLAN_TOOL, PlanChoice, Store, StoreHandle as _, plan_review};
+use crate::theme::{FS_2XS, FS_SM, FS_XS, R_FULL, R_LG, R_MD, R_SM, SP_1, SP_2, SP_3, SP_4, SP_5};
 use crate::timing::RunEnd;
+use crate::views::kit::{self, BtnTone};
 use kage_client::wire::{NoticeTone, ToolCallContent, ToolCallStatus, TurnReason};
 use kage_client::{Session, ToolCallItem, TranscriptItem};
 
@@ -59,6 +61,8 @@ const ICON_SM: f32 = 14.0;
 const SHELL_TAIL: usize = 12;
 /// The tallest a detail body grows before it scrolls.
 const DETAIL_MAX_H: f32 = 320.0;
+/// The tallest a plan document grows before it scrolls.
+const PLAN_DOC_MAX_H: f32 = 420.0;
 /// The extra small icon size of the design (`.ico.xs`).
 const ICON_XS: f32 = 12.0;
 /// The user bubble's corner radius.
@@ -964,6 +968,7 @@ fn plain_row(session: &Session, ix: usize, ui: &UiState, last: usize) -> Option<
             }
             Row::Plan { ix }
         }
+        TranscriptItem::Decision { subject, .. } if subject == EXIT_PLAN_TOOL => return None,
         TranscriptItem::Decision { .. } => Row::Decision { ix },
     })
 }
@@ -972,6 +977,10 @@ fn plain_row(session: &Session, ix: usize, ui: &UiState, last: usize) -> Option<
 pub struct TranscriptView {
     store: Entity<Store>,
     composer: Entity<TextareaState>,
+    /// The revise field of the plan card under review.
+    revise: Entity<InputState>,
+    /// The plan card whose revise field shows, by item index.
+    revising: Option<usize>,
     /// The measured list the rows render in.
     list: ListState,
     /// The row model this view renders, rebuilt per frame.
@@ -999,12 +1008,31 @@ impl TranscriptView {
     pub fn new(
         store: Entity<Store>,
         composer: Entity<TextareaState>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        let revise = cx.new(|cx| InputState::new(window, cx).placeholder("What should change?"));
+        cx.subscribe_in(
+            &revise,
+            window,
+            |this, input, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    let text = input.read(cx).value().trim().to_owned();
+                    if text.is_empty() {
+                        return;
+                    }
+                    this.review(PlanChoice::Revise, Some(&text), cx);
+                    input.update(cx, |state, cx| state.set_value("", window, cx));
+                }
+            },
+        )
+        .detach();
         Self {
             store,
             composer,
+            revise,
+            revising: None,
             list: following_list(),
             model: Rc::default(),
             signatures: Vec::new(),
@@ -1014,6 +1042,14 @@ impl TranscriptView {
             render_counts: HashMap::new(),
             find: None,
         }
+    }
+
+    /// Answers the plan review from its card.
+    fn review(&mut self, choice: PlanChoice, revision: Option<&str>, cx: &mut Context<Self>) {
+        self.store
+            .act(cx, |store| store.review_plan(choice, revision));
+        self.revising = None;
+        cx.notify();
     }
 
     /// Whether the list follows the bottom as rows arrive and grow.
@@ -1201,6 +1237,14 @@ impl TranscriptView {
                         cx,
                     )
                     .into_any_element()
+                }
+                Some(TranscriptItem::ToolCall(call)) if call.title == EXIT_PLAN_TOOL => {
+                    match session {
+                        Some(session) => self
+                            .render_plan_card(session, *ix, call, cx)
+                            .into_any_element(),
+                        None => blank_row(*ix).into_any_element(),
+                    }
                 }
                 Some(TranscriptItem::ToolCall(call)) => self
                     .render_tool(
@@ -1707,6 +1751,205 @@ impl TranscriptView {
         unit
     }
 
+    /// The plan an `exit_plan` call presents, as the design's plan card:
+    /// the title from the document's first heading, the review state,
+    /// the markdown document while open, and the three answers while
+    /// the review is pending.
+    fn render_plan_card(
+        &self,
+        session: &Session,
+        ix: usize,
+        call: &ToolCallItem,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let ink = crate::theme::Palette::active(cx);
+        let view = cx.entity();
+        let pending =
+            plan_review(session).is_some_and(|review| review.call_id == call.tool_call_id);
+        let doc = input_str(call.input.as_ref(), "plan").to_owned();
+        let title = doc
+            .lines()
+            .find_map(|line| line.strip_prefix("# "))
+            .unwrap_or("Plan")
+            .to_owned();
+        let state = if pending {
+            Some(("Pending review", ink.accent, ink.accent_soft, ink.accent_bd))
+        } else {
+            plan_decision(session, ix).map(|choice| match choice {
+                PlanChoice::Approve => ("Approved", ink.ok, ink.ok_soft, ink.ok_bd),
+                PlanChoice::Revise => ("Revising", ink.warn, ink.warn_soft, ink.warn_bd),
+                PlanChoice::Reject => ("Rejected", ink.danger, ink.danger_soft, ink.danger_bd),
+            })
+        };
+        // A pending plan opens by default; a click flips the default.
+        let open = pending != self.ui.expanded.contains(&RowKey::Item(ix));
+        let hover = ink.hover;
+        let head = h_flex()
+            .id("head")
+            .gap(px(10.))
+            .items_center()
+            .min_h(px(44.))
+            .px(px(12.))
+            .py(px(10.))
+            .cursor_pointer()
+            .bg(if pending {
+                ink.accent_soft
+            } else {
+                ink.surface
+            })
+            .hover(move |style| style.bg(hover))
+            .on_click({
+                let view = view.clone();
+                move |_, _, cx| {
+                    view.update(cx, |this, cx| {
+                        this.toggle(RowKey::Item(ix));
+                        cx.notify();
+                    });
+                }
+            })
+            .child(
+                div()
+                    .size(px(28.))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(R_MD))
+                    .bg(ink.accent_soft)
+                    .text_color(ink.accent)
+                    .child(Icon::new(IconName::PenLine).with_size(px(ICON_SM))),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .truncate()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(FS_SM))
+                            .text_color(ink.ink_strong)
+                            .child(SharedString::from(title)),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(FS_XS))
+                            .text_color(ink.faint)
+                            .child("Plan written in plan mode"),
+                    ),
+            )
+            .children(state.map(|(label, fg, bg, border)| {
+                div()
+                    .flex_none()
+                    .px(px(7.))
+                    .py(px(1.))
+                    .rounded(px(R_FULL))
+                    .border_1()
+                    .border_color(border)
+                    .bg(bg)
+                    .text_size(px(10.5))
+                    .text_color(fg)
+                    .child(label)
+            }))
+            .child(
+                Icon::new(if open {
+                    IconName::ChevronUp
+                } else {
+                    IconName::ChevronDown
+                })
+                .with_size(px(ICON_SM))
+                .text_color(ink.faint),
+            );
+        let mut card = v_flex()
+            .id(ElementId::named_usize("row-plan-card", ix))
+            .test_support()
+            .w_full()
+            .border_1()
+            .border_color(ink.accent_bd)
+            .rounded(px(R_LG))
+            .bg(ink.surface)
+            .overflow_hidden()
+            .child(head);
+        if open && !doc.is_empty() {
+            card = card.child(
+                div()
+                    .id("doc")
+                    .max_h(px(PLAN_DOC_MAX_H))
+                    .overflow_y_scroll()
+                    .px(px(16.))
+                    .py(px(12.))
+                    .border_t_1()
+                    .border_color(ink.subtle)
+                    .child(TextView::markdown(
+                        ElementId::named_usize("plan-md", ix),
+                        doc,
+                    )),
+            );
+        }
+        if pending {
+            let answer = |id: &'static str, tone: BtnTone, choice: PlanChoice| {
+                let view = view.clone();
+                kit::btn_sm(format!("{id}-{ix}"), tone, ink).on_click(move |_, _, cx| {
+                    view.update(cx, |this, cx| this.review(choice, None, cx));
+                })
+            };
+            let revising = self.revising == Some(ix);
+            let revise_view = view.clone();
+            let revise = self.revise.clone();
+            let mut actions = h_flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(SP_4))
+                .px(px(12.))
+                .py(px(10.))
+                .border_t_1()
+                .border_color(ink.subtle)
+                .child(
+                    div()
+                        .mr_auto()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(FS_SM))
+                        .text_color(ink.ink_strong)
+                        .child("Ready to build with this plan?"),
+                )
+                .child(
+                    answer("plan-reject", BtnTone::Danger, PlanChoice::Reject)
+                        .child("Reject and exit"),
+                )
+                .child(
+                    kit::btn_sm(format!("plan-revise-{ix}"), BtnTone::Plain, ink)
+                        .on_click(move |_, window, cx| {
+                            revise_view.update(cx, |this, cx| {
+                                this.revising = if this.revising == Some(ix) {
+                                    None
+                                } else {
+                                    Some(ix)
+                                };
+                                if this.revising.is_some() {
+                                    revise.update(cx, |state, cx| state.focus(window, cx));
+                                }
+                                cx.notify();
+                            });
+                        })
+                        .child("Revise"),
+                )
+                .child(
+                    answer("plan-approve", BtnTone::Primary, PlanChoice::Approve)
+                        .child(Icon::new(IconName::Check).with_size(px(ICON_XS)))
+                        .child("Approve plan"),
+                );
+            if revising {
+                actions = actions.child(div().w_full().child(Input::new(&self.revise).small()));
+            }
+            card = card.child(actions);
+        }
+        div()
+            .id(ElementId::named_usize("row-plan-unit", ix))
+            .w_full()
+            .child(card)
+    }
+
     /// A collapsed run of same-family tool calls.
     fn render_group(&self, row: &Row, cx: &Context<Self>) -> Stateful<Div> {
         let Row::Group {
@@ -1933,6 +2176,21 @@ fn run_texts(session: &Session, end: usize) -> (Option<String>, String) {
         .collect::<Vec<_>>()
         .join("\n\n");
     (prompt.filter(|text| !text.is_empty()), reply)
+}
+
+/// What the reviewer answered to the plan the `exit_plan` call at `ix`
+/// presented: the first review decision this client recorded after it.
+fn plan_decision(session: &Session, ix: usize) -> Option<PlanChoice> {
+    session.items[ix..].iter().find_map(|item| match item {
+        TranscriptItem::Decision { subject, label, .. } if subject == EXIT_PLAN_TOOL => {
+            Some(match label.to_lowercase().as_str() {
+                "approve" => PlanChoice::Approve,
+                "revise" => PlanChoice::Revise,
+                _ => PlanChoice::Reject,
+            })
+        }
+        _ => None,
+    })
 }
 
 /// The names of a prompt's non-text blocks, for its attachment chips.
@@ -2576,6 +2834,11 @@ fn item_fingerprint(session: &Session, ix: usize, hasher: &mut impl std::hash::H
         }
         Some(TranscriptItem::User { content, .. }) => content.len().hash(hasher),
         Some(TranscriptItem::ToolCall(call)) => {
+            if call.title == EXIT_PLAN_TOOL {
+                // The card follows the open ask and the decision after it.
+                session.permissions.len().hash(hasher);
+                session.items.len().hash(hasher);
+            }
             format!("{:?}", call.status).hash(hasher);
             call.content.len().hash(hasher);
             call.text().len().hash(hasher);
@@ -3119,6 +3382,38 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_review_reads_its_answer_from_the_decision_it_hides() {
+        let exit_plan = call(
+            "call_plan",
+            "exit_plan",
+            ToolKind::Other,
+            ToolCallStatus::Completed,
+            Vec::new(),
+            None,
+            Some(serde_json::json!({"plan": "# Retry budget\n\n1. Do it"})),
+        );
+        let session = session_with(vec![
+            exit_plan,
+            TranscriptItem::Decision {
+                subject: "exit_plan".into(),
+                label: "Revise".into(),
+                allowed: false,
+                feedback: Some("cover the tests".into()),
+            },
+        ]);
+        let model = row_model(&session, &UiState::default());
+        assert_eq!(
+            model.kinds(),
+            vec!["tool"],
+            "the card speaks for the decision"
+        );
+        assert_eq!(
+            super::plan_decision(&session, 0),
+            Some(crate::store::PlanChoice::Revise)
+        );
+    }
+
+    #[test]
     fn a_streaming_delta_moves_only_its_own_row_signature() {
         let mut session = session_with(vec![
             TranscriptItem::User {
@@ -3343,7 +3638,7 @@ mod tests {
         cx.update(gpui_kit::init);
         cx.add_window_view(|window: &mut Window, cx| {
             let composer = cx.new(|cx| gpui_kit::component::input::TextareaState::new(window, cx));
-            super::TranscriptView::new(store.clone(), composer, cx)
+            super::TranscriptView::new(store.clone(), composer, window, cx)
         })
     }
 

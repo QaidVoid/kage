@@ -33,7 +33,9 @@ use gpui_kit::{
     StatefulInteractiveElement, StyleRefinement, Styled, Window, div, px, relative,
 };
 use kage_client::Session;
-use kage_client::wire::{FsKind, FsListResult, SessionConfigKind, SessionConfigOption};
+use kage_client::wire::{
+    FsKind, FsListResult, SessionConfigKind, SessionConfigOption, SessionConfigSelectOption,
+};
 use serde_json::Value;
 
 use crate::store::{Store, StoreHandle as _};
@@ -489,16 +491,33 @@ pub(crate) fn active_mode(session: &Session) -> Option<String> {
         .or_else(|| select_option(session, "mode").map(|option| option.current_value.clone()))
 }
 
-/// The value Shift+Tab cycles to: the entry after the active one in
-/// the mode option's advertised list, wrapping around. No option or an
-/// empty list cycles nowhere.
+/// The value of the mode option that is plan mode rather than a
+/// permission mode.
+pub(crate) const PLAN_MODE: &str = "plan";
+
+/// The permission modes the mode option advertises, in its order: every
+/// value but plan mode, which the toolbar shows as its own chip.
+pub(crate) fn permission_values(session: &Session) -> Vec<&SessionConfigSelectOption> {
+    select_option(session, "mode")
+        .map(|option| {
+            option
+                .options
+                .iter()
+                .filter(|value| value.value != PLAN_MODE)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The permission mode Shift+Tab cycles to from `current`: the next
+/// advertised one, wrapping around. No option or an empty list cycles
+/// nowhere.
 #[must_use]
-pub(crate) fn next_mode_value(session: &Session) -> Option<String> {
-    let values = &select_option(session, "mode")?.options;
+pub(crate) fn next_mode_value(session: &Session, current: &str) -> Option<String> {
+    let values = permission_values(session);
     if values.is_empty() {
         return None;
     }
-    let current = active_mode(session).unwrap_or_default();
     let index = values
         .iter()
         .position(|value| value.value == current)
@@ -825,14 +844,17 @@ impl ComposerView {
         }
     }
 
-    /// Steps the permission mode to the next advertised value.
+    /// Steps the permission mode to the next advertised value. Plan
+    /// mode stays on; it has its own chip.
     fn cycle_mode(&mut self, cx: &mut Context<Self>) {
-        self.store.update(cx, |store, cx| {
-            let next = store.active_session().and_then(next_mode_value);
+        self.store.act(cx, |store| {
+            let current = store.permission_mode().unwrap_or_default();
+            let next = store
+                .active_session()
+                .and_then(|session| next_mode_value(session, &current));
             if let Some(value) = next {
-                store.set_option("mode", &value);
+                store.set_permission(&value);
             }
-            cx.notify();
         });
     }
 
@@ -1258,12 +1280,14 @@ impl ComposerView {
                             .on_click({
                                 let this = this.clone();
                                 let store = store.clone();
-                                let target = if plan_on { "default" } else { "plan" };
                                 move |_, _, cx| {
                                     close(&this, cx);
-                                    store.update(cx, |store, cx| {
-                                        store.set_option("mode", target);
-                                        cx.notify();
+                                    store.act(cx, |store| {
+                                        if plan_on {
+                                            store.exit_plan()
+                                        } else {
+                                            store.enter_plan()
+                                        }
                                     });
                                 }
                             })
@@ -1338,16 +1362,19 @@ impl ComposerView {
                 .child("Mode")
                 .into_any_element();
         };
-        let option = option.clone();
-        let active = session.and_then(active_mode).unwrap_or_else(|| {
-            option
-                .options
-                .first()
-                .map(|value| value.value.clone())
-                .unwrap_or_default()
-        });
-        let label = option
-            .options
+        let values: Vec<SessionConfigSelectOption> = session
+            .map(permission_values)
+            .unwrap_or_default()
+            .into_iter()
+            .cloned()
+            .collect();
+        let active = self
+            .store
+            .read(cx)
+            .permission_mode()
+            .or_else(|| values.first().map(|value| value.value.clone()))
+            .unwrap_or_else(|| option.current_value.clone());
+        let label = values
             .iter()
             .find(|value| value.value == active)
             .map(|value| value.name.clone())
@@ -1370,17 +1397,14 @@ impl ComposerView {
         }
         pill.dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
             let mut built = menu.label("Permission mode");
-            for value in &option.options {
+            for value in &values {
                 let store = store.clone();
                 let value = value.clone();
                 built = built.item(
                     PopupMenuItem::new(value.name.clone())
                         .checked(value.value == active)
                         .on_click(move |_, _, cx| {
-                            store.update(cx, |store, cx| {
-                                store.set_option("mode", &value.value);
-                                cx.notify();
-                            });
+                            store.act(cx, |store| store.set_permission(&value.value));
                         }),
                 );
             }
@@ -1430,9 +1454,12 @@ impl ComposerView {
                     .opacity(0.7)
                     .hover(move |style| style.bg(fill_hover).opacity(1.))
                     .on_click(move |_, _, cx| {
-                        store.update(cx, |store, cx| {
-                            store.set_option(option, off);
-                            cx.notify();
+                        store.act(cx, |store| {
+                            if option == "mode" {
+                                store.exit_plan()
+                            } else {
+                                store.set_option(option, off)
+                            }
                         });
                     })
                     .child(Icon::new(IconName::X).with_size(px(12.))),
@@ -2058,28 +2085,33 @@ mod tests {
         let values = ["default", "ask", "allow", "deny", "plan"];
         let session = mode_session("default", None, &values);
         assert_eq!(
-            next_mode_value(&session).as_deref(),
+            next_mode_value(&session, "default").as_deref(),
             Some("ask"),
             "the cycle follows the option's order"
         );
-        let session = mode_session("plan", None, &values);
-        assert_eq!(next_mode_value(&session).as_deref(), Some("default"));
-        let session = mode_session("mystery", None, &values);
         assert_eq!(
-            next_mode_value(&session).as_deref(),
+            next_mode_value(&session, "deny").as_deref(),
+            Some("default"),
+            "plan mode is not a permission mode"
+        );
+        assert_eq!(
+            next_mode_value(&session, "mystery").as_deref(),
             Some("default"),
             "an unknown current starts the cycle"
         );
         let session = mode_session("ask", Some("deny"), &values);
-        assert_eq!(
-            next_mode_value(&session).as_deref(),
-            Some("plan"),
-            "current_mode_update marks the active mode, not the stale option value"
-        );
         let bare = Session::new("s1");
-        assert_eq!(next_mode_value(&bare), None, "no option, no cycle");
+        assert_eq!(
+            next_mode_value(&bare, "default"),
+            None,
+            "no option, no cycle"
+        );
         let empty = mode_session("default", None, &[]);
-        assert_eq!(next_mode_value(&empty), None, "no values, no cycle");
+        assert_eq!(
+            next_mode_value(&empty, "default"),
+            None,
+            "no values, no cycle"
+        );
         assert_eq!(
             active_mode(&session),
             Some("deny".to_owned()),

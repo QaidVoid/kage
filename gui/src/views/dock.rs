@@ -1,16 +1,14 @@
 //! The dock row above the composer: the goal pill with its popover,
-//! the plan review pill with its three answers, the running swarm and
-//! todos pills, and the queued prompt rows.
+//! the plan pill that leads to the plan card under review, the running
+//! swarm and todos pills, and the queued prompt rows.
 //!
 //! Every pill derives its state from the active session the store
 //! holds, so the dock counts only what frames delivered and hides
 //! what is incomputable. Two pieces of the full dock are absent on
 //! purpose: the background-agents pill, which waits for the wire to
 //! carry background agent events, and the approval card, a separate
-//! view the shell mounts beside this row. A revise answer picks the
-//! ask's own revise option and rides the client's feedback channel,
-//! which carries the typed text to the agent under
-//! `_meta.kage.planReview`.
+//! view the shell mounts beside this row. The plan review itself is
+//! answered on its card in the transcript.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -28,16 +26,14 @@ use gpui_kit::{
     InteractiveElement, Interactivity, IntoElement, ParentElement, Render, SharedString, Stateful,
     StatefulInteractiveElement, StyleRefinement, Styled, Window, div, px,
 };
-use kage_client::wire::{
-    ContentBlock, NoticeTone, PermissionOption, PermissionOptionKind, SubagentState,
-};
-use kage_client::{PermissionDecision, Session, TranscriptItem};
+use kage_client::wire::{ContentBlock, NoticeTone, SubagentState};
+use kage_client::{Session, TranscriptItem};
 use serde_json::Value;
 
-use crate::store::{Store, StoreHandle as _};
+use crate::store::{Store, StoreHandle as _, plan_review};
 use crate::theme::{
-    CTL_ICO, FONT_MONO, FS_2XS, FS_BASE, FS_SM, FS_XS, Palette, R_FULL, R_LG, R_MD, R_SM, SP_3,
-    SP_4, SP_5,
+    CTL_ICO, FONT_MONO, FS_2XS, FS_BASE, FS_SM, FS_XS, Palette, R_FULL, R_LG, R_SM, SP_3, SP_4,
+    SP_5,
 };
 use crate::views::deferred::Deferred;
 use gpui_kit::base::ElementExt as _;
@@ -46,8 +42,6 @@ use gpui_kit::base::ElementExt as _;
 const GOAL_OPTION: &str = "goal";
 /// The prefix of the success notice that reports a met goal.
 const GOAL_MET_PREFIX: &str = "goal met: ";
-/// The tool whose open ask is the plan mode review.
-const EXIT_PLAN_TOOL: &str = "exit_plan";
 /// Characters a queue row shows before the ellipsis.
 const QUEUE_TEXT_COLUMNS: usize = 80;
 /// The width of the todos mini bar, in pixels.
@@ -153,61 +147,6 @@ fn mini_bar(done: usize, total: usize, pal: &Palette) -> Div {
         .child(div().w(px(fill)).h_full().bg(pal.ok))
 }
 
-/// The three tones a small action button carries: the plain fill,
-/// the filled success, and the outlined danger.
-enum BtnTone {
-    /// The plain hairline button.
-    Plain,
-    /// The filled success button, for the go-ahead answer.
-    Ok,
-    /// The outlined danger button, for the refuse answer.
-    Danger,
-}
-
-/// One small action button as the design draws it: 26px tall, an 8px
-/// radius, 12px medium text, in one of the three action tones. The
-/// filled success tone has no hover step because the design lifts it
-/// with a brightness filter the toolkit has no equivalent for.
-fn btn_sm(id: impl Into<SharedString>, label: &str, tone: BtnTone, pal: &Palette) -> Stateful<Div> {
-    let fill_hover = pal.fill_hover;
-    let line_strong = pal.line_strong;
-    let danger_soft = pal.danger_soft;
-    let ok_on = pal.ok_ink;
-    let label = SharedString::from(label.to_owned());
-    let mut btn = h_flex()
-        .id(id.into())
-        .h(px(26.))
-        .px(px(9.))
-        .gap(px(SP_3))
-        .flex_none()
-        .items_center()
-        .rounded(px(R_MD))
-        .border_1()
-        .font_weight(FontWeight::MEDIUM)
-        .text_size(px(FS_XS))
-        .cursor_pointer()
-        .child(label);
-    match tone {
-        BtnTone::Plain => {
-            btn = btn
-                .border_color(pal.line)
-                .bg(pal.fill)
-                .text_color(pal.ink)
-                .hover(move |style| style.bg(fill_hover).border_color(line_strong));
-        }
-        BtnTone::Ok => {
-            btn = btn.border_color(pal.ok).bg(pal.ok).text_color(ok_on);
-        }
-        BtnTone::Danger => {
-            btn = btn
-                .border_color(pal.danger_bd)
-                .text_color(pal.danger)
-                .hover(move |style| style.bg(danger_soft));
-        }
-    }
-    btn
-}
-
 /// One 26px icon button as the queue rows carry: a muted glyph that
 /// inks over the hover fill.
 fn icon_btn<E: InteractiveElement + ParentElement + Styled>(
@@ -258,51 +197,6 @@ pub(crate) fn goal_state(session: &Session) -> Option<GoalState> {
         )
     });
     Some(GoalState { text, met })
-}
-
-/// The plan review pill's state, from the open exit plan ask.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PlanReviewState {
-    /// The id the decision answers.
-    pub request_id: u64,
-    /// The offered approve option, when the ask offers one.
-    pub approve: Option<String>,
-    /// The offered revise option, when the ask offers one.
-    pub revise: Option<String>,
-    /// The offered reject option, when the ask offers one.
-    pub reject: Option<String>,
-}
-
-/// The first offered option whose id or name is `name`, case
-/// insensitively. A review ask carries two reject-kind options, so
-/// the kind alone cannot tell revise from reject; the option ids the
-/// agent reads decisions from can.
-fn option_named(options: &[PermissionOption], name: &str) -> Option<String> {
-    options
-        .iter()
-        .find(|option| {
-            option.option_id.eq_ignore_ascii_case(name) || option.name.eq_ignore_ascii_case(name)
-        })
-        .map(|option| option.option_id.clone())
-}
-
-/// The open plan review of a session, when one is pending.
-#[must_use]
-pub(crate) fn plan_review(session: &Session) -> Option<PlanReviewState> {
-    let ask = session
-        .permissions
-        .iter()
-        .find(|ask| ask.tool_call.title.as_deref() == Some(EXIT_PLAN_TOOL))?;
-    let approve = match ask.option_of(PermissionOptionKind::AllowOnce) {
-        Some(id) => Some(id.to_owned()),
-        None => option_named(&ask.options, "approve"),
-    };
-    Some(PlanReviewState {
-        request_id: ask.request_id,
-        approve,
-        revise: option_named(&ask.options, "revise"),
-        reject: option_named(&ask.options, "reject"),
-    })
 }
 
 /// The swarm pill's state, from the session's subagent tree.
@@ -453,19 +347,13 @@ pub struct DockRow {
     store: Entity<Store>,
     /// Whether the goal popover shows.
     goal_open: bool,
-    /// Whether the revise text field shows under the pill row.
-    revise_open: bool,
     /// The goal text field inside the goal popover.
     goal_input: Entity<InputState>,
-    /// The revise text field under the pill row.
-    revise_input: Entity<InputState>,
     /// The goal text, held until the popover's field has been laid out.
-    /// Both fields mount only when their surface opens, so a write on
-    /// the opening frame lands on an element that has never been laid
-    /// out; see [`crate::views::deferred`].
+    /// The field mounts only when the popover opens, so a write on the
+    /// opening frame lands on an element that has never been laid out;
+    /// see [`crate::views::deferred`].
     goal_mirror: Deferred,
-    /// The revise text, held for the same reason and the same moment.
-    revise_mirror: Deferred,
 }
 
 impl EventEmitter<DockEvent> for DockRow {}
@@ -479,9 +367,6 @@ impl DockRow {
         let goal_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Set the goal option; empty clears it")
         });
-        let revise_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Tell kage what to change in the plan")
-        });
         cx.subscribe_in(
             &goal_input,
             window,
@@ -494,26 +379,12 @@ impl DockRow {
             },
         )
         .detach();
-        cx.subscribe_in(
-            &revise_input,
-            window,
-            |this, revise, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    this.send_revise(cx);
-                    revise.update(cx, |state, cx| state.set_value("", window, cx));
-                }
-            },
-        )
-        .detach();
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
         Self {
             store,
             goal_open: false,
-            revise_open: false,
             goal_input,
-            revise_input,
             goal_mirror: Deferred::new(),
-            revise_mirror: Deferred::new(),
         }
     }
 
@@ -522,77 +393,6 @@ impl DockRow {
         self.store
             .act(cx, |store| store.set_option(GOAL_OPTION, text));
         self.goal_open = false;
-        cx.notify();
-    }
-
-    /// Answers the open plan review with the offered option `choice`
-    /// names, exactly the id the ask offered. A revise carries its
-    /// text through the client's feedback channel.
-    fn decide_plan(&mut self, choice: &str, revision: Option<&str>, cx: &mut Context<Self>) {
-        let store = self.store.clone();
-        let Some(session_id) = store.read(cx).active_id().map(str::to_owned) else {
-            return;
-        };
-        let Some(review) = store.read(cx).active_session().and_then(plan_review) else {
-            return;
-        };
-        let offered = match choice {
-            "approve" => review.approve.clone(),
-            "revise" => review.revise.clone(),
-            _ => review.reject.clone(),
-        };
-        let Some(option_id) = offered else {
-            return;
-        };
-        let revision = revision
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(str::to_owned);
-        let decision = match revision {
-            Some(feedback) => PermissionDecision::Feedback {
-                option_id,
-                feedback,
-            },
-            None => PermissionDecision::Option(option_id),
-        };
-        store.act(cx, |store| {
-            store.reply_permission(&session_id, review.request_id, &decision);
-        });
-        self.revise_open = false;
-        cx.notify();
-    }
-
-    /// Answers the review with its offered approve option.
-    fn approve_plan(&mut self, cx: &mut Context<Self>) {
-        self.decide_plan("approve", None, cx);
-    }
-
-    /// Answers the review with its offered reject option.
-    fn reject_plan(&mut self, cx: &mut Context<Self>) {
-        self.decide_plan("reject", None, cx);
-    }
-
-    /// Answers the review with its offered revise option and the
-    /// typed text as its feedback.
-    fn send_revise(&mut self, cx: &mut Context<Self>) {
-        let text = self.revise_input.read(cx).value().trim().to_owned();
-        self.decide_plan("revise", Some(&text), cx);
-    }
-
-    /// Shows the revise field under the pill row.
-    fn open_revise(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.revise_open = true;
-        let revise_input = self.revise_input.clone();
-        self.revise_mirror.set(String::new(), |text| {
-            revise_input.update(cx, |state, cx| state.set_value(text, window, cx));
-        });
-        revise_input.update(cx, |state, cx| state.focus(window, cx));
-        cx.notify();
-    }
-
-    /// Hides the revise field.
-    fn close_revise(&mut self, cx: &mut Context<Self>) {
-        self.revise_open = false;
         cx.notify();
     }
 
@@ -773,18 +573,12 @@ impl DockRow {
             .into_any_element()
     }
 
-    /// The plan review pill with its three answers and the scroll
-    /// request on the pill itself. The pending review carries the
-    /// attention palette: the success tint and border with the accent
-    /// plan glyph.
-    fn plan_pill(
-        &self,
-        review: &PlanReviewState,
-        pal: &'static Palette,
-        cx: &Context<Self>,
-    ) -> AnyElement {
+    /// The plan pill: under review it carries the attention palette
+    /// and brings the plan card into view; in plan mode before any plan
+    /// it says where the plan will show up.
+    fn plan_pill(&self, pending: bool, pal: &'static Palette, cx: &Context<Self>) -> AnyElement {
         let this = cx.entity();
-        let attention = h_flex()
+        let pill = h_flex()
             .id("dock-plan-pill")
             .h(px(28.))
             .px(px(10.))
@@ -794,68 +588,38 @@ impl DockRow {
             .items_center()
             .rounded(px(R_FULL))
             .border_1()
-            .border_color(pal.ok_bd)
-            .bg(pal.ok_soft)
             .text_size(px(FS_XS))
+            .child(
+                Icon::new(IconName::PenLine)
+                    .with_size(px(12.))
+                    .text_color(pal.accent),
+            );
+        if !pending {
+            return pill
+                .border_color(pal.line)
+                .bg(pal.surface)
+                .text_color(pal.muted)
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child("Plan mode: the plan will show up here"),
+                )
+                .into_any_element();
+        }
+        pill.border_color(pal.ok_bd)
+            .bg(pal.ok_soft)
             .text_color(pal.ok)
             .cursor_pointer()
             .tooltip(|window, cx| {
                 Tooltip::new("a plan waits for review; click to find it in the transcript")
                     .build(window, cx)
             })
-            .child(
-                Icon::new(IconName::PenLine)
-                    .with_size(px(12.))
-                    .text_color(pal.accent),
-            )
             .child(div().min_w_0().truncate().child("Plan: pending review"))
-            .on_click({
-                let this = this.clone();
-                move |_, _, cx| {
-                    this.update(cx, |this, cx| this.request_scroll_to_plan(cx));
-                }
-            });
-        let mut row = h_flex().gap(px(SP_3)).items_center().child(attention);
-        let approve = btn_sm("dock-plan-approve", "Approve", BtnTone::Ok, pal);
-        row = row.child(match &review.approve {
-            Some(_) => approve.on_click({
-                let this = this.clone();
-                move |_, _, cx| {
-                    this.update(cx, |this, cx| this.approve_plan(cx));
-                }
-            }),
-            None => approve
-                .opacity(0.45)
-                .cursor_default()
-                .tooltip(|window, cx| {
-                    Tooltip::new("the ask offers no approve option").build(window, cx)
-                }),
-        });
-        let revise = btn_sm("dock-plan-revise", "Revise", BtnTone::Plain, pal);
-        row = row.child(match &review.revise {
-            Some(_) => revise.on_click({
-                let this = this.clone();
-                move |_, window, cx| {
-                    this.update(cx, |this, cx| this.open_revise(window, cx));
-                }
-            }),
-            None => revise.opacity(0.45).cursor_default().tooltip(|window, cx| {
-                Tooltip::new("the ask offers no revise option").build(window, cx)
-            }),
-        });
-        let reject = btn_sm("dock-plan-reject", "Reject", BtnTone::Danger, pal);
-        row = row.child(match &review.reject {
-            Some(_) => reject.on_click({
-                let this = this.clone();
-                move |_, _, cx| {
-                    this.update(cx, |this, cx| this.reject_plan(cx));
-                }
-            }),
-            None => reject.opacity(0.45).cursor_default().tooltip(|window, cx| {
-                Tooltip::new("the ask offers no reject option").build(window, cx)
-            }),
-        });
-        row.into_any_element()
+            .on_click(move |_, _, cx| {
+                this.update(cx, |this, cx| this.request_scroll_to_plan(cx));
+            })
+            .into_any_element()
     }
 
     /// The swarm pill, in the violet swarm color with its mono count,
@@ -1045,49 +809,6 @@ impl DockRow {
         );
         unit
     }
-
-    /// The inline revise field the Revise action opens, laid out as
-    /// the design lays its action rows out: the field, then the
-    /// confirm and the escape.
-    fn revise_field(&self, cx: &Context<Self>, revise_laid_out: Rc<Cell<bool>>) -> AnyElement {
-        let this = cx.entity();
-        let revise_input = self.revise_input.clone();
-        let release = cx.entity().downgrade();
-        h_flex()
-            .w_full()
-            .mb(px(SP_4))
-            .gap(px(SP_4))
-            .items_center()
-            .on_prepaint(move |_, _, cx| {
-                revise_laid_out.set(true);
-                let _ = release.update(cx, |_, cx| cx.notify());
-            })
-            .child(Input::new(&revise_input).flex_1())
-            .child(
-                Button::new("dock-revise-send")
-                    .label("Send")
-                    .xsmall()
-                    .on_click({
-                        let this = this.clone();
-                        move |_, _, cx| {
-                            this.update(cx, |this, cx| this.send_revise(cx));
-                        }
-                    }),
-            )
-            .child(
-                Button::new("dock-revise-cancel")
-                    .label("Cancel")
-                    .xsmall()
-                    .ghost()
-                    .on_click({
-                        let this = this.clone();
-                        move |_, _, cx| {
-                            this.update(cx, |this, cx| this.close_revise(cx));
-                        }
-                    }),
-            )
-            .into_any_element()
-    }
 }
 
 impl Render for DockRow {
@@ -1098,13 +819,9 @@ impl Render for DockRow {
         self.goal_mirror.flush(|text| {
             goal_input.update(cx, |state, cx| state.set_value(text, window, cx));
         });
-        let revise_input = self.revise_input.clone();
-        self.revise_mirror.flush(|text| {
-            revise_input.update(cx, |state, cx| state.set_value(text, window, cx));
-        });
         let goal_laid_out = self.goal_mirror.laid_out().flag();
-        let revise_laid_out = self.revise_mirror.laid_out().flag();
         let pal = Palette::active(cx);
+        let plan_on = self.store.read(cx).plan_on();
         let (goal, review, swarm, todos, queue) = {
             let session = self.store.read(cx).active_session();
             (
@@ -1130,7 +847,7 @@ impl Render for DockRow {
         };
 
         let mut dock = v_flex().w_full();
-        if goal.is_some() || review.is_some() || swarm.is_some() || todos.is_some() {
+        if goal.is_some() || review.is_some() || plan_on || swarm.is_some() || todos.is_some() {
             let mut pills = h_flex()
                 .w_full()
                 .flex_wrap()
@@ -1140,8 +857,8 @@ impl Render for DockRow {
             if let Some(goal) = &goal {
                 pills = pills.child(self.goal_pill(goal, pal, cx, goal_laid_out.clone()));
             }
-            if let Some(review) = &review {
-                pills = pills.child(self.plan_pill(review, pal, cx));
+            if review.is_some() || plan_on {
+                pills = pills.child(self.plan_pill(review.is_some(), pal, cx));
             }
             if let Some(swarm) = &swarm {
                 pills = pills.child(self.swarm_pill(swarm, pal));
@@ -1150,9 +867,6 @@ impl Render for DockRow {
                 pills = pills.child(self.todos_pill(todos, pal));
             }
             dock = dock.child(pills);
-        }
-        if self.revise_open {
-            dock = dock.child(self.revise_field(cx, revise_laid_out.clone()));
         }
         if !queue.is_empty() {
             let mut sheet = v_flex()
@@ -1181,10 +895,10 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        DockEvent, DockRow, GoalState, PlanReviewState, QueueRow, SwarmState, TodosState,
-        goal_state, plan_review, prompt_text, queue_rows, swarm_state, todos_state, truncate_text,
+        DockEvent, DockRow, GoalState, QueueRow, SwarmState, TodosState, goal_state, prompt_text,
+        queue_rows, swarm_state, todos_state, truncate_text,
     };
-    use crate::store::{Command, Store};
+    use crate::store::{Command, PlanChoice, PlanReviewState, Store, plan_review};
     use crate::transport::State;
     use kage_client::wire::{
         ContentBlock, NoticeTone, SessionConfigKind, SessionConfigOption, SubagentState,
@@ -1538,6 +1252,7 @@ mod tests {
             plan_review(&session),
             Some(PlanReviewState {
                 request_id: 7,
+                call_id: "call_exit_plan".into(),
                 approve: Some("approve".into()),
                 revise: Some("revise".into()),
                 reject: Some("reject".into()),
@@ -1607,7 +1322,7 @@ mod tests {
     #[gpui_kit::test]
     fn plan_answers_send_exactly_the_offered_option_ids(cx: &mut TestAppContext) {
         let store = cx.new(|_| booted_store());
-        let (dock, visual) = window_on(cx, store.clone());
+        let (_dock, visual) = window_on(cx, store.clone());
         visual.update(|_, cx| {
             store.update(cx, |store, _| {
                 assert!(
@@ -1620,7 +1335,7 @@ mod tests {
             let review = store
                 .read(cx)
                 .active_session()
-                .and_then(super::plan_review)
+                .and_then(plan_review)
                 .expect("the ask opens the review");
             assert_eq!(review.request_id, 7);
             assert_eq!(review.approve.as_deref(), Some("approve"));
@@ -1629,7 +1344,7 @@ mod tests {
         });
 
         visual.update(|_, cx| {
-            dock.update(cx, |dock, cx| dock.approve_plan(cx));
+            store.update(cx, |store, _| store.review_plan(PlanChoice::Approve, None));
         });
         let replies = drain_replies(&store, visual);
         assert_eq!(
@@ -1655,14 +1370,9 @@ mod tests {
         visual.update(|_, cx| {
             store.update(cx, |store, _| {
                 store.absorb(review_ask(8));
-                assert!(
-                    store
-                        .active_session()
-                        .and_then(super::plan_review)
-                        .is_some()
-                );
+                assert!(store.active_session().and_then(plan_review).is_some());
             });
-            dock.update(cx, |dock, cx| dock.reject_plan(cx));
+            store.update(cx, |store, _| store.review_plan(PlanChoice::Reject, None));
         });
         let replies = drain_replies(&store, visual);
         assert_eq!(replies.len(), 1);
@@ -1679,7 +1389,7 @@ mod tests {
     #[gpui_kit::test]
     fn revise_answers_with_the_revise_option_and_delivers_the_text(cx: &mut TestAppContext) {
         let store = cx.new(|_| booted_store());
-        let (dock, visual) = window_on(cx, store.clone());
+        let (_dock, visual) = window_on(cx, store.clone());
         visual.update(|_, cx| {
             store.update(cx, |store, _| {
                 assert!(store.submit("plan it").is_some());
@@ -1687,18 +1397,10 @@ mod tests {
                 let _ = store.take_outgoing();
             });
         });
-        visual.update(|window, cx| {
-            dock.update(cx, |dock, cx| {
-                dock.open_revise(window, cx);
-                dock.revise_input.update(cx, |state, cx| {
-                    state.set_value("cover the tests too", window, cx);
-                });
-            });
-            assert!(dock.read(cx).revise_open, "the field stays open to type");
-        });
         visual.update(|_, cx| {
-            dock.update(cx, |dock, cx| dock.send_revise(cx));
-            assert!(!dock.read(cx).revise_open, "a sent revise closes the field");
+            store.update(cx, |store, _| {
+                store.review_plan(PlanChoice::Revise, Some("cover the tests too"));
+            });
             let session = store.read(cx).active_session().unwrap();
             assert!(
                 session.permissions.is_empty(),

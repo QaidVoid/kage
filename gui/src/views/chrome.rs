@@ -1769,7 +1769,7 @@ mod tests {
         let cap = captured.clone();
         let (_, visual) = cx.add_window_view(move |window: &mut Window, cx| {
             let composer = cx.new(|cx| TextareaState::new(window, cx));
-            let transcript = cx.new(|cx| TranscriptView::new(store.clone(), composer, cx));
+            let transcript = cx.new(|cx| TranscriptView::new(store.clone(), composer, window, cx));
             let find = cx.new(|cx| FindBar::new(store.clone(), transcript.clone(), window, cx));
             cap.borrow_mut().replace((find.clone(), transcript.clone()));
             FindHost { find, transcript }

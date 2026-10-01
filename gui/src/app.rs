@@ -197,7 +197,7 @@ impl Shell {
         // composer's element laying out, because the composer is what
         // renders that element.
         let input_laid_out = composer.read(cx).input_laid_out();
-        let transcript = cx.new(|cx| TranscriptView::new(store.clone(), input.clone(), cx));
+        let transcript = cx.new(|cx| TranscriptView::new(store.clone(), input.clone(), window, cx));
         let workbench = cx.new(|_| WorkbenchView::new(store.clone()));
         let dock = cx.new(|cx| DockRow::new(store.clone(), window, cx));
         let approval = cx.new(|cx| ApprovalCard::new(store.clone(), window, cx));

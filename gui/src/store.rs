@@ -7,14 +7,17 @@
 //! shell, which owns the transport. Views read the store and call its
 //! command methods; they never see frames.
 
-use kage_client::wire::{ContentBlock, FsListResult, FsOp};
+use kage_client::wire::{ContentBlock, FsListResult, FsOp, PermissionOption, PermissionOptionKind};
 use kage_client::{Change, Client, Frame, PermissionAsk, PromptOutcome, Session, SteerError};
 
 use gpui_kit::{App, Entity};
 
 use crate::gate::{self, Report};
+use std::collections::HashMap;
+
 use crate::timing::{SessionTimes, Timings};
 use crate::transport::{Link, State};
+use crate::views::composer::{PLAN_MODE, active_mode};
 
 /// Store mutations that queue frames or move state go through
 /// [`StoreHandle::act`], which notifies the store's observers: the
@@ -50,6 +53,69 @@ pub enum Command {
     /// Send the prompt the recording expects, once its session is
     /// open.
     ReplayPrompt,
+}
+
+/// The tool whose open ask is the plan mode review.
+pub(crate) const EXIT_PLAN_TOOL: &str = "exit_plan";
+
+/// The open plan review of a session: the exit plan ask and the
+/// options it offers for each answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlanReviewState {
+    /// The id the decision answers.
+    pub request_id: u64,
+    /// The `exit_plan` call under review.
+    pub call_id: String,
+    /// The offered approve option, when the ask offers one.
+    pub approve: Option<String>,
+    /// The offered revise option, when the ask offers one.
+    pub revise: Option<String>,
+    /// The offered reject option, when the ask offers one.
+    pub reject: Option<String>,
+}
+
+/// The first offered option whose id or name is `name`, case
+/// insensitively. A review ask carries two reject-kind options, so
+/// the kind alone cannot tell revise from reject; the option ids the
+/// agent reads decisions from can.
+fn option_named(options: &[PermissionOption], name: &str) -> Option<String> {
+    options
+        .iter()
+        .find(|option| {
+            option.option_id.eq_ignore_ascii_case(name) || option.name.eq_ignore_ascii_case(name)
+        })
+        .map(|option| option.option_id.clone())
+}
+
+/// The open plan review of a session, when one is pending.
+#[must_use]
+pub(crate) fn plan_review(session: &Session) -> Option<PlanReviewState> {
+    let ask = session
+        .permissions
+        .iter()
+        .find(|ask| ask.tool_call.title.as_deref() == Some(EXIT_PLAN_TOOL))?;
+    let approve = match ask.option_of(PermissionOptionKind::AllowOnce) {
+        Some(id) => Some(id.to_owned()),
+        None => option_named(&ask.options, "approve"),
+    };
+    Some(PlanReviewState {
+        request_id: ask.request_id,
+        call_id: ask.tool_call.tool_call_id.clone(),
+        approve,
+        revise: option_named(&ask.options, "revise"),
+        reject: option_named(&ask.options, "reject"),
+    })
+}
+
+/// An answer to a plan review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanChoice {
+    /// Build with the plan.
+    Approve,
+    /// Rework the plan with the given text.
+    Revise,
+    /// Drop the plan and leave plan mode.
+    Reject,
 }
 
 /// The client state plus everything the shell and views read around
@@ -95,6 +161,10 @@ pub struct Store {
     /// The options a welcome card chose, set on the session the welcome
     /// prompt opens before the prompt goes out.
     held_options: Vec<(String, String)>,
+    /// Per session, the permission mode under plan mode. The wire shows
+    /// only `plan` while plan mode is on; the engine keeps the
+    /// permission mode underneath, and leaving plan mode restores it.
+    permissions: HashMap<String, String>,
     /// The last `_kage/fs` listing answer, held with the session it
     /// ran against for the picker that asked. A later answer replaces
     /// it.
@@ -125,6 +195,7 @@ impl Store {
             opening: None,
             returned_prompt: None,
             held_options: Vec::new(),
+            permissions: HashMap::new(),
             fs_listing: None,
             commands: Vec::new(),
         }
@@ -193,7 +264,7 @@ impl Store {
 
     /// The open asks of the active session and the subagents under it,
     /// oldest session first. Asks of other sessions wait for the user
-    /// to open those.
+    /// to open those, and a plan review is answered on its plan card.
     #[must_use]
     pub fn active_asks(&self) -> Vec<(&str, &PermissionAsk)> {
         let Some(active) = self.active.as_deref() else {
@@ -203,6 +274,7 @@ impl Store {
         state
             .open_asks()
             .into_iter()
+            .filter(|(_, ask)| ask.tool_call.title.as_deref() != Some(EXIT_PLAN_TOOL))
             .filter(|(id, _)| {
                 let mut at = Some(*id);
                 // A parent chain is short; the bound only guards a cycle.
@@ -304,6 +376,9 @@ impl Store {
         for id in touched {
             if let Some(session) = self.client.state().session(id) {
                 self.timings.observe(session);
+                if let Some(mode) = active_mode(session).filter(|mode| mode != PLAN_MODE) {
+                    self.permissions.insert(id.to_owned(), mode);
+                }
             }
         }
         for change in &changes {
@@ -497,8 +572,99 @@ impl Store {
         let Some(session) = self.active.clone() else {
             return false;
         };
+        if id == "mode" && value != PLAN_MODE {
+            self.permissions.insert(session.clone(), value.to_owned());
+        }
         self.client.set_config_option(&session, id, value);
         true
+    }
+
+    /// Answers the active session's plan review with the offered option
+    /// `choice` names, exactly the id the ask offered. A revise carries
+    /// its text through the client's feedback channel. Reports whether
+    /// an answer went out.
+    pub fn review_plan(&mut self, choice: PlanChoice, revision: Option<&str>) -> bool {
+        let Some(session_id) = self.active.clone() else {
+            return false;
+        };
+        let Some(review) = self.active_session().and_then(plan_review) else {
+            return false;
+        };
+        let offered = match choice {
+            PlanChoice::Approve => review.approve,
+            PlanChoice::Revise => review.revise,
+            PlanChoice::Reject => review.reject,
+        };
+        let Some(option_id) = offered else {
+            return false;
+        };
+        let decision = match revision.map(str::trim).filter(|text| !text.is_empty()) {
+            Some(feedback) => kage_client::PermissionDecision::Feedback {
+                option_id,
+                feedback: feedback.to_owned(),
+            },
+            None => kage_client::PermissionDecision::Option(option_id),
+        };
+        self.client
+            .reply_permission(&session_id, review.request_id, &decision)
+    }
+
+    /// Whether the active session is in plan mode.
+    #[must_use]
+    pub fn plan_on(&self) -> bool {
+        self.active_session()
+            .and_then(active_mode)
+            .is_some_and(|mode| mode == PLAN_MODE)
+    }
+
+    /// The permission mode of the active session: its mode, or under
+    /// plan mode the mode plan mode will return to.
+    #[must_use]
+    pub fn permission_mode(&self) -> Option<String> {
+        let session = self.active_session()?;
+        let mode = active_mode(session)?;
+        if mode != PLAN_MODE {
+            return Some(mode);
+        }
+        Some(
+            self.permissions
+                .get(&session.id)
+                .cloned()
+                .unwrap_or_else(|| "default".to_owned()),
+        )
+    }
+
+    /// Sets the permission mode of the active session. Under plan mode
+    /// the choice waits for plan mode to end, as the engine keeps one
+    /// mode on the wire.
+    pub fn set_permission(&mut self, value: &str) -> bool {
+        let Some(id) = self.active.clone() else {
+            return false;
+        };
+        if self.plan_on() {
+            self.permissions.insert(id, value.to_owned());
+            return true;
+        }
+        self.set_option("mode", value)
+    }
+
+    /// Turns plan mode on for the active session.
+    pub fn enter_plan(&mut self) -> bool {
+        if self.plan_on() {
+            return false;
+        }
+        self.set_option("mode", PLAN_MODE)
+    }
+
+    /// Turns plan mode off, back to the permission mode it held.
+    pub fn exit_plan(&mut self) -> bool {
+        if !self.plan_on() {
+            return false;
+        }
+        let mode = self
+            .permission_mode()
+            .unwrap_or_else(|| "default".to_owned());
+        self.set_option("mode", &mode)
     }
 
     /// Lists the active session's workdir through `_kage/fs`. The
@@ -878,38 +1044,50 @@ mod tests {
             }),
         });
 
-        let mut sent = 0usize;
-        for expected in ["ask", "allow", "deny", "plan", "default"] {
-            assert!(
-                crate::views::composer::next_mode_value(store.active_session().unwrap(),)
-                    .is_some_and(|next| next == expected)
-            );
-            assert!(store.set_option("mode", expected));
-            let outgoing = store.take_outgoing();
-            assert_eq!(outgoing.len(), 1, "one set_config_option per step");
-            let Frame::Request { id, method, params } = &outgoing[0] else {
-                panic!("expected a request, got {:?}", outgoing[0]);
-            };
-            assert_eq!(method, "session/set_config_option");
-            assert_eq!(params["configId"], "mode");
-            sent += 1;
-            store.absorb(Frame::Success {
-                id: *id,
-                result: serde_json::json!({"configOptions": [{
-                    "id": "mode", "name": "Mode", "category": "mode",
-                    "type": "select", "currentValue": expected,
-                    "options": [
-                        {"value": "default", "name": "Default"},
-                        {"value": "ask", "name": "Ask"},
-                        {"value": "allow", "name": "Allow"},
-                        {"value": "deny", "name": "Deny"},
-                        {"value": "plan", "name": "Plan"}
-                    ]
-                }]}),
-            });
+        let sent_mode = |store: &mut Store| -> Vec<String> {
+            store
+                .take_outgoing()
+                .into_iter()
+                .filter_map(|frame| match frame {
+                    Frame::Request { method, params, .. }
+                        if method == "session/set_config_option"
+                            && params["configId"] == "mode" =>
+                    {
+                        params["value"].as_str().map(str::to_owned)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        // Shift+Tab walks the permission modes; plan mode is its own chip.
+        for expected in ["ask", "allow", "deny", "default", "ask"] {
+            let current = store.permission_mode().unwrap();
+            let next =
+                crate::views::composer::next_mode_value(store.active_session().unwrap(), &current);
+            assert_eq!(next.as_deref(), Some(expected));
+            assert!(store.set_permission(expected));
+            assert_eq!(sent_mode(&mut store), [expected], "one frame per step");
         }
-        assert_eq!(sent, 5, "one cycle through every advertised value");
-        assert!(store.take_outgoing().is_empty(), "everything was drained");
+
+        assert!(store.enter_plan());
+        assert_eq!(sent_mode(&mut store), ["plan"]);
+        assert!(store.plan_on());
+        assert_eq!(
+            store.permission_mode().as_deref(),
+            Some("ask"),
+            "kept under plan"
+        );
+        assert!(store.set_permission("allow"));
+        assert!(
+            sent_mode(&mut store).is_empty(),
+            "a choice under plan waits"
+        );
+        assert!(store.exit_plan());
+        assert_eq!(
+            sent_mode(&mut store),
+            ["allow"],
+            "plan ends on the waiting choice"
+        );
     }
 
     #[test]

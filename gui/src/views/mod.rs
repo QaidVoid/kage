@@ -9,6 +9,7 @@ pub mod chrome;
 pub mod composer;
 pub mod deferred;
 pub mod dock;
+pub(crate) mod kit;
 pub mod sidebar;
 pub mod transcript;
 pub mod workbench;

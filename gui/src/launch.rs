@@ -111,13 +111,14 @@ impl Launch {
         self
     }
 
-    /// The transport the launch selected.
-    fn transport(&self) -> Box<dyn Transport> {
+    /// The transport the launch selected. Stdio runs `--rpc-bin`, else
+    /// the binary the setup screen saved, else `kage` from the PATH.
+    fn transport(&self, saved: Option<&str>) -> Box<dyn Transport> {
         match &self.wire {
             Wire::Stdio => {
-                let config = match &self.rpc_bin {
+                let config = match self.rpc_bin.as_deref().or(saved) {
                     Some(program) => StdioConfig {
-                        program: program.clone(),
+                        program: program.to_owned(),
                         args: vec!["rpc".to_owned()],
                     },
                     None => StdioConfig::engine(),
@@ -159,7 +160,7 @@ pub fn run() {
                 ..Default::default()
             };
             let args = ShellArgs {
-                transport: launch.transport(),
+                transport: launch.transport(prefs.kage_path.as_deref()),
                 replay,
                 stream,
                 prefs,

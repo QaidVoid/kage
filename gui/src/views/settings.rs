@@ -564,6 +564,23 @@ impl SettingsView {
                     badge(link.name, pal),
                     pal,
                 ))
+                .when(link.name == "kage rpc", |rows| {
+                    let binary = store
+                        .prefs()
+                        .kage_path
+                        .clone()
+                        .unwrap_or_else(|| "kage from the PATH".to_owned());
+                    rows.child(row(
+                        "kage binary",
+                        "The engine this app spawns; the setup screen picks another when none runs",
+                        div()
+                            .font_family(FONT_MONO)
+                            .text_size(px(FS_XS))
+                            .text_color(pal.ink)
+                            .child(SharedString::from(binary)),
+                        pal,
+                    ))
+                })
                 .child(row(
                     "Endpoint",
                     "The token rides the kage.<token> subprotocol and is never shown",

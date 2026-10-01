@@ -16,6 +16,8 @@ pub(crate) mod eclipse;
 pub(crate) mod kit;
 pub mod settings;
 pub(crate) mod settings_config;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod setup;
 pub mod sidebar;
 pub mod transcript;
 pub mod vim;

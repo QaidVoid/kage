@@ -98,7 +98,7 @@ pub fn check(state: &State) -> Report {
 
 /// Whether `version` sorts before `minimum`. A version that does not
 /// parse as dotted numbers counts as below.
-fn is_below(version: &str, minimum: &str) -> bool {
+pub(crate) fn is_below(version: &str, minimum: &str) -> bool {
     match (parse(version), parse(minimum)) {
         (Some(found), Some(floor)) => found < floor,
         _ => true,

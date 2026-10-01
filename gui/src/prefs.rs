@@ -41,6 +41,8 @@ pub struct Prefs {
     pub pinned: BTreeSet<String>,
     /// Sessions left out of the sidebar until restored.
     pub archived: BTreeSet<String>,
+    /// The `kage` binary the setup screen chose, when the PATH has none.
+    pub kage_path: Option<String>,
     /// The model, thinking and mode options the last session showed,
     /// which the welcome pane offers before a session exists.
     pub template: Vec<SessionConfigOption>,
@@ -59,6 +61,7 @@ impl Default for Prefs {
             vim: false,
             pinned: BTreeSet::new(),
             archived: BTreeSet::new(),
+            kage_path: None,
             template: Vec::new(),
         }
     }

@@ -231,6 +231,13 @@ pub struct Shell {
     vim_focus: FocusHandle,
     /// The open `:` line.
     vim_line: Option<(Entity<InputState>, Subscription)>,
+    /// The channel transport events arrive on, kept so a new transport
+    /// can take over when the setup screen picks a `kage`.
+    #[cfg(not(target_arch = "wasm32"))]
+    events: crate::transport::EventSender,
+    /// The screen shown while the stdio transport finds no `kage`.
+    #[cfg(not(target_arch = "wasm32"))]
+    setup: Entity<crate::views::setup::SetupView>,
     streamed: usize,
 }
 
@@ -348,7 +355,29 @@ impl Shell {
         .detach();
 
         let (events, incoming) = async_channel::unbounded();
-        args.transport.start(events);
+        args.transport.start(events.clone());
+        #[cfg(not(target_arch = "wasm32"))]
+        let setup = cx.new(|cx| crate::views::setup::SetupView::new(window, cx));
+        #[cfg(not(target_arch = "wasm32"))]
+        cx.subscribe_in(
+            &setup,
+            window,
+            |shell, _, event: &crate::views::setup::SetupEvent, _, cx| {
+                use crate::views::setup::SetupEvent;
+                let program = match event {
+                    SetupEvent::Use(program) => {
+                        let saved = program.clone();
+                        shell.store.act(cx, |store| {
+                            store.update_prefs(|prefs| prefs.kage_path = Some(saved));
+                        });
+                        program.clone()
+                    }
+                    SetupEvent::Retry => "kage".to_owned(),
+                };
+                shell.restart_stdio(program, cx);
+            },
+        )
+        .detach();
 
         cx.observe(&store, |shell, _, cx| {
             shell.flush_outgoing(cx);
@@ -423,6 +452,10 @@ impl Shell {
             statuses: BTreeMap::new(),
             vim_focus: cx.focus_handle(),
             vim_line: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            events,
+            #[cfg(not(target_arch = "wasm32"))]
+            setup,
             streamed: 0,
         }
     }
@@ -774,6 +807,32 @@ impl Shell {
                 dialog.open(DialogKind::ConfirmSwarm, window, cx);
             });
         }
+    }
+
+    /// Replaces the stdio transport with one that runs `program`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn restart_stdio(&mut self, program: String, cx: &mut Context<Self>) {
+        use crate::transport::stdio::{Config, StdioTransport};
+        self.transport.close();
+        let mut transport = StdioTransport::new(Config {
+            program,
+            args: vec!["rpc".to_owned()],
+        });
+        transport.start(self.events.clone());
+        self.transport = Box::new(transport);
+        self.store.update(cx, |store, cx| {
+            store.set_connect(crate::transport::State::Connecting);
+            cx.notify();
+        });
+    }
+
+    /// Whether the setup screen shows: the stdio transport could not
+    /// run `kage`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn needs_setup(&self, cx: &Context<Self>) -> bool {
+        let store = self.store.read(cx);
+        store.link().name == "kage rpc"
+            && matches!(store.connect(), crate::transport::State::Refused(_))
     }
 
     /// Moves the vim cursor by `delta` rows.
@@ -1510,10 +1569,19 @@ impl Render for Shell {
                                 .size_full()
                                 .min_h_0()
                                 .child(self.topbar(cx))
-                                .child(self.find.clone())
-                                .child(self.content_column(cx))
-                                .child(self.bottom_band(cx))
-                                .children(self.vim_bar(window, cx)),
+                                .map(|panel| {
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    if self.needs_setup(cx) {
+                                        return panel.child(
+                                            div().flex_1().min_h_0().child(self.setup.clone()),
+                                        );
+                                    }
+                                    panel
+                                        .child(self.find.clone())
+                                        .child(self.content_column(cx))
+                                        .child(self.bottom_band(cx))
+                                        .children(self.vim_bar(window, cx))
+                                }),
                         ),
                     )
                     .child(
@@ -1749,5 +1817,40 @@ mod tests {
             ":q closes the workbench"
         );
         assert!(visual.update(|_, cx| shell.read(cx).vim_line.is_none()));
+    }
+
+    /// A stdio transport that cannot find `kage`.
+    struct Missing;
+
+    impl crate::transport::Transport for Missing {
+        fn link(&self) -> crate::transport::Link {
+            crate::transport::Link {
+                name: "kage rpc",
+                detail: "stdio".to_owned(),
+            }
+        }
+        fn start(&mut self, events: EventSender) {
+            let _ = events.try_send(crate::transport::Event::State(
+                crate::transport::State::Refused("no kage on PATH".into()),
+            ));
+        }
+        fn send(&self, _frame: kage_client::Frame) {}
+        fn close(&self) {}
+    }
+
+    #[gpui_kit::test]
+    fn a_missing_kage_shows_the_setup_screen_in_place_of_the_chat(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut args = args();
+        args.transport = Box::new(Missing);
+        let (_shell, visual) =
+            cx.add_window_view(move |window: &mut Window, cx| Shell::new(args, window, cx));
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(visual.update(|window, _| window.try_find("setup").is_some()));
+        assert!(
+            visual.update(|window, _| window.try_find("composer").is_none()),
+            "the chat steps aside"
+        );
     }
 }

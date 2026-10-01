@@ -45,6 +45,12 @@ impl Snapshot {
     pub(crate) fn parse(value: &serde_json::Value) -> Self {
         serde_json::from_value(value.clone()).unwrap_or_default()
     }
+
+    /// The MCP server configured as `name`.
+    #[must_use]
+    pub(crate) fn mcp_server(&self, name: &str) -> Option<&McpServer> {
+        self.mcp.servers.get(name)
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -89,16 +95,17 @@ struct Mcp {
     allow_sampling: bool,
 }
 
+/// One `[mcp.servers.<name>]` entry as the snapshot shows it.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-struct McpServer {
-    command: Option<String>,
-    args: Vec<String>,
-    env: BTreeMap<String, String>,
-    url: Option<String>,
-    headers: BTreeMap<String, String>,
-    disabled: bool,
-    oauth: Option<serde_json::Value>,
+pub(crate) struct McpServer {
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    pub url: Option<String>,
+    pub headers: BTreeMap<String, String>,
+    pub disabled: bool,
+    pub oauth: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -424,16 +431,24 @@ pub(crate) fn providers_page(
 pub(crate) fn mcp_page(
     snapshot: &Snapshot,
     live: &BTreeMap<String, McpServerStatus>,
+    on_edit: impl Fn(Option<String>, &mut Window, &mut App) + Clone + 'static,
     pal: &Palette,
 ) -> Vec<AnyElement> {
     let servers = &snapshot.mcp.servers;
+    let add = on_edit.clone();
+    let head = group("Servers", pal)
+        .justify_between()
+        .child(
+            btn_sm("mcp-add", BtnTone::Plain, pal)
+                .on_click(move |_, window, cx| add(None, window, cx))
+                .child(Icon::new(IconName::Plus).with_size(px(12.)))
+                .child("Add server"),
+        )
+        .into_any_element();
     if servers.is_empty() {
         return vec![
-            note(
-                "No MCP servers configured. Add them under [mcp.servers] in config.toml.",
-                pal,
-            )
-            .into_any_element(),
+            head,
+            note("No MCP servers configured yet.", pal).into_any_element(),
         ];
     }
     let mut list = boxed(pal);
@@ -501,12 +516,19 @@ pub(crate) fn mcp_page(
             .child(mono(name.clone(), pal))
             .child(plain_badge(transport, pal))
             .child(badge(word, fg, bg, line));
+        let edit = on_edit.clone();
+        let edited = name.clone();
+        let hover = pal.fill_hover;
         let mut row = list_row(
             div().size(px(8.)).rounded(px(R_FULL)).bg(dot),
             name_line,
             Some(SharedString::from(target)),
             pal,
-        );
+        )
+        .id(SharedString::from(format!("mcp-row-{name}")))
+        .cursor_pointer()
+        .hover(move |row| row.bg(hover))
+        .on_click(move |_, window, cx| edit(Some(edited.clone()), window, cx));
         if !extras.is_empty() {
             row = row.child(
                 div()
@@ -520,6 +542,7 @@ pub(crate) fn mcp_page(
         list = list.child(row);
     }
     vec![
+        head,
         list.into_any_element(),
         note(
             if snapshot.mcp.allow_sampling {

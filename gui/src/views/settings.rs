@@ -23,6 +23,7 @@ use crate::theme::{
     FONT_MONO, FS_SM, FS_XS, Palette, R_FULL, R_LG, R_MD, ThemeChoice, WEIGHT_BOLD, WEIGHT_SEMIBOLD,
 };
 use crate::transport::State;
+use crate::views::mcp_form::{FormDone, McpForm};
 use crate::views::settings_config as config;
 
 gpui_kit::actions!(kage_desktop, [SettingsClose]);
@@ -220,6 +221,8 @@ pub struct SettingsView {
     /// The text field a rule's glob or tool name is typed into, made
     /// the first time one is added.
     rule_input: Option<Entity<InputState>>,
+    /// The MCP server form, while one is open.
+    mcp_form: Option<Entity<McpForm>>,
 }
 
 impl Focusable for SettingsView {
@@ -240,6 +243,7 @@ impl SettingsView {
             plugin_open: None,
             rule_add: None,
             rule_input: None,
+            mcp_form: None,
         }
     }
 
@@ -254,6 +258,28 @@ impl SettingsView {
         self.open = true;
         self.go(section, cx);
         window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Opens the MCP server form on server `name`, or on a new server.
+    fn edit_mcp(&mut self, name: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let snapshot = self
+            .store
+            .read(cx)
+            .config()
+            .map(config::Snapshot::parse)
+            .unwrap_or_default();
+        let existing = name
+            .as_deref()
+            .and_then(|name| Some((name, snapshot.mcp_server(name)?)));
+        let store = self.store.clone();
+        let form = cx.new(|cx| McpForm::new(store, existing, window, cx));
+        cx.subscribe(&form, |this, _, _: &FormDone, cx| {
+            this.mcp_form = None;
+            cx.notify();
+        })
+        .detach();
+        self.mcp_form = Some(form);
         cx.notify();
     }
 
@@ -322,6 +348,7 @@ impl SettingsView {
     /// next visit.
     fn go(&mut self, section: Section, cx: &mut Context<Self>) {
         self.section = section;
+        self.mcp_form = None;
         if matches!(
             section,
             Section::Providers | Section::Mcp | Section::Permissions | Section::Plugins
@@ -566,7 +593,18 @@ impl SettingsView {
                 let live = session
                     .map(|session| session.mcp.clone())
                     .unwrap_or_default();
-                config::mcp_page(&snapshot, &live, pal)
+                if let Some(form) = &self.mcp_form {
+                    return vec![form.clone().into_any_element()];
+                }
+                let view = cx.entity();
+                config::mcp_page(
+                    &snapshot,
+                    &live,
+                    move |name, window, cx| {
+                        view.update(cx, |this, cx| this.edit_mcp(name, window, cx));
+                    },
+                    pal,
+                )
             }
             Section::Permissions => {
                 let active = store.active_session();

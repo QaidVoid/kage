@@ -38,17 +38,15 @@
 //! click into the composer takes it back for typing at once.
 
 use std::collections::HashMap;
-use std::sync::LazyLock;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::theme::{ActiveTheme, ThemeMode};
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     AppContext as _, BoxShadow, Context, Div, Entity, FocusHandle, Focusable, FontWeight, Hsla,
     InteractiveElement, IntoElement, KeyDownEvent, Modifiers, ParentElement as _, Render,
     SharedString, Stateful, StatefulInteractiveElement as _, Styled, TestSupportExt as _, Window,
-    div, px, rgba,
+    div, px,
 };
 use kage_client::wire::PermissionOptionKind;
 use kage_client::{PermissionAsk, PermissionDecision};
@@ -62,18 +60,6 @@ use crate::theme::{
 /// The keys of a tool input that name its primary argument, most
 /// specific first.
 const SUBJECT_KEYS: [&str; 5] = ["command", "path", "pattern", "url", "description"];
-
-/// The on-color text of a filled success button, which the design
-/// hard codes per button style instead of a palette role.
-const OK_ON: u32 = 0x0B1A10;
-
-/// The palette roles the toolkit theme does not carry, taken from
-/// the active mode's own palette so both palettes stay exact.
-fn palette(mode: ThemeMode) -> &'static Palette {
-    static SHADOW: LazyLock<Palette> = LazyLock::new(Palette::shadow);
-    static DAWN: LazyLock<Palette> = LazyLock::new(Palette::dawn);
-    if mode.is_dark() { &SHADOW } else { &DAWN }
-}
 
 /// The success ring around a card: the design draws the success tint
 /// as a 4px spread shadow with no offset or blur.
@@ -101,7 +87,7 @@ fn option_btn(id: SharedString, tone: BtnTone, pal: &Palette) -> Stateful<Div> {
     let danger_soft = pal.danger_soft;
     let fill_hover = pal.fill_hover;
     let line_strong = pal.line_strong;
-    let ok_on: Hsla = rgba(OK_ON).into();
+    let ok_on = pal.ok_ink;
     let btn = h_flex()
         .id(id)
         .h(px(26.))
@@ -461,7 +447,7 @@ impl ApprovalCard {
                     .child(SharedString::from(reason)),
             );
         }
-        let ok_on: Hsla = rgba(OK_ON).into();
+        let ok_on = pal.ok_ink;
         let mut actions = h_flex()
             .w_full()
             .flex_wrap()
@@ -533,7 +519,7 @@ impl ApprovalCard {
 
 impl Render for ApprovalCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let pal = palette(cx.theme().mode);
+        let pal = Palette::active(cx);
         let asks: Vec<(String, PermissionAsk)> = self
             .store
             .read(cx)

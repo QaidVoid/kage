@@ -43,17 +43,6 @@ gpui_kit::actions!(
     [PaletteUp, PaletteDown, PaletteRun, PaletteClose]
 );
 
-/// The design palette of the active theme: the shell installs the
-/// dark kage palette at startup, and the light dawn palette when it
-/// installs the light mode instead.
-fn design_palette(cx: &App) -> crate::theme::Palette {
-    if cx.theme().mode.is_dark() {
-        crate::theme::Palette::shadow()
-    } else {
-        crate::theme::Palette::dawn()
-    }
-}
-
 /// The bordered keyboard hint chip of the design: 18px tall with
 /// 10.5px type, as `.kbd` draws it.
 fn kbd_chip(label: &str, p: &crate::theme::Palette) -> Div {
@@ -384,7 +373,7 @@ impl Render for FindBar {
         if !self.open {
             return div().into_any_element();
         }
-        let p = design_palette(cx);
+        let p = crate::theme::Palette::active(cx);
         let this = cx.entity();
         let laid_out = self.query_mirror.laid_out().flag();
         let release = cx.entity().downgrade();
@@ -755,7 +744,7 @@ impl Render for PaletteView {
             });
             return div().into_any_element();
         }
-        let p = design_palette(cx);
+        let p = crate::theme::Palette::active(cx);
         let laid_out = self.query_mirror.laid_out().flag();
         let release = cx.entity().downgrade();
         let entries = self.entries(cx);
@@ -863,7 +852,7 @@ impl Render for PaletteView {
                             .child(SharedString::from(entry.detail())),
                     ),
                 )
-                .child(badge_chip(entry.badge(), &p));
+                .child(badge_chip(entry.badge(), p));
             list = list.child(row);
         }
 
@@ -930,21 +919,21 @@ impl Render for PaletteView {
                         h_flex()
                             .items_center()
                             .gap(px(4.))
-                            .child(kbd_chip("\u{2191}\u{2193}", &p))
+                            .child(kbd_chip("\u{2191}\u{2193}", p))
                             .child("move"),
                     )
                     .child(
                         h_flex()
                             .items_center()
                             .gap(px(4.))
-                            .child(kbd_chip("Enter", &p))
+                            .child(kbd_chip("Enter", p))
                             .child("run"),
                     )
                     .child(
                         h_flex()
                             .items_center()
                             .gap(px(4.))
-                            .child(kbd_chip("Esc", &p))
+                            .child(kbd_chip("Esc", p))
                             .child("close"),
                     ),
             );
@@ -1041,7 +1030,7 @@ impl Toasts {
 
 impl Render for Toasts {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = design_palette(cx);
+        let p = crate::theme::Palette::active(cx);
         let this = cx.entity();
         let raised: Vec<(usize, ToastDraft)> = self
             .items
@@ -1296,7 +1285,7 @@ impl Render for WelcomeView {
         self.fill_mirror.flush(|text| {
             composer.update(cx, |state, cx| state.set_value(text, window, cx));
         });
-        let p = design_palette(cx);
+        let p = crate::theme::Palette::active(cx);
         // Under 860px the web client stacks the cards in one column and
         // pads the pane 14px, as `@media (max-width: 860px)` does.
         let narrow = window.viewport_size().width <= px(860.);
@@ -1455,10 +1444,10 @@ impl Render for WelcomeView {
             .text_size(px(FS_XS))
             .text_color(p.faint)
             .child("Type")
-            .child(kbd_chip("help", &p).mx(px(2.)))
+            .child(kbd_chip("help", p).mx(px(2.)))
             .child("in any chat to list the test keywords")
             .child("\u{b7}")
-            .child(kbd_chip("Ctrl K", &p).mx(px(2.)))
+            .child(kbd_chip("Ctrl K", p).mx(px(2.)))
             .child("commands");
 
         let column = v_flex()

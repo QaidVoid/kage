@@ -9,9 +9,10 @@
 //! client.
 
 use std::borrow::Cow;
+use std::sync::LazyLock;
 
 use gpui_kit::base::motion::Easing;
-use gpui_kit::component::theme::{Theme, ThemeColor, ThemeMode};
+use gpui_kit::component::theme::{ActiveTheme as _, Theme, ThemeColor, ThemeMode};
 use gpui_kit::{App, BoxShadow, FontWeight, Hsla, WindowAppearance, px, rgba};
 
 /// The display family for brand moments and headings.
@@ -290,6 +291,8 @@ pub struct Palette {
     pub ok_soft: Hsla,
     /// Success border.
     pub ok_bd: Hsla,
+    /// Text on a solid success fill.
+    pub ok_ink: Hsla,
     /// Warning yellow.
     pub warn: Hsla,
     /// Warning tint background.
@@ -386,6 +389,18 @@ fn layer(hex: u32, x: f32, y: f32, blur: f32, spread: f32) -> BoxShadow {
 }
 
 impl Palette {
+    /// The palette of the active theme mode.
+    #[must_use]
+    pub fn active(cx: &App) -> &'static Self {
+        static SHADOW: LazyLock<Palette> = LazyLock::new(Palette::shadow);
+        static DAWN: LazyLock<Palette> = LazyLock::new(Palette::dawn);
+        if cx.theme().mode.is_dark() {
+            &SHADOW
+        } else {
+            &DAWN
+        }
+    }
+
     /// The dark palette: ink surfaces with a violet undertone, one
     /// warm lantern accent, violet reserved for swarms.
     pub fn shadow() -> Self {
@@ -417,6 +432,7 @@ impl Palette {
             ok: color(0x8BD49C),
             ok_soft: color(0x8BD49C1C),
             ok_bd: color(0x8BD49C4D),
+            ok_ink: color(0x0B1A10),
             warn: color(0xE8C96A),
             warn_soft: color(0xE8C96A1C),
             warn_bd: color(0xE8C96A4D),
@@ -525,6 +541,7 @@ impl Palette {
             ok: color(0x2B7443),
             ok_soft: color(0x2B74431A),
             ok_bd: color(0x2B74434D),
+            ok_ink: color(0x0B1A10),
             warn: color(0x836409),
             warn_soft: color(0x8364091A),
             warn_bd: color(0x8364094D),
@@ -730,7 +747,6 @@ pub fn apply_system(cx: &mut App, appearance: WindowAppearance) {
 mod tests {
     use super::*;
     use gpui_kit::Rgba;
-    use gpui_kit::component::theme::ActiveTheme as _;
 
     #[test]
     fn a_six_digit_token_is_opaque() {

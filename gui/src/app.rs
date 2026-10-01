@@ -41,17 +41,6 @@ const REPLAY_PROMPT: &str = "fix the null check";
 /// default workbench width.
 const WORKBENCH_W: f32 = 460.0;
 
-/// The design palette of the active theme: the shell installs the
-/// dark kage palette at startup, and the light dawn palette when it
-/// installs the light mode instead.
-fn design_palette(cx: &App) -> crate::theme::Palette {
-    if cx.theme().mode.is_dark() {
-        crate::theme::Palette::shadow()
-    } else {
-        crate::theme::Palette::dawn()
-    }
-}
-
 /// The short name a session's directory carries in the crumbs: the
 /// last path segment, or `local` when the session has none.
 #[must_use]
@@ -500,7 +489,7 @@ impl Shell {
     /// panel toggles at the far end, as the web client's topbar draws
     /// them. Without a session the bar carries the toggles alone.
     fn topbar(&self, cx: &Context<Self>) -> impl IntoElement {
-        let p = design_palette(cx);
+        let p = crate::theme::Palette::active(cx);
         let sidebar_visible = self.sidebar_visible;
         let side_float = self.side_float;
         let workbench_visible = self.workbench_visible;
@@ -646,7 +635,7 @@ impl Render for Shell {
         let sidebar_visible = self.sidebar_visible;
         let side_float = self.side_float;
         let workbench_visible = self.workbench_visible;
-        let p = design_palette(cx);
+        let p = crate::theme::Palette::active(cx);
         // The web client's breakpoints: under 1180px the workbench
         // overlays instead of taking a column, under 860px the sidebar
         // does the same and the welcome cards stack.

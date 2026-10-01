@@ -14,21 +14,19 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::LazyLock;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::theme::{ActiveTheme, ThemeMode};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, AnyElement, AppContext as _, Context, Div, Entity, EventEmitter, FontWeight, Hsla,
+    Anchor, AnyElement, AppContext as _, Context, Div, Entity, EventEmitter, FontWeight,
     InteractiveElement, Interactivity, IntoElement, ParentElement, Render, SharedString, Stateful,
-    StatefulInteractiveElement, StyleRefinement, Styled, Window, div, px, rgba,
+    StatefulInteractiveElement, StyleRefinement, Styled, Window, div, px,
 };
 use kage_client::wire::{
     ContentBlock, NoticeTone, PermissionOption, PermissionOptionKind, SubagentState,
@@ -54,17 +52,6 @@ const EXIT_PLAN_TOOL: &str = "exit_plan";
 const QUEUE_TEXT_COLUMNS: usize = 80;
 /// The width of the todos mini bar, in pixels.
 const TODO_BAR: f32 = 36.0;
-/// The on-color text of a filled success button, which the design
-/// hard codes per button style instead of a palette role.
-const OK_ON: u32 = 0x0B1A10;
-
-/// The palette roles the toolkit theme does not carry, taken from
-/// the active mode's own palette so both palettes stay exact.
-fn palette(mode: ThemeMode) -> &'static Palette {
-    static SHADOW: LazyLock<Palette> = LazyLock::new(Palette::shadow);
-    static DAWN: LazyLock<Palette> = LazyLock::new(Palette::dawn);
-    if mode.is_dark() { &SHADOW } else { &DAWN }
-}
 
 /// A trigger that hosts a popover while styled as a dock pill. The
 /// popover machinery asks its trigger for the selectable contract;
@@ -184,7 +171,7 @@ fn btn_sm(id: impl Into<SharedString>, label: &str, tone: BtnTone, pal: &Palette
     let fill_hover = pal.fill_hover;
     let line_strong = pal.line_strong;
     let danger_soft = pal.danger_soft;
-    let ok_on: Hsla = rgba(OK_ON).into();
+    let ok_on = pal.ok_ink;
     let label = SharedString::from(label.to_owned());
     let mut btn = h_flex()
         .id(id.into())
@@ -1116,7 +1103,7 @@ impl Render for DockRow {
         });
         let goal_laid_out = self.goal_mirror.laid_out().flag();
         let revise_laid_out = self.revise_mirror.laid_out().flag();
-        let pal = palette(cx.theme().mode);
+        let pal = Palette::active(cx);
         let (goal, review, swarm, todos, queue) = {
             let session = self.store.read(cx).active_session();
             (

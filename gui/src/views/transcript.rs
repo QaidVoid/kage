@@ -20,7 +20,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::input::TextareaState;
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::theme::{ActiveTheme, ThemeColor, ThemeMode};
+use gpui_kit::component::theme::{ActiveTheme, ThemeColor};
 use gpui_kit::component::{
     Icon, Sizable as _, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list,
 };
@@ -29,7 +29,7 @@ use gpui_kit::{
     Animation, AnimationExt as _, AnyElement, App, Context, Div, ElementId, Entity, Hsla,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, ScrollStrategy,
     SharedString, Size, Stateful, StatefulInteractiveElement as _, Styled as _,
-    TestSupportExt as _, Window, div, px, radians, relative, rgba, size,
+    TestSupportExt as _, Window, div, px, radians, relative, size,
 };
 
 use crate::store::Store;
@@ -81,72 +81,6 @@ const DETAIL_PRE_PY: f32 = 10.0;
 const DETAIL_TOP: f32 = 6.0;
 /// The detail box's bottom margin.
 const DETAIL_BOTTOM: f32 = 10.0;
-
-/// Ink colors the toolkit's theme roles do not carry, taken verbatim
-/// from the design's two palettes.
-#[derive(Clone, Copy)]
-struct Ink {
-    /// The deepest level, behind mono bodies and diff lines.
-    deep: Hsla,
-    /// Tertiary text.
-    faint: Hsla,
-    /// The faintest marks.
-    ghost: Hsla,
-    /// The faintest fills, under flanking rules.
-    subtle: Hsla,
-    /// Success tint background.
-    ok_soft: Hsla,
-    /// Danger tint background.
-    danger_soft: Hsla,
-    /// Diff added lines.
-    diff_add: Hsla,
-    /// Diff added line background.
-    diff_add_bg: Hsla,
-    /// Diff deleted lines.
-    diff_del: Hsla,
-    /// Diff deleted line background.
-    diff_del_bg: Hsla,
-}
-
-impl Ink {
-    fn shadow() -> Self {
-        Self {
-            deep: rgba(0x09080C).into(),
-            faint: rgba(0xECE8F66B).into(),
-            ghost: rgba(0xECE8F640).into(),
-            subtle: rgba(0xE8E2F50D).into(),
-            ok_soft: rgba(0x8BD49C1C).into(),
-            danger_soft: rgba(0xF2727F1C).into(),
-            diff_add: rgba(0x8BD49C).into(),
-            diff_add_bg: rgba(0x8BD49C1F).into(),
-            diff_del: rgba(0xF2727F).into(),
-            diff_del_bg: rgba(0xF2727F1F).into(),
-        }
-    }
-
-    fn dawn() -> Self {
-        Self {
-            deep: rgba(0xFFFFFF).into(),
-            faint: rgba(0x1A142E7D).into(),
-            ghost: rgba(0x1A142E4D).into(),
-            subtle: rgba(0x1A142E0D).into(),
-            ok_soft: rgba(0x2B74431A).into(),
-            danger_soft: rgba(0xBF36491A).into(),
-            diff_add: rgba(0x2B7443).into(),
-            diff_add_bg: rgba(0x2B74431F).into(),
-            diff_del: rgba(0xBF3649).into(),
-            diff_del_bg: rgba(0xBF36491F).into(),
-        }
-    }
-
-    /// The ink of the active palette.
-    fn active(cx: &App) -> Self {
-        match cx.theme().mode {
-            ThemeMode::Light => Self::dawn(),
-            _ => Self::shadow(),
-        }
-    }
-}
 
 /// The design's vertical margins around one row. An expanded row
 /// carries the margin of the detail or body that closes it.
@@ -1496,7 +1430,7 @@ impl TranscriptView {
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let theme = cx.theme().colors;
-        let ink = Ink::active(cx);
+        let ink = crate::theme::Palette::active(cx);
         let view = cx.entity();
         let label = match (live, duration) {
             (true, _) => "Thinking".to_owned(),
@@ -1584,7 +1518,7 @@ impl TranscriptView {
     ) -> Stateful<Div> {
         let theme = cx.theme().colors;
         let mono = cx.theme().mono_font_family.clone();
-        let ink = Ink::active(cx);
+        let ink = crate::theme::Palette::active(cx);
         let view = cx.entity();
         let (verb, target) = tool_verb(call);
         let expanded = self.ui.expanded.contains(&RowKey::Item(ix)) || live_shell_tail(call);
@@ -1728,7 +1662,7 @@ impl TranscriptView {
     ) -> Stateful<Div> {
         let theme = cx.theme().colors;
         let mono = cx.theme().mono_font_family.clone();
-        let ink = Ink::active(cx);
+        let ink = crate::theme::Palette::active(cx);
         let view = cx.entity();
         let RowKey::Group(group_ix) = key else {
             return blank_row(0);
@@ -1792,7 +1726,7 @@ impl TranscriptView {
     ) -> Stateful<Div> {
         let theme = cx.theme().colors;
         let mono = cx.theme().mono_font_family.clone();
-        let ink = Ink::active(cx);
+        let ink = crate::theme::Palette::active(cx);
         let why = if tools_follow {
             "turn ended, tools follow"
         } else {
@@ -1860,7 +1794,7 @@ fn render_notice(
     cx: &Context<TranscriptView>,
 ) -> Stateful<Div> {
     let theme = cx.theme().colors;
-    let ink = Ink::active(cx);
+    let ink = crate::theme::Palette::active(cx);
     let (color, pill) = match tone {
         NoticeTone::Info => (ink.faint, false),
         NoticeTone::Warn => (theme.warning, false),
@@ -1899,7 +1833,7 @@ fn render_compaction(
     after: u64,
     cx: &Context<TranscriptView>,
 ) -> Stateful<Div> {
-    let ink = Ink::active(cx);
+    let ink = crate::theme::Palette::active(cx);
     let rule = || div().flex_1().h(px(1.)).bg(ink.subtle);
     div()
         .id(ElementId::named_usize("row-compaction", ix))
@@ -1928,7 +1862,7 @@ fn render_plan(
 ) -> Stateful<Div> {
     let theme = cx.theme().colors;
     let mono = cx.theme().mono_font_family.clone();
-    let ink = Ink::active(cx);
+    let ink = crate::theme::Palette::active(cx);
     let done = entries
         .iter()
         .filter(|entry| {
@@ -2058,7 +1992,7 @@ fn render_decision(
     cx: &Context<TranscriptView>,
 ) -> AnyElement {
     let theme = cx.theme().colors;
-    let ink = Ink::active(cx);
+    let ink = crate::theme::Palette::active(cx);
     let mono = cx.theme().mono_font_family.clone();
     let color = if allowed { theme.success } else { theme.danger };
     let mut row = h_flex()
@@ -2145,7 +2079,7 @@ fn render_detail(
                 .px(px(SP_5))
                 .py(px(DETAIL_HEAD_PY))
                 .border_b_1()
-                .border_color(Ink::active(cx).subtle)
+                .border_color(crate::theme::Palette::active(cx).subtle)
                 .text_size(px(FS_XS))
                 .text_color(theme.muted_foreground)
                 .child(Icon::new(icon_name).with_size(px(ICON_XS)))
@@ -2169,7 +2103,7 @@ fn render_pre(text: &str, cx: &Context<TranscriptView>) -> Div {
         .w_full()
         .px(px(SP_5))
         .py(px(DETAIL_PRE_PY))
-        .bg(Ink::active(cx).deep)
+        .bg(crate::theme::Palette::active(cx).deep)
         .font_family(cx.theme().mono_font_family.clone())
         .text_size(px(DETAIL_SIZE))
         .line_height(px(DETAIL_LINE))
@@ -2182,7 +2116,7 @@ fn render_pre(text: &str, cx: &Context<TranscriptView>) -> Div {
 pub(crate) fn render_diff(lines: &[DiffLine], cx: &App) -> Div {
     let theme = cx.theme().colors;
     let mono = cx.theme().mono_font_family.clone();
-    let ink = Ink::active(cx);
+    let ink = crate::theme::Palette::active(cx);
     let mut view = v_flex().w_full().bg(ink.deep);
     for line in lines {
         let (color, bg) = match line {

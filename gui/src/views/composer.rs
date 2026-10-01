@@ -12,7 +12,6 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName;
@@ -22,7 +21,7 @@ use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, Textarea
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::progress::ProgressCircle;
-use gpui_kit::component::theme::{ActiveTheme, ThemeMode};
+use gpui_kit::component::theme::ActiveTheme;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -49,14 +48,6 @@ gpui_kit::actions!(kage_desktop, [CycleMode]);
 /// How long the first Esc of an interrupt gesture waits for the
 /// second one.
 pub(crate) const ESC_WINDOW: Duration = Duration::from_millis(1500);
-
-/// The palette roles the toolkit theme does not carry, taken from the
-/// active mode's own palette so both palettes stay exact.
-fn palette(mode: ThemeMode) -> &'static Palette {
-    static SHADOW: LazyLock<Palette> = LazyLock::new(Palette::shadow);
-    static DAWN: LazyLock<Palette> = LazyLock::new(Palette::dawn);
-    if mode.is_dark() { &SHADOW } else { &DAWN }
-}
 
 /// A toolbar control that hosts a popover or a dropdown menu while
 /// styled as a plain pill. The popover machinery asks its trigger for
@@ -1726,7 +1717,7 @@ impl Render for ComposerView {
         let goal_laid_out = self.goal_mirror.laid_out().flag();
         let release = cx.entity().downgrade();
         let theme = cx.theme().colors;
-        let pal = palette(cx.theme().mode);
+        let pal = Palette::active(cx);
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let session = self.store.read(cx).active_session();
         let plan_on = session

@@ -7,13 +7,11 @@ use gpui_kit::AnyElement;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::theme::ActiveTheme;
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, Context, Div, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Stateful, StatefulInteractiveElement as _,
-    Styled as _, Window, div, px,
+    Context, Div, Entity, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use kage_client::wire::{ToolCallContent, ToolKind};
 use kage_client::{ToolCallItem, TranscriptItem};
@@ -175,17 +173,6 @@ pub enum WorkbenchEvent {
     /// The user picked a file in the files pane; the shell mentions it
     /// in the composer.
     Mention(String),
-}
-
-/// The design palette of the active theme: the shell installs the
-/// dark kage palette at startup, and the light dawn palette when it
-/// installs the light mode instead.
-fn design_palette(cx: &App) -> crate::theme::Palette {
-    if cx.theme().mode.is_dark() {
-        crate::theme::Palette::shadow()
-    } else {
-        crate::theme::Palette::dawn()
-    }
 }
 
 /// The panes the workbench tabs switch between.
@@ -897,7 +884,7 @@ impl WorkbenchView {
 
 impl Render for WorkbenchView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = design_palette(cx);
+        let p = crate::theme::Palette::active(cx);
         let has_session = self.store.read(cx).active_session().is_some();
 
         let this = cx.entity();
@@ -950,7 +937,7 @@ impl Render for WorkbenchView {
                         (!pages.is_empty()).then(|| pages.len().to_string())
                     }
                 });
-            head = head.child(self.tab_button(tab, self.tab == tab, count, &p).on_click(
+            head = head.child(self.tab_button(tab, self.tab == tab, count, p).on_click(
                 move |_, _, cx| {
                     this.update(cx, |this, cx| {
                         this.tab = tab;
@@ -978,18 +965,18 @@ impl Render for WorkbenchView {
                 .overflow_y_scroll()
                 .pb(px(16.))
                 .children(match self.tab {
-                    Tab::Changes => self.changes_section(&p, cx),
-                    Tab::Files => self.files_section(&p, cx),
-                    Tab::Agents => self.agents_section(&p, cx),
-                    Tab::Terminal => self.terminal_section(&p, cx),
-                    Tab::Browser => self.browser_section(&p, cx),
+                    Tab::Changes => self.changes_section(p, cx),
+                    Tab::Files => self.files_section(p, cx),
+                    Tab::Agents => self.agents_section(p, cx),
+                    Tab::Terminal => self.terminal_section(p, cx),
+                    Tab::Browser => self.browser_section(p, cx),
                 })
         } else {
             v_flex().id("wb-body").child(
                 empty_block(
                     IconName::PanelRight,
                     "Start a session to see its changes, agents and output here.",
-                    &p,
+                    p,
                 )
                 .into_any_element(),
             )

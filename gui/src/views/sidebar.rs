@@ -6,13 +6,12 @@ use gpui_kit::AnyElement;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::theme::ActiveTheme;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, Context, Div, Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div,
+    Context, Div, Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div,
     linear_color_stop, linear_gradient, px,
 };
 
@@ -24,17 +23,6 @@ use crate::theme::{
     WEIGHT_REGULAR, WEIGHT_SEMIBOLD,
 };
 use crate::transport::State;
-
-/// The design palette of the active theme: the shell installs the
-/// dark kage palette at startup, and the light dawn palette when it
-/// installs the light mode instead.
-fn design_palette(cx: &App) -> crate::theme::Palette {
-    if cx.theme().mode.is_dark() {
-        crate::theme::Palette::shadow()
-    } else {
-        crate::theme::Palette::dawn()
-    }
-}
 
 /// The days from 1970-01-01 to a civil date.
 fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
@@ -337,7 +325,7 @@ impl SidebarView {
 
 impl Render for SidebarView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = design_palette(cx);
+        let p = crate::theme::Palette::active(cx);
         let store = self.store.read(cx);
         let state = store.state();
         let now = unix_seconds();
@@ -482,7 +470,7 @@ impl Render for SidebarView {
                                 item.active,
                                 true,
                                 now,
-                                &p,
+                                p,
                             ));
                         }
                     }
@@ -498,7 +486,7 @@ impl Render for SidebarView {
                     item.active,
                     false,
                     now,
-                    &p,
+                    p,
                 ));
             }
         }
@@ -540,7 +528,7 @@ impl Render for SidebarView {
                         h_flex()
                             .items_center()
                             .gap(px(9.))
-                            .child(eclipse_mark(22., p.sidebar, &p))
+                            .child(eclipse_mark(22., p.sidebar, p))
                             .child(
                                 div()
                                     .font_family(FONT_DISPLAY)
@@ -583,7 +571,7 @@ impl Render for SidebarView {
                             IconName::SquarePen,
                             "New session",
                             "Ctrl N",
-                            &p,
+                            p,
                         )
                         .on_click(move |_, _, cx| {
                             new_session.update(cx, |store, cx| {
@@ -593,7 +581,7 @@ impl Render for SidebarView {
                         }),
                     )
                     .child(
-                        self.nav_button("nav-search", IconName::Search, "Search", "Ctrl K", &p)
+                        self.nav_button("nav-search", IconName::Search, "Search", "Ctrl K", p)
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(Box::new(OpenPalette), cx);
                             }),

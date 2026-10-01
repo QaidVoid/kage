@@ -7,7 +7,7 @@
 use serde_json::Value;
 
 use crate::frame::RpcError;
-use kage_acp_wire::FsResult;
+use kage_acp_wire::{FsResult, OptionEntry};
 
 /// The scopes and one-shot answers a handled frame produced.
 #[derive(Debug, Clone, PartialEq)]
@@ -83,6 +83,12 @@ pub enum Change {
         /// The transcript as Markdown.
         markdown: String,
     },
+    /// A `_kage/options` answer arrived: every engine option a client
+    /// can change, with its value in effect.
+    Options {
+        /// The options, in the engine's order.
+        options: Vec<OptionEntry>,
+    },
     /// A request the client sent was answered with an error. The
     /// client keeps no error log; a host surfaces this where it fits.
     Failed {
@@ -105,7 +111,11 @@ impl Change {
             | Self::Agents { id } => Some(id),
             Self::Fs { session_id, .. } | Self::Exported { session_id, .. } => Some(session_id),
             Self::Forked { from, .. } => Some(from),
-            Self::Connection | Self::Directory | Self::Config { .. } | Self::Failed { .. } => None,
+            Self::Connection
+            | Self::Directory
+            | Self::Config { .. }
+            | Self::Options { .. }
+            | Self::Failed { .. } => None,
         }
     }
 }

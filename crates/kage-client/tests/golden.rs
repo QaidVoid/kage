@@ -1122,3 +1122,29 @@ fn a_fork_names_its_prompt_by_text_and_occurrence() {
         }]
     );
 }
+
+#[test]
+fn engine_options_list_and_set_answer_with_every_option() {
+    let mut client = connected(false);
+    let _ = client.take_outgoing();
+    let listed = serde_json::json!({"options": [{
+        "name": "agent_max_depth", "toml": "agents.max_depth", "doc": "How deep.",
+        "kind": "int", "min": 0, "max": 3, "default": 1, "value": 2,
+        "configured": true, "live": false,
+    }]});
+    let id = client.set_engine_option("agent_max_depth", serde_json::json!(2));
+    let outgoing = client.take_outgoing();
+    let Frame::Request { method, params, .. } = &outgoing[0] else {
+        panic!("a set is a request: {outgoing:?}");
+    };
+    assert_eq!(method, "_kage/options/set");
+    assert_eq!(
+        params,
+        &serde_json::json!({"name": "agent_max_depth", "value": 2})
+    );
+    let changes = client.handle(Frame::Success { id, result: listed });
+    let [Change::Options { options }] = changes.as_slice() else {
+        panic!("one options change: {changes:?}");
+    };
+    assert_eq!(options[0].value, serde_json::json!(2));
+}

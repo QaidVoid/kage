@@ -495,6 +495,62 @@ pub struct SessionRequest {
     pub session_id: String,
 }
 
+/// One engine option, as `_kage/options/list` reports it: the settings
+/// a client can change through `_kage/options/set`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OptionEntry {
+    /// The option name.
+    pub name: String,
+    /// The dotted `config.toml` key it writes.
+    pub toml: String,
+    /// One-line description.
+    pub doc: String,
+    /// What it accepts: `bool`, `int`, `fraction`, `choice`, `str` or
+    /// `key`.
+    pub kind: String,
+    /// The smallest integer an `int` accepts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<i64>,
+    /// The largest integer an `int` accepts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<i64>,
+    /// The values a `choice` accepts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+    /// The default value.
+    pub default: serde_json::Value,
+    /// The value in effect.
+    pub value: serde_json::Value,
+    /// Whether the value comes from a config file rather than the
+    /// default.
+    #[serde(default)]
+    pub configured: bool,
+    /// Whether a change applies while sessions run; otherwise it
+    /// applies at the next session start.
+    #[serde(default)]
+    pub live: bool,
+}
+
+/// `_kage/options/list` and `_kage/options/set` result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OptionsResponse {
+    /// Every option, in the engine's order.
+    pub options: Vec<OptionEntry>,
+}
+
+/// `_kage/options/set` request params.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OptionSetRequest {
+    /// The option to change.
+    pub name: String,
+    /// The new value: a boolean, a number or a string, as the option's
+    /// kind takes.
+    pub value: serde_json::Value,
+}
+
 /// `_kage/session/rename` request params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1397,6 +1453,39 @@ mod tests {
         assert_eq!(encoded, json, "serialized shape must match the spec");
         let decoded: T = serde_json::from_value(json).unwrap();
         assert_eq!(&decoded, value, "round-trip must be lossless");
+    }
+
+    #[test]
+    fn option_shapes_round_trip() {
+        roundtrip(
+            &OptionsResponse {
+                options: vec![OptionEntry {
+                    name: "agent_max_depth".into(),
+                    toml: "agents.max_depth".into(),
+                    doc: "How deep agents may nest.".into(),
+                    kind: "int".into(),
+                    min: Some(0),
+                    max: Some(3),
+                    values: Vec::new(),
+                    default: serde_json::json!(1),
+                    value: serde_json::json!(2),
+                    configured: true,
+                    live: false,
+                }],
+            },
+            serde_json::json!({"options": [{
+                "name": "agent_max_depth", "toml": "agents.max_depth",
+                "doc": "How deep agents may nest.", "kind": "int", "min": 0, "max": 3,
+                "default": 1, "value": 2, "configured": true, "live": false,
+            }]}),
+        );
+        roundtrip(
+            &OptionSetRequest {
+                name: "thinking_level".into(),
+                value: serde_json::json!("high"),
+            },
+            serde_json::json!({"name": "thinking_level", "value": "high"}),
+        );
     }
 
     #[test]

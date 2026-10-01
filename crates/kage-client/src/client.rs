@@ -15,12 +15,12 @@ use serde_json::Value;
 use kage_acp_wire::{
     CancelNotification, ClientCapabilities, CloseSessionRequest, ConfigGetRequest, ContentBlock,
     FsOp, FsRequest, Implementation, InitializeRequest, KageMeta, ListSessionsRequest,
-    LoadSessionRequest, McpServer, NewSessionRequest, PROTOCOL_VERSION, PermissionOptionKind,
-    PermissionOutcome, PlanReview, PromptDelivery, PromptRef, PromptRequest, PromptResponse,
-    RequestMeta, RequestPermissionRequest, RequestPermissionResult, ResumeSessionRequest,
-    SelectedOption, SessionExportResponse, SessionForkRequest, SessionForkResponse,
-    SessionNotification, SessionRenameRequest, SessionRequest, SessionUpdate,
-    SetSessionConfigOptionRequest, SwarmResumeRequest,
+    LoadSessionRequest, McpServer, NewSessionRequest, OptionSetRequest, OptionsResponse,
+    PROTOCOL_VERSION, PermissionOptionKind, PermissionOutcome, PlanReview, PromptDelivery,
+    PromptRef, PromptRequest, PromptResponse, RequestMeta, RequestPermissionRequest,
+    RequestPermissionResult, ResumeSessionRequest, SelectedOption, SessionExportResponse,
+    SessionForkRequest, SessionForkResponse, SessionNotification, SessionRenameRequest,
+    SessionRequest, SessionUpdate, SetSessionConfigOptionRequest, SwarmResumeRequest,
 };
 
 use crate::change::Change;
@@ -140,6 +140,7 @@ enum Pending {
     Rename {
         session_id: String,
     },
+    Options,
 }
 
 /// The client side of an ACP connection.
@@ -562,6 +563,30 @@ impl Client {
         )
     }
 
+    /// Asks for the engine options a client can change. The answer
+    /// arrives as [`Change::Options`].
+    pub fn options_list(&mut self) -> u64 {
+        self.request(
+            "_kage/options/list",
+            serde_json::json!({}),
+            Pending::Options,
+        )
+    }
+
+    /// Stores engine option `name` as `value` in the user config. The
+    /// options after the write arrive as [`Change::Options`]; a refused
+    /// value arrives as [`Change::Failed`] with the engine's reason.
+    pub fn set_engine_option(&mut self, name: &str, value: Value) -> u64 {
+        self.request(
+            "_kage/options/set",
+            params(&OptionSetRequest {
+                name: name.to_owned(),
+                value,
+            }),
+            Pending::Options,
+        )
+    }
+
     /// Lists or reads a path under the session workdir. The answer
     /// arrives as [`Change::Fs`].
     pub fn fs(&mut self, session_id: &str, op: FsOp, path: &str) -> u64 {
@@ -848,6 +873,14 @@ impl Client {
             | Pending::Compact { session_id }
             | Pending::Rename { session_id } => {
                 vec![Change::Session { id: session_id }]
+            }
+            Pending::Options => {
+                match answer::<OptionsResponse>(id, result, "_kage/options result") {
+                    Err(failed) => failed,
+                    Ok(answer) => vec![Change::Options {
+                        options: answer.options,
+                    }],
+                }
             }
             Pending::Fork { session_id } => {
                 match answer::<SessionForkResponse>(id, result, "_kage/session/fork result") {

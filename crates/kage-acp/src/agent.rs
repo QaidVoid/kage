@@ -27,11 +27,11 @@ use crate::acp::{
     CloseSessionRequest, CloseSessionResponse, ConfigGetRequest, ConfigGetResult, FsRequest,
     FsResult, InitializeRequest, InitializeResponse, KageMeta, ListSessionsRequest,
     ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
-    NewSessionResponse, PermissionOption, PermissionOptionKind, PermissionOutcome, PlanReview,
-    PromptRequest, PromptResponse, RequestMeta, RequestPermissionRequest,
-    RequestPermissionResponse, RequestPermissionResult, ResumeSessionRequest,
-    ResumeSessionResponse, SessionExportResponse, SessionForkRequest, SessionForkResponse,
-    SessionNotification, SessionRenameRequest, SessionRequest, SessionUpdate,
+    NewSessionResponse, OptionSetRequest, OptionsResponse, PermissionOption, PermissionOptionKind,
+    PermissionOutcome, PlanReview, PromptRequest, PromptResponse, RequestMeta,
+    RequestPermissionRequest, RequestPermissionResponse, RequestPermissionResult,
+    ResumeSessionRequest, ResumeSessionResponse, SessionExportResponse, SessionForkRequest,
+    SessionForkResponse, SessionNotification, SessionRenameRequest, SessionRequest, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SwarmResumeRequest,
     SwarmResumeResponse, ToolCallUpdate,
 };
@@ -404,6 +404,28 @@ pub trait Agent: Send + Sync + 'static {
         Err(RpcError::method_not_found("_kage/session/rename"))
     }
 
+    /// The engine options a client can change (`_kage/options/list`).
+    /// The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the configuration cannot be read.
+    fn options_list(&self) -> Result<OptionsResponse, RpcError> {
+        Err(RpcError::method_not_found("_kage/options/list"))
+    }
+
+    /// Validates and stores one engine option in the user config
+    /// (`_kage/options/set`), answering with every option after the
+    /// write. The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the option is unknown, the value does
+    /// not fit it, or the config cannot be written.
+    fn option_set(&self, _req: OptionSetRequest) -> Result<OptionsResponse, RpcError> {
+        Err(RpcError::method_not_found("_kage/options/set"))
+    }
+
     /// Run one prompt turn to completion, streaming `session/update`
     /// notifications through `ctx`.
     ///
@@ -620,6 +642,27 @@ fn handle_request<A: Agent>(
             Err(e) => return parse_failed(peer, &id, e),
             Ok(req) => spawn_op(peer, agent, id, move |a| a.close_session(req).map(jval)),
         },
+        other if other.starts_with("_kage/") => {
+            return handle_kage_request(peer, agent, id, other, params);
+        }
+        other => {
+            let _ = peer.respond(&id, Err(RpcError::method_not_found(other)));
+            return None;
+        }
+    };
+    Some(op)
+}
+
+/// Answer one `_kage/*` extension request on its own thread. Returns
+/// the thread to wait for at the end of the input.
+fn handle_kage_request<A: Agent>(
+    peer: &Peer,
+    agent: &Arc<A>,
+    id: serde_json::Value,
+    method: &str,
+    params: serde_json::Value,
+) -> Option<thread::JoinHandle<()>> {
+    let op = match method {
         "_kage/config/get" => match parse::<ConfigGetRequest>(params) {
             Ok(req) => spawn_op(peer, agent, id, move |a| a.config_get(req).map(jval)),
             Err(e) => return parse_failed(peer, &id, e),
@@ -642,6 +685,11 @@ fn handle_request<A: Agent>(
         },
         "_kage/session/compact" => match parse::<SessionRequest>(params) {
             Ok(req) => spawn_op(peer, agent, id, move |a| a.session_compact(req)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/options/list" => spawn_op(peer, agent, id, |a| a.options_list().map(jval)),
+        "_kage/options/set" => match parse::<OptionSetRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.option_set(req).map(jval)),
             Err(e) => return parse_failed(peer, &id, e),
         },
         "_kage/session/rename" => match parse::<SessionRenameRequest>(params) {

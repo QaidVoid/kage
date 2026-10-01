@@ -35,6 +35,7 @@ pub(crate) mod host;
 mod live;
 mod mcp;
 mod options;
+mod registry;
 mod sessions;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -47,12 +48,12 @@ use kage_acp::acp::{
     AgentCapabilities, AgentMeta, CloseSessionRequest, CloseSessionResponse, ConfigGetRequest,
     ConfigGetResult, FsRequest, FsResult, Implementation, InitializeRequest, InitializeResponse,
     KageAgentInfo, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, McpCapabilities, NewSessionRequest, NewSessionResponse, PROTOCOL_VERSION,
-    PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse, ResumeSessionRequest,
-    ResumeSessionResponse, SessionCapabilities, SessionConfigOption, SessionExportResponse,
-    SessionForkRequest, SessionForkResponse, SessionRenameRequest, SessionRequest, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, Supported,
-    SwarmResumeRequest, SwarmResumeResponse,
+    LoadSessionResponse, McpCapabilities, NewSessionRequest, NewSessionResponse, OptionSetRequest,
+    OptionsResponse, PROTOCOL_VERSION, PromptCapabilities, PromptDelivery, PromptRequest,
+    PromptResponse, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
+    SessionConfigOption, SessionExportResponse, SessionForkRequest, SessionForkResponse,
+    SessionRenameRequest, SessionRequest, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, StopReason, Supported, SwarmResumeRequest, SwarmResumeResponse,
 };
 use kage_acp::agent::{Agent, PromptContext, send_update};
 use kage_core::config::{Config, McpServer as McpSpec};
@@ -477,6 +478,21 @@ impl Agent for CliAcpAgent {
         let id = self.engine_id(&req.session_id)?;
         self.host.engine.send(Command::to(id, CommandKind::Compact));
         Ok(serde_json::json!({}))
+    }
+
+    fn options_list(&self) -> Result<OptionsResponse, RpcError> {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let config = Config::load_layered(&cwd).map_err(|e| RpcError::internal(e.to_string()))?;
+        Ok(registry::entries(&config))
+    }
+
+    /// Writes the option into the user config. A project config that
+    /// sets the same key still wins, which the answer shows.
+    fn option_set(&self, req: OptionSetRequest) -> Result<OptionsResponse, RpcError> {
+        let path =
+            Config::default_path().ok_or_else(|| RpcError::internal("no user config directory"))?;
+        registry::set(&path, &req)?;
+        self.options_list()
     }
 
     fn session_rename(&self, req: SessionRenameRequest) -> Result<serde_json::Value, RpcError> {

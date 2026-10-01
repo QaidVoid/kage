@@ -49,7 +49,8 @@ use kage_acp::acp::{
     KageAgentInfo, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, McpCapabilities, NewSessionRequest, NewSessionResponse, PROTOCOL_VERSION,
     PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse, ResumeSessionRequest,
-    ResumeSessionResponse, SessionCapabilities, SessionConfigOption, SessionUpdate,
+    ResumeSessionResponse, SessionCapabilities, SessionConfigOption, SessionExportResponse,
+    SessionForkRequest, SessionForkResponse, SessionRequest, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, Supported,
     SwarmResumeRequest, SwarmResumeResponse,
 };
@@ -435,6 +436,22 @@ impl Agent for CliAcpAgent {
     /// Continues swarm children of the session. The engine verifies the
     /// members once the command lands; one that is not a swarm child of
     /// the session refuses the whole request with a notice.
+    fn session_fork(&self, req: SessionForkRequest) -> Result<SessionForkResponse, RpcError> {
+        self.fork_recorded(&req)
+    }
+
+    fn session_export(&self, req: SessionRequest) -> Result<SessionExportResponse, RpcError> {
+        self.export_recorded(&req.session_id)
+    }
+
+    /// Asks the engine to compact the session now. The result reaches
+    /// the client as the compaction's updates.
+    fn session_compact(&self, req: SessionRequest) -> Result<serde_json::Value, RpcError> {
+        let id = self.engine_id(&req.session_id)?;
+        self.host.engine.send(Command::to(id, CommandKind::Compact));
+        Ok(serde_json::json!({}))
+    }
+
     fn swarm_resume(&self, req: SwarmResumeRequest) -> Result<SwarmResumeResponse, RpcError> {
         let id = self.engine_id(&req.session_id)?;
         let mut members = BTreeMap::new();

@@ -352,6 +352,26 @@ pub struct SessionInfo {
     /// ISO 8601 time of the last activity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
+    /// kage's facts about the session, under `_meta.kage`.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<SessionInfoMeta>,
+}
+
+/// The `_meta` of a listed session.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfoMeta {
+    /// kage's facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kage: Option<SessionInfoKage>,
+}
+
+/// kage's facts about a listed session.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfoKage {
+    /// The session this one was forked from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
 }
 
 /// `session/set_config_option` request params.
@@ -432,6 +452,55 @@ pub struct SwarmResumeRequest {
 pub struct SwarmResumeResponse {
     /// The children the engine accepted, in map order.
     pub resumed: Vec<String>,
+}
+
+/// A prompt of a session, named by its text and how many earlier
+/// prompts carried the same text, so a client finds it without knowing
+/// the session's entry ids.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptRef {
+    /// The prompt's first text block, as typed.
+    pub text: String,
+    /// How many earlier prompts of the session had this same text.
+    #[serde(default)]
+    pub occurrence: u32,
+}
+
+/// `_kage/session/fork` request params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionForkRequest {
+    /// The session to copy.
+    pub session_id: String,
+    /// Copy only what came before this prompt. Absent copies the whole
+    /// session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<PromptRef>,
+}
+
+/// `_kage/session/fork` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionForkResponse {
+    /// The copy, a recorded session `session/load` opens.
+    pub session_id: String,
+}
+
+/// `_kage/session/export` and `_kage/session/compact` request params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRequest {
+    /// The session to act on.
+    pub session_id: String,
+}
+
+/// `_kage/session/export` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionExportResponse {
+    /// The session's transcript as Markdown.
+    pub markdown: String,
 }
 
 /// `_kage/fs` request params. `path` is relative to the session
@@ -1589,12 +1658,18 @@ mod tests {
                         cwd: "/w".into(),
                         title: Some("Fix the build".into()),
                         updated_at: Some("2026-09-25T10:00:00Z".into()),
+                        meta: None,
                     },
                     SessionInfo {
                         session_id: "s2".into(),
                         cwd: "/w".into(),
                         title: None,
                         updated_at: None,
+                        meta: Some(SessionInfoMeta {
+                            kage: Some(SessionInfoKage {
+                                parent_session_id: Some("s1".into()),
+                            }),
+                        }),
                     },
                 ],
                 next_cursor: Some("50".into()),
@@ -1607,7 +1682,7 @@ mod tests {
                         "title": "Fix the build",
                         "updatedAt": "2026-09-25T10:00:00Z"
                     },
-                    {"sessionId": "s2", "cwd": "/w"}
+                    {"sessionId": "s2", "cwd": "/w", "_meta": {"kage": {"parentSessionId": "s1"}}}
                 ],
                 "nextCursor": "50"
             }),

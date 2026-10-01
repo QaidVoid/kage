@@ -51,7 +51,6 @@ use self::swarm_tool::SwarmInfo;
 
 pub(crate) use bus::{Subscriber, SubscriptionId};
 pub(crate) use recorder::Recorder;
-#[cfg(test)]
 pub(crate) use sessions::render_session_markdown;
 
 use agent_tool::{AgentTool, Spawn};

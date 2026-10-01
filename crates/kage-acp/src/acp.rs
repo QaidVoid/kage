@@ -28,15 +28,17 @@ pub use kage_acp_wire::schema::{
     LoadSessionResponse, McpCapabilities, McpServer, McpServerHttp, McpServerStdio, MessageChunk,
     NewSessionRequest, NewSessionResponse, NoticeTone, NoticeUpdate, PROTOCOL_VERSION,
     PermissionOption, PermissionOptionKind, PermissionOutcome, Plan, PlanReview,
-    PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse, RequestMeta,
+    PromptCapabilities, PromptDelivery, PromptRef, PromptRequest, PromptResponse, RequestMeta,
     RequestPermissionRequest, RequestPermissionResponse, RequestPermissionResult, ResourceLink,
     ResumeSessionRequest, ResumeSessionResponse, SelectedOption, SessionCapabilities,
     SessionConfigCategory, SessionConfigKind, SessionConfigOption, SessionConfigSelectOption,
-    SessionInfo, SessionInfoUpdate, SessionNotification, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, StopReason, SubagentSessionCapabilities, SubagentState,
-    SubagentSwarm, SubagentUpdate, Supported, SwarmMeta, SwarmResumeRequest, SwarmResumeResponse,
-    TerminalRef, TextContent, ToolCall, ToolCallContent, ToolCallMeta, ToolCallStatus,
-    ToolCallUpdate, ToolKind, TurnPhase, TurnReason, TurnUpdate, UsageUpdate,
+    SessionExportResponse, SessionForkRequest, SessionForkResponse, SessionInfo, SessionInfoKage,
+    SessionInfoMeta, SessionInfoUpdate, SessionNotification, SessionRequest,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
+    SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate, Supported,
+    SwarmMeta, SwarmResumeRequest, SwarmResumeResponse, TerminalRef, TextContent, ToolCall,
+    ToolCallContent, ToolCallMeta, ToolCallStatus, ToolCallUpdate, ToolKind, TurnPhase, TurnReason,
+    TurnUpdate, UsageUpdate,
 };
 
 /// `_kage/config/get` result: the read-only sections a settings page

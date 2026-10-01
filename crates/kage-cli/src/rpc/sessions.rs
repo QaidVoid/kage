@@ -2,26 +2,27 @@
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use kage_acp::acp::{
-    ContentBlock, ListSessionsRequest, ListSessionsResponse, McpServer, SessionConfigOption,
-    SessionInfo, SessionInfoUpdate, SessionUpdate,
+    ContentBlock, ListSessionsRequest, ListSessionsResponse, McpServer, PromptRef,
+    SessionConfigOption, SessionExportResponse, SessionForkRequest, SessionForkResponse,
+    SessionInfo, SessionInfoKage, SessionInfoMeta, SessionInfoUpdate, SessionUpdate,
 };
 use kage_acp::agent::PromptContext;
 use kage_core::sync::lock;
-use kage_core::{Content, LoopEvent, Message, MessageId, Role, ToolOutput};
+use kage_core::{Content, LoopEvent, Message, MessageId, Role, SessionId, ToolOutput};
 use kage_jsonrpc::RpcError;
 use kage_loop::TokenBudget;
-use kage_session::SessionWriter;
+use kage_session::{EntryId, SessionEntry, SessionReader, SessionWriter};
 
 use super::bridge::to_update;
 use super::bridge::user_chunk;
 use super::content::image_block;
 use super::mcp::editor_servers;
 use super::options::config_options;
-use crate::engine::Recorder;
+use crate::engine::{Recorder, render_session_markdown};
 
 /// Sessions per `session/list` page.
 const LIST_PAGE: usize = 50;
@@ -43,9 +44,7 @@ impl super::CliAcpAgent {
         replay_file: bool,
     ) -> Result<Vec<SessionConfigOption>, RpcError> {
         let servers = editor_servers(servers)?;
-        let path = kage_session::find_by_prefix(&self.host.sessions, client_id)
-            .map_err(|e| RpcError::internal(e.to_string()))?
-            .ok_or_else(|| RpcError::new(-32602, format!("unknown session {client_id}")))?;
+        let path = self.recorded_path(client_id)?;
         let id = crate::engine::session_id_of(&path).ok_or_else(|| {
             RpcError::internal(format!("bad session file name {}", path.display()))
         })?;
@@ -111,6 +110,79 @@ impl super::CliAcpAgent {
         spec.recorder = Some(Recorder::new(writer, spec.plugins.clone()));
         Ok(self.open(client_id.to_owned(), spec))
     }
+
+    /// The file of the recorded session `client_id` names.
+    fn recorded_path(&self, client_id: &str) -> Result<PathBuf, RpcError> {
+        kage_session::find_by_prefix(&self.host.sessions, client_id)
+            .map_err(|e| RpcError::internal(e.to_string()))?
+            .ok_or_else(|| RpcError::new(-32602, format!("unknown session {client_id}")))
+    }
+
+    /// Copies the recorded session `req.session_id` names into a new
+    /// session, whole or up to the prompt `req.before` names.
+    pub(super) fn fork_recorded(
+        &self,
+        req: &SessionForkRequest,
+    ) -> Result<SessionForkResponse, RpcError> {
+        let path = self.recorded_path(&req.session_id)?;
+        let at = fork_point(&path, req.before.as_ref())?;
+        let id = SessionId::new();
+        let dst = self.host.sessions.join(format!("{id}.jsonl"));
+        kage_session::fork(&path, &dst, id, at).map_err(|e| RpcError::internal(e.to_string()))?;
+        Ok(SessionForkResponse {
+            session_id: id.to_string(),
+        })
+    }
+
+    /// The recorded session `client_id` names as a Markdown transcript.
+    pub(super) fn export_recorded(
+        &self,
+        client_id: &str,
+    ) -> Result<SessionExportResponse, RpcError> {
+        let path = self.recorded_path(client_id)?;
+        let replay = kage_session::replay(&path).map_err(|e| RpcError::internal(e.to_string()))?;
+        Ok(SessionExportResponse {
+            markdown: render_session_markdown(&replay),
+        })
+    }
+}
+
+/// The entry a fork of `path` copies through: the one just before the
+/// prompt `before` names, or the last entry when `before` is absent.
+fn fork_point(path: &Path, before: Option<&PromptRef>) -> Result<EntryId, RpcError> {
+    let internal = |e: kage_session::SessionError| RpcError::internal(e.to_string());
+    let mut last = None;
+    let mut seen = 0;
+    for entry in SessionReader::iter(path).map_err(internal)? {
+        let entry = entry.map_err(internal)?;
+        if let (Some(before), SessionEntry::Message(m)) = (before, &entry)
+            && m.message.role == Role::User
+            && prompt_text(&m.message) == before.text
+        {
+            if seen == before.occurrence {
+                return last.ok_or_else(|| RpcError::internal("the prompt has no entry before it"));
+            }
+            seen += 1;
+        }
+        last = Some(entry.id());
+    }
+    match before {
+        Some(_) => Err(RpcError::new(-32602, "the session has no such prompt")),
+        None => last.ok_or_else(|| RpcError::internal("the session has no entries")),
+    }
+}
+
+/// The first text block of a user message: the prompt as typed, ahead
+/// of any attachment rendered as text.
+fn prompt_text(message: &Message) -> &str {
+    message
+        .content
+        .iter()
+        .find_map(|block| match block {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// The `session/update`s that show `history` as the live bridge showed
@@ -205,6 +277,11 @@ pub(super) fn list_page(
                 s.updated_at
                     .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             ),
+            meta: s.parent_session.map(|parent| SessionInfoMeta {
+                kage: Some(SessionInfoKage {
+                    parent_session_id: Some(parent.to_string()),
+                }),
+            }),
         })
         .collect();
     Ok(ListSessionsResponse {

@@ -1659,6 +1659,117 @@ fn session_list_hides_agents_filters_by_cwd_and_orders_newest_first() {
 }
 
 #[test]
+fn session_fork_copies_up_to_the_named_prompt_and_links_its_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = dir.path();
+    let turn = |prompt: &str, reply: &str| {
+        [
+            message(Role::User, vec![text(prompt)], None),
+            message(Role::Assistant, vec![text(reply)], None),
+        ]
+    };
+    let entries: Vec<SessionEntry> = [
+        turn("again", "one"),
+        turn("next", "two"),
+        turn("again", "three"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let source = record(sessions, "/p", "mock:m", 1, &entries);
+    let h = serve(Vec::new(), sessions, sessions);
+    let fork = |before: serde_json::Value| {
+        let mut params = serde_json::json!({ "sessionId": source });
+        if !before.is_null() {
+            params["before"] = before;
+        }
+        h.client.request("_kage/session/fork", params)
+    };
+    let history = |id: &str| {
+        let path = kage_session::find_by_prefix(sessions, id).unwrap().unwrap();
+        kage_session::replay(&path).unwrap().history.len()
+    };
+
+    let second = fork(serde_json::json!({ "text": "again", "occurrence": 1 })).unwrap();
+    let second = second["sessionId"].as_str().unwrap();
+    assert_eq!(history(second), 4, "copies the two turns before it");
+    let first = fork(serde_json::json!({ "text": "again" })).unwrap();
+    assert_eq!(history(first["sessionId"].as_str().unwrap()), 0);
+    let whole = fork(serde_json::Value::Null).unwrap();
+    assert_eq!(history(whole["sessionId"].as_str().unwrap()), 6);
+    let missing = fork(serde_json::json!({ "text": "never" })).unwrap_err();
+    assert_eq!(missing.code, -32602);
+
+    let page = h
+        .client
+        .request("session/list", serde_json::json!({}))
+        .unwrap();
+    let listed = page["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["sessionId"] == second)
+        .unwrap();
+    assert_eq!(listed["_meta"]["kage"]["parentSessionId"], source);
+}
+
+#[test]
+fn session_export_renders_the_recorded_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = dir.path();
+    let source = record(
+        sessions,
+        "/p",
+        "mock:m",
+        1,
+        &[
+            message(Role::User, vec![text("explain the parser")], None),
+            message(Role::Assistant, vec![text("it reads tokens")], None),
+        ],
+    );
+    let h = serve(Vec::new(), sessions, sessions);
+
+    let out = h
+        .client
+        .request(
+            "_kage/session/export",
+            serde_json::json!({ "sessionId": source }),
+        )
+        .unwrap();
+    let markdown = out["markdown"].as_str().unwrap();
+    assert!(markdown.contains("explain the parser"), "{markdown}");
+    assert!(markdown.contains("it reads tokens"), "{markdown}");
+    let unknown = h
+        .client
+        .request(
+            "_kage/session/export",
+            serde_json::json!({ "sessionId": "zz" }),
+        )
+        .unwrap_err();
+    assert_eq!(unknown.code, -32602);
+}
+
+#[test]
+fn session_compact_needs_an_open_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(Vec::new(), dir.path(), dir.path());
+    let params = serde_json::json!({"cwd": dir.path(), "mcpServers": []});
+    let created = h.client.request("session/new", params).unwrap();
+
+    let compact = |id: &serde_json::Value| {
+        h.client.request(
+            "_kage/session/compact",
+            serde_json::json!({ "sessionId": id }),
+        )
+    };
+    assert_eq!(
+        compact(&created["sessionId"]).unwrap(),
+        serde_json::json!({})
+    );
+    assert_eq!(compact(&serde_json::json!("zz")).unwrap_err().code, -32602);
+}
+
+#[test]
 fn session_list_pages_with_a_cursor() {
     let dir = tempfile::tempdir().unwrap();
     let sessions = dir.path();

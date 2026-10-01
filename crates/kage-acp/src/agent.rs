@@ -30,7 +30,8 @@ use crate::acp::{
     NewSessionResponse, PermissionOption, PermissionOptionKind, PermissionOutcome, PlanReview,
     PromptRequest, PromptResponse, RequestMeta, RequestPermissionRequest,
     RequestPermissionResponse, RequestPermissionResult, ResumeSessionRequest,
-    ResumeSessionResponse, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    ResumeSessionResponse, SessionExportResponse, SessionForkRequest, SessionForkResponse,
+    SessionNotification, SessionRequest, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SwarmResumeRequest, SwarmResumeResponse, ToolCallUpdate,
 };
 
@@ -360,6 +361,38 @@ pub trait Agent: Send + Sync + 'static {
         Err(RpcError::method_not_found("_kage/swarm/resume"))
     }
 
+    /// Copy a recorded session, whole or up to a prompt
+    /// (`_kage/session/fork`). The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session or the prompt is unknown,
+    /// or the copy fails.
+    fn session_fork(&self, _req: SessionForkRequest) -> Result<SessionForkResponse, RpcError> {
+        Err(RpcError::method_not_found("_kage/session/fork"))
+    }
+
+    /// Render a recorded session as Markdown (`_kage/session/export`).
+    /// The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session is unknown or unreadable.
+    fn session_export(&self, _req: SessionRequest) -> Result<SessionExportResponse, RpcError> {
+        Err(RpcError::method_not_found("_kage/session/export"))
+    }
+
+    /// Summarize a session's older turns now (`_kage/session/compact`).
+    /// The compaction reaches the client as its update. The default
+    /// rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session is unknown.
+    fn session_compact(&self, _req: SessionRequest) -> Result<serde_json::Value, RpcError> {
+        Err(RpcError::method_not_found("_kage/session/compact"))
+    }
+
     /// Run one prompt turn to completion, streaming `session/update`
     /// notifications through `ctx`.
     ///
@@ -586,6 +619,18 @@ fn handle_request<A: Agent>(
         },
         "_kage/swarm/resume" => match parse::<SwarmResumeRequest>(params) {
             Ok(req) => spawn_op(peer, agent, id, move |a| a.swarm_resume(req).map(jval)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/session/fork" => match parse::<SessionForkRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.session_fork(req).map(jval)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/session/export" => match parse::<SessionRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.session_export(req).map(jval)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/session/compact" => match parse::<SessionRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.session_compact(req)),
             Err(e) => return parse_failed(peer, &id, e),
         },
         other => {
@@ -817,6 +862,7 @@ mod tests {
                     cwd: req.cwd.unwrap_or_default(),
                     title: None,
                     updated_at: None,
+                    meta: None,
                 }],
                 next_cursor: None,
             })

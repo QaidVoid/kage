@@ -21,6 +21,7 @@ use crate::theme::{
     FONT_MONO, FS_SM, FS_XS, Palette, R_FULL, R_LG, R_MD, ThemeChoice, WEIGHT_BOLD, WEIGHT_SEMIBOLD,
 };
 use crate::transport::State;
+use crate::views::settings_config as config;
 
 gpui_kit::actions!(kage_desktop, [SettingsClose]);
 
@@ -29,6 +30,14 @@ gpui_kit::actions!(kage_desktop, [SettingsClose]);
 pub enum Section {
     /// Theme and input behavior.
     General,
+    /// The providers and their models.
+    Providers,
+    /// The MCP servers and their status.
+    Mcp,
+    /// The permission mode and the tool rules.
+    Permissions,
+    /// The plugin directory and grants.
+    Plugins,
     /// The link to the engine.
     Connection,
     /// The shortcut table.
@@ -43,8 +52,12 @@ pub enum Section {
 
 impl Section {
     /// Every section, in nav order.
-    pub const ALL: [Section; 6] = [
+    pub const ALL: [Section; 10] = [
         Section::General,
+        Section::Providers,
+        Section::Mcp,
+        Section::Permissions,
+        Section::Plugins,
         Section::Connection,
         Section::Keyboard,
         Section::Lab,
@@ -57,6 +70,10 @@ impl Section {
     pub fn label(self) -> &'static str {
         match self {
             Section::General => "General",
+            Section::Providers => "Model Providers",
+            Section::Mcp => "MCP Servers",
+            Section::Permissions => "Permissions",
+            Section::Plugins => "Plugins",
             Section::Connection => "Connection",
             Section::Keyboard => "Keyboard",
             Section::Lab => "Lab",
@@ -68,6 +85,10 @@ impl Section {
     fn icon(self) -> IconName {
         match self {
             Section::General => IconName::Settings2,
+            Section::Providers => IconName::Zap,
+            Section::Mcp => IconName::Server,
+            Section::Permissions => IconName::ShieldCheck,
+            Section::Plugins => IconName::LayoutDashboard,
             Section::Connection => IconName::Network,
             Section::Keyboard => IconName::Command,
             Section::Lab => IconName::Lightbulb,
@@ -213,7 +234,7 @@ impl SettingsView {
     /// Shows the dialog on `section`, taking the focus.
     pub fn open(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
-        self.section = section;
+        self.go(section, cx);
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -223,8 +244,17 @@ impl SettingsView {
         cx.notify();
     }
 
+    /// Shows `section`. A page read from the engine's configuration
+    /// asks for a fresh snapshot, so an edit to config.toml shows on the
+    /// next visit.
     fn go(&mut self, section: Section, cx: &mut Context<Self>) {
         self.section = section;
+        if matches!(
+            section,
+            Section::Providers | Section::Mcp | Section::Permissions | Section::Plugins
+        ) {
+            self.store.act(cx, Store::ask_config);
+        }
         cx.notify();
     }
 
@@ -296,6 +326,9 @@ impl SettingsView {
         let mut out = vec![title(self.section.label(), pal).into_any_element()];
         match self.section {
             Section::General => out.extend(self.general(window, pal, cx)),
+            Section::Providers | Section::Mcp | Section::Permissions | Section::Plugins => {
+                out.extend(self.config_page(pal, cx));
+            }
             Section::Connection => out.extend(self.connection(pal, cx)),
             Section::Keyboard => out.extend(self.keyboard(pal, cx)),
             Section::Lab => out.extend(self.lab(pal, cx)),
@@ -425,6 +458,58 @@ impl SettingsView {
                 ))
                 .into_any_element(),
         ]
+    }
+
+    /// One of the pages the configuration snapshot backs.
+    fn config_page(&self, pal: &'static Palette, cx: &Context<Self>) -> Vec<AnyElement> {
+        let store = self.store.read(cx);
+        let Some(config) = store.config() else {
+            return config::waiting(pal);
+        };
+        let snapshot = config::Snapshot::parse(config);
+        let session = store.active_session().or_else(|| {
+            store
+                .state()
+                .sessions
+                .values()
+                .find(|session| session.opened && session.parent.is_none())
+        });
+        let option = |id: &str| {
+            session.and_then(|session| session.config_options.iter().find(|o| o.id == id))
+        };
+        match self.section {
+            Section::Providers => config::providers_page(&snapshot, option("model"), pal),
+            Section::Mcp => {
+                let live = session
+                    .map(|session| session.mcp.clone())
+                    .unwrap_or_default();
+                config::mcp_page(&snapshot, &live, pal)
+            }
+            Section::Permissions => {
+                let active = store.active_session();
+                let modes = active
+                    .and_then(|session| session.config_options.iter().find(|o| o.id == "mode"))
+                    .map(|option| {
+                        let mut option = option.clone();
+                        option
+                            .options
+                            .retain(|choice| choice.value != crate::views::composer::PLAN_MODE);
+                        option
+                    });
+                let current = store.permission_mode();
+                let handle = self.store.clone();
+                config::permissions_page(
+                    &snapshot,
+                    modes.as_ref(),
+                    current.as_deref(),
+                    move |value, cx| {
+                        handle.act(cx, |store| store.set_permission(&value));
+                    },
+                    pal,
+                )
+            }
+            _ => config::plugins_page(&snapshot, pal),
+        }
     }
 
     fn connection(&self, pal: &Palette, cx: &Context<Self>) -> Vec<AnyElement> {

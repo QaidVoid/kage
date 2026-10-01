@@ -223,6 +223,8 @@ pub struct Store {
     fs_reading: Option<String>,
     /// The last file read: the session, the path and the answer.
     fs_preview: Option<(String, String, FsReadResult)>,
+    /// The last `_kage/config/get` answer, raw as the wire carried it.
+    config: Option<serde_json::Value>,
     /// Forks waiting for their copy, by source session.
     forking: HashMap<String, ForkPlan>,
     /// Copies waiting to open, with their source, by copy.
@@ -262,6 +264,7 @@ impl Store {
             fs_listing: None,
             fs_reading: None,
             fs_preview: None,
+            config: None,
             forking: HashMap::new(),
             forked: HashMap::new(),
             notes: Vec::new(),
@@ -477,6 +480,7 @@ impl Store {
             }
             match change {
                 Change::Forked { from, to } => self.open_fork(from, to),
+                Change::Config { config } => self.config = Some(config.clone()),
                 Change::Session { id } => self.settle_fork(id),
                 Change::Fs {
                     session_id,
@@ -837,6 +841,18 @@ impl Store {
             .as_ref()?
             .parent_session_id
             .as_deref()
+    }
+
+    /// Asks the engine for its configuration snapshot; the answer
+    /// replaces [`Store::config`].
+    pub fn ask_config(&mut self) {
+        self.client.config_get();
+    }
+
+    /// The last configuration snapshot the engine answered with.
+    #[must_use]
+    pub fn config(&self) -> Option<&serde_json::Value> {
+        self.config.as_ref()
     }
 
     /// The messages for the user since the last call, oldest first.

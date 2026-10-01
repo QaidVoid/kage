@@ -1011,6 +1011,7 @@ fn a_failed_swarm_member_resumes_from_the_wire() {
         .unwrap()
         .to_owned();
     let batch = announced["update"]["swarm"]["id"].clone();
+    let call = announced["update"]["toolCallId"].clone();
     let failed = updates
         .iter()
         .find(|p| is_terminal(p) && p["update"]["subagentSessionId"] == b)
@@ -1042,7 +1043,15 @@ fn a_failed_swarm_member_resumes_from_the_wire() {
         });
     assert_eq!(title["update"]["title"], "Parent title");
 
-    // Resuming the failed member continues it in a fresh batch.
+    // A session that is no swarm child refuses the whole request.
+    let stranger = SessionId::new().to_string();
+    let refused = h.client.request(
+        "_kage/swarm/resume",
+        serde_json::json!({"sessionId": h.session, "members": {&stranger: "go on"}}),
+    );
+    assert!(refused.is_err(), "{refused:?}");
+
+    // Resuming the failed member continues it on its own card.
     let resumed = h
         .client
         .request(
@@ -1058,9 +1067,11 @@ fn a_failed_swarm_member_resumes_from_the_wire() {
     let reannounced = updates
         .iter()
         .find(|p| p["update"]["subagentSessionId"] == b && p["update"]["swarm"].is_object())
-        .expect("b re-announced into a fresh batch");
-    let new_batch = reannounced["update"]["swarm"]["id"].clone();
-    assert_ne!(new_batch, batch);
+        .expect("b re-announced");
+    assert_eq!(reannounced["update"]["swarm"]["id"], batch);
+    assert_eq!(reannounced["update"]["swarm"]["item"], "b");
+    assert_eq!(reannounced["update"]["toolCallId"], call);
+    assert_eq!(reannounced["update"]["state"], "running");
     let terminal = updates
         .iter()
         .find(|p| {

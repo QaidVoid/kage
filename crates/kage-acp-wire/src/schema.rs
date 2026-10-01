@@ -434,8 +434,11 @@ pub struct McpStatusUpdate {
 
 /// `_kage/swarm/resume` request params: continue children of an
 /// earlier `swarm` call of the session, whether they failed or never
-/// ran. The children re-announce and stream on their own sessions
-/// like any other member.
+/// ran. The children re-announce under the call and batch place they
+/// first had and stream on their own sessions like any other member.
+/// Once all have reported, the session gets a notice with the counts
+/// and its next turn reads their results. A child that is not a swarm
+/// child of the session, or is still working, refuses the request.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SwarmResumeRequest {
@@ -450,7 +453,7 @@ pub struct SwarmResumeRequest {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SwarmResumeResponse {
-    /// The children the engine accepted, in map order.
+    /// The children the engine checked and attached, in map order.
     pub resumed: Vec<String>,
 }
 

@@ -22,7 +22,7 @@ mod sessions;
 mod shell;
 mod swarm_tool;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -54,7 +54,7 @@ pub(crate) use recorder::Recorder;
 pub(crate) use sessions::render_session_markdown;
 
 use agent_tool::{AGENT_TOOL, AgentTool, Spawn};
-use agents::{AgentLink, depth_of};
+use agents::{AgentLink, SwarmResumed, depth_of};
 use bus::Bus;
 use mailbox_tool::{MAILBOX_TOOL, MailboxTool};
 use mcp::{McpDone, restart_failed};
@@ -169,6 +169,19 @@ enum Input {
         reply: crossbeam_channel::Sender<Result<Vec<ResumeChild>, String>>,
     },
     Attach(Box<Attach>),
+    /// Continue swarm children of `parent` for a client's
+    /// `_kage/swarm/resume`. Replies with the accepted ids once every
+    /// child is checked and attached, or the reason the whole request
+    /// is refused.
+    ResumeSwarm {
+        parent: SessionId,
+        /// Child session id to a follow-up prompt.
+        members: BTreeMap<SessionId, String>,
+        reply: crossbeam_channel::Sender<Result<Vec<SessionId>, String>>,
+    },
+    /// Every child a client's resume continued has reported. The
+    /// engine tells the parent how they did.
+    SwarmResumed(Box<SwarmResumed>),
     /// Drop a message into a live session's mailbox. The engine
     /// resolves the target, wraps the message so the target knows the
     /// sender, and prompts it with [`Delivery::Queue`]. Replies with
@@ -219,6 +232,14 @@ pub(super) struct ResumeChild {
     pub agent: String,
     /// The description its first spawn showed.
     pub description: String,
+    /// The `swarm` call that first spawned it.
+    pub tool_call_id: ToolCallId,
+    /// The batch it was first spawned in.
+    pub batch_id: ToolCallId,
+    /// Its place in that batch, when its marker records one.
+    pub index: Option<usize>,
+    /// The size of that batch, when its marker records one.
+    pub total: Option<usize>,
 }
 
 /// A request from a `swarm` call to re-prompt an existing child
@@ -230,8 +251,10 @@ pub(super) struct Attach {
     pub agent: String,
     /// The description its first spawn showed.
     pub description: String,
-    /// The resume call's batch, stamped on the link.
-    pub batch_id: ToolCallId,
+    /// The call the child reports under now: the resuming `swarm`
+    /// call, or for a client's resume the call that first spawned it,
+    /// so its card stays where it was.
+    pub tool_call_id: ToolCallId,
     pub prompt: String,
     pub reply: crossbeam_channel::Sender<ToolOutput>,
     /// Batch membership for the resumed child, so its card keeps its
@@ -298,6 +321,30 @@ impl Engine {
 
     pub(crate) fn send(&self, command: Command) {
         self.commander.send(command);
+    }
+
+    /// Continue swarm children of `parent` with their follow-up
+    /// prompts, the answer to a client's `_kage/swarm/resume`. Returns
+    /// the accepted children once each is checked and attached, or the
+    /// reason the whole request is refused. Their results reach
+    /// `parent` once every one has reported.
+    pub(crate) fn resume_swarm(
+        &self,
+        parent: SessionId,
+        members: BTreeMap<SessionId, String>,
+    ) -> Result<Vec<SessionId>, String> {
+        let (reply, answer) = crossbeam_channel::bounded(1);
+        self.commander
+            .0
+            .send(Input::ResumeSwarm {
+                parent,
+                members,
+                reply,
+            })
+            .map_err(|_| "the engine stopped".to_owned())?;
+        answer
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|_| "the engine did not answer the resume".to_owned())?
     }
 
     /// Test-only: the hosted sessions with the length of each idle
@@ -443,6 +490,14 @@ impl Dispatcher {
                     let _ = reply.send(self.verify_resume(parent, &ids));
                 }
                 Input::Attach(attach) => self.attach(*attach),
+                Input::ResumeSwarm {
+                    parent,
+                    members,
+                    reply,
+                } => {
+                    let _ = reply.send(self.resume_members(parent, &members));
+                }
+                Input::SwarmResumed(resumed) => self.swarm_resumed(*resumed),
                 Input::Deliver {
                     from,
                     to,
@@ -679,7 +734,6 @@ impl Dispatcher {
             CommandKind::Close => self.close(id),
             CommandKind::SwarmMode { on } => self.set_swarm_mode(id, on),
             CommandKind::SetGoal { goal } => self.set_goal(id, goal),
-            CommandKind::SwarmResume { members } => self.resume_members(id, &members),
             CommandKind::PlanMode { on } => {
                 let session = self.sessions.get_mut(&id).expect("session checked");
                 if session.gate.plan() != on {

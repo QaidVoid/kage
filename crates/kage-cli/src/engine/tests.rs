@@ -3685,7 +3685,7 @@ fn a_reaped_swarm_child_resumes_from_its_file() {
         id: child,
         agent: "general".into(),
         description: "a swarm".into(),
-        batch_id: ToolCallId::new("call_r"),
+        tool_call_id: ToolCallId::new("call_r"),
         prompt: "continue".into(),
         reply,
         swarm: None,
@@ -4180,12 +4180,11 @@ fn resuming_a_busy_swarm_child_leaves_its_running_call_alone() {
     let mut seen = wait_for(&h.events, is_tool_start_outside(parent));
     seen.extend(wait_for(&h.events, is_tool_start_outside(parent)));
     let busy = spawned(&seen)[0].0;
-    h.engine.send(Command::to(
-        parent,
-        CommandKind::SwarmResume {
-            members: [(busy, "start over".to_owned())].into(),
-        },
-    ));
+    let refused = h
+        .engine
+        .resume_swarm(parent, [(busy, "start over".to_owned())].into())
+        .unwrap_err();
+    assert!(refused.contains("still working"), "{refused}");
     h.release.send(()).unwrap();
     h.release.send(()).unwrap();
     let events = until_runs_end(&h.events, 3);
@@ -4305,4 +4304,77 @@ fn a_delivered_agent_is_dropped_and_takes_no_more_prompts() {
     h.engine.shutdown();
     assert_eq!(notices(&seen), [format!("unknown session {child}")]);
     assert_eq!(mock.call_count(), 3, "nothing ran");
+}
+
+#[test]
+fn a_client_resume_keeps_the_member_on_its_card_and_reports_to_the_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let mock = MockProvider::sequence(vec![
+        swarm_turn(&[("call_s", swarm_task(&["a", "b"]))]),
+        text_turn("a one"),
+        text_turn("b one"),
+        text_turn("parent done"),
+    ]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let parent = SessionId::new();
+    let (recorder, _) = recorder_in(dir.path(), parent);
+    h.engine.open(SessionSpec {
+        recorder: Some(recorder),
+        agents: Some(swarm_setup(1, 60_000)),
+        ..h.spec(parent)
+    });
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let first = until_runs_end(&h.events, 3);
+    let member = |events: &[Envelope], id: SessionId| {
+        events.iter().rev().find_map(|e| match &e.event {
+            Event::Host(HostEvent::AgentSpawned {
+                tool_call_id,
+                swarm,
+                ..
+            }) if e.session == id => Some((tool_call_id.clone(), swarm.clone())),
+            _ => None,
+        })
+    };
+    let child = spawned(&first)[0].0;
+    let (call, swarm) = member(&first, child).unwrap();
+
+    mock.push_script(text_turn("a two"));
+    let accepted = h
+        .engine
+        .resume_swarm(parent, [(child, String::new())].into())
+        .unwrap();
+    assert_eq!(accepted, [child]);
+    let events = until_runs_end(&h.events, 1);
+    let (again, swarm_again) = member(&events, child).expect("announced again");
+    assert_eq!(again, call, "the member reports under its first call");
+    assert_eq!(swarm_again, swarm, "in its old place");
+    let done = wait_for(&h.events, |e| {
+        e.session == parent
+            && notices(std::slice::from_ref(e))
+                .iter()
+                .any(|n| n.contains("finished"))
+    });
+    assert!(
+        notices(&done)
+            .iter()
+            .any(|n| n == "resumed swarm members finished: completed: 1, failed: 0, cancelled: 0"),
+        "{:?}",
+        notices(&done)
+    );
+
+    mock.push_script(text_turn("noted"));
+    prompt(&h.engine, parent, "what changed?", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+    h.engine.shutdown();
+    let request = mock.last_request().unwrap();
+    let note = request
+        .messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .find_map(|c| match c {
+            Content::Text { text } if text.starts_with("[swarm resume]") => Some(text.clone()),
+            _ => None,
+        })
+        .expect("the parent reads the results");
+    assert!(note.contains("a two"), "{note}");
 }

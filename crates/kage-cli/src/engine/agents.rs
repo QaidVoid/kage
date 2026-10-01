@@ -16,7 +16,7 @@ use kage_tools::ToolRegistry;
 use super::agent_tool::{self, AGENT_TOOL, Spawn};
 use super::mailbox_tool::MAILBOX_TOOL;
 use super::runner::Work;
-use super::swarm_tool::{SWARM_TOOL, SwarmInfo};
+use super::swarm_tool::{self, Member, SWARM_TOOL, SwarmInfo};
 use super::{
     AgentSetup, Attach, CONTINUE_PROMPT, Recorder, ResumeChild, Session, SessionSpec, notice,
 };
@@ -28,6 +28,16 @@ const FORK_CONTEXT_NOTICE: &str = "The conversation above is not your own histor
 snapshot inherited from the session that forked you, so treat it as reference material only. \
 You are an independent agent, not a continuation of that agent. Do the task in the next message \
 yourself, then report the result.";
+
+/// The children a client's swarm resume continued, once every one has
+/// reported.
+pub(super) struct SwarmResumed {
+    pub(super) parent: SessionId,
+    /// The description the first child was spawned under.
+    pub(super) description: String,
+    pub(super) members: Vec<Member>,
+    pub(super) outputs: Vec<ToolOutput>,
+}
 
 /// How an agent session hangs off the session that started it.
 pub(super) struct AgentLink {
@@ -155,6 +165,7 @@ impl super::Dispatcher {
         if let Some(info) = &swarm {
             marker["batch_id"] = serde_json::Value::String(info.batch_id.0.clone());
             marker["index"] = serde_json::Value::from(info.index);
+            marker["total"] = serde_json::Value::from(info.total);
             marker["item"] = serde_json::Value::String(info.item.clone());
         }
 
@@ -233,11 +244,21 @@ impl super::Dispatcher {
             if text("parent") != parent.to_string() || text("batch_id").is_empty() {
                 return Err(format!("session {id} is not a swarm child of this session"));
             }
+            let number = |key: &str| {
+                marker
+                    .get(key)
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|n| usize::try_from(n).ok())
+            };
             children.push(ResumeChild {
                 id: *id,
                 item: text("item"),
                 agent: text("agent"),
                 description: text("description"),
+                tool_call_id: ToolCallId::new(text("tool_call_id")),
+                batch_id: ToolCallId::new(text("batch_id")),
+                index: number("index"),
+                total: number("total"),
             });
         }
         Ok(children)
@@ -254,7 +275,7 @@ impl super::Dispatcher {
             id,
             agent,
             description,
-            batch_id,
+            tool_call_id,
             prompt,
             reply,
             swarm,
@@ -288,7 +309,7 @@ impl super::Dispatcher {
         link.reply = Some(reply);
         if reopened {
             let member = swarm.as_ref().map(swarm_member);
-            self.publish_agent_opened(id, parent, batch_id, agent, description, member);
+            self.publish_agent_opened(id, parent, tool_call_id, agent, description, member);
         }
         let content = vec![Content::Text { text: prompt }];
         self.launch_agent(id, setup.max_running, content);
@@ -365,54 +386,135 @@ impl super::Dispatcher {
         }
     }
 
-    /// Continue the named swarm children of `id`, the engine answer to
-    /// a `_kage/swarm/resume` request. Each verified child joins a
-    /// fresh batch and runs again; a child that is not a swarm member
-    /// of `id` refuses the whole request with a notice.
-    pub(super) fn resume_members(&mut self, id: SessionId, members: &BTreeMap<SessionId, String>) {
+    /// Continue the named swarm children of `parent`, the engine answer
+    /// to a client's `_kage/swarm/resume`. Every child is checked first,
+    /// and one that is not a swarm child of `parent` or is still working
+    /// refuses the whole request. Each child reports under the call that
+    /// first spawned it, in its old place, so a client's card keeps it.
+    /// Once all have reported, [`Self::swarm_resumed`] tells `parent`.
+    pub(super) fn resume_members(
+        &mut self,
+        parent: SessionId,
+        members: &BTreeMap<SessionId, String>,
+    ) -> Result<Vec<SessionId>, String> {
         if members.is_empty() {
-            return;
+            return Ok(Vec::new());
         }
         let ids: Vec<SessionId> = members.keys().copied().collect();
-        let children = match self.verify_resume(id, &ids) {
-            Ok(children) => children,
-            Err(text) => {
-                notice(&self.bus, id, NoticeLevel::Warning, text);
-                return;
-            }
-        };
-        let batch_id = ToolCallId::new(format!("swarm_{}", ulid::Ulid::generate()));
-        let total = children.len();
-        notice(
-            &self.bus,
-            id,
-            NoticeLevel::Info,
-            format!("resuming {} swarm member(s)", children.len()),
-        );
-        for (index, child) in children.into_iter().enumerate() {
+        let children = self.verify_resume(parent, &ids)?;
+        if let Some(busy) = ids.iter().find(|id| self.is_busy(**id)) {
+            return Err(format!(
+                "session {busy} is still working on an earlier call; resume it once that \
+                 call has its result"
+            ));
+        }
+        let (reply, results) = crossbeam_channel::bounded(children.len());
+        let mut resumed = Vec::with_capacity(children.len());
+        let description = children
+            .first()
+            .map(|child| child.description.clone())
+            .unwrap_or_default();
+        for child in children {
             let prompt = members
                 .get(&child.id)
                 .filter(|prompt| !prompt.trim().is_empty())
                 .cloned()
                 .unwrap_or_else(|| CONTINUE_PROMPT.to_owned());
-            let (reply, _result) = crossbeam_channel::bounded(1);
+            let swarm = child
+                .index
+                .zip(child.total)
+                .map(|(index, total)| SwarmInfo {
+                    id: child.id,
+                    batch_id: child.batch_id.clone(),
+                    index,
+                    item: child.item.clone(),
+                    total,
+                });
+            resumed.push(Member {
+                id: child.id,
+                item: child.item,
+                agent: child.agent.clone(),
+            });
             self.attach(Attach {
-                parent: id,
+                parent,
                 id: child.id,
                 agent: child.agent,
                 description: child.description,
-                batch_id: batch_id.clone(),
+                tool_call_id: child.tool_call_id,
                 prompt,
-                reply,
-                swarm: Some(SwarmInfo {
-                    id: child.id,
-                    batch_id: batch_id.clone(),
-                    index,
-                    item: child.item,
-                    total,
-                }),
+                reply: reply.clone(),
+                swarm,
             });
         }
+        drop(reply);
+        notice(
+            &self.bus,
+            parent,
+            NoticeLevel::Info,
+            format!("resuming {} swarm member(s)", resumed.len()),
+        );
+        let accepted = resumed.iter().map(|member| member.id).collect();
+        let engine = self.tx.clone();
+        std::thread::spawn(move || {
+            let outputs: Vec<ToolOutput> = results.iter().collect();
+            let _ = engine.send(super::Input::SwarmResumed(Box::new(SwarmResumed {
+                parent,
+                description,
+                members: resumed,
+                outputs,
+            })));
+        });
+        Ok(accepted)
+    }
+
+    /// Whether the agent `id` is hosted and still owes a call its
+    /// result or has work in flight.
+    fn is_busy(&self, id: SessionId) -> bool {
+        self.sessions.get(&id).is_some_and(|session| {
+            session.idle.is_none()
+                || session
+                    .link
+                    .as_ref()
+                    .is_some_and(|link| link.reply.is_some())
+                || self.waiting.contains(&id)
+        })
+    }
+
+    /// Tell `parent` how the children a client resumed did: a notice
+    /// with the counts, and their results as a note the parent's next
+    /// run reads, so the conversation learns what the retry changed.
+    pub(super) fn swarm_resumed(&mut self, resumed: SwarmResumed) {
+        let SwarmResumed {
+            parent,
+            description,
+            members,
+            outputs,
+        } = resumed;
+        let Some(session) = self.sessions.get_mut(&parent) else {
+            return;
+        };
+        let aggregate =
+            swarm_tool::render(swarm_tool::RESULT_CAP, &description, &members, &outputs);
+        let summary = aggregate.text.lines().next().unwrap_or_default().to_owned();
+        let text = format!(
+            "[swarm resume] The user continued members of an earlier swarm. Their \
+             results:\n{}",
+            aggregate.text
+        );
+        session
+            .pending_history
+            .push(Message::new(Role::User, vec![Content::Text { text }], None));
+        let level = if aggregate.is_error {
+            NoticeLevel::Warning
+        } else {
+            NoticeLevel::Info
+        };
+        notice(
+            &self.bus,
+            parent,
+            level,
+            format!("resumed swarm members finished: {summary}"),
+        );
     }
 
     /// Write the `kage:agent` marker and the title right after the header.

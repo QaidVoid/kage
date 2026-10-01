@@ -33,7 +33,7 @@ const CANCEL_GRACE: Duration = Duration::from_secs(2);
 /// this, bodies are cut before any status line. It stays under the
 /// loop's own cap on tool results, which would otherwise cut the middle
 /// children's status lines out.
-const RESULT_CAP: usize = kage_core::MAX_TOOL_RESULT_BYTES - 256;
+pub(super) const RESULT_CAP: usize = kage_core::MAX_TOOL_RESULT_BYTES - 256;
 
 /// Longest item or description an aggregate repeats per child, in
 /// characters. Both land in every `<swarm>` element, so a long one
@@ -253,7 +253,7 @@ impl Tool for SwarmTool {
                     id: child.id,
                     agent: child.agent.clone(),
                     description: child.description,
-                    batch_id: batch_id.clone(),
+                    tool_call_id: call_id.clone(),
                     prompt: prompt.clone(),
                     reply: reply.clone(),
                     swarm: Some(SwarmInfo {
@@ -496,10 +496,10 @@ fn expand(input: &SwarmInput, defs: &AgentDefs, max_items: usize) -> Result<Call
 
 /// One slot in the swarm: a child session, the item it runs, and the
 /// agent definition it uses.
-struct Member {
-    id: SessionId,
-    item: String,
-    agent: String,
+pub(super) struct Member {
+    pub(super) id: SessionId,
+    pub(super) item: String,
+    pub(super) agent: String,
 }
 
 /// One child's slot in the aggregate result: the lines around its
@@ -528,7 +528,12 @@ impl Block {
 /// never reported render as cancelled, session id included, and a
 /// hint names the resume path. The call is an error only when every
 /// child failed.
-fn render(cap: usize, description: &str, members: &[Member], results: &[ToolOutput]) -> ToolOutput {
+pub(super) fn render(
+    cap: usize,
+    description: &str,
+    members: &[Member],
+    results: &[ToolOutput],
+) -> ToolOutput {
     // Every result is an `<agent>` element naming its child, engine
     // refusals included.
     let mut slots: Vec<Option<&ToolOutput>> = vec![None; members.len()];

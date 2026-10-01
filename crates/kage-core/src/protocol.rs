@@ -555,15 +555,6 @@ pub enum CommandKind {
         /// Whether the session delegates repeated work through `swarm`.
         on: bool,
     },
-    /// Continue children of an earlier `swarm` call of the session,
-    /// each with its own follow-up prompt. Engine answer to the
-    /// `_kage/swarm/resume` request; the model cannot send it. Each
-    /// accepted child re-announces and runs like a member of a fresh
-    /// batch.
-    SwarmResume {
-        /// Child session id to a follow-up prompt.
-        members: BTreeMap<SessionId, String>,
-    },
     /// Set the goal the session works toward. Once set, every
     /// completed turn is checked against it and the user is told when
     /// it is met. `None` clears the goal and stops the checks.

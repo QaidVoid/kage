@@ -510,25 +510,28 @@ impl Agent for CliAcpAgent {
         Ok(serde_json::json!({}))
     }
 
-    /// Continues swarm children of the session. The engine verifies the
-    /// members once the command lands; one that is not a swarm child of
-    /// the session refuses the whole request with a notice.
+    /// Continues swarm children of the session. Answers once the engine
+    /// checked and attached every member: one that is not a swarm child
+    /// of the session, or is still working, refuses the whole request.
+    /// The members' results reach the session once all have reported.
     fn swarm_resume(&self, req: SwarmResumeRequest) -> Result<SwarmResumeResponse, RpcError> {
         let id = self.engine_id(&req.session_id)?;
         let mut members = BTreeMap::new();
-        let mut resumed = Vec::new();
         for (key, prompt) in req.members {
             let child = key
                 .parse::<ulid::Ulid>()
                 .map(SessionId)
                 .map_err(|_| RpcError::new(-32602, format!("{key} is not a session id")))?;
             members.insert(child, prompt);
-            resumed.push(key);
         }
-        self.host
+        let resumed = self
+            .host
             .engine
-            .send(Command::to(id, CommandKind::SwarmResume { members }));
-        Ok(SwarmResumeResponse { resumed })
+            .resume_swarm(id, members)
+            .map_err(|text| RpcError::new(-32602, text))?;
+        Ok(SwarmResumeResponse {
+            resumed: resumed.iter().map(ToString::to_string).collect(),
+        })
     }
 
     fn fs(&self, req: FsRequest) -> Result<FsResult, RpcError> {

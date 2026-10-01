@@ -163,6 +163,8 @@ pub struct Store {
     /// The options a welcome card chose, set on the session the welcome
     /// prompt opens before the prompt goes out.
     held_options: Vec<(String, String)>,
+    /// Sessions whose transcript moved while another one showed.
+    unread: std::collections::HashSet<String>,
     /// Whether swarm cards draw the constellation rather than the bar,
     /// the Lab setting of the same name.
     constellation: bool,
@@ -206,6 +208,7 @@ impl Store {
             held_options: Vec::new(),
             permissions: HashMap::new(),
             constellation: true,
+            unread: std::collections::HashSet::new(),
             fs_listing: None,
             fs_reading: None,
             fs_preview: None,
@@ -328,7 +331,14 @@ impl Store {
                 .unwrap_or_else(|| self.cwd.clone());
             self.client.load_session(&id, &cwd, &[]);
         }
+        self.unread.remove(&id);
         self.active = Some(id);
+    }
+
+    /// Whether session `id` moved since the user last looked at it.
+    #[must_use]
+    pub fn is_unread(&self, id: &str) -> bool {
+        self.unread.contains(id)
     }
 
     /// Leaves the active session: the welcome pane shows, and the
@@ -385,6 +395,17 @@ impl Store {
         let mut touched: Vec<&str> = changes.iter().filter_map(Change::session_id).collect();
         touched.sort_unstable();
         touched.dedup();
+        for change in &changes {
+            if let Change::Transcript { id } = change
+                && self.active.as_deref() != Some(id.as_str())
+                && self
+                    .state()
+                    .session(id)
+                    .is_some_and(|session| session.parent.is_none() && session.opened)
+            {
+                self.unread.insert(id.clone());
+            }
+        }
         for id in touched {
             if let Some(session) = self.client.state().session(id) {
                 self.timings.observe(session);

@@ -12,6 +12,7 @@ pub(crate) mod constellation;
 pub mod deferred;
 pub mod dialog;
 pub mod dock;
+pub(crate) mod eclipse;
 pub(crate) mod kit;
 pub mod sidebar;
 pub mod transcript;

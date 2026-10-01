@@ -6,7 +6,6 @@ use gpui_kit::AnyElement;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -85,15 +84,16 @@ fn ago(iso: Option<&str>, now: i64) -> Option<SharedString> {
 /// What a session row leads or badges with.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum RowState {
-    /// A turn is in flight; the row leads with the spinner.
-    Running,
-    /// Permission asks wait; the row badges for review.
+    /// A permission ask waits; the row badges Approve.
+    Approve,
+    /// A plan waits for review; the row badges Review.
     Review,
-    /// The last turn stopped in a refusal; the row badges failed.
+    /// A turn is in flight; the row leads with the orbiting eclipse.
+    Running,
+    /// The last turn stopped in a refusal; the row badges Failed.
     Failed,
-    /// The session works in plan mode.
-    Plan,
-    /// Quiet: the row shows its relative time.
+    /// Quiet: the row shows its relative time, or the swarm glyph in
+    /// swarm mode.
     Idle,
 }
 
@@ -106,20 +106,32 @@ struct RowItem {
     state: RowState,
     active: bool,
     project: SharedString,
+    /// Whether the session works in swarm mode.
+    swarm: bool,
+    /// Whether it moved since the user last looked.
+    unread: bool,
 }
 
 fn row_state(session: &kage_client::Session) -> RowState {
-    if session.running || session.in_turn {
-        RowState::Running
-    } else if !session.permissions.is_empty() {
+    if crate::store::plan_review(session).is_some() {
         RowState::Review
+    } else if !session.permissions.is_empty() {
+        RowState::Approve
+    } else if session.running || session.in_turn {
+        RowState::Running
     } else if session.last_stop == Some(kage_client::wire::StopReason::Refusal) {
         RowState::Failed
-    } else if session.mode.as_deref() == Some("plan") {
-        RowState::Plan
     } else {
         RowState::Idle
     }
+}
+
+/// Whether the session works in swarm mode.
+fn swarm_on(session: &kage_client::Session) -> bool {
+    session
+        .config_options
+        .iter()
+        .any(|option| option.id == "swarm" && option.current_value == "on")
 }
 
 /// The eclipse brand mark: a gradient disc with a backdrop-colored
@@ -220,26 +232,47 @@ impl SidebarView {
         }
     }
 
-    /// One session row: title, relative time, and the lead or badge
-    /// the row state carries. Grouped rows carry the design's 32px
-    /// left inset so they clear the project row's icon.
-    #[allow(clippy::too_many_arguments)]
+    /// One session row: title, then the attention badge, the working
+    /// eclipse or the swarm glyph, else the relative time. An unread row
+    /// reads bold. Grouped rows carry the design's 32px left inset so
+    /// they clear the project row's icon.
     fn session_row(
         &self,
-        id: &str,
-        title: Option<&str>,
-        updated_at: Option<&str>,
-        state: RowState,
-        active: bool,
+        item: &RowItem,
         grouped: bool,
         now: i64,
         p: &crate::theme::Palette,
     ) -> AnyElement {
         let store = self.store.clone();
-        let id_owned = id.to_owned();
+        let id_owned = item.id.clone();
+        let active = item.active;
         let fg = if active { p.ink_strong } else { p.muted };
+        let unread = item.unread && !active;
+        let trailing = match item.state {
+            RowState::Approve => Some(pill("Approve", p.ok, p.ok_soft).into_any_element()),
+            RowState::Review => Some(pill("Review", p.ok, p.ok_soft).into_any_element()),
+            RowState::Failed => Some(pill("Failed", p.danger, p.danger_soft).into_any_element()),
+            RowState::Running => Some(
+                crate::views::eclipse::eclipse(14., Some(crate::clock::epoch()), p)
+                    .into_any_element(),
+            ),
+            RowState::Idle if item.swarm => Some(
+                Icon::new(IconName::Waypoints)
+                    .with_size(px(12.))
+                    .text_color(p.done)
+                    .into_any_element(),
+            ),
+            RowState::Idle => ago(item.updated_at.as_deref(), now).map(|when| {
+                div()
+                    .flex_none()
+                    .text_size(px(FS_XS))
+                    .text_color(p.faint)
+                    .child(when)
+                    .into_any_element()
+            }),
+        };
         div()
-            .id(SharedString::from(format!("session-{id}")))
+            .id(SharedString::from(format!("session-{}", item.id)))
             .w_full()
             .min_h(px(32.))
             .px(px(8.))
@@ -270,30 +303,16 @@ impl SidebarView {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .child(SharedString::from(title.unwrap_or("untitled session"))),
+                    .when(unread, |title| {
+                        title.text_color(p.ink_strong).font_weight(WEIGHT_SEMIBOLD)
+                    })
+                    .child(SharedString::from(
+                        item.title
+                            .clone()
+                            .unwrap_or_else(|| "untitled session".to_owned()),
+                    )),
             )
-            .children(match state {
-                RowState::Running => Some(
-                    Spinner::new()
-                        .icon(Icon::new(IconName::LoaderCircle))
-                        .color(p.accent)
-                        .with_size(px(14.))
-                        .into_any_element(),
-                ),
-                RowState::Review => Some(pill("Review", p.ok, p.ok_soft).into_any_element()),
-                RowState::Failed => {
-                    Some(pill("Failed", p.danger, p.danger_soft).into_any_element())
-                }
-                RowState::Plan => Some(pill("Plan", p.accent, p.accent_soft).into_any_element()),
-                RowState::Idle => ago(updated_at, now).map(|when| {
-                    div()
-                        .flex_none()
-                        .text_size(px(FS_XS))
-                        .text_color(p.faint)
-                        .child(when)
-                        .into_any_element()
-                }),
-            })
+            .children(trailing)
             .into_any_element()
     }
 
@@ -347,6 +366,8 @@ impl Render for SidebarView {
                 state: row_state(session),
                 active,
                 project: crate::app::project_name(session.cwd.as_deref()),
+                swarm: swarm_on(session),
+                unread: store.is_unread(id),
             });
         }
         for info in &state.directory {
@@ -360,6 +381,8 @@ impl Render for SidebarView {
                 state: RowState::Idle,
                 active: store.active_id() == Some(info.session_id.as_str()),
                 project: crate::app::project_name(Some(&info.cwd)),
+                swarm: false,
+                unread: false,
             });
         }
 
@@ -463,32 +486,14 @@ impl Render for SidebarView {
                         );
                     } else {
                         for item in members {
-                            list = list.child(self.session_row(
-                                &item.id,
-                                item.title.as_deref(),
-                                item.updated_at.as_deref(),
-                                item.state,
-                                item.active,
-                                true,
-                                now,
-                                p,
-                            ));
+                            list = list.child(self.session_row(item, true, now, p));
                         }
                     }
                 }
             }
         } else {
             for item in &items {
-                list = list.child(self.session_row(
-                    &item.id,
-                    item.title.as_deref(),
-                    item.updated_at.as_deref(),
-                    item.state,
-                    item.active,
-                    false,
-                    now,
-                    p,
-                ));
+                list = list.child(self.session_row(item, false, now, p));
             }
         }
 
@@ -735,9 +740,6 @@ mod tests {
         session.running = true;
         assert_eq!(row_state(&session), RowState::Running);
         session.running = false;
-        session.mode = Some("plan".to_owned());
-        assert_eq!(row_state(&session), RowState::Plan);
-        session.mode = None;
         session.last_stop = Some(StopReason::Refusal);
         assert_eq!(row_state(&session), RowState::Failed);
         session.last_stop = Some(StopReason::Cancelled);

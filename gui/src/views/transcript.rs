@@ -1630,7 +1630,8 @@ impl TranscriptView {
                 });
             })
             .child(if live {
-                spinner(theme.primary, ix).into_any_element()
+                crate::views::eclipse::eclipse(ICON_SM, Some(crate::clock::epoch()), ink)
+                    .into_any_element()
             } else {
                 icon(IconName::Lightbulb, theme.muted_foreground).into_any_element()
             })

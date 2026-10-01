@@ -12,7 +12,6 @@ use std::time::Duration;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::theme::ActiveTheme;
 use gpui_kit::component::{Sizable as _, h_flex, h_resizable, resizable_panel, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -632,12 +631,11 @@ impl Shell {
                     .bg(p.fill)
                     .text_size(px(FS_XS))
                     .text_color(p.muted)
-                    .child(
-                        Spinner::new()
-                            .icon(IconName::LoaderCircle)
-                            .color(p.accent)
-                            .with_size(px(13.)),
-                    )
+                    .child(crate::views::eclipse::eclipse(
+                        14.,
+                        Some(crate::clock::epoch()),
+                        p,
+                    ))
                     .child(SharedString::from(format!("Working {label}")))
                     .into_any_element()
             }))

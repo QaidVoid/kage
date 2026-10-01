@@ -23,6 +23,14 @@ pub fn unix_seconds() -> i64 {
     (js_sys::Date::now() / 1_000.0) as i64
 }
 
+/// The app's own clock origin: the first time anything asked. Animations
+/// that must not restart on a repaint measure their phase from it.
+#[must_use]
+pub fn epoch() -> web_time::Instant {
+    static EPOCH: std::sync::OnceLock<web_time::Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(web_time::Instant::now)
+}
+
 /// The local time of day of a Unix timestamp, as `17:27`.
 #[must_use]
 pub fn time_of_day(unix: i64) -> String {

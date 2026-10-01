@@ -121,7 +121,10 @@ impl super::Dispatcher {
             None => (SessionId::new(), None),
         };
         let (spec, missing, lazy_history) = if fork {
-            match forked_spec(from, parent, id, def, &setup) {
+            let batch = swarm.as_ref().map(|info| &info.batch_id);
+            let forked = fork_snapshot(&mut self.fork_snapshot, from, batch)
+                .and_then(|snapshot| forked_spec(from, parent, id, def, &setup, snapshot));
+            match forked {
                 Ok((spec, missing, path)) => (spec, missing, Some(path)),
                 Err(text) => return fail(text),
             }
@@ -130,6 +133,12 @@ impl super::Dispatcher {
             (spec, missing, None)
         };
         let cancel = from.cancel.child();
+        if swarm
+            .as_ref()
+            .is_some_and(|info| info.index + 1 >= info.total)
+        {
+            self.fork_snapshot = None;
+        }
         let batch_id = swarm.as_ref().map(|info| info.batch_id.clone());
         let link = AgentLink {
             parent,
@@ -153,26 +162,13 @@ impl super::Dispatcher {
             marker["item"] = serde_json::Value::String(info.item.clone());
         }
 
-        let max = setup.max_running;
-        let member = swarm.as_ref().map(|info| SwarmMember {
-            batch: Some(info.batch_id.clone()),
-            item: info.item.clone(),
-            index: u32::try_from(info.index).unwrap_or(u32::MAX),
-            total: u32::try_from(info.total).unwrap_or(u32::MAX),
-        });
+        let member = swarm.as_ref().map(swarm_member);
         self.publish_agent_opened(id, parent, tool_call_id, agent, description.clone(), member);
         self.open(spec, cancel, Some(link));
         self.record_agent_entries(id, marker, description);
-        for name in missing {
-            notice(
-                &self.bus,
-                id,
-                NoticeLevel::Warning,
-                format!("agent tools: no tool named `{name}`"),
-            );
-        }
+        self.warn_all(id, missing.iter().map(missing_tool).collect());
         let content = vec![Content::Text { text: prompt }];
-        self.launch_agent(id, max, content);
+        self.launch_agent(id, setup.max_running, content);
     }
 
     /// Publish the `AgentSpawned` event that opens a child's card.
@@ -295,12 +291,7 @@ impl super::Dispatcher {
         }
         link.reply = Some(reply);
         if reopened {
-            let member = swarm.as_ref().map(|info| SwarmMember {
-                batch: Some(info.batch_id.clone()),
-                item: info.item.clone(),
-                index: u32::try_from(info.index).unwrap_or(u32::MAX),
-                total: u32::try_from(info.total).unwrap_or(u32::MAX),
-            });
+            let member = swarm.as_ref().map(swarm_member);
             self.publish_agent_opened(id, parent, batch_id, agent, description, member);
         }
         let content = vec![Content::Text { text: prompt }];
@@ -381,11 +372,7 @@ impl super::Dispatcher {
         let cancel = from.cancel.child();
         self.open(spec, cancel, Some(link));
         let mut warnings: Vec<String> = note.into_iter().collect();
-        warnings.extend(
-            missing
-                .into_iter()
-                .map(|name| format!("agent tools: no tool named `{name}`")),
-        );
+        warnings.extend(missing.iter().map(missing_tool));
         Ok(warnings)
     }
 
@@ -687,62 +674,35 @@ fn agent_spec(
     (spec, missing)
 }
 
+/// The card facts of a swarm child.
+fn swarm_member(info: &SwarmInfo) -> SwarmMember {
+    SwarmMember {
+        batch: Some(info.batch_id.clone()),
+        item: info.item.clone(),
+        index: u32::try_from(info.index).unwrap_or(u32::MAX),
+        total: u32::try_from(info.total).unwrap_or(u32::MAX),
+    }
+}
+
+/// The warning for a listed tool that matches no tool of the parent.
+fn missing_tool(name: &String) -> String {
+    format!("agent tools: no tool named `{name}`")
+}
+
 /// 0 for a main session, 1 for its agents, and so on.
 pub(super) fn depth_of(session: &Session) -> u8 {
     session.link.as_ref().map_or(0, |l| l.depth)
 }
 
-/// The entry a forked child copies up to, and whether any conversation
-/// was copied at all: the parent's latest entry the copy may end on.
-/// An assistant message carrying tool calls is skipped, so the copied
-/// history never ends on a tool call that was never answered. The
-/// header id when no message qualifies, which forks an empty
-/// conversation.
-fn fork_point(path: &Path) -> Option<(kage_session::EntryId, bool)> {
-    let reader = kage_session::SessionReader::iter(path).ok()?;
-    let mut header_id = None;
-    let mut at = None;
-    for entry in reader {
-        let entry = entry.ok()?;
-        match &entry {
-            kage_session::SessionEntry::Header(header) => header_id = Some(header.id),
-            kage_session::SessionEntry::Message(message) => {
-                let calls_tools = message.message.role == Role::Assistant
-                    && message
-                        .message
-                        .content
-                        .iter()
-                        .any(|c| matches!(c, Content::ToolCall { .. }));
-                if !calls_tools {
-                    at = Some(entry.id());
-                }
-            }
-            _ => {}
-        }
-    }
-    match at {
-        Some(at) => Some((at, true)),
-        None => header_id.map(|id| (id, false)),
-    }
-}
-
-/// The session spec for a child spawned from a snapshot of `from`'s
-/// conversation instead of zero context: `from`'s session file is
-/// forked into the child's own file up to [`fork_point`], and the
-/// child's context history and token budget load from that copy at
-/// the first run start ([`AgentLink::lazy_history`]), so a child
-/// queued behind the running limit holds kilobytes instead of the
-/// whole snapshot. Model, system prompt, thinking level and tools
-/// still follow the definition. Errors when `from` does not record,
-/// or the fork fails. Returns the child's file path for the lazy
-/// load.
-fn forked_spec(
+/// What a forked child copies from `from`'s session file: every entry
+/// up to the latest message that is not an assistant's tool call, so
+/// the copy never ends on a call that was never answered. Read once
+/// per swarm call: the children of `batch` reuse `cache`.
+fn fork_snapshot<'a>(
+    cache: &'a mut Option<(ToolCallId, kage_session::Snapshot)>,
     from: &Session,
-    parent: SessionId,
-    id: SessionId,
-    def: &AgentDef,
-    setup: &AgentSetup,
-) -> Result<(SessionSpec, Vec<String>, PathBuf), String> {
+    batch: Option<&ToolCallId>,
+) -> Result<&'a kage_session::Snapshot, String> {
     let Some(src) = from.path.as_deref() else {
         return Err(
             "cannot fork: this session is not recorded, so there is no conversation \
@@ -750,11 +710,50 @@ fn forked_spec(
                 .to_owned(),
         );
     };
-    let dir = src
-        .parent()
+    if cache
+        .as_ref()
+        .is_some_and(|(cached, _)| Some(cached) == batch)
+    {
+        return Ok(&cache.as_ref().expect("checked above").1);
+    }
+    let answered = |entry: &kage_session::SessionEntry| match entry {
+        kage_session::SessionEntry::Message(message) => {
+            message.message.role != Role::Assistant
+                || !message
+                    .message
+                    .content
+                    .iter()
+                    .any(|c| matches!(c, Content::ToolCall { .. }))
+        }
+        _ => false,
+    };
+    let snapshot = kage_session::snapshot(src, answered)
+        .map_err(|err| format!("cannot fork: the session file could not be read: {err}"))?;
+    let batch = batch.cloned().unwrap_or_else(|| ToolCallId::new(""));
+    Ok(&cache.insert((batch, snapshot)).1)
+}
+
+/// The session spec for a child spawned from `snapshot`, a copy of
+/// `from`'s conversation, instead of zero context. The snapshot is
+/// written into the child's own file, and the child's context history
+/// and token budget load from that copy at the first run start
+/// ([`AgentLink::lazy_history`]), so a child queued behind the running
+/// limit holds kilobytes instead of the whole snapshot. Model, system
+/// prompt, thinking level and tools still follow the definition.
+/// Returns the child's file path for the lazy load.
+fn forked_spec(
+    from: &Session,
+    parent: SessionId,
+    id: SessionId,
+    def: &AgentDef,
+    setup: &AgentSetup,
+    snapshot: &kage_session::Snapshot,
+) -> Result<(SessionSpec, Vec<String>, PathBuf), String> {
+    let dir = from
+        .path
+        .as_deref()
+        .and_then(Path::parent)
         .ok_or_else(|| "cannot fork: the session file has no directory".to_owned())?;
-    let (at, copied) = fork_point(src)
-        .ok_or_else(|| "cannot fork: the session file could not be read".to_owned())?;
     let model = def
         .model
         .clone()
@@ -776,13 +775,12 @@ fn forked_spec(
         model: model.clone(),
         system_prompt: system_prompt.clone(),
         parent_session: Some(parent),
-        parent_entry: Some(at),
+        parent_entry: Some(snapshot.at),
     };
-    kage_session::fork_as(src, &child_path, header, at)
+    let mut writer = snapshot
+        .write(&child_path, header)
         .map_err(|err| format!("cannot fork into session {id}: {err}"))?;
-    let mut writer = kage_session::SessionWriter::open(&child_path)
-        .map_err(|err| format!("cannot append to session {id}: {err}"))?;
-    if copied {
+    if !snapshot.is_empty() {
         let notice = kage_session::SessionEntry::Message(kage_session::MessageEntry {
             id: kage_session::EntryId::new(),
             ts: chrono::Utc::now(),

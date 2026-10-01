@@ -149,6 +149,22 @@ impl SessionWriter {
         Ok(())
     }
 
+    /// Append entry lines already encoded by another writer, each
+    /// ending in `\n`, with one flush and one fsync for all of them.
+    /// Copies a session's entries without decoding and re-encoding
+    /// them one by one.
+    pub fn append_lines(&mut self, lines: &[u8]) -> Result<(), SessionError> {
+        self.inner
+            .write_all(lines)
+            .map_err(|err| self.io_err(err))?;
+        self.inner.flush().map_err(|err| self.io_err(err))?;
+        self.inner
+            .get_ref()
+            .sync_all()
+            .map_err(|err| self.io_err(err))?;
+        Ok(())
+    }
+
     /// Path of the file this writer is appending to.
     #[must_use]
     pub fn path(&self) -> &Path {

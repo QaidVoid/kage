@@ -69,7 +69,7 @@ pub fn fork(
 ///
 /// # Errors
 ///
-/// Errors if `src` cannot be opened, if its first entry is not a header,
+/// Errors if `src` cannot be read, if its first entry is not a header,
 /// if `dst` already exists, or if no entry in `src` has id `at`.
 pub fn fork_as(
     src: &Path,
@@ -77,43 +77,115 @@ pub fn fork_as(
     new_header: Header,
     at: EntryId,
 ) -> Result<(), SessionError> {
-    let mut reader = SessionReader::iter(src)?;
-    let first = reader.next().ok_or_else(|| SessionError::Empty {
-        path: src.to_path_buf(),
-    })??;
-    let SessionEntry::Header(parent_header) = first else {
-        return Err(SessionError::MissingHeader {
-            path: src.to_path_buf(),
-        });
-    };
-
-    if at == parent_header.id {
-        SessionWriter::create(PathBuf::from(dst), new_header)?;
-        return Ok(());
-    }
-
-    let mut writer = SessionWriter::create(PathBuf::from(dst), new_header)?;
-    let mut copied_target = false;
-    for item in reader {
-        let entry = item?;
-        let entry_id = entry.id();
-        writer.append(&entry)?;
-        if entry_id == at {
-            copied_target = true;
-            break;
-        }
-    }
-    if !copied_target {
-        // The user named an entry that doesn't exist in the source. The
-        // partial dst file is still on disk; remove it so the caller is not
-        // left with a confusing half-fork.
-        let _ = std::fs::remove_file(dst);
+    let snapshot = snapshot(src, |entry| entry.id() == at)?;
+    if snapshot.at != at {
         return Err(SessionError::EntryNotFound {
             path: src.to_path_buf(),
             at,
         });
     }
+    snapshot.write(dst, new_header)?;
     Ok(())
+}
+
+/// A session's entries after its header, up to and including the last
+/// one a filter kept, as the raw lines of the file.
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    /// The last entry kept, or the header when no entry was.
+    pub at: EntryId,
+    /// The entry lines up to `at`, each ending in `\n`.
+    pub lines: Vec<u8>,
+}
+
+impl Snapshot {
+    /// Whether any entry past the header was kept.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    /// Create the session file `dst` under `header` holding these
+    /// entries, with one fsync for all of them, and keep it open for
+    /// appending.
+    ///
+    /// # Errors
+    ///
+    /// Errors if `dst` already exists or cannot be written.
+    pub fn write(&self, dst: &Path, header: Header) -> Result<SessionWriter, SessionError> {
+        let mut writer = SessionWriter::create(PathBuf::from(dst), header)?;
+        if !self.is_empty() {
+            writer.append_lines(&self.lines)?;
+        }
+        Ok(writer)
+    }
+}
+
+/// Read `src` once and keep its entries up to the last one `keep`
+/// accepts. A trailing line that does not parse is a torn write and
+/// ends the file, as it does for [`SessionReader`].
+///
+/// # Errors
+///
+/// Errors if `src` cannot be read, if its first entry is not a header,
+/// or if a line before the last does not parse.
+pub fn snapshot(
+    src: &Path,
+    keep: impl Fn(&SessionEntry) -> bool,
+) -> Result<Snapshot, SessionError> {
+    let data = std::fs::read(src).map_err(|err| SessionError::Io {
+        path: src.to_path_buf(),
+        source: err,
+    })?;
+    let mut lines = data.split_inclusive(|byte| *byte == b'\n').peekable();
+    let mut offset = 0;
+    let header_id = loop {
+        let Some(line) = lines.next() else {
+            return Err(SessionError::Empty {
+                path: src.to_path_buf(),
+            });
+        };
+        offset += line.len();
+        if line.trim_ascii().is_empty() {
+            continue;
+        }
+        match serde_json::from_slice::<SessionEntry>(line) {
+            Ok(SessionEntry::Header(header)) => break header.id,
+            _ => {
+                return Err(SessionError::MissingHeader {
+                    path: src.to_path_buf(),
+                });
+            }
+        }
+    };
+    let start = offset;
+    let mut kept = (header_id, start);
+    let mut line_no = 1;
+    while let Some(line) = lines.next() {
+        line_no += 1;
+        offset += line.len();
+        if line.trim_ascii().is_empty() {
+            continue;
+        }
+        match serde_json::from_slice::<SessionEntry>(line) {
+            Ok(entry) if keep(&entry) => kept = (entry.id(), offset),
+            Ok(_) => {}
+            Err(_) if lines.peek().is_none() => break,
+            Err(err) => {
+                return Err(SessionError::Decode {
+                    path: src.to_path_buf(),
+                    line: line_no,
+                    source: err,
+                });
+            }
+        }
+    }
+    let (at, end) = kept;
+    let mut lines = data[start..end].to_vec();
+    if lines.last().is_some_and(|byte| *byte != b'\n') {
+        lines.push(b'\n');
+    }
+    Ok(Snapshot { at, lines })
 }
 
 /// Resolve `prefix` against entry ids in `src`. Errors if zero or multiple
@@ -200,6 +272,38 @@ mod tests {
         for e in entries {
             w.append(e).unwrap();
         }
+    }
+
+    #[test]
+    fn a_snapshot_keeps_through_the_last_kept_entry_and_skips_a_torn_tail() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.jsonl");
+        let header = fresh_header("x:y");
+        let header_id = header.id;
+        let entries = [
+            message_entry(Role::User, "one"),
+            message_entry(Role::Assistant, "two"),
+            message_entry(Role::User, "three"),
+        ];
+        write(&src, header, &entries);
+        let mut file = std::fs::OpenOptions::new().append(true).open(&src).unwrap();
+        std::io::Write::write_all(&mut file, b"{\"type\":\"mess").unwrap();
+
+        let is_assistant = |entry: &SessionEntry| matches!(entry, SessionEntry::Message(m) if m.message.role == Role::Assistant);
+        let snap = snapshot(&src, is_assistant).unwrap();
+        assert_eq!(snap.at, entries[1].id());
+        let dst = dir.path().join("dst.jsonl");
+        drop(snap.write(&dst, fresh_header("x:y")).unwrap());
+        let copied: Vec<EntryId> = SessionReader::iter(&dst)
+            .unwrap()
+            .skip(1)
+            .map(|e| e.unwrap().id())
+            .collect();
+        assert_eq!(copied, [entries[0].id(), entries[1].id()]);
+
+        let none = snapshot(&src, |_| false).unwrap();
+        assert!(none.is_empty());
+        assert_eq!(none.at, header_id);
     }
 
     #[test]
@@ -300,15 +404,12 @@ mod tests {
     fn fork_refuses_to_overwrite() {
         let dir = tempdir().unwrap();
         let src = dir.path().join("src.jsonl");
-        write(
-            &src,
-            fresh_header("x:y"),
-            &[message_entry(Role::User, "hi")],
-        );
+        let hi = message_entry(Role::User, "hi");
+        write(&src, fresh_header("x:y"), std::slice::from_ref(&hi));
 
         let dst = dir.path().join("dst.jsonl");
         std::fs::write(&dst, b"existing").unwrap();
-        let err = fork(&src, &dst, SessionId::new(), EntryId::new()).unwrap_err();
+        let err = fork(&src, &dst, SessionId::new(), hi.id()).unwrap_err();
         assert!(matches!(err, SessionError::Io { .. }));
     }
 

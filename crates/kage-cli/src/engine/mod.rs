@@ -256,6 +256,7 @@ impl Engine {
             engine_shutdown: Arc::new(AtomicBool::new(false)),
             watchdogs: HashMap::new(),
             swarm_requeues: HashMap::new(),
+            fork_snapshot: None,
         };
         let thread = thread::spawn(move || dispatcher.run(&rx));
         Self {
@@ -425,6 +426,10 @@ struct Dispatcher {
     /// Swarm children requeued after a rate limit: attempts so far
     /// and when their shared timeout budget started.
     swarm_requeues: HashMap<SessionId, RequeueState>,
+    /// The parent conversation a forking swarm call copies into each of
+    /// its children, read once per call and dropped after its last
+    /// child spawns.
+    fork_snapshot: Option<(ToolCallId, kage_session::Snapshot)>,
 }
 
 impl Dispatcher {

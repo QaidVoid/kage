@@ -14,6 +14,7 @@ pub mod dialog;
 pub mod dock;
 pub(crate) mod eclipse;
 pub(crate) mod kit;
+pub mod settings;
 pub mod sidebar;
 pub mod transcript;
 pub mod workbench;

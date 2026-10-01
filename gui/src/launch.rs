@@ -142,12 +142,14 @@ pub fn run() {
     let replay = launch.wire == Wire::Replay;
     let stream = launch.stream;
     let smoke_millis = launch.smoke_millis;
+    let prefs = crate::prefs::load();
     gpui_kit::application()
         .with_assets(crate::assets::KageAssets::new(Assets))
         .run(move |cx: &mut App| {
             theme::install_fonts(cx);
             gpui_kit::init(cx);
             cx.bind_keys(crate::app::key_bindings());
+            cx.set_global(prefs.theme);
             let options = WindowOptions {
                 titlebar: Some(TitlebarOptions {
                     title: Some("kage client".into()),
@@ -160,16 +162,17 @@ pub fn run() {
                 transport: launch.transport(),
                 replay,
                 stream,
+                prefs,
             };
             let (_, shell) = gpui_kit::open_window(options, cx, move |window, cx| {
                 // The window knows the platform appearance, so the theme is
                 // chosen here rather than at `run`, and the observer keeps
                 // it in step when the desktop flips.
-                crate::theme::apply_system(cx, window.appearance());
+                crate::theme::apply_choice(cx, window.appearance());
                 let shell = cx.new(|cx| Shell::new(args, window, cx));
                 window
                     .observe_window_appearance(|window, cx| {
-                        crate::theme::apply_system(cx, window.appearance());
+                        crate::theme::apply_choice(cx, window.appearance());
                         window.refresh();
                     })
                     .detach();

@@ -18,6 +18,7 @@ use kage_client::{
 use gpui_kit::{App, Entity};
 
 use crate::gate::{self, Report};
+use crate::prefs::Prefs;
 use std::collections::HashMap;
 
 use crate::timing::{SessionTimes, Timings};
@@ -58,6 +59,27 @@ pub enum Command {
     /// Send the prompt the recording expects, once its session is
     /// open.
     ReplayPrompt,
+}
+
+/// A message for the user the shell toasts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Note {
+    /// Severity.
+    pub tone: NoticeTone,
+    /// The message.
+    pub text: String,
+    /// The archived session a click on the toast restores.
+    pub undo_archive: Option<String>,
+}
+
+impl Note {
+    fn new(tone: NoticeTone, text: String) -> Self {
+        Self {
+            tone,
+            text,
+            undo_archive: None,
+        }
+    }
 }
 
 /// What a fork the user asked for does once its copy is made.
@@ -184,9 +206,11 @@ pub struct Store {
     held_options: Vec<(String, String)>,
     /// Sessions whose transcript moved while another one showed.
     unread: std::collections::HashSet<String>,
-    /// Whether swarm cards draw the constellation rather than the bar,
-    /// the Lab setting of the same name.
-    constellation: bool,
+    /// The client's own preferences.
+    prefs: Prefs,
+    /// Bumped on every preferences change, so the shell stores each
+    /// change once.
+    prefs_rev: u64,
     /// Per session, the permission mode under plan mode. The wire shows
     /// only `plan` while plan mode is on; the engine keeps the
     /// permission mode underneath, and leaving plan mode restores it.
@@ -204,7 +228,7 @@ pub struct Store {
     /// Copies waiting to open, with their source, by copy.
     forked: HashMap<String, (String, ForkPlan)>,
     /// Messages for the user the shell toasts.
-    notes: Vec<(NoticeTone, String)>,
+    notes: Vec<Note>,
     /// Commands waiting for the shell.
     commands: Vec<Command>,
 }
@@ -232,7 +256,8 @@ impl Store {
             returned_prompt: None,
             held_options: Vec::new(),
             permissions: HashMap::new(),
-            constellation: true,
+            prefs: Prefs::default(),
+            prefs_rev: 0,
             unread: std::collections::HashSet::new(),
             fs_listing: None,
             fs_reading: None,
@@ -733,9 +758,10 @@ impl Store {
             .and_then(|session| session.title.clone())
             .unwrap_or_else(|| "untitled session".to_owned());
         match plan {
-            ForkPlan::Fork => self
-                .notes
-                .push((NoticeTone::Success, format!("Forked \"{source}\""))),
+            ForkPlan::Fork => self.notes.push(Note::new(
+                NoticeTone::Success,
+                format!("Forked \"{source}\""),
+            )),
             ForkPlan::Rewind { title, prompt } => {
                 let kept = format!("{} (before rewind)", title.as_deref().unwrap_or(&source));
                 if let Some(title) = &title {
@@ -743,7 +769,7 @@ impl Store {
                 }
                 self.client.rename_session(&from, &kept);
                 self.returned_prompt = Some(prompt);
-                self.notes.push((
+                self.notes.push(Note::new(
                     NoticeTone::Success,
                     format!("Rewound; the old state is \"{kept}\""),
                 ));
@@ -814,8 +840,62 @@ impl Store {
     }
 
     /// The messages for the user since the last call, oldest first.
-    pub fn take_notes(&mut self) -> Vec<(NoticeTone, String)> {
+    pub fn take_notes(&mut self) -> Vec<Note> {
         std::mem::take(&mut self.notes)
+    }
+
+    /// The title session `id` shows under, from its state or the
+    /// directory.
+    #[must_use]
+    pub fn session_title(&self, id: &str) -> Option<&str> {
+        self.state()
+            .session(id)
+            .and_then(|session| session.title.as_deref())
+            .or_else(|| {
+                self.state()
+                    .directory
+                    .iter()
+                    .find(|info| info.session_id == id)?
+                    .title
+                    .as_deref()
+            })
+    }
+
+    /// Pins session `id` to the top of the sidebar, or unpins it.
+    pub fn toggle_pin(&mut self, id: &str) {
+        self.update_prefs(|prefs| {
+            if !prefs.pinned.remove(id) {
+                prefs.pinned.insert(id.to_owned());
+            }
+        });
+    }
+
+    /// Takes session `id` out of the sidebar until it is restored; the
+    /// welcome shows when it was the active one. The toast that says so
+    /// restores it on click.
+    pub fn archive(&mut self, id: &str) {
+        let title = self
+            .session_title(id)
+            .unwrap_or("untitled session")
+            .to_owned();
+        self.update_prefs(|prefs| {
+            prefs.archived.insert(id.to_owned());
+        });
+        if self.active.as_deref() == Some(id) {
+            self.show_welcome();
+        }
+        self.notes.push(Note {
+            tone: NoticeTone::Info,
+            text: format!("Archived \"{title}\"; click to undo"),
+            undo_archive: Some(id.to_owned()),
+        });
+    }
+
+    /// Brings archived session `id` back to the sidebar.
+    pub fn restore(&mut self, id: &str) {
+        self.update_prefs(|prefs| {
+            prefs.archived.remove(id);
+        });
     }
 
     /// Answers the open permission ask of `session`, by request id.
@@ -889,7 +969,35 @@ impl Store {
     /// Whether swarm cards draw the constellation.
     #[must_use]
     pub fn constellation(&self) -> bool {
-        self.constellation
+        self.prefs.constellation
+    }
+
+    /// Starts from stored preferences.
+    #[must_use]
+    pub fn with_prefs(mut self, prefs: Prefs) -> Self {
+        self.prefs = prefs;
+        self
+    }
+
+    /// The client's own preferences.
+    #[must_use]
+    pub fn prefs(&self) -> &Prefs {
+        &self.prefs
+    }
+
+    /// Changes the preferences; the shell stores the result.
+    pub fn update_prefs(&mut self, change: impl FnOnce(&mut Prefs)) {
+        let before = self.prefs.clone();
+        change(&mut self.prefs);
+        if self.prefs != before {
+            self.prefs_rev += 1;
+        }
+    }
+
+    /// The preferences revision, bumped on every change.
+    #[must_use]
+    pub fn prefs_rev(&self) -> u64 {
+        self.prefs_rev
     }
 
     /// Whether the active session is in plan mode.
@@ -1726,9 +1834,11 @@ mod tests {
         let sent = land_fork(&mut store, frames, "s2");
         assert!(sent.iter().any(|(_, method, _)| method == "session/list"));
         assert_eq!(store.active_id(), Some("s2"));
+        let notes = store.take_notes();
+        assert_eq!(notes.len(), 1);
         assert_eq!(
-            store.take_notes(),
-            [(NoticeTone::Success, "Forked \"Parser\"".to_owned())]
+            (notes[0].tone, notes[0].text.as_str()),
+            (NoticeTone::Success, "Forked \"Parser\"")
         );
     }
 

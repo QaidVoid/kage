@@ -15,9 +15,9 @@ use gpui_kit::{
     linear_color_stop, linear_gradient, px, relative,
 };
 
-use crate::app::{OpenPalette, ToggleSidebar};
+use crate::app::{OpenPalette, OpenSettings, ToggleSidebar};
 use crate::clock::unix_seconds;
-use crate::store::Store;
+use crate::store::{Store, StoreHandle as _};
 use crate::theme::{
     FONT_DISPLAY, FONT_MONO, FS_2XS, FS_BASE, FS_SM, FS_XS, PANEL_HEAD_H, R_MD, WEIGHT_BOLD,
     WEIGHT_REGULAR, WEIGHT_SEMIBOLD,
@@ -112,6 +112,8 @@ struct RowItem {
     unread: bool,
     /// The session it was forked from.
     parent: Option<String>,
+    /// Whether the user pinned it to the top.
+    pinned: bool,
 }
 
 /// Where a row sits in the fork forest.
@@ -281,9 +283,6 @@ fn conn_dot(color: Hsla, halo: Option<Hsla>) -> Div {
 /// The left panel.
 pub struct SidebarView {
     store: Entity<Store>,
-    /// Whether the list groups under project rows, as the web
-    /// client's group-by-project setting does.
-    group_by_project: bool,
     /// The projects whose groups are collapsed, keyed by name.
     collapsed: std::collections::BTreeSet<String>,
 }
@@ -294,7 +293,6 @@ impl SidebarView {
     pub fn new(store: Entity<Store>) -> Self {
         Self {
             store,
-            group_by_project: true,
             collapsed: std::collections::BTreeSet::new(),
         }
     }
@@ -438,6 +436,13 @@ impl SidebarView {
             .children(guides)
             .children(forks)
             .children(trailing)
+            .when(item.pinned, |row| {
+                row.child(
+                    Icon::new(IconName::Pin)
+                        .with_size(px(11.))
+                        .text_color(p.faint),
+                )
+            })
             .into_any_element()
     }
 
@@ -494,6 +499,7 @@ impl Render for SidebarView {
                 swarm: swarm_on(session),
                 unread: store.is_unread(id),
                 parent: store.fork_parent(id).map(str::to_owned),
+                pinned: store.prefs().pinned.contains(id),
             });
         }
         for info in &state.directory {
@@ -510,15 +516,22 @@ impl Render for SidebarView {
                 swarm: false,
                 unread: false,
                 parent: store.fork_parent(&info.session_id).map(str::to_owned),
+                pinned: store.prefs().pinned.contains(&info.session_id),
             });
         }
-        // Newest first; a live session with no time yet is the newest.
+        // Archived sessions leave the list until restored.
+        items.retain(|item| !store.prefs().archived.contains(&item.id));
+        // Pinned first, then newest first; a live session with no time
+        // yet is the newest.
         items.sort_by_key(|item| {
-            std::cmp::Reverse(
-                item.updated_at
-                    .as_deref()
-                    .and_then(epoch_seconds)
-                    .unwrap_or(i64::MAX),
+            (
+                !item.pinned,
+                std::cmp::Reverse(
+                    item.updated_at
+                        .as_deref()
+                        .and_then(epoch_seconds)
+                        .unwrap_or(i64::MAX),
+                ),
             )
         });
 
@@ -530,7 +543,7 @@ impl Render for SidebarView {
             .overflow_y_scroll()
             .px(px(8.))
             .pb(px(12.));
-        if self.group_by_project {
+        if store.prefs().group_by_project {
             let mut groups: Vec<(SharedString, Vec<&RowItem>)> = Vec::new();
             for item in &items {
                 if let Some(group) = groups.iter_mut().find(|(name, _)| name == &item.project) {
@@ -753,8 +766,8 @@ impl Render for SidebarView {
                     .text_color(p.faint)
                     .child(div().flex_1().child("SESSIONS"))
                     .child({
-                        let this = this.clone();
-                        let grouped = self.group_by_project;
+                        let store = self.store.clone();
+                        let grouped = self.store.read(cx).prefs().group_by_project;
                         div()
                             .id("side-group-toggle")
                             .size(px(20.))
@@ -780,9 +793,10 @@ impl Render for SidebarView {
                                 .with_size(px(13.)),
                             )
                             .on_click(move |_, _, cx| {
-                                this.update(cx, |this, cx| {
-                                    this.group_by_project = !this.group_by_project;
-                                    cx.notify();
+                                store.act(cx, |store| {
+                                    store.update_prefs(|prefs| {
+                                        prefs.group_by_project = !prefs.group_by_project;
+                                    });
                                 });
                             })
                     }),
@@ -812,6 +826,16 @@ impl Render for SidebarView {
                                     .truncate()
                                     .child(connect_label),
                             ),
+                    )
+                    .child(
+                        Button::new("open-settings")
+                            .icon(IconName::Settings)
+                            .xsmall()
+                            .ghost()
+                            .tooltip("Settings (Ctrl ,)")
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(OpenSettings), cx);
+                            }),
                     ),
             )
     }

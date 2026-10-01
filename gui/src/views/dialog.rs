@@ -171,8 +171,13 @@ impl DialogView {
         self.open.is_some()
     }
 
-    /// Shows `kind`, taking the focus.
+    /// Shows `kind`, taking the focus. Swarm mode turns on without the
+    /// confirmation when the user switched it off.
     pub fn open(&mut self, kind: DialogKind, window: &mut Window, cx: &mut Context<Self>) {
+        if kind == DialogKind::ConfirmSwarm && !self.store.read(cx).prefs().confirm_swarm {
+            self.enable_swarm(None, cx);
+            return;
+        }
         self.open = Some(kind);
         match kind {
             DialogKind::Goal => {

@@ -3586,6 +3586,7 @@ dependencies = [
  "gpui-kit",
  "js-sys",
  "kage-client",
+ "serde",
  "serde_json",
  "tungstenite",
  "wasm-bindgen",

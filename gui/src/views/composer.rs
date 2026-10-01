@@ -626,9 +626,18 @@ impl ComposerView {
             &input,
             window,
             |this, _, event: &InputEvent, window, cx| match event {
+                // With Enter sends off, a plain Enter adds the newline the
+                // textarea left out and Ctrl+Enter sends.
                 InputEvent::PressEnter { secondary, shift } => {
-                    if !*shift {
-                        this.submit(*secondary, window, cx);
+                    if this.store.read(cx).prefs().enter_sends {
+                        if !*shift {
+                            this.submit(*secondary, window, cx);
+                        }
+                    } else if *secondary {
+                        this.submit(false, window, cx);
+                    } else if !*shift {
+                        this.input
+                            .update(cx, |state, cx| state.insert("\n", window, cx));
                     }
                 }
                 InputEvent::Change => this.on_input_change(cx),
@@ -1175,6 +1184,15 @@ impl ComposerView {
         let steer = self.store.read(cx).state().steer_available();
         let left = if let Some(hint) = self.esc_hint(cx) {
             hint.into_any_element()
+        } else if !self.store.read(cx).prefs().enter_sends {
+            h_flex()
+                .flex_wrap()
+                .items_center()
+                .child(kbd("Ctrl Enter", pal))
+                .child(hint_word(if running { "queue" } else { "send" }))
+                .child(kbd("Enter", pal))
+                .child(hint_word("newline"))
+                .into_any_element()
         } else if running {
             let mut row = h_flex()
                 .flex_wrap()

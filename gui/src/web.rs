@@ -98,14 +98,16 @@ pub fn start() {
                 ..Default::default()
             };
             let (server, token) = connection();
+            let prefs = crate::prefs::load();
+            cx.set_global(prefs.theme);
             gpui_kit::open_window(options, cx, |window, cx| {
                 // `gpui_web` reads `prefers-color-scheme` for the window's
                 // appearance, so the System default follows the browser and
                 // the observer follows a live change.
-                theme::apply_system(cx, window.appearance());
+                theme::apply_choice(cx, window.appearance());
                 window
                     .observe_window_appearance(|window, cx| {
-                        theme::apply_system(cx, window.appearance());
+                        theme::apply_choice(cx, window.appearance());
                         window.refresh();
                     })
                     .detach();
@@ -113,6 +115,7 @@ pub fn start() {
                     transport: Box::new(WebTransport::new(server, token)),
                     replay: false,
                     stream: false,
+                    prefs,
                 };
                 cx.new(|cx| Shell::new(args, window, cx))
             })

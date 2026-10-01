@@ -26,6 +26,7 @@ use gpui_kit::{
 };
 
 use crate::clock::unix_seconds;
+use crate::prefs::Prefs;
 use crate::store::{Command, Store, StoreHandle as _};
 use crate::theme::{CONTENT_W, FS_SM, FS_XS, PANEL_HEAD_H, R_FULL, SIDE_W, SP_4, SP_6, SP_8};
 use crate::transport::{Event, Transport};
@@ -35,6 +36,7 @@ use crate::views::chrome::{
 };
 use crate::views::deferred::Deferred;
 use crate::views::dialog::{DialogKind, DialogView};
+use crate::views::settings::{Section, SettingsView};
 use crate::views::{
     ApprovalCard, ApprovalEvent, ComposerView, DockEvent, DockRow, SidebarView, TranscriptEvent,
     TranscriptView, WorkbenchEvent, WorkbenchView,
@@ -89,7 +91,8 @@ gpui_kit::actions!(
         ToggleWorkbench,
         SendPrompt,
         OpenFind,
-        OpenPalette
+        OpenPalette,
+        OpenSettings
     ]
 );
 
@@ -113,6 +116,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-f", OpenFind, None),
         KeyBinding::new("ctrl-k", OpenPalette, None),
         KeyBinding::new("cmd-k", OpenPalette, None),
+        KeyBinding::new("ctrl-,", OpenSettings, None),
+        KeyBinding::new("cmd-,", OpenSettings, None),
         // The find bar and the palette answer in their own key contexts,
         // so Enter, the arrows and Esc act only while their query holds
         // the focus.
@@ -124,6 +129,11 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("enter", PaletteRun, Some("Palette")),
         KeyBinding::new("escape", PaletteClose, Some("Palette")),
         KeyBinding::new("escape", crate::views::dialog::DialogClose, Some("Dialog")),
+        KeyBinding::new(
+            "escape",
+            crate::views::settings::SettingsClose,
+            Some("Settings"),
+        ),
         // Inside the input's own context, so it wins over the toolkit's
         // outdent binding while the composer is focused.
         KeyBinding::new(
@@ -150,6 +160,8 @@ pub struct ShellArgs {
     pub replay: bool,
     /// Whether the 30 updates per second stream runs for measurement.
     pub stream: bool,
+    /// The preferences stored at launch.
+    pub prefs: Prefs,
 }
 
 /// The topbar's inline title editor.
@@ -175,6 +187,8 @@ pub struct Shell {
     palette: Entity<PaletteView>,
     /// The modal dialog layer.
     dialog: Entity<DialogView>,
+    /// The settings dialog.
+    settings: Entity<SettingsView>,
     toasts: Entity<Toasts>,
     welcome: Entity<WelcomeView>,
     /// Counts the notice items each session held, so frames that add
@@ -198,6 +212,8 @@ pub struct Shell {
     last_active: Option<String>,
     /// The inline title editor while the user renames the session.
     rename: Option<Rename>,
+    /// The preferences revision last stored.
+    saved_prefs: u64,
     streamed: usize,
 }
 
@@ -211,9 +227,15 @@ impl Shell {
     fn build(mut args: ShellArgs, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cwd = working_dir();
         let link = args.transport.link();
-        let store = cx.new(|_| Store::new(cwd, args.replay).with_link(link));
+        let prefs = std::mem::take(&mut args.prefs);
+        let store = cx.new(|_| {
+            Store::new(cwd, args.replay)
+                .with_link(link)
+                .with_prefs(prefs)
+        });
         let sidebar = cx.new(|_| SidebarView::new(store.clone()));
         let dialog = cx.new(|cx| DialogView::new(store.clone(), window, cx));
+        let settings = cx.new(|cx| SettingsView::new(store.clone(), cx));
         let composer = cx.new(|cx| ComposerView::new(store.clone(), dialog.clone(), window, cx));
         let input = composer.read(cx).input().clone();
         // The other views that write this same textarea wait on the
@@ -313,6 +335,8 @@ impl Shell {
 
         cx.observe(&store, |shell, _, cx| {
             shell.flush_outgoing(cx);
+            shell.save_prefs(cx);
+            shell.raise_notes(cx);
             let active = shell
                 .store
                 .read(cx)
@@ -362,6 +386,7 @@ impl Shell {
             find,
             palette,
             dialog,
+            settings,
             toasts,
             welcome,
             notices: NoticeWatch::default(),
@@ -376,6 +401,7 @@ impl Shell {
             viewport_width: f32::MAX,
             last_active: None,
             rename: None,
+            saved_prefs: 0,
             streamed: 0,
         }
     }
@@ -455,12 +481,7 @@ impl Shell {
                 });
             }
         }
-        let notes = self.store.update(cx, |store, _| store.take_notes());
-        drafts.extend(notes.into_iter().map(|(tone, text)| ToastDraft {
-            tone,
-            text,
-            action: ToastAction::None,
-        }));
+
         if drafts.is_empty() {
             return;
         }
@@ -707,6 +728,46 @@ impl Shell {
             )
     }
 
+    /// Opens the settings dialog on `section`; find and the palette step
+    /// aside.
+    pub fn open_settings(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette.update(cx, |palette, cx| palette.close(cx));
+        self.settings
+            .update(cx, |settings, cx| settings.open(section, window, cx));
+    }
+
+    /// Toasts the messages the store left for the user.
+    fn raise_notes(&mut self, cx: &mut Context<Self>) {
+        let notes = self.store.update(cx, |store, _| store.take_notes());
+        if notes.is_empty() {
+            return;
+        }
+        self.toasts.update(cx, |toasts, cx| {
+            for note in notes {
+                toasts.push(
+                    ToastDraft {
+                        tone: note.tone,
+                        text: note.text,
+                        action: note
+                            .undo_archive
+                            .map_or(ToastAction::None, ToastAction::Restore),
+                    },
+                    cx,
+                );
+            }
+        });
+    }
+
+    /// Stores the preferences when they moved since the last save.
+    fn save_prefs(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        if store.prefs_rev() == self.saved_prefs {
+            return;
+        }
+        self.saved_prefs = store.prefs_rev();
+        crate::prefs::save(store.prefs());
+    }
+
     /// Opens the rewind dialog for the prompt at item `prompt`, or says
     /// why not while a turn runs.
     fn ask_rewind(&mut self, prompt: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -817,6 +878,11 @@ impl Shell {
     /// The session actions behind the topbar's ellipsis.
     fn session_menu(&self, running: bool, cx: &Context<Self>) -> impl IntoElement {
         let store = self.store.clone();
+        let pinned = self
+            .store
+            .read(cx)
+            .active_id()
+            .is_some_and(|id| self.store.read(cx).prefs().pinned.contains(id));
         let shell = cx.entity();
         Button::new("session-menu")
             .icon(IconName::Ellipsis)
@@ -832,6 +898,8 @@ impl Shell {
                 };
                 let copy_id = store.clone();
                 let close = store.clone();
+                let pin = store.clone();
+                let archive = store.clone();
                 let shell = shell.clone();
                 menu.min_w(px(220.))
                     .item(
@@ -839,6 +907,21 @@ impl Shell {
                             .icon(IconName::Pencil)
                             .on_click(move |_, window, cx| {
                                 shell.update(cx, |shell, cx| shell.start_rename(window, cx));
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(if pinned { "Unpin" } else { "Pin" })
+                            .icon(if pinned {
+                                IconName::PinOff
+                            } else {
+                                IconName::Pin
+                            })
+                            .on_click(move |_, _, cx| {
+                                pin.act(cx, |store| {
+                                    if let Some(id) = store.active_id().map(str::to_owned) {
+                                        store.toggle_pin(&id);
+                                    }
+                                });
                             }),
                     )
                     .item(
@@ -872,6 +955,17 @@ impl Shell {
                             .icon(IconName::X)
                             .on_click(move |_, _, cx| {
                                 close.act(cx, Store::close_active);
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Archive")
+                            .icon(IconName::Archive)
+                            .on_click(move |_, _, cx| {
+                                archive.act(cx, |store| {
+                                    if let Some(id) = store.active_id().map(str::to_owned) {
+                                        store.archive(&id);
+                                    }
+                                });
                             }),
                     )
             })
@@ -974,6 +1068,9 @@ impl Render for Shell {
                 shell.send_composer(window, cx);
             }))
             .on_action(cx.listener(|shell, _: &OpenFind, window, cx| shell.open_find(window, cx)))
+            .on_action(cx.listener(|shell, _: &OpenSettings, window, cx| {
+                shell.open_settings(Section::General, window, cx);
+            }))
             .on_action(cx.listener(|shell, _: &OpenPalette, window, cx| {
                 shell.open_palette(window, cx);
             }))
@@ -1036,6 +1133,7 @@ impl Render for Shell {
             })
             .child(self.palette.clone())
             .child(self.dialog.clone())
+            .child(self.settings.clone())
             .child(self.toasts.clone())
     }
 }
@@ -1073,6 +1171,7 @@ mod tests {
             transport: Box::new(Silent),
             replay: false,
             stream: false,
+            prefs: crate::prefs::Prefs::default(),
         }
     }
 

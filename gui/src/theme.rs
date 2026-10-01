@@ -14,6 +14,7 @@ use std::sync::LazyLock;
 use gpui_kit::base::motion::Easing;
 use gpui_kit::component::theme::{ActiveTheme as _, Theme, ThemeColor, ThemeMode};
 use gpui_kit::{App, BoxShadow, FontWeight, Hsla, WindowAppearance, px, rgba};
+use serde::{Deserialize, Serialize};
 
 /// The display family for brand moments and headings.
 pub const FONT_DISPLAY: &str = "Schibsted Grotesk";
@@ -381,9 +382,11 @@ fn color(hex: u32) -> Hsla {
     rgba(opaque).into()
 }
 
-/// Builds one box shadow layer from the design's shadow recipe.
+/// Builds one box shadow layer from the design's shadow recipe. Shadow
+/// colors always carry alpha, so `hex` is read as all four bytes: black
+/// at 55 percent is `0x0000008C`, which [`color`] would take for blue.
 fn layer(hex: u32, x: f32, y: f32, blur: f32, spread: f32) -> BoxShadow {
-    BoxShadow::new(px(x), px(y), color(hex))
+    BoxShadow::new(px(x), px(y), rgba(hex).into())
         .blur_radius(px(blur))
         .spread_radius(px(spread))
 }
@@ -728,6 +731,44 @@ pub fn apply_dawn(cx: &mut App) {
     apply(&Palette::dawn(), ThemeMode::Light, cx);
 }
 
+/// The theme the user chose: one of the two kage themes, or System,
+/// which follows the platform's appearance.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThemeChoice {
+    /// Dawn on a light desktop, shadow otherwise.
+    #[default]
+    System,
+    /// The dark kage theme.
+    Shadow,
+    /// The light kage theme.
+    Dawn,
+}
+
+impl gpui_kit::Global for ThemeChoice {}
+
+impl ThemeChoice {
+    /// The label the theme cards show.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Shadow => "kage shadow",
+            Self::Dawn => "kage dawn",
+        }
+    }
+}
+
+/// Installs the theme the stored choice names, reading the platform's
+/// `appearance` for System. Without a stored choice this is System.
+pub fn apply_choice(cx: &mut App, appearance: WindowAppearance) {
+    match cx.try_global::<ThemeChoice>().copied().unwrap_or_default() {
+        ThemeChoice::System => apply_system(cx, appearance),
+        ThemeChoice::Shadow => apply_shadow(cx),
+        ThemeChoice::Dawn => apply_dawn(cx),
+    }
+}
+
 /// Installs whichever palette the platform's appearance asks for: dawn on a
 /// light desktop, shadow otherwise. This is the System default: no stored
 /// choice, so the platform decides.
@@ -922,6 +963,14 @@ mod tests {
     /// A mode change writes it back over the theme, so `apply` has to name
     /// the bundled family after the change and never before it.
     const VIRTUAL_UI_FONT: &str = ".SystemUIFont";
+
+    #[test]
+    fn dark_shadows_are_black_not_blue() {
+        let shadow = super::Palette::shadow();
+        let color = shadow.shadow_2[0].color;
+        assert!(color.l < 0.01, "{color:?}");
+        assert!((color.a - 0x8C as f32 / 255.).abs() < 0.01, "{color:?}");
+    }
 
     #[gpui_kit::test]
     fn the_installed_theme_carries_the_bundled_families(cx: &mut App) {

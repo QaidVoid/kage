@@ -131,6 +131,8 @@ pub enum ToastAction {
     None,
     /// Follow the session the toast is about.
     ActivateSession(String),
+    /// Bring an archived session back.
+    Restore(String),
 }
 
 /// One toast before it renders.
@@ -1033,11 +1035,20 @@ impl Toasts {
             .iter()
             .find(|toast| toast.id == id)
             .map(|toast| toast.draft.action.clone());
-        if let Some(ToastAction::ActivateSession(session)) = action {
-            self.store.update(cx, |store, cx| {
-                store.set_active(session);
-                cx.notify();
-            });
+        match action {
+            Some(ToastAction::ActivateSession(session)) => {
+                self.store.update(cx, |store, cx| {
+                    store.set_active(session);
+                    cx.notify();
+                });
+            }
+            Some(ToastAction::Restore(session)) => {
+                self.store.update(cx, |store, cx| {
+                    store.restore(&session);
+                    cx.notify();
+                });
+            }
+            _ => {}
         }
         self.remove(id, cx);
     }

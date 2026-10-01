@@ -14,6 +14,7 @@ pub mod app;
 pub mod assets;
 pub mod clock;
 pub mod gate;
+pub mod prefs;
 #[doc(hidden)]
 pub mod store;
 pub mod theme;

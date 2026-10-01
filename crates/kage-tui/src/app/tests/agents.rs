@@ -1607,3 +1607,61 @@ fn the_wheel_moves_the_agents_overlay_and_not_the_transcript() {
         "the transcript stays put"
     );
 }
+
+#[test]
+fn the_footer_counts_the_agents_under_the_viewed_session() {
+    use kage_core::protocol::{HostEvent, Usage};
+    let (mut app, _rx, events) = app_with_events();
+    {
+        let handle = app.session_usage.as_ref().unwrap();
+        let mut main = lock(handle);
+        main.input_tokens = 100;
+        main.total_cost = 1.0;
+    }
+    let child = spawn_agent(&mut app, &events, "a1", "general");
+    let nested = kage_core::SessionId::new();
+    let spawned = HostEvent::AgentSpawned {
+        parent: child,
+        tool_call_id: kage_core::ToolCallId::new("n1"),
+        agent: "explore".into(),
+        description: "look".into(),
+        swarm: None,
+    };
+    send_to(&mut app, &events, nested, vec![spawned.into()]);
+    let usage = |input: u64, cost: f64| Usage {
+        total: kage_core::event::TokenUsage {
+            input,
+            ..kage_core::event::TokenUsage::default()
+        },
+        context_used: input,
+        cost,
+        ..Usage::default()
+    };
+    for (session, input, cost) in [(child, 20, 0.5), (nested, 3, 0.25)] {
+        send_to(
+            &mut app,
+            &events,
+            session,
+            vec![
+                HostEvent::UsageUpdated {
+                    usage: usage(input, cost),
+                }
+                .into(),
+            ],
+        );
+    }
+
+    let main = app.session_usage_snapshot().unwrap();
+    assert_eq!(main.input_tokens, 123);
+    assert!((main.total_cost - 1.75).abs() < 1e-9);
+    app.set_focus(Some(child));
+    let viewed = app.session_usage_snapshot().unwrap();
+    assert_eq!(viewed.input_tokens, 23);
+    assert_eq!(
+        viewed.current_context, 20,
+        "the context stays the agent's own"
+    );
+    let rows = app.agents_overlay_rows();
+    assert_eq!(rows[0].tokens, 100, "the main row shows the main session");
+    assert!((rows[0].cost - 1.0).abs() < 1e-9);
+}

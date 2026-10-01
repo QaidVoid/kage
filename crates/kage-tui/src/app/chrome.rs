@@ -466,7 +466,7 @@ impl App {
             return Vec::new();
         };
         let ms = |d: std::time::Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
-        let usage = self.session_usage_snapshot().unwrap_or_default();
+        let usage = self.main_usage().unwrap_or_default();
         let running = self.session_running(None);
         let title = self
             .slots

@@ -752,6 +752,8 @@ pub enum TranscriptEvent {
     OpenAgent(String),
     /// Show the agents list in the workbench.
     OpenAgents,
+    /// Ask to rewind the session to before the prompt at this item.
+    Rewind(usize),
 }
 
 /// The find state the transcript tints rows with: the matching row
@@ -1548,8 +1550,41 @@ impl TranscriptView {
                                     state.focus(window, cx);
                                 });
                             }),
-                    ),
+                    )
+                    .when(self.pinned.is_none(), |actions| {
+                        actions.children(self.lineage_actions(ix, Some(ix), cx))
+                    }),
             )
+    }
+
+    /// Fork from here and Rewind to here: the fork keeps everything
+    /// through item `ix`'s turn, and the rewind drops the prompt at
+    /// item `rewind` and what followed it.
+    fn lineage_actions(&self, ix: usize, rewind: Option<usize>, cx: &Context<Self>) -> Vec<Button> {
+        let store = self.store.clone();
+        let mut out = vec![
+            Button::new(ElementId::named_usize("fork-here", ix))
+                .icon(IconName::GitFork)
+                .xsmall()
+                .ghost()
+                .tooltip("Fork from here")
+                .on_click(move |_, _, cx| {
+                    store.act(cx, |store| store.fork(Some(ix)));
+                }),
+        ];
+        if let Some(prompt) = rewind {
+            out.push(
+                Button::new(ElementId::named_usize("rewind-here", ix))
+                    .icon(IconName::Undo2)
+                    .xsmall()
+                    .ghost()
+                    .tooltip("Rewind to here")
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(TranscriptEvent::Rewind(prompt));
+                    })),
+            );
+        }
+        out
     }
 
     /// Assistant reply text as markdown, with a caret while it streams.
@@ -2407,6 +2442,13 @@ impl TranscriptView {
                         }
                     }),
             );
+        }
+        if self.pinned.is_none() {
+            let next = session.items[ix + 1..]
+                .iter()
+                .position(|item| matches!(item, TranscriptItem::User { .. }))
+                .map(|offset| ix + 1 + offset);
+            actions = actions.children(self.lineage_actions(ix, next, cx));
         }
         div()
             .id(ElementId::named_usize("row-turn-end", ix))

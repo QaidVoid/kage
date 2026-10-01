@@ -12,7 +12,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Context, Div, Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render,
     SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div,
-    linear_color_stop, linear_gradient, px,
+    linear_color_stop, linear_gradient, px, relative,
 };
 
 use crate::app::{OpenPalette, ToggleSidebar};
@@ -110,6 +110,73 @@ struct RowItem {
     swarm: bool,
     /// Whether it moved since the user last looked.
     unread: bool,
+    /// The session it was forked from.
+    parent: Option<String>,
+}
+
+/// Where a row sits in the fork forest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Place {
+    /// The row's index in the list the forest was built from.
+    ix: usize,
+    /// How many forks deep it sits.
+    depth: usize,
+    /// Whether it is its parent's last fork.
+    last: bool,
+    /// Per depth, whether a guide rail runs past the row there because
+    /// a later sibling of an ancestor follows.
+    rails: Vec<bool>,
+    /// How many forks it has.
+    kids: usize,
+}
+
+/// `parents` as a forest: each row is followed by its forks, depth
+/// first. A row whose parent is not in the list is a root.
+fn forest(parents: &[Option<&str>], ids: &[&str]) -> Vec<Place> {
+    fn walk(
+        ix: usize,
+        depth: usize,
+        last: bool,
+        rails: Vec<bool>,
+        kids_of: &[Vec<usize>],
+        out: &mut Vec<Place>,
+    ) {
+        let kids = &kids_of[ix];
+        out.push(Place {
+            ix,
+            depth,
+            last,
+            rails: rails.clone(),
+            kids: kids.len(),
+        });
+        for (n, &kid) in kids.iter().enumerate() {
+            let mut rails = rails.clone();
+            rails.resize(depth + 2, false);
+            rails[depth + 1] = n + 1 < kids.len();
+            walk(kid, depth + 1, n + 1 == kids.len(), rails, kids_of, out);
+        }
+    }
+    let position = |id: &str| ids.iter().position(|known| *known == id);
+    let mut kids_of = vec![Vec::new(); ids.len()];
+    let mut roots = Vec::new();
+    for (ix, parent) in parents.iter().enumerate() {
+        match parent.and_then(position).filter(|&at| at != ix) {
+            Some(at) => kids_of[at].push(ix),
+            None => roots.push(ix),
+        }
+    }
+    let mut out = Vec::with_capacity(ids.len());
+    for root in roots {
+        walk(root, 0, true, Vec::new(), &kids_of, &mut out);
+    }
+    out
+}
+
+/// The fork forest of `rows`.
+fn placed(rows: &[&RowItem]) -> Vec<Place> {
+    let parents: Vec<Option<&str>> = rows.iter().map(|row| row.parent.as_deref()).collect();
+    let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+    forest(&parents, &ids)
 }
 
 fn row_state(session: &kage_client::Session) -> RowState {
@@ -239,10 +306,65 @@ impl SidebarView {
     fn session_row(
         &self,
         item: &RowItem,
+        place: &Place,
         grouped: bool,
         now: i64,
         p: &crate::theme::Palette,
     ) -> AnyElement {
+        let base = if grouped { 32. } else { 8. };
+        let guide_color = if item.active {
+            p.accent_bd
+        } else {
+            p.line_strong
+        };
+        let mut guides: Vec<Div> = Vec::new();
+        for depth in 1..=place.depth {
+            let left = px(base - 14. + (depth - 1) as f32 * 16.);
+            let column = div().absolute().top_0().bottom_0().left(left).w(px(12.));
+            if depth < place.depth {
+                if place.rails.get(depth).copied().unwrap_or(false) {
+                    guides.push(column.border_l_1().border_color(p.line_strong));
+                }
+                continue;
+            }
+            guides.push(
+                column
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .top(px(-2.))
+                            .h(relative(0.5))
+                            .w(px(9.))
+                            .border_l_1()
+                            .border_b_1()
+                            .border_color(guide_color)
+                            .rounded_bl(px(7.)),
+                    )
+                    .when(!place.last, |column| {
+                        column.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .top(relative(0.5))
+                                .bottom_0()
+                                .border_l_1()
+                                .border_color(p.line_strong),
+                        )
+                    }),
+            );
+        }
+        let forks = (place.kids > 0).then(|| {
+            h_flex()
+                .flex_none()
+                .items_center()
+                .gap(px(2.))
+                .font_family(FONT_MONO)
+                .text_size(px(10.5))
+                .text_color(p.faint)
+                .child(Icon::new(IconName::GitBranch).with_size(px(11.)))
+                .child(SharedString::from(place.kids.to_string()))
+        });
         let store = self.store.clone();
         let id_owned = item.id.clone();
         let active = item.active;
@@ -275,8 +397,9 @@ impl SidebarView {
             .id(SharedString::from(format!("session-{}", item.id)))
             .w_full()
             .min_h(px(32.))
+            .relative()
             .px(px(8.))
-            .when(grouped, |row| row.pl(px(32.)))
+            .pl(px(base + place.depth as f32 * 16.))
             .py(px(5.))
             .flex()
             .items_center()
@@ -312,6 +435,8 @@ impl SidebarView {
                             .unwrap_or_else(|| "untitled session".to_owned()),
                     )),
             )
+            .children(guides)
+            .children(forks)
             .children(trailing)
             .into_any_element()
     }
@@ -368,6 +493,7 @@ impl Render for SidebarView {
                 project: crate::app::project_name(session.cwd.as_deref()),
                 swarm: swarm_on(session),
                 unread: store.is_unread(id),
+                parent: store.fork_parent(id).map(str::to_owned),
             });
         }
         for info in &state.directory {
@@ -383,8 +509,18 @@ impl Render for SidebarView {
                 project: crate::app::project_name(Some(&info.cwd)),
                 swarm: false,
                 unread: false,
+                parent: store.fork_parent(&info.session_id).map(str::to_owned),
             });
         }
+        // Newest first; a live session with no time yet is the newest.
+        items.sort_by_key(|item| {
+            std::cmp::Reverse(
+                item.updated_at
+                    .as_deref()
+                    .and_then(epoch_seconds)
+                    .unwrap_or(i64::MAX),
+            )
+        });
 
         // The list body: groups under project rows, or one flat list.
         let mut list = v_flex()
@@ -485,15 +621,22 @@ impl Render for SidebarView {
                                 .child("No conversations yet"),
                         );
                     } else {
-                        for item in members {
-                            list = list.child(self.session_row(item, true, now, p));
+                        for place in placed(&members) {
+                            list = list.child(self.session_row(
+                                members[place.ix],
+                                &place,
+                                true,
+                                now,
+                                p,
+                            ));
                         }
                     }
                 }
             }
         } else {
-            for item in &items {
-                list = list.child(self.session_row(item, false, now, p));
+            let rows: Vec<&RowItem> = items.iter().collect();
+            for place in placed(&rows) {
+                list = list.child(self.session_row(rows[place.ix], &place, false, now, p));
             }
         }
 
@@ -676,7 +819,7 @@ impl Render for SidebarView {
 
 #[cfg(test)]
 mod tests {
-    use super::{RowState, ago, ago_label, days_from_civil, epoch_seconds, row_state};
+    use super::{RowState, ago, ago_label, days_from_civil, epoch_seconds, forest, row_state};
     use crate::clock::unix_seconds;
     use kage_client::Session;
 
@@ -751,5 +894,31 @@ mod tests {
     #[test]
     fn the_clock_reads_unix_seconds() {
         assert!(unix_seconds() > 1_700_000_000);
+    }
+
+    #[test]
+    fn forks_nest_under_their_source_with_rails_past_later_siblings() {
+        let ids = ["a", "b", "c", "d", "e"];
+        let parents = [None, Some("a"), Some("a"), Some("b"), Some("gone")];
+        let placed = forest(&parents, &ids);
+        let order: Vec<(&str, usize, bool, usize)> = placed
+            .iter()
+            .map(|place| (ids[place.ix], place.depth, place.last, place.kids))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("a", 0, true, 2),
+                ("b", 1, false, 1),
+                ("d", 2, true, 0),
+                ("c", 1, true, 0),
+                ("e", 0, true, 0),
+            ]
+        );
+        assert_eq!(
+            placed[2].rails.get(1),
+            Some(&true),
+            "b's later sibling keeps a rail running past d"
+        );
     }
 }

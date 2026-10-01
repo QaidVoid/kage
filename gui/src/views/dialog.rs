@@ -1,4 +1,5 @@
-//! The shell's modal dialogs: setting a goal and confirming swarm mode.
+//! The shell's modal dialogs: setting a goal, confirming swarm mode and
+//! rewinding a session.
 //!
 //! One view the shell mounts over everything; it draws nothing while no
 //! dialog is open. A dialog closes on Esc, on a click on the scrim, and
@@ -14,10 +15,14 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 
+use gpui_kit::prelude::FluentBuilder as _;
+use kage_client::{Session, TranscriptItem};
+
 use crate::store::{Store, StoreHandle as _};
-use crate::theme::{FS_SM, Palette, R_MD};
+use crate::theme::{FONT_MONO, FS_SM, FS_XS, Palette, R_FULL, R_MD};
 use crate::views::deferred::Deferred;
 use crate::views::kit::{self, BtnTone};
+use crate::views::workbench::{ChangeEntry, change_entries};
 
 gpui_kit::actions!(kage_desktop, [DialogClose]);
 
@@ -28,6 +33,98 @@ pub enum DialogKind {
     Goal,
     /// Confirm turning swarm mode on.
     ConfirmSwarm,
+    /// Rewind the active session to before the prompt at this item.
+    Rewind(usize),
+}
+
+/// What a rewind to before a prompt drops from the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RewindPreview {
+    /// The prompt the rewind goes back to.
+    pub prompt: String,
+    /// The prompts from it on.
+    pub turns: usize,
+    /// The transcript items from it on, turn boundaries aside.
+    pub entries: usize,
+    /// The tool calls among them.
+    pub tools: usize,
+    /// The subagents those calls started.
+    pub agents: usize,
+    /// The files the dropped calls and their subagents changed.
+    pub files: Vec<ChangeEntry>,
+}
+
+/// What rewinding `session` to before the prompt at item `prompt`
+/// drops, or `None` when that item is no prompt.
+pub(crate) fn rewind_preview(
+    store: &Store,
+    session: &Session,
+    prompt: usize,
+) -> Option<RewindPreview> {
+    let text = session.prompt_ref(prompt)?.text;
+    let gone = &session.items[prompt..];
+    let calls: Vec<&str> = gone
+        .iter()
+        .filter_map(|item| match item {
+            TranscriptItem::ToolCall(call) => Some(call.tool_call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut files = change_entries(gone);
+    let mut agents = 0;
+    for (id, agent) in &session.agents {
+        if !agent
+            .tool_call_id
+            .as_deref()
+            .is_some_and(|call| calls.contains(&call))
+        {
+            continue;
+        }
+        agents += 1;
+        let Some(child) = store.state().session(id) else {
+            continue;
+        };
+        for mut entry in change_entries(&child.items) {
+            if let Some(known) = files.iter_mut().find(|known| known.path == entry.path) {
+                known.add += entry.add;
+                known.del += entry.del;
+                continue;
+            }
+            entry.by = agent.name.clone();
+            files.push(entry);
+        }
+    }
+    Some(RewindPreview {
+        prompt: text,
+        turns: gone
+            .iter()
+            .filter(|item| matches!(item, TranscriptItem::User { .. }))
+            .count(),
+        entries: gone
+            .iter()
+            .filter(|item| !matches!(item, TranscriptItem::TurnEnd { .. }))
+            .count(),
+        tools: calls.len(),
+        agents,
+        files,
+    })
+}
+
+/// A count chip of the rewind preview.
+fn count_chip(label: String, fg: Hsla, bg: Hsla) -> impl IntoElement {
+    div()
+        .px(px(8.))
+        .py(px(2.))
+        .rounded(px(R_FULL))
+        .bg(bg)
+        .text_size(px(FS_XS))
+        .text_color(fg)
+        .child(label)
+}
+
+/// `n` and the noun, `one` when `n` is one and `many` otherwise.
+fn counted(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// The dialog layer over the shell.
@@ -92,7 +189,7 @@ impl DialogView {
                 });
                 goal.update(cx, |state, cx| state.focus(window, cx));
             }
-            DialogKind::ConfirmSwarm => window.focus(&self.focus, cx),
+            DialogKind::ConfirmSwarm | DialogKind::Rewind(_) => window.focus(&self.focus, cx),
         }
         cx.notify();
     }
@@ -116,6 +213,158 @@ impl DialogView {
             store.set_option("swarm", "on")
         });
         self.close(cx);
+    }
+
+    fn rewind(&mut self, prompt: usize, cx: &mut Context<Self>) {
+        self.store.act(cx, |store| store.rewind(prompt));
+        self.close(cx);
+    }
+
+    fn rewind_body(
+        &self,
+        prompt: usize,
+        pal: &Palette,
+        cx: &Context<Self>,
+    ) -> (IconName, &'static str, AnyElement, AnyElement) {
+        let view = cx.entity();
+        let store = self.store.read(cx);
+        let session = store.active_session();
+        let preview = session.and_then(|session| rewind_preview(store, session, prompt));
+        let title = session
+            .and_then(|session| session.title.clone())
+            .unwrap_or_else(|| "untitled session".to_owned());
+        let mut body = v_flex().gap(px(12.));
+        if let Some(preview) = &preview {
+            body = body
+                .child(
+                    div()
+                        .id("rewind-quote")
+                        .max_h(px(96.))
+                        .overflow_y_scroll()
+                        .px(px(12.))
+                        .py(px(10.))
+                        .border_l_3()
+                        .border_color(pal.accent)
+                        .rounded_r(px(R_MD))
+                        .bg(pal.surface)
+                        .text_size(px(FS_SM))
+                        .text_color(pal.ink_strong)
+                        .child(SharedString::from(preview.prompt.clone())),
+                )
+                .child(
+                    h_flex()
+                        .flex_wrap()
+                        .gap(px(6.))
+                        .child(count_chip(
+                            counted(preview.turns, "turn", "turns"),
+                            pal.muted,
+                            pal.fill,
+                        ))
+                        .child(count_chip(
+                            counted(preview.entries, "entry", "entries"),
+                            pal.muted,
+                            pal.fill,
+                        ))
+                        .child(count_chip(
+                            counted(preview.tools, "tool call", "tool calls"),
+                            pal.muted,
+                            pal.fill,
+                        ))
+                        .when(preview.agents > 0, |chips| {
+                            chips.child(count_chip(
+                                counted(preview.agents, "agent", "agents"),
+                                pal.done,
+                                pal.done_soft,
+                            ))
+                        })
+                        .child(if preview.files.is_empty() {
+                            count_chip("0 files".to_owned(), pal.muted, pal.fill)
+                        } else {
+                            count_chip(
+                                counted(preview.files.len(), "file", "files"),
+                                pal.warn,
+                                pal.warn_soft,
+                            )
+                        }),
+                )
+                .when(!preview.files.is_empty(), |body| {
+                    let mut list = v_flex()
+                        .border_1()
+                        .border_color(pal.subtle)
+                        .rounded(px(12.))
+                        .overflow_hidden()
+                        .child(
+                            h_flex()
+                                .gap(px(8.))
+                                .px(px(12.))
+                                .py(px(8.))
+                                .bg(pal.fill)
+                                .text_size(px(FS_XS))
+                                .text_color(pal.muted)
+                                .child(div().flex_1().child("Files stay as they are"))
+                                .child("restoring them stays with the TUI rewind plugin"),
+                        );
+                    for file in &preview.files {
+                        list = list.child(
+                            h_flex()
+                                .gap(px(8.))
+                                .px(px(12.))
+                                .py(px(6.))
+                                .border_t_1()
+                                .border_color(pal.subtle)
+                                .text_size(px(12.))
+                                .child(
+                                    Icon::new(if file.created {
+                                        IconName::FilePlus
+                                    } else {
+                                        IconName::File
+                                    })
+                                    .with_size(px(12.))
+                                    .text_color(pal.faint),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family(FONT_MONO)
+                                        .child(SharedString::from(file.path.clone())),
+                                )
+                                .child(div().text_color(pal.ok).child(format!("+{}", file.add)))
+                                .child(
+                                    div().text_color(pal.danger).child(format!("-{}", file.del)),
+                                ),
+                        );
+                    }
+                    body.child(list)
+                });
+        }
+        body = body.child(div().text_size(px(13.)).text_color(pal.muted).child(SharedString::from(
+            format!(
+                "The current state stays as \"{title} (before rewind)\", and this message goes back in the composer."
+            ),
+        )));
+        let cancel = view.clone();
+        let foot = h_flex()
+            .gap(px(8.))
+            .child(
+                kit::btn_sm("rewind-cancel", BtnTone::Plain, pal)
+                    .on_click(move |_, _, cx| cancel.update(cx, |this, cx| this.close(cx)))
+                    .child("Cancel"),
+            )
+            .child(
+                kit::btn_sm("rewind-go", BtnTone::Primary, pal)
+                    .on_click(move |_, _, cx| view.update(cx, |this, cx| this.rewind(prompt, cx)))
+                    .child(Icon::new(IconName::Undo2).with_size(px(12.)))
+                    .child("Rewind"),
+            )
+            .into_any_element();
+        (
+            IconName::Undo2,
+            "Rewind to this message?",
+            body.into_any_element(),
+            foot,
+        )
     }
 
     /// The advertised name of permission mode `value`, or the value.
@@ -245,9 +494,10 @@ impl Render for DialogView {
         let (icon, title, body, foot) = match kind {
             DialogKind::Goal => self.goal_body(pal, cx),
             DialogKind::ConfirmSwarm => self.swarm_body(pal, cx),
+            DialogKind::Rewind(prompt) => self.rewind_body(prompt, pal, cx),
         };
         let (icon_fg, icon_bg) = match kind {
-            DialogKind::Goal => (pal.accent, pal.accent_soft),
+            DialogKind::Goal | DialogKind::Rewind(_) => (pal.accent, pal.accent_soft),
             DialogKind::ConfirmSwarm => (pal.done, pal.done_soft),
         };
         let scrim_close = cx.entity();
@@ -256,7 +506,11 @@ impl Render for DialogView {
             .track_focus(&self.focus)
             .key_context("Dialog")
             .on_action(cx.listener(|this, _: &DialogClose, _, cx| this.close(cx)))
-            .w(px(if kind == DialogKind::Goal { 480. } else { 460. }))
+            .w(px(match kind {
+                DialogKind::Goal => 480.,
+                DialogKind::ConfirmSwarm => 460.,
+                DialogKind::Rewind(_) => 560.,
+            }))
             .bg(pal.bg)
             .border_1()
             .border_color(pal.line)
@@ -327,7 +581,10 @@ mod tests {
     use gpui_kit::{AppContext as _, TestAppContext, Window};
     use kage_client::Frame;
 
-    use super::{DialogKind, DialogView};
+    use kage_client::wire::{ContentBlock, DiffContent, ToolCallContent, ToolCallStatus, ToolKind};
+    use kage_client::{Session, Subagent, ToolCallItem, TranscriptItem};
+
+    use super::{DialogKind, DialogView, rewind_preview};
     use crate::store::{Command, Store};
     use crate::transport::State;
 
@@ -406,6 +663,80 @@ mod tests {
                 ("mode".to_owned(), "default".to_owned()),
                 ("swarm".to_owned(), "on".to_owned())
             ]
+        );
+    }
+
+    fn call(id: &str, kind: ToolKind) -> TranscriptItem {
+        TranscriptItem::ToolCall(ToolCallItem {
+            tool_call_id: id.to_owned(),
+            title: "a call".to_owned(),
+            kind,
+            status: ToolCallStatus::Completed,
+            input: None,
+            swarm: None,
+            content: Vec::new(),
+            raw_output: None,
+        })
+    }
+
+    fn prompt(text: &str) -> TranscriptItem {
+        TranscriptItem::User {
+            content: vec![ContentBlock::text(text)],
+            steered: false,
+        }
+    }
+
+    #[test]
+    fn the_rewind_preview_counts_what_follows_the_prompt() {
+        let mut session = Session::new("s1");
+        let mut edit = call("t2", ToolKind::Edit);
+        if let TranscriptItem::ToolCall(item) = &mut edit {
+            item.content = vec![ToolCallContent::Diff(DiffContent {
+                path: "src/lib.rs".into(),
+                old_text: Some("a\n".into()),
+                new_text: "b\nc\n".into(),
+            })];
+        }
+        session.items = vec![
+            prompt("first"),
+            call("t1", ToolKind::Read),
+            prompt("second"),
+            edit,
+            call("t3", ToolKind::Other),
+            prompt("third"),
+        ];
+        session.agents.insert(
+            "c1".into(),
+            Subagent {
+                tool_call_id: Some("t3".into()),
+                ..Subagent::default()
+            },
+        );
+        session.agents.insert(
+            "c0".into(),
+            Subagent {
+                tool_call_id: Some("t1".into()),
+                ..Subagent::default()
+            },
+        );
+        let store = Store::new("/w", false);
+
+        let preview = rewind_preview(&store, &session, 2).unwrap();
+        assert_eq!(preview.prompt, "second");
+        assert_eq!(
+            (
+                preview.turns,
+                preview.entries,
+                preview.tools,
+                preview.agents
+            ),
+            (2, 4, 2, 1)
+        );
+        assert_eq!(preview.files.len(), 1);
+        assert_eq!(preview.files[0].path, "src/lib.rs");
+        assert!(
+            rewind_preview(&store, &session, 1).is_none(),
+            "a tool call is no prompt"
         );
     }
 }

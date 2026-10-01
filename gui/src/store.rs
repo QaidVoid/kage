@@ -8,9 +8,12 @@
 //! command methods; they never see frames.
 
 use kage_client::wire::{
-    ContentBlock, FsListResult, FsOp, FsReadResult, PermissionOption, PermissionOptionKind,
+    ContentBlock, FsListResult, FsOp, FsReadResult, NoticeTone, PermissionOption,
+    PermissionOptionKind,
 };
-use kage_client::{Change, Client, Frame, PermissionAsk, PromptOutcome, Session, SteerError};
+use kage_client::{
+    Change, Client, Frame, PermissionAsk, PromptOutcome, Session, SteerError, TranscriptItem,
+};
 
 use gpui_kit::{App, Entity};
 
@@ -55,6 +58,22 @@ pub enum Command {
     /// Send the prompt the recording expects, once its session is
     /// open.
     ReplayPrompt,
+}
+
+/// What a fork the user asked for does once its copy is made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ForkPlan {
+    /// Open the copy.
+    Fork,
+    /// Open the copy in place of the source: the copy takes the
+    /// source's title, the source keeps the old state under a "(before
+    /// rewind)" title, and the rewound prompt goes back to the composer.
+    Rewind {
+        /// The source's title, which the copy takes.
+        title: Option<String>,
+        /// The prompt the rewind discarded.
+        prompt: String,
+    },
 }
 
 /// The tool whose open ask is the plan mode review.
@@ -180,6 +199,12 @@ pub struct Store {
     fs_reading: Option<String>,
     /// The last file read: the session, the path and the answer.
     fs_preview: Option<(String, String, FsReadResult)>,
+    /// Forks waiting for their copy, by source session.
+    forking: HashMap<String, ForkPlan>,
+    /// Copies waiting to open, with their source, by copy.
+    forked: HashMap<String, (String, ForkPlan)>,
+    /// Messages for the user the shell toasts.
+    notes: Vec<(NoticeTone, String)>,
     /// Commands waiting for the shell.
     commands: Vec<Command>,
 }
@@ -212,6 +237,9 @@ impl Store {
             fs_listing: None,
             fs_reading: None,
             fs_preview: None,
+            forking: HashMap::new(),
+            forked: HashMap::new(),
+            notes: Vec::new(),
             commands: Vec::new(),
         }
     }
@@ -423,6 +451,8 @@ impl Store {
                 }
             }
             match change {
+                Change::Forked { from, to } => self.open_fork(from, to),
+                Change::Session { id } => self.settle_fork(id),
                 Change::Fs {
                     session_id,
                     result: kage_client::wire::FsResult::List(listing),
@@ -620,6 +650,172 @@ impl Store {
             .collect();
         self.client.swarm_resume(&session, members);
         true
+    }
+
+    /// Copies the active session into a new one and opens it. With
+    /// `through`, the copy keeps the transcript up to the end of that
+    /// item's turn; without, all of it. Reports whether a request went
+    /// out.
+    pub fn fork(&mut self, through: Option<usize>) -> bool {
+        let Some(session) = self.active_session() else {
+            return false;
+        };
+        let before = through.and_then(|index| {
+            let next = session.items[index + 1..]
+                .iter()
+                .position(|item| matches!(item, TranscriptItem::User { .. }))?;
+            session.prompt_ref(index + 1 + next)
+        });
+        let id = session.id.clone();
+        self.forking.insert(id.clone(), ForkPlan::Fork);
+        self.client.fork_session(&id, before);
+        true
+    }
+
+    /// Rewinds the active session to just before the prompt at item
+    /// `prompt`: a copy without it and what followed opens in the
+    /// session's place, the session stays as it was under a "(before
+    /// rewind)" title, and the prompt text comes back to the composer.
+    /// Refused while a run is in flight. Reports whether a request went
+    /// out.
+    pub fn rewind(&mut self, prompt: usize) -> bool {
+        let Some(session) = self.active_session() else {
+            return false;
+        };
+        if session.running || session.in_turn {
+            return false;
+        }
+        let Some(before) = session.prompt_ref(prompt) else {
+            return false;
+        };
+        let id = session.id.clone();
+        let plan = ForkPlan::Rewind {
+            title: session.title.clone(),
+            prompt: before.text.clone(),
+        };
+        self.forking.insert(id.clone(), plan);
+        self.client.fork_session(&id, Some(before));
+        true
+    }
+
+    /// Opens the copy a fork made, refreshing the directory so it nests
+    /// under its source.
+    fn open_fork(&mut self, from: &str, to: &str) {
+        let plan = self.forking.remove(from).unwrap_or(ForkPlan::Fork);
+        self.forked.insert(to.to_owned(), (from.to_owned(), plan));
+        let listed = (!self.cwd.is_empty()).then(|| self.cwd.clone());
+        self.client.list_sessions(listed.as_deref(), None);
+        let cwd = self
+            .state()
+            .session(from)
+            .and_then(|session| session.cwd.clone())
+            .unwrap_or_else(|| self.cwd.clone());
+        self.client.load_session(to, &cwd, &[]);
+        self.unread.remove(to);
+        self.active = Some(to.to_owned());
+    }
+
+    /// Carries out the rest of a fork's plan once its copy opened.
+    fn settle_fork(&mut self, id: &str) {
+        if !self
+            .state()
+            .session(id)
+            .is_some_and(|session| session.opened)
+        {
+            return;
+        }
+        let Some((from, plan)) = self.forked.remove(id) else {
+            return;
+        };
+        let source = self
+            .state()
+            .session(&from)
+            .and_then(|session| session.title.clone())
+            .unwrap_or_else(|| "untitled session".to_owned());
+        match plan {
+            ForkPlan::Fork => self
+                .notes
+                .push((NoticeTone::Success, format!("Forked \"{source}\""))),
+            ForkPlan::Rewind { title, prompt } => {
+                let kept = format!("{} (before rewind)", title.as_deref().unwrap_or(&source));
+                if let Some(title) = &title {
+                    self.client.rename_session(id, title);
+                }
+                self.client.rename_session(&from, &kept);
+                self.returned_prompt = Some(prompt);
+                self.notes.push((
+                    NoticeTone::Success,
+                    format!("Rewound; the old state is \"{kept}\""),
+                ));
+            }
+        }
+    }
+
+    /// Names the active session. Blank titles are ignored. Reports
+    /// whether a request went out.
+    pub fn rename(&mut self, title: &str) -> bool {
+        let title = title.trim();
+        let Some(id) = self.active.clone().filter(|_| !title.is_empty()) else {
+            return false;
+        };
+        self.client.rename_session(&id, title);
+        true
+    }
+
+    /// Summarizes the active session's older turns now. Refused while a
+    /// run is in flight. Reports whether a request went out.
+    pub fn compact(&mut self) -> bool {
+        let Some(session) = self.active_session() else {
+            return false;
+        };
+        if session.running || session.in_turn {
+            return false;
+        }
+        let id = session.id.clone();
+        self.client.compact_session(&id);
+        true
+    }
+
+    /// Asks for the active session as Markdown; the text arrives as
+    /// [`Change::Exported`]. Reports whether a request went out.
+    pub fn export(&mut self) -> bool {
+        let Some(id) = self.active.clone() else {
+            return false;
+        };
+        self.client.export_session(&id);
+        true
+    }
+
+    /// Releases the active session and shows the welcome pane. The
+    /// session stays recorded and listed.
+    pub fn close_active(&mut self) {
+        let Some(id) = self.active.clone() else {
+            return;
+        };
+        self.client.close_session(&id);
+        let cwd = (!self.cwd.is_empty()).then(|| self.cwd.clone());
+        self.client.list_sessions(cwd.as_deref(), None);
+        self.show_welcome();
+    }
+
+    /// The session `id` was forked from, as the directory lists it.
+    #[must_use]
+    pub fn fork_parent(&self, id: &str) -> Option<&str> {
+        self.state()
+            .directory
+            .iter()
+            .find(|info| info.session_id == id)?
+            .meta
+            .as_ref()?
+            .kage
+            .as_ref()?
+            .parent_session_id
+            .as_deref()
+    }
+
+    /// The messages for the user since the last call, oldest first.
+    pub fn take_notes(&mut self) -> Vec<(NoticeTone, String)> {
+        std::mem::take(&mut self.notes)
     }
 
     /// Answers the open permission ask of `session`, by request id.
@@ -847,7 +1043,8 @@ impl Store {
 mod tests {
     use super::{Command, Store, StoreHandle as _};
     use crate::transport::State;
-    use kage_client::{Frame, PromptOutcome, SteerError};
+    use kage_client::wire::NoticeTone;
+    use kage_client::{Frame, PromptOutcome, SteerError, TranscriptItem};
 
     /// An initialize answer with the given version and capabilities.
     fn init_answer(version: Option<&str>, steer: bool, close: bool) -> Frame {
@@ -1442,5 +1639,153 @@ mod tests {
         assert_eq!(asked, ["c1", "s1"], "a child's ask shows on its parent");
         store.show_welcome();
         assert!(store.active_asks().is_empty(), "the welcome shows no card");
+    }
+
+    /// The requests in `frames` as (id, method, params).
+    fn requests(frames: Vec<Frame>) -> Vec<(u64, String, serde_json::Value)> {
+        frames
+            .into_iter()
+            .filter_map(|frame| match frame {
+                Frame::Request { id, method, params } => Some((id, method, params)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A store on session `s1`, titled "Parser", that ran the prompts
+    /// "again", "next" and "again".
+    fn three_prompts() -> Store {
+        let mut store = welcome_store();
+        open_session(&mut store, 3, "s1");
+        store.absorb(Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({
+                "sessionId": "s1",
+                "update": {"sessionUpdate": "session_info_update", "title": "Parser"},
+            }),
+        });
+        for text in ["again", "next", "again"] {
+            store.prompt(text);
+            let (id, ..) = requests(store.take_outgoing()).remove(0);
+            store.absorb(Frame::Success {
+                id,
+                result: serde_json::json!({"stopReason": "end_turn"}),
+            });
+        }
+        let _ = store.take_outgoing();
+        store
+    }
+
+    /// Answers the fork request in `frames` with copy `to`, then the
+    /// copy's load, and returns what the store sent meanwhile.
+    fn land_fork(
+        store: &mut Store,
+        frames: Vec<Frame>,
+        to: &str,
+    ) -> Vec<(u64, String, serde_json::Value)> {
+        let (fork, ..) = requests(frames)
+            .into_iter()
+            .find(|(_, method, _)| method == "_kage/session/fork")
+            .expect("a fork request");
+        store.absorb(Frame::Success {
+            id: fork,
+            result: serde_json::json!({"sessionId": to}),
+        });
+        let mut sent = requests(store.take_outgoing());
+        let load = sent
+            .iter()
+            .find(|(_, method, _)| method == "session/load")
+            .map(|(id, ..)| *id)
+            .expect("the copy loads");
+        store.absorb(Frame::Success {
+            id: load,
+            result: serde_json::json!({}),
+        });
+        sent.extend(requests(store.take_outgoing()));
+        sent
+    }
+
+    #[test]
+    fn a_fork_keeps_the_turn_it_starts_from_and_opens_the_copy() {
+        let mut store = three_prompts();
+        let first = store
+            .active_session()
+            .unwrap()
+            .items
+            .iter()
+            .position(|item| matches!(item, TranscriptItem::User { .. }))
+            .unwrap();
+
+        assert!(store.fork(Some(first)));
+        let frames = store.take_outgoing();
+        let (_, _, params) = requests(frames.clone()).remove(0);
+        assert_eq!(
+            params["before"],
+            serde_json::json!({"text": "next", "occurrence": 0})
+        );
+        let sent = land_fork(&mut store, frames, "s2");
+        assert!(sent.iter().any(|(_, method, _)| method == "session/list"));
+        assert_eq!(store.active_id(), Some("s2"));
+        assert_eq!(
+            store.take_notes(),
+            [(NoticeTone::Success, "Forked \"Parser\"".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_rewind_opens_the_copy_under_the_old_title_and_returns_the_prompt() {
+        let mut store = three_prompts();
+        let last = store
+            .active_session()
+            .unwrap()
+            .items
+            .iter()
+            .rposition(|item| matches!(item, TranscriptItem::User { .. }))
+            .unwrap();
+
+        assert!(store.rewind(last));
+        let frames = store.take_outgoing();
+        let (_, _, params) = requests(frames.clone()).remove(0);
+        assert_eq!(
+            params["before"],
+            serde_json::json!({"text": "again", "occurrence": 1})
+        );
+        let sent = land_fork(&mut store, frames, "s2");
+        let renames: Vec<(String, String)> = sent
+            .iter()
+            .filter(|(_, method, _)| method == "_kage/session/rename")
+            .map(|(_, _, params)| {
+                (
+                    params["sessionId"].as_str().unwrap().to_owned(),
+                    params["title"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            renames,
+            [
+                ("s2".to_owned(), "Parser".to_owned()),
+                ("s1".to_owned(), "Parser (before rewind)".to_owned())
+            ]
+        );
+        assert_eq!(store.active_id(), Some("s2"));
+        assert_eq!(store.take_returned_prompt().as_deref(), Some("again"));
+    }
+
+    #[test]
+    fn compact_and_rewind_wait_for_the_run_and_close_keeps_the_listing() {
+        let mut store = three_prompts();
+        store.prompt("busy");
+        let _ = store.take_outgoing();
+        assert!(!store.compact(), "compact waits for the run");
+        assert!(!store.rewind(0), "a rewind waits for the run");
+
+        store.close_active();
+        let methods: Vec<String> = requests(store.take_outgoing())
+            .into_iter()
+            .map(|(_, method, _)| method)
+            .collect();
+        assert_eq!(methods, ["session/close", "session/list"]);
+        assert_eq!(store.active_id(), None);
     }
 }

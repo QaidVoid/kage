@@ -10,14 +10,19 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use gpui_kit::assets::IconName;
+use gpui_kit::base::ElementExt as _;
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Escape as InputEscape, Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::theme::ActiveTheme;
-use gpui_kit::component::{Sizable as _, h_flex, h_resizable, resizable_panel, v_flex};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{Icon, Sizable as _, h_flex, h_resizable, resizable_panel, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext, Context, Entity, InteractiveElement as _, IntoElement, KeyBinding,
-    ParentElement as _, Render, SharedString, Styled as _, Window, div, px,
+    Anchor, AnyElement, App, AppContext, ClickEvent, ClipboardItem, Context, Entity,
+    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 
 use crate::clock::unix_seconds;
@@ -25,13 +30,16 @@ use crate::store::{Command, Store, StoreHandle as _};
 use crate::theme::{CONTENT_W, FS_SM, FS_XS, PANEL_HEAD_H, R_FULL, SIDE_W, SP_4, SP_6, SP_8};
 use crate::transport::{Event, Transport};
 use crate::views::chrome::{
-    FindBar, FindEvent, NoticeWatch, PaletteView, Toasts, WelcomeView, toasts_for_changes,
+    FindBar, FindEvent, NoticeWatch, PaletteView, ToastAction, ToastDraft, Toasts, WelcomeView,
+    toasts_for_changes,
 };
-use crate::views::dialog::DialogView;
+use crate::views::deferred::Deferred;
+use crate::views::dialog::{DialogKind, DialogView};
 use crate::views::{
     ApprovalCard, ApprovalEvent, ComposerView, DockEvent, DockRow, SidebarView, TranscriptEvent,
     TranscriptView, WorkbenchEvent, WorkbenchView,
 };
+use kage_client::wire::NoticeTone;
 use kage_client::{Change, Frame};
 
 /// The prompt the replay transcript was recorded with.
@@ -144,6 +152,15 @@ pub struct ShellArgs {
     pub stream: bool,
 }
 
+/// The topbar's inline title editor.
+struct Rename {
+    editor: Entity<InputState>,
+    /// The current title, written once the field has laid out; see
+    /// [`crate::views::deferred`].
+    title: Deferred,
+    _events: Subscription,
+}
+
 /// The window's root view.
 pub struct Shell {
     store: Entity<Store>,
@@ -179,6 +196,8 @@ pub struct Shell {
     /// The active session id as of the last store tick, to close the
     /// sidebar float when the selection moves.
     last_active: Option<String>,
+    /// The inline title editor while the user renames the session.
+    rename: Option<Rename>,
     streamed: usize,
 }
 
@@ -250,6 +269,10 @@ impl Shell {
             &transcript,
             window,
             |shell, _, event: &TranscriptEvent, window, cx| {
+                if let TranscriptEvent::Rewind(prompt) = event {
+                    shell.ask_rewind(*prompt, window, cx);
+                    return;
+                }
                 shell.workbench_visible = true;
                 shell.workbench.update(cx, |workbench, cx| match event {
                     TranscriptEvent::OpenFile(path) => workbench.open_file(path, cx),
@@ -257,6 +280,7 @@ impl Shell {
                     TranscriptEvent::OpenBrowser => workbench.open_browser(cx),
                     TranscriptEvent::OpenAgent(id) => workbench.open_agent(id.clone(), window, cx),
                     TranscriptEvent::OpenAgents => workbench.open_agents(cx),
+                    TranscriptEvent::Rewind(_) => {}
                 });
                 cx.notify();
             },
@@ -351,6 +375,7 @@ impl Shell {
             // Measured on the first frame; until then behave wide.
             viewport_width: f32::MAX,
             last_active: None,
+            rename: None,
             streamed: 0,
         }
     }
@@ -420,6 +445,22 @@ impl Shell {
     fn raise_toasts(&mut self, changes: &[Change], cx: &mut Context<Self>) {
         let mut drafts = toasts_for_changes(changes);
         drafts.extend(self.notices.scan(self.store.read(cx).state()));
+        for change in changes {
+            if let Change::Exported { markdown, .. } = change {
+                cx.write_to_clipboard(ClipboardItem::new_string(markdown.clone()));
+                drafts.push(ToastDraft {
+                    tone: NoticeTone::Success,
+                    text: "Copied the session as Markdown".to_owned(),
+                    action: ToastAction::None,
+                });
+            }
+        }
+        let notes = self.store.update(cx, |store, _| store.take_notes());
+        drafts.extend(notes.into_iter().map(|(tone, text)| ToastDraft {
+            tone,
+            text,
+            action: ToastAction::None,
+        }));
         if drafts.is_empty() {
             return;
         }
@@ -573,6 +614,10 @@ impl Shell {
         let workbench_visible = self.workbench_visible;
         let session = self.store.read(cx).active_session();
         let now = unix_seconds();
+        let has_session = session.is_some();
+        let running = session.is_some_and(|session| session.in_turn || session.running);
+        let forked =
+            session.is_some_and(|session| self.store.read(cx).fork_parent(&session.id).is_some());
         let working = session
             .filter(|session| session.in_turn || session.running)
             .and_then(|session| self.turn_started.get(&session.id))
@@ -609,15 +654,26 @@ impl Shell {
                     .text_size(px(FS_SM))
                     .child(div().flex_none().text_color(p.muted).child(name))
                     .child(div().flex_none().text_color(p.ghost).child("/"))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(p.ink_strong)
-                            .child(title),
-                    )
+                    .child(self.title_crumb(title, cx))
                     .into_any_element()
             }))
+            .when(forked, |bar| {
+                bar.child(
+                    h_flex()
+                        .id("fork-pill")
+                        .flex_none()
+                        .h(px(24.))
+                        .px(px(9.))
+                        .gap(px(5.))
+                        .items_center()
+                        .rounded(px(R_FULL))
+                        .bg(p.fill)
+                        .text_size(px(FS_XS))
+                        .text_color(p.muted)
+                        .child(Icon::new(IconName::GitFork).with_size(px(12.)))
+                        .child("fork"),
+                )
+            })
             .child(div().flex_1())
             .children(working.map(|label| {
                 h_flex()
@@ -639,6 +695,7 @@ impl Shell {
                     .child(SharedString::from(format!("Working {label}")))
                     .into_any_element()
             }))
+            .when(has_session, |bar| bar.child(self.session_menu(running, cx)))
             .child(
                 Button::new("toggle-workbench")
                     .icon(IconName::PanelRight)
@@ -648,6 +705,176 @@ impl Shell {
                     .tooltip("Workbench (Ctrl B)")
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_workbench(cx))),
             )
+    }
+
+    /// Opens the rewind dialog for the prompt at item `prompt`, or says
+    /// why not while a turn runs.
+    fn ask_rewind(&mut self, prompt: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let running = self
+            .store
+            .read(cx)
+            .active_session()
+            .is_some_and(|session| session.running || session.in_turn);
+        if running {
+            self.toasts.update(cx, |toasts, cx| {
+                toasts.push(
+                    ToastDraft {
+                        tone: NoticeTone::Warn,
+                        text: "Interrupt the running turn before rewinding".to_owned(),
+                        action: ToastAction::None,
+                    },
+                    cx,
+                );
+            });
+            return;
+        }
+        self.dialog.update(cx, |dialog, cx| {
+            dialog.open(DialogKind::Rewind(prompt), window, cx);
+        });
+    }
+
+    /// Opens the inline title editor on the active session's title.
+    fn start_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(title) = self
+            .store
+            .read(cx)
+            .active_session()
+            .map(|session| session.title.clone().unwrap_or_default())
+        else {
+            return;
+        };
+        let editor = cx.new(|cx| InputState::new(window, cx));
+        editor.update(cx, |state, cx| state.focus(window, cx));
+        let pending = Deferred::new();
+        pending.set(title, |_| {});
+        let events = cx.subscribe_in(
+            &editor,
+            window,
+            |shell, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    shell.finish_rename(true, window, cx);
+                }
+                _ => {}
+            },
+        );
+        self.rename = Some(Rename {
+            editor,
+            title: pending,
+            _events: events,
+        });
+        cx.notify();
+    }
+
+    /// Closes the title editor, saving its text when `save` is set.
+    fn finish_rename(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rename) = self.rename.take() else {
+            return;
+        };
+        if save && rename.title.is_laid_out() {
+            let title = rename.editor.read(cx).value().to_string();
+            self.store.act(cx, |store| store.rename(&title));
+        }
+        let input = self.composer.read(cx).input().clone();
+        input.update(cx, |state, cx| state.focus(window, cx));
+        cx.notify();
+    }
+
+    /// The session title in the crumbs: the inline editor while
+    /// renaming, else the title, which a double-click starts renaming.
+    fn title_crumb(&self, title: String, cx: &Context<Self>) -> AnyElement {
+        let p = crate::theme::Palette::active(cx);
+        if let Some(rename) = &self.rename {
+            let laid_out = rename.title.laid_out().flag();
+            let release = cx.entity().downgrade();
+            return div()
+                .min_w(px(260.))
+                .on_action(cx.listener(|this, _: &InputEscape, window, cx| {
+                    this.finish_rename(false, window, cx);
+                }))
+                .on_prepaint(move |_, _, cx| {
+                    if !laid_out.replace(true) {
+                        let _ = release.update(cx, |_, cx| cx.notify());
+                    }
+                })
+                .child(Input::new(&rename.editor).small())
+                .into_any_element();
+        }
+        div()
+            .id("topbar-title")
+            .min_w_0()
+            .truncate()
+            .text_color(p.ink_strong)
+            .tooltip(|window, cx| Tooltip::new("Double-click to rename").build(window, cx))
+            .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                if event.click_count() == 2 {
+                    this.start_rename(window, cx);
+                }
+            }))
+            .child(title)
+            .into_any_element()
+    }
+
+    /// The session actions behind the topbar's ellipsis.
+    fn session_menu(&self, running: bool, cx: &Context<Self>) -> impl IntoElement {
+        let store = self.store.clone();
+        let shell = cx.entity();
+        Button::new("session-menu")
+            .icon(IconName::Ellipsis)
+            .xsmall()
+            .ghost()
+            .tooltip("Session actions")
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                let act = |f: fn(&mut Store) -> bool| {
+                    let store = store.clone();
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        store.act(cx, f);
+                    }
+                };
+                let copy_id = store.clone();
+                let close = store.clone();
+                let shell = shell.clone();
+                menu.min_w(px(220.))
+                    .item(
+                        PopupMenuItem::new("Rename")
+                            .icon(IconName::Pencil)
+                            .on_click(move |_, window, cx| {
+                                shell.update(cx, |shell, cx| shell.start_rename(window, cx));
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Fork session")
+                            .icon(IconName::GitFork)
+                            .on_click(act(|store| store.fork(None))),
+                    )
+                    .item(
+                        PopupMenuItem::new("Compact now")
+                            .icon(IconName::Layers)
+                            .disabled(running)
+                            .on_click(act(Store::compact)),
+                    )
+                    .item(
+                        PopupMenuItem::new("Export markdown")
+                            .icon(IconName::ExternalLink)
+                            .on_click(act(Store::export)),
+                    )
+                    .item(
+                        PopupMenuItem::new("Copy session ID")
+                            .icon(IconName::Copy)
+                            .on_click(move |_, _, cx| {
+                                if let Some(id) = copy_id.read(cx).active_id() {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(id.to_owned()));
+                                }
+                            }),
+                    )
+                    .separator()
+                    .item(
+                        PopupMenuItem::new("Close session")
+                            .icon(IconName::X)
+                            .on_click(move |_, _, cx| {
+                                close.act(cx, Store::close_active);
+                            }),
+                    )
+            })
     }
 
     /// The centered content column: the transcript scroller, or the
@@ -709,6 +936,15 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(rename) = &self.rename {
+            let editor = rename.editor.clone();
+            rename.title.flush(|title| {
+                editor.update(cx, |state, cx| {
+                    state.set_value(title, window, cx);
+                    state.select_all(window, cx);
+                });
+            });
+        }
         let theme = cx.theme().colors;
         let sidebar_visible = self.sidebar_visible;
         let side_float = self.side_float;

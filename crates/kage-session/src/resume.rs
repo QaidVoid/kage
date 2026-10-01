@@ -279,9 +279,9 @@ pub fn find_by_prefix(dir: &Path, prefix: &str) -> Result<Option<PathBuf>, Sessi
     Ok(Some(first))
 }
 
-/// Find the most recently created session in `dir`, skipping agent
-/// sessions.
-pub fn find_last(dir: &Path) -> Result<Option<PathBuf>, SessionError> {
+/// Find the most recently created session in `dir` that was recorded
+/// in working directory `cwd`, skipping agent sessions.
+pub fn find_last(dir: &Path, cwd: &Path) -> Result<Option<PathBuf>, SessionError> {
     // Session ids are ULIDs, which sort by creation time, so the newest
     // name is the newest session; only the head of each candidate is
     // read, to skip agent sessions and files without a header.
@@ -290,7 +290,7 @@ pub fn find_last(dir: &Path) -> Result<Option<PathBuf>, SessionError> {
     Ok(files
         .into_iter()
         .map(|(_, path)| path)
-        .find(|path| opens_as_user_session(path)))
+        .find(|path| opens_as_user_session(path, cwd)))
 }
 
 /// The `*.jsonl` files of `dir` with their file stems, which are the
@@ -317,9 +317,9 @@ fn session_files(dir: &Path) -> Result<Vec<(String, PathBuf)>, SessionError> {
         .collect())
 }
 
-/// Whether `path` starts with a header and is not an agent session,
-/// reading only its first two lines.
-fn opens_as_user_session(path: &Path) -> bool {
+/// Whether `path` starts with a header recorded in `cwd` and is not an
+/// agent session, reading only its first two lines.
+fn opens_as_user_session(path: &Path, cwd: &Path) -> bool {
     use std::io::BufRead as _;
     let Ok(file) = std::fs::File::open(path) else {
         return false;
@@ -329,7 +329,7 @@ fn opens_as_user_session(path: &Path) -> bool {
         .next()
         .and_then(Result::ok)
         .and_then(|line| serde_json::from_str::<SessionEntry>(&line).ok());
-    if !matches!(header, Some(SessionEntry::Header(_))) {
+    if !matches!(header, Some(SessionEntry::Header(header)) if header.cwd == cwd) {
         return false;
     }
     match lines.next().and_then(Result::ok) {
@@ -731,8 +731,25 @@ mod tests {
         let path_b = dir.path().join("b.jsonl");
         write(&path_b, fresh_header(), &[]);
 
-        let last = find_last(dir.path()).unwrap().unwrap();
+        let last = find_last(dir.path(), Path::new("/work")).unwrap().unwrap();
         assert_eq!(last, path_b);
+    }
+
+    #[test]
+    fn find_last_keeps_to_the_working_directory() {
+        let dir = tempdir().unwrap();
+        let here = dir.path().join("a.jsonl");
+        write(&here, fresh_header(), &[]);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let mut elsewhere = fresh_header();
+        elsewhere.cwd = PathBuf::from("/other");
+        write(&dir.path().join("b.jsonl"), elsewhere, &[]);
+
+        assert_eq!(
+            find_last(dir.path(), Path::new("/work")).unwrap(),
+            Some(here)
+        );
+        assert_eq!(find_last(dir.path(), Path::new("/nowhere")).unwrap(), None);
     }
 
     #[test]
@@ -749,6 +766,9 @@ mod tests {
         });
         write(&dir.path().join("b.jsonl"), fresh_header(), &[marker]);
 
-        assert_eq!(find_last(dir.path()).unwrap().unwrap(), main);
+        assert_eq!(
+            find_last(dir.path(), Path::new("/work")).unwrap().unwrap(),
+            main
+        );
     }
 }

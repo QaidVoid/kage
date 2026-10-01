@@ -186,7 +186,8 @@ or to `none` to print only the session lines (see
 
 Every session is recorded to `~/.local/share/kage/sessions/<id>.jsonl`
 unless you pass `--no-session`. Resume one in the TUI by id (or a
-unique prefix), or the most recent one with `--last`:
+unique prefix), or the most recent one started in the current directory
+with `--last`:
 
 ```bash
 kage resume <id>

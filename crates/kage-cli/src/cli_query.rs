@@ -280,9 +280,10 @@ pub(crate) fn resolve_resume_target(
     last: bool,
 ) -> Result<PathBuf, String> {
     if last {
-        return kage_session::find_last(dir)
+        let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
+        return kage_session::find_last(dir, &cwd)
             .map_err(|e| format!("failed to scan sessions: {e}"))?
-            .ok_or_else(|| format!("no sessions in {}", dir.display()));
+            .ok_or_else(|| format!("no sessions recorded in {}", cwd.display()));
     }
     let prefix = id.ok_or_else(|| {
         "resume needs a session id or --last; to pick one, run `kage` and press ctrl+s".to_owned()

@@ -127,7 +127,8 @@ pub(crate) enum Command {
     Resume {
         /// Session id or unique prefix. Mutually exclusive with --last.
         id: Option<String>,
-        /// Resume the most recently created session.
+        /// Resume the most recently created session of the current
+        /// directory.
         #[arg(long = "last", conflicts_with = "id")]
         last: bool,
         /// New user prompt to append in print mode. Without it the

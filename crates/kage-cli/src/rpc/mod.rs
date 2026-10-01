@@ -34,6 +34,7 @@ mod fs;
 pub(crate) mod host;
 mod live;
 mod mcp;
+mod models;
 mod options;
 mod registry;
 mod sessions;
@@ -48,12 +49,13 @@ use kage_acp::acp::{
     AgentCapabilities, AgentMeta, CloseSessionRequest, CloseSessionResponse, ConfigGetRequest,
     ConfigGetResult, FsRequest, FsResult, Implementation, InitializeRequest, InitializeResponse,
     KageAgentInfo, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, McpCapabilities, NewSessionRequest, NewSessionResponse, OptionSetRequest,
-    OptionsResponse, PROTOCOL_VERSION, PromptCapabilities, PromptDelivery, PromptRequest,
-    PromptResponse, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
-    SessionConfigOption, SessionExportResponse, SessionForkRequest, SessionForkResponse,
-    SessionRenameRequest, SessionRequest, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, StopReason, Supported, SwarmResumeRequest, SwarmResumeResponse,
+    LoadSessionResponse, McpCapabilities, ModelsResponse, NewSessionRequest, NewSessionResponse,
+    OptionSetRequest, OptionsResponse, PROTOCOL_VERSION, PromptCapabilities, PromptDelivery,
+    PromptRequest, PromptResponse, ResumeSessionRequest, ResumeSessionResponse,
+    SessionCapabilities, SessionConfigOption, SessionExportResponse, SessionForkRequest,
+    SessionForkResponse, SessionRenameRequest, SessionRequest, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, Supported,
+    SwarmResumeRequest, SwarmResumeResponse,
 };
 use kage_acp::agent::{Agent, PromptContext, send_update};
 use kage_core::config::{Config, McpServer as McpSpec};
@@ -484,6 +486,10 @@ impl Agent for CliAcpAgent {
         let id = self.engine_id(&req.session_id)?;
         self.host.engine.send(Command::to(id, CommandKind::Compact));
         Ok(serde_json::json!({}))
+    }
+
+    fn models_list(&self) -> Result<ModelsResponse, RpcError> {
+        Ok(models::catalog(&self.host.registry))
     }
 
     fn options_list(&self) -> Result<OptionsResponse, RpcError> {

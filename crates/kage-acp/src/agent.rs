@@ -26,10 +26,10 @@ use kage_jsonrpc::{CancelNotice, Inbound, Peer, RpcError, connect_with};
 use crate::acp::{
     CloseSessionRequest, CloseSessionResponse, ConfigGetRequest, ConfigGetResult, FsRequest,
     FsResult, InitializeRequest, InitializeResponse, KageMeta, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
-    NewSessionResponse, OptionSetRequest, OptionsResponse, PermissionOption, PermissionOptionKind,
-    PermissionOutcome, PlanReview, PromptRequest, PromptResponse, RequestMeta,
-    RequestPermissionRequest, RequestPermissionResponse, RequestPermissionResult,
+    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, ModelsResponse,
+    NewSessionRequest, NewSessionResponse, OptionSetRequest, OptionsResponse, PermissionOption,
+    PermissionOptionKind, PermissionOutcome, PlanReview, PromptRequest, PromptResponse,
+    RequestMeta, RequestPermissionRequest, RequestPermissionResponse, RequestPermissionResult,
     ResumeSessionRequest, ResumeSessionResponse, SessionExportResponse, SessionForkRequest,
     SessionForkResponse, SessionNotification, SessionRenameRequest, SessionRequest, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SwarmResumeRequest,
@@ -404,6 +404,16 @@ pub trait Agent: Send + Sync + 'static {
         Err(RpcError::method_not_found("_kage/session/rename"))
     }
 
+    /// Every model the engine can run now, with what the catalog knows
+    /// of each (`_kage/models/list`). The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the agent offers no catalog.
+    fn models_list(&self) -> Result<ModelsResponse, RpcError> {
+        Err(RpcError::method_not_found("_kage/models/list"))
+    }
+
     /// The engine options a client can change (`_kage/options/list`).
     /// The default rejects.
     ///
@@ -688,6 +698,7 @@ fn handle_kage_request<A: Agent>(
             Err(e) => return parse_failed(peer, &id, e),
         },
         "_kage/options/list" => spawn_op(peer, agent, id, |a| a.options_list().map(jval)),
+        "_kage/models/list" => spawn_op(peer, agent, id, |a| a.models_list().map(jval)),
         "_kage/options/set" => match parse::<OptionSetRequest>(params) {
             Ok(req) => spawn_op(peer, agent, id, move |a| a.option_set(req).map(jval)),
             Err(e) => return parse_failed(peer, &id, e),

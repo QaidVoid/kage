@@ -4607,3 +4607,28 @@ fn a_client_attaching_mid_swarm_hears_each_members_place() {
     let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
     assert_eq!(response["stopReason"], "end_turn");
 }
+
+#[test]
+fn the_model_catalog_lists_each_provider_with_its_models() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(Vec::new(), dir.path(), dir.path());
+    let catalog = h
+        .client
+        .request("_kage/models/list", serde_json::json!({}))
+        .unwrap();
+    let mock = catalog["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "mock")
+        .expect("the mock provider");
+    assert_eq!(mock["name"], "Mock");
+    let ids: Vec<_> = mock["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["mock/m", "mock/other"]);
+    assert_eq!(mock["models"][0]["name"], "Mock m");
+}

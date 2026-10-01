@@ -535,6 +535,55 @@ pub struct OptionEntry {
     pub live: bool,
 }
 
+/// One model a client can pick, as `_kage/models/list` reports it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelEntry {
+    /// `provider/model`, the value the `model` config option takes.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Context window in tokens, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u64>,
+    /// USD per million input tokens, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_cost: Option<f64>,
+    /// USD per million output tokens, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_cost: Option<f64>,
+    /// The thinking levels it accepts, by the `thinking` option's
+    /// values. Empty when it does not think.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub thinking: Vec<String>,
+    /// Whether it reads images.
+    #[serde(default)]
+    pub images: bool,
+    /// Release date, `YYYY-MM-DD`, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released: Option<String>,
+}
+
+/// One provider with credentials and the models it offers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProvider {
+    /// The id models are qualified with.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Its models, in the provider's order.
+    pub models: Vec<ModelEntry>,
+}
+
+/// `_kage/models/list` result: every model the engine can run now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelsResponse {
+    /// Providers by id.
+    pub providers: Vec<ModelProvider>,
+}
+
 /// `_kage/options/list` and `_kage/options/set` result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

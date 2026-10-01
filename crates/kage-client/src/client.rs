@@ -15,12 +15,13 @@ use serde_json::Value;
 use kage_acp_wire::{
     CancelNotification, ClientCapabilities, CloseSessionRequest, ConfigGetRequest, ContentBlock,
     FsOp, FsRequest, Implementation, InitializeRequest, KageMeta, ListSessionsRequest,
-    LoadSessionRequest, McpServer, NewSessionRequest, OptionSetRequest, OptionsResponse,
-    PROTOCOL_VERSION, PermissionOptionKind, PermissionOutcome, PlanReview, PromptDelivery,
-    PromptRef, PromptRequest, PromptResponse, RequestMeta, RequestPermissionRequest,
-    RequestPermissionResult, ResumeSessionRequest, SelectedOption, SessionExportResponse,
-    SessionForkRequest, SessionForkResponse, SessionNotification, SessionRenameRequest,
-    SessionRequest, SessionUpdate, SetSessionConfigOptionRequest, SwarmResumeRequest,
+    LoadSessionRequest, McpServer, ModelsResponse, NewSessionRequest, OptionSetRequest,
+    OptionsResponse, PROTOCOL_VERSION, PermissionOptionKind, PermissionOutcome, PlanReview,
+    PromptDelivery, PromptRef, PromptRequest, PromptResponse, RequestMeta,
+    RequestPermissionRequest, RequestPermissionResult, ResumeSessionRequest, SelectedOption,
+    SessionExportResponse, SessionForkRequest, SessionForkResponse, SessionNotification,
+    SessionRenameRequest, SessionRequest, SessionUpdate, SetSessionConfigOptionRequest,
+    SwarmResumeRequest,
 };
 
 use crate::change::Change;
@@ -140,6 +141,7 @@ enum Pending {
     Rename {
         session_id: String,
     },
+    Models,
     Options,
 }
 
@@ -563,6 +565,12 @@ impl Client {
         )
     }
 
+    /// Asks for every model the engine can run now. The answer arrives
+    /// as [`Change::Models`].
+    pub fn models_list(&mut self) -> u64 {
+        self.request("_kage/models/list", serde_json::json!({}), Pending::Models)
+    }
+
     /// Asks for the engine options a client can change. The answer
     /// arrives as [`Change::Options`].
     pub fn options_list(&mut self) -> u64 {
@@ -815,21 +823,7 @@ impl Client {
             return Vec::new();
         };
         match pending {
-            Pending::Initialize => {
-                match answer::<kage_acp_wire::InitializeResponse>(id, result, "initialize result") {
-                    Err(failed) => failed,
-                    Ok(response) => {
-                        self.state.protocol_version = Some(response.protocol_version);
-                        self.state.capabilities = Some(response.agent_capabilities);
-                        self.state.agent = response.agent_info;
-                        self.state.agent_cwd = response
-                            .meta
-                            .and_then(|meta| meta.kage)
-                            .and_then(|kage| kage.cwd);
-                        vec![Change::Connection]
-                    }
-                }
-            }
+            Pending::Initialize => self.apply_initialize(id, result),
             Pending::NewSession { cwd } => self.apply_new_session(id, cwd, result),
             Pending::Open { session_id } => {
                 match answer::<kage_acp_wire::LoadSessionResponse>(
@@ -874,6 +868,12 @@ impl Client {
             | Pending::Rename { session_id } => {
                 vec![Change::Session { id: session_id }]
             }
+            Pending::Models => match answer::<ModelsResponse>(id, result, "_kage/models result") {
+                Err(failed) => failed,
+                Ok(answer) => vec![Change::Models {
+                    providers: answer.providers,
+                }],
+            },
             Pending::Options => {
                 match answer::<OptionsResponse>(id, result, "_kage/options result") {
                     Err(failed) => failed,
@@ -908,6 +908,24 @@ impl Client {
                         result: fs_result,
                     }],
                 }
+            }
+        }
+    }
+
+    /// Records what the agent said of itself in its `initialize`
+    /// answer.
+    fn apply_initialize(&mut self, id: u64, result: Value) -> Vec<Change> {
+        match answer::<kage_acp_wire::InitializeResponse>(id, result, "initialize result") {
+            Err(failed) => failed,
+            Ok(response) => {
+                self.state.protocol_version = Some(response.protocol_version);
+                self.state.capabilities = Some(response.agent_capabilities);
+                self.state.agent = response.agent_info;
+                self.state.agent_cwd = response
+                    .meta
+                    .and_then(|meta| meta.kage)
+                    .and_then(|kage| kage.cwd);
+                vec![Change::Connection]
             }
         }
     }

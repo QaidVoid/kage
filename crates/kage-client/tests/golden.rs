@@ -312,7 +312,7 @@ fn the_approval_fixture_round_trips_a_permission_ask() {
                     label,
                     allowed: true,
                     feedback: None,
-                } if subject == "shell" && label == "Allow shell"
+                } if subject == "cargo test" && label == "Allow shell"
             ),
             "the reply appended the decision record: {:?}",
             own_prompt(&session.items)[1]
@@ -516,7 +516,7 @@ fn feedback_rides_the_meta_channel_and_the_record_quotes_it() {
                 label,
                 allowed: false,
                 feedback: Some(text),
-            } if subject == "shell" && label == "Reject shell" && text == "use rustfmt first"
+            } if subject == "cargo test" && label == "Reject shell" && text == "use rustfmt first"
         ),
         "the decision record quotes the feedback: {:?}",
         own_prompt(&session.items)[1]
@@ -642,7 +642,7 @@ fn the_subagent_fixture_builds_the_agent_tree_and_the_child_transcript() {
                 label,
                 allowed: true,
                 feedback: None,
-            } if subject == "ls" && label == "Allow ls"
+            } if subject == "/w" && label == "Allow ls"
         ),
         "the child's answer recorded its own decision"
     );

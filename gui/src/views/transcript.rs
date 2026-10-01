@@ -2,11 +2,12 @@
 //! transcript.
 //!
 //! The transcript renders a row model built from kage-client session
-//! items: a virtual list with one variable-height row per model row.
-//! Labels, verbs and chips are computed only from what the wire
-//! delivered; a chip whose inputs are missing is not rendered. Row
-//! heights are deterministic estimates, which is all the virtual list
-//! needs. The list follows the bottom while a turn streams and offers
+//! items: a measured list with one row per model row. Labels, verbs
+//! and chips are computed only from what the wire delivered; a chip
+//! whose inputs are missing is not rendered. Each row carries a
+//! signature of what decides its height, and only rows whose signature
+//! moved are measured again. The list follows the bottom while a turn
+//! streams, even as the last row grows, and offers
 //! a jump control once the reader scrolls away from it. Every row
 //! carries a stable element id, so element state such as the markdown
 //! parse cache stays with its item across frames.
@@ -15,49 +16,42 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
-use web_time::Instant;
-
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::input::TextareaState;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::theme::{ActiveTheme, ThemeColor};
-use gpui_kit::component::{
-    Icon, Sizable as _, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list,
-};
+use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Animation, AnimationExt as _, AnyElement, App, Context, Div, ElementId, Entity, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, ScrollStrategy,
-    SharedString, Size, Stateful, StatefulInteractiveElement as _, Styled as _,
-    TestSupportExt as _, Window, div, px, radians, relative, size,
+    Animation, AnimationExt as _, AnyElement, App, Context, Div, ElementId, Entity, FollowMode,
+    Hsla, InteractiveElement as _, IntoElement, ListAlignment, ListState, ParentElement as _,
+    Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
+    TestSupportExt as _, Window, div, list, px, radians, relative,
 };
 
-use crate::store::Store;
+use crate::store::{Store, StoreHandle as _};
 use crate::theme::{FS_2XS, FS_SM, FS_XS, R_FULL, R_LG, R_SM, SP_1, SP_2, SP_3, SP_4, SP_5};
+use crate::timing::RunEnd;
 use kage_client::wire::{NoticeTone, ToolCallContent, ToolCallStatus, TurnReason};
 use kage_client::{Session, ToolCallItem, TranscriptItem};
 
-/// One estimated text line: the design's base size at its body line
-/// height (14px at 1.5).
-const LINE: f32 = 21.0;
 /// The line height of the mono detail text: 12px at 1.55.
 const DETAIL_LINE: f32 = 19.0;
 /// The line height of the thinking body: 13px at 1.5.
 const THINK_LINE: f32 = 20.0;
 /// The activity row's minimum height.
 const ROW_H: f32 = 28.0;
+/// The turn-end row's height: the 24px action buttons it carries.
+const TURN_END_H: f32 = 24.0;
 /// The activity row's vertical margin, collapsed with its neighbors'.
 const ROW_MARGIN: f32 = 2.0;
 /// The design's 12px detail size.
 const DETAIL_SIZE: f32 = 12.0;
-/// Characters a wrapped prose line holds before the estimate breaks it.
-const COLUMNS: usize = 72;
-/// Characters a mono detail line holds.
-const MONO_COLUMNS: usize = 96;
-/// The distance from the bottom that still counts as following it.
-const FOLLOW_SLACK: f32 = 32.0;
+/// How far past the viewport the list lays rows out, so a scroll never
+/// shows a row before it was measured.
+const LIST_OVERDRAW: f32 = 800.0;
 /// The small icon size of the design (`.ico.sm`).
 const ICON_SM: f32 = 14.0;
 /// The extra small icon size of the design (`.ico.xs`).
@@ -72,15 +66,10 @@ const BUBBLE_PY: f32 = 9.0;
 const BUBBLE_MAX: f32 = 0.85;
 /// The left indent of detail boxes and thinking bodies.
 const DETAIL_INDENT: f32 = 22.0;
-/// The height of a detail head: 12px text at 1.5 plus 7px padding
-/// above and below and the hairline under it.
-const DETAIL_HEAD_H: f32 = 33.0;
 /// The detail head's vertical padding.
 const DETAIL_HEAD_PY: f32 = 7.0;
 /// The mono body's vertical padding inside a detail box.
 const DETAIL_PRE_PY: f32 = 10.0;
-/// The detail box's top margin and hairline borders.
-const DETAIL_TOP: f32 = 6.0;
 /// The detail box's bottom margin.
 const DETAIL_BOTTOM: f32 = 10.0;
 
@@ -116,20 +105,6 @@ fn gap(prev: Option<&Row>, row: &Row) -> f32 {
         Some(prev) => f32::max(margins(prev).1, top),
         None => top,
     }
-}
-
-/// The estimated lines `text` wraps to.
-fn text_lines(text: &str) -> usize {
-    let breaks = text.matches('\n').count() + 1;
-    let wrapped = text.chars().count().div_ceil(COLUMNS).max(1);
-    breaks.max(wrapped)
-}
-
-/// The estimated mono lines `text` wraps to in a detail box.
-fn mono_lines(text: &str) -> usize {
-    let breaks = text.matches('\n').count() + 1;
-    let wrapped = text.chars().count().div_ceil(MONO_COLUMNS).max(1);
-    breaks.max(wrapped)
 }
 
 /// One rendered line of a unified diff.
@@ -221,21 +196,28 @@ fn diff_of_text(text: &str) -> Option<Vec<DiffLine>> {
     )
 }
 
-/// The unified diff a tool call delivered, if any. Structured diff
-/// content wins over diff-marked text content.
 /// The unified lines of one tool call's diff, when the call carries
-/// or implies one. Shared with the workbench's changes pane.
+/// or implies one: every structured diff it delivered, one hunk each,
+/// else its diff-marked text. Shared with the workbench's changes pane.
 pub(crate) fn diff_lines(call: &ToolCallItem) -> Option<Vec<DiffLine>> {
-    for content in &call.content {
-        if let ToolCallContent::Diff(diff) = content {
-            return Some(diff_of_texts(
+    let hunks: Vec<DiffLine> = call
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            ToolCallContent::Diff(diff) => Some(diff_of_texts(
                 &diff.path,
                 diff.old_text.as_deref().unwrap_or(""),
                 &diff.new_text,
-            ));
-        }
+            )),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    if hunks.is_empty() {
+        diff_of_text(&call.text())
+    } else {
+        Some(hunks)
     }
-    diff_of_text(&call.text())
 }
 
 /// The added and removed line counts of a unified diff.
@@ -416,6 +398,7 @@ fn tool_verb(call: &ToolCallItem) -> (String, String) {
             "Creating",
             basename(input_str(input, "path")).to_owned(),
         ),
+        "todo_list" => ("Updated todos", "Updating todos", String::new()),
         "web_search" => (
             "Searched the web",
             "Searching the web",
@@ -454,6 +437,7 @@ fn tool_icon(title: &str) -> IconName {
         "edit" => IconName::Pencil,
         "write" => IconName::FilePlus,
         "web_search" | "web_fetch" => IconName::Globe,
+        "todo_list" => IconName::ListTodo,
         _ => IconName::Zap,
     }
 }
@@ -522,12 +506,14 @@ fn family_of(title: &str) -> Option<Family> {
     }
 }
 
-/// The summary label of one collapsed group, over its member titles.
-fn group_label(family: Family, titles: &[&str]) -> String {
+/// The summary label of one collapsed group, over its member titles:
+/// the first part capitalized, the rest lower case, as one sentence.
+fn group_label(family: Family, titles: &[&str], running: bool) -> String {
     match family {
         Family::Shell => {
             let n = titles.len();
-            format!("Ran {n} command{}", if n == 1 { "" } else { "s" })
+            let verb = if running { "Running" } else { "Ran" };
+            format!("{verb} {n} command{}", if n == 1 { "" } else { "s" })
         }
         Family::Explore => {
             let mut reads = 0;
@@ -541,24 +527,20 @@ fn group_label(family: Family, titles: &[&str]) -> String {
                 }
             }
             let mut parts: Vec<String> = Vec::new();
-            if reads > 0 {
-                parts.push(format!(
-                    "Read {reads} file{}",
-                    if reads == 1 { "" } else { "s" }
-                ));
-            }
-            if searches > 0 {
-                parts.push(format!(
-                    "Searched {searches} pattern{}",
-                    if searches == 1 { "" } else { "s" }
-                ));
-            }
-            if listings > 0 {
-                parts.push(format!(
-                    "Listed {listings} director{}",
-                    if listings == 1 { "y" } else { "ies" }
-                ));
-            }
+            let mut part = |verb: &str, n: usize, one: &str, many: &str| {
+                if n == 0 {
+                    return;
+                }
+                let verb = if parts.is_empty() {
+                    verb.to_owned()
+                } else {
+                    verb.to_lowercase()
+                };
+                parts.push(format!("{verb} {n} {}", if n == 1 { one } else { many }));
+            };
+            part("Read", reads, "file", "files");
+            part("Searched", searches, "pattern", "patterns");
+            part("Listed", listings, "directory", "directories");
             parts.join(", ")
         }
     }
@@ -633,8 +615,6 @@ enum Row {
         live: bool,
         /// Whether the body is expanded.
         expanded: bool,
-        /// How long the view watched this item stream, when it did.
-        duration: Option<Duration>,
     },
     /// One tool call.
     Tool {
@@ -657,15 +637,15 @@ enum Row {
         members: Vec<usize>,
         /// How many members failed.
         failed: usize,
+        /// Whether a member is still pending or running.
+        running: bool,
         /// Whether the nested rows are listed.
         expanded: bool,
     },
-    /// A turn boundary.
+    /// The end of a run: the turn boundary no tool calls follow.
     TurnEnd {
         /// The item index.
         ix: usize,
-        /// Whether tool calls follow this turn.
-        tools_follow: bool,
         /// Why the run stopped, when the session carries it.
         outcome: Option<Outcome>,
     },
@@ -726,15 +706,12 @@ impl Row {
     }
 }
 
-/// The view-local UI state a row model renders with: expansion choices
-/// and the thinking spans the view measured itself.
+/// The view-local UI state a row model renders with: the expansion
+/// choices of one session.
 #[derive(Debug, Default)]
 struct UiState {
     /// Row keys whose detail, body or nested list is expanded.
     expanded: HashSet<RowKey>,
-    /// Per thinking item index, when the view first saw it stream and
-    /// how long it streamed once it stopped.
-    thinking: HashMap<usize, (Instant, Option<Duration>)>,
 }
 
 /// The find state the transcript tints rows with: the matching row
@@ -747,13 +724,11 @@ pub struct FindMarks {
     pub current: usize,
 }
 
-/// The rows and heights a transcript renders, in order.
+/// The rows a transcript renders, in order.
 #[derive(Debug, Default)]
 struct RowModel {
     /// The rows, oldest first.
     rows: Vec<Row>,
-    /// The estimated height of each row, same order.
-    heights: Vec<Pixels>,
 }
 
 impl RowModel {
@@ -829,88 +804,6 @@ fn row_search_text(session: &Session, row: &Row) -> String {
     }
 }
 
-/// The line count a tool detail renders when shown.
-fn detail_line_count(call: &ToolCallItem) -> usize {
-    if (call.title == "edit" || call.title == "write")
-        && let Some(lines) = diff_lines(call)
-    {
-        return lines.len().max(1);
-    }
-    let text = call.text();
-    if text.is_empty() {
-        1
-    } else {
-        mono_lines(&text)
-    }
-}
-
-/// The estimated height of one tool row, detail included when shown. The
-/// detail's closing margin is not counted here: it belongs to the gap the
-/// next row is seated on, not to the box.
-fn tool_height(session: &Session, ix: usize, ui: &UiState) -> Pixels {
-    let Some(TranscriptItem::ToolCall(call)) = session.items.get(ix) else {
-        return px(ROW_H);
-    };
-    let shown = ui.expanded.contains(&RowKey::Item(ix)) || live_shell_tail(call);
-    if !shown {
-        return px(ROW_H);
-    }
-    px(ROW_H + DETAIL_TOP + DETAIL_HEAD_H + detail_line_count(call) as f32 * DETAIL_LINE)
-}
-
-/// The estimated height of one model row, top spacing included.
-fn row_height(session: &Session, prev: Option<&Row>, row: &Row, ui: &UiState) -> Pixels {
-    let content = match row {
-        Row::User { ix, .. } => {
-            let text = user_text(session, *ix);
-            18.0 + text_lines(&text) as f32 * LINE
-        }
-        Row::Assistant { ix, .. } => item_lines(session, *ix) as f32 * LINE,
-        Row::Thinking { ix, expanded, .. } => {
-            let mut height = ROW_H;
-            if *expanded {
-                height += DETAIL_TOP + item_lines(session, *ix) as f32 * THINK_LINE;
-            }
-            height
-        }
-        Row::Tool { ix, .. } => f32::from(tool_height(session, *ix, ui)),
-        Row::Group {
-            members, expanded, ..
-        } => {
-            let mut height = ROW_H;
-            if *expanded {
-                for ix in members {
-                    height += f32::from(tool_height(session, *ix, ui));
-                }
-            }
-            height
-        }
-        Row::TurnEnd { .. } => 17.0,
-        Row::Notice { ix } => item_lines(session, *ix) as f32 * LINE,
-        Row::Compaction { .. } => 18.0,
-        Row::Plan { ix } => {
-            let entries = match session.items.get(*ix) {
-                Some(TranscriptItem::Plan { entries }) => entries.len(),
-                _ => 0,
-            };
-            ROW_H + 16.0 + entries as f32 * 26.0
-        }
-        Row::Decision { .. } => 18.0,
-    };
-    px(gap(prev, row) + content)
-}
-
-/// The text of the user or message item at `ix`, for estimates.
-fn item_lines(session: &Session, ix: usize) -> usize {
-    match session.items.get(ix) {
-        Some(TranscriptItem::Assistant { text } | TranscriptItem::Thinking { text }) => {
-            text_lines(text)
-        }
-        Some(TranscriptItem::Notice { text, .. }) => text_lines(text),
-        _ => 0,
-    }
-}
-
 /// The text of a prompt: its text blocks in order, a blank line apart.
 fn prompt_text(content: &[kage_client::wire::ContentBlock]) -> String {
     content
@@ -920,18 +813,12 @@ fn prompt_text(content: &[kage_client::wire::ContentBlock]) -> String {
         .join("\n\n")
 }
 
-fn user_text(session: &Session, ix: usize) -> String {
-    match session.items.get(ix) {
-        Some(TranscriptItem::User { content, .. }) => prompt_text(content),
-        _ => String::new(),
-    }
-}
-
 /// Builds the row model of one session over the view's UI state.
 ///
-/// Consecutive finished tool calls of one collapse family become one
-/// group row; a run that still has a pending or running member stays
-/// as plain rows, so a streaming call never hides in a closed group.
+/// Consecutive tool calls of one collapse family become one group row,
+/// across the turn boundaries between them, which render nothing; only
+/// the boundary that ends the run gets a row. A `todo_list` call is the
+/// todos row itself, so the plan update it produced is not drawn twice.
 fn row_model(session: &Session, ui: &UiState) -> RowModel {
     let items = &session.items;
     let last = items.len().saturating_sub(1);
@@ -943,54 +830,56 @@ fn row_model(session: &Session, ui: &UiState) -> RowModel {
             _ => None,
         };
         let Some(family) = family else {
-            rows.push(plain_row(session, index, ui, last));
+            if let Some(row) = plain_row(session, index, ui, last) {
+                rows.push(row);
+            }
             index += 1;
             continue;
         };
         let mut run = vec![index];
-        while let Some(TranscriptItem::ToolCall(call)) = items.get(index + run.len()) {
-            if family_of(&call.title) == Some(family) {
-                run.push(index + run.len());
-            } else {
-                break;
+        let mut next = index + 1;
+        while let Some(item) = items.get(next) {
+            match item {
+                TranscriptItem::ToolCall(call) if family_of(&call.title) == Some(family) => {
+                    run.push(next);
+                }
+                TranscriptItem::TurnEnd {
+                    reason: Some(TurnReason::ToolCalls),
+                } => {}
+                _ => break,
             }
+            next += 1;
         }
-        let all_ended = run.iter().all(|ix| {
-            matches!(
-                items[*ix],
-                TranscriptItem::ToolCall(ToolCallItem {
-                    status: ToolCallStatus::Completed,
-                    ..
-                })
-            )
-        });
-        if run.len() > 1 && all_ended {
-            let titles: Vec<&str> = run
+        // A trailing boundary belongs to the run only when another member
+        // followed it.
+        let end = run[run.len() - 1] + 1;
+        if run.len() > 1 {
+            let key = RowKey::Group(index);
+            let calls: Vec<&ToolCallItem> = run
                 .iter()
-                .map(|ix| match &items[*ix] {
-                    TranscriptItem::ToolCall(call) => call.title.as_str(),
-                    _ => "",
+                .filter_map(|ix| match &items[*ix] {
+                    TranscriptItem::ToolCall(call) => Some(call),
+                    _ => None,
                 })
                 .collect();
-            let failed = run
+            let titles: Vec<&str> = calls.iter().map(|call| call.title.as_str()).collect();
+            let failed = calls
                 .iter()
-                .filter(|ix| {
-                    matches!(
-                        items[**ix],
-                        TranscriptItem::ToolCall(ToolCallItem {
-                            status: ToolCallStatus::Failed,
-                            ..
-                        })
-                    )
-                })
+                .filter(|call| call.status == ToolCallStatus::Failed)
                 .count();
-            let key = RowKey::Group(index);
+            let running = calls.iter().any(|call| {
+                matches!(
+                    call.status,
+                    ToolCallStatus::Pending | ToolCallStatus::InProgress
+                )
+            });
             rows.push(Row::Group {
                 key,
-                label: group_label(family, &titles),
+                label: group_label(family, &titles, running),
                 family,
                 members: run.clone(),
                 failed,
+                running,
                 expanded: ui.expanded.contains(&key),
             });
             if ui.expanded.contains(&key) {
@@ -1003,37 +892,23 @@ fn row_model(session: &Session, ui: &UiState) -> RowModel {
                 }
             }
         } else {
-            for ix in &run {
-                rows.push(Row::Tool {
-                    ix: *ix,
-                    nested: false,
-                    expanded: ui.expanded.contains(&RowKey::Item(*ix)),
-                });
-            }
+            rows.push(Row::Tool {
+                ix: index,
+                nested: false,
+                expanded: ui.expanded.contains(&RowKey::Item(index)),
+            });
         }
-        index += run.len();
+        index = end;
     }
-    let mut prev: Option<&Row> = None;
-    let mut heights: Vec<Pixels> = rows
-        .iter()
-        .map(|row| {
-            let height = row_height(session, prev, row, ui);
-            prev = Some(row);
-            height
-        })
-        .collect();
-    if let Some(last) = rows.last()
-        && let Some(height) = heights.last_mut()
-    {
-        *height += px(margins(last).1);
-    }
-    RowModel { rows, heights }
+    RowModel { rows }
 }
 
-/// The row one non-grouped transcript item renders as.
-fn plain_row(session: &Session, ix: usize, ui: &UiState, last: usize) -> Row {
+/// The row one non-grouped transcript item renders as, if any: a turn
+/// boundary tool calls follow renders nothing, and neither does the
+/// plan update a `todo_list` call just produced.
+fn plain_row(session: &Session, ix: usize, ui: &UiState, last: usize) -> Option<Row> {
     let live = ix == last && session.running;
-    match &session.items[ix] {
+    Some(match &session.items[ix] {
         TranscriptItem::User { content, .. } => Row::User {
             ix,
             text: prompt_text(content),
@@ -1043,16 +918,17 @@ fn plain_row(session: &Session, ix: usize, ui: &UiState, last: usize) -> Row {
             ix,
             live,
             expanded: ui.expanded.contains(&RowKey::Item(ix)),
-            duration: ui.thinking.get(&ix).and_then(|(_, span)| *span),
         },
         TranscriptItem::ToolCall(_) => Row::Tool {
             ix,
             nested: false,
             expanded: ui.expanded.contains(&RowKey::Item(ix)),
         },
-        TranscriptItem::TurnEnd { reason } => Row::TurnEnd {
+        TranscriptItem::TurnEnd {
+            reason: Some(TurnReason::ToolCalls),
+        } => return None,
+        TranscriptItem::TurnEnd { .. } => Row::TurnEnd {
             ix,
-            tools_follow: *reason == Some(TurnReason::ToolCalls),
             outcome: if ix == last {
                 turn_outcome(session.last_stop)
             } else {
@@ -1061,24 +937,49 @@ fn plain_row(session: &Session, ix: usize, ui: &UiState, last: usize) -> Row {
         },
         TranscriptItem::Notice { .. } => Row::Notice { ix },
         TranscriptItem::Compaction { .. } => Row::Compaction { ix },
-        TranscriptItem::Plan { .. } => Row::Plan { ix },
+        TranscriptItem::Plan { .. } => {
+            // The update lands after the turn boundary the call's turn
+            // closed with, since the tool runs once the model is done.
+            let from_todo_tool = session.items[..ix]
+                .iter()
+                .rev()
+                .find(|item| {
+                    !matches!(
+                        item,
+                        TranscriptItem::TurnEnd {
+                            reason: Some(TurnReason::ToolCalls)
+                        }
+                    )
+                })
+                .is_some_and(|item| {
+                    matches!(item, TranscriptItem::ToolCall(call) if call.title == "todo_list")
+                });
+            if from_todo_tool {
+                return None;
+            }
+            Row::Plan { ix }
+        }
         TranscriptItem::Decision { .. } => Row::Decision { ix },
-    }
+    })
 }
 
 /// The middle panel.
 pub struct TranscriptView {
     store: Entity<Store>,
     composer: Entity<TextareaState>,
-    scroll: VirtualListScrollHandle,
+    /// The measured list the rows render in.
+    list: ListState,
     /// The row model this view renders, rebuilt per frame.
     model: Rc<RowModel>,
-    /// View-local expansion and thinking-timing state.
+    /// What each row of the list looked like when it was last laid out,
+    /// so a frame re-measures only the rows that changed.
+    signatures: Vec<u64>,
+    /// The expansion state of the session on screen.
     ui: UiState,
+    /// The expansion state of the other sessions, kept for their return.
+    stashed: HashMap<String, UiState>,
     /// The session the UI state belongs to.
     session_key: Option<String>,
-    /// Whether the list follows the bottom.
-    follow: bool,
     /// Per-row render counts since this session opened.
     render_counts: HashMap<RowKey, u32>,
     /// The find marks the find bar last set, tinting matching rows.
@@ -1097,23 +998,44 @@ impl TranscriptView {
         Self {
             store,
             composer,
-            scroll: VirtualListScrollHandle::new(),
+            list: following_list(),
             model: Rc::default(),
+            signatures: Vec::new(),
             ui: UiState::default(),
+            stashed: HashMap::new(),
             session_key: None,
-            follow: true,
             render_counts: HashMap::new(),
             find: None,
         }
     }
 
-    /// Recomputes whether the list still sits at the bottom, from the
-    /// scroll state of the last completed frame.
-    fn sync_follow(&mut self) {
-        let handle = self.scroll.base_handle();
-        let max = handle.max_offset().y;
-        let scrolled = -handle.offset().y;
-        self.follow = max <= px(FOLLOW_SLACK) || scrolled >= max - px(FOLLOW_SLACK);
+    /// Whether the list follows the bottom as rows arrive and grow.
+    #[must_use]
+    pub fn following(&self) -> bool {
+        self.list.is_following_tail()
+    }
+
+    /// Re-lays the rows whose signature moved since the last frame:
+    /// the span between the unchanged head and the unchanged tail.
+    fn sync_list(&mut self, signatures: Vec<u64>) {
+        let old = &self.signatures;
+        let head = old
+            .iter()
+            .zip(&signatures)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let tail = old[head..]
+            .iter()
+            .rev()
+            .zip(signatures[head..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let changed = old.len() - head - tail;
+        let fresh = signatures.len() - head - tail;
+        if changed > 0 || fresh > 0 {
+            self.list.splice(head..head + changed, fresh);
+        }
+        self.signatures = signatures;
     }
 
     /// Marks one row's detail, body or nested list expanded or collapsed.
@@ -1159,8 +1081,8 @@ impl TranscriptView {
         let Some(ix) = self.model.rows.iter().position(|row| row.key() == key) else {
             return;
         };
-        self.follow = false;
-        self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+        self.list.scroll_to_reveal_item(ix);
+        self.list.pause_following_tail();
         cx.notify();
     }
 
@@ -1178,27 +1100,6 @@ impl TranscriptView {
             return;
         };
         self.scroll_to_row(RowKey::Item(ix), cx);
-    }
-
-    /// Records the thinking spans the view observes, so an ended
-    /// thinking row can say how long it streamed. A span starts when
-    /// the item is the streaming tail and freezes when it stops; a
-    /// body that arrived complete, as a loaded history does, shows no
-    /// duration.
-    fn observe_thinking(&mut self, streaming: &[usize], last: usize, running: bool) {
-        for ix in streaming {
-            let live = *ix == last && running;
-            if live {
-                self.ui
-                    .thinking
-                    .entry(*ix)
-                    .or_insert((Instant::now(), None));
-            } else if let Some(span) = self.ui.thinking.get_mut(ix)
-                && span.1.is_none()
-            {
-                span.1 = Some(span.0.elapsed());
-            }
-        }
     }
 
     /// The dismissible banner the gate report raises.
@@ -1252,7 +1153,9 @@ impl TranscriptView {
         last: bool,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let session = self.store.read(cx).active_session();
+        let store = self.store.read(cx);
+        let session = store.active_session();
+        let times = session.and_then(|session| store.timings(&session.id));
         let element = match row {
             Row::User { ix, text } => self.render_user(*ix, text, cx).into_any_element(),
             Row::Assistant { ix, live } => match session.and_then(|s| s.items.get(*ix)) {
@@ -1261,43 +1164,60 @@ impl TranscriptView {
                     .into_any_element(),
                 _ => blank_row(*ix).into_any_element(),
             },
-            Row::Thinking {
-                ix,
-                live,
-                expanded,
-                duration,
-            } => match session.and_then(|s| s.items.get(*ix)) {
+            Row::Thinking { ix, live, expanded } => match session.and_then(|s| s.items.get(*ix)) {
                 Some(TranscriptItem::Thinking { text }) => self
-                    .render_thinking(*ix, text, *live, *expanded, *duration, cx)
+                    .render_thinking(
+                        *ix,
+                        text,
+                        *live,
+                        *expanded,
+                        times.and_then(|t| t.thinking(*ix)),
+                        cx,
+                    )
                     .into_any_element(),
                 _ => blank_row(*ix).into_any_element(),
             },
             Row::Tool { ix, nested, .. } => {
                 let first_nested = matches!(prev, Some(Row::Group { .. }));
                 match session.and_then(|s| s.items.get(*ix)) {
+                    Some(TranscriptItem::ToolCall(call))
+                        if call.status == ToolCallStatus::Completed
+                            && let Some(todos) = todos_of_call(call) =>
+                    {
+                        render_todos(
+                            *ix,
+                            &todos,
+                            self.ui.expanded.contains(&RowKey::Item(*ix)),
+                            cx,
+                        )
+                        .into_any_element()
+                    }
                     Some(TranscriptItem::ToolCall(call)) => self
-                        .render_tool(*ix, call, *nested, first_nested, cx)
+                        .render_tool(
+                            *ix,
+                            call,
+                            *nested,
+                            first_nested,
+                            times.and_then(|t| t.tool(&call.tool_call_id)),
+                            cx,
+                        )
                         .into_any_element(),
                     _ => blank_row(*ix).into_any_element(),
                 }
             }
-            Row::Group {
-                key,
-                label,
-                family,
-                members: _,
-                failed,
-                expanded,
-            } => self
-                .render_group(*key, label, *family, *failed, *expanded, cx)
-                .into_any_element(),
-            Row::TurnEnd {
-                ix,
-                tools_follow,
-                outcome,
-            } => self
-                .render_turn_end(*ix, *tools_follow, *outcome, cx)
-                .into_any_element(),
+            Row::Group { .. } => self.render_group(row, cx).into_any_element(),
+            Row::TurnEnd { ix, outcome } => match session {
+                Some(session) => self
+                    .render_turn_end(
+                        session,
+                        *ix,
+                        *outcome,
+                        times.and_then(|t| t.run_end(*ix)),
+                        cx,
+                    )
+                    .into_any_element(),
+                None => blank_row(*ix).into_any_element(),
+            },
             Row::Notice { ix } => match session.and_then(|s| s.items.get(*ix)) {
                 Some(TranscriptItem::Notice { tone, text }) => {
                     render_notice(*ix, *tone, text, cx).into_any_element()
@@ -1313,9 +1233,13 @@ impl TranscriptView {
                 _ => blank_row(*ix).into_any_element(),
             },
             Row::Plan { ix } => match session.and_then(|s| s.items.get(*ix)) {
-                Some(TranscriptItem::Plan { entries }) => {
-                    render_plan(*ix, entries, cx).into_any_element()
-                }
+                Some(TranscriptItem::Plan { entries }) => render_todos(
+                    *ix,
+                    &todos_of_plan(entries),
+                    self.ui.expanded.contains(&RowKey::Item(*ix)),
+                    cx,
+                )
+                .into_any_element(),
                 _ => blank_row(*ix).into_any_element(),
             },
             Row::Decision { ix } => match session.and_then(|s| s.items.get(*ix)) {
@@ -1446,8 +1370,8 @@ impl TranscriptView {
         };
         let mut head = h_flex()
             .id("head")
-            .w_full()
             .min_h(px(ROW_H))
+            .ml(px(-SP_3))
             .px(px(SP_3))
             .py(px(SP_1))
             .gap(px(SP_4))
@@ -1516,6 +1440,7 @@ impl TranscriptView {
         call: &ToolCallItem,
         nested: bool,
         first_nested: bool,
+        took: Option<Duration>,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let theme = cx.theme().colors;
@@ -1549,8 +1474,9 @@ impl TranscriptView {
         };
         let mut head = h_flex()
             .id("head")
-            .w_full()
+            .when(nested, |head| head.w_full())
             .min_h(px(ROW_H))
+            .when(!nested, |head| head.ml(px(-SP_3)))
             .pl(px(if nested { SP_5 } else { SP_3 }))
             .pr(px(SP_3))
             .py(px(SP_1))
@@ -1598,6 +1524,15 @@ impl TranscriptView {
                 ink.danger_soft,
                 mono.clone(),
             ));
+        }
+        if let Some(took) = took {
+            meta = meta.child(
+                div()
+                    .font_family(mono.clone())
+                    .text_size(px(FS_2XS))
+                    .text_color(ink.faint)
+                    .child(crate::clock::span(took)),
+            );
         }
         head = head.child(meta);
         if diff.is_some() || !output.is_empty() {
@@ -1653,15 +1588,21 @@ impl TranscriptView {
     }
 
     /// A collapsed run of same-family tool calls.
-    fn render_group(
-        &self,
-        key: RowKey,
-        label: &str,
-        family: Family,
-        failed: usize,
-        expanded: bool,
-        cx: &Context<Self>,
-    ) -> Stateful<Div> {
+    fn render_group(&self, row: &Row, cx: &Context<Self>) -> Stateful<Div> {
+        let Row::Group {
+            key,
+            label,
+            family,
+            failed,
+            running,
+            expanded,
+            ..
+        } = row
+        else {
+            return blank_row(0);
+        };
+        let (key, family, failed, running, expanded) =
+            (*key, *family, *failed, *running, *expanded);
         let theme = cx.theme().colors;
         let mono = cx.theme().mono_font_family.clone();
         let ink = crate::theme::Palette::active(cx);
@@ -1675,8 +1616,8 @@ impl TranscriptView {
         };
         let mut head = h_flex()
             .id("head")
-            .w_full()
             .min_h(px(ROW_H))
+            .ml(px(-SP_3))
             .px(px(SP_3))
             .py(px(SP_1))
             .gap(px(SP_4))
@@ -1685,11 +1626,19 @@ impl TranscriptView {
             .cursor_pointer()
             .text_size(px(FS_SM))
             .hover(move |style| style.bg(theme.list_hover))
-            .child(icon(group_icon, theme.muted_foreground))
+            .child(if running {
+                spinner(theme.primary, group_ix).into_any_element()
+            } else {
+                icon(group_icon, theme.muted_foreground).into_any_element()
+            })
             .child(
                 div()
                     .whitespace_nowrap()
-                    .text_color(theme.foreground)
+                    .text_color(if running {
+                        ink.ink_strong
+                    } else {
+                        theme.foreground
+                    })
                     .child(SharedString::from(label.to_owned())),
             )
             .on_click(move |_, _, cx| {
@@ -1718,28 +1667,32 @@ impl TranscriptView {
             .child(head)
     }
 
-    /// A turn boundary with its stop outcome, when the session knows one.
+    /// The end of a run: when it ended and how long it ran, when this
+    /// client watched it, the stop outcome, and the run's actions on
+    /// hover.
     fn render_turn_end(
         &self,
+        session: &Session,
         ix: usize,
-        tools_follow: bool,
         outcome: Option<Outcome>,
+        end: Option<RunEnd>,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let theme = cx.theme().colors;
         let mono = cx.theme().mono_font_family.clone();
         let ink = crate::theme::Palette::active(cx);
-        let why = if tools_follow {
-            "turn ended, tools follow"
-        } else {
-            "turn ended"
-        };
         let mut row = h_flex()
             .gap(px(SP_4))
             .items_center()
+            .min_h(px(TURN_END_H))
             .text_size(px(FS_2XS))
-            .text_color(ink.faint)
-            .child(why);
+            .text_color(ink.faint);
+        if let Some(end) = end {
+            row = row
+                .child(crate::clock::time_of_day(end.at))
+                .child("\u{b7}")
+                .child(crate::clock::span(end.took));
+        }
         if let Some(outcome) = outcome {
             row = row.child(match outcome {
                 Outcome::Interrupted => chip(
@@ -1756,10 +1709,44 @@ impl TranscriptView {
                 ),
             });
         }
+        let (prompt, reply) = run_texts(session, ix);
+        let composer = self.composer.clone();
+        let store = self.store.clone();
+        let mut actions = h_flex()
+            .gap(px(SP_1))
+            .opacity(0.)
+            .group_hover("turn-end", |style| style.opacity(1.));
+        if !reply.is_empty() {
+            actions = actions.child(
+                Clipboard::new(ElementId::named_usize("copy-turn", ix))
+                    .value(reply)
+                    .tooltip("Copy response"),
+            );
+        }
+        if let Some(prompt) = prompt {
+            actions = actions.child(
+                Button::new(ElementId::named_usize("retry-turn", ix))
+                    .icon(IconName::RefreshCw)
+                    .xsmall()
+                    .ghost()
+                    .tooltip("Retry")
+                    .on_click(move |_, window, cx| {
+                        let accepted = store.act(cx, |store| store.submit(&prompt).is_some());
+                        if !accepted {
+                            let text = prompt.clone();
+                            composer.update(cx, |state, cx| {
+                                state.set_value(&text, window, cx);
+                                state.focus(window, cx);
+                            });
+                        }
+                    }),
+            );
+        }
         div()
             .id(ElementId::named_usize("row-turn-end", ix))
+            .group("turn-end")
             .w_full()
-            .child(row)
+            .child(row.child(actions))
     }
 
     /// The placeholder shown while the session has nothing to show.
@@ -1780,6 +1767,28 @@ impl TranscriptView {
             .text_color(theme.muted_foreground)
             .child(text)
     }
+}
+
+/// The prompt that started the run ending at `end`, and the reply text
+/// the run produced, for the turn-end actions.
+fn run_texts(session: &Session, end: usize) -> (Option<String>, String) {
+    let start = session.items[..end]
+        .iter()
+        .rposition(|item| matches!(item, TranscriptItem::User { steered: false, .. }));
+    let prompt = start.and_then(|ix| match &session.items[ix] {
+        TranscriptItem::User { content, .. } => Some(prompt_text(content)),
+        _ => None,
+    });
+    let reply = session.items[start.map_or(0, |ix| ix + 1)..end]
+        .iter()
+        .filter_map(|item| match item {
+            TranscriptItem::Assistant { text } => Some(text.trim()),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (prompt.filter(|text| !text.is_empty()), reply)
 }
 
 /// An empty row, shown only when the model names an item that is gone.
@@ -1855,40 +1864,112 @@ fn render_compaction(
         .child(rule())
 }
 
-/// The plan over the entries the update carried: one activity row and
-/// the boxed todo list under it.
-fn render_plan(
+/// Where one todo stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TodoState {
+    /// Not started.
+    Pending,
+    /// The one in progress.
+    Running,
+    /// Finished.
+    Done,
+    /// Given up on.
+    Failed,
+}
+
+/// One todo of a todos row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Todo {
+    text: String,
+    state: TodoState,
+}
+
+/// The todos of an ACP plan update: `content` and `status` per entry.
+fn todos_of_plan(entries: &[serde_json::Value]) -> Vec<Todo> {
+    entries
+        .iter()
+        .map(|entry| Todo {
+            text: entry
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            state: match entry.get("status").and_then(serde_json::Value::as_str) {
+                Some("completed") => TodoState::Done,
+                Some("in_progress") => TodoState::Running,
+                _ => TodoState::Pending,
+            },
+        })
+        .collect()
+}
+
+/// The todos a `todo_list` call wrote: `title` and `status` per entry.
+fn todos_of_call(call: &ToolCallItem) -> Option<Vec<Todo>> {
+    if call.title != "todo_list" {
+        return None;
+    }
+    let todos = call.input.as_ref()?.get("todos")?.as_array()?;
+    Some(
+        todos
+            .iter()
+            .map(|todo| Todo {
+                text: todo
+                    .get("title")
+                    .or_else(|| todo.get("content"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                state: match todo.get("status").and_then(serde_json::Value::as_str) {
+                    Some("done" | "completed") => TodoState::Done,
+                    Some("in_progress") => TodoState::Running,
+                    Some("failed") => TodoState::Failed,
+                    _ => TodoState::Pending,
+                },
+            })
+            .collect(),
+    )
+}
+
+/// The todos row: Updated todos, the one in progress or all done, the
+/// done count, and the list when expanded.
+fn render_todos(
     ix: usize,
-    entries: &[serde_json::Value],
+    todos: &[Todo],
+    expanded: bool,
     cx: &Context<TranscriptView>,
 ) -> Stateful<Div> {
     let theme = cx.theme().colors;
     let mono = cx.theme().mono_font_family.clone();
     let ink = crate::theme::Palette::active(cx);
-    let done = entries
+    let view = cx.entity();
+    let done = todos
         .iter()
-        .filter(|entry| {
-            entry.get("status").and_then(serde_json::Value::as_str) == Some("completed")
-        })
+        .filter(|todo| todo.state == TodoState::Done)
         .count();
-    let current = entries
+    let complete = done == todos.len() && !todos.is_empty();
+    let current = todos
         .iter()
-        .find(|entry| {
-            entry.get("status").and_then(serde_json::Value::as_str) == Some("in_progress")
-        })
-        .and_then(|entry| entry.get("content"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    let complete = done == entries.len() && !entries.is_empty();
+        .find(|todo| todo.state == TodoState::Running)
+        .map(|todo| todo.text.clone())
+        .unwrap_or_default();
     let head = h_flex()
-        .w_full()
+        .id("head")
         .min_h(px(ROW_H))
+        .ml(px(-SP_3))
         .px(px(SP_3))
         .py(px(SP_1))
         .gap(px(SP_4))
         .items_center()
+        .rounded(px(R_SM))
+        .cursor_pointer()
         .text_size(px(FS_SM))
         .hover(move |style| style.bg(theme.list_hover))
+        .on_click(move |_, _, cx| {
+            view.update(cx, |this, cx| {
+                this.toggle(RowKey::Item(ix));
+                cx.notify();
+            });
+        })
         .child(icon(IconName::ListTodo, theme.muted_foreground))
         .child(
             div()
@@ -1906,12 +1987,12 @@ fn render_plan(
                 .child(SharedString::from(if complete {
                     "all done".to_owned()
                 } else {
-                    current.to_owned()
+                    current
                 })),
         )
         .child(
             chip(
-                format!("{done}/{}", entries.len()),
+                format!("{done}/{}", todos.len()),
                 if complete {
                     theme.success
                 } else {
@@ -1925,27 +2006,33 @@ fn render_plan(
                 mono.clone(),
             )
             .ml_auto(),
-        );
+        )
+        .child(chevron(expanded, ink.faint));
+    let mut row = div()
+        .id(ElementId::named_usize("row-plan", ix))
+        .w_full()
+        .flex()
+        .flex_col()
+        .child(head);
+    if !expanded {
+        return row;
+    }
     let mut list = v_flex().pt(px(SP_3)).px(px(SP_5)).pb(px(10.));
-    for (entry_ix, entry) in entries.iter().enumerate() {
-        let status = entry
-            .get("status")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        let text = entry
-            .get("content")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        let (lead, text_color) = match status {
-            "completed" => (
+    for (todo_ix, todo) in todos.iter().enumerate() {
+        let (lead, text_color) = match todo.state {
+            TodoState::Done => (
                 icon(IconName::CircleCheck, theme.success).into_any_element(),
                 theme.muted_foreground,
             ),
-            "in_progress" => (
-                spinner(theme.primary, ix * 1000 + entry_ix).into_any_element(),
+            TodoState::Running => (
+                spinner(theme.primary, ix * 1000 + todo_ix).into_any_element(),
                 theme.secondary_foreground,
             ),
-            _ => (
+            TodoState::Failed => (
+                icon(IconName::CircleX, theme.danger).into_any_element(),
+                theme.danger,
+            ),
+            TodoState::Pending => (
                 icon(IconName::Circle, ink.ghost).into_any_element(),
                 theme.foreground,
             ),
@@ -1957,29 +2044,24 @@ fn render_plan(
             .text_size(px(FS_SM))
             .text_color(text_color)
             .child(div().mt(px(3.)).child(lead))
-            .child(SharedString::from(text.to_owned()));
-        if status == "completed" {
+            .child(SharedString::from(todo.text.clone()));
+        if todo.state == TodoState::Done {
             line = line.line_through();
         }
         list = list.child(line);
     }
-    div()
-        .id(ElementId::named_usize("row-plan", ix))
-        .w_full()
-        .flex()
-        .flex_col()
-        .child(head)
-        .child(
-            div()
-                .mt(px(SP_2))
-                .ml(px(DETAIL_INDENT))
-                .border_1()
-                .border_color(theme.border)
-                .rounded(px(R_LG))
-                .bg(theme.muted)
-                .overflow_hidden()
-                .child(list),
-        )
+    row = row.child(
+        div()
+            .mt(px(SP_2))
+            .ml(px(DETAIL_INDENT))
+            .border_1()
+            .border_color(theme.border)
+            .rounded(px(R_LG))
+            .bg(theme.muted)
+            .overflow_hidden()
+            .child(list),
+    );
+    row
 }
 
 /// The one-line record of an answered permission ask: what the ask
@@ -2159,28 +2241,19 @@ impl Render for TranscriptView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.store.read(cx).active_id().map(str::to_owned);
         if active != self.session_key {
+            let left = std::mem::take(&mut self.ui);
+            if let Some(key) = self.session_key.take() {
+                self.stashed.insert(key, left);
+            }
+            self.ui = active
+                .as_ref()
+                .and_then(|key| self.stashed.remove(key))
+                .unwrap_or_default();
             self.session_key = active;
-            self.ui = UiState::default();
             self.render_counts.clear();
             self.find = None;
-            self.follow = true;
-        }
-        let observed = self.store.read(cx).active_session().map(|session| {
-            (
-                session.items.len(),
-                session
-                    .items
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(ix, item)| {
-                        matches!(item, TranscriptItem::Thinking { .. }).then_some(ix)
-                    })
-                    .collect::<Vec<_>>(),
-                session.running,
-            )
-        });
-        if let Some((len, streaming, running)) = observed {
-            self.observe_thinking(&streaming, len.saturating_sub(1), running);
+            self.list = following_list();
+            self.signatures.clear();
         }
         let model = {
             let session = self.store.read(cx).active_session();
@@ -2189,70 +2262,54 @@ impl Render for TranscriptView {
                 None => Rc::default(),
             }
         };
-        if self.follow && !model.rows.is_empty() {
-            self.scroll
-                .scroll_to_item(model.rows.len() - 1, ScrollStrategy::Top);
-        }
+        let signatures = match self.store.read(cx).active_session() {
+            Some(session) => signatures(session, &model.rows),
+            None => Vec::new(),
+        };
+        self.sync_list(signatures);
         self.model = model.clone();
         let count = model.rows.len();
-        let sizes: Rc<Vec<Size<Pixels>>> = Rc::new(
-            model
-                .heights
-                .iter()
-                .map(|height| size(px(0.), *height))
-                .collect(),
-        );
         let banner = self.banner(cx);
-        let scroll = self.scroll.clone();
-        let follow = self.follow;
+        let follow = self.following();
         let colors = cx.theme().colors;
 
         let mut panel = v_flex().id("transcript").size_full().min_h_0();
         if let Some(banner) = banner {
             panel = panel.child(banner);
         }
+        let view = cx.entity().downgrade();
         panel.child(if count > 0 {
             div()
                 .flex_1()
                 .min_h_0()
                 .relative()
                 .overflow_hidden()
-                .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                    let was = this.follow;
-                    this.sync_follow();
-                    if was != this.follow {
-                        cx.notify();
-                    }
-                }))
+                .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
                 .child(
-                    v_virtual_list(
-                        cx.entity(),
-                        "transcript-rows",
-                        sizes,
-                        move |this, range, _, cx| {
+                    list(self.list.clone(), move |ix, _window, cx| {
+                        view.update(cx, |this, cx| {
                             let model = this.model.clone();
-                            let last_ix = model.rows.len().saturating_sub(1);
-                            range
-                                .map(|ix| {
-                                    let row = &model.rows[ix];
-                                    *this.render_counts.entry(row.key()).or_insert(0) += 1;
-                                    let prev = ix.checked_sub(1).and_then(|p| model.rows.get(p));
-                                    let element = this.render_row(ix, row, prev, ix == last_ix, cx);
-                                    match this.row_tint(row.key(), colors) {
-                                        Some(tint) => div()
-                                            .id(ElementId::named_usize("find-hit", ix))
-                                            .test_support()
-                                            .w_full()
-                                            .bg(tint)
-                                            .child(element)
-                                            .into_any_element(),
-                                        None => element,
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                        },
-                    )
-                    .track_scroll(&scroll),
+                            let Some(row) = model.rows.get(ix) else {
+                                return div().into_any_element();
+                            };
+                            *this.render_counts.entry(row.key()).or_insert(0) += 1;
+                            let prev = ix.checked_sub(1).and_then(|p| model.rows.get(p));
+                            let last = ix + 1 == model.rows.len();
+                            let element = this.render_row(ix, row, prev, last, cx);
+                            match this.row_tint(row.key(), colors) {
+                                Some(tint) => div()
+                                    .id(ElementId::named_usize("find-hit", ix))
+                                    .test_support()
+                                    .w_full()
+                                    .bg(tint)
+                                    .child(element)
+                                    .into_any_element(),
+                                None => element,
+                            }
+                        })
+                        .unwrap_or_else(|_| div().into_any_element())
+                    })
+                    .size_full(),
                 )
                 .when(!follow, |area| {
                     area.child(
@@ -2261,9 +2318,7 @@ impl Render for TranscriptView {
                                 .label("Jump to latest")
                                 .small()
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.follow = true;
-                                    let last = this.model.rows.len().saturating_sub(1);
-                                    this.scroll.scroll_to_item(last, ScrollStrategy::Top);
+                                    this.list.set_follow_mode(FollowMode::Tail);
                                     cx.notify();
                                 })),
                         ),
@@ -2273,6 +2328,67 @@ impl Render for TranscriptView {
         } else {
             self.placeholder(cx).into_any_element()
         })
+    }
+}
+
+/// A list that starts at the bottom and follows it.
+fn following_list() -> ListState {
+    let list = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW));
+    list.set_follow_mode(FollowMode::Tail);
+    list
+}
+
+/// One signature per row: what decides its laid-out height. A row whose
+/// signature is unchanged keeps its measurement.
+fn signatures(session: &Session, rows: &[Row]) -> Vec<u64> {
+    use std::hash::{Hash as _, Hasher as _};
+
+    let last = rows.len().saturating_sub(1);
+    rows.iter()
+        .enumerate()
+        .map(|(ix, row)| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            format!("{row:?}").hash(&mut hasher);
+            let prev = ix.checked_sub(1).and_then(|p| rows.get(p));
+            gap(prev, row).to_bits().hash(&mut hasher);
+            (ix == last).hash(&mut hasher);
+            let members: &[usize] = match row {
+                Row::Group { members, .. } => members,
+                _ => &[],
+            };
+            match row.key() {
+                RowKey::Item(item) => item_fingerprint(session, item, &mut hasher),
+                RowKey::Group(_) => {
+                    for item in members {
+                        item_fingerprint(session, *item, &mut hasher);
+                    }
+                }
+            }
+            hasher.finish()
+        })
+        .collect()
+}
+
+/// Hashes what of one item can change its row's height.
+fn item_fingerprint(session: &Session, ix: usize, hasher: &mut impl std::hash::Hasher) {
+    use std::hash::Hash as _;
+
+    match session.items.get(ix) {
+        Some(TranscriptItem::Assistant { text } | TranscriptItem::Thinking { text }) => {
+            text.len().hash(hasher);
+        }
+        Some(TranscriptItem::User { content, .. }) => content.len().hash(hasher),
+        Some(TranscriptItem::ToolCall(call)) => {
+            format!("{:?}", call.status).hash(hasher);
+            call.content.len().hash(hasher);
+            call.text().len().hash(hasher);
+            call.raw_output.is_some().hash(hasher);
+            call.input.as_ref().map(ToString::to_string).hash(hasher);
+        }
+        Some(TranscriptItem::Notice { text, .. }) => text.hash(hasher),
+        Some(TranscriptItem::Plan { entries }) => format!("{entries:?}").hash(hasher),
+        Some(item) => format!("{item:?}").hash(hasher),
+        None => {}
     }
 }
 
@@ -2338,13 +2454,6 @@ mod tests {
         ToolCallContent::Content(MessageChunk {
             content: ContentBlock::text(text),
         })
-    }
-
-    #[test]
-    fn text_wraps_and_counts_breaks() {
-        assert_eq!(super::text_lines("one line"), 1);
-        assert_eq!(super::text_lines("two\nlines"), 2);
-        assert_eq!(super::text_lines(&"x".repeat(200)), 3);
     }
 
     #[test]
@@ -2618,7 +2727,6 @@ mod tests {
         let session = session_with(vec![read("1"), read("2"), read("3")]);
         let ui = UiState {
             expanded: HashSet::from([RowKey::Group(0)]),
-            thinking: std::collections::HashMap::new(),
         };
         let model = row_model(&session, &ui);
         assert_eq!(model.kinds(), vec!["group", "tool", "tool", "tool"]);
@@ -2635,7 +2743,7 @@ mod tests {
     }
 
     #[test]
-    fn a_streaming_tool_row_never_hides_in_a_closed_group() {
+    fn a_run_with_a_running_member_groups_under_a_running_label() {
         let read = |status| {
             call(
                 "r",
@@ -2653,10 +2761,51 @@ mod tests {
             read(ToolCallStatus::InProgress),
         ]);
         let model = row_model(&session, &UiState::default());
+        assert_eq!(model.kinds(), vec!["group"]);
+        assert!(matches!(
+            &model.rows[0],
+            Row::Group { running: true, label, .. } if label == "Read 3 files"
+        ));
+    }
+
+    #[test]
+    fn a_run_groups_across_the_turn_boundaries_between_its_calls() {
+        let shell = |id: &str| {
+            call(
+                id,
+                "shell",
+                ToolKind::Execute,
+                ToolCallStatus::Completed,
+                Vec::new(),
+                None,
+                Some(serde_json::json!({"command": "ls"})),
+            )
+        };
+        let boundary = || TranscriptItem::TurnEnd {
+            reason: Some(TurnReason::ToolCalls),
+        };
+        let session = session_with(vec![shell("a"), boundary(), shell("b"), boundary()]);
+        let model = row_model(&session, &UiState::default());
+        assert_eq!(model.kinds(), vec!["group"]);
+        assert!(matches!(
+            &model.rows[0],
+            Row::Group { members, label, .. } if members == &[0, 2] && label == "Ran 2 commands"
+        ));
+    }
+
+    #[test]
+    fn group_labels_capitalize_only_their_first_part() {
         assert_eq!(
-            model.kinds(),
-            vec!["tool", "tool", "tool"],
-            "an unfinished member keeps the run open"
+            super::group_label(
+                super::Family::Explore,
+                &["read", "grep", "ls", "read"],
+                false
+            ),
+            "Read 2 files, searched 1 pattern, listed 1 directory"
+        );
+        assert_eq!(
+            super::group_label(super::Family::Shell, &["shell", "shell"], true),
+            "Running 2 commands"
         );
     }
 
@@ -2686,7 +2835,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_end_rows_carry_the_reason_and_the_run_outcome() {
+    fn only_the_run_end_gets_a_row_and_it_carries_the_outcome() {
         let mut session = session_with(vec![
             TranscriptItem::TurnEnd {
                 reason: Some(TurnReason::ToolCalls),
@@ -2697,25 +2846,10 @@ mod tests {
         ]);
         session.last_stop = Some(kage_client::wire::StopReason::Cancelled);
         let model = row_model(&session, &UiState::default());
-        assert_eq!(model.kinds(), vec!["turn-end", "turn-end"]);
+        assert_eq!(model.kinds(), vec!["turn-end"], "tools followed the first");
         match &model.rows[0] {
-            Row::TurnEnd {
-                tools_follow,
-                outcome,
-                ..
-            } => {
-                assert!(tools_follow);
-                assert_eq!(*outcome, None, "only the final row speaks for the run");
-            }
-            other => panic!("expected a turn end, got {other:?}"),
-        }
-        match &model.rows[1] {
-            Row::TurnEnd {
-                tools_follow,
-                outcome,
-                ..
-            } => {
-                assert!(!tools_follow);
+            Row::TurnEnd { ix, outcome } => {
+                assert_eq!(*ix, 1);
                 assert_eq!(*outcome, Some(Outcome::Interrupted));
             }
             other => panic!("expected a turn end, got {other:?}"),
@@ -2793,21 +2927,22 @@ mod tests {
     }
 
     #[test]
-    fn heights_stay_variable_and_deterministic_per_row() {
-        let short = session_with(vec![TranscriptItem::TurnEnd { reason: None }]);
-        let long = session_with(vec![TranscriptItem::Assistant {
-            text: "a reply that runs across several\nlines of text".into(),
-        }]);
+    fn a_streaming_delta_moves_only_its_own_row_signature() {
+        let mut session = session_with(vec![
+            TranscriptItem::User {
+                content: vec![ContentBlock::text("go")],
+                steered: false,
+            },
+            TranscriptItem::Assistant { text: "a".into() },
+        ]);
         let ui = UiState::default();
-        let short_height = u32::from(row_model(&short, &ui).heights[0]);
-        let long_height = u32::from(row_model(&long, &ui).heights[0]);
-        assert!(short_height >= 24);
-        assert_ne!(short_height, long_height, "heights vary by content");
-        assert_eq!(
-            u32::from(row_model(&long, &ui).heights[0]),
-            long_height,
-            "deterministic"
-        );
+        let before = super::signatures(&session, &row_model(&session, &ui).rows);
+        session.items[1] = TranscriptItem::Assistant {
+            text: "a longer reply".into(),
+        };
+        let after = super::signatures(&session, &row_model(&session, &ui).rows);
+        assert_eq!(before[0], after[0], "the prompt row keeps its measurement");
+        assert_ne!(before[1], after[1], "the growing reply is measured again");
     }
 
     #[test]
@@ -2865,17 +3000,14 @@ mod tests {
             vec![
                 "user",
                 "tool",
-                "turn-end",
                 "thinking",
                 "assistant",
                 "tool",
                 "tool",
-                "plan",
-                "turn-end",
                 "assistant",
                 "turn-end",
             ],
-            "the recording has no consecutive same-family calls to group"
+            "boundaries tools follow render nothing, and the todo call is the plan"
         );
         let tools: Vec<(String, Vec<String>)> = model
             .rows
@@ -2902,7 +3034,10 @@ mod tests {
             "the fixture edit has no diff, so no chip"
         );
         assert!(tools[1].1.is_empty());
-        assert_eq!(tools[2].0, "todo_list", "unknown tools keep their name");
+        assert_eq!(
+            tools[2].0, "Updated todos",
+            "the todo call reads as its row"
+        );
         let outcomes: Vec<Option<Outcome>> = model
             .rows
             .iter()
@@ -2913,19 +3048,15 @@ mod tests {
             .collect();
         assert_eq!(
             outcomes,
-            vec![None, None, None],
+            vec![None],
             "the recording ended cleanly, so no chip"
         );
         assert!(
-            model.rows.iter().any(|row| matches!(
-                row,
-                Row::Thinking {
-                    live: false,
-                    duration: None,
-                    ..
-                }
-            )),
-            "a thinking body with no observed span shows no duration"
+            model
+                .rows
+                .iter()
+                .any(|row| matches!(row, Row::Thinking { live: false, .. })),
+            "the recorded thinking is done"
         );
     }
 
@@ -3068,14 +3199,8 @@ mod tests {
             .iter()
             .filter(|(key, count)| **count > before.get(*key).copied().unwrap_or(0))
             .count();
-        let row_height = visual.update(|_, cx| {
-            view.read(cx)
-                .model
-                .heights
-                .first()
-                .map(|height| f32::from(*height))
-                .unwrap_or(60.0)
-        });
+        // A two-line prompt bubble with its margin is well over 40px.
+        let row_height = 40.0;
         let viewport_rows = (viewport_height / row_height) as usize;
         assert!(
             grew <= viewport_rows + 4,
@@ -3104,7 +3229,7 @@ mod tests {
         });
         visual.update(|window, cx| window.draw(cx).clear(cx));
         assert!(
-            visual.update(|_, cx| view.read(cx).follow),
+            visual.update(|_, cx| view.read(cx).following()),
             "a fresh list follows the bottom"
         );
 
@@ -3134,7 +3259,7 @@ mod tests {
         });
         visual.update(|window, cx| window.draw(cx).clear(cx));
         assert!(
-            !visual.update(|_, cx| view.read(cx).follow),
+            !visual.update(|_, cx| view.read(cx).following()),
             "scrolling up stops the bottom follow"
         );
     }
@@ -3164,7 +3289,7 @@ mod tests {
                 window
                     .find(gpui_kit::ElementId::named_usize("row-decision", 0))
                     .label(),
-                Some("Reject shell shell \"use rustfmt first\""),
+                Some("Reject shell cargo test \"use rustfmt first\""),
                 "the decision row names the chosen label, the subject and the feedback"
             );
         });
@@ -3187,7 +3312,7 @@ mod tests {
         });
         visual.update(|window, cx| window.draw(cx).clear(cx));
         assert!(
-            visual.update(|_, cx| view.read(cx).follow),
+            visual.update(|_, cx| view.read(cx).following()),
             "a fresh list follows the bottom"
         );
         assert!(
@@ -3198,7 +3323,7 @@ mod tests {
         visual.update(|_, cx| view.update(cx, |view, cx| view.scroll_to_plan(cx)));
         visual.update(|window, cx| window.draw(cx).clear(cx));
         assert!(
-            !visual.update(|_, cx| view.read(cx).follow),
+            !visual.update(|_, cx| view.read(cx).following()),
             "jumping to the plan stops the bottom follow"
         );
         assert!(

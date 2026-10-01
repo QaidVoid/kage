@@ -189,12 +189,19 @@ local function script_for(prompt)
     end
   end
   -- A text-only step ends the turn, so in a combined script it rides
-  -- the next step's tool calls instead and the run keeps going.
+  -- the next step's tool calls instead, or joins the next reply, and
+  -- the run keeps going.
   local merged = {}
+  local function text_only(step)
+    return step and step.say and not step.tools and not step.plan and not step.error
+  end
   for i, step in ipairs(steps) do
     local next_step = steps[i + 1]
     local prev = merged[#merged]
-    if prev and prev.carry then
+    if text_only(prev) and not prev.carry and text_only(step) then
+      -- Two replies in a row are one reply: the first would end the run.
+      merged[#merged] = { think = prev.think or step.think, say = prev.say .. "\n\n" .. step.say }
+    elseif prev and prev.carry then
       merged[#merged] = { say = prev.say, think = step.think, tools = step.tools, plan = step.plan, error = step.error }
     else
       local carry = step.say and not step.tools and not step.plan and not step.error

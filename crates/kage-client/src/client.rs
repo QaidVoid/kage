@@ -1015,11 +1015,7 @@ fn decision_record(
     decision: &PermissionDecision,
     option_id: Option<&str>,
 ) -> TranscriptItem {
-    let subject = ask
-        .tool_call
-        .title
-        .clone()
-        .unwrap_or_else(|| ask.tool_call.tool_call_id.clone());
+    let subject = ask.subject();
     let chosen = option_id.and_then(|option_id| {
         ask.options
             .iter()

@@ -241,7 +241,24 @@ pub struct PermissionAsk {
     pub plan: Option<String>,
 }
 
+/// The tool input keys that name a call's primary argument, most
+/// specific first: what an ask and its decision are about.
+pub const SUBJECT_KEYS: [&str; 5] = ["command", "path", "pattern", "url", "description"];
+
 impl PermissionAsk {
+    /// What the ask is about: the primary argument of the tool input,
+    /// else the tool title, else the call id.
+    #[must_use]
+    pub fn subject(&self) -> String {
+        let input = self.tool_call.raw_input.as_ref();
+        SUBJECT_KEYS
+            .iter()
+            .find_map(|key| input?.get(*key)?.as_str())
+            .map(str::to_owned)
+            .or_else(|| self.tool_call.title.clone())
+            .unwrap_or_else(|| self.tool_call.tool_call_id.clone())
+    }
+
     /// The id of the first option of `kind`, when the ask offers one.
     #[must_use]
     pub fn option_of(&self, kind: PermissionOptionKind) -> Option<&str> {

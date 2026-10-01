@@ -58,10 +58,7 @@ use crate::store::{Store, StoreHandle as _};
 use crate::theme::{
     FONT_MONO, FS_2XS, FS_BASE, FS_XS, Palette, R_FULL, R_MD, R_XL, SP_3, SP_4, WEIGHT_SEMIBOLD,
 };
-
-/// The keys of a tool input that name its primary argument, most
-/// specific first.
-const SUBJECT_KEYS: [&str; 5] = ["command", "path", "pattern", "url", "description"];
+use kage_client::SUBJECT_KEYS;
 
 /// The success ring around a card: the design draws the success tint
 /// as a 4px spread shadow with no offset or blur.
@@ -760,7 +757,7 @@ mod tests {
             };
             assert_eq!(
                 (subject.as_str(), label.as_str(), *allowed),
-                ("shell", "Reject shell", false),
+                ("cargo test", "Reject shell", false),
             );
             assert_eq!(feedback.as_deref(), None);
         });
@@ -843,7 +840,7 @@ mod tests {
             };
             assert_eq!(
                 (subject.as_str(), label.as_str(), *allowed),
-                ("shell", "Reject shell", false),
+                ("cargo test", "Reject shell", false),
             );
             assert_eq!(feedback.as_deref(), Some("use rustfmt first"));
         });

@@ -3582,6 +3582,7 @@ name = "kage-desktop"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "chrono",
  "gpui-kit",
  "js-sys",
  "kage-client",

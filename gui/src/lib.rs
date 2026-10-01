@@ -17,6 +17,7 @@ pub mod gate;
 #[doc(hidden)]
 pub mod store;
 pub mod theme;
+pub mod timing;
 pub mod transport;
 pub mod views;
 

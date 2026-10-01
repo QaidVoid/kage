@@ -13,6 +13,7 @@ use kage_client::{Change, Client, Frame, PermissionAsk, PromptOutcome, Session, 
 use gpui_kit::{App, Entity};
 
 use crate::gate::{self, Report};
+use crate::timing::{SessionTimes, Timings};
 use crate::transport::{Link, State};
 
 /// Store mutations that queue frames or move state go through
@@ -74,6 +75,8 @@ pub struct Store {
     prompted: bool,
     /// The directory sessions open in.
     cwd: String,
+    /// What this client timed itself as frames arrived.
+    timings: Timings,
     /// What the transport connects to.
     link: Link,
     /// The session the transcript view follows. `None` is the welcome
@@ -115,6 +118,7 @@ impl Store {
             replay,
             prompted: false,
             cwd: cwd.into(),
+            timings: Timings::default(),
             link: Link::serve(""),
             active: None,
             pending_prompt: None,
@@ -148,6 +152,12 @@ impl Store {
         } else {
             Some(&self.cwd)
         }
+    }
+
+    /// What this client timed of session `id` as its frames arrived.
+    #[must_use]
+    pub fn timings(&self, id: &str) -> Option<&SessionTimes> {
+        self.timings.session(id)
     }
 
     /// The client state as the frames left it.
@@ -286,6 +296,14 @@ impl Store {
                     let cwd = (!self.cwd.is_empty()).then_some(self.cwd.as_str());
                     self.client.list_sessions(cwd, None);
                 }
+            }
+        }
+        let mut touched: Vec<&str> = changes.iter().filter_map(Change::session_id).collect();
+        touched.sort_unstable();
+        touched.dedup();
+        for id in touched {
+            if let Some(session) = self.client.state().session(id) {
+                self.timings.observe(session);
             }
         }
         for change in &changes {

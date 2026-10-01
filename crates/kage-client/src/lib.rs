@@ -27,7 +27,8 @@ pub use change::Change;
 pub use client::{Client, PermissionDecision, PromptOutcome, SteerError};
 pub use frame::{Frame, RpcError};
 pub use state::{
-    PermissionAsk, QueuedPrompt, Session, State, Subagent, ToolCallItem, TranscriptItem, Usage,
+    PermissionAsk, QueuedPrompt, SUBJECT_KEYS, Session, State, Subagent, ToolCallItem,
+    TranscriptItem, Usage,
 };
 
 pub use kage_acp_wire as wire;

@@ -424,7 +424,8 @@ impl App {
     /// agent loader. Their transcripts are not kept; opening one reads
     /// it again.
     fn restore_agents(&mut self, root: SessionId, messages: &[Arc<kage_core::Message>]) {
-        self.agents.restore(root, messages);
+        self.agents
+            .restore(root, messages.iter().map(AsRef::as_ref));
         let Some(load) = self.agent_loader.as_ref() else {
             return;
         };
@@ -442,7 +443,7 @@ impl App {
             let Some(own) = load(session) else {
                 continue;
             };
-            self.agents.restore(session, &own);
+            self.agents.restore(session, own.iter().map(AsRef::as_ref));
             pending.extend(
                 self.agents
                     .under(session)

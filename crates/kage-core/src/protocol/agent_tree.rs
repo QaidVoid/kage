@@ -7,7 +7,6 @@
 //! holds [`Instant`]s, so it lives in memory only and is never serialized.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::{Envelope, Event, HostEvent, RunOutcome, SessionId, SwarmMember, TokenUsage, Usage};
@@ -163,7 +162,11 @@ impl AgentTree {
     /// the wrapper's recorded stats; without a recorded time, an
     /// `agent` call falls back to the gap between the call and its
     /// result. Sessions already known are skipped.
-    pub fn restore(&mut self, parent: SessionId, messages: &[Arc<Message>]) {
+    pub fn restore<'a>(
+        &mut self,
+        parent: SessionId,
+        messages: impl IntoIterator<Item = &'a Message>,
+    ) {
         // Recorded calls: the task text, the call time and whether the
         // call was a `swarm` batch.
         let mut calls = HashMap::new();
@@ -644,7 +647,7 @@ mod tests {
         answered.ts = asked.ts + chrono::Duration::milliseconds(8_800);
 
         let mut tree = AgentTree::default();
-        tree.restore(parent, &[Arc::new(asked), Arc::new(answered)]);
+        tree.restore(parent, [&asked, &answered]);
         let rows: Vec<(SessionId, AgentState, &str)> = tree
             .under(parent)
             .into_iter()
@@ -692,7 +695,7 @@ mod tests {
             None,
         );
         let mut tree = AgentTree::default();
-        tree.restore(parent, &[Arc::new(asked), Arc::new(answered)]);
+        tree.restore(parent, [&asked, &answered]);
         let node = tree.get(child).unwrap();
         assert_eq!(node.tool_calls, 9);
         assert_eq!(node.usage.total.input, 120_000);
@@ -757,7 +760,7 @@ mod tests {
             None,
         );
         let mut tree = AgentTree::default();
-        tree.restore(parent, &[Arc::new(asked), Arc::new(answered)]);
+        tree.restore(parent, [&asked, &answered]);
         let members: Vec<(SessionId, u32, u32, String)> = tree
             .under(parent)
             .into_iter()

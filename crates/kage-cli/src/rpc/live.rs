@@ -15,15 +15,15 @@ use std::path::Path;
 
 use kage_acp::acp::{
     SessionConfigOption, SessionInfoUpdate, SessionUpdate, SubagentSessionCapabilities,
-    SubagentState, SubagentUpdate, ToolCallUpdate,
+    SubagentState, SubagentSwarm, SubagentUpdate, ToolCallUpdate,
 };
 use kage_acp::agent::{PromptContext, send_update};
 use kage_core::protocol::{
     AgentState, AgentTree, Command, CommandKind, EXIT_PLAN_TOOL, Envelope, Event, HostEvent,
-    NoticeLevel, RequestId, SwarmMember,
+    NoticeLevel, RequestId, RunOutcome, SwarmMember,
 };
 use kage_core::sync::lock;
-use kage_core::{LoopEvent, MessageId, SessionId, ToolCallId};
+use kage_core::{LoopError, LoopEvent, MessageId, SessionId, ToolCallId};
 use kage_jsonrpc::RpcError;
 
 use super::CliAcpAgent;
@@ -63,9 +63,20 @@ pub(super) struct SubagentSeed {
     pub(super) description: String,
     /// The parent's call that started the agent.
     pub(super) tool_call_id: String,
-    /// Where the agent already ended: the state to announce. `None`
-    /// leaves the client reading it as running.
-    pub(super) ended: Option<SubagentState>,
+    /// The state to announce: running, paused, or where it ended.
+    pub(super) state: SubagentState,
+    /// Why a paused agent paused.
+    pub(super) reason: Option<String>,
+    /// Swarm batch membership, when a `swarm` call started it.
+    pub(super) swarm: Option<SwarmMember>,
+}
+
+impl SubagentSeed {
+    /// Whether the agent still runs or will again, so the bridge keeps
+    /// streaming it.
+    pub(super) fn live(&self) -> bool {
+        matches!(self.state, SubagentState::Running | SubagentState::Paused)
+    }
 }
 
 /// An open permission request with the call it reports under.
@@ -99,6 +110,9 @@ pub(super) struct Seed {
     pub(super) seen: HashMap<String, super::bridge::SeenCall>,
     /// Running subagents the bridge streams and settles.
     pub(super) running: HashSet<SessionId>,
+    /// The running ones paused for a rate limit, which report running
+    /// again when their next run starts.
+    pub(super) paused: HashSet<SessionId>,
 }
 
 /// One `agent` call Live recorded, enough to rebuild its tree node.
@@ -183,6 +197,9 @@ pub(super) struct Live {
     spawns: HashMap<SessionId, Vec<Spawn>>,
     /// Agent sessions announced and not ended yet.
     running: HashSet<SessionId>,
+    /// Agents waiting out a rate limit before their next run, with the
+    /// reason they gave.
+    paused: HashMap<SessionId, String>,
     owners: HashMap<SessionId, u64>,
     working: HashSet<SessionId>,
     /// Connections holding each session open.
@@ -201,6 +218,7 @@ impl Live {
             tree: AgentTree::default(),
             spawns: HashMap::new(),
             running: HashSet::new(),
+            paused: HashMap::new(),
             owners: HashMap::new(),
             working: HashSet::new(),
             attached: HashMap::new(),
@@ -289,7 +307,22 @@ impl Live {
                     self.maybe_close(session);
                 }
             }
-            HostEvent::RunEnded { .. } => {
+            HostEvent::AgentPaused { reason } => {
+                self.paused.insert(session, reason.clone());
+            }
+            HostEvent::RunStarted => {
+                self.paused.remove(&session);
+            }
+            HostEvent::RunEnded { outcome } => {
+                let requeued = matches!(
+                    outcome,
+                    RunOutcome::Failed {
+                        error: LoopError::RateLimited { .. }
+                    }
+                );
+                if !requeued {
+                    self.paused.remove(&session);
+                }
                 self.flight.remove(&session);
                 self.owners.remove(&session);
                 self.running.remove(&session);
@@ -421,15 +454,18 @@ impl Live {
             .under(attached)
             .into_iter()
             .map(|(_, node)| {
-                let ended = if self.running.contains(&node.session) {
-                    None
+                let reason = self.paused.get(&node.session).cloned();
+                let state = if reason.is_some() {
+                    SubagentState::Paused
+                } else if self.running.contains(&node.session) {
+                    SubagentState::Running
                 } else {
-                    Some(match node.state {
+                    match node.state {
                         AgentState::Done => SubagentState::Completed,
                         AgentState::Failed => SubagentState::Failed,
                         AgentState::Cancelled => SubagentState::Cancelled,
                         AgentState::Queued | AgentState::Running => SubagentState::Running,
-                    })
+                    }
                 };
                 SubagentSeed {
                     session: node.session,
@@ -437,7 +473,9 @@ impl Live {
                     agent: node.agent.clone(),
                     description: node.description.clone(),
                     tool_call_id: node.tool_call_id.to_string(),
-                    ended,
+                    state,
+                    reason,
+                    swarm: node.swarm.clone(),
                 }
             })
             .collect();
@@ -553,6 +591,7 @@ impl CliAcpAgent {
             for update in super::sessions::replay_updates(&replay.history) {
                 ctx.update(update);
             }
+            self.announce_restored(id, &replay.history, ctx);
         }
         // The turn in flight, unless the file already holds its message.
         let mut seen = HashMap::new();
@@ -625,11 +664,18 @@ impl CliAcpAgent {
                 kind,
             );
         }
+        let paused = snap
+            .subagents
+            .iter()
+            .filter(|seed| seed.state == SubagentState::Paused)
+            .map(|seed| seed.session)
+            .collect();
         lock(&self.seeds).push(Seed {
             session: id,
             spawns: snap.spawns,
             seen,
             running,
+            paused,
         });
         self.host.attach(id, false);
         Ok(())
@@ -657,13 +703,24 @@ impl CliAcpAgent {
                     subagent_session_id: seed.session.to_string(),
                     name: Some(seed.agent.clone()),
                     task: Some(seed.description.clone()),
-                    capabilities: Some(SubagentSessionCapabilities { cancel: true }),
-                    state: seed.ended,
+                    capabilities: Some(SubagentSessionCapabilities {
+                        cancel: seed.live(),
+                    }),
+                    state: Some(seed.state),
+                    swarm: seed.swarm.as_ref().map(|member| SubagentSwarm {
+                        id: member
+                            .batch
+                            .as_ref()
+                            .map_or_else(|| seed.tool_call_id.clone(), ToString::to_string),
+                        item: member.item.clone(),
+                        index: member.index,
+                        total: member.total,
+                    }),
+                    reason: seed.reason.clone(),
                     tool_call_id: Some(seed.tool_call_id.clone()),
-                    ..SubagentUpdate::default()
                 }),
             );
-            if seed.ended.is_none() {
+            if seed.live() {
                 running.insert(seed.session);
                 lock(&self.ids)
                     .subagents

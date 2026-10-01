@@ -1,7 +1,7 @@
 //! Listing, loading and resuming recorded sessions.
 
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -9,8 +9,10 @@ use kage_acp::acp::{
     ContentBlock, ListSessionsRequest, ListSessionsResponse, McpServer, PromptRef,
     SessionConfigOption, SessionExportResponse, SessionForkRequest, SessionForkResponse,
     SessionInfo, SessionInfoKage, SessionInfoMeta, SessionInfoUpdate, SessionUpdate,
+    SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate,
 };
-use kage_acp::agent::PromptContext;
+use kage_acp::agent::{PromptContext, send_update};
+use kage_core::protocol::{AgentNode, AgentState, AgentTree};
 use kage_core::sync::lock;
 use kage_core::{Content, LoopEvent, Message, MessageId, Role, SessionId, ToolOutput};
 use kage_jsonrpc::RpcError;
@@ -58,6 +60,7 @@ impl super::CliAcpAgent {
                 for update in replay_updates(&replay.history) {
                     ctx.update(update);
                 }
+                self.announce_restored(id, &replay.history, ctx);
                 if let Some(title) = replay.title {
                     ctx.update(SessionUpdate::SessionInfoUpdate(SessionInfoUpdate {
                         title: Some(title),
@@ -80,6 +83,7 @@ impl super::CliAcpAgent {
             for update in replay_updates(&replay.history) {
                 ctx.update(update);
             }
+            self.announce_restored(id, &replay.history, ctx);
             if let Some(title) = replay.title {
                 ctx.update(SessionUpdate::SessionInfoUpdate(SessionInfoUpdate {
                     title: Some(title),
@@ -131,6 +135,7 @@ impl super::CliAcpAgent {
             for update in replay_updates(&replay.history) {
                 ctx.update(update);
             }
+            self.announce_restored(replay.header.session, &replay.history, ctx);
             if let Some(title) = replay.title {
                 ctx.update(SessionUpdate::SessionInfoUpdate(SessionInfoUpdate {
                     title: Some(title),
@@ -140,6 +145,25 @@ impl super::CliAcpAgent {
         }
         lock(&self.ids).read_only.insert(client_id.to_owned());
         Ok(Vec::new())
+    }
+
+    /// Announces the finished agents the recorded session `root`
+    /// started, at every depth: `root`'s own through `ctx`, deeper ones
+    /// on the session of the agent that started them.
+    pub(super) fn announce_restored(
+        &self,
+        root: SessionId,
+        history: &[Message],
+        ctx: &PromptContext,
+    ) {
+        for (parent, update) in restored_subagents(&self.host.sessions, root, history) {
+            let update = SessionUpdate::SubagentUpdate(update);
+            if parent == root {
+                ctx.update(update);
+            } else {
+                send_update(&self.peer, &parent.to_string(), update);
+            }
+        }
     }
 
     /// The file of the recorded session `client_id` names.
@@ -214,6 +238,72 @@ fn prompt_text(message: &Message) -> &str {
             _ => None,
         })
         .unwrap_or_default()
+}
+
+/// The subagent updates that rebuild the finished agents of the
+/// recorded session `root`: the ones its `history` started, then each
+/// agent's own from that agent's file in `dir`, parents first. Each
+/// comes with the session whose call started it. The records come
+/// from the `<agent>` and `<swarm>` results the engine wrote, so they
+/// survive a restart.
+pub(super) fn restored_subagents(
+    dir: &Path,
+    root: SessionId,
+    history: &[Message],
+) -> Vec<(SessionId, SubagentUpdate)> {
+    let mut tree = AgentTree::default();
+    tree.restore(root, history);
+    let mut pending: Vec<SessionId> = tree
+        .under(root)
+        .into_iter()
+        .map(|(_, node)| node.session)
+        .collect();
+    let mut seen = HashSet::new();
+    while let Some(session) = pending.pop() {
+        if !seen.insert(session) {
+            continue;
+        }
+        let Ok(replay) = kage_session::replay(&crate::build_session_path(dir, session)) else {
+            continue;
+        };
+        tree.restore(session, &replay.history);
+        pending.extend(
+            tree.under(session)
+                .into_iter()
+                .map(|(_, node)| node.session),
+        );
+    }
+    tree.under(root)
+        .into_iter()
+        .map(|(_, node)| (node.parent, restored_update(node)))
+        .collect()
+}
+
+/// The announcement of a finished agent rebuilt from a stored result.
+fn restored_update(node: &AgentNode) -> SubagentUpdate {
+    SubagentUpdate {
+        subagent_session_id: node.session.to_string(),
+        name: Some(node.agent.clone()),
+        task: Some(node.description.clone()),
+        capabilities: Some(SubagentSessionCapabilities { cancel: false }),
+        state: Some(match node.state {
+            AgentState::Done => SubagentState::Completed,
+            AgentState::Failed => SubagentState::Failed,
+            AgentState::Cancelled => SubagentState::Cancelled,
+            AgentState::Queued | AgentState::Running => SubagentState::Running,
+        }),
+        swarm: node.swarm.as_ref().map(|member| SubagentSwarm {
+            id: member
+                .batch
+                .as_ref()
+                .map_or_else(|| node.tool_call_id.to_string(), ToString::to_string),
+            item: member.item.clone(),
+            index: member.index,
+            total: member.total,
+        }),
+        reason: None,
+        tool_call_id: Some(node.tool_call_id.to_string()),
+    }
 }
 
 /// The `session/update`s that show `history` as the live bridge showed

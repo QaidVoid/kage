@@ -414,6 +414,7 @@ impl Bridge {
             }
             self.seen.insert(seed.session, seed.seen);
             self.streaming.extend(seed.running);
+            self.paused.extend(seed.paused);
         }
     }
 

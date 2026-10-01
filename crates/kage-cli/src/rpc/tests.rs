@@ -4245,7 +4245,7 @@ fn a_late_subagent_client_hears_of_a_running_agent_and_its_ask() {
     assert_eq!(announced["update"]["name"], "general");
     assert_eq!(announced["update"]["task"], "list files");
     assert_eq!(announced["update"]["capabilities"]["cancel"], true);
-    assert!(announced["update"].get("state").is_none());
+    assert_eq!(announced["update"]["state"], "running");
     let (re_asked, params) = until_ask(&c2.inbox, &mut Vec::new());
     assert_eq!(params["sessionId"], child);
     assert_eq!(params["toolCall"]["toolCallId"], "call_agent");
@@ -4507,4 +4507,103 @@ fn an_agent_session_loads_to_read_and_refuses_prompts() {
         .map(|(id, _)| id.to_string())
         .collect();
     assert!(!hosted.contains(&child), "{hosted:?}");
+}
+
+#[test]
+fn loading_a_session_rebuilds_its_agents_at_every_depth() {
+    let dir = tempfile::tempdir().unwrap();
+    let task = |prompt: &str| serde_json::json!({"description": prompt, "prompt": prompt});
+    let h = serve_agents(
+        vec![
+            tool_turn("call_outer", "agent", task("outer")),
+            tool_turn("call_inner", "agent", task("inner")),
+            text_turn("inner done"),
+            text_turn("outer done"),
+            text_turn("parent done"),
+        ],
+        dir.path(),
+        dir.path(),
+        AgentSetup {
+            max_depth: 2,
+            ..default_agents()
+        },
+    );
+    initialize(&h.client);
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+    prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    drain(&h.inbox);
+    h.client
+        .request("session/close", serde_json::json!({"sessionId": h.session}))
+        .unwrap();
+
+    let cwd = dir.path().display().to_string();
+    let params = serde_json::json!({"sessionId": h.session, "cwd": cwd, "mcpServers": []});
+    h.client.request("session/load", params).unwrap();
+    let updates: Vec<serde_json::Value> = drain(&h.inbox)
+        .into_iter()
+        .filter(|p| p["update"]["sessionUpdate"] == "subagent_update")
+        .collect();
+    let outer = updates
+        .iter()
+        .find(|p| p["update"]["toolCallId"] == "call_outer")
+        .expect("the outer agent comes back");
+    assert_eq!(outer["sessionId"], h.session);
+    assert_eq!(outer["update"]["state"], "completed");
+    assert_eq!(outer["update"]["name"], "general");
+    assert_eq!(outer["update"]["task"], "outer");
+    let outer_id = outer["update"]["subagentSessionId"].clone();
+    let inner = updates
+        .iter()
+        .find(|p| p["update"]["toolCallId"] == "call_inner")
+        .expect("the inner agent comes back from the outer one's file");
+    assert_eq!(inner["sessionId"], outer_id, "announced on its parent");
+    assert_eq!(inner["update"]["state"], "completed");
+}
+
+#[test]
+fn a_client_attaching_mid_swarm_hears_each_members_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().display().to_string();
+    let h = serve_agents(
+        vec![
+            tool_turn("call_s", "swarm", swarm_input(&["a", "b"])),
+            tool_turn("call_a", "ls", serde_json::json!({ "path": path })),
+            text_turn("a done"),
+            text_turn("b done"),
+            text_turn("parent done"),
+        ],
+        dir.path(),
+        dir.path(),
+        AgentSetup {
+            max_running: 1,
+            ..default_agents()
+        },
+    );
+    initialize(&h.client);
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+    let (ask, _) = until_ask(&h.inbox, &mut Vec::new());
+
+    let c2 = connect(&h.host);
+    initialize(&c2.client);
+    let cwd = dir.path().display().to_string();
+    let params = serde_json::json!({"sessionId": h.session, "cwd": cwd, "mcpServers": []});
+    c2.client.request("session/load", params).unwrap();
+    let mut seeds = updates_until(&c2.inbox, &h.session, "subagent_update");
+    seeds.extend(drain(&c2.inbox));
+    let items: Vec<(serde_json::Value, serde_json::Value)> = seeds
+        .iter()
+        .filter(|p| p["update"]["sessionUpdate"] == "subagent_update")
+        .map(|p| {
+            (
+                p["update"]["swarm"]["item"].clone(),
+                p["update"]["swarm"]["index"].clone(),
+            )
+        })
+        .collect();
+    assert!(items.contains(&("a".into(), 0.into())), "{seeds:#?}");
+    assert!(items.contains(&("b".into(), 1.into())), "{seeds:#?}");
+
+    allow(&h.client, &ask);
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
 }

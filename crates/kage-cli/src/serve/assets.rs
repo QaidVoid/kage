@@ -24,10 +24,16 @@ use std::time::Duration;
 /// glue and the module are all same-origin (`script-src 'self'`), and
 /// `'wasm-unsafe-eval'` is the minimum WebAssembly compilation needs;
 /// styles come from same-origin sheets, images from same-origin or
-/// data URLs, and the WebSocket dial is `connect-src 'self'`.
+/// data URLs, and the WebSocket dial is `connect-src 'self'`. The four
+/// hashes admit the exact `style` attributes of the GPUI web
+/// platform's safe-area probes, one per edge, and nothing else.
 pub(crate) const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self' \
-     'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self'; \
-     base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+     'wasm-unsafe-eval'; style-src 'self' 'unsafe-hashes' \
+     'sha256-f7k/zkE0F5tLJydN2gyZQ4AOODzhaXhLLMp11FaIh5k=' \
+     'sha256-tUiyeK8Byfwc/oNxmI63Upo8EZy+Z4dQfKT3FPt4Qq4=' \
+     'sha256-MnlFZhszarHl/R/A2EWXa+4M/Hs8g3j+PBNaIrrscZ8=' \
+     'sha256-KVR0sJO9NDObqCUVDwC9L9fIyWNaULEbUQPAXIyMyx4='; img-src 'self' data:; \
+     connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /// How long a rejected asset connection may take to collect its reply
 /// before the socket is dropped.

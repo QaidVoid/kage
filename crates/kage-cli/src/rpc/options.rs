@@ -171,26 +171,26 @@ const MODES: [(&str, Option<PermissionAction>, &str, &str); 4] = [
     (
         "default",
         None,
-        "Default",
-        "The configured permission rules decide",
+        "Ask When Needed",
+        "Built-in tools run unless a config rule says otherwise; MCP tools ask",
     ),
     (
         "ask",
         Some(PermissionAction::Ask),
-        "Ask",
-        "Ask before every tool call",
+        "Always Ask",
+        "Every tool call needs your approval first, reads included",
     ),
     (
         "allow",
         Some(PermissionAction::Allow),
-        "Allow",
-        "Run every tool call without asking",
+        "Never Ask",
+        "Everything runs without asking; only configured denies refuse",
     ),
     (
         "deny",
         Some(PermissionAction::Deny),
-        "Deny",
-        "Refuse every tool call",
+        "Deny All",
+        "Every tool call is refused, reads included",
     ),
 ];
 

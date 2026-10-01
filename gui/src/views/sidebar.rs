@@ -106,6 +106,8 @@ struct RowItem {
     state: RowState,
     active: bool,
     project: SharedString,
+    /// The directory the session works in.
+    dir: Option<String>,
     /// Whether the session works in swarm mode.
     swarm: bool,
     /// Whether it moved since the user last looked.
@@ -497,6 +499,7 @@ impl Render for SidebarView {
                 state: row_state(session),
                 active,
                 project: crate::app::project_name(session.cwd.as_deref()),
+                dir: session.cwd.clone(),
                 swarm: swarm_on(session),
                 unread: store.is_unread(id),
                 parent: store.fork_parent(id).map(str::to_owned),
@@ -514,6 +517,7 @@ impl Render for SidebarView {
                 state: RowState::Idle,
                 active: store.active_id() == Some(info.session_id.as_str()),
                 project: crate::app::project_name(Some(&info.cwd)),
+                dir: Some(info.cwd.clone()),
                 swarm: false,
                 unread: false,
                 parent: store.fork_parent(&info.session_id).map(str::to_owned),
@@ -602,6 +606,7 @@ impl Render for SidebarView {
                         })
                         .child({
                             let store = store.clone();
+                            let dir = members.iter().find_map(|item| item.dir.clone());
                             div()
                                 .id(SharedString::from(format!("proj-add-{project}")))
                                 .size(px(22.))
@@ -615,7 +620,10 @@ impl Render for SidebarView {
                                 .tooltip(|window, cx| Tooltip::new("New session").build(window, cx))
                                 .child(Icon::new(IconName::Plus).with_size(px(13.)))
                                 .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    let dir = dir.clone();
                                     store.update(cx, |store, cx| {
+                                        store.set_project(dir);
                                         store.show_welcome();
                                         cx.notify();
                                     });

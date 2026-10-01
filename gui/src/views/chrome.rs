@@ -1345,6 +1345,12 @@ pub struct WelcomeView {
     /// otherwise reach an engine still holding its construction font; see
     /// [`crate::views::deferred`].
     fill_mirror: Deferred,
+    /// The dialog layer, for picking a folder by path.
+    dialog: Entity<crate::views::dialog::DialogView>,
+    /// Whether the project picker shows.
+    project_open: bool,
+    /// Where the project chip sits, recorded as it prepaints.
+    chip_bounds: std::rc::Rc<std::cell::Cell<Option<gpui_kit::Bounds<gpui_kit::Pixels>>>>,
 }
 
 impl WelcomeView {
@@ -1353,6 +1359,7 @@ impl WelcomeView {
         store: Entity<Store>,
         composer: Entity<TextareaState>,
         composer_view: Entity<crate::views::composer::ComposerView>,
+        dialog: Entity<crate::views::dialog::DialogView>,
         composer_laid_out: LaidOut,
     ) -> Self {
         Self {
@@ -1360,7 +1367,160 @@ impl WelcomeView {
             composer,
             composer_view,
             fill_mirror: Deferred::after(composer_laid_out),
+            dialog,
+            project_open: false,
+            chip_bounds: std::rc::Rc::default(),
         }
+    }
+
+    /// Picks the folder the next session opens in: the platform's
+    /// folder dialog natively, a path typed into a dialog in the
+    /// browser, which has no picker for the server's files, or when no
+    /// platform picker answers.
+    fn open_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.project_open = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let chosen = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: false,
+                prompt: Some("Open folder".into()),
+            });
+            cx.spawn_in(window, async move |this, cx| {
+                let picked = match chosen.await {
+                    Ok(Ok(Some(paths))) => paths.first().map(|path| path.display().to_string()),
+                    // No platform picker answered: type the path instead.
+                    Ok(Err(_)) => {
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            this.dialog.update(cx, |dialog, cx| {
+                                dialog.open(
+                                    crate::views::dialog::DialogKind::OpenFolder,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        });
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(path) = picked {
+                    let _ = this.update(cx, |this, cx| {
+                        this.store
+                            .update(cx, |store, _| store.set_project(Some(path)));
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+        }
+        #[cfg(target_arch = "wasm32")]
+        self.dialog.update(cx, |dialog, cx| {
+            dialog.open(crate::views::dialog::DialogKind::OpenFolder, window, cx);
+        });
+        cx.notify();
+    }
+
+    /// The project picker's rows: every directory a session worked in,
+    /// most recent first, then the folder action.
+    fn project_menu(&self, cx: &Context<Self>) -> impl IntoElement {
+        let p = crate::theme::Palette::active(cx);
+        let store = self.store.read(cx);
+        let current = store.session_dir().map(str::to_owned);
+        let this = cx.entity();
+        let mut menu = v_flex().w(px(320.)).p(px(5.)).child(
+            div()
+                .px(px(9.))
+                .pt(px(6.))
+                .pb(px(3.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(FS_2XS))
+                .text_color(p.faint)
+                .child("PROJECT"),
+        );
+        for dir in store.projects().into_iter().take(8) {
+            let checked = current.as_deref() == Some(dir.as_str());
+            let pick = this.clone();
+            let chosen = dir.clone();
+            menu = menu.child(
+                h_flex()
+                    .id(SharedString::from(format!("project-{dir}")))
+                    .px(px(9.))
+                    .py(px(7.))
+                    .gap(px(10.))
+                    .items_center()
+                    .rounded(px(R_MD))
+                    .cursor_pointer()
+                    .hover(move |row| row.bg(p.selected))
+                    .on_click(move |_, _, cx| {
+                        let chosen = chosen.clone();
+                        pick.update(cx, |this, cx| {
+                            this.project_open = false;
+                            this.store
+                                .update(cx, |store, _| store.set_project(Some(chosen)));
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        Icon::new(IconName::Folder)
+                            .with_size(px(14.))
+                            .text_color(p.muted),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(FS_SM))
+                                    .text_color(p.ink)
+                                    .child(crate::app::project_name(Some(&dir))),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(FS_XS))
+                                    .text_color(p.faint)
+                                    .child(SharedString::from(dir.clone())),
+                            ),
+                    )
+                    .when(checked, |row| {
+                        row.child(
+                            Icon::new(IconName::Check)
+                                .with_size(px(14.))
+                                .text_color(p.accent),
+                        )
+                    }),
+            );
+        }
+        let open = this.clone();
+        menu.child(div().h(px(1.)).mx(px(2.)).my(px(4.)).bg(p.subtle))
+            .child(
+                h_flex()
+                    .id("project-open-folder")
+                    .px(px(9.))
+                    .py(px(7.))
+                    .gap(px(10.))
+                    .items_center()
+                    .rounded(px(R_MD))
+                    .cursor_pointer()
+                    .hover(move |row| row.bg(p.selected))
+                    .on_click(move |_, window, cx| {
+                        open.update(cx, |this, cx| this.open_folder(window, cx));
+                    })
+                    .child(
+                        Icon::new(IconName::Plus)
+                            .with_size(px(14.))
+                            .text_color(p.muted),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(FS_SM))
+                            .text_color(p.ink)
+                            .child("Open folder\u{2026}"),
+                    ),
+            )
     }
 
     /// The composer textarea the cards fill.
@@ -1483,12 +1643,61 @@ impl Render for WelcomeView {
             .bg(p.surface)
             .text_size(px(FS_SM))
             .text_color(p.ink)
+            .cursor_pointer()
+            .hover(move |chip| chip.bg(p.hover))
+            .on_prepaint({
+                let bounds = self.chip_bounds.clone();
+                move |at, _, _| bounds.set(Some(at))
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.project_open = !this.project_open;
+                cx.notify();
+            }))
             .child(
                 Icon::new(IconName::Folder)
                     .with_size(px(14.))
                     .text_color(p.muted),
             )
-            .child(project);
+            .child(project)
+            .child(
+                Icon::new(IconName::ChevronDown)
+                    .with_size(px(12.))
+                    .text_color(p.faint),
+            );
+        let project_menu = self
+            .chip_bounds
+            .get()
+            .filter(|_| self.project_open)
+            .map(|at| {
+                let close = cx.entity();
+                let mut surface = div()
+                    .occlude()
+                    .bg(p.bg)
+                    .border_1()
+                    .border_color(p.line)
+                    .rounded(px(R_LG))
+                    .overflow_hidden()
+                    .on_mouse_down_out(move |event, _, cx| {
+                        if at.contains(&event.position) {
+                            return;
+                        }
+                        close.update(cx, |this, cx| {
+                            this.project_open = false;
+                            cx.notify();
+                        });
+                    })
+                    .child(self.project_menu(cx));
+                surface.style().box_shadow = Some(p.shadow_menu.clone());
+                gpui_kit::deferred(
+                    gpui_kit::anchored()
+                        .anchor(gpui_kit::Anchor::TopLeft)
+                        .position(gpui_kit::point(at.left(), at.bottom() + px(6.)))
+                        .snap_to_window_with_margin(px(8.))
+                        .child(surface),
+                )
+                .with_priority(1)
+            });
+        let proj_picker = div().child(proj_picker).children(project_menu);
 
         // The wordmark: the kanji glyph over its hard offset shadow,
         // then the name, as the web client's `.wordmark` draws them.
@@ -2486,14 +2695,10 @@ mod tests {
         let cap = captured.clone();
         cx.update(gpui_kit::init);
         let (_, visual) = cx.add_window_view(move |window: &mut Window, cx| {
-            let composer_view = cx.new(|cx| {
-                ComposerView::new(
-                    store.clone(),
-                    cx.new(|cx| crate::views::dialog::DialogView::new(store.clone(), window, cx)),
-                    window,
-                    cx,
-                )
-            });
+            let dialog =
+                cx.new(|cx| crate::views::dialog::DialogView::new(store.clone(), window, cx));
+            let composer_view =
+                cx.new(|cx| ComposerView::new(store.clone(), dialog.clone(), window, cx));
             let composer = composer_view.read(cx).input().clone();
             let composer_laid_out = composer_view.read(cx).input_laid_out();
             let welcome = cx.new(|_| {
@@ -2501,6 +2706,7 @@ mod tests {
                     store.clone(),
                     composer.clone(),
                     composer_view.clone(),
+                    dialog.clone(),
                     composer_laid_out.clone(),
                 )
             });

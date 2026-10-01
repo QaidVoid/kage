@@ -35,6 +35,8 @@ pub enum DialogKind {
     ConfirmSwarm,
     /// Rewind the active session to before the prompt at this item.
     Rewind(usize),
+    /// Pick the directory the next session opens in, by path.
+    OpenFolder,
 }
 
 /// What a rewind to before a prompt drops from the session.
@@ -136,6 +138,9 @@ pub struct DialogView {
     /// The goal text, held until the dialog's field has been laid out;
     /// see [`crate::views::deferred`].
     goal_mirror: Deferred,
+    folder: Entity<InputState>,
+    /// The folder path, held like the goal text.
+    folder_mirror: Deferred,
 }
 
 impl Focusable for DialogView {
@@ -156,12 +161,21 @@ impl DialogView {
             }
         })
         .detach();
+        let folder = cx.new(|cx| InputState::new(window, cx).placeholder("/path/to/project"));
+        cx.subscribe_in(&folder, window, |this, _, event: &InputEvent, _, cx| {
+            if let InputEvent::PressEnter { .. } = event {
+                this.save_folder(cx);
+            }
+        })
+        .detach();
         Self {
             store,
             open: None,
             focus: cx.focus_handle(),
             goal,
             goal_mirror: Deferred::new(),
+            folder,
+            folder_mirror: Deferred::new(),
         }
     }
 
@@ -194,6 +208,14 @@ impl DialogView {
                 });
                 goal.update(cx, |state, cx| state.focus(window, cx));
             }
+            DialogKind::OpenFolder => {
+                let current = self.store.read(cx).session_dir().map(str::to_owned);
+                let folder = self.folder.clone();
+                self.folder_mirror.set(current.unwrap_or_default(), |text| {
+                    folder.update(cx, |state, cx| state.set_value(text, window, cx));
+                });
+                folder.update(cx, |state, cx| state.focus(window, cx));
+            }
             DialogKind::ConfirmSwarm | DialogKind::Rewind(_) => window.focus(&self.focus, cx),
         }
         cx.notify();
@@ -207,6 +229,12 @@ impl DialogView {
     fn save_goal(&mut self, cx: &mut Context<Self>) {
         let text = self.goal.read(cx).value().trim().to_owned();
         self.store.act(cx, |store| store.set_option("goal", &text));
+        self.close(cx);
+    }
+
+    fn save_folder(&mut self, cx: &mut Context<Self>) {
+        let path = self.folder.read(cx).value().trim().to_owned();
+        self.store.act(cx, |store| store.set_project(Some(path)));
         self.close(cx);
     }
 
@@ -429,6 +457,46 @@ impl DialogView {
         (IconName::Target, "Set a goal", body, foot)
     }
 
+    fn folder_body(
+        &self,
+        pal: &Palette,
+        cx: &Context<Self>,
+    ) -> (IconName, &'static str, AnyElement, AnyElement) {
+        let view = cx.entity();
+        let laid_out = self.folder_mirror.laid_out().flag();
+        let release = cx.entity().downgrade();
+        let body =
+            v_flex()
+                .gap(px(10.))
+                .child(div().text_size(px(FS_SM)).text_color(pal.muted).child(
+                    "A directory on the machine kage runs on. The next session opens there.",
+                ))
+                .child(
+                    div()
+                        .on_prepaint(move |_, _, cx| {
+                            laid_out.set(true);
+                            let _ = release.update(cx, |_, cx| cx.notify());
+                        })
+                        .child(Input::new(&self.folder)),
+                )
+                .into_any_element();
+        let cancel = view.clone();
+        let foot = h_flex()
+            .gap(px(8.))
+            .child(
+                kit::btn_sm("folder-cancel", BtnTone::Plain, pal)
+                    .on_click(move |_, _, cx| cancel.update(cx, |this, cx| this.close(cx)))
+                    .child("Cancel"),
+            )
+            .child(
+                kit::btn_sm("folder-open", BtnTone::Primary, pal)
+                    .on_click(move |_, _, cx| view.update(cx, |this, cx| this.save_folder(cx)))
+                    .child("Open"),
+            )
+            .into_any_element();
+        (IconName::FolderOpen, "Open folder", body, foot)
+    }
+
     fn swarm_body(
         &self,
         pal: &Palette,
@@ -492,6 +560,10 @@ impl Render for DialogView {
         self.goal_mirror.flush(|text| {
             goal.update(cx, |state, cx| state.set_value(text, window, cx));
         });
+        let folder = self.folder.clone();
+        self.folder_mirror.flush(|text| {
+            folder.update(cx, |state, cx| state.set_value(text, window, cx));
+        });
         let Some(kind) = self.open else {
             return div().into_any_element();
         };
@@ -500,9 +572,12 @@ impl Render for DialogView {
             DialogKind::Goal => self.goal_body(pal, cx),
             DialogKind::ConfirmSwarm => self.swarm_body(pal, cx),
             DialogKind::Rewind(prompt) => self.rewind_body(prompt, pal, cx),
+            DialogKind::OpenFolder => self.folder_body(pal, cx),
         };
         let (icon_fg, icon_bg) = match kind {
-            DialogKind::Goal | DialogKind::Rewind(_) => (pal.accent, pal.accent_soft),
+            DialogKind::Goal | DialogKind::Rewind(_) | DialogKind::OpenFolder => {
+                (pal.accent, pal.accent_soft)
+            }
             DialogKind::ConfirmSwarm => (pal.done, pal.done_soft),
         };
         let scrim_close = cx.entity();
@@ -512,7 +587,7 @@ impl Render for DialogView {
             .key_context("Dialog")
             .on_action(cx.listener(|this, _: &DialogClose, _, cx| this.close(cx)))
             .w(px(match kind {
-                DialogKind::Goal => 480.,
+                DialogKind::Goal | DialogKind::OpenFolder => 480.,
                 DialogKind::ConfirmSwarm => 460.,
                 DialogKind::Rewind(_) => 560.,
             }))

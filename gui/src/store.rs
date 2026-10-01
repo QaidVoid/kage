@@ -184,6 +184,9 @@ pub struct Store {
     prompted: bool,
     /// The directory sessions open in.
     cwd: String,
+    /// The project the user picked for the next new session, over
+    /// [`Store::cwd`].
+    project: Option<String>,
     /// What this client timed itself as frames arrived.
     timings: Timings,
     /// What the transport connects to.
@@ -254,6 +257,7 @@ impl Store {
             replay,
             prompted: false,
             cwd: cwd.into(),
+            project: None,
             timings: Timings::default(),
             link: Link::serve(""),
             active: None,
@@ -291,15 +295,53 @@ impl Store {
         &self.link
     }
 
-    /// The directory a new session opens in: the shell's own, or the
-    /// engine's when the shell has none, as in a browser.
+    /// The directory a new session opens in: the project the user
+    /// picked, else the shell's own, else the engine's when the shell
+    /// has none, as in a browser.
     #[must_use]
     pub fn session_dir(&self) -> Option<&str> {
+        if let Some(project) = &self.project {
+            return Some(project);
+        }
         if self.cwd.is_empty() {
             self.state().agent_cwd.as_deref()
         } else {
             Some(&self.cwd)
         }
+    }
+
+    /// Picks the directory the next new session opens in; `None` goes
+    /// back to the default.
+    pub fn set_project(&mut self, dir: Option<String>) {
+        self.project = dir.filter(|dir| !dir.trim().is_empty());
+    }
+
+    /// Every directory a recorded or open session works in, most
+    /// recently used first.
+    #[must_use]
+    pub fn projects(&self) -> Vec<String> {
+        let state = self.state();
+        let mut seen: Vec<(String, Option<String>)> = Vec::new();
+        let dirs =
+            state
+                .directory
+                .iter()
+                .map(|info| (info.cwd.clone(), info.updated_at.clone()))
+                .chain(state.sessions.values().filter_map(|session| {
+                    Some((session.cwd.clone()?, session.updated_at.clone()))
+                }));
+        for (dir, at) in dirs.filter(|(dir, _)| !dir.is_empty() && dir != ".") {
+            match seen.iter_mut().find(|(known, _)| *known == dir) {
+                Some((_, latest)) => {
+                    if at > *latest {
+                        *latest = at;
+                    }
+                }
+                None => seen.push((dir, at)),
+            }
+        }
+        seen.sort_by(|a, b| b.1.cmp(&a.1));
+        seen.into_iter().map(|(dir, _)| dir).collect()
     }
 
     /// What this client timed of session `id` as its frames arrived.
@@ -447,10 +489,9 @@ impl Store {
                     // The recorded sessions fill the sidebar's project
                     // groups, and a live connection lands on the
                     // welcome pane, the way the web client boots.
-                    // A browser knows no directory of its own, so it
-                    // lists every recorded session the server holds.
-                    let cwd = (!self.cwd.is_empty()).then_some(self.cwd.as_str());
-                    self.client.list_sessions(cwd, None);
+                    // Every project the engine recorded is listed,
+                    // the ones the TUI opened included.
+                    self.client.list_sessions(None, None);
                 }
             }
         }
@@ -598,7 +639,8 @@ impl Store {
 
     /// Opens a fresh session in the store's directory.
     pub fn new_session(&mut self) {
-        self.opening = Some(self.client.new_session(&self.cwd, &[]));
+        let dir = self.project.clone().unwrap_or_else(|| self.cwd.clone());
+        self.opening = Some(self.client.new_session(&dir, &[]));
     }
 
     /// Opens a fresh session to carry `text`, the prompt a welcome
@@ -745,8 +787,7 @@ impl Store {
     fn open_fork(&mut self, from: &str, to: &str) {
         let plan = self.forking.remove(from).unwrap_or(ForkPlan::Fork);
         self.forked.insert(to.to_owned(), (from.to_owned(), plan));
-        let listed = (!self.cwd.is_empty()).then(|| self.cwd.clone());
-        self.client.list_sessions(listed.as_deref(), None);
+        self.client.list_sessions(None, None);
         let cwd = self
             .state()
             .session(from)
@@ -832,8 +873,7 @@ impl Store {
             return;
         };
         self.client.close_session(&id);
-        let cwd = (!self.cwd.is_empty()).then(|| self.cwd.clone());
-        self.client.list_sessions(cwd.as_deref(), None);
+        self.client.list_sessions(None, None);
         self.show_welcome();
     }
 
@@ -1391,6 +1431,48 @@ mod tests {
         };
         assert_eq!(method, "session/list");
         assert!(params.get("cwd").is_none(), "no cwd filter: {params}");
+    }
+
+    #[test]
+    fn every_project_is_listed_and_one_can_be_picked() {
+        let mut store = Store::new("/w", false);
+        store.set_connect(State::Connected);
+        run_commands(&mut store);
+        let _ = store.take_outgoing();
+        store.absorb(init_answer(Some("0.1.0"), true, true));
+        let outgoing = store.take_outgoing();
+        let Frame::Request { id, method, params } = &outgoing[0] else {
+            panic!("expected the list, got {:?}", outgoing[0]);
+        };
+        assert_eq!(method, "session/list");
+        assert!(
+            params.get("cwd").is_none(),
+            "a shell with a directory lists all: {params}"
+        );
+        store.absorb(Frame::Success {
+            id: *id,
+            result: serde_json::json!({ "sessions": [
+                { "sessionId": "a", "cwd": "/a", "updatedAt": "2026-10-01T10:00:00Z" },
+                { "sessionId": "b", "cwd": "/b", "updatedAt": "2026-10-01T11:00:00Z" },
+                { "sessionId": "c", "cwd": ".", "updatedAt": "2026-10-01T12:00:00Z" },
+            ]}),
+        });
+        let _ = store.take_outgoing();
+        assert_eq!(
+            store.projects(),
+            ["/b", "/a"],
+            "newest first, no relative dirs"
+        );
+
+        store.set_project(Some("/a".into()));
+        assert_eq!(store.session_dir(), Some("/a"));
+        store.new_session();
+        let outgoing = store.take_outgoing();
+        let Frame::Request { method, params, .. } = &outgoing[0] else {
+            panic!("expected session/new, got {:?}", outgoing[0]);
+        };
+        assert_eq!(method, "session/new");
+        assert_eq!(params["cwd"], "/a");
     }
 
     /// Opens a session the way the shell does, answering its

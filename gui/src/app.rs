@@ -291,6 +291,7 @@ impl Shell {
                 store.clone(),
                 input.clone(),
                 composer.clone(),
+                dialog.clone(),
                 input_laid_out,
             )
         });

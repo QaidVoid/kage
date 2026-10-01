@@ -157,7 +157,7 @@ pub(crate) fn agent_facts(
         });
     // The final answer, or for an agent that never gave one the error
     // it ended on.
-    let result = child.filter(|_| !phase.live()).and_then(|child| {
+    let watched = child.filter(|_| !phase.live()).and_then(|child| {
         child.items.iter().rev().find_map(|item| match item {
             TranscriptItem::Assistant { text } => first_line(text),
             TranscriptItem::Notice {
@@ -166,6 +166,13 @@ pub(crate) fn agent_facts(
             } => first_line(text),
             _ => None,
         })
+    });
+    let result = watched.or_else(|| {
+        agent
+            .tool_call_id
+            .as_deref()
+            .filter(|_| !phase.live())
+            .and_then(|call| recorded_reply(parent, call, id))
     });
     AgentFacts {
         id: id.to_owned(),
@@ -195,6 +202,21 @@ pub(crate) fn agent_facts(
             .as_ref()
             .map(|swarm| (swarm.item.clone(), swarm.index)),
     }
+}
+
+/// The first line of the reply the parent's call `call_id` recorded for
+/// child `id`, read from the `<agent session="id" ...>` element of the
+/// call's result. A card shows it while the child's own transcript is
+/// not loaded.
+fn recorded_reply(parent: &Session, call_id: &str, id: &str) -> Option<String> {
+    let text = parent.items.iter().find_map(|item| match item {
+        TranscriptItem::ToolCall(call) if call.tool_call_id == call_id => Some(call.text()),
+        _ => None,
+    })?;
+    let at = text.find(&format!("session=\"{id}\""))?;
+    let body = &text[at..];
+    let body = &body[body.find('>')? + 1..];
+    first_line(body.split("</agent>").next()?)
 }
 
 /// The first non-empty line of `text`, without inline code ticks.
@@ -846,7 +868,46 @@ pub(crate) fn swarm_card(
 
 #[cfg(test)]
 mod tests {
-    use super::{hash, tokens};
+    use kage_client::wire::{
+        ContentBlock, MessageChunk, ToolCallContent, ToolCallStatus, ToolKind,
+    };
+    use kage_client::{Session, ToolCallItem, TranscriptItem};
+
+    use super::{hash, recorded_reply, tokens};
+
+    #[test]
+    fn a_card_reads_the_reply_its_call_recorded() {
+        let output = "completed: 2, failed: 0, cancelled: 0\n\
+            <swarm description=\"d\" item=\"a\">\n<agent name=\"general\" session=\"c1\" \
+            state=\"completed\" tools=\"1\">\nfirst `answer`\nmore\n</agent>\n</swarm>\n\
+            <swarm description=\"d\" item=\"b\">\n<agent name=\"general\" session=\"c2\" \
+            state=\"failed\" tools=\"0\">\n\nboom\n</agent>\n</swarm>";
+        let mut parent = Session::new("p");
+        parent.items.push(TranscriptItem::ToolCall(ToolCallItem {
+            tool_call_id: "call_s".into(),
+            title: "swarm".into(),
+            kind: ToolKind::Other,
+            status: ToolCallStatus::Completed,
+            input: None,
+            swarm: None,
+            content: vec![ToolCallContent::Content(MessageChunk {
+                content: ContentBlock::text(output),
+                meta: None,
+            })],
+            raw_output: None,
+            took_ms: None,
+        }));
+        assert_eq!(
+            recorded_reply(&parent, "call_s", "c1").as_deref(),
+            Some("first answer")
+        );
+        assert_eq!(
+            recorded_reply(&parent, "call_s", "c2").as_deref(),
+            Some("boom")
+        );
+        assert_eq!(recorded_reply(&parent, "call_s", "c3"), None);
+        assert_eq!(recorded_reply(&parent, "other", "c1"), None);
+    }
 
     #[test]
     fn token_counts_shorten_like_the_design() {

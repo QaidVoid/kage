@@ -8,9 +8,9 @@ use kage_acp::acp::{
     AvailableCommandsUpdate, CompactionUpdate, ConfigOptionUpdate, ContentBlock, Cost,
     CurrentModeUpdate, DiffContent, KageMeta, McpStatusUpdate, MessageChunk, NoticeTone,
     NoticeUpdate, Plan, SessionConfigSelectOption, SessionInfoUpdate, SessionUpdate,
-    SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate, SwarmMeta, ToolCall,
-    ToolCallContent, ToolCallMeta, ToolCallStatus, ToolCallUpdate, ToolKind, TurnPhase, TurnReason,
-    TurnUpdate, UsageUpdate,
+    SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate, SubagentUsage,
+    SwarmMeta, ToolCall, ToolCallContent, ToolCallMeta, ToolCallStatus, ToolCallUpdate, ToolKind,
+    TurnPhase, TurnReason, TurnUpdate, UsageUpdate,
 };
 use kage_acp::agent::{PermissionDecision, PlanReviewDecision, request_plan_review, send_update};
 use kage_core::protocol::{
@@ -21,7 +21,7 @@ use kage_core::protocol::{
 use kage_core::sync::lock;
 use kage_core::{
     CancelFlag, Content, LoopError, LoopEvent, Message, Role, SessionId,
-    StopReason as CoreStopReason, ToolCallId, ToolOutput,
+    StopReason as CoreStopReason, TokenUsage, ToolCallId, ToolOutput,
 };
 use kage_jsonrpc::Peer;
 
@@ -431,6 +431,28 @@ impl Bridge {
         send_update(&self.peer, client_id, update);
     }
 
+    /// Reports a streamed agent's usage and model to its parent's client
+    /// session, after the agent's own usage update.
+    fn report_agent_usage(&self, session: SessionId) {
+        let Some(node) = self.tree.get(session) else {
+            return;
+        };
+        let Some(parent_id) = self.client_of(node.parent) else {
+            return;
+        };
+        let update = SubagentUpdate {
+            subagent_session_id: session.to_string(),
+            usage: agent_usage(node),
+            model: agent_model(node),
+            ..SubagentUpdate::default()
+        };
+        send_update(
+            &self.peer,
+            &parent_id,
+            SessionUpdate::SubagentUpdate(update),
+        );
+    }
+
     /// Announces an agent as a subagent of its parent's client session,
     /// then shows its activity on its own session until it ends. A
     /// requeued child reports `paused` with its reason to the parent
@@ -470,6 +492,8 @@ impl Bridge {
                 state: Some(SubagentState::Running),
                 reason: None,
                 tool_call_id: Some(tool_call_id.to_string()),
+                usage: None,
+                model: None,
             };
             send_update(
                 &self.peer,
@@ -519,6 +543,9 @@ impl Bridge {
             self.handle_client(session, session.to_string(), event);
         } else if self.streaming.contains(&session) {
             self.handle_client(session, session.to_string(), event);
+            if let Event::Host(HostEvent::UsageUpdated { .. }) = event {
+                self.report_agent_usage(session);
+            }
         }
     }
 
@@ -568,9 +595,10 @@ impl Bridge {
             return;
         }
         lock(&self.ids).subagents.remove(&session.to_string());
-        let Some(parent) = self.tree.get(session).map(|node| node.parent) else {
+        let Some(node) = self.tree.get(session) else {
             return;
         };
+        let (parent, usage, model) = (node.parent, agent_usage(node), agent_model(node));
         if let Some(parent_id) = self.client_of(parent) {
             let update = SubagentUpdate {
                 subagent_session_id: session.to_string(),
@@ -579,6 +607,8 @@ impl Bridge {
                     RunOutcome::Cancelled => SubagentState::Cancelled,
                     RunOutcome::Failed { .. } => SubagentState::Failed,
                 }),
+                usage,
+                model,
                 ..SubagentUpdate::default()
             };
             send_update(
@@ -1142,4 +1172,27 @@ pub(super) fn tool_kind(name: &str) -> ToolKind {
         "web_fetch" => ToolKind::Fetch,
         _ => ToolKind::Other,
     }
+}
+
+/// What a subagent update reports of `node`'s use: its token totals,
+/// cost and the time it ran so far. `None` before it used anything.
+pub(super) fn agent_usage(node: &AgentNode) -> Option<SubagentUsage> {
+    let usage = &node.usage;
+    let took = node.elapsed();
+    if usage.total == TokenUsage::default() && took.is_none() {
+        return None;
+    }
+    Some(SubagentUsage {
+        input: usage.total.input,
+        output: usage.total.output,
+        cache_read: usage.total.cache_read,
+        cache_write: usage.total.cache_write,
+        cost: usage.cost,
+        run_ms: took.map(|took| u64::try_from(took.as_millis()).unwrap_or(u64::MAX)),
+    })
+}
+
+/// The model a subagent update reports of `node`, once known.
+pub(super) fn agent_model(node: &AgentNode) -> Option<String> {
+    (!node.model.is_empty()).then(|| node.model.clone())
 }

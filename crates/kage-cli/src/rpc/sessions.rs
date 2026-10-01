@@ -303,6 +303,8 @@ fn restored_update(node: &AgentNode) -> SubagentUpdate {
         }),
         reason: None,
         tool_call_id: Some(node.tool_call_id.to_string()),
+        usage: super::bridge::agent_usage(node),
+        model: super::bridge::agent_model(node),
     }
 }
 

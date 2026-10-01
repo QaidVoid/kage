@@ -3,8 +3,9 @@
 //! A card reads the subagent records the parent session holds, joined
 //! to the call by the `toolCallId` each `subagent_update` names, and the
 //! child sessions the engine streams. Every count is engine state:
-//! elapsed time is what this client watched, tokens are the child's
-//! context use, and a field the wire never carried stays blank.
+//! elapsed time is what this client watched or else the run time the
+//! engine reported, tokens are what the child reported spending, and a
+//! field the wire never carried stays blank.
 
 use std::time::Duration;
 
@@ -100,10 +101,14 @@ pub(crate) struct AgentFacts {
     pub phase: Phase,
     /// Why it paused, while paused.
     pub reason: Option<String>,
-    /// How long this client watched it run.
+    /// How long it ran, as watched or as the engine reported.
     pub elapsed: Option<Duration>,
-    /// The tokens in its context, once it reported any.
+    /// The tokens it read and wrote, once it reported any.
     pub tokens: Option<u64>,
+    /// What it cost in USD, once priced.
+    pub cost: Option<f64>,
+    /// The model it runs.
+    pub model: Option<String>,
     /// Its latest tool line, while it works.
     pub last: Option<String>,
     /// Its final answer's first line, once it ended.
@@ -136,6 +141,7 @@ pub(crate) fn agent_facts(
     agent: &Subagent,
 ) -> AgentFacts {
     let child = store.state().session(id);
+    let usage = agent.usage.as_ref();
     let phase = Phase::of(agent);
     let last = child
         .filter(|_| phase.live())
@@ -167,8 +173,20 @@ pub(crate) fn agent_facts(
         task: agent.task.clone().unwrap_or_default(),
         phase,
         reason: agent.reason.clone(),
-        elapsed: store.timings(&parent.id).and_then(|times| times.agent(id)),
-        tokens: child.map(|child| child.usage.used).filter(|used| *used > 0),
+        elapsed: store
+            .timings(&parent.id)
+            .and_then(|times| times.agent(id))
+            .or_else(|| {
+                usage
+                    .and_then(|usage| usage.run_ms)
+                    .map(Duration::from_millis)
+            }),
+        tokens: usage
+            .map(|usage| usage.input + usage.output)
+            .or_else(|| child.map(|child| child.usage.used))
+            .filter(|used| *used > 0),
+        cost: usage.map(|usage| usage.cost).filter(|cost| *cost > 0.0),
+        model: agent.model.clone(),
         last,
         result,
         stoppable: phase.live() && agent.capabilities.is_some_and(|caps| caps.cancel),

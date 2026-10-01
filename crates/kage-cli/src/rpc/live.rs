@@ -15,7 +15,7 @@ use std::path::Path;
 
 use kage_acp::acp::{
     SessionConfigOption, SessionInfoUpdate, SessionUpdate, SubagentSessionCapabilities,
-    SubagentState, SubagentSwarm, SubagentUpdate, ToolCallUpdate,
+    SubagentState, SubagentSwarm, SubagentUpdate, SubagentUsage, ToolCallUpdate,
 };
 use kage_acp::agent::{PromptContext, send_update};
 use kage_core::protocol::{
@@ -69,6 +69,10 @@ pub(super) struct SubagentSeed {
     pub(super) reason: Option<String>,
     /// Swarm batch membership, when a `swarm` call started it.
     pub(super) swarm: Option<SwarmMember>,
+    /// What it used so far.
+    pub(super) usage: Option<SubagentUsage>,
+    /// The model it runs, once known.
+    pub(super) model: Option<String>,
 }
 
 impl SubagentSeed {
@@ -524,6 +528,8 @@ impl Live {
                     state,
                     reason,
                     swarm: node.swarm.clone(),
+                    usage: super::bridge::agent_usage(node),
+                    model: super::bridge::agent_model(node),
                 }
             })
             .collect();
@@ -874,6 +880,8 @@ impl CliAcpAgent {
                     }),
                     reason: seed.reason.clone(),
                     tool_call_id: Some(seed.tool_call_id.clone()),
+                    usage: seed.usage.clone(),
+                    model: seed.model.clone(),
                 }),
             );
             if seed.live() {

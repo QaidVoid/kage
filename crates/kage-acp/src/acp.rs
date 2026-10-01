@@ -36,10 +36,10 @@ pub use kage_acp_wire::schema::{
     SessionExportResponse, SessionForkRequest, SessionForkResponse, SessionInfo, SessionInfoKage,
     SessionInfoMeta, SessionInfoUpdate, SessionNotification, SessionRenameRequest, SessionRequest,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
-    SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate, Supported,
-    SwarmMeta, SwarmResumeRequest, SwarmResumeResponse, TerminalRef, TextContent, ToolCall,
-    ToolCallContent, ToolCallMeta, ToolCallStatus, ToolCallUpdate, ToolKind, TurnPhase, TurnReason,
-    TurnUpdate, UsageUpdate,
+    SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate, SubagentUsage,
+    Supported, SwarmMeta, SwarmResumeRequest, SwarmResumeResponse, TerminalRef, TextContent,
+    ToolCall, ToolCallContent, ToolCallMeta, ToolCallStatus, ToolCallUpdate, ToolKind, TurnPhase,
+    TurnReason, TurnUpdate, UsageUpdate,
 };
 
 /// `_kage/config/get` result: the read-only sections a settings page

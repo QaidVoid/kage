@@ -21,7 +21,7 @@ use kage_client::{ToolCallItem, TranscriptItem};
 use crate::app::ToggleWorkbench;
 use crate::store::{Store, StoreHandle as _};
 use crate::theme::{FONT_MONO, FS_2XS, FS_SM, FS_XS, PANEL_HEAD_H, R_FULL, R_MD, WEIGHT_SEMIBOLD};
-use crate::views::agents::{agent_facts, avatar, meta_line, state_chip};
+use crate::views::agents::{agent_facts, avatar, meta_line, state_chip, tokens};
 use crate::views::kit::{self, BtnTone};
 use crate::views::transcript::TranscriptView;
 
@@ -660,8 +660,10 @@ impl WorkbenchView {
         });
         let facts_line = [
             Some(facts.name.clone()),
+            facts.model.clone(),
             facts.elapsed.map(crate::clock::span),
-            facts.tokens.map(|n| format!("{n} tok")),
+            facts.tokens.map(|n| format!("{} tok", tokens(n))),
+            facts.cost.map(|cost| format!("USD {cost:.4}")),
             Some(format!("{calls} tool calls")),
             facts.item.as_ref().map(|(item, _)| format!("item: {item}")),
         ]

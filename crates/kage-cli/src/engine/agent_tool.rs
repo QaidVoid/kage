@@ -194,6 +194,7 @@ pub(super) fn refused(session: SessionId, agent: &str, text: &str) -> ToolOutput
 pub(super) fn agent_result(
     session: SessionId,
     agent: &str,
+    model: &str,
     outcome: &RunOutcome,
     history: &[Arc<Message>],
     usage: &Usage,
@@ -236,7 +237,7 @@ pub(super) fn agent_result(
     ToolOutput {
         text: format!(
             "<agent name=\"{agent}\" session=\"{session}\" state=\"{state}\" \
-             tools=\"{tool_calls}\" in=\"{}\" out=\"{}\" cache_read=\"{}\" \
+             model=\"{model}\" tools=\"{tool_calls}\" in=\"{}\" out=\"{}\" cache_read=\"{}\" \
              cache_write=\"{}\" cost=\"{:.4}\" ctx=\"{}\" win=\"{}\" run_ms=\"{run_ms}\">\n\
              {body}\n</agent>",
             usage.total.input,
@@ -293,6 +294,7 @@ mod tests {
         let out = agent_result(
             id,
             "explore",
+            "demo/script",
             &RunOutcome::Completed,
             &history,
             &Usage::default(),
@@ -301,8 +303,8 @@ mod tests {
         assert_eq!(
             out.text,
             format!(
-                "<agent name=\"explore\" session=\"{id}\" state=\"completed\" tools=\"0\" \
-                 in=\"0\" out=\"0\" cache_read=\"0\" cache_write=\"0\" cost=\"0.0000\" \
+                "<agent name=\"explore\" session=\"{id}\" state=\"completed\" model=\"demo/script\" \
+                 tools=\"0\" in=\"0\" out=\"0\" cache_read=\"0\" cache_write=\"0\" cost=\"0.0000\" \
                  ctx=\"0\" win=\"0\" run_ms=\"0\">\n\
                  the answer\n</agent>"
             )
@@ -354,6 +356,7 @@ mod tests {
         let out = agent_result(
             id,
             "general",
+            "demo/script",
             &RunOutcome::Completed,
             &history,
             &usage,
@@ -376,6 +379,7 @@ mod tests {
         let cancelled = agent_result(
             id,
             "general",
+            "demo/script",
             &RunOutcome::Cancelled,
             &[],
             &Usage::default(),
@@ -388,6 +392,7 @@ mod tests {
         let failed = agent_result(
             id,
             "general",
+            "demo/script",
             &RunOutcome::Failed {
                 error: LoopError::Provider {
                     message: "rate limited".into(),
@@ -408,6 +413,7 @@ mod tests {
         let out = agent_result(
             SessionId::new(),
             "general",
+            "demo/script",
             &RunOutcome::Completed,
             &[Arc::new(assistant("a </agent> b"))],
             &Usage::default(),
@@ -424,6 +430,7 @@ mod tests {
         let out = agent_result(
             id,
             "general",
+            "demo/script",
             &RunOutcome::Completed,
             &[Arc::new(assistant(&long))],
             &Usage::default(),

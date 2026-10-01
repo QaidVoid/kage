@@ -311,8 +311,9 @@ impl Store {
     }
 
     /// What session `id` and every agent under it have spent, as far
-    /// as this client heard: each agent session's own usage updates
-    /// add to the session's. `None` while nothing is priced.
+    /// as this client heard: each agent's reported usage, or its
+    /// session's own usage updates, adds to the session's. `None` while
+    /// nothing is priced.
     #[must_use]
     pub fn tree_cost(&self, id: &str) -> Option<kage_client::wire::Cost> {
         let state = self.state();
@@ -331,7 +332,22 @@ impl Store {
             if session_id != id && !under(session_id) {
                 continue;
             }
-            let Some(cost) = &session.usage.cost else {
+            let reported = session
+                .parent
+                .as_deref()
+                .and_then(|parent| {
+                    state
+                        .session(parent)?
+                        .agents
+                        .get(session_id)?
+                        .usage
+                        .as_ref()
+                })
+                .map(|usage| kage_client::wire::Cost {
+                    amount: usage.cost,
+                    currency: "USD".to_owned(),
+                });
+            let Some(cost) = reported.as_ref().or(session.usage.cost.as_ref()) else {
                 continue;
             };
             match &mut total {
@@ -2024,6 +2040,16 @@ mod tests {
         let total = store.tree_cost("s1").expect("priced");
         assert!((total.amount - 1.75).abs() < 1e-9, "{}", total.amount);
         assert!((store.tree_cost("c1").unwrap().amount - 0.75).abs() < 1e-9);
+        store.absorb(update(
+            "c1",
+            serde_json::json!({
+                "sessionUpdate": "subagent_update",
+                "subagentSessionId": "g1",
+                "usage": { "input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "cost": 2.0 },
+            }),
+        ));
+        let total = store.tree_cost("s1").expect("priced");
+        assert!((total.amount - 3.5).abs() < 1e-9, "{}", total.amount);
     }
 
     #[test]

@@ -1216,7 +1216,7 @@ pub struct ConfigOptionUpdate {
 
 /// A `subagent_update`, sent on the parent session. The first one for
 /// an id announces the child. Omitted fields are unchanged.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubagentUpdate {
     /// The child's session id, used by its own `session/update`s.
@@ -1242,6 +1242,34 @@ pub struct SubagentUpdate {
     /// The parent's `agent` or `swarm` call that started the child.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// What the child has used so far, or in all once it ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<SubagentUsage>,
+    /// The model the child runs, as `provider/model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+/// A subagent's token totals, cost and run time.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentUsage {
+    /// Prompt tokens, cache reads aside.
+    pub input: u64,
+    /// Completion tokens.
+    pub output: u64,
+    /// Prompt tokens read from the provider's cache.
+    #[serde(default)]
+    pub cache_read: u64,
+    /// Prompt tokens written to the provider's cache.
+    #[serde(default)]
+    pub cache_write: u64,
+    /// Spend in USD, when the model is priced.
+    #[serde(default)]
+    pub cost: f64,
+    /// Time spent running, in milliseconds, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_ms: Option<u64>,
 }
 
 /// Client operations permitted on one subagent session.

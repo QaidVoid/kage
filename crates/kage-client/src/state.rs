@@ -312,6 +312,10 @@ pub struct Subagent {
     pub reason: Option<String>,
     /// The parent's `agent` or `swarm` call that started the child.
     pub tool_call_id: Option<String>,
+    /// Tokens, cost and run time the child reported, latest first.
+    pub usage: Option<kage_acp_wire::SubagentUsage>,
+    /// The model the child runs, as `provider/model`.
+    pub model: Option<String>,
 }
 
 impl Subagent {
@@ -342,6 +346,12 @@ impl Subagent {
         }
         if update.reason.is_some() {
             self.reason.clone_from(&update.reason);
+        }
+        if update.usage.is_some() {
+            self.usage.clone_from(&update.usage);
+        }
+        if update.model.is_some() {
+            self.model.clone_from(&update.model);
         }
     }
 }

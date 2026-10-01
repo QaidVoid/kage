@@ -53,3 +53,9 @@ does not open it in the engine: prompting it is refused, because an
 agent belongs to the call that started it. Loading a session rebuilds
 `subagent_update` records for the agents its history started, at
 every depth, from the results the engine recorded.
+
+A `subagent_update` may also carry `model`, the child's
+`provider/model`, and `usage`: `{ input, output, cacheRead,
+cacheWrite, cost, runMs? }`, the child's token totals, its cost in
+USD and how long it has run. The engine sends them as the child
+reports usage and on the update that ends it.

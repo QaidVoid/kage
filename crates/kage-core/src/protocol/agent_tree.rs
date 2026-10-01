@@ -216,7 +216,7 @@ impl AgentTree {
                                     total: u32::try_from(total).unwrap_or(u32::MAX),
                                 }),
                                 state: agent.state,
-                                model: String::new(),
+                                model: agent.model,
                                 usage: agent.usage,
                                 tool_calls: agent.tool_calls,
                                 last_tool: None,
@@ -338,6 +338,8 @@ struct RestoredAgent {
     state: AgentState,
     usage: Usage,
     tool_calls: u32,
+    /// The model it ran, when the header carries it.
+    model: String,
     /// Recorded run time in milliseconds, when the header carries it.
     run_ms: Option<u64>,
 }
@@ -361,6 +363,9 @@ fn agent_header(line: &str) -> Option<RestoredAgent> {
         session: SessionId(session),
         state,
         tool_calls: u32::try_from(num("tools")).unwrap_or(u32::MAX),
+        model: attr("model")
+            .map(crate::canonical_model)
+            .unwrap_or_default(),
         usage: Usage {
             total: TokenUsage {
                 input: num("in"),
@@ -686,7 +691,7 @@ mod tests {
                 call_id: ToolCallId("a1".into()),
                 output: format!(
                     "<agent name=\"explore\" session=\"{child}\" state=\"completed\" \
-                     tools=\"9\" in=\"120000\" out=\"40000\" cache_read=\"80000\" \
+                     model=\"anthropic:claude\" tools=\"9\" in=\"120000\" out=\"40000\" cache_read=\"80000\" \
                      cache_write=\"8000\" cost=\"1.25\" ctx=\"248000\" win=\"1000000\" \
                      run_ms=\"4200\">\nreply\n</agent>"
                 ),
@@ -698,6 +703,7 @@ mod tests {
         tree.restore(parent, [&asked, &answered]);
         let node = tree.get(child).unwrap();
         assert_eq!(node.tool_calls, 9);
+        assert_eq!(node.model, "anthropic/claude");
         assert_eq!(node.usage.total.input, 120_000);
         assert_eq!(node.usage.total.output, 40_000);
         assert_eq!(node.usage.total.cache_read, 80_000);

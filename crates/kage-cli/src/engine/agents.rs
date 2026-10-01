@@ -581,7 +581,9 @@ impl super::Dispatcher {
         usage: Usage,
         run_time: Duration,
     ) -> Option<(crossbeam_channel::Sender<ToolOutput>, ToolOutput)> {
-        let link = self.sessions.get_mut(&id)?.link.as_mut()?;
+        let session = self.sessions.get_mut(&id)?;
+        let model = &session.state.model;
+        let link = session.link.as_mut()?;
         let reply = link.reply.take()?;
         self.swarm_requeues.remove(&id);
         let own = link
@@ -590,7 +592,7 @@ impl super::Dispatcher {
             .map_or(history, |at| &history[at + 1..]);
         Some((
             reply,
-            agent_tool::agent_result(id, &link.agent, outcome, own, &usage, run_time),
+            agent_tool::agent_result(id, &link.agent, model, outcome, own, &usage, run_time),
         ))
     }
 

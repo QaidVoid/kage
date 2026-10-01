@@ -1346,8 +1346,8 @@ fn agent_call_returns_the_child_reply_and_records_the_child() {
     let output = tool_output(&events, parent_id, "call_a");
     assert!(
         output.text.starts_with(&format!(
-            "<agent name=\"general\" session=\"{child}\" state=\"completed\" tools=\"0\" \
-             in=\"10\" out=\"2\" cache_read=\"0\" cache_write=\"0\" cost=\"0.0000\" \
+            "<agent name=\"general\" session=\"{child}\" state=\"completed\" model=\"mock/m\" \
+             tools=\"0\" in=\"10\" out=\"2\" cache_read=\"0\" cache_write=\"0\" cost=\"0.0000\" \
              ctx=\"12\" win=\"200000\" run_ms=\""
         )),
         "{}",
@@ -2244,8 +2244,8 @@ fn a_swarm_and_an_agent_call_work_in_sequence() {
     let agent = tool_output(&events, parent, "call_a");
     assert!(
         agent.text.starts_with(&format!(
-            "<agent name=\"general\" session=\"{}\" state=\"completed\" tools=\"0\" \
-             in=\"10\" out=\"2\" cache_read=\"0\" cache_write=\"0\" cost=\"0.0000\" \
+            "<agent name=\"general\" session=\"{}\" state=\"completed\" model=\"mock/m\" \
+             tools=\"0\" in=\"10\" out=\"2\" cache_read=\"0\" cache_write=\"0\" cost=\"0.0000\" \
              ctx=\"12\" win=\"200000\" run_ms=\"",
             spawned(&events).last().unwrap().0
         )),

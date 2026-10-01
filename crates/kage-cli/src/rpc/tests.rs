@@ -730,6 +730,12 @@ fn subagents_stream_and_ask_on_their_own_sessions() {
     assert_eq!(updates[terminal]["sessionId"], h.session);
     assert_eq!(updates[terminal]["update"]["subagentSessionId"], child);
     assert_eq!(updates[terminal]["update"]["state"], "completed");
+    let ended = &updates[terminal]["update"];
+    assert!(
+        ended["model"].as_str().is_some_and(|m| m.contains('/')),
+        "{ended}"
+    );
+    assert!(ended["usage"]["runMs"].is_u64(), "{ended}");
     let last_child = updates.iter().rposition(|p| p["sessionId"] == child);
     assert!(last_child < Some(terminal), "{updates:#?}");
     let own: Vec<_> = updates.iter().filter(|p| p["sessionId"] == child).collect();

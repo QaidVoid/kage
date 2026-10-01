@@ -900,6 +900,48 @@ fn a_config_write_answers_with_the_snapshot_or_fails() {
         }],
     );
     assert_eq!(changes, vec![Change::Failed { request: id, error }]);
+    let id = client.config_test(kage_acp_wire::ProviderProbe {
+        id: "lab".into(),
+        ..Default::default()
+    });
+    let _ = client.take_outgoing();
+    let changes = drive(
+        &mut client,
+        &[Frame::Success {
+            id,
+            result: serde_json::json!({
+                "ok": true, "status": 200, "message": "GET /models", "millis": 5,
+                "models": [{"id": "m1", "context": 8000}],
+            }),
+        }],
+    );
+    let [Change::Tested { request, result }] = changes.as_slice() else {
+        panic!("{changes:?}");
+    };
+    assert_eq!(*request, id);
+    assert!(result.ok);
+    assert_eq!(result.models[0].context, Some(8000));
+
+    let id = client.auth_set("lab", Some("sk".into()));
+    let sent = client.take_outgoing();
+    assert!(matches!(
+        &sent[0],
+        Frame::Request { method, params, .. }
+            if method == "_kage/auth/set" && params["provider"] == "lab" && params["key"] == "sk"
+    ));
+    let changes = drive(
+        &mut client,
+        &[Frame::Success {
+            id,
+            result: serde_json::json!({}),
+        }],
+    );
+    assert_eq!(
+        changes,
+        vec![Change::KeySaved {
+            provider: "lab".into()
+        }]
+    );
 }
 
 #[test]

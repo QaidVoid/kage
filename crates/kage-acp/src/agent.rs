@@ -24,14 +24,15 @@ use kage_core::CancelFlag;
 use kage_jsonrpc::{CancelNotice, Inbound, Peer, RpcError, connect_with};
 
 use crate::acp::{
-    CloseSessionRequest, CloseSessionResponse, ConfigGetRequest, ConfigGetResult, ConfigSetRequest,
-    FsRequest, FsResult, InitializeRequest, InitializeResponse, KageMeta, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, ModelsResponse,
-    NewSessionRequest, NewSessionResponse, OptionSetRequest, OptionsResponse, PermissionOption,
-    PermissionOptionKind, PermissionOutcome, PlanReview, PromptRequest, PromptResponse,
-    RequestMeta, RequestPermissionRequest, RequestPermissionResponse, RequestPermissionResult,
-    ResumeSessionRequest, ResumeSessionResponse, SessionExportResponse, SessionForkRequest,
-    SessionForkResponse, SessionNotification, SessionRenameRequest, SessionRequest, SessionUpdate,
+    AuthSetRequest, CloseSessionRequest, CloseSessionResponse, ConfigGetRequest, ConfigGetResult,
+    ConfigSetRequest, ConfigTestRequest, ConfigTestResult, FsRequest, FsResult, InitializeRequest,
+    InitializeResponse, KageMeta, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    LoadSessionResponse, ModelsResponse, NewSessionRequest, NewSessionResponse, OptionSetRequest,
+    OptionsResponse, PermissionOption, PermissionOptionKind, PermissionOutcome, PlanReview,
+    PromptRequest, PromptResponse, RequestMeta, RequestPermissionRequest,
+    RequestPermissionResponse, RequestPermissionResult, ResumeSessionRequest,
+    ResumeSessionResponse, SessionExportResponse, SessionForkRequest, SessionForkResponse,
+    SessionNotification, SessionRenameRequest, SessionRequest, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SwarmResumeRequest,
     SwarmResumeResponse, ToolCallUpdate,
 };
@@ -450,6 +451,29 @@ pub trait Agent: Send + Sync + 'static {
         Err(RpcError::method_not_found("_kage/config/set"))
     }
 
+    /// Asks a provider for its model list (`_kage/config/test`), as
+    /// saved or as a form holds it, so a client can test a connection
+    /// and fill a model table without a socket of its own. The default
+    /// rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the request names no provider. An
+    /// unreachable or refusing endpoint is a result, not an error.
+    fn config_test(&self, _req: ConfigTestRequest) -> Result<ConfigTestResult, RpcError> {
+        Err(RpcError::method_not_found("_kage/config/test"))
+    }
+
+    /// Saves or removes a provider's API key in the credential store
+    /// (`_kage/auth/set`), never in `config.toml`. The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the store cannot be written.
+    fn auth_set(&self, _req: AuthSetRequest) -> Result<serde_json::Value, RpcError> {
+        Err(RpcError::method_not_found("_kage/auth/set"))
+    }
+
     /// Run one prompt turn to completion, streaming `session/update`
     /// notifications through `ctx`.
     ///
@@ -722,6 +746,14 @@ fn handle_kage_request<A: Agent>(
         },
         "_kage/config/set" => match parse::<ConfigSetRequest>(params) {
             Ok(req) => spawn_op(peer, agent, id, move |a| a.config_set(req).map(jval)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/config/test" => match parse::<ConfigTestRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.config_test(req).map(jval)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/auth/set" => match parse::<AuthSetRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.auth_set(req)),
             Err(e) => return parse_failed(peer, &id, e),
         },
         "_kage/session/rename" => match parse::<SessionRenameRequest>(params) {

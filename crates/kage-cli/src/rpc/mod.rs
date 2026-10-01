@@ -39,6 +39,7 @@ mod live;
 mod mcp;
 mod models;
 mod options;
+mod probe;
 mod registry;
 mod sessions;
 
@@ -50,12 +51,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use kage_acp::acp::{
-    AgentCapabilities, AgentMeta, CloseSessionRequest, CloseSessionResponse, ConfigGetRequest,
-    ConfigGetResult, ConfigSetRequest, FsRequest, FsResult, Implementation, InitializeRequest,
-    InitializeResponse, InstalledPlugin, KageAgentInfo, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, McpCapabilities, ModelsResponse, NewSessionRequest,
-    NewSessionResponse, OptionSetRequest, OptionsResponse, PROTOCOL_VERSION, PromptCapabilities,
-    PromptDelivery, PromptRequest, PromptResponse, ResumeSessionRequest, ResumeSessionResponse,
+    AgentCapabilities, AgentMeta, AuthSetRequest, CloseSessionRequest, CloseSessionResponse,
+    ConfigGetRequest, ConfigGetResult, ConfigSetRequest, ConfigTestRequest, ConfigTestResult,
+    FsRequest, FsResult, Implementation, InitializeRequest, InitializeResponse, InstalledPlugin,
+    KageAgentInfo, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    LoadSessionResponse, McpCapabilities, ModelsResponse, NewSessionRequest, NewSessionResponse,
+    OptionSetRequest, OptionsResponse, PROTOCOL_VERSION, PromptCapabilities, PromptDelivery,
+    PromptRequest, PromptResponse, ResumeSessionRequest, ResumeSessionResponse,
     SessionCapabilities, SessionConfigOption, SessionExportResponse, SessionForkRequest,
     SessionForkResponse, SessionRenameRequest, SessionRequest, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, Supported,
@@ -527,6 +529,9 @@ impl Agent for CliAcpAgent {
     fn config_get(&self, req: ConfigGetRequest) -> Result<ConfigGetResult, RpcError> {
         let mut config = self.load_config(&req)?;
         redact_secrets(&mut config);
+        let store =
+            crate::auth::AuthStore::load().unwrap_or_else(|_| crate::auth::AuthStore::empty());
+        let provider_keys = probe::provider_keys(&config, &store);
         let installed_plugins = crate::plugins_dir()
             .map(|dir| installed_plugins(&dir, &config.plugins.enabled))
             .unwrap_or_default();
@@ -537,6 +542,7 @@ impl Agent for CliAcpAgent {
             plugins: config.plugins,
             ui: config.ui,
             installed_plugins,
+            provider_keys,
         })
     }
 
@@ -558,6 +564,35 @@ impl Agent for CliAcpAgent {
         self.config_get(ConfigGetRequest {
             session_id: req.session_id,
         })
+    }
+
+    /// Lists the provider's models with the user config and saved keys
+    /// filling what the probe leaves out.
+    fn config_test(&self, req: ConfigTestRequest) -> Result<ConfigTestResult, RpcError> {
+        let config = Config::load_default().map_err(|e| RpcError::internal(e.to_string()))?;
+        let store =
+            crate::auth::AuthStore::load().unwrap_or_else(|_| crate::auth::AuthStore::empty());
+        Ok(probe::probe(&req.provider, &config, &store))
+    }
+
+    /// Saves or removes the key, then reloads the providers so one that
+    /// had no key before registers.
+    fn auth_set(&self, req: AuthSetRequest) -> Result<serde_json::Value, RpcError> {
+        if req.provider.is_empty() {
+            return Err(RpcError::new(-32602, "name the provider the key is for"));
+        }
+        let mut store = crate::auth::AuthStore::load().map_err(RpcError::internal)?;
+        match req.key.filter(|key| !key.trim().is_empty()) {
+            Some(key) => {
+                store.set_api_key(&req.provider, key.trim());
+            }
+            None => {
+                store.remove(&req.provider);
+            }
+        }
+        store.save().map_err(RpcError::internal)?;
+        self.host.reload_providers().map_err(RpcError::internal)?;
+        Ok(serde_json::json!({}))
     }
 
     fn session_fork(&self, req: SessionForkRequest) -> Result<SessionForkResponse, RpcError> {

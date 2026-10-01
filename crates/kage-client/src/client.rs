@@ -143,6 +143,10 @@ enum Pending {
     },
     Models,
     Options,
+    ConfigTest,
+    AuthSet {
+        provider: String,
+    },
 }
 
 /// The client side of an ACP connection.
@@ -517,6 +521,33 @@ impl Client {
                 value,
             }),
             Pending::ConfigGet,
+        )
+    }
+
+    /// Asks the engine to list the models of `provider`, as saved or as
+    /// a form holds it. The answer arrives as [`Change::Tested`] under
+    /// the returned request id.
+    pub fn config_test(&mut self, provider: kage_acp_wire::ProviderProbe) -> u64 {
+        self.request(
+            "_kage/config/test",
+            params(&kage_acp_wire::ConfigTestRequest { provider }),
+            Pending::ConfigTest,
+        )
+    }
+
+    /// Saves `key` as `provider`'s API key in the engine's credential
+    /// store, or removes the saved one when `key` is `None`. The answer
+    /// arrives as [`Change::KeySaved`].
+    pub fn auth_set(&mut self, provider: &str, key: Option<String>) -> u64 {
+        self.request(
+            "_kage/auth/set",
+            params(&kage_acp_wire::AuthSetRequest {
+                provider: provider.to_owned(),
+                key,
+            }),
+            Pending::AuthSet {
+                provider: provider.to_owned(),
+            },
         )
     }
 
@@ -908,25 +939,15 @@ impl Client {
                 self.state.sessions.remove(&session_id);
                 vec![Change::Session { id: session_id }]
             }
-            Pending::ConfigGet => vec![Change::Config { config: result }],
+            pending @ (Pending::ConfigGet
+            | Pending::ConfigTest
+            | Pending::AuthSet { .. }
+            | Pending::Models
+            | Pending::Options) => settings_answer(id, pending, result),
             Pending::SwarmResume { session_id }
             | Pending::Compact { session_id }
             | Pending::Rename { session_id } => {
                 vec![Change::Session { id: session_id }]
-            }
-            Pending::Models => match answer::<ModelsResponse>(id, result, "_kage/models result") {
-                Err(failed) => failed,
-                Ok(answer) => vec![Change::Models {
-                    providers: answer.providers,
-                }],
-            },
-            Pending::Options => {
-                match answer::<OptionsResponse>(id, result, "_kage/options result") {
-                    Err(failed) => failed,
-                    Ok(answer) => vec![Change::Options {
-                        options: answer.options,
-                    }],
-                }
             }
             Pending::Fork { session_id } => {
                 match answer::<SessionForkResponse>(id, result, "_kage/session/fork result") {
@@ -1326,4 +1347,36 @@ fn answer<T: serde::de::DeserializeOwned>(
 /// caller's input.
 fn params<T: serde::Serialize>(value: &T) -> Value {
     serde_json::to_value(value).expect("wire type serializes")
+}
+
+/// The change a settings answer makes: a config snapshot, a provider
+/// test, a saved key, the model list or the engine options.
+fn settings_answer(id: u64, pending: Pending, result: Value) -> Vec<Change> {
+    match pending {
+        Pending::ConfigGet => vec![Change::Config { config: result }],
+        Pending::ConfigTest => {
+            match answer::<kage_acp_wire::ConfigTestResult>(id, result, "_kage/config/test result")
+            {
+                Err(failed) => failed,
+                Ok(result) => vec![Change::Tested {
+                    request: id,
+                    result,
+                }],
+            }
+        }
+        Pending::AuthSet { provider } => vec![Change::KeySaved { provider }],
+        Pending::Models => match answer::<ModelsResponse>(id, result, "_kage/models result") {
+            Err(failed) => failed,
+            Ok(answer) => vec![Change::Models {
+                providers: answer.providers,
+            }],
+        },
+        Pending::Options => match answer::<OptionsResponse>(id, result, "_kage/options result") {
+            Err(failed) => failed,
+            Ok(answer) => vec![Change::Options {
+                options: answer.options,
+            }],
+        },
+        _ => Vec::new(),
+    }
 }

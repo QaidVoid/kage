@@ -630,6 +630,87 @@ pub struct ConfigSetRequest {
     pub value: Option<serde_json::Value>,
 }
 
+/// `_kage/config/test` request params.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigTestRequest {
+    /// The provider to reach.
+    pub provider: ProviderProbe,
+}
+
+/// A provider to reach, as the config holds it or as a form holds it
+/// before it is saved. Omitted fields fall back to the saved entry and
+/// then to the provider's defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderProbe {
+    /// The provider id.
+    pub id: String,
+    /// The wire protocol: `openai`, `anthropic` or `gemini`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The endpoint base URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// The environment variable holding the key; empty for none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// A key typed into the form, used for this request only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Extra headers. A redacted value keeps the saved one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+}
+
+/// `_kage/config/test` result: whether the provider's model list
+/// answered, and what it listed.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigTestResult {
+    /// Whether the endpoint answered with a model list.
+    pub ok: bool,
+    /// The HTTP status, when the endpoint answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// What happened, for the user: the request and its outcome.
+    pub message: String,
+    /// How long the request took, in milliseconds.
+    pub millis: u64,
+    /// The models listed, with the context and output limits the
+    /// endpoint or the model catalog knows.
+    #[serde(default)]
+    pub models: Vec<ProbeModel>,
+}
+
+/// One model a provider listed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeModel {
+    /// The model id the endpoint takes.
+    pub id: String,
+    /// A display name, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The context window in tokens, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u64>,
+    /// The most output tokens per turn, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output: Option<u64>,
+}
+
+/// `_kage/auth/set` request params.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthSetRequest {
+    /// The provider the key is for.
+    pub provider: String,
+    /// The API key; `null` removes the saved one.
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
 /// `_kage/session/rename` request params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

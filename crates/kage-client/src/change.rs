@@ -95,6 +95,20 @@ pub enum Change {
         /// The options, in the engine's order.
         options: Vec<OptionEntry>,
     },
+    /// A `_kage/config/test` answer arrived: whether the provider's
+    /// model list answered, and what it listed.
+    Tested {
+        /// The id of the test request, so a form matches its answer.
+        request: u64,
+        /// What the engine found.
+        result: kage_acp_wire::ConfigTestResult,
+    },
+    /// A `_kage/auth/set` answer arrived: the provider's key was saved
+    /// or removed.
+    KeySaved {
+        /// The provider the key is for.
+        provider: String,
+    },
     /// A request the client sent was answered with an error. The
     /// client keeps no error log; a host surfaces this where it fits.
     Failed {
@@ -122,6 +136,8 @@ impl Change {
             | Self::Config { .. }
             | Self::Models { .. }
             | Self::Options { .. }
+            | Self::Tested { .. }
+            | Self::KeySaved { .. }
             | Self::Failed { .. } => None,
         }
     }

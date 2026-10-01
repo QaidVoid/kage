@@ -11,6 +11,8 @@
 //! send boundary ([`crate::agent::send_update`]); the serde shape is
 //! identical either way.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use kage_acp_wire as wire;
@@ -19,17 +21,18 @@ use kage_core::permissions::PermissionsConfig;
 use kage_core::protocol::McpServerStatus;
 
 pub use kage_acp_wire::schema::{
-    AgentCapabilities, AgentMeta, AvailableCommandsUpdate, BlobContent, CancelNotification,
-    ChunkMeta, ClientCapabilities, CloseSessionRequest, CloseSessionResponse, CompactionUpdate,
-    ConfigGetRequest, ConfigOptionUpdate, ConfigSetRequest, ContentBlock, Cost, CurrentModeUpdate,
-    DiffContent, EmbeddedResource, EnvVariable, FsCapability, FsEntry, FsKind, FsListResult, FsOp,
-    FsReadResult, FsRequest, FsResult, HttpHeader, Implementation, InitializeRequest,
-    InitializeResponse, KageAgentInfo, KageMeta, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, McpCapabilities, McpServer, McpServerHttp,
-    McpServerStdio, MessageChunk, ModelEntry, ModelProvider, ModelsResponse, NewSessionRequest,
-    NewSessionResponse, NoticeTone, NoticeUpdate, OptionEntry, OptionSetRequest, OptionsResponse,
-    PROTOCOL_VERSION, PermissionOption, PermissionOptionKind, PermissionOutcome, Plan, PlanReview,
-    PromptCapabilities, PromptDelivery, PromptRef, PromptRequest, PromptResponse, RequestMeta,
+    AgentCapabilities, AgentMeta, AuthSetRequest, AvailableCommandsUpdate, BlobContent,
+    CancelNotification, ChunkMeta, ClientCapabilities, CloseSessionRequest, CloseSessionResponse,
+    CompactionUpdate, ConfigGetRequest, ConfigOptionUpdate, ConfigSetRequest, ConfigTestRequest,
+    ConfigTestResult, ContentBlock, Cost, CurrentModeUpdate, DiffContent, EmbeddedResource,
+    EnvVariable, FsCapability, FsEntry, FsKind, FsListResult, FsOp, FsReadResult, FsRequest,
+    FsResult, HttpHeader, Implementation, InitializeRequest, InitializeResponse, KageAgentInfo,
+    KageMeta, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
+    McpCapabilities, McpServer, McpServerHttp, McpServerStdio, MessageChunk, ModelEntry,
+    ModelProvider, ModelsResponse, NewSessionRequest, NewSessionResponse, NoticeTone, NoticeUpdate,
+    OptionEntry, OptionSetRequest, OptionsResponse, PROTOCOL_VERSION, PermissionOption,
+    PermissionOptionKind, PermissionOutcome, Plan, PlanReview, ProbeModel, PromptCapabilities,
+    PromptDelivery, PromptRef, PromptRequest, PromptResponse, ProviderProbe, RequestMeta,
     RequestPermissionRequest, RequestPermissionResponse, RequestPermissionResult, ResourceLink,
     ResumeSessionRequest, ResumeSessionResponse, SelectedOption, SessionCapabilities,
     SessionConfigCategory, SessionConfigKind, SessionConfigOption, SessionConfigSelectOption,
@@ -60,6 +63,34 @@ pub struct ConfigGetResult {
     /// The plugin files in the plugin directory, by name.
     #[serde(default)]
     pub installed_plugins: Vec<InstalledPlugin>,
+    /// Where each provider kage registers or the config defines finds
+    /// its key, by provider id.
+    #[serde(default)]
+    pub provider_keys: BTreeMap<String, ProviderKey>,
+}
+
+/// Where one provider finds its API key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderKey {
+    /// The environment variable it reads; empty when it needs no key.
+    pub env: String,
+    /// Where the key is now.
+    pub source: KeySource,
+}
+
+/// Where a provider's key is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeySource {
+    /// Set in the environment variable.
+    Env,
+    /// Saved in the credential store.
+    Auth,
+    /// Nowhere: the provider is not usable until one is set.
+    Missing,
+    /// The provider needs no key.
+    Unneeded,
 }
 
 /// One plugin file in the plugin directory.

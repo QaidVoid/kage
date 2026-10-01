@@ -310,6 +310,39 @@ impl Store {
         }
     }
 
+    /// What session `id` and every agent under it have spent, as far
+    /// as this client heard: each agent session's own usage updates
+    /// add to the session's. `None` while nothing is priced.
+    #[must_use]
+    pub fn tree_cost(&self, id: &str) -> Option<kage_client::wire::Cost> {
+        let state = self.state();
+        let under = |session: &str| {
+            let mut parent = state.session(session).and_then(|s| s.parent.as_deref());
+            while let Some(at) = parent {
+                if at == id {
+                    return true;
+                }
+                parent = state.session(at).and_then(|s| s.parent.as_deref());
+            }
+            false
+        };
+        let mut total: Option<kage_client::wire::Cost> = None;
+        for (session_id, session) in &state.sessions {
+            if session_id != id && !under(session_id) {
+                continue;
+            }
+            let Some(cost) = &session.usage.cost else {
+                continue;
+            };
+            match &mut total {
+                Some(sum) if sum.currency == cost.currency => sum.amount += cost.amount,
+                Some(_) => {}
+                None => total = Some(cost.clone()),
+            }
+        }
+        total
+    }
+
     /// Picks the directory the next new session opens in; `None` goes
     /// back to the default.
     pub fn set_project(&mut self, dir: Option<String>) {
@@ -424,6 +457,15 @@ impl Store {
     /// actually opens it.
     pub fn set_active(&mut self, id: impl Into<String>) {
         let id = id.into();
+        // An agent's session belongs to its parent's card: it is read
+        // there, never followed on its own.
+        if self
+            .state()
+            .session(&id)
+            .is_some_and(|s| s.parent.is_some())
+        {
+            return;
+        }
         let known = self.state().session(&id).is_some();
         if !known {
             let cwd = self
@@ -892,10 +934,14 @@ impl Store {
             .as_deref()
     }
 
-    /// Asks the engine for its configuration snapshot; the answer
-    /// replaces [`Store::config`].
+    /// Asks the engine for its configuration snapshot, read for the
+    /// active session's directory; the answer replaces
+    /// [`Store::config`].
     pub fn ask_config(&mut self) {
-        self.client.config_get();
+        match self.active.clone() {
+            Some(id) => self.client.config_get_for(&id),
+            None => self.client.config_get(),
+        };
     }
 
     /// Asks the engine for the models it can run; the answer lands in
@@ -919,10 +965,13 @@ impl Store {
         });
     }
 
-    /// Asks the engine for its options; the answer replaces
-    /// [`Store::engine_options`].
+    /// Asks the engine for its options, read for the active session's
+    /// directory; the answer replaces [`Store::engine_options`].
     pub fn ask_engine_options(&mut self) {
-        self.client.options_list();
+        match self.active.clone() {
+            Some(id) => self.client.options_list_for(&id),
+            None => self.client.options_list(),
+        };
     }
 
     /// The engine options as the engine last answered.
@@ -1943,6 +1992,38 @@ mod tests {
             Some("fix the flake")
         );
         assert!(store.take_outgoing().is_empty(), "no prompt went out");
+    }
+
+    #[test]
+    fn the_cost_counts_every_agent_under_the_session() {
+        let mut store = welcome_store();
+        open_session(&mut store, 3, "s1");
+        let update = |session: &str, update: serde_json::Value| Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({ "sessionId": session, "update": update }),
+        };
+        let usage = |amount: f64| {
+            serde_json::json!({
+                "sessionUpdate": "usage_update",
+                "used": 10,
+                "size": 100,
+                "cost": { "amount": amount, "currency": "USD" },
+            })
+        };
+        store.absorb(update(
+            "s1",
+            serde_json::json!({"sessionUpdate": "subagent_update", "subagentSessionId": "c1"}),
+        ));
+        store.absorb(update(
+            "c1",
+            serde_json::json!({"sessionUpdate": "subagent_update", "subagentSessionId": "g1"}),
+        ));
+        store.absorb(update("s1", usage(1.0)));
+        store.absorb(update("c1", usage(0.5)));
+        store.absorb(update("g1", usage(0.25)));
+        let total = store.tree_cost("s1").expect("priced");
+        assert!((total.amount - 1.75).abs() < 1e-9, "{}", total.amount);
+        assert!((store.tree_cost("c1").unwrap().amount - 0.75).abs() < 1e-9);
     }
 
     #[test]

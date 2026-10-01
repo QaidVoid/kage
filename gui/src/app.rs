@@ -1031,8 +1031,9 @@ impl Shell {
                     crate::views::agents::tokens(usage.size)
                 )
             }),
-            cost: session
-                .and_then(|session| session.usage.cost.as_ref())
+            cost: store
+                .active_id()
+                .and_then(|id| store.tree_cost(id))
                 .map(|cost| format!("{} {:.2}", cost.currency, cost.amount)),
             link: if store.connect().is_connected() {
                 store.link().name.to_string()

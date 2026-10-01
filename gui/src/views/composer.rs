@@ -1412,11 +1412,10 @@ impl ComposerView {
                 .child(hint_word("newline"))
                 .into_any_element()
         };
-        let cost = self
-            .store
-            .read(cx)
-            .active_session()
-            .and_then(|session| session.usage.cost.as_ref())
+        let store = self.store.read(cx);
+        let cost = store
+            .active_id()
+            .and_then(|id| store.tree_cost(id))
             .map(|cost| format!("{} {:.4}", cost.currency, cost.amount))
             .unwrap_or_default();
         h_flex()
@@ -1917,10 +1916,11 @@ impl ComposerView {
         let gauge = Gauge {
             used,
             size,
-            cost: session
-                .usage
-                .cost
-                .as_ref()
+            cost: self
+                .store
+                .read(cx)
+                .active_id()
+                .and_then(|id| self.store.read(cx).tree_cost(id))
                 .map(|cost| format!("{} {:.2}", cost.currency, cost.amount)),
             model: select_option(session, "model").and_then(|option| {
                 option

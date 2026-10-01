@@ -790,8 +790,9 @@ impl PaletteView {
             .unwrap_or(&no_commands);
         let mut sessions: Vec<(String, Option<String>, bool)> = state
             .sessions
-            .keys()
-            .map(|id| (id.clone(), Some(store.display_title(id)), true))
+            .iter()
+            .filter(|(_, session)| session.parent.is_none())
+            .map(|(id, _)| (id.clone(), Some(store.display_title(id)), true))
             .collect();
         for info in &state.directory {
             if state.sessions.contains_key(&info.session_id) {

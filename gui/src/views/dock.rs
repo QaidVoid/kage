@@ -65,7 +65,7 @@ impl Pill {
     /// Wraps an id-carrying stateful div as a popover trigger.
     fn new(id: &'static str) -> Self {
         Self {
-            element: div().id(id),
+            element: div().id(id).flex(),
         }
     }
 }
@@ -114,7 +114,8 @@ impl IntoElement for Pill {
 /// or open.
 fn pill<E: InteractiveElement + Styled>(el: E, pal: &Palette) -> E {
     let (raised, ink, line_strong) = (pal.raised, pal.ink, pal.line_strong);
-    el.h(px(28.))
+    el.flex()
+        .h(px(28.))
         .px(px(10.))
         .gap(px(SP_3))
         .flex_none()

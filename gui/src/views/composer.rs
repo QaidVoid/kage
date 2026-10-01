@@ -61,7 +61,7 @@ impl Pill {
     /// Wraps an id-carrying stateful div as a popover trigger.
     fn new(id: &'static str) -> Self {
         Self {
-            element: div().id(id),
+            element: div().id(id).flex(),
         }
     }
 }

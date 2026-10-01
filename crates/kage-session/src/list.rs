@@ -8,6 +8,12 @@
 //! entry, user message and title. So each file is scanned for line
 //! boundaries and entry tags without decoding, and only those few lines
 //! are decoded, found by walking back from the end.
+//!
+//! Even so, reading a head and a tail of every file costs seconds once a
+//! directory holds thousands of sessions. The summaries are therefore
+//! kept in an index file beside the sessions ([`INDEX_FILE`]), keyed by
+//! each file's length and mtime, so a listing re-reads only the files
+//! that changed since any process last listed.
 
 use std::collections::HashMap;
 use std::fs::{File, metadata};
@@ -35,7 +41,7 @@ pub const PLAN_MODE_ENTRY_KIND: &str = "kage:plan_mode";
 /// One row in `kage list`. Reflects the persisted state of a session file
 /// at the moment of listing; subsequent appends will not be visible until
 /// [`list`] is called again.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionSummary {
     /// Session id from the header.
     pub id: SessionId,
@@ -64,6 +70,17 @@ pub struct SessionSummary {
     pub agent: Option<String>,
 }
 
+/// The index of summaries kept in the sessions directory. Its extension
+/// is not `jsonl`, so listings never mistake it for a session.
+pub const INDEX_FILE: &str = ".index.json";
+
+/// The index format; an index written with another is ignored.
+const INDEX_VERSION: u32 = 1;
+
+/// The most characters of the latest prompt a summary keeps: enough for
+/// any label, without carrying a pasted document per session.
+const PROMPT_CHARS: usize = 300;
+
 /// Bytes scanned after the header for an early title: titles are
 /// appended when generated, usually right after the first exchange.
 const HEAD_PROBE: u64 = 64 * 1024;
@@ -84,10 +101,28 @@ pub fn list(dir: &Path) -> Result<Vec<SessionSummary>, SessionError> {
 /// Memo of per-file summaries keyed by the file's size and mtime at
 /// read time. [`SessionCache::list`] re-reads only the files that
 /// changed since the previous call, so repeated listings of a mostly
-/// static directory cost one stat per file.
+/// static directory cost one stat per file. The first listing starts
+/// from the directory's [`INDEX_FILE`], and a listing that summarized
+/// anything anew writes the index back.
 #[derive(Default)]
 pub struct SessionCache {
     by_path: HashMap<PathBuf, (u64, Option<SystemTime>, SessionSummary)>,
+    /// Whether the index file was read for this cache yet.
+    loaded: bool,
+}
+
+/// The on-disk form of a [`SessionCache`].
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Index {
+    version: u32,
+    entries: Vec<IndexEntry>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct IndexEntry {
+    size: u64,
+    modified: Option<SystemTime>,
+    summary: SessionSummary,
 }
 
 impl SessionCache {
@@ -95,6 +130,10 @@ impl SessionCache {
     /// [`list`], reusing cached summaries for files whose length and
     /// mtime are unchanged.
     pub fn list(&mut self, dir: &Path) -> Result<Vec<SessionSummary>, SessionError> {
+        if !self.loaded {
+            self.loaded = true;
+            self.load_index(dir);
+        }
         let read_dir = match std::fs::read_dir(dir) {
             Ok(d) => d,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -107,6 +146,8 @@ impl SessionCache {
         };
 
         let mut summaries = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut fresh = false;
         for entry in read_dir {
             let entry = entry.map_err(|err| SessionError::Io {
                 path: dir.to_path_buf(),
@@ -116,15 +157,21 @@ impl SessionCache {
             if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
                 continue;
             }
-            if let Some(summary) = self.summarize(&path) {
+            if let Some(summary) = self.summarize(&path, &mut fresh) {
                 summaries.push(summary);
             }
+            seen.insert(path);
+        }
+        let before = self.by_path.len();
+        self.by_path.retain(|path, _| seen.contains(path));
+        if fresh || self.by_path.len() != before {
+            self.save_index(dir);
         }
         summaries.sort_by_key(|s| std::cmp::Reverse(s.created_at));
         Ok(summaries)
     }
 
-    fn summarize(&mut self, path: &Path) -> Option<SessionSummary> {
+    fn summarize(&mut self, path: &Path, fresh: &mut bool) -> Option<SessionSummary> {
         let meta = metadata(path).ok()?;
         let size = meta.len();
         let modified = meta.modified().ok();
@@ -134,14 +181,73 @@ impl SessionCache {
         {
             return Some(summary.clone());
         }
-        let summary = summarize_one(path)?;
+        // Session files only grow, so a file seen before at a smaller
+        // size needs its titles looked for in the appended bytes alone.
+        let before = self
+            .by_path
+            .get(path)
+            .filter(|(old, _, _)| *old <= size)
+            .map(|(old, _, summary)| (*old, summary.title.clone()));
+        let summary = summarize_from(path, before)?;
+        *fresh = true;
         self.by_path
             .insert(path.to_owned(), (size, modified, summary.clone()));
         Some(summary)
     }
+
+    /// Seeds the memo from the directory's index. A missing, unreadable
+    /// or other-version index seeds nothing.
+    fn load_index(&mut self, dir: &Path) {
+        let Ok(bytes) = std::fs::read(dir.join(INDEX_FILE)) else {
+            return;
+        };
+        let Ok(index) = serde_json::from_slice::<Index>(&bytes) else {
+            return;
+        };
+        if index.version != INDEX_VERSION {
+            return;
+        }
+        for entry in index.entries {
+            self.by_path.insert(
+                entry.summary.path.clone(),
+                (entry.size, entry.modified, entry.summary),
+            );
+        }
+    }
+
+    /// Writes the memo back as the directory's index, atomically, so a
+    /// concurrent listing reads either the old index or the new one, and
+    /// readable by the owner only, as it quotes prompts. A failed write
+    /// only costs the next process a rescan.
+    fn save_index(&self, dir: &Path) {
+        let index = Index {
+            version: INDEX_VERSION,
+            entries: self
+                .by_path
+                .values()
+                .map(|(size, modified, summary)| IndexEntry {
+                    size: *size,
+                    modified: *modified,
+                    summary: summary.clone(),
+                })
+                .collect(),
+        };
+        let Ok(bytes) = serde_json::to_vec(&index) else {
+            return;
+        };
+        let _ = kage_core::fsutil::atomic_write_private(&dir.join(INDEX_FILE), &bytes);
+    }
 }
 
+#[cfg(test)]
 fn summarize_one(path: &Path) -> Option<SessionSummary> {
+    summarize_from(path, None)
+}
+
+/// Summarizes the session at `path`. `before` is the size it had and
+/// the title it showed when last summarized: the title scan then starts
+/// where that copy ended instead of at the head.
+fn summarize_from(path: &Path, before: Option<(u64, Option<String>)>) -> Option<SessionSummary> {
     let mut file = BufReader::with_capacity(128 * 1024, File::open(path).ok()?);
     file.seek(SeekFrom::Start(0)).ok()?;
     let mut buf = Vec::new();
@@ -196,6 +302,20 @@ fn summarize_one(path: &Path) -> Option<SessionSummary> {
     }
     let header = header?;
 
+    // The latest title can sit anywhere: generated after a first
+    // exchange whose tool output pushed it past the head probe, or set
+    // by a rename mid-session. Agent sessions are never listed by
+    // title, so only user sessions pay for the scan.
+    let scanned = if agent.is_none() {
+        let (start, known) = match before {
+            Some((size, title)) => (size, title),
+            None => (consumed, head_title.clone()),
+        };
+        latest_title(&mut file, &mut buf, start).or(known)
+    } else {
+        None
+    };
+
     let (updated_at, last_user_prompt, tail_title) = scan_tail(&mut file, &mut buf);
     let updated_at = updated_at.unwrap_or(header.ts);
 
@@ -204,9 +324,29 @@ fn summarize_one(path: &Path) -> Option<SessionSummary> {
         path.to_path_buf(),
         updated_at,
         last_user_prompt,
-        tail_title.or(head_title),
+        tail_title.or(scanned).or(head_title),
         agent,
     ))
+}
+
+/// The last title entry from byte `start` to the end of the file,
+/// decoding only the lines tagged `title`.
+fn latest_title(file: &mut BufReader<File>, buf: &mut Vec<u8>, start: u64) -> Option<String> {
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut title = None;
+    loop {
+        buf.clear();
+        match file.read_until(b'\n', buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        if leading_tag(buf) == Some(b"title")
+            && let Ok(SessionEntry::Title(t)) = serde_json::from_slice(buf.trim_ascii_end())
+        {
+            title = Some(t.title);
+        }
+    }
+    title
 }
 
 /// The `"type"` tag when it is the first key of `line`, the way the
@@ -274,7 +414,9 @@ fn scan_tail(
             SessionEntry::Message(m)
                 if m.message.role == kage_core::Role::User && last_user_prompt.is_none() =>
             {
-                last_user_prompt = Some(first_text(&m.message));
+                last_user_prompt = Some(
+                    first_text(&m.message).map(|text| text.chars().take(PROMPT_CHARS).collect()),
+                );
             }
             SessionEntry::Title(t) if title.is_none() => title = Some(t.title),
             _ => {}
@@ -382,6 +524,73 @@ mod tests {
         let dir = tempdir().unwrap();
         let summaries = list(dir.path()).unwrap();
         assert!(summaries.is_empty());
+    }
+
+    #[test]
+    fn a_title_buried_mid_file_still_labels_the_session_and_a_rename_wins() {
+        let dir = tempdir().unwrap();
+        let path = write_session(dir.path(), "a.jsonl", "first ask");
+        let line = |entry: &SessionEntry| format!("{}\n", serde_json::to_string(entry).unwrap());
+        let title = |text: &str| {
+            SessionEntry::Title(crate::SessionTitle {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                title: text.into(),
+            })
+        };
+        let bulk = message(Role::Assistant, text(&"x".repeat(200 * 1024)));
+        append_raw(&path, &line(&bulk));
+        append_raw(&path, &line(&title("the real title")));
+        for _ in 0..4 {
+            append_raw(&path, &line(&bulk));
+        }
+        append_raw(&path, &line(&message(Role::User, text("later ask"))));
+
+        let mut cache = SessionCache::default();
+        let listed = cache.list(dir.path()).unwrap();
+        assert_eq!(listed[0].title.as_deref(), Some("the real title"));
+
+        for _ in 0..4 {
+            append_raw(&path, &line(&bulk));
+        }
+        append_raw(&path, &line(&title("renamed")));
+        for _ in 0..4 {
+            append_raw(&path, &line(&bulk));
+        }
+        let listed = cache.list(dir.path()).unwrap();
+        assert_eq!(
+            listed[0].title.as_deref(),
+            Some("renamed"),
+            "the appended bytes are scanned for a newer title"
+        );
+    }
+
+    #[test]
+    fn the_index_carries_summaries_across_caches_and_drops_deleted_files() {
+        let dir = tempdir().unwrap();
+        let a = write_session(dir.path(), "a.jsonl", "ask one");
+        write_session(dir.path(), "b.jsonl", "ask two");
+        let first = list(dir.path()).unwrap();
+        let index = dir.path().join(INDEX_FILE);
+        assert!(index.exists(), "a listing writes the index");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&index).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "the index quotes prompts");
+        }
+
+        let mut fresh = SessionCache::default();
+        fresh.load_index(dir.path());
+        assert_eq!(fresh.by_path.len(), 2, "a new cache starts from the index");
+        assert_eq!(fresh.list(dir.path()).unwrap(), first);
+
+        std::fs::remove_file(&a).unwrap();
+        let after = list(dir.path()).unwrap();
+        assert_eq!(after.len(), 1);
+        let mut reread = SessionCache::default();
+        reread.load_index(dir.path());
+        assert_eq!(reread.by_path.len(), 1, "the deleted file left the index");
     }
 
     #[test]

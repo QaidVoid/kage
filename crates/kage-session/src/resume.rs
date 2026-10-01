@@ -21,7 +21,6 @@ use kage_core::{Content, Message, MessageId, Role};
 
 use crate::entry::{Compaction, FORMAT_VERSION, Header, SessionEntry};
 use crate::error::SessionError;
-use crate::list::list;
 use crate::reader::SessionReader;
 
 /// Result of replaying a session: enough state to seed an `AgentContext`
@@ -162,7 +161,16 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
                         _ => {}
                     }
                 }
-                history.push(Arc::unwrap_or_clone(m.message));
+                let mut message = Arc::unwrap_or_clone(m.message);
+                // Sessions recorded before tool results were capped can
+                // hold results of many megabytes; the loaded history
+                // keeps them to the size a live run would.
+                for block in &mut message.content {
+                    if let Content::ToolResultBlock { output, .. } = block {
+                        *output = kage_core::cap_tool_result(std::mem::take(output));
+                    }
+                }
+                history.push(message);
             }
             SessionEntry::Compaction(c) => {
                 compaction = Some(CompactionCounts {
@@ -245,11 +253,12 @@ fn ensure_supported_version(path: &Path, version: u32) -> Result<(), SessionErro
 /// Find the session file in `dir` whose id starts with `prefix`. Returns
 /// `Ok(None)` if no match exists; an error if the prefix is ambiguous.
 pub fn find_by_prefix(dir: &Path, prefix: &str) -> Result<Option<PathBuf>, SessionError> {
-    let summaries = list(dir)?;
-    let mut matches = summaries
+    // Each file is named for its session id, so the names alone answer
+    // without opening a single session.
+    let mut matches = session_files(dir)?
         .into_iter()
-        .filter(|s| s.id.to_string().starts_with(prefix));
-    let Some(first) = matches.next() else {
+        .filter(|(id, _)| id.starts_with(prefix));
+    let Some((_, first)) = matches.next() else {
         return Ok(None);
     };
     if matches.next().is_some() {
@@ -261,16 +270,69 @@ pub fn find_by_prefix(dir: &Path, prefix: &str) -> Result<Option<PathBuf>, Sessi
             ),
         });
     }
-    Ok(Some(first.path))
+    Ok(Some(first))
 }
 
 /// Find the most recently created session in `dir`, skipping agent
 /// sessions.
 pub fn find_last(dir: &Path) -> Result<Option<PathBuf>, SessionError> {
-    Ok(list(dir)?
+    // Session ids are ULIDs, which sort by creation time, so the newest
+    // name is the newest session; only the head of each candidate is
+    // read, to skip agent sessions and files without a header.
+    let mut files = session_files(dir)?;
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(files
         .into_iter()
-        .find(|s| s.agent.is_none())
-        .map(|s| s.path))
+        .map(|(_, path)| path)
+        .find(|path| opens_as_user_session(path)))
+}
+
+/// The `*.jsonl` files of `dir` with their file stems, which are the
+/// session ids. A missing directory has none.
+fn session_files(dir: &Path) -> Result<Vec<(String, PathBuf)>, SessionError> {
+    let read_dir = match std::fs::read_dir(dir) {
+        Ok(read_dir) => read_dir,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(SessionError::Io {
+                path: dir.to_path_buf(),
+                source: err,
+            });
+        }
+    };
+    Ok(read_dir
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .filter_map(|path| {
+            let stem = path.file_stem()?.to_str()?.to_owned();
+            Some((stem, path))
+        })
+        .collect())
+}
+
+/// Whether `path` starts with a header and is not an agent session,
+/// reading only its first two lines.
+fn opens_as_user_session(path: &Path) -> bool {
+    use std::io::BufRead as _;
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut lines = std::io::BufReader::new(file).lines();
+    let header = lines
+        .next()
+        .and_then(Result::ok)
+        .and_then(|line| serde_json::from_str::<SessionEntry>(&line).ok());
+    if !matches!(header, Some(SessionEntry::Header(_))) {
+        return false;
+    }
+    match lines.next().and_then(Result::ok) {
+        Some(line) => !matches!(
+            serde_json::from_str::<SessionEntry>(&line),
+            Ok(SessionEntry::Custom(custom)) if custom.kind == crate::list::AGENT_ENTRY_KIND
+        ),
+        None => true,
+    }
 }
 
 #[cfg(test)]

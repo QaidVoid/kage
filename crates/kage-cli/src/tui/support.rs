@@ -348,16 +348,10 @@ pub(crate) fn resolve_switch_target(target: &str) -> Result<PathBuf, String> {
         return Ok(direct);
     }
     let dir = crate::sessions_dir().map_err(|e| format!("sessions dir: {e}"))?;
-    let summaries = kage_session::list(&dir).map_err(|e| format!("listing sessions: {e}"))?;
-    let mut hits: Vec<PathBuf> = summaries
-        .into_iter()
-        .filter(|s| s.id.to_string().starts_with(target))
-        .map(|s| s.path)
-        .collect();
-    match hits.len() {
-        1 => Ok(hits.remove(0)),
-        0 => Err(format!("no session matching '{target}'")),
-        _ => Err(format!("ambiguous session id '{target}'")),
+    match kage_session::find_by_prefix(&dir, target) {
+        Ok(Some(path)) => Ok(path),
+        Ok(None) => Err(format!("no session matching '{target}'")),
+        Err(_) => Err(format!("ambiguous session id '{target}'")),
     }
 }
 

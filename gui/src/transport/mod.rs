@@ -82,6 +82,28 @@ impl State {
     }
 }
 
+/// What a transport connects to, as the sidebar footer names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    /// The engine command on the other end: `kage rpc` or `kage serve`.
+    pub name: &'static str,
+    /// Where it runs: `stdio · local`, or the endpoint's host and path.
+    pub detail: String,
+}
+
+impl Link {
+    /// The link to a `kage serve` endpoint at `url`, shown without its
+    /// scheme.
+    #[must_use]
+    pub fn serve(url: &str) -> Self {
+        let detail = url.split_once("://").map_or(url, |(_, rest)| rest);
+        Self {
+            name: "kage serve",
+            detail: detail.to_owned(),
+        }
+    }
+}
+
 /// A transport behind the shell.
 ///
 /// The shell starts it once, then only calls [`Transport::send`] and
@@ -100,6 +122,9 @@ pub trait Transport: 'static {
     /// Closes the link for good: no more retries, no more events
     /// after [`State::Closed`].
     fn close(&self);
+
+    /// What the transport connects to.
+    fn link(&self) -> Link;
 
     /// The engine's connection id for diagnostics, when the transport
     /// learned one.

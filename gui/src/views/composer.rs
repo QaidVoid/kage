@@ -738,8 +738,8 @@ impl ComposerView {
 
     /// Sends the typed text: on the welcome pane it opens the session
     /// the text rides on; plain when idle, or queued while a run is
-    /// in flight, or steered when `steer` says so and the wire allows
-    /// it. Accepted text leaves the textarea and the draft.
+    /// in flight, or steered into the run when `steer` says so and the
+    /// wire allows it. A steer with no run in flight sends plainly. Accepted text leaves the textarea and the draft.
     pub fn submit(&mut self, steer: bool, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input_value(cx);
         let text = text.trim();
@@ -749,7 +749,7 @@ impl ComposerView {
         let accepted = if self.loaded.is_none() && !self.store.read(cx).pending_prompt() {
             self.store.act(cx, |store| store.open_with_prompt(text));
             true
-        } else if steer {
+        } else if steer && self.running(cx) {
             self.store.act(cx, |store| store.steer(text).is_ok())
         } else {
             self.store.act(cx, |store| store.submit(text).is_some())
@@ -1858,6 +1858,53 @@ mod tests {
             Some("session-2"),
             "the composer follows the session the store activated"
         );
+    }
+
+    /// Ctrl+Enter steers a running turn; with nothing running there is
+    /// no turn to steer, so the text goes out as a plain prompt.
+    #[gpui_kit::test]
+    fn a_steer_with_nothing_running_sends_the_prompt(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let store = store_with_session(cx);
+        let (handle, composer) = cx.update(|app| {
+            gpui_kit::open_window(Default::default(), app, |window, cx| {
+                cx.new(|cx| ComposerView::new(store.clone(), window, cx))
+            })
+            .expect("the window opens")
+        });
+        cx.update(|app| {
+            store.update(app, |store, cx| {
+                let request = store
+                    .take_outgoing()
+                    .into_iter()
+                    .find_map(|frame| match frame {
+                        Frame::Request { id, method, .. } if method == "session/new" => Some(id),
+                        _ => None,
+                    })
+                    .expect("session/new went out");
+                store.absorb(Frame::Success {
+                    id: request,
+                    result: serde_json::json!({ "sessionId": "s1" }),
+                });
+                cx.notify();
+            });
+        });
+        let _ = handle.update(cx, |_, window, app| {
+            composer.update(app, |composer, cx| {
+                composer
+                    .input()
+                    .update(cx, |state, cx| state.set_value("go", window, cx));
+                composer.submit(true, window, cx);
+            });
+        });
+        let sent = cx.update(|app| {
+            store.update(app, |store, _| {
+                store.take_outgoing().into_iter().any(
+                    |frame| matches!(frame, Frame::Request { method, .. } if method == "session/prompt"),
+                )
+            })
+        });
+        assert!(sent, "the prompt went out");
     }
 
     use std::time::{Duration, Instant};

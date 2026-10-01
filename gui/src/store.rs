@@ -13,7 +13,7 @@ use kage_client::{Change, Client, Frame, PromptOutcome, Session, SteerError};
 use gpui_kit::{App, Entity};
 
 use crate::gate::{self, Report};
-use crate::transport::State;
+use crate::transport::{Link, State};
 
 /// Store mutations that queue frames or move state go through
 /// [`StoreHandle::act`], which notifies the store's observers: the
@@ -74,6 +74,8 @@ pub struct Store {
     prompted: bool,
     /// The directory sessions open in.
     cwd: String,
+    /// What the transport connects to.
+    link: Link,
     /// The session the transcript view follows. `None` is the welcome
     /// state, where the next prompt opens the session it rides on.
     active: Option<String>,
@@ -103,10 +105,35 @@ impl Store {
             replay,
             prompted: false,
             cwd: cwd.into(),
+            link: Link::serve(""),
             active: None,
             pending_prompt: None,
             fs_listing: None,
             commands: Vec::new(),
+        }
+    }
+
+    /// Names what the transport connects to.
+    #[must_use]
+    pub fn with_link(mut self, link: Link) -> Self {
+        self.link = link;
+        self
+    }
+
+    /// What the transport connects to.
+    #[must_use]
+    pub fn link(&self) -> &Link {
+        &self.link
+    }
+
+    /// The directory a new session opens in: the shell's own, or the
+    /// engine's when the shell has none, as in a browser.
+    #[must_use]
+    pub fn session_dir(&self) -> Option<&str> {
+        if self.cwd.is_empty() {
+            self.state().agent_cwd.as_deref()
+        } else {
+            Some(&self.cwd)
         }
     }
 

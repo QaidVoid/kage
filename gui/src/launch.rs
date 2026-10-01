@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use gpui_kit::assets::Assets;
-use gpui_kit::{App, AppContext, Entity, KeyBinding, TitlebarOptions, WindowOptions, px, size};
+use gpui_kit::{App, AppContext, Entity, TitlebarOptions, WindowOptions, px, size};
 
 use crate::app::{Shell, ShellArgs};
 use crate::theme;
@@ -147,50 +147,7 @@ pub fn run() {
         .run(move |cx: &mut App| {
             theme::install_fonts(cx);
             gpui_kit::init(cx);
-            let mut keys = vec![
-                KeyBinding::new("ctrl-q", crate::app::Quit, None),
-                KeyBinding::new("cmd-q", crate::app::Quit, None),
-                KeyBinding::new("ctrl-n", crate::app::NewSession, None),
-                KeyBinding::new("cmd-n", crate::app::NewSession, None),
-                KeyBinding::new("ctrl-b", crate::app::ToggleWorkbench, None),
-                KeyBinding::new("cmd-b", crate::app::ToggleWorkbench, None),
-                KeyBinding::new("ctrl-\\", crate::app::ToggleSidebar, None),
-                KeyBinding::new("cmd-\\", crate::app::ToggleSidebar, None),
-                KeyBinding::new("ctrl-enter", crate::app::SendPrompt, None),
-                KeyBinding::new("ctrl-f", crate::app::OpenFind, None),
-                KeyBinding::new("cmd-f", crate::app::OpenFind, None),
-                KeyBinding::new("ctrl-k", crate::app::OpenPalette, None),
-                KeyBinding::new("cmd-k", crate::app::OpenPalette, None),
-            ];
-            // The find bar answers in its own key context, so Enter,
-            // Shift+Enter and Esc close or step only while its query
-            // holds the focus.
-            keys.extend([
-                KeyBinding::new("enter", crate::views::chrome::FindNext, Some("Find")),
-                KeyBinding::new("shift-enter", crate::views::chrome::FindPrev, Some("Find")),
-                KeyBinding::new("escape", crate::views::chrome::FindClose, Some("Find")),
-            ]);
-            // The palette owns its arrows, Enter and Esc the same way;
-            // the single-line query never claims them for itself.
-            keys.extend([
-                KeyBinding::new("up", crate::views::chrome::PaletteUp, Some("Palette")),
-                KeyBinding::new("down", crate::views::chrome::PaletteDown, Some("Palette")),
-                KeyBinding::new("enter", crate::views::chrome::PaletteRun, Some("Palette")),
-                KeyBinding::new(
-                    "escape",
-                    crate::views::chrome::PaletteClose,
-                    Some("Palette"),
-                ),
-            ]);
-            // The composer claims Shift+Tab inside the input's own key
-            // context, so it wins over the toolkit's outdent binding
-            // while the input is focused.
-            keys.push(KeyBinding::new(
-                "shift-tab",
-                crate::views::composer::CycleMode,
-                Some("Input"),
-            ));
-            cx.bind_keys(keys);
+            cx.bind_keys(crate::app::key_bindings());
             let options = WindowOptions {
                 titlebar: Some(TitlebarOptions {
                     title: Some("kage client".into()),
@@ -204,7 +161,7 @@ pub fn run() {
                 replay,
                 stream,
             };
-            let (handle, shell) = gpui_kit::open_window(options, cx, move |window, cx| {
+            let (_, shell) = gpui_kit::open_window(options, cx, move |window, cx| {
                 // The window knows the platform appearance, so the theme is
                 // chosen here rather than at `run`, and the observer keeps
                 // it in step when the desktop flips.
@@ -219,45 +176,7 @@ pub fn run() {
                 shell
             })
             .expect("failed to open the window");
-            let shell_new = shell.clone();
-
-            // The key router: app-level listeners run at the end of the
-            // bubble phase, after whatever the focused view consumed.
-            cx.on_action(move |_: &crate::app::Quit, cx| cx.quit());
-            cx.on_action(move |_: &crate::app::NewSession, cx| {
-                shell_new.update(cx, |shell, cx| shell.show_welcome(cx));
-            });
-            let shell_toggle_sidebar = shell.clone();
-            cx.on_action(move |_: &crate::app::ToggleSidebar, cx| {
-                shell_toggle_sidebar.update(cx, |shell, cx| shell.toggle_sidebar(cx));
-            });
-            let shell_toggle_workbench = shell.clone();
-            cx.on_action(move |_: &crate::app::ToggleWorkbench, cx| {
-                shell_toggle_workbench.update(cx, |shell, cx| shell.toggle_workbench(cx));
-            });
-            cx.on_action(move |_: &crate::app::SendPrompt, cx| {
-                let _ = handle.update(cx, |root, window, cx| {
-                    if let Ok(shell) = root.downcast::<Shell>() {
-                        shell.update(cx, |shell, cx| shell.send_composer(window, cx));
-                    }
-                });
-            });
-            let shell_find = handle;
-            cx.on_action(move |_: &crate::app::OpenFind, cx| {
-                let _ = shell_find.update(cx, |root, window, cx| {
-                    if let Ok(shell) = root.downcast::<Shell>() {
-                        shell.update(cx, |shell, cx| shell.open_find(window, cx));
-                    }
-                });
-            });
-            let shell_palette = handle;
-            cx.on_action(move |_: &crate::app::OpenPalette, cx| {
-                let _ = shell_palette.update(cx, |root, window, cx| {
-                    if let Ok(shell) = root.downcast::<Shell>() {
-                        shell.update(cx, |shell, cx| shell.open_palette(window, cx));
-                    }
-                });
-            });
+            crate::app::route_actions(cx);
 
             if let Some(millis) = smoke_millis {
                 quit_after(cx, shell, Duration::from_millis(millis));

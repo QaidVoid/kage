@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use kage_client::Frame;
 
-use super::{Event, EventSender, State, Transport};
+use super::{Event, EventSender, Link, State, Transport};
 
 /// The golden transcript the replay transport plays, in wire order.
 const TRANSCRIPT: &str = include_str!("../../../crates/kage-client/tests/fixtures/fix-tools.jsonl");
@@ -69,6 +69,13 @@ impl ReplayTransport {
 }
 
 impl Transport for ReplayTransport {
+    fn link(&self) -> Link {
+        Link {
+            name: "replay",
+            detail: "recorded transcript".to_owned(),
+        }
+    }
+
     fn start(&mut self, events: EventSender) {
         #[cfg(not(target_arch = "wasm32"))]
         {

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use kage_client::Frame;
 
-use super::{Event, EventSender, State, Transport};
+use super::{Event, EventSender, Link, State, Transport};
 
 /// What to spawn for `kage rpc`.
 #[derive(Debug, Clone)]
@@ -122,6 +122,13 @@ fn next_line(reader: &mut BufReader<std::process::ChildStdout>) -> Option<String
 }
 
 impl Transport for StdioTransport {
+    fn link(&self) -> Link {
+        Link {
+            name: "kage rpc",
+            detail: "stdio \u{b7} local".to_owned(),
+        }
+    }
+
     fn start(&mut self, events: EventSender) {
         let Some(program) = resolve(&self.config.program) else {
             let _ = events.send_blocking(Event::State(State::Refused(format!(

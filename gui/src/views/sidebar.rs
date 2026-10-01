@@ -4,6 +4,7 @@
 
 use gpui_kit::AnyElement;
 use gpui_kit::assets::IconName;
+use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
@@ -493,11 +494,13 @@ impl Render for SidebarView {
 
         let version = state.agent.as_ref().and_then(|agent| agent.version.clone());
 
+        let link = store.link();
+        let link_name = link.name;
         let status_line = match store.connect() {
-            State::Connected => "stdio \u{b7} local",
-            State::Connecting => "connecting...",
-            State::Reconnecting { .. } => "reconnecting...",
-            State::Refused(_) | State::Closed => "not running",
+            State::Connected => link.detail.clone(),
+            State::Connecting => "connecting\u{2026}".to_owned(),
+            State::Reconnecting { .. } => "reconnecting\u{2026}".to_owned(),
+            State::Refused(_) | State::Closed => "not running".to_owned(),
         };
 
         let dot = match store.connect() {
@@ -512,6 +515,7 @@ impl Render for SidebarView {
 
         v_flex()
             .id("sidebar")
+            .test_support()
             .size_full()
             .overflow_hidden()
             .bg(p.sidebar)
@@ -652,7 +656,7 @@ impl Render for SidebarView {
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .child(div().text_color(p.ink).truncate().child("kage rpc"))
+                            .child(div().text_color(p.ink).truncate().child(link_name))
                             .child(
                                 div()
                                     .text_size(px(11.))

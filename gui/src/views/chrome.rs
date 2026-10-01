@@ -877,7 +877,11 @@ impl Render for PaletteView {
                 let index = this.selected;
                 this.run_index(index, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &PaletteClose, _, cx| this.close(cx)))
+            .on_action(cx.listener(|this, _: &PaletteClose, window, cx| {
+                this.close(cx);
+                this.composer
+                    .update(cx, |state, cx| state.focus(window, cx));
+            }))
             .child(
                 h_flex()
                     .items_center()
@@ -1124,28 +1128,28 @@ const SUGGESTIONS: [Suggestion; 4] = [
     Suggestion {
         id: "welcome-card-fix",
         icon: IconName::Lightbulb,
-        text: "Fix the flaky retry test in kage-provider",
+        text: "Find the failing tests and fix them",
         option: None,
         tag: None,
     },
     Suggestion {
         id: "welcome-card-swarm",
         icon: IconName::Waypoints,
-        text: "Audit every crate for unwrap on runtime paths",
+        text: "Review every module for unhandled errors",
         option: Some(("swarm", "on")),
         tag: Some("swarm"),
     },
     Suggestion {
         id: "welcome-card-plan",
         icon: IconName::ListTodo,
-        text: "Plan the remote MCP rollout",
+        text: "Plan the next change before touching code",
         option: Some(("mode", "plan")),
         tag: Some("plan"),
     },
     Suggestion {
         id: "welcome-card-delegate",
         icon: IconName::Bot,
-        text: "Delegate the docs check to subagents",
+        text: "Delegate a docs check to subagents",
         option: None,
         tag: None,
     },
@@ -1357,26 +1361,9 @@ impl Render for WelcomeView {
             cards = cards.child(card);
         }
 
-        // The project pill above the composer, as the web client's
-        // proj-picker draws it: a surface fill, the folder, the project
-        // name and the branch label. The client knows one directory,
-        // the shell's own, so the pill names it and picks nothing.
-        let project = crate::app::project_name(
-            self.store
-                .read(cx)
-                .state()
-                .directory
-                .first()
-                .map(|info| info.cwd.as_str())
-                .or_else(|| {
-                    self.store
-                        .read(cx)
-                        .state()
-                        .sessions
-                        .values()
-                        .find_map(|session| session.cwd.as_deref())
-                }),
-        );
+        // The project pill above the composer: the folder and the name
+        // of the directory the next session opens in.
+        let project = crate::app::project_name(self.store.read(cx).session_dir());
         let proj_picker = h_flex()
             .id("welcome-proj")
             .mb(px(8.))
@@ -1388,28 +1375,14 @@ impl Render for WelcomeView {
             .self_start()
             .rounded(px(R_MD))
             .bg(p.surface)
-            .hover(|pill| pill.bg(p.raised))
             .text_size(px(FS_SM))
             .text_color(p.ink)
-            .cursor_default()
             .child(
                 Icon::new(IconName::Folder)
                     .with_size(px(14.))
                     .text_color(p.muted),
             )
-            .child(project)
-            .child(
-                div()
-                    .font_family(FONT_MONO)
-                    .text_size(px(11.))
-                    .text_color(p.faint)
-                    .child("main"),
-            )
-            .child(
-                Icon::new(IconName::ChevronDown)
-                    .with_size(px(12.))
-                    .text_color(p.faint),
-            );
+            .child(project);
 
         // The wordmark: the kanji glyph over its hard offset shadow,
         // then the name, as the web client's `.wordmark` draws them.
@@ -1443,12 +1416,8 @@ impl Render for WelcomeView {
             .mt(px(18.))
             .text_size(px(FS_XS))
             .text_color(p.faint)
-            .child("Type")
-            .child(kbd_chip("help", p).mx(px(2.)))
-            .child("in any chat to list the test keywords")
-            .child("\u{b7}")
-            .child(kbd_chip("Ctrl K", p).mx(px(2.)))
-            .child("commands");
+            .child(kbd_chip("Ctrl K", p).mr(px(4.)))
+            .child("commands and sessions");
 
         let column = v_flex()
             .w_full()
@@ -1493,7 +1462,7 @@ impl Render for WelcomeView {
                     ),
             )
             .child(
-                div()
+                v_flex()
                     .w_full()
                     .child(proj_picker)
                     .child(div().w_full().child(self.composer_view.clone())),

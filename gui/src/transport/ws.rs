@@ -22,7 +22,7 @@ use tungstenite::protocol::WebSocket;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Error as WsError, Message};
 
-use super::{Backoff, Event, EventSender, State, Transport};
+use super::{Backoff, Event, EventSender, Link, State, Transport};
 
 /// The prefix of the subprotocol entry kage's own client sends.
 const TOKEN_SUBPROTOCOL_PREFIX: &str = "kage.";
@@ -215,6 +215,10 @@ impl WsTransport {
 }
 
 impl Transport for WsTransport {
+    fn link(&self) -> Link {
+        Link::serve(&self.url)
+    }
+
     fn start(&mut self, events: EventSender) {
         let transport = self.clone();
         thread::Builder::new()

@@ -18,7 +18,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::{JsCast as _, JsValue};
 
 use gpui_kit::assets::Assets;
-use gpui_kit::{App, AppContext, KeyBinding, TitlebarOptions, WindowOptions, px, size};
+use gpui_kit::{App, AppContext, TitlebarOptions, WindowOptions, px, size};
 
 use crate::app::{Shell, ShellArgs};
 use crate::theme;
@@ -88,17 +88,7 @@ pub fn start() {
             // prepaint. See `views::deferred`.
             gpui_kit::init(cx);
             theme::install_fonts(cx);
-            cx.bind_keys([
-                KeyBinding::new("ctrl-q", crate::app::Quit, None),
-                KeyBinding::new("cmd-q", crate::app::Quit, None),
-                KeyBinding::new("ctrl-n", crate::app::NewSession, None),
-                KeyBinding::new("cmd-n", crate::app::NewSession, None),
-                KeyBinding::new("ctrl-b", crate::app::ToggleWorkbench, None),
-                KeyBinding::new("cmd-b", crate::app::ToggleWorkbench, None),
-                KeyBinding::new("ctrl-\\", crate::app::ToggleSidebar, None),
-                KeyBinding::new("cmd-\\", crate::app::ToggleSidebar, None),
-                KeyBinding::new("ctrl-enter", crate::app::SendPrompt, None),
-            ]);
+            cx.bind_keys(crate::app::key_bindings());
             let options = WindowOptions {
                 titlebar: Some(TitlebarOptions {
                     title: Some("kage client".into()),
@@ -108,7 +98,7 @@ pub fn start() {
                 ..Default::default()
             };
             let (server, token) = connection();
-            let (handle, shell) = gpui_kit::open_window(options, cx, |window, cx| {
+            gpui_kit::open_window(options, cx, |window, cx| {
                 // `gpui_web` reads `prefers-color-scheme` for the window's
                 // appearance, so the System default follows the browser and
                 // the observer follows a live change.
@@ -127,26 +117,7 @@ pub fn start() {
                 cx.new(|cx| Shell::new(args, window, cx))
             })
             .expect("failed to open the window");
-            let shell_new = shell.clone();
-            cx.on_action(move |_: &crate::app::Quit, cx| cx.quit());
-            cx.on_action(move |_: &crate::app::NewSession, cx| {
-                shell_new.update(cx, |shell, cx| shell.show_welcome(cx));
-            });
-            let shell_toggle_sidebar = shell.clone();
-            cx.on_action(move |_: &crate::app::ToggleSidebar, cx| {
-                shell_toggle_sidebar.update(cx, |shell, cx| shell.toggle_sidebar(cx));
-            });
-            let shell_toggle_workbench = shell.clone();
-            cx.on_action(move |_: &crate::app::ToggleWorkbench, cx| {
-                shell_toggle_workbench.update(cx, |shell, cx| shell.toggle_workbench(cx));
-            });
-            cx.on_action(move |_: &crate::app::SendPrompt, cx| {
-                let _ = handle.update(cx, |root, window, cx| {
-                    if let Ok(shell) = root.downcast::<Shell>() {
-                        shell.update(cx, |shell, cx| shell.send_composer(window, cx));
-                    }
-                });
-            });
+            crate::app::route_actions(cx);
         });
 }
 

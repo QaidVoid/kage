@@ -24,7 +24,7 @@ use web_sys::{MessageEvent, WebSocket};
 
 use kage_client::Frame;
 
-use super::{Backoff, Event, EventSender, State, Transport};
+use super::{Backoff, Event, EventSender, Link, State, Transport};
 
 /// The prefix of the subprotocol entry kage's own client sends.
 const TOKEN_SUBPROTOCOL_PREFIX: &str = "kage.";
@@ -226,6 +226,10 @@ impl WebTransport {
 }
 
 impl Transport for WebTransport {
+    fn link(&self) -> Link {
+        Link::serve(&self.url)
+    }
+
     fn start(&mut self, events: EventSender) {
         self.inner.borrow_mut().events = Some(events);
         self.dial();

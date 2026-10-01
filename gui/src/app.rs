@@ -17,8 +17,8 @@ use gpui_kit::component::theme::ActiveTheme;
 use gpui_kit::component::{Sizable as _, h_flex, h_resizable, resizable_panel, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Window, div, px,
+    App, AppContext, Context, Entity, InteractiveElement as _, IntoElement, KeyBinding,
+    ParentElement as _, Render, SharedString, Styled as _, Window, div, px,
 };
 
 use crate::clock::unix_seconds;
@@ -85,6 +85,53 @@ gpui_kit::actions!(
     ]
 );
 
+/// The shell's key bindings, shared by the native and browser builds.
+#[must_use]
+pub fn key_bindings() -> Vec<KeyBinding> {
+    use crate::views::chrome::{
+        FindClose, FindNext, FindPrev, PaletteClose, PaletteDown, PaletteRun, PaletteUp,
+    };
+    vec![
+        KeyBinding::new("ctrl-q", Quit, None),
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("ctrl-n", NewSession, None),
+        KeyBinding::new("cmd-n", NewSession, None),
+        KeyBinding::new("ctrl-b", ToggleWorkbench, None),
+        KeyBinding::new("cmd-b", ToggleWorkbench, None),
+        KeyBinding::new("ctrl-\\", ToggleSidebar, None),
+        KeyBinding::new("cmd-\\", ToggleSidebar, None),
+        KeyBinding::new("ctrl-enter", SendPrompt, None),
+        KeyBinding::new("ctrl-f", OpenFind, None),
+        KeyBinding::new("cmd-f", OpenFind, None),
+        KeyBinding::new("ctrl-k", OpenPalette, None),
+        KeyBinding::new("cmd-k", OpenPalette, None),
+        // The find bar and the palette answer in their own key contexts,
+        // so Enter, the arrows and Esc act only while their query holds
+        // the focus.
+        KeyBinding::new("enter", FindNext, Some("Find")),
+        KeyBinding::new("shift-enter", FindPrev, Some("Find")),
+        KeyBinding::new("escape", FindClose, Some("Find")),
+        KeyBinding::new("up", PaletteUp, Some("Palette")),
+        KeyBinding::new("down", PaletteDown, Some("Palette")),
+        KeyBinding::new("enter", PaletteRun, Some("Palette")),
+        KeyBinding::new("escape", PaletteClose, Some("Palette")),
+        // Inside the input's own context, so it wins over the toolkit's
+        // outdent binding while the composer is focused.
+        KeyBinding::new(
+            "shift-tab",
+            crate::views::composer::CycleMode,
+            Some("Input"),
+        ),
+    ]
+}
+
+/// Routes the actions that need no window. The shell's root element
+/// handles the rest, since an action dispatched in a window cannot
+/// update that same window from an app-level listener.
+pub fn route_actions(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx| cx.quit());
+}
+
 /// What the shell is launched with.
 pub struct ShellArgs {
     /// The transport to connect through, already built, not started.
@@ -141,7 +188,8 @@ impl Shell {
     /// Builds every view of the shell and wires them to the store.
     fn build(mut args: ShellArgs, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cwd = working_dir();
-        let store = cx.new(|_| Store::new(cwd, args.replay));
+        let link = args.transport.link();
+        let store = cx.new(|_| Store::new(cwd, args.replay).with_link(link));
         let sidebar = cx.new(|_| SidebarView::new(store.clone()));
         let composer = cx.new(|cx| ComposerView::new(store.clone(), window, cx));
         let input = composer.read(cx).input().clone();
@@ -653,18 +701,29 @@ impl Render for Shell {
             // `.SystemUIFont`, which the web cannot load at all: the
             // render then panics on the first line it lays out.
             .font_family(cx.theme().font_family.clone())
+            .on_action(cx.listener(|shell, _: &NewSession, _, cx| shell.show_welcome(cx)))
+            .on_action(cx.listener(|shell, _: &ToggleSidebar, _, cx| shell.toggle_sidebar(cx)))
+            .on_action(cx.listener(|shell, _: &ToggleWorkbench, _, cx| shell.toggle_workbench(cx)))
+            .on_action(cx.listener(|shell, _: &SendPrompt, window, cx| {
+                shell.send_composer(window, cx);
+            }))
+            .on_action(cx.listener(|shell, _: &OpenFind, window, cx| shell.open_find(window, cx)))
+            .on_action(cx.listener(|shell, _: &OpenPalette, window, cx| {
+                shell.open_palette(window, cx);
+            }))
             .child(
+                // Every panel stays in the group at every width: the group
+                // keys its sizes by position, so a column that joined later
+                // would take a neighbour's size.
                 h_resizable("kage-shell")
-                    .when(!narrow, |row| {
-                        row.child(
-                            resizable_panel()
-                                .size(px(SIDE_W))
-                                .size_range(px(160.)..px(420.))
-                                .flex_none()
-                                .visible(sidebar_visible)
-                                .child(self.sidebar.clone()),
-                        )
-                    })
+                    .child(
+                        resizable_panel()
+                            .size(px(SIDE_W))
+                            .size_range(px(160.)..px(420.))
+                            .flex_none()
+                            .visible(sidebar_visible && !narrow)
+                            .child(self.sidebar.clone()),
+                    )
                     .child(
                         resizable_panel().child(
                             v_flex()
@@ -676,16 +735,14 @@ impl Render for Shell {
                                 .child(self.bottom_band(cx)),
                         ),
                     )
-                    .when(!mid, |row| {
-                        row.child(
-                            resizable_panel()
-                                .size(px(WORKBENCH_W))
-                                .size_range(px(200.)..px(520.))
-                                .flex_none()
-                                .visible(workbench_visible)
-                                .child(self.workbench.clone()),
-                        )
-                    }),
+                    .child(
+                        resizable_panel()
+                            .size(px(WORKBENCH_W))
+                            .size_range(px(200.)..px(520.))
+                            .flex_none()
+                            .visible(workbench_visible && !mid)
+                            .child(self.workbench.clone()),
+                    ),
             )
             .when(narrow && side_float, |shell| {
                 shell.child(
@@ -736,6 +793,9 @@ mod tests {
     struct Silent;
 
     impl crate::transport::Transport for Silent {
+        fn link(&self) -> crate::transport::Link {
+            crate::transport::Link::serve("ws://silent")
+        }
         fn start(&mut self, _events: EventSender) {}
         fn send(&self, _frame: kage_client::Frame) {}
         fn close(&self) {}
@@ -780,5 +840,53 @@ mod tests {
             px(crate::theme::WELCOME_W),
             "the composer reaches the design's welcome width through the shell"
         );
+    }
+
+    /// The browser starts the canvas small and grows it once the page
+    /// lays out, so the shell first renders without its side columns.
+    /// The sidebar must still open at the design's width afterwards.
+    #[gpui_kit::test]
+    fn the_sidebar_keeps_its_width_after_a_narrow_start(cx: &mut TestAppContext) {
+        let visual = shell_without_session(cx);
+        for width in [300., 1024., 1440.] {
+            visual.simulate_resize(gpui_kit::size(px(width), px(900.)));
+            for _ in 0..3 {
+                visual.update(|window, cx| window.draw(cx).clear(cx));
+            }
+        }
+        let sidebar = visual.update(|window, _| {
+            window
+                .find(ElementId::Name("sidebar".into()))
+                .bounds()
+                .size
+                .width
+        });
+        assert_eq!(sidebar, px(crate::theme::SIDE_W));
+    }
+
+    /// The keys reach the shell through the bindings both builds share:
+    /// Ctrl+K opens the palette, Ctrl+Enter sends the composer and
+    /// Ctrl+F opens find.
+    #[gpui_kit::test]
+    fn the_shared_bindings_reach_the_shell(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.bind_keys(super::key_bindings());
+        });
+        let (shell, visual) =
+            cx.add_window_view(|window: &mut Window, cx| Shell::new(args(), window, cx));
+        visual.update(|_, cx| super::route_actions(cx));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.simulate_keystrokes("ctrl-k");
+        let open = visual.update(|_, cx| shell.read(cx).palette.read(cx).is_open());
+        assert!(open, "Ctrl+K opens the palette");
+        visual.simulate_keystrokes("escape");
+        visual.simulate_input("hi");
+        visual.simulate_keystrokes("ctrl-enter");
+        let pending = visual.update(|_, cx| shell.read(cx).store.read(cx).pending_prompt());
+        assert!(pending, "Ctrl+Enter sends the welcome prompt");
+        visual.simulate_keystrokes("ctrl-f");
+        let find = visual.update(|_, cx| shell.read(cx).find.read(cx).is_open());
+        assert!(find, "Ctrl+F opens find even from the composer");
     }
 }

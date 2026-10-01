@@ -11,7 +11,9 @@
 //!   `gpui-pre-web`, WebGPU with a WebGL2 canvas fallback.
 
 pub mod app;
+pub mod clock;
 pub mod gate;
+#[doc(hidden)]
 pub mod store;
 pub mod theme;
 pub mod transport;

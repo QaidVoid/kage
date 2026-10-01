@@ -12,7 +12,7 @@ use std::borrow::Cow;
 
 use gpui_kit::base::motion::Easing;
 use gpui_kit::component::theme::{Theme, ThemeColor, ThemeMode};
-use gpui_kit::{App, BoxShadow, FontWeight, Hsla, px, rgba};
+use gpui_kit::{App, BoxShadow, FontWeight, Hsla, WindowAppearance, px, rgba};
 
 /// The display family for brand moments and headings.
 pub const FONT_DISPLAY: &str = "Schibsted Grotesk";
@@ -329,9 +329,20 @@ pub struct Palette {
     pub shadow_menu: Vec<BoxShadow>,
 }
 
-/// Converts one hex color, alpha included, to the toolkit's color type.
+/// Converts one hex color to the toolkit's color type.
+///
+/// A 6-digit literal is opaque; an 8-digit one carries alpha in its last
+/// byte, as the design's own tokens do (`0xF2A65A42` is the accent at 26
+/// percent). GPUI's [`rgba`] always reads four bytes, so passing a 6-digit
+/// value straight through would take its blue as alpha and draw every
+/// surface at that opacity: `0x0F0E13` became 7 percent, which is what
+/// shifted the whole shell off the palette.
 fn color(hex: u32) -> Hsla {
-    rgba(hex).into()
+    let opaque = match hex.checked_shr(24) {
+        Some(0) | None => (hex << 8) | 0xFF,
+        Some(_) => hex,
+    };
+    rgba(opaque).into()
 }
 
 /// Builds one box shadow layer from the design's shadow recipe.
@@ -642,6 +653,9 @@ fn theme_colors(p: &Palette, mode: ThemeMode) -> ThemeColor {
 /// Installs one palette as the theme of the running app and names the
 /// bundled families and the metric tokens on it.
 fn apply(palette: &Palette, mode: ThemeMode, cx: &mut App) {
+    // Both families are named in the same edit as the colors, after the mode
+    // change, so the library's own font probes find a real family to keep and
+    // skip the `.SystemUIFont` lookup that the web cannot satisfy.
     Theme::change(mode, None, cx);
     Theme::update(cx, |theme| {
         theme.colors = theme_colors(palette, mode);
@@ -664,9 +678,112 @@ pub fn apply_dawn(cx: &mut App) {
     apply(&Palette::dawn(), ThemeMode::Light, cx);
 }
 
+/// Installs whichever palette the platform's appearance asks for: dawn on a
+/// light desktop, shadow otherwise. The System default, which the prototype
+/// resolves the same way.
+pub fn apply_system(cx: &mut App, appearance: WindowAppearance) {
+    let light = matches!(
+        appearance,
+        WindowAppearance::Light | WindowAppearance::VibrantLight
+    );
+    if light {
+        apply_dawn(cx);
+    } else {
+        apply_shadow(cx);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::Rgba;
+    use gpui_kit::component::theme::ActiveTheme as _;
+
+    #[test]
+    fn a_six_digit_token_is_opaque() {
+        // The design's fills are RGB triples, and GPUI's `rgba` reads a
+        // fourth byte as alpha. Passing a 6-digit value straight through
+        // drew `bg` at 7 percent, which shifted the whole shell off the
+        // palette, so the conversion has to supply the missing byte.
+        for hex in [0x0F0E13, 0x0B0A0E, 0x17151D, 0xF2A65A, 0x8BD49C] {
+            assert_eq!(color(hex).a, 1.0, "{hex:#010x} must be opaque");
+        }
+        // And the channels are the ones asked for. The palette stores
+        // Hsla, so the round trip costs a fraction of a step per channel;
+        // a whole step would be a real shift.
+        let bg = Rgba::from(color(0x0F0E13));
+        let one_step = 1.0 / 255.0;
+        for (got, want) in [(bg.r, 15), (bg.g, 14), (bg.b, 19)] {
+            assert!(
+                (got - want as f32 / 255.0).abs() < one_step,
+                "bg keeps its own channels: {got} against {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_eight_digit_token_keeps_its_alpha() {
+        // The design writes translucency deliberately: `line` is a
+        // hairline at 11 percent, the focus ring at 42, and body ink at
+        // 86. Those have to survive the conversion, or every soft fill
+        // lands solid.
+        assert_eq!(color(0xE8E2F51C).a, 0x1C as f32 / 255.0, "line");
+        assert_eq!(color(0xF2A65A42).a, 0x42 as f32 / 255.0, "selection");
+        assert_eq!(color(0xECE8F6DB).a, 0xDB as f32 / 255.0, "ink");
+        assert_eq!(color(0xF2A65A).a, 1.0, "the 6-digit accent beside it");
+    }
+
+    #[gpui_kit::test]
+    fn the_system_default_follows_the_appearance(cx: &mut gpui_kit::TestAppContext) {
+        // Dawn on a light desktop, shadow otherwise, which is what the
+        // prototype's `resolvedTheme` does and what E7.1 step 3 asks for.
+        for (appearance, dawn) in [
+            (WindowAppearance::Light, true),
+            (WindowAppearance::VibrantLight, true),
+            (WindowAppearance::Dark, false),
+            (WindowAppearance::VibrantDark, false),
+        ] {
+            cx.update(|app| {
+                gpui_kit::init(app);
+                apply_system(app, appearance);
+                let theme = app.theme();
+                assert_eq!(
+                    theme.mode,
+                    if dawn {
+                        ThemeMode::Light
+                    } else {
+                        ThemeMode::Dark
+                    },
+                    "{appearance:?} must pick the matching palette"
+                );
+                assert_eq!(
+                    theme.colors.background.a, 1.0,
+                    "{appearance:?} must paint an opaque background"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn the_theme_fills_are_opaque() {
+        // Every large surface is a 6-digit token, so one that reached the
+        // window translucent would show the backdrop through the whole
+        // app rather than on a single element.
+        let p = Palette::shadow();
+        for (name, token) in [
+            ("bg", p.bg),
+            ("sidebar", p.sidebar),
+            ("surface", p.surface),
+            ("raised", p.raised),
+            ("sunken", p.sunken),
+            ("deep", p.deep),
+            ("well", p.well),
+            ("composer_bg", p.composer_bg),
+            ("bubble", p.bubble),
+        ] {
+            assert_eq!(token.a, 1.0, "{name} must be opaque");
+        }
+    }
 
     #[test]
     fn shadow_palette_matches_the_design_tokens() {
@@ -733,5 +850,57 @@ mod tests {
         assert_eq!(FONT_BODY, "Inter");
         assert_eq!(FONT_MONO, "JetBrains Mono");
         assert_eq!(WEIGHT_EXTRABOLD, FontWeight(800.0));
+    }
+
+    #[test]
+    fn body_and_mono_name_bundled_families_not_the_virtual_ones() {
+        // The component library skips its `.SystemUIFont` probe only when
+        // the theme already names a family. Naming a virtual or empty
+        // family hands the probe back a family with no web fallback, and
+        // the app panics on its first text layout instead of booting.
+        assert_ne!(FONT_BODY, ".SystemUIFont");
+        assert_ne!(FONT_MONO, ".SystemUIFont");
+        assert!(!FONT_BODY.is_empty());
+        assert!(!FONT_MONO.is_empty());
+        assert!(
+            FONT_FILES.iter().all(|bytes| !bytes.is_empty()),
+            "each bundled family has bytes to register"
+        );
+    }
+
+    /// The virtual family GPUI and the component library both default to.
+    /// A mode change writes it back over the theme, so `apply` has to name
+    /// the bundled family after the change and never before it.
+    const VIRTUAL_UI_FONT: &str = ".SystemUIFont";
+
+    #[gpui_kit::test]
+    fn the_installed_theme_carries_the_bundled_families(cx: &mut App) {
+        // `apply_shadow` runs the library's real write path: the mode change
+        // reloads the registered theme, which carries `.SystemUIFont`, and
+        // only the edit after it survives. A theme left carrying the virtual
+        // family looks correct until the first text is laid out, and then
+        // takes the whole window down, so assert against the live theme
+        // rather than against the constants this module happens to name.
+        install_fonts(cx);
+        gpui_kit::init(cx);
+        apply_shadow(cx);
+        let theme = cx.theme();
+        assert_eq!(theme.font_family.as_ref(), FONT_BODY);
+        assert_eq!(theme.mono_font_family.as_ref(), FONT_MONO);
+        assert_ne!(theme.font_family.as_ref(), VIRTUAL_UI_FONT);
+        assert_ne!(theme.mono_font_family.as_ref(), VIRTUAL_UI_FONT);
+    }
+
+    #[gpui_kit::test]
+    fn the_light_theme_carries_the_bundled_families_too(cx: &mut App) {
+        // The same has to hold for the dawn palette: a light mode change
+        // reloads the light theme, which is a second chance to write the
+        // virtual family back.
+        install_fonts(cx);
+        gpui_kit::init(cx);
+        apply_dawn(cx);
+        let theme = cx.theme();
+        assert_eq!(theme.font_family.as_ref(), FONT_BODY);
+        assert_eq!(theme.mono_font_family.as_ref(), FONT_MONO);
     }
 }

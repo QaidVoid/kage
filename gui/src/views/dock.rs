@@ -12,15 +12,23 @@
 //! which carries the typed text to the agent under
 //! `_meta.kage.planReview`.
 
-use gpui_kit::AnyElement;
+use std::cell::Cell;
+use std::rc::Rc;
+use std::sync::LazyLock;
+
+use gpui_kit::assets::IconName;
+use gpui_kit::base::Selectable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::theme::ActiveTheme;
-use gpui_kit::component::{Disableable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::theme::{ActiveTheme, ThemeMode};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Window, div, px,
+    Anchor, AnyElement, AppContext as _, Context, Div, Entity, EventEmitter, FontWeight, Hsla,
+    InteractiveElement, Interactivity, IntoElement, ParentElement, Render, SharedString, Stateful,
+    StatefulInteractiveElement, StyleRefinement, Styled, Window, div, px, rgba,
 };
 use kage_client::wire::{
     ContentBlock, NoticeTone, PermissionOption, PermissionOptionKind, SubagentState,
@@ -29,6 +37,12 @@ use kage_client::{PermissionDecision, Session, TranscriptItem};
 use serde_json::Value;
 
 use crate::store::Store;
+use crate::theme::{
+    CTL_ICO, FONT_MONO, FS_2XS, FS_BASE, FS_SM, FS_XS, Palette, R_FULL, R_LG, R_MD, R_SM, SP_3,
+    SP_4, SP_5,
+};
+use crate::views::deferred::Deferred;
+use gpui_kit::base::ElementExt as _;
 
 /// The config option id the goal pill reads and edits.
 const GOAL_OPTION: &str = "goal";
@@ -39,7 +53,191 @@ const EXIT_PLAN_TOOL: &str = "exit_plan";
 /// Characters a queue row shows before the ellipsis.
 const QUEUE_TEXT_COLUMNS: usize = 80;
 /// The width of the todos mini bar, in pixels.
-const TODO_BAR: f32 = 44.0;
+const TODO_BAR: f32 = 36.0;
+/// The on-color text of a filled success button, which the design
+/// hard codes per button style instead of a palette role.
+const OK_ON: u32 = 0x0B1A10;
+
+/// The palette roles the toolkit theme does not carry, taken from
+/// the active mode's own palette so both palettes stay exact.
+fn palette(mode: ThemeMode) -> &'static Palette {
+    static SHADOW: LazyLock<Palette> = LazyLock::new(Palette::shadow);
+    static DAWN: LazyLock<Palette> = LazyLock::new(Palette::dawn);
+    if mode.is_dark() { &SHADOW } else { &DAWN }
+}
+
+/// A trigger that hosts a popover while styled as a dock pill. The
+/// popover machinery asks its trigger for the selectable contract;
+/// the pill keeps its open-state styling on the view's own flag
+/// instead.
+struct Pill {
+    element: Stateful<Div>,
+}
+
+impl Pill {
+    /// Wraps an id-carrying stateful div as a popover trigger.
+    fn new(id: &'static str) -> Self {
+        Self {
+            element: div().id(id),
+        }
+    }
+}
+
+impl Selectable for Pill {
+    fn selected(self, _: bool) -> Self {
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        false
+    }
+}
+
+impl Styled for Pill {
+    fn style(&mut self) -> &mut StyleRefinement {
+        self.element.style()
+    }
+}
+
+impl InteractiveElement for Pill {
+    fn interactivity(&mut self) -> &mut Interactivity {
+        self.element.interactivity()
+    }
+}
+
+impl StatefulInteractiveElement for Pill {}
+
+impl ParentElement for Pill {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.element.extend(elements);
+    }
+}
+
+impl IntoElement for Pill {
+    type Element = Stateful<Div>;
+
+    fn into_element(self) -> Self::Element {
+        self.element
+    }
+}
+
+/// The pill shape the dock pills share: 28px tall, fully round, a
+/// hairline border over the surface, muted 12px text that lifts onto
+/// the raised fill, inks and takes the stronger border while hovered
+/// or open.
+fn pill<E: InteractiveElement + Styled>(el: E, pal: &Palette) -> E {
+    let (raised, ink, line_strong) = (pal.raised, pal.ink, pal.line_strong);
+    el.h(px(28.))
+        .px(px(10.))
+        .gap(px(SP_3))
+        .flex_none()
+        .max_w(px(320.))
+        .items_center()
+        .rounded(px(R_FULL))
+        .border_1()
+        .border_color(pal.line)
+        .bg(pal.surface)
+        .text_size(px(FS_XS))
+        .text_color(pal.muted)
+        .hover(move |style| style.bg(raised).border_color(line_strong).text_color(ink))
+}
+
+/// The mono count a pill carries after its label.
+fn pill_count(text: String, pal: &Palette) -> Div {
+    div()
+        .flex_none()
+        .font_family(FONT_MONO)
+        .text_color(pal.ink_strong)
+        .child(SharedString::from(text))
+}
+
+/// The todos mini bar: a 36 by 4 track with the done share in the
+/// success green.
+fn mini_bar(done: usize, total: usize, pal: &Palette) -> Div {
+    let fill = TODO_BAR * done as f32 / total.max(1) as f32;
+    div()
+        .w(px(TODO_BAR))
+        .h(px(4.))
+        .flex_none()
+        .rounded(px(2.))
+        .bg(pal.fill_hover)
+        .overflow_hidden()
+        .child(div().w(px(fill)).h_full().bg(pal.ok))
+}
+
+/// The three tones a small action button carries: the plain fill,
+/// the filled success, and the outlined danger.
+enum BtnTone {
+    /// The plain hairline button.
+    Plain,
+    /// The filled success button, for the go-ahead answer.
+    Ok,
+    /// The outlined danger button, for the refuse answer.
+    Danger,
+}
+
+/// One small action button as the design draws it: 26px tall, an 8px
+/// radius, 12px medium text, in one of the three action tones. The
+/// filled success tone has no hover step because the design lifts it
+/// with a brightness filter the toolkit has no equivalent for.
+fn btn_sm(id: impl Into<SharedString>, label: &str, tone: BtnTone, pal: &Palette) -> Stateful<Div> {
+    let fill_hover = pal.fill_hover;
+    let line_strong = pal.line_strong;
+    let danger_soft = pal.danger_soft;
+    let ok_on: Hsla = rgba(OK_ON).into();
+    let label = SharedString::from(label.to_owned());
+    let mut btn = h_flex()
+        .id(id.into())
+        .h(px(26.))
+        .px(px(9.))
+        .gap(px(SP_3))
+        .flex_none()
+        .items_center()
+        .rounded(px(R_MD))
+        .border_1()
+        .font_weight(FontWeight::MEDIUM)
+        .text_size(px(FS_XS))
+        .cursor_pointer()
+        .child(label);
+    match tone {
+        BtnTone::Plain => {
+            btn = btn
+                .border_color(pal.line)
+                .bg(pal.fill)
+                .text_color(pal.ink)
+                .hover(move |style| style.bg(fill_hover).border_color(line_strong));
+        }
+        BtnTone::Ok => {
+            btn = btn.border_color(pal.ok).bg(pal.ok).text_color(ok_on);
+        }
+        BtnTone::Danger => {
+            btn = btn
+                .border_color(pal.danger_bd)
+                .text_color(pal.danger)
+                .hover(move |style| style.bg(danger_soft));
+        }
+    }
+    btn
+}
+
+/// One 26px icon button as the queue rows carry: a muted glyph that
+/// inks over the hover fill.
+fn icon_btn<E: InteractiveElement + ParentElement + Styled>(
+    el: E,
+    icon: IconName,
+    pal: &Palette,
+) -> E {
+    let (hover, ink) = (pal.hover, pal.ink);
+    el.size(px(CTL_ICO))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(R_SM))
+        .text_color(pal.muted)
+        .hover(move |style| style.bg(hover).text_color(ink))
+        .child(Icon::new(icon).with_size(px(12.)))
+}
 
 /// The goal pill's state, as the session carries it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,6 +471,13 @@ pub struct DockRow {
     goal_input: Entity<InputState>,
     /// The revise text field under the pill row.
     revise_input: Entity<InputState>,
+    /// The goal text, held until the popover's field has been laid out.
+    /// Both fields mount only when their surface opens, so a write on
+    /// the opening frame lands on an element that has never been laid
+    /// out; see [`crate::views::deferred`].
+    goal_mirror: Deferred,
+    /// The revise text, held for the same reason and the same moment.
+    revise_mirror: Deferred,
 }
 
 impl EventEmitter<DockEvent> for DockRow {}
@@ -319,6 +524,8 @@ impl DockRow {
             revise_open: false,
             goal_input,
             revise_input,
+            goal_mirror: Deferred::new(),
+            revise_mirror: Deferred::new(),
         }
     }
 
@@ -387,10 +594,11 @@ impl DockRow {
     /// Shows the revise field under the pill row.
     fn open_revise(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.revise_open = true;
-        self.revise_input.update(cx, |state, cx| {
-            state.set_value("", window, cx);
-            state.focus(window, cx);
+        let revise_input = self.revise_input.clone();
+        self.revise_mirror.set(String::new(), |text| {
+            revise_input.update(cx, |state, cx| state.set_value(text, window, cx));
         });
+        revise_input.update(cx, |state, cx| state.focus(window, cx));
         cx.notify();
     }
 
@@ -436,54 +644,114 @@ impl DockRow {
     }
 
     /// The goal pill and its popover, in its active or met color.
-    fn goal_pill(&self, goal: &GoalState, cx: &Context<Self>) -> AnyElement {
-        let theme = cx.theme().colors;
+    fn goal_pill(
+        &self,
+        goal: &GoalState,
+        pal: &'static Palette,
+        cx: &Context<Self>,
+        goal_laid_out: Rc<Cell<bool>>,
+    ) -> AnyElement {
         let this = cx.entity();
         let goal_input = self.goal_input.clone();
+        let release = cx.entity().downgrade();
         let text = goal.text.clone();
-        let trigger = Button::new("dock-goal-pill")
-            .label(if goal.met { "goal met" } else { "goal" })
-            .xsmall()
-            .tooltip("the session goal; click to edit or clear it");
-        let trigger = if goal.met {
-            trigger.success()
+        let met = goal.met;
+        let (icon, icon_color) = if met {
+            (IconName::CircleCheck, pal.ok)
         } else {
-            trigger.secondary()
+            (IconName::Target, pal.accent)
         };
+        let trigger = pill(Pill::new("dock-goal-pill"), pal)
+            .tooltip(|window, cx| {
+                Tooltip::new("the session goal; click to edit or clear it").build(window, cx)
+            })
+            .when(self.goal_open, |pill| {
+                pill.bg(pal.raised)
+                    .border_color(pal.line_strong)
+                    .text_color(pal.ink)
+            })
+            .child(Icon::new(icon).with_size(px(12.)).text_color(icon_color))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(goal.text.clone())),
+            );
         Popover::new("dock-goal")
             .trigger(trigger)
             .anchor(Anchor::BottomLeft)
             .open(self.goal_open)
             .on_open_change({
                 let text = text.clone();
-                let goal_input = goal_input.clone();
                 let this = this.clone();
                 move |open, window, cx| {
-                    if *open {
-                        goal_input.update(cx, |state, cx| {
-                            state.set_value(text.as_str(), window, cx);
-                        });
-                    }
+                    let text = text.clone();
                     this.update(cx, |this, cx| {
                         this.goal_open = *open;
+                        if *open {
+                            let goal_input = this.goal_input.clone();
+                            this.goal_mirror.set(text, |text| {
+                                goal_input.update(cx, |state, cx| {
+                                    state.set_value(text, window, cx);
+                                });
+                            });
+                        }
                         cx.notify();
                     });
                 }
             })
             .content(move |_, _, _| {
+                let goal_laid_out = goal_laid_out.clone();
+                let release = release.clone();
                 v_flex()
-                    .w(px(300.))
-                    .gap_2()
+                    .w(px(340.))
+                    .p(px(5.))
+                    .bg(pal.menu)
+                    .border_1()
+                    .border_color(pal.line)
+                    .rounded(px(R_LG))
+                    .shadow(pal.shadow_menu.clone())
                     .child(
                         div()
-                            .text_size(px(12.))
-                            .text_color(theme.muted_foreground)
+                            .px(px(9.))
+                            .pt(px(6.))
+                            .pb(px(3.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(FS_2XS))
+                            .text_color(pal.faint)
+                            .child(if met { "Goal met" } else { "Goal" }),
+                    )
+                    .child(
+                        div()
+                            .px(px(9.))
+                            .pt(px(4.))
+                            .pb(px(10.))
+                            .text_size(px(FS_BASE))
+                            .text_color(pal.ink_strong)
                             .child(SharedString::from(text.clone())),
                     )
-                    .child(Input::new(&goal_input).flex_1())
+                    .child(
+                        div()
+                            .px(px(9.))
+                            .pb(px(8.))
+                            .text_size(px(FS_XS))
+                            .text_color(pal.muted)
+                            .child(
+                                "The agent re-checks the goal after each turn and keeps \
+                                 going until it is met.",
+                            ),
+                    )
+                    .child(div().h(px(1.)).mx(px(2.)).my(px(4.)).bg(pal.subtle))
                     .child(
                         h_flex()
-                            .gap_1()
+                            .px(px(2.))
+                            .pb(px(2.))
+                            .gap(px(SP_4))
+                            .on_prepaint(move |_, _, cx| {
+                                goal_laid_out.set(true);
+                                let _ = release.update(cx, |_, cx| cx.notify());
+                            })
+                            .child(Input::new(&goal_input).flex_1())
                             .child(
                                 Button::new("dock-goal-save")
                                     .label("Save")
@@ -518,23 +786,49 @@ impl DockRow {
     }
 
     /// The plan review pill with its three answers and the scroll
-    /// request on the pill itself.
-    fn plan_pill(&self, review: &PlanReviewState, cx: &Context<Self>) -> AnyElement {
+    /// request on the pill itself. The pending review carries the
+    /// attention palette: the success tint and border with the accent
+    /// plan glyph.
+    fn plan_pill(
+        &self,
+        review: &PlanReviewState,
+        pal: &'static Palette,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let this = cx.entity();
-        let mut row = h_flex().gap_1().items_center().child(
-            Button::new("dock-plan-pill")
-                .label("plan review")
-                .xsmall()
-                .warning()
-                .tooltip("a plan waits for review; click to find it in the transcript")
-                .on_click({
-                    let this = this.clone();
-                    move |_, _, cx| {
-                        this.update(cx, |this, cx| this.request_scroll_to_plan(cx));
-                    }
-                }),
-        );
-        let approve = Button::new("dock-plan-approve").label("Approve").xsmall();
+        let attention = h_flex()
+            .id("dock-plan-pill")
+            .h(px(28.))
+            .px(px(10.))
+            .gap(px(SP_3))
+            .flex_none()
+            .max_w(px(320.))
+            .items_center()
+            .rounded(px(R_FULL))
+            .border_1()
+            .border_color(pal.ok_bd)
+            .bg(pal.ok_soft)
+            .text_size(px(FS_XS))
+            .text_color(pal.ok)
+            .cursor_pointer()
+            .tooltip(|window, cx| {
+                Tooltip::new("a plan waits for review; click to find it in the transcript")
+                    .build(window, cx)
+            })
+            .child(
+                Icon::new(IconName::PenLine)
+                    .with_size(px(12.))
+                    .text_color(pal.accent),
+            )
+            .child(div().min_w_0().truncate().child("Plan: pending review"))
+            .on_click({
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |this, cx| this.request_scroll_to_plan(cx));
+                }
+            });
+        let mut row = h_flex().gap(px(SP_3)).items_center().child(attention);
+        let approve = btn_sm("dock-plan-approve", "Approve", BtnTone::Ok, pal);
         row = row.child(match &review.approve {
             Some(_) => approve.on_click({
                 let this = this.clone();
@@ -543,10 +837,13 @@ impl DockRow {
                 }
             }),
             None => approve
-                .disabled(true)
-                .tooltip("the ask offers no approve option"),
+                .opacity(0.45)
+                .cursor_default()
+                .tooltip(|window, cx| {
+                    Tooltip::new("the ask offers no approve option").build(window, cx)
+                }),
         });
-        let revise = Button::new("dock-plan-revise").label("Revise").xsmall();
+        let revise = btn_sm("dock-plan-revise", "Revise", BtnTone::Plain, pal);
         row = row.child(match &review.revise {
             Some(_) => revise.on_click({
                 let this = this.clone();
@@ -554,11 +851,11 @@ impl DockRow {
                     this.update(cx, |this, cx| this.open_revise(window, cx));
                 }
             }),
-            None => revise
-                .disabled(true)
-                .tooltip("the ask offers no revise option"),
+            None => revise.opacity(0.45).cursor_default().tooltip(|window, cx| {
+                Tooltip::new("the ask offers no revise option").build(window, cx)
+            }),
         });
-        let reject = Button::new("dock-plan-reject").label("Reject").xsmall();
+        let reject = btn_sm("dock-plan-reject", "Reject", BtnTone::Danger, pal);
         row = row.child(match &review.reject {
             Some(_) => reject.on_click({
                 let this = this.clone();
@@ -566,131 +863,161 @@ impl DockRow {
                     this.update(cx, |this, cx| this.reject_plan(cx));
                 }
             }),
-            None => reject
-                .disabled(true)
-                .tooltip("the ask offers no reject option"),
+            None => reject.opacity(0.45).cursor_default().tooltip(|window, cx| {
+                Tooltip::new("the ask offers no reject option").build(window, cx)
+            }),
         });
         row.into_any_element()
     }
 
-    /// The swarm pill, with paused members marked in the label.
-    fn swarm_pill(&self, swarm: &SwarmState, cx: &Context<Self>) -> AnyElement {
-        let theme = cx.theme().colors;
-        let mut label = format!("swarm {}/{}", swarm.done, swarm.total);
-        if swarm.paused > 0 {
-            label.push_str(&format!(" \u{b7} {} paused", swarm.paused));
-        }
-        let trigger = Button::new("dock-swarm-pill")
-            .label(SharedString::from(label))
-            .xsmall()
-            .tooltip("delegated members and their states");
-        let trigger = if swarm.paused > 0 {
-            trigger.warning()
-        } else {
-            trigger.secondary()
-        };
+    /// The swarm pill, in the violet swarm color with its mono count,
+    /// and the member list popover. The violet stays on through the
+    /// hover lift, as the design pins the pill's color inline.
+    fn swarm_pill(&self, swarm: &SwarmState, pal: &'static Palette) -> AnyElement {
+        let count = format!("{}/{}", swarm.done, swarm.total);
+        let (raised, line_strong) = (pal.raised, pal.line_strong);
+        let trigger = Pill::new("dock-swarm-pill")
+            .h(px(28.))
+            .px(px(10.))
+            .gap(px(SP_3))
+            .flex_none()
+            .max_w(px(320.))
+            .items_center()
+            .rounded(px(R_FULL))
+            .border_1()
+            .border_color(pal.line)
+            .bg(pal.surface)
+            .text_size(px(FS_XS))
+            .text_color(pal.done)
+            .tooltip(|window, cx| {
+                Tooltip::new("delegated members and their states").build(window, cx)
+            })
+            .hover(move |style| style.bg(raised).border_color(line_strong))
+            .child(Icon::new(IconName::Waypoints).with_size(px(12.)))
+            .child("Swarm")
+            .child(pill_count(count, pal))
+            .children(
+                (swarm.paused > 0)
+                    .then(|| div().child(SharedString::from(format!("{} paused", swarm.paused)))),
+            );
         let members = swarm.members.clone();
         Popover::new("dock-swarm")
             .trigger(trigger)
             .anchor(Anchor::BottomLeft)
             .content(move |_, _, _| {
-                let mut list = v_flex().w(px(240.)).gap_1();
-                for (name, word) in &members {
-                    let color = match *word {
-                        "paused" => theme.warning,
-                        "failed" => theme.danger,
-                        "done" => theme.success,
-                        _ => theme.muted_foreground,
-                    };
-                    list = list.child(
+                v_flex()
+                    .w(px(240.))
+                    .p(px(5.))
+                    .bg(pal.menu)
+                    .border_1()
+                    .border_color(pal.line)
+                    .rounded(px(R_LG))
+                    .shadow(pal.shadow_menu.clone())
+                    .children(members.iter().map(|(name, word)| {
+                        let color = match *word {
+                            "paused" => pal.warn,
+                            "failed" => pal.danger,
+                            "done" => pal.ok,
+                            _ => pal.muted,
+                        };
                         h_flex()
                             .w_full()
-                            .justify_between()
-                            .gap_2()
+                            .px(px(9.))
+                            .py(px(4.))
+                            .gap(px(SP_4))
+                            .items_center()
                             .child(
                                 div()
+                                    .min_w_0()
                                     .flex_1()
-                                    .text_size(px(12.))
                                     .truncate()
+                                    .text_size(px(FS_XS))
+                                    .text_color(pal.ink)
                                     .child(SharedString::from(name.clone())),
                             )
                             .child(
                                 div()
-                                    .text_size(px(11.))
+                                    .flex_none()
+                                    .text_size(px(FS_2XS))
                                     .text_color(color)
-                                    .child(SharedString::from(*word)),
-                            ),
-                    );
-                }
-                list
+                                    .child(*word),
+                            )
+                    }))
             })
             .into_any_element()
     }
 
-    /// The todos pill with done/total and its mini bar.
-    fn todos_pill(&self, todos: &TodosState, cx: &Context<Self>) -> AnyElement {
-        let theme = cx.theme().colors;
-        let fill = TODO_BAR * todos.done as f32 / todos.total.max(1) as f32;
-        Button::new("dock-todos-pill")
-            .label(SharedString::from(format!(
-                "todos {}/{}",
-                todos.done, todos.total
-            )))
-            .xsmall()
-            .tooltip("the plan's todos, done of total")
-            .child(
-                div()
-                    .w(px(TODO_BAR))
-                    .h(px(4.))
-                    .rounded_full()
-                    .bg(theme.border)
-                    .child(div().w(px(fill)).h_full().rounded_full().bg(theme.primary)),
-            )
+    /// The todos pill with done/total and its mini bar. It only
+    /// reports: the todos themselves live in the transcript, so the
+    /// pill keeps the pointer off.
+    fn todos_pill(&self, todos: &TodosState, pal: &'static Palette) -> AnyElement {
+        pill(div().id("dock-todos-pill"), pal)
+            .cursor_default()
+            .tooltip(|window, cx| Tooltip::new("the plan's todos, done of total").build(window, cx))
+            .child(Icon::new(IconName::ListTodo).with_size(px(12.)))
+            .child("Progress")
+            .child(pill_count(format!("{}/{}", todos.done, todos.total), pal))
+            .child(mini_bar(todos.done, todos.total, pal))
             .into_any_element()
     }
 
     /// One queue row with its three actions. `steer_tip` disables the
-    /// steer button with the reason when a steer cannot go out.
+    /// steer button with the reason when a steer cannot go out, and
+    /// `separator` draws the hairline above every row after the
+    /// first.
     fn queue_row(
         &self,
         row: &QueueRow,
+        separator: bool,
         steer_tip: Option<&'static str>,
+        pal: &'static Palette,
         cx: &Context<Self>,
-    ) -> AnyElement {
-        let theme = cx.theme().colors;
+    ) -> impl IntoElement {
         let this = cx.entity();
         let index = row.index;
         let mut unit = h_flex()
             .id(SharedString::from(format!("dock-queue-row-{index}")))
+            .when(separator, |line| line.border_t_1().border_color(pal.subtle))
             .w_full()
-            .px_2()
-            .py_1()
-            .gap_2()
+            .h(px(34.))
+            .flex_none()
+            .pl(px(SP_5))
+            .pr(px(6.))
+            .gap(px(SP_4))
             .items_center()
-            .rounded(px(4.))
-            .border_1()
-            .border_color(theme.border)
-            .hover(|line| line.bg(theme.list_hover))
+            .text_size(px(FS_SM))
             .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(theme.muted_foreground)
-                    .child("queued"),
+                Icon::new(IconName::List)
+                    .with_size(px(12.))
+                    .text_color(pal.faint),
             )
             .child(
                 div()
+                    .flex_none()
+                    .text_size(px(FS_2XS))
+                    .text_color(pal.faint)
+                    .child("Queued"),
+            )
+            .child(
+                div()
+                    .min_w_0()
                     .flex_1()
-                    .text_size(px(12.))
                     .truncate()
+                    .text_color(pal.ink)
                     .child(SharedString::from(row.text.clone())),
             );
-        let steer_button = Button::new(SharedString::from(format!("dock-queue-steer-{index}")))
-            .label("Steer now")
-            .xsmall()
-            .ghost();
+        let steer = icon_btn(
+            div().id(SharedString::from(format!("dock-queue-steer-{index}"))),
+            IconName::CornerDownLeft,
+            pal,
+        )
+        .tooltip(|window, cx| Tooltip::new("Steer now").build(window, cx));
         unit = unit.child(match steer_tip {
-            Some(why) => steer_button.disabled(true).tooltip(why),
-            None => steer_button.on_click({
+            Some(why) => steer
+                .opacity(0.45)
+                .cursor_default()
+                .tooltip(move |window, cx| Tooltip::new(why).build(window, cx)),
+            None => steer.on_click({
                 let this = this.clone();
                 move |_, _, cx| {
                     this.update(cx, |this, cx| this.steer_row(index, cx));
@@ -698,49 +1025,55 @@ impl DockRow {
             }),
         });
         unit = unit.child(
-            Button::new(SharedString::from(format!("dock-queue-edit-{index}")))
-                .label("Edit")
-                .xsmall()
-                .ghost()
-                .tooltip("fills the composer draft and leaves the queue")
-                .on_click({
-                    let row = row.clone();
-                    let this = this.clone();
-                    move |_, _, cx| {
-                        this.update(cx, |this, cx| this.edit_row(&row, cx));
-                    }
-                }),
+            icon_btn(
+                div().id(SharedString::from(format!("dock-queue-edit-{index}"))),
+                IconName::Pencil,
+                pal,
+            )
+            .tooltip(|window, cx| {
+                Tooltip::new("fills the composer draft and leaves the queue").build(window, cx)
+            })
+            .on_click({
+                let row = row.clone();
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |this, cx| this.edit_row(&row, cx));
+                }
+            }),
         );
         unit = unit.child(
-            Button::new(SharedString::from(format!("dock-queue-remove-{index}")))
-                .label("Remove")
-                .xsmall()
-                .ghost()
-                .on_click({
-                    let this = this.clone();
-                    move |_, _, cx| {
-                        this.update(cx, |this, cx| this.remove_row(index, cx));
-                    }
-                }),
+            icon_btn(
+                div().id(SharedString::from(format!("dock-queue-remove-{index}"))),
+                IconName::X,
+                pal,
+            )
+            .tooltip(|window, cx| Tooltip::new("Remove").build(window, cx))
+            .on_click({
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |this, cx| this.remove_row(index, cx));
+                }
+            }),
         );
-        unit.into_any_element()
+        unit
     }
 
-    /// The inline revise field the Revise action opens.
-    fn revise_field(&self, cx: &Context<Self>) -> AnyElement {
-        let theme = cx.theme().colors;
+    /// The inline revise field the Revise action opens, laid out as
+    /// the design lays its action rows out: the field, then the
+    /// confirm and the escape.
+    fn revise_field(&self, cx: &Context<Self>, revise_laid_out: Rc<Cell<bool>>) -> AnyElement {
         let this = cx.entity();
         let revise_input = self.revise_input.clone();
+        let release = cx.entity().downgrade();
         h_flex()
-            .id("dock-revise")
             .w_full()
-            .px_2()
-            .py_1()
-            .gap_2()
+            .mb(px(SP_4))
+            .gap(px(SP_4))
             .items_center()
-            .rounded(px(4.))
-            .border_1()
-            .border_color(theme.warning)
+            .on_prepaint(move |_, _, cx| {
+                revise_laid_out.set(true);
+                let _ = release.update(cx, |_, cx| cx.notify());
+            })
             .child(Input::new(&revise_input).flex_1())
             .child(
                 Button::new("dock-revise-send")
@@ -770,7 +1103,20 @@ impl DockRow {
 }
 
 impl Render for DockRow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Text held while these fields were unlaid lands here, on the
+        // first render after each field's element prepainted.
+        let goal_input = self.goal_input.clone();
+        self.goal_mirror.flush(|text| {
+            goal_input.update(cx, |state, cx| state.set_value(text, window, cx));
+        });
+        let revise_input = self.revise_input.clone();
+        self.revise_mirror.flush(|text| {
+            revise_input.update(cx, |state, cx| state.set_value(text, window, cx));
+        });
+        let goal_laid_out = self.goal_mirror.laid_out().flag();
+        let revise_laid_out = self.revise_mirror.laid_out().flag();
+        let pal = palette(cx.theme().mode);
         let (goal, review, swarm, todos, queue) = {
             let session = self.store.read(cx).active_session();
             (
@@ -795,28 +1141,44 @@ impl Render for DockRow {
             }
         };
 
-        let mut dock = v_flex().w_full().px_2().pt_1().gap_1();
+        let mut dock = v_flex().w_full();
         if goal.is_some() || review.is_some() || swarm.is_some() || todos.is_some() {
-            let mut pills = h_flex().w_full().flex_wrap().gap_1();
+            let mut pills = h_flex()
+                .w_full()
+                .flex_wrap()
+                .items_center()
+                .gap(px(SP_3))
+                .mb(px(SP_4));
             if let Some(goal) = &goal {
-                pills = pills.child(self.goal_pill(goal, cx));
+                pills = pills.child(self.goal_pill(goal, pal, cx, goal_laid_out.clone()));
             }
             if let Some(review) = &review {
-                pills = pills.child(self.plan_pill(review, cx));
+                pills = pills.child(self.plan_pill(review, pal, cx));
             }
             if let Some(swarm) = &swarm {
-                pills = pills.child(self.swarm_pill(swarm, cx));
+                pills = pills.child(self.swarm_pill(swarm, pal));
             }
             if let Some(todos) = &todos {
-                pills = pills.child(self.todos_pill(todos, cx));
+                pills = pills.child(self.todos_pill(todos, pal));
             }
             dock = dock.child(pills);
         }
         if self.revise_open {
-            dock = dock.child(self.revise_field(cx));
+            dock = dock.child(self.revise_field(cx, revise_laid_out.clone()));
         }
-        for row in &queue {
-            dock = dock.child(self.queue_row(row, steer_tip, cx));
+        if !queue.is_empty() {
+            let mut sheet = v_flex()
+                .w_full()
+                .mb(px(SP_4))
+                .border_1()
+                .border_color(pal.line)
+                .rounded(px(R_LG))
+                .bg(pal.surface)
+                .overflow_hidden();
+            for (index, row) in queue.iter().enumerate() {
+                sheet = sheet.child(self.queue_row(row, index > 0, steer_tip, pal, cx));
+            }
+            dock = dock.child(sheet);
         }
         dock
     }

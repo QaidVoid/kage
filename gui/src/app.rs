@@ -100,20 +100,38 @@ pub struct Shell {
 
 impl Shell {
     /// Builds the shell, starts the transport, and pumps its events.
-    pub fn new(mut args: ShellArgs, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(args: ShellArgs, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::build(args, window, cx)
+    }
+
+    /// Builds every view of the shell and wires them to the store.
+    fn build(mut args: ShellArgs, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cwd = working_dir();
         let store = cx.new(|_| Store::new(cwd, args.replay));
         let sidebar = cx.new(|_| SidebarView::new(store.clone()));
         let composer = cx.new(|cx| ComposerView::new(store.clone(), window, cx));
         let input = composer.read(cx).input().clone();
+        // The other views that write this same textarea wait on the
+        // composer's element laying out, because the composer is what
+        // renders that element.
+        let input_laid_out = composer.read(cx).input_laid_out();
         let transcript = cx.new(|cx| TranscriptView::new(store.clone(), input.clone(), cx));
         let workbench = cx.new(|_| WorkbenchView::new(store.clone()));
         let dock = cx.new(|cx| DockRow::new(store.clone(), window, cx));
         let approval = cx.new(|cx| ApprovalCard::new(store.clone(), window, cx));
         let find = cx.new(|cx| FindBar::new(store.clone(), transcript.clone(), window, cx));
-        let palette = cx.new(|cx| PaletteView::new(store.clone(), input.clone(), window, cx));
+        let palette = cx.new(|cx| {
+            PaletteView::new(
+                store.clone(),
+                input.clone(),
+                input_laid_out.clone(),
+                window,
+                cx,
+            )
+        });
         let toasts = cx.new(|_| Toasts::new(store.clone()));
-        let welcome = cx.new(|cx| WelcomeView::new(store.clone(), input.clone(), window, cx));
+        let welcome =
+            cx.new(|cx| WelcomeView::new(store.clone(), input.clone(), input_laid_out, window, cx));
 
         cx.subscribe_in(
             &dock,
@@ -179,7 +197,10 @@ impl Shell {
             welcome,
             notices: NoticeWatch::default(),
             sidebar_visible: true,
-            workbench_visible: true,
+            // Closed at first, as the design has it: the workbench is a
+            // panel the user asks for with Ctrl B, and opening it by
+            // default narrows the transcript on every launch.
+            workbench_visible: false,
             streamed: 0,
         }
     }
@@ -463,6 +484,11 @@ impl Render for Shell {
             .relative()
             .bg(theme.background)
             .text_color(theme.foreground)
+            // The family is named on the root so every element below it
+            // inherits it. Without this the shell's own text resolves
+            // `.SystemUIFont`, which the web cannot load at all: the
+            // render then panics on the first line it lays out.
+            .font_family(cx.theme().font_family.clone())
             .child(
                 h_resizable("kage-shell")
                     .child(

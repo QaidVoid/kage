@@ -19,22 +19,103 @@ use gpui_kit::component::theme::{ActiveTheme as _, ThemeColor};
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, EventEmitter, FontWeight, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, TestSupportExt as _, Window, div, px,
+    App, AppContext as _, Context, Div, Entity, EventEmitter, FontWeight, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div,
+    linear_color_stop, linear_gradient, px, relative,
 };
 use kage_client::wire::NoticeTone;
 use kage_client::{Change, State, TranscriptItem};
 use serde_json::Value;
 
 use crate::store::Store;
+use crate::theme::{
+    FONT_DISPLAY, FONT_MONO, FS_2XS, FS_SM, FS_XS, R_LG, R_MD, R_XL, WEIGHT_EXTRABOLD,
+    WEIGHT_SEMIBOLD,
+};
+use crate::views::deferred::{Deferred, LaidOut};
 use crate::views::transcript::{FindMarks, RowKey, TranscriptView};
+use gpui_kit::base::ElementExt as _;
 
 gpui_kit::actions!(kage_desktop, [FindNext, FindPrev, FindClose]);
 gpui_kit::actions!(
     kage_desktop,
     [PaletteUp, PaletteDown, PaletteRun, PaletteClose]
 );
+
+/// The design palette of the active theme: the shell installs the
+/// dark kage palette at startup, and the light dawn palette when it
+/// installs the light mode instead.
+fn design_palette(cx: &App) -> crate::theme::Palette {
+    if cx.theme().mode.is_dark() {
+        crate::theme::Palette::shadow()
+    } else {
+        crate::theme::Palette::dawn()
+    }
+}
+
+/// The eclipse brand mark: a gradient disc with a backdrop-colored
+/// disc across its upper right, clipped to the mark's own circle.
+fn eclipse_mark(size: f32, backdrop: Hsla, p: &crate::theme::Palette) -> Div {
+    div()
+        .relative()
+        .flex_none()
+        .size(px(size))
+        .rounded_full()
+        .overflow_hidden()
+        .border_1()
+        .border_color(p.line_strong)
+        .bg(linear_gradient(
+            135.,
+            linear_color_stop(p.orb_1, 0.),
+            linear_color_stop(p.orb_2, 1.),
+        ))
+        .child(
+            div()
+                .absolute()
+                .top(px(size * 0.5 / 24.))
+                .left(px(size * 8. / 24.))
+                .size(px(size * 17. / 24.))
+                .rounded_full()
+                .bg(backdrop),
+        )
+}
+
+/// The bordered keyboard hint chip of the design.
+fn kbd_chip(label: &str, p: &crate::theme::Palette) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .h(px(18.))
+        .px(px(5.))
+        .rounded(px(5.))
+        .border_1()
+        .border_color(p.line)
+        .text_size(px(10.5))
+        .font_family(FONT_MONO)
+        .text_color(p.faint)
+        .whitespace_nowrap()
+        .child(SharedString::from(label.to_owned()))
+}
+
+/// The small rounded meta chip of the design's badges.
+fn badge_chip(label: &str, p: &crate::theme::Palette) -> Div {
+    div()
+        .flex_none()
+        .mt(px(2.))
+        .px(px(7.))
+        .py(px(1.))
+        .rounded_full()
+        .border_1()
+        .border_color(p.line)
+        .bg(p.fill)
+        .text_size(px(10.5))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(p.muted)
+        .whitespace_nowrap()
+        .child(SharedString::from(label.to_owned()))
+}
 
 /// How long a toast stays before it expires on its own.
 pub const TOAST_TTL: Duration = Duration::from_secs(4);
@@ -186,6 +267,10 @@ pub enum FindEvent {
 pub struct FindBar {
     transcript: Entity<TranscriptView>,
     query: Entity<InputState>,
+    /// The query text, held until the field has been laid out. The bar
+    /// mounts only when it opens, so its first write lands on an element
+    /// that has never been laid out; see [`crate::views::deferred`].
+    query_mirror: Deferred,
     open: bool,
     /// The keys of the rows the query matched, in transcript order.
     matches: Vec<RowKey>,
@@ -215,6 +300,7 @@ impl FindBar {
         Self {
             transcript,
             query,
+            query_mirror: Deferred::new(),
             open: false,
             matches: Vec::new(),
             current: 0,
@@ -238,10 +324,11 @@ impl FindBar {
         self.open = true;
         self.current = 0;
         self.matches.clear();
-        self.query.update(cx, |state, cx| {
-            state.set_value("", window, cx);
-            state.focus(window, cx);
+        let query = self.query.clone();
+        self.query_mirror.set(String::new(), |text| {
+            query.update(cx, |state, cx| state.set_value(text, window, cx));
         });
+        query.update(cx, |state, cx| state.focus(window, cx));
         self.recompute(cx);
     }
 
@@ -253,8 +340,10 @@ impl FindBar {
         self.open = false;
         self.matches.clear();
         self.current = 0;
-        self.query
-            .update(cx, |state, cx| state.set_value("", window, cx));
+        let query = self.query.clone();
+        self.query_mirror.set(String::new(), |text| {
+            query.update(cx, |state, cx| state.set_value(text, window, cx));
+        });
         self.transcript
             .update(cx, |transcript, cx| transcript.set_find(None, cx));
         cx.notify();
@@ -311,46 +400,75 @@ impl FindBar {
 }
 
 impl Render for FindBar {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The query text held while the field was unlaid lands here, on
+        // the first render after the field's element prepainted.
+        let state = self.query.clone();
+        self.query_mirror.flush(|text| {
+            state.update(cx, |state, cx| state.set_value(text, window, cx));
+        });
         if !self.open {
             return div().into_any_element();
         }
-        let theme = cx.theme().colors;
+        let p = design_palette(cx);
         let this = cx.entity();
+        let laid_out = self.query_mirror.laid_out().flag();
+        let release = cx.entity().downgrade();
         let total = self.matches.len();
         let step = move |this: &Entity<Self>, back: bool, cx: &mut App| {
             this.update(cx, |this, cx| this.step(back, cx));
         };
         let prev = this.clone();
         let next = this.clone();
-        h_flex()
+        let counter = SharedString::from(counter_text(self.current, total));
+        let mut pop = h_flex()
             .id("find-bar")
             .test_support()
             .key_context("Find")
-            .w_full()
-            .px_3()
-            .py_2()
-            .gap_2()
+            .w(px(340.))
+            .px(px(8.))
+            .py(px(6.))
+            .gap(px(8.))
             .items_center()
-            .bg(theme.secondary)
-            .border_b_1()
-            .border_color(theme.border)
+            .rounded(px(R_LG))
+            .border_1()
+            .border_color(p.line)
+            .bg(p.menu)
+            .on_prepaint({
+                let laid_out = laid_out.clone();
+                move |_, _, cx| {
+                    laid_out.set(true);
+                    let _ = release.update(cx, |_, cx| cx.notify());
+                }
+            })
             .on_action(cx.listener(|this, _: &FindNext, _, cx| this.step(false, cx)))
             .on_action(cx.listener(|this, _: &FindPrev, _, cx| this.step(true, cx)))
             .on_action(cx.listener(|this, _: &FindClose, window, cx| {
                 this.close(window, cx);
                 cx.emit(FindEvent::Closed);
             }))
-            .child(Icon::new(IconName::Search).text_color(theme.muted_foreground))
-            .child(Input::new(&self.query).w(px(320.)))
+            .child(
+                Icon::new(IconName::Search)
+                    .with_size(px(14.))
+                    .text_color(p.faint),
+            )
+            .child(
+                Input::new(&self.query)
+                    .flex_1()
+                    .appearance(false)
+                    .bordered(false)
+                    .text_color(p.ink),
+            )
             .child(
                 div()
                     .id("find-counter")
                     .test_support()
-                    .text_size(px(12.))
-                    .text_color(theme.muted_foreground)
-                    .aria_label(SharedString::from(counter_text(self.current, total)))
-                    .child(SharedString::from(counter_text(self.current, total))),
+                    .flex_none()
+                    .text_size(px(FS_2XS))
+                    .font_family(FONT_MONO)
+                    .text_color(p.faint)
+                    .aria_label(counter.clone())
+                    .child(counter),
             )
             .child(
                 Button::new("find-prev")
@@ -383,7 +501,15 @@ impl Render for FindBar {
                             });
                         }
                     }),
-            )
+            );
+        pop.style().box_shadow = Some(p.shadow_menu.clone());
+        div()
+            .w_full()
+            .flex()
+            .justify_end()
+            .px(px(10.))
+            .py(px(6.))
+            .child(pop)
             .into_any_element()
     }
 }
@@ -491,6 +617,14 @@ pub struct PaletteView {
     store: Entity<Store>,
     composer: Entity<TextareaState>,
     query: Entity<InputState>,
+    /// The query text, held until the field has been laid out. The
+    /// palette mounts only when it opens, so its first write lands on an
+    /// element that has never been laid out; see
+    /// [`crate::views::deferred`].
+    query_mirror: Deferred,
+    /// The command text handed to the composer, held on the composer's
+    /// own layout, because the composer is what renders that element.
+    composer_mirror: Deferred,
     open: bool,
     /// The highlighted row index.
     selected: usize,
@@ -502,6 +636,7 @@ impl PaletteView {
     pub fn new(
         store: Entity<Store>,
         composer: Entity<TextareaState>,
+        composer_laid_out: LaidOut,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -518,6 +653,8 @@ impl PaletteView {
             store,
             composer,
             query,
+            query_mirror: Deferred::new(),
+            composer_mirror: Deferred::after(composer_laid_out),
             open: false,
             selected: 0,
         }
@@ -564,10 +701,11 @@ impl PaletteView {
     pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
         self.selected = 0;
-        self.query.update(cx, |state, cx| {
-            state.set_value("", window, cx);
-            state.focus(window, cx);
+        let query = self.query.clone();
+        self.query_mirror.set(String::new(), |text| {
+            query.update(cx, |state, cx| state.set_value(text, window, cx));
         });
+        query.update(cx, |state, cx| state.focus(window, cx));
         cx.notify();
     }
 
@@ -605,10 +743,12 @@ impl PaletteView {
                 let active = self.store.read(cx).active_id().map(str::to_owned);
                 self.store
                     .update(cx, |store, _| store.set_draft(active.as_deref(), &text));
-                self.composer.update(cx, |state, cx| {
-                    state.set_value(text.as_str(), window, cx);
-                    state.focus(window, cx);
+                let composer = self.composer.clone();
+                self.composer_mirror.set(text, |text| {
+                    composer.update(cx, |state, cx| state.set_value(text, window, cx));
                 });
+                self.composer
+                    .update(cx, |state, cx| state.focus(window, cx));
             }
             PaletteEntry::Session { id, .. } => {
                 self.store.update(cx, |store, cx| {
@@ -624,52 +764,107 @@ impl PaletteView {
 }
 
 impl Render for PaletteView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The query text held while the field was unlaid lands here, on
+        // the first render after the field's element prepainted.
+        let state = self.query.clone();
+        self.query_mirror.flush(|text| {
+            state.update(cx, |state, cx| state.set_value(text, window, cx));
+        });
         if !self.open {
+            // A command run while the palette closes still hands its text
+            // to the composer, so the flush runs whether the palette is
+            // open or not.
+            let composer = self.composer.clone();
+            self.composer_mirror.flush(|text| {
+                composer.update(cx, |state, cx| state.set_value(text, window, cx));
+            });
             return div().into_any_element();
         }
-        let theme = cx.theme().colors;
+        let p = design_palette(cx);
+        let laid_out = self.query_mirror.laid_out().flag();
+        let release = cx.entity().downgrade();
         let entries = self.entries(cx);
         if self.selected >= entries.len() {
             self.selected = 0;
         }
         let selected = self.selected;
         let this = cx.entity();
+        let query = self.query.read(cx).value().trim().to_lowercase();
+        let top: f32 = (window.viewport_size().height * 0.12).into();
+
         let mut list = v_flex()
             .id("palette-list")
-            .max_h(px(360.))
-            .overflow_y_scroll();
+            .max_h(px(420.))
+            .overflow_y_scroll()
+            .p(px(6.));
         if entries.is_empty() {
             list = list.child(
                 div()
                     .id("palette-empty")
                     .test_support()
-                    .px_3()
-                    .py_2()
-                    .text_size(px(12.))
-                    .text_color(theme.muted_foreground)
-                    .child("nothing matches"),
+                    .px(px(24.))
+                    .py(px(24.))
+                    .text_size(px(FS_SM))
+                    .text_color(p.faint)
+                    .child("Nothing matches"),
             );
         }
+        let mut last_kind = "";
         for (ix, entry) in entries.iter().enumerate() {
             let this = this.clone();
+            let kind = match entry {
+                PaletteEntry::Command { .. } => "command",
+                PaletteEntry::Session { .. } => "session",
+            };
+            if kind != last_kind {
+                last_kind = kind;
+                let label = match kind {
+                    "session" if query.is_empty() => "RECENT SESSIONS",
+                    "session" => "SESSIONS",
+                    _ => "COMMANDS",
+                };
+                list = list.child(
+                    div()
+                        .px(px(9.))
+                        .pt(px(6.))
+                        .pb(px(3.))
+                        .text_size(px(FS_2XS))
+                        .font_weight(WEIGHT_SEMIBOLD)
+                        .text_color(p.faint)
+                        .child(label),
+                );
+            }
+            let (icon, mono_label) = match entry {
+                PaletteEntry::Command { .. } => (IconName::Command, true),
+                PaletteEntry::Session { .. } => (IconName::MessageSquare, false),
+            };
+            let mut label_row = div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(if mono_label { 12.5 } else { FS_SM }))
+                .text_color(p.ink)
+                .child(SharedString::from(entry.label()));
+            if mono_label {
+                label_row = label_row.font_family(FONT_MONO);
+            }
             let row = h_flex()
                 .id(SharedString::from(format!("palette-entry-{ix}")))
                 .test_support()
                 .w_full()
-                .px_2()
-                .py_1()
-                .gap_2()
-                .items_center()
-                .rounded(px(4.))
+                .px(px(9.))
+                .py(px(7.))
+                .gap(px(10.))
+                .items_start()
+                .rounded(px(R_MD))
                 .map(|row| {
                     if ix == selected {
-                        row.bg(theme.list_active)
+                        row.bg(p.selected)
                     } else {
                         row
                     }
                 })
-                .hover(|row| row.bg(theme.list_hover))
+                .hover(|row| row.bg(p.selected))
                 .aria_label(SharedString::from(format!(
                     "{} {}",
                     entry.badge(),
@@ -679,30 +874,107 @@ impl Render for PaletteView {
                     this.update(cx, |this, cx| this.run_index(ix, window, cx));
                 })
                 .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(theme.foreground)
-                        .child(SharedString::from(entry.label())),
+                    Icon::new(icon)
+                        .mt(px(2.))
+                        .with_size(px(14.))
+                        .text_color(p.faint),
                 )
                 .child(
-                    div()
-                        .text_size(px(10.))
-                        .px_1()
-                        .rounded_xs()
-                        .bg(theme.secondary)
-                        .text_color(theme.secondary_foreground)
-                        .child(entry.badge()),
+                    v_flex().flex_1().min_w_0().child(label_row).child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(FS_XS))
+                            .text_color(p.muted)
+                            .child(SharedString::from(entry.detail())),
+                    ),
                 )
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(px(11.))
-                        .text_color(theme.muted_foreground)
-                        .truncate()
-                        .child(SharedString::from(entry.detail())),
-                );
+                .child(badge_chip(entry.badge(), &p));
             list = list.child(row);
         }
+
+        let mut dialog = v_flex()
+            .id("palette")
+            .test_support()
+            .key_context("Palette")
+            .w(px(620.))
+            .max_h(px(520.))
+            .overflow_hidden()
+            .bg(p.bg)
+            .border_1()
+            .border_color(p.line)
+            .rounded(px(R_XL))
+            .on_action(cx.listener(|this, _: &PaletteUp, _, cx| {
+                this.move_selection(-1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PaletteDown, _, cx| {
+                this.move_selection(1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PaletteRun, window, cx| {
+                let index = this.selected;
+                this.run_index(index, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PaletteClose, _, cx| this.close(cx)))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(16.))
+                    .py(px(14.))
+                    .border_b_1()
+                    .border_color(p.subtle)
+                    .text_color(p.faint)
+                    .on_prepaint({
+                        let laid_out = laid_out.clone();
+                        move |_, _, cx| {
+                            laid_out.set(true);
+                            let _ = release.update(cx, |_, cx| cx.notify());
+                        }
+                    })
+                    .child(Icon::new(IconName::Search))
+                    .child(
+                        Input::new(&self.query)
+                            .flex_1()
+                            .appearance(false)
+                            .bordered(false)
+                            .text_size(px(15.))
+                            .text_color(p.ink_strong),
+                    ),
+            )
+            .child(list)
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(14.))
+                    .px(px(16.))
+                    .py(px(8.))
+                    .border_t_1()
+                    .border_color(p.subtle)
+                    .text_size(px(FS_2XS))
+                    .text_color(p.faint)
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .child(kbd_chip("\u{2191}\u{2193}", &p))
+                            .child("move"),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .child(kbd_chip("Enter", &p))
+                            .child("run"),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .child(kbd_chip("Esc", &p))
+                            .child("close"),
+                    ),
+            );
+        dialog.style().box_shadow = Some(p.shadow_2.clone());
         div()
             .id("palette-overlay")
             .absolute()
@@ -711,52 +983,13 @@ impl Render for PaletteView {
                 h: 0.,
                 s: 0.,
                 l: 0.,
-                a: 0.35,
+                a: 0.45,
             })
             .flex()
             .justify_center()
             .items_start()
-            .pt(px(80.))
-            .child(
-                v_flex()
-                    .id("palette")
-                    .test_support()
-                    .key_context("Palette")
-                    .w(px(560.))
-                    .max_h(px(480.))
-                    .p_2()
-                    .gap_2()
-                    .bg(theme.popover)
-                    .border_1()
-                    .border_color(theme.border)
-                    .rounded(px(8.))
-                    .overflow_hidden()
-                    .on_action(cx.listener(|this, _: &PaletteUp, _, cx| {
-                        this.move_selection(-1, cx);
-                    }))
-                    .on_action(cx.listener(|this, _: &PaletteDown, _, cx| {
-                        this.move_selection(1, cx);
-                    }))
-                    .on_action(cx.listener(|this, _: &PaletteRun, window, cx| {
-                        let index = this.selected;
-                        this.run_index(index, window, cx);
-                    }))
-                    .on_action(cx.listener(|this, _: &PaletteClose, _, cx| this.close(cx)))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(Icon::new(IconName::Search).text_color(theme.muted_foreground))
-                            .child(Input::new(&self.query).flex_1()),
-                    )
-                    .child(list)
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(theme.muted_foreground)
-                            .child("up down move \u{b7} enter runs \u{b7} esc closes"),
-                    ),
-            )
+            .pt(px(top))
+            .child(dialog)
             .into_any_element()
     }
 }
@@ -833,56 +1066,67 @@ impl Toasts {
 }
 
 impl Render for Toasts {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().colors;
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = design_palette(cx);
         let this = cx.entity();
         let raised: Vec<(usize, ToastDraft)> = self
             .items
             .iter()
             .map(|toast| (toast.id, toast.draft.clone()))
             .collect();
-        div()
+        let mut root = div()
             .absolute()
-            .bottom(px(36.))
+            .bottom(px(42.))
             .right(px(16.))
             .flex()
             .flex_col()
-            .gap_2()
-            .items_end()
-            .children(raised.into_iter().map(|(id, draft)| {
-                let this = this.clone();
-                h_flex()
-                    .id(SharedString::from(format!("toast-{id}")))
-                    .test_support()
-                    .w(px(340.))
-                    .px_3()
-                    .py_2()
-                    .gap_2()
-                    .items_center()
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.popover)
-                    .cursor_pointer()
-                    .hover(|toast| toast.bg(theme.list_hover))
-                    .aria_label(SharedString::from(draft.text.clone()))
-                    .on_click(move |_, _, cx| {
-                        this.update(cx, |this, cx| this.clicked(id, cx));
-                    })
-                    .child(
-                        div()
-                            .size(px(8.))
-                            .rounded_full()
-                            .bg(tone_color(draft.tone, theme)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(12.))
-                            .text_color(theme.foreground)
-                            .child(SharedString::from(draft.text)),
-                    )
-            }))
+            .gap(px(8.))
+            .items_end();
+        for (id, draft) in raised {
+            let this = this.clone();
+            let (icon, color) = match draft.tone {
+                NoticeTone::Success => (IconName::CircleCheck, p.ok),
+                NoticeTone::Error => (IconName::CircleX, p.danger),
+                NoticeTone::Warn => (IconName::TriangleAlert, p.warn),
+                NoticeTone::Info => (IconName::Info, p.accent),
+            };
+            let mut card = h_flex()
+                .id(SharedString::from(format!("toast-{id}")))
+                .test_support()
+                .min_w(px(260.))
+                .max_w(px(380.))
+                .px(px(12.))
+                .py(px(10.))
+                .gap(px(10.))
+                .items_start()
+                .rounded(px(R_LG))
+                .border_1()
+                .border_color(p.line)
+                .bg(p.raised)
+                .cursor_pointer()
+                .hover(|toast| toast.border_color(p.line_strong))
+                .aria_label(SharedString::from(draft.text.clone()))
+                .on_click(move |_, _, cx| {
+                    this.update(cx, |this, cx| this.clicked(id, cx));
+                })
+                .child(
+                    Icon::new(icon)
+                        .mt(px(2.))
+                        .with_size(px(14.))
+                        .text_color(color),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(FS_SM))
+                        .text_color(p.ink)
+                        .child(SharedString::from(draft.text)),
+                );
+            card.style().box_shadow = Some(p.shadow_2.clone());
+            root = root.child(card);
+        }
+        root
     }
 }
 
@@ -944,6 +1188,11 @@ pub struct WelcomeView {
     store: Entity<Store>,
     composer: Entity<TextareaState>,
     goal: Entity<InputState>,
+    /// The card text to hand the composer, held until the composer has
+    /// been laid out. A card raised before the first frame would
+    /// otherwise reach an engine still holding its construction font; see
+    /// [`crate::views::deferred`].
+    fill_mirror: Deferred,
     /// A card clicked while no session could carry it.
     pending: Option<PendingCard>,
 }
@@ -953,6 +1202,7 @@ impl WelcomeView {
     pub fn new(
         store: Entity<Store>,
         composer: Entity<TextareaState>,
+        composer_laid_out: LaidOut,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -990,6 +1240,7 @@ impl WelcomeView {
             store,
             composer,
             goal,
+            fill_mirror: Deferred::after(composer_laid_out),
             pending: None,
         }
     }
@@ -1016,11 +1267,11 @@ impl WelcomeView {
             let active = self.store.read(cx).active_id().map(str::to_owned);
             self.store
                 .update(cx, |store, _| store.set_draft(active.as_deref(), &draft));
-            let fill = draft.clone();
-            self.composer.update(cx, |state, cx| {
-                state.set_value(fill.as_str(), window, cx);
-                state.focus(window, cx);
+            let composer = self.composer.clone();
+            self.fill_mirror.set(draft, |text| {
+                composer.update(cx, |state, cx| state.set_value(text, window, cx));
             });
+            composer.update(cx, |state, cx| state.focus(window, cx));
             cx.notify();
         }
         if !self.offers(&card, cx) {
@@ -1071,44 +1322,161 @@ impl WelcomeView {
 }
 
 impl Render for WelcomeView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().colors;
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Card text held while the composer was unlaid lands here, on
+        // the first render after the composer's element prepainted. The
+        // flag is the composer's own: this view does not lay that element
+        // out, so a prepaint here would say nothing about it.
+        let composer = self.composer.clone();
+        self.fill_mirror.flush(|text| {
+            composer.update(cx, |state, cx| state.set_value(text, window, cx));
+        });
+        let p = design_palette(cx);
         let this = cx.entity();
-        let mut cards = h_flex().flex_wrap().justify_center().gap_3();
+
+        let tag = |suggestion: &Suggestion| {
+            if suggestion.option_id == "swarm" {
+                ("swarm", p.done_soft, p.done)
+            } else {
+                ("plan", p.accent_soft, p.accent)
+            }
+        };
+        let mut cards = v_flex()
+            .id("welcome-cards")
+            .w_full()
+            .grid_cols(2)
+            .gap(px(8.))
+            .mt(px(16.));
         for suggestion in &SUGGESTIONS {
             let this = this.clone();
+            let (label, bg, fg) = tag(suggestion);
             cards = cards.child(
                 v_flex()
                     .id(suggestion.id)
                     .test_support()
-                    .w(px(256.))
-                    .p_3()
-                    .gap_1()
-                    .rounded(px(8.))
+                    .items_start()
+                    .px(px(12.))
+                    .py(px(10.))
+                    .gap(px(2.))
+                    .rounded(px(R_LG))
                     .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.background)
+                    .border_color(p.line)
+                    .text_size(px(FS_SM))
+                    .text_color(p.muted)
                     .cursor_pointer()
-                    .hover(|card| card.border_color(theme.primary))
+                    .hover(move |card| {
+                        card.bg(p.hover)
+                            .border_color(p.line_strong)
+                            .text_color(p.ink)
+                    })
                     .on_click(move |_, window, cx| {
                         this.update(cx, |this, cx| this.suggestion(suggestion, window, cx));
                     })
                     .child(
-                        div()
-                            .text_size(px(14.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.foreground)
-                            .child(suggestion.title),
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(div().flex_1().min_w_0().truncate().child(suggestion.title))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .px(px(7.))
+                                    .py(px(1.))
+                                    .rounded_full()
+                                    .text_size(px(FS_2XS))
+                                    .text_color(fg)
+                                    .bg(bg)
+                                    .child(label),
+                            ),
                     )
                     .child(
                         div()
-                            .text_size(px(11.))
-                            .text_color(theme.muted_foreground)
+                            .text_size(px(FS_XS))
+                            .text_color(p.faint)
                             .child(suggestion.body),
                     ),
             );
         }
+
         let goal_input = self.goal.clone();
+        cards = cards.child(
+            v_flex()
+                .id("welcome-card-goal")
+                .test_support()
+                .items_start()
+                .px(px(12.))
+                .py(px(10.))
+                .gap(px(2.))
+                .rounded(px(R_LG))
+                .border_1()
+                .border_color(p.line)
+                .text_size(px(FS_SM))
+                .text_color(p.muted)
+                .child(
+                    div()
+                        .w_full()
+                        .truncate()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Set a goal"),
+                )
+                .child(
+                    div()
+                        .text_size(px(FS_XS))
+                        .text_color(p.faint)
+                        .child("the session works toward it until a notice reports it met"),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .mt(px(4.))
+                        .gap(px(4.))
+                        .child(Input::new(&goal_input).flex_1())
+                        .child(
+                            Button::new("welcome-goal-set")
+                                .label("Set")
+                                .xsmall()
+                                .on_click(move |_, window, cx| {
+                                    let text = goal_input.read(cx).value().trim().to_owned();
+                                    this.update(cx, |this, cx| {
+                                        if !text.is_empty() {
+                                            this.raise(
+                                                PendingCard {
+                                                    option_id: "goal",
+                                                    option_value: text,
+                                                    draft: None,
+                                                },
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                    });
+                                    goal_input
+                                        .update(cx, |state, cx| state.set_value("", window, cx));
+                                }),
+                        ),
+                ),
+        );
+
+        let wordmark_shadow = div()
+            .absolute()
+            .top(px(4.))
+            .left(px(4.))
+            .font_family(FONT_DISPLAY)
+            .font_weight(WEIGHT_EXTRABOLD)
+            .text_size(px(60.))
+            .line_height(relative(1.))
+            .text_color(p.accent_soft)
+            .child("kage");
+        let wordmark_face = div()
+            .relative()
+            .font_family(FONT_DISPLAY)
+            .font_weight(WEIGHT_EXTRABOLD)
+            .text_size(px(60.))
+            .line_height(relative(1.))
+            .text_color(p.ink_strong)
+            .child("kage");
+
         v_flex()
             .id("welcome")
             .test_support()
@@ -1117,93 +1485,31 @@ impl Render for WelcomeView {
             .justify_center()
             .child(
                 v_flex()
-                    .w(px(560.))
-                    .gap_4()
+                    .w_full()
+                    .max_w(px(728.))
+                    .px(px(24.))
                     .items_center()
                     .child(
                         h_flex()
                             .id("welcome-wordmark")
                             .test_support()
-                            .gap_2()
                             .items_center()
-                            .child(
-                                div()
-                                    .text_size(px(30.))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.primary)
-                                    .child("\u{25b8}"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(30.))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.foreground)
-                                    .child("kage"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(theme.muted_foreground)
-                            .child("the agent runs here; ctrl-n opens a session"),
+                            .gap(px(16.))
+                            .mb(px(30.))
+                            .child(eclipse_mark(76., p.bg, &p))
+                            .child(div().relative().child(wordmark_shadow).child(wordmark_face)),
                     )
                     .child(cards)
                     .child(
-                        v_flex()
-                            .id("welcome-card-goal")
-                            .test_support()
-                            .w(px(256.))
-                            .p_3()
-                            .gap_1()
-                            .rounded(px(8.))
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.background)
-                            .child(
-                                div()
-                                    .text_size(px(14.))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.foreground)
-                                    .child("Set a goal"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(theme.muted_foreground)
-                                    .child(
-                                        "the session works toward it until a notice reports it met",
-                                    ),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .child(Input::new(&goal_input).flex_1())
-                                    .child(
-                                        Button::new("welcome-goal-set")
-                                            .label("Set")
-                                            .xsmall()
-                                            .on_click(move |_, window, cx| {
-                                                let text =
-                                                    goal_input.read(cx).value().trim().to_owned();
-                                                this.update(cx, |this, cx| {
-                                                    if !text.is_empty() {
-                                                        this.raise(
-                                                            PendingCard {
-                                                                option_id: "goal",
-                                                                option_value: text,
-                                                                draft: None,
-                                                            },
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    }
-                                                });
-                                                goal_input.update(cx, |state, cx| {
-                                                    state.set_value("", window, cx)
-                                                });
-                                            }),
-                                    ),
-                            ),
+                        h_flex()
+                            .items_center()
+                            .mt(px(18.))
+                            .gap(px(2.))
+                            .text_size(px(FS_XS))
+                            .text_color(p.faint)
+                            .child("the agent runs here")
+                            .child(kbd_chip("Ctrl N", &p))
+                            .child("opens a session"),
                     ),
             )
     }
@@ -1225,12 +1531,14 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        FindBar, NoticeWatch, PaletteEntry, PaletteView, ToastAction, ToastDraft, Toasts,
+        FindBar, LaidOut, NoticeWatch, PaletteEntry, PaletteView, ToastAction, ToastDraft, Toasts,
         WelcomeView, counter_text, find_matches, palette_entries, step_match, toasts_for_changes,
     };
     use crate::store::{Command, Store};
     use crate::transport::State;
     use crate::views::transcript::TranscriptView;
+    use gpui_kit::base::ElementExt as _;
+    use gpui_kit::component::input::Textarea;
     use kage_client::wire::NoticeTone;
     use kage_client::{Change, Frame};
 
@@ -1536,6 +1844,11 @@ mod tests {
         visual.update(|window, cx| {
             find.update(cx, |find, cx| find.open(window, cx));
         });
+        // The opening query write waits for the bar's element to prepaint
+        // and lands on the render after that, so the bar takes a frame
+        // before the test types into it. The field itself is focused at
+        // once, because focusing is not a text write.
+        visual.update(|window, cx| window.render_frame(cx));
         visual.update(|window, cx| window.input("cargo", cx));
         visual.update(|window, cx| window.render_frame(cx));
         visual.update(|window, _| {
@@ -1619,7 +1932,11 @@ mod tests {
             palette.update(cx, |palette, cx| palette.open(window, cx));
         });
         assert!(visual.update(|_, cx| palette.read(cx).is_open()));
-
+        // The opening query write waits for the bar's element to prepaint
+        // and lands on the render after that, so the bar takes a frame
+        // before the test types into it. The field itself is focused at
+        // once, because focusing is not a text write.
+        visual.update(|window, cx| window.render_frame(cx));
         visual.update(|window, cx| window.input("rev", cx));
         visual.update(|window, cx| window.render_frame(cx));
         visual.update(|window, _| {
@@ -1672,23 +1989,49 @@ mod tests {
         cx.update(gpui_kit::init);
         let (_, visual) = cx.add_window_view(move |window: &mut Window, cx| {
             let composer = cx.new(|cx| TextareaState::new(window, cx));
-            let palette =
-                cx.new(|cx| PaletteView::new(store.clone(), composer.clone(), window, cx));
+            let composer_laid_out = LaidOut::new();
+            let palette = cx.new(|cx| {
+                PaletteView::new(
+                    store.clone(),
+                    composer.clone(),
+                    composer_laid_out.clone(),
+                    window,
+                    cx,
+                )
+            });
             cap.borrow_mut().replace(palette.clone());
-            PaletteHost { palette }
+            PaletteHost {
+                palette,
+                composer,
+                composer_laid_out,
+            }
         });
         let palette = captured.borrow().clone().expect("the palette was built");
         (palette, visual)
     }
 
     /// A test root that mounts a palette.
+    /// A test root that mounts the palette over the composer it fills.
+    ///
+    /// The composer is mounted because the palette's fill waits on that
+    /// textarea's element laying out, which the shell's arrangement is what
+    /// makes possible.
     struct PaletteHost {
         palette: Entity<PaletteView>,
+        composer: Entity<TextareaState>,
+        composer_laid_out: LaidOut,
     }
 
     impl gpui_kit::Render for PaletteHost {
         fn render(&mut self, _: &mut Window, _: &mut gpui_kit::Context<Self>) -> impl IntoElement {
-            div().size_full().child(self.palette.clone())
+            div()
+                .size_full()
+                .child(self.palette.clone())
+                .child(Textarea::new(&self.composer))
+                .on_prepaint({
+                    let laid_out = self.composer_laid_out.clone();
+                    move |_, _, _| laid_out.mark()
+                })
         }
     }
 
@@ -1772,6 +2115,10 @@ mod tests {
         });
 
         visual.update(|window, cx| window.click("welcome-card-plan", cx));
+        // The fill waits on the composer's element having prepainted, and
+        // the composer mounts after the card is clicked, so the host takes
+        // a frame for the write to land.
+        visual.update(|window, cx| window.render_frame(cx));
         let frames = drain_requests(&store, visual);
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].0, "session/set_config_option");
@@ -1852,23 +2199,48 @@ mod tests {
         cx.update(gpui_kit::init);
         let (_, visual) = cx.add_window_view(move |window: &mut Window, cx| {
             let composer = cx.new(|cx| TextareaState::new(window, cx));
-            let welcome =
-                cx.new(|cx| WelcomeView::new(store.clone(), composer.clone(), window, cx));
+            let composer_laid_out = LaidOut::new();
+            let welcome = cx.new(|cx| {
+                WelcomeView::new(
+                    store.clone(),
+                    composer.clone(),
+                    composer_laid_out.clone(),
+                    window,
+                    cx,
+                )
+            });
             cap.borrow_mut().replace(welcome.clone());
-            WelcomeHost { welcome }
+            WelcomeHost {
+                welcome,
+                composer,
+                composer_laid_out,
+            }
         });
         let welcome = captured.borrow().clone().expect("the welcome was built");
         (welcome, visual)
     }
 
-    /// A test root that mounts a welcome pane.
+    /// A test root that mounts a welcome pane over the composer it fills.
+    ///
+    /// The composer is mounted because the welcome pane's fill waits on the
+    /// composer's element laying out, which is the shell's arrangement and
+    /// the only one where the fill can land.
     struct WelcomeHost {
         welcome: Entity<WelcomeView>,
+        composer: Entity<TextareaState>,
+        composer_laid_out: LaidOut,
     }
 
     impl gpui_kit::Render for WelcomeHost {
         fn render(&mut self, _: &mut Window, _: &mut gpui_kit::Context<Self>) -> impl IntoElement {
-            v_flex().size_full().child(self.welcome.clone())
+            v_flex()
+                .size_full()
+                .child(self.welcome.clone())
+                .child(Textarea::new(&self.composer))
+                .on_prepaint({
+                    let laid_out = self.composer_laid_out.clone();
+                    move |_, _, _| laid_out.mark()
+                })
         }
     }
 }

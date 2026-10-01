@@ -42,6 +42,8 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 # and the wasm-bindgen-cli version stay one and the same.
 wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "=0.4.79"
+# `Date.now`, the browser clock behind `clock::unix_seconds`.
+js-sys = "=0.3.106"
 web-sys = { version = "=0.3.106", features = [
     "BinaryType",
     "Document",

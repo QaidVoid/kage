@@ -147,7 +147,6 @@ pub fn run() {
         .run(move |cx: &mut App| {
             theme::install_fonts(cx);
             gpui_kit::init(cx);
-            theme::apply_shadow(cx);
             let mut keys = vec![
                 KeyBinding::new("ctrl-q", crate::app::Quit, None),
                 KeyBinding::new("cmd-q", crate::app::Quit, None),
@@ -206,7 +205,18 @@ pub fn run() {
                 stream,
             };
             let (handle, shell) = gpui_kit::open_window(options, cx, move |window, cx| {
-                cx.new(|cx| Shell::new(args, window, cx))
+                // The window knows the platform appearance, so the theme is
+                // chosen here rather than at `run`, and the observer keeps
+                // it in step when the desktop flips.
+                crate::theme::apply_system(cx, window.appearance());
+                let shell = cx.new(|cx| Shell::new(args, window, cx));
+                window
+                    .observe_window_appearance(|window, cx| {
+                        crate::theme::apply_system(cx, window.appearance());
+                        window.refresh();
+                    })
+                    .detach();
+                shell
             })
             .expect("failed to open the window");
             let shell_new = shell.clone();

@@ -20,33 +20,167 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::input::TextareaState;
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::theme::{ActiveTheme, ThemeColor};
+use gpui_kit::component::theme::{ActiveTheme, ThemeColor, ThemeMode};
 use gpui_kit::component::{
     Icon, Sizable as _, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, Div, ElementId, Entity, FontWeight, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, ScrollStrategy, SharedString, Size, Stateful,
-    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div, px, size,
+    Animation, AnimationExt as _, AnyElement, App, Context, Div, ElementId, Entity, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, ScrollStrategy,
+    SharedString, Size, Stateful, StatefulInteractiveElement as _, Styled as _,
+    TestSupportExt as _, Window, div, px, radians, relative, rgba, size,
 };
 
 use crate::store::Store;
+use crate::theme::{FS_2XS, FS_SM, FS_XS, R_FULL, R_LG, R_SM, SP_1, SP_2, SP_3, SP_4, SP_5};
 use kage_client::wire::{NoticeTone, ToolCallContent, ToolCallStatus, TurnReason};
 use kage_client::{Session, ToolCallItem, TranscriptItem};
 
-/// One estimated text line, for row sizing.
-const LINE: f32 = 18.0;
-/// The line height of the small mono detail text.
-const DETAIL_LINE: f32 = 15.0;
-/// The padding every row carries beyond its text.
-const BASE: f32 = 30.0;
+/// One estimated text line: the design's base size at its body line
+/// height (14px at 1.5).
+const LINE: f32 = 21.0;
+/// The line height of the mono detail text: 12px at 1.55.
+const DETAIL_LINE: f32 = 19.0;
+/// The line height of the thinking body: 13px at 1.5.
+const THINK_LINE: f32 = 20.0;
+/// The activity row's minimum height.
+const ROW_H: f32 = 28.0;
+/// The activity row's vertical margin, collapsed with its neighbors'.
+const ROW_MARGIN: f32 = 2.0;
+/// The design's 12px detail size.
+const DETAIL_SIZE: f32 = 12.0;
 /// Characters a wrapped prose line holds before the estimate breaks it.
 const COLUMNS: usize = 72;
 /// Characters a mono detail line holds.
 const MONO_COLUMNS: usize = 96;
 /// The distance from the bottom that still counts as following it.
 const FOLLOW_SLACK: f32 = 32.0;
+/// The small icon size of the design (`.ico.sm`).
+const ICON_SM: f32 = 14.0;
+/// The extra small icon size of the design (`.ico.xs`).
+const ICON_XS: f32 = 12.0;
+/// The user bubble's corner radius.
+const BUBBLE_R: f32 = 18.0;
+/// The user bubble's horizontal padding.
+const BUBBLE_PX: f32 = 14.0;
+/// The user bubble's vertical padding.
+const BUBBLE_PY: f32 = 9.0;
+/// The bubble's widest share of the column.
+const BUBBLE_MAX: f32 = 0.85;
+/// The left indent of detail boxes and thinking bodies.
+const DETAIL_INDENT: f32 = 22.0;
+/// The height of a detail head: 12px text at 1.5 plus 7px padding
+/// above and below and the hairline under it.
+const DETAIL_HEAD_H: f32 = 33.0;
+/// The detail head's vertical padding.
+const DETAIL_HEAD_PY: f32 = 7.0;
+/// The mono body's vertical padding inside a detail box.
+const DETAIL_PRE_PY: f32 = 10.0;
+/// The detail box's top margin and hairline borders.
+const DETAIL_TOP: f32 = 6.0;
+/// The detail box's bottom margin.
+const DETAIL_BOTTOM: f32 = 10.0;
+
+/// Ink colors the toolkit's theme roles do not carry, taken verbatim
+/// from the design's two palettes.
+#[derive(Clone, Copy)]
+struct Ink {
+    /// The deepest level, behind mono bodies and diff lines.
+    deep: Hsla,
+    /// Tertiary text.
+    faint: Hsla,
+    /// The faintest marks.
+    ghost: Hsla,
+    /// The faintest fills, under flanking rules.
+    subtle: Hsla,
+    /// Success tint background.
+    ok_soft: Hsla,
+    /// Danger tint background.
+    danger_soft: Hsla,
+    /// Diff added lines.
+    diff_add: Hsla,
+    /// Diff added line background.
+    diff_add_bg: Hsla,
+    /// Diff deleted lines.
+    diff_del: Hsla,
+    /// Diff deleted line background.
+    diff_del_bg: Hsla,
+}
+
+impl Ink {
+    fn shadow() -> Self {
+        Self {
+            deep: rgba(0x09080C).into(),
+            faint: rgba(0xECE8F66B).into(),
+            ghost: rgba(0xECE8F640).into(),
+            subtle: rgba(0xE8E2F50D).into(),
+            ok_soft: rgba(0x8BD49C1C).into(),
+            danger_soft: rgba(0xF2727F1C).into(),
+            diff_add: rgba(0x8BD49C).into(),
+            diff_add_bg: rgba(0x8BD49C1F).into(),
+            diff_del: rgba(0xF2727F).into(),
+            diff_del_bg: rgba(0xF2727F1F).into(),
+        }
+    }
+
+    fn dawn() -> Self {
+        Self {
+            deep: rgba(0xFFFFFF).into(),
+            faint: rgba(0x1A142E7D).into(),
+            ghost: rgba(0x1A142E4D).into(),
+            subtle: rgba(0x1A142E0D).into(),
+            ok_soft: rgba(0x2B74431A).into(),
+            danger_soft: rgba(0xBF36491A).into(),
+            diff_add: rgba(0x2B7443).into(),
+            diff_add_bg: rgba(0x2B74431F).into(),
+            diff_del: rgba(0xBF3649).into(),
+            diff_del_bg: rgba(0xBF36491F).into(),
+        }
+    }
+
+    /// The ink of the active palette.
+    fn active(cx: &App) -> Self {
+        match cx.theme().mode {
+            ThemeMode::Light => Self::dawn(),
+            _ => Self::shadow(),
+        }
+    }
+}
+
+/// The design's vertical margins around one row. An expanded row
+/// carries the margin of the detail or body that closes it.
+fn margins(row: &Row) -> (f32, f32) {
+    match row {
+        Row::User { .. } | Row::Assistant { .. } => (18.0, 18.0),
+        Row::Thinking { expanded, .. } => (
+            ROW_MARGIN,
+            if *expanded { DETAIL_BOTTOM } else { ROW_MARGIN },
+        ),
+        Row::Tool { expanded, .. } => (
+            ROW_MARGIN,
+            if *expanded { DETAIL_BOTTOM } else { ROW_MARGIN },
+        ),
+        Row::Group { expanded, .. } => (
+            ROW_MARGIN,
+            if *expanded { DETAIL_BOTTOM } else { ROW_MARGIN },
+        ),
+        Row::TurnEnd { .. } => (6.0, 22.0),
+        Row::Notice { .. } | Row::Compaction { .. } => (10.0, 10.0),
+        Row::Plan { .. } => (ROW_MARGIN, 12.0),
+        Row::Decision { .. } => (4.0, 4.0),
+    }
+}
+
+/// The space two adjacent rows render with: the design's collapsed
+/// margins. The first row carries only its own top margin.
+fn gap(prev: Option<&Row>, row: &Row) -> f32 {
+    let (top, _) = margins(row);
+    match prev {
+        Some(prev) => f32::max(margins(prev).1, top),
+        None => top,
+    }
+}
 
 /// The estimated lines `text` wraps to.
 fn text_lines(text: &str) -> usize {
@@ -344,6 +478,19 @@ fn tool_verb(call: &ToolCallItem) -> (String, String) {
             "Creating",
             basename(input_str(input, "path")).to_owned(),
         ),
+        "web_search" => (
+            "Searched the web",
+            "Searching the web",
+            input_str(input, "query").to_owned(),
+        ),
+        "web_fetch" => (
+            "Fetched",
+            "Fetching",
+            input_str(input, "url")
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .to_owned(),
+        ),
         other => (
             other,
             other,
@@ -357,6 +504,67 @@ fn tool_verb(call: &ToolCallItem) -> (String, String) {
     };
     let verb = if done { done_word } else { doing_word };
     (verb.to_owned(), target)
+}
+
+/// The icon one tool title renders with.
+fn tool_icon(title: &str) -> IconName {
+    match title {
+        "read" => IconName::File,
+        "grep" | "find" => IconName::Search,
+        "ls" => IconName::ListTree,
+        "shell" => IconName::Terminal,
+        "edit" => IconName::Pencil,
+        "write" => IconName::FilePlus,
+        "web_search" | "web_fetch" => IconName::Globe,
+        _ => IconName::Zap,
+    }
+}
+
+/// A design icon at its small size in one color.
+fn icon(name: IconName, color: Hsla) -> Icon {
+    Icon::new(name).with_size(px(ICON_SM)).text_color(color)
+}
+
+/// The spinner the running states show, turning like the design's.
+fn spinner(color: Hsla, key: usize) -> impl IntoElement {
+    Icon::new(IconName::LoaderCircle)
+        .with_size(px(ICON_SM))
+        .text_color(color)
+        .with_animation(
+            ElementId::named_usize("spin", key),
+            Animation::new(Duration::from_millis(900)).repeat(),
+            |icon, delta| icon.rotate(radians(delta * std::f32::consts::PI * 2.0)),
+        )
+}
+
+/// The row's edge chevron: pointing right when closed, down when open.
+fn chevron(open: bool, color: Hsla) -> Icon {
+    Icon::new(IconName::ChevronRight)
+        .with_size(px(ICON_SM))
+        .text_color(color)
+        .rotate(radians(if open {
+            std::f32::consts::FRAC_PI_2
+        } else {
+            0.0
+        }))
+}
+
+/// A pill chip in one tone of the design's chip anatomy: 20px tall,
+/// mono at the smallest size, on a soft tint.
+fn chip(text: String, fg: Hsla, bg: Hsla, mono: SharedString) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .flex_none()
+        .h(px(20.0))
+        .px(px(7.0))
+        .rounded(px(R_FULL))
+        .font_family(mono)
+        .text_size(px(FS_2XS))
+        .text_color(fg)
+        .bg(bg)
+        .whitespace_nowrap()
+        .child(SharedString::from(text))
 }
 
 /// The collapse family of a tool title. Only these titles group.
@@ -496,6 +704,8 @@ enum Row {
         ix: usize,
         /// Whether the row sits inside an expanded group.
         nested: bool,
+        /// Whether the detail is expanded.
+        expanded: bool,
     },
     /// A collapsed run of same-family tool calls.
     Group {
@@ -503,6 +713,8 @@ enum Row {
         key: RowKey,
         /// The summary label.
         label: String,
+        /// The collapse family, naming the icon.
+        family: Family,
         /// The indexes of the member items.
         members: Vec<usize>,
         /// How many members failed.
@@ -697,62 +909,59 @@ fn detail_line_count(call: &ToolCallItem) -> usize {
 /// The estimated height of one tool row, detail included when shown.
 fn tool_height(session: &Session, ix: usize, ui: &UiState) -> Pixels {
     let Some(TranscriptItem::ToolCall(call)) = session.items.get(ix) else {
-        return px(BASE);
+        return px(ROW_H);
     };
     let shown = ui.expanded.contains(&RowKey::Item(ix)) || live_shell_tail(call);
     if !shown {
-        return px(28.0);
+        return px(ROW_H);
     }
-    px(38.0 + detail_line_count(call) as f32 * DETAIL_LINE)
+    px(ROW_H
+        + DETAIL_TOP
+        + DETAIL_HEAD_H
+        + detail_line_count(call) as f32 * DETAIL_LINE
+        + DETAIL_BOTTOM)
 }
 
-/// The estimated height of one model row.
-fn row_height(session: &Session, row: &Row, ui: &UiState) -> Pixels {
-    match row {
+/// The estimated height of one model row, top spacing included.
+fn row_height(session: &Session, prev: Option<&Row>, row: &Row, ui: &UiState) -> Pixels {
+    let content = match row {
         Row::User { ix, .. } => {
             let text = user_text(session, *ix);
-            px(BASE + text_lines(&text) as f32 * LINE + 26.0)
+            18.0 + text_lines(&text) as f32 * LINE
         }
-        Row::Assistant { ix, live } => {
-            let lines = item_lines(session, *ix) as f32;
-            px(BASE + lines * LINE + if *live { 16.0 } else { 0.0 })
-        }
-        Row::Thinking {
-            ix, live, expanded, ..
-        } => {
-            let mut height = 26.0;
-            if *live && !*expanded {
-                height += LINE;
-            }
+        Row::Assistant { ix, .. } => item_lines(session, *ix) as f32 * LINE,
+        Row::Thinking { ix, expanded, .. } => {
+            let mut height = ROW_H;
             if *expanded {
-                height += item_lines(session, *ix) as f32 * 15.0;
+                height += DETAIL_TOP + item_lines(session, *ix) as f32 * THINK_LINE + DETAIL_BOTTOM;
             }
-            px(height)
+            height
         }
-        Row::Tool { ix, .. } => tool_height(session, *ix, ui),
+        Row::Tool { ix, .. } => f32::from(tool_height(session, *ix, ui)),
         Row::Group {
             members, expanded, ..
         } => {
-            let mut height = 28.0;
+            let mut height = ROW_H;
             if *expanded {
                 for ix in members {
                     height += f32::from(tool_height(session, *ix, ui));
                 }
             }
-            px(height)
+            height
         }
-        Row::TurnEnd { .. } => px(24.0),
-        Row::Notice { ix } => px(BASE + item_lines(session, *ix) as f32 * LINE),
-        Row::Compaction { .. } => px(BASE),
+        Row::TurnEnd { .. } => 17.0,
+        Row::Notice { ix } => item_lines(session, *ix) as f32 * LINE,
+        Row::Compaction { .. } => 18.0,
         Row::Plan { ix } => {
             let entries = match session.items.get(*ix) {
                 Some(TranscriptItem::Plan { entries }) => entries.len(),
                 _ => 0,
             };
-            px(BASE + entries as f32 * LINE)
+            ROW_H + 16.0 + entries as f32 * 26.0
         }
-        Row::Decision { .. } => px(24.0),
-    }
+        Row::Decision { .. } => 18.0,
+    };
+    px(gap(prev, row) + content)
 }
 
 /// The text of the user or message item at `ix`, for estimates.
@@ -834,6 +1043,7 @@ fn row_model(session: &Session, ui: &UiState) -> RowModel {
             rows.push(Row::Group {
                 key,
                 label: group_label(family, &titles),
+                family,
                 members: run.clone(),
                 failed,
                 expanded: ui.expanded.contains(&key),
@@ -843,6 +1053,7 @@ fn row_model(session: &Session, ui: &UiState) -> RowModel {
                     rows.push(Row::Tool {
                         ix: *ix,
                         nested: true,
+                        expanded: ui.expanded.contains(&RowKey::Item(*ix)),
                     });
                 }
             }
@@ -851,15 +1062,26 @@ fn row_model(session: &Session, ui: &UiState) -> RowModel {
                 rows.push(Row::Tool {
                     ix: *ix,
                     nested: false,
+                    expanded: ui.expanded.contains(&RowKey::Item(*ix)),
                 });
             }
         }
         index += run.len();
     }
-    let heights = rows
+    let mut prev: Option<&Row> = None;
+    let mut heights: Vec<Pixels> = rows
         .iter()
-        .map(|row| row_height(session, row, ui))
+        .map(|row| {
+            let height = row_height(session, prev, row, ui);
+            prev = Some(row);
+            height
+        })
         .collect();
+    if let Some(last) = rows.last()
+        && let Some(height) = heights.last_mut()
+    {
+        *height += px(margins(last).1);
+    }
     RowModel { rows, heights }
 }
 
@@ -878,7 +1100,11 @@ fn plain_row(session: &Session, ix: usize, ui: &UiState, last: usize) -> Row {
             expanded: ui.expanded.contains(&RowKey::Item(ix)),
             duration: ui.thinking.get(&ix).and_then(|(_, span)| *span),
         },
-        TranscriptItem::ToolCall(_) => Row::Tool { ix, nested: false },
+        TranscriptItem::ToolCall(_) => Row::Tool {
+            ix,
+            nested: false,
+            expanded: ui.expanded.contains(&RowKey::Item(ix)),
+        },
         TranscriptItem::TurnEnd { reason } => Row::TurnEnd {
             ix,
             tools_follow: *reason == Some(TurnReason::ToolCalls),
@@ -1071,10 +1297,17 @@ impl TranscriptView {
         )
     }
 
-    /// One transcript row, from the model and the session it names.
-    fn render_row(&self, row: &Row, cx: &Context<Self>) -> AnyElement {
+    /// One transcript row, from the model and the session it names,
+    /// seated on the design's collapsed margins.
+    fn render_row(
+        &self,
+        row: &Row,
+        prev: Option<&Row>,
+        last: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let session = self.store.read(cx).active_session();
-        match row {
+        let element = match row {
             Row::User { ix, text } => self.render_user(*ix, text, cx).into_any_element(),
             Row::Assistant { ix, live } => match session.and_then(|s| s.items.get(*ix)) {
                 Some(TranscriptItem::Assistant { text }) => self
@@ -1093,20 +1326,24 @@ impl TranscriptView {
                     .into_any_element(),
                 _ => blank_row(*ix).into_any_element(),
             },
-            Row::Tool { ix, nested } => match session.and_then(|s| s.items.get(*ix)) {
-                Some(TranscriptItem::ToolCall(call)) => {
-                    self.render_tool(*ix, call, *nested, cx).into_any_element()
+            Row::Tool { ix, nested, .. } => {
+                let first_nested = matches!(prev, Some(Row::Group { .. }));
+                match session.and_then(|s| s.items.get(*ix)) {
+                    Some(TranscriptItem::ToolCall(call)) => self
+                        .render_tool(*ix, call, *nested, first_nested, cx)
+                        .into_any_element(),
+                    _ => blank_row(*ix).into_any_element(),
                 }
-                _ => blank_row(*ix).into_any_element(),
-            },
+            }
             Row::Group {
                 key,
                 label,
+                family,
                 members: _,
                 failed,
                 expanded,
             } => self
-                .render_group(*key, label, *failed, *expanded, cx)
+                .render_group(*key, label, *family, *failed, *expanded, cx)
                 .into_any_element(),
             Row::TurnEnd {
                 ix,
@@ -1144,10 +1381,15 @@ impl TranscriptView {
                 }) => render_decision(*ix, subject, label, *allowed, feedback.as_deref(), cx),
                 _ => blank_row(*ix).into_any_element(),
             },
+        };
+        let mut cell = div().w_full().pt(px(gap(prev, row)));
+        if last {
+            cell = cell.pb(px(margins(row).1));
         }
+        cell.child(element).into_any_element()
     }
 
-    /// A user message with copy and edit actions.
+    /// A user message: a right-aligned bubble over hover actions.
     fn render_user(&self, ix: usize, text: &str, cx: &Context<Self>) -> Stateful<Div> {
         let theme = cx.theme().colors;
         let composer = self.composer.clone();
@@ -1156,28 +1398,33 @@ impl TranscriptView {
         div()
             .id(ElementId::named_usize("row-user", ix))
             .w_full()
-            .px_3()
-            .py_1()
             .flex()
             .flex_col()
-            .gap_1()
+            .items_end()
+            .group("user-msg")
+            .child(
+                div()
+                    .max_w(relative(BUBBLE_MAX))
+                    .rounded(px(BUBBLE_R))
+                    .px(px(BUBBLE_PX))
+                    .py(px(BUBBLE_PY))
+                    .bg(theme.secondary)
+                    .text_color(theme.secondary_foreground)
+                    .child(SharedString::from(text.to_owned())),
+            )
             .child(
                 h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(theme.muted_foreground)
-                            .child("you"),
-                    )
+                    .mt(px(SP_2))
+                    .gap(px(SP_1))
+                    .opacity(0.)
+                    .group_hover("user-msg", |style| style.opacity(1.))
                     .child(Clipboard::new("copy").value(copy_text).tooltip("Copy"))
                     .child(
                         Button::new("edit")
-                            .label("Edit and resend")
+                            .icon(IconName::Pencil)
                             .xsmall()
                             .ghost()
-                            .tooltip("fills the composer with this text")
+                            .tooltip("Edit and resend")
                             .on_click(move |_, window, cx| {
                                 let text = edit_text.clone();
                                 composer.update(cx, |state, cx| {
@@ -1186,11 +1433,6 @@ impl TranscriptView {
                                 });
                             }),
                     ),
-            )
-            .child(
-                div()
-                    .text_color(theme.foreground)
-                    .child(SharedString::from(text.to_owned())),
             )
     }
 
@@ -1206,17 +1448,25 @@ impl TranscriptView {
         let mut row = div()
             .id(ElementId::named_usize("row-assistant", ix))
             .w_full()
-            .px_3()
-            .py_1()
-            .flex()
-            .flex_col()
-            .gap_1()
+            .text_color(theme.foreground)
             .child(
                 TextView::markdown(ElementId::named_usize("md", ix), text.to_owned())
                     .text_color(theme.foreground),
             );
         if live {
-            row = row.child(div().w(px(8.)).h(px(14.)).rounded_sm().bg(theme.primary));
+            row = row.child(
+                div()
+                    .w(px(7.))
+                    .h(px(14.))
+                    .mt(px(SP_1))
+                    .ml(px(2.))
+                    .bg(theme.foreground)
+                    .with_animation(
+                        ElementId::named_usize("caret", ix),
+                        Animation::new(Duration::from_millis(1000)).repeat(),
+                        |caret, delta| caret.opacity(if delta < 0.5 { 1.0 } else { 0.0 }),
+                    ),
+            );
         }
         row
     }
@@ -1232,58 +1482,75 @@ impl TranscriptView {
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let theme = cx.theme().colors;
+        let ink = Ink::active(cx);
         let view = cx.entity();
         let label = match (live, duration) {
             (true, _) => "Thinking".to_owned(),
             (false, Some(span)) => format!("Thought for {}s", span.as_secs().max(1)),
             (false, None) => "Thought".to_owned(),
         };
+        let verb_color = if live {
+            theme.secondary_foreground
+        } else {
+            theme.foreground
+        };
         let mut head = h_flex()
             .id("head")
-            .gap_2()
+            .w_full()
+            .min_h(px(ROW_H))
+            .px(px(SP_3))
+            .py(px(SP_1))
+            .gap(px(SP_4))
             .items_center()
+            .rounded(px(R_SM))
+            .cursor_pointer()
+            .text_size(px(FS_SM))
+            .hover(move |style| style.bg(theme.list_hover))
             .on_click(move |_, _, cx| {
                 view.update(cx, |this, cx| {
                     this.toggle(RowKey::Item(ix));
                     cx.notify();
                 });
             })
+            .child(if live {
+                spinner(theme.primary, ix).into_any_element()
+            } else {
+                icon(IconName::Lightbulb, theme.muted_foreground).into_any_element()
+            })
             .child(
                 div()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_size(px(12.))
-                    .text_color(theme.muted_foreground)
+                    .whitespace_nowrap()
+                    .text_color(verb_color)
                     .child(label),
             );
         if live && !expanded {
             head = head.child(
                 div()
-                    .text_size(px(12.))
+                    .min_w_0()
+                    .truncate()
                     .italic()
-                    .text_color(theme.muted_foreground)
+                    .text_size(px(FS_SM))
+                    .text_color(ink.faint)
                     .child(SharedString::from(last_sentence(text))),
             );
         }
-        head = head.child(
-            div()
-                .text_size(px(11.))
-                .text_color(theme.muted_foreground)
-                .child(if expanded { "[-]" } else { "[+]" }),
-        );
+        head = head.child(chevron(expanded, ink.faint));
         let mut row = div()
             .id(ElementId::named_usize("row-thinking", ix))
             .w_full()
-            .px_3()
-            .py_1()
             .flex()
             .flex_col()
-            .gap_1()
             .child(head);
         if expanded {
             row = row.child(
                 div()
-                    .text_size(px(12.))
-                    .italic()
+                    .mt(px(SP_2))
+                    .ml(px(DETAIL_INDENT))
+                    .pl(px(SP_5))
+                    .border_l_2()
+                    .border_color(theme.border)
+                    .text_size(px(FS_SM))
+                    .line_height(px(THINK_LINE))
                     .text_color(theme.muted_foreground)
                     .child(SharedString::from(text.to_owned())),
             );
@@ -1291,77 +1558,102 @@ impl TranscriptView {
         row
     }
 
-    /// One tool call: verb, target, honest chips, expandable detail.
+    /// One tool call: state icon, verb, target, honest chips, and the
+    /// detail box when expanded.
     fn render_tool(
         &self,
         ix: usize,
         call: &ToolCallItem,
         nested: bool,
+        first_nested: bool,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let theme = cx.theme().colors;
+        let mono = cx.theme().mono_font_family.clone();
+        let ink = Ink::active(cx);
         let view = cx.entity();
         let (verb, target) = tool_verb(call);
-        let status = match call.status {
-            ToolCallStatus::Pending => Some(("pending", theme.muted_foreground)),
-            ToolCallStatus::InProgress => Some(("running", theme.warning)),
-            ToolCallStatus::Failed => Some(("failed", theme.danger)),
-            ToolCallStatus::Completed => None,
-        };
-        let output = call.text();
         let expanded = self.ui.expanded.contains(&RowKey::Item(ix)) || live_shell_tail(call);
+        let running =
+            call.status == ToolCallStatus::InProgress || call.status == ToolCallStatus::Pending;
+        let failed = call.status == ToolCallStatus::Failed;
+        let output = call.text();
         let diff = if call.title == "edit" || call.title == "write" {
             diff_lines(call)
         } else {
             None
         };
+        let verb_color = if failed {
+            theme.danger
+        } else if running {
+            theme.secondary_foreground
+        } else {
+            theme.foreground
+        };
+        let lead = if failed {
+            icon(IconName::CircleX, theme.danger).into_any_element()
+        } else if running {
+            spinner(theme.primary, ix).into_any_element()
+        } else {
+            icon(tool_icon(&call.title), theme.muted_foreground).into_any_element()
+        };
         let mut head = h_flex()
             .id("head")
-            .gap_2()
+            .w_full()
+            .min_h(px(ROW_H))
+            .pl(px(if nested { SP_5 } else { SP_3 }))
+            .pr(px(SP_3))
+            .py(px(SP_1))
+            .gap(px(SP_4))
             .items_center()
+            .text_size(px(FS_SM))
+            .hover(move |style| style.bg(theme.list_hover))
+            .child(lead)
             .child(
                 div()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_size(px(12.))
-                    .text_color(theme.foreground)
-                    .child(verb),
+                    .whitespace_nowrap()
+                    .text_color(verb_color)
+                    .child(SharedString::from(verb)),
             )
             .child(
                 div()
-                    .text_size(px(12.))
-                    .text_color(theme.muted_foreground)
+                    .min_w_0()
                     .truncate()
+                    .font_family(mono.clone())
+                    .text_size(px(DETAIL_SIZE))
+                    .text_color(theme.muted_foreground)
                     .child(SharedString::from(target)),
             );
-        for chip in chips_for(call) {
-            let color = match chip.tone {
-                ChipTone::Neutral => theme.muted_foreground,
-                ChipTone::Good => theme.success,
-                ChipTone::Bad => theme.danger,
+        let mut meta = h_flex().gap(px(SP_4)).items_center().flex_none().ml_auto();
+        if call.status == ToolCallStatus::Pending {
+            meta = meta.child(chip(
+                "waiting".to_owned(),
+                theme.muted_foreground,
+                theme.list_hover,
+                mono.clone(),
+            ));
+        }
+        for mark in chips_for(call) {
+            let (fg, bg) = match mark.tone {
+                ChipTone::Neutral => (theme.muted_foreground, theme.list_hover),
+                ChipTone::Good => (ink.diff_add, ink.diff_add_bg),
+                ChipTone::Bad => (ink.diff_del, ink.diff_del_bg),
             };
-            head = head.child(
-                div()
-                    .px_1()
-                    .rounded(px(3.))
-                    .text_size(px(11.))
-                    .text_color(color)
-                    .border_1()
-                    .border_color(theme.border)
-                    .child(SharedString::from(chip.text)),
-            );
+            meta = meta.child(chip(mark.text, fg, bg, mono.clone()));
         }
-        if let Some((word, color)) = status {
-            head = head.child(div().text_size(px(11.)).text_color(color).child(word));
+        if failed {
+            meta = meta.child(chip(
+                "failed".to_owned(),
+                theme.danger,
+                ink.danger_soft,
+                mono.clone(),
+            ));
         }
+        head = head.child(meta);
         if diff.is_some() || !output.is_empty() {
             let view_head = view.clone();
             head = head
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(theme.muted_foreground)
-                        .child(if expanded { "[-]" } else { "[+]" }),
-                )
+                .child(chevron(expanded, ink.faint))
                 .on_click(move |_, _, cx| {
                     view_head.update(cx, |this, cx| {
                         this.toggle(RowKey::Item(ix));
@@ -1369,29 +1661,42 @@ impl TranscriptView {
                     });
                 });
         }
+        let head = if !nested {
+            head.rounded(px(R_SM))
+        } else {
+            head.when(!first_nested, |row| {
+                row.border_t_1().border_color(ink.subtle)
+            })
+        };
         let mut unit = div()
             .id(ElementId::named_usize("row-tool", ix))
             .w_full()
-            .px_3()
-            .py_1()
             .flex()
             .flex_col()
-            .gap_1();
-        if nested {
-            unit = unit.pl_4();
-        }
-        unit = unit.child(head);
+            .child(head);
         if expanded {
             if let Some(lines) = diff {
-                unit = unit.child(render_diff(&lines, cx));
+                unit = unit.child(render_detail(None, render_diff(&lines, cx), cx));
             } else if !output.is_empty() {
-                unit = unit.child(
-                    div()
-                        .text_size(px(12.))
-                        .font_family("JetBrains Mono")
-                        .text_color(theme.muted_foreground)
-                        .child(SharedString::from(output)),
-                );
+                let detail_head = if call.title == "read" {
+                    Some((
+                        IconName::File,
+                        input_str(call.input.as_ref(), "path").to_owned(),
+                    ))
+                } else if call.title == "shell" {
+                    Some((
+                        IconName::Terminal,
+                        format!("$ {}", input_str(call.input.as_ref(), "command")),
+                    ))
+                } else if call.title == "edit" || call.title == "write" {
+                    Some((
+                        IconName::FileDiff,
+                        input_str(call.input.as_ref(), "path").to_owned(),
+                    ))
+                } else {
+                    None
+                };
+                unit = unit.child(render_detail(detail_head, render_pre(&output, cx), cx));
             }
         }
         unit
@@ -1402,55 +1707,64 @@ impl TranscriptView {
         &self,
         key: RowKey,
         label: &str,
+        family: Family,
         failed: usize,
         expanded: bool,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let theme = cx.theme().colors;
+        let mono = cx.theme().mono_font_family.clone();
+        let ink = Ink::active(cx);
         let view = cx.entity();
         let RowKey::Group(group_ix) = key else {
             return blank_row(0);
         };
+        let group_icon = match family {
+            Family::Shell => IconName::Terminal,
+            Family::Explore => IconName::Search,
+        };
         let mut head = h_flex()
             .id("head")
-            .gap_2()
+            .w_full()
+            .min_h(px(ROW_H))
+            .px(px(SP_3))
+            .py(px(SP_1))
+            .gap(px(SP_4))
             .items_center()
+            .rounded(px(R_SM))
+            .cursor_pointer()
+            .text_size(px(FS_SM))
+            .hover(move |style| style.bg(theme.list_hover))
+            .child(icon(group_icon, theme.muted_foreground))
             .child(
                 div()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_size(px(12.))
+                    .whitespace_nowrap()
                     .text_color(theme.foreground)
                     .child(SharedString::from(label.to_owned())),
             )
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(theme.muted_foreground)
-                    .child(if expanded { "[-] hide" } else { "[+] show" }),
-            );
+            .on_click(move |_, _, cx| {
+                view.update(cx, |this, cx| {
+                    this.toggle(key);
+                    cx.notify();
+                });
+            });
         if failed > 0 {
             head = head.child(
-                div()
-                    .px_1()
-                    .rounded(px(3.))
-                    .text_size(px(11.))
-                    .text_color(theme.danger)
-                    .border_1()
-                    .border_color(theme.border)
-                    .child(SharedString::from(format!("{failed} failed"))),
+                chip(
+                    format!("{failed} failed"),
+                    theme.danger,
+                    ink.danger_soft,
+                    mono.clone(),
+                )
+                .ml_auto(),
             );
         }
-        head = head.on_click(move |_, _, cx| {
-            view.update(cx, |this, cx| {
-                this.toggle(key);
-                cx.notify();
-            });
-        });
+        head = head.child(chevron(expanded, ink.faint));
         div()
             .id(ElementId::named_usize("row-group", group_ix))
             .w_full()
-            .px_3()
-            .py_1()
+            .flex()
+            .flex_col()
             .child(head)
     }
 
@@ -1463,42 +1777,38 @@ impl TranscriptView {
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let theme = cx.theme().colors;
+        let mono = cx.theme().mono_font_family.clone();
+        let ink = Ink::active(cx);
         let why = if tools_follow {
             "turn ended, tools follow"
         } else {
             "turn ended"
         };
         let mut row = h_flex()
-            .gap_2()
+            .gap(px(SP_4))
             .items_center()
-            .child(div().flex_1().h(px(1.)).bg(theme.border))
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(theme.muted_foreground)
-                    .child(why),
-            );
+            .text_size(px(FS_2XS))
+            .text_color(ink.faint)
+            .child(why);
         if let Some(outcome) = outcome {
-            let (word, color) = match outcome {
-                Outcome::Interrupted => ("interrupted", theme.warning),
-                Outcome::Failed => ("failed", theme.danger),
-            };
-            row = row.child(
-                div()
-                    .px_1()
-                    .rounded(px(3.))
-                    .text_size(px(11.))
-                    .text_color(color)
-                    .border_1()
-                    .border_color(theme.border)
-                    .child(word),
-            );
+            row = row.child(match outcome {
+                Outcome::Interrupted => chip(
+                    "interrupted".to_owned(),
+                    theme.muted_foreground,
+                    theme.list_hover,
+                    mono.clone(),
+                ),
+                Outcome::Failed => chip(
+                    "failed".to_owned(),
+                    theme.danger,
+                    ink.danger_soft,
+                    mono.clone(),
+                ),
+            });
         }
         div()
             .id(ElementId::named_usize("row-turn-end", ix))
             .w_full()
-            .px_3()
-            .py_1()
             .child(row)
     }
 
@@ -1527,7 +1837,8 @@ fn blank_row(ix: usize) -> Stateful<Div> {
     div().id(ElementId::named_usize("row-blank", ix)).w_full()
 }
 
-/// A notice row in its tone's color.
+/// The design's notice row: the text between two flanking hairlines,
+/// in the tone's color.
 fn render_notice(
     ix: usize,
     tone: NoticeTone,
@@ -1535,23 +1846,38 @@ fn render_notice(
     cx: &Context<TranscriptView>,
 ) -> Stateful<Div> {
     let theme = cx.theme().colors;
-    let color = match tone {
-        NoticeTone::Info => theme.info,
-        NoticeTone::Warn => theme.warning,
-        NoticeTone::Error => theme.danger,
-        NoticeTone::Success => theme.success,
+    let ink = Ink::active(cx);
+    let (color, pill) = match tone {
+        NoticeTone::Info => (ink.faint, false),
+        NoticeTone::Warn => (theme.warning, false),
+        NoticeTone::Error => (theme.danger, true),
+        NoticeTone::Success => (theme.success, false),
     };
+    let rule = || div().flex_1().h(px(1.)).bg(ink.subtle);
     div()
         .id(ElementId::named_usize("row-notice", ix))
         .w_full()
-        .px_3()
-        .py_1()
-        .text_size(px(13.))
-        .text_color(color)
-        .child(SharedString::from(text.to_owned()))
+        .flex()
+        .items_center()
+        .gap(px(SP_4))
+        .child(rule())
+        .child(
+            div()
+                .when(pill, |body| {
+                    body.px(px(10.))
+                        .py(px(SP_2))
+                        .rounded(px(R_FULL))
+                        .bg(ink.danger_soft)
+                })
+                .text_size(px(FS_XS))
+                .text_color(color)
+                .child(SharedString::from(text.to_owned())),
+        )
+        .child(rule())
 }
 
-/// A compaction row with the tokens the summary saved.
+/// A compaction row with the tokens the summary saved, between the
+/// same flanking hairlines the notices use.
 fn render_compaction(
     ix: usize,
     kept: u64,
@@ -1559,63 +1885,151 @@ fn render_compaction(
     after: u64,
     cx: &Context<TranscriptView>,
 ) -> Stateful<Div> {
-    let theme = cx.theme().colors;
+    let ink = Ink::active(cx);
+    let rule = || div().flex_1().h(px(1.)).bg(ink.subtle);
     div()
         .id(ElementId::named_usize("row-compaction", ix))
         .w_full()
-        .px_3()
-        .py_1()
-        .text_size(px(12.))
-        .text_color(theme.muted_foreground)
-        .child(SharedString::from(format!(
-            "context compacted: kept {kept} turns, {before} -> {after} tokens"
-        )))
+        .flex()
+        .items_center()
+        .gap(px(SP_4))
+        .child(rule())
+        .child(
+            div()
+                .text_size(px(FS_XS))
+                .text_color(ink.faint)
+                .child(SharedString::from(format!(
+                    "context compacted: kept {kept} turns, {before} -> {after} tokens"
+                ))),
+        )
+        .child(rule())
 }
 
-/// A plan row over the entries the update carried.
+/// The plan over the entries the update carried: one activity row and
+/// the boxed todo list under it.
 fn render_plan(
     ix: usize,
     entries: &[serde_json::Value],
     cx: &Context<TranscriptView>,
 ) -> Stateful<Div> {
     let theme = cx.theme().colors;
-    let mut rows = v_flex().gap_0().child(
-        div()
-            .text_size(px(11.))
-            .text_color(theme.muted_foreground)
-            .child("plan"),
-    );
-    for entry in entries {
+    let mono = cx.theme().mono_font_family.clone();
+    let ink = Ink::active(cx);
+    let done = entries
+        .iter()
+        .filter(|entry| {
+            entry.get("status").and_then(serde_json::Value::as_str) == Some("completed")
+        })
+        .count();
+    let current = entries
+        .iter()
+        .find(|entry| {
+            entry.get("status").and_then(serde_json::Value::as_str) == Some("in_progress")
+        })
+        .and_then(|entry| entry.get("content"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let complete = done == entries.len() && !entries.is_empty();
+    let head = h_flex()
+        .w_full()
+        .min_h(px(ROW_H))
+        .px(px(SP_3))
+        .py(px(SP_1))
+        .gap(px(SP_4))
+        .items_center()
+        .text_size(px(FS_SM))
+        .hover(move |style| style.bg(theme.list_hover))
+        .child(icon(IconName::ListTodo, theme.muted_foreground))
+        .child(
+            div()
+                .whitespace_nowrap()
+                .text_color(theme.foreground)
+                .child("Updated todos"),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .font_family(mono.clone())
+                .text_size(px(DETAIL_SIZE))
+                .text_color(theme.muted_foreground)
+                .child(SharedString::from(if complete {
+                    "all done".to_owned()
+                } else {
+                    current.to_owned()
+                })),
+        )
+        .child(
+            chip(
+                format!("{done}/{}", entries.len()),
+                if complete {
+                    theme.success
+                } else {
+                    theme.muted_foreground
+                },
+                if complete {
+                    ink.ok_soft
+                } else {
+                    theme.list_hover
+                },
+                mono.clone(),
+            )
+            .ml_auto(),
+        );
+    let mut list = v_flex().pt(px(SP_3)).px(px(SP_5)).pb(px(10.));
+    for (entry_ix, entry) in entries.iter().enumerate() {
         let status = entry
             .get("status")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        let mark = match status {
-            "completed" => "x",
-            "in_progress" => "~",
-            _ => " ",
-        };
         let text = entry
             .get("content")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        rows = rows.child(
-            h_flex()
-                .gap_2()
-                .child(div().w(px(12.)).text_color(theme.primary).child(mark))
-                .child(
-                    div()
-                        .text_color(theme.foreground)
-                        .child(SharedString::from(text.to_owned())),
-                ),
-        );
+        let (lead, text_color) = match status {
+            "completed" => (
+                icon(IconName::CircleCheck, theme.success).into_any_element(),
+                theme.muted_foreground,
+            ),
+            "in_progress" => (
+                spinner(theme.primary, ix * 1000 + entry_ix).into_any_element(),
+                theme.secondary_foreground,
+            ),
+            _ => (
+                icon(IconName::Circle, ink.ghost).into_any_element(),
+                theme.foreground,
+            ),
+        };
+        let mut line = h_flex()
+            .items_start()
+            .gap(px(9.))
+            .py(px(3.))
+            .text_size(px(FS_SM))
+            .text_color(text_color)
+            .child(div().mt(px(3.)).child(lead))
+            .child(SharedString::from(text.to_owned()));
+        if status == "completed" {
+            line = line.line_through();
+        }
+        list = list.child(line);
     }
     div()
         .id(ElementId::named_usize("row-plan", ix))
         .w_full()
-        .px_3()
-        .py_1()
-        .child(rows)
+        .flex()
+        .flex_col()
+        .child(head)
+        .child(
+            div()
+                .mt(px(SP_2))
+                .ml(px(DETAIL_INDENT))
+                .border_1()
+                .border_color(theme.border)
+                .rounded(px(R_LG))
+                .bg(theme.muted)
+                .overflow_hidden()
+                .child(list),
+        )
 }
 
 /// The one-line record of an answered permission ask: what the ask
@@ -1630,37 +2044,46 @@ fn render_decision(
     cx: &Context<TranscriptView>,
 ) -> AnyElement {
     let theme = cx.theme().colors;
+    let ink = Ink::active(cx);
+    let mono = cx.theme().mono_font_family.clone();
     let color = if allowed { theme.success } else { theme.danger };
     let mut row = h_flex()
-        .gap_2()
+        .w_full()
+        .min_h(px(ROW_H))
+        .px(px(SP_3))
+        .py(px(SP_1))
+        .gap(px(SP_4))
         .items_center()
+        .text_size(px(FS_XS))
+        .text_color(theme.muted_foreground)
         .child(
             Icon::new(if allowed {
                 IconName::ShieldCheck
             } else {
                 IconName::ShieldX
             })
+            .with_size(px(ICON_XS))
             .text_color(color),
         )
         .child(
             div()
-                .text_size(px(12.))
-                .text_color(theme.foreground)
+                .whitespace_nowrap()
                 .child(SharedString::from(label.to_owned())),
         )
         .child(
             div()
-                .text_size(px(12.))
-                .text_color(theme.muted_foreground)
+                .min_w_0()
                 .truncate()
+                .font_family(mono.clone())
+                .text_color(theme.foreground)
                 .child(SharedString::from(subject.to_owned())),
         );
     if let Some(feedback) = feedback {
         row = row.child(
             div()
-                .text_size(px(12.))
+                .flex_none()
                 .italic()
-                .text_color(theme.muted_foreground)
+                .text_color(ink.faint)
                 .child(SharedString::from(format!("\"{feedback}\""))),
         );
     }
@@ -1668,8 +2091,6 @@ fn render_decision(
         .id(ElementId::named_usize("row-decision", ix))
         .test_support()
         .w_full()
-        .px_3()
-        .py_1()
         .aria_label(SharedString::from(match feedback {
             Some(feedback) => format!("{label} {subject} \"{feedback}\""),
             None => format!("{label} {subject}"),
@@ -1678,33 +2099,95 @@ fn render_decision(
         .into_any_element()
 }
 
+/// The design's detail box: a bordered surface with an optional head
+/// naming the path or command, indented under the row that opened it.
+fn render_detail(head: Option<(IconName, String)>, body: Div, cx: &Context<TranscriptView>) -> Div {
+    let theme = cx.theme().colors;
+    let mono = cx.theme().mono_font_family.clone();
+    let mut box_ = div()
+        .mt(px(SP_2))
+        .mb(px(DETAIL_BOTTOM))
+        .ml(px(DETAIL_INDENT))
+        .border_1()
+        .border_color(theme.border)
+        .rounded(px(R_LG))
+        .bg(theme.muted)
+        .overflow_hidden();
+    if let Some((icon_name, path)) = head {
+        box_ = box_.child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap(px(SP_4))
+                .px(px(SP_5))
+                .py(px(DETAIL_HEAD_PY))
+                .border_b_1()
+                .border_color(Ink::active(cx).subtle)
+                .text_size(px(FS_XS))
+                .text_color(theme.muted_foreground)
+                .child(Icon::new(icon_name).with_size(px(ICON_XS)))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(mono.clone())
+                        .text_color(theme.foreground)
+                        .child(SharedString::from(path)),
+                ),
+        );
+    }
+    box_.child(body)
+}
+
+/// The mono body of a detail box: the design's deep well at its 12px
+/// detail size.
+fn render_pre(text: &str, cx: &Context<TranscriptView>) -> Div {
+    div()
+        .w_full()
+        .px(px(SP_5))
+        .py(px(DETAIL_PRE_PY))
+        .bg(Ink::active(cx).deep)
+        .font_family(cx.theme().mono_font_family.clone())
+        .text_size(px(DETAIL_SIZE))
+        .line_height(px(DETAIL_LINE))
+        .child(SharedString::from(text.to_owned()))
+}
+
 /// A unified diff with per-line added and removed coloring, computed
 /// from the markers the delivered text carries.
 fn render_diff(lines: &[DiffLine], cx: &Context<TranscriptView>) -> Div {
     let theme = cx.theme().colors;
-    let mut view = v_flex()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(theme.border)
-        .overflow_hidden();
+    let mono = cx.theme().mono_font_family.clone();
+    let ink = Ink::active(cx);
+    let mut view = v_flex().w_full().bg(ink.deep);
     for line in lines {
         let (color, bg) = match line {
-            DiffLine::Add(_) => (theme.success, theme.list_hover),
-            DiffLine::Del(_) => (theme.danger, theme.list_even),
-            DiffLine::Head(_) => (theme.muted_foreground, theme.secondary),
-            DiffLine::Ctx(_) => (theme.foreground, theme.background),
+            DiffLine::Add(_) => (ink.diff_add, ink.diff_add_bg),
+            DiffLine::Del(_) => (ink.diff_del, ink.diff_del_bg),
+            DiffLine::Head(_) => (ink.faint, theme.list_hover),
+            DiffLine::Ctx(_) => (theme.foreground, ink.deep),
         };
         view = view.child(
             h_flex()
-                .px_2()
-                .font_family("JetBrains Mono")
-                .text_size(px(12.))
+                .whitespace_nowrap()
+                .font_family(mono.clone())
+                .text_size(px(DETAIL_SIZE))
+                .line_height(px(DETAIL_LINE))
                 .bg(bg)
                 .text_color(color)
-                .child(div().w(px(14.)).child(line.marker()))
                 .child(
                     div()
+                        .w(px(20.))
+                        .flex_none()
+                        .text_center()
+                        .text_color(ink.ghost)
+                        .child(line.marker()),
+                )
+                .child(
+                    div()
+                        .min_w_0()
                         .truncate()
+                        .pr(px(SP_5))
                         .child(SharedString::from(line.body().to_owned())),
                 ),
         );
@@ -1788,11 +2271,13 @@ impl Render for TranscriptView {
                         sizes,
                         move |this, range, _, cx| {
                             let model = this.model.clone();
+                            let last_ix = model.rows.len().saturating_sub(1);
                             range
                                 .map(|ix| {
                                     let row = &model.rows[ix];
                                     *this.render_counts.entry(row.key()).or_insert(0) += 1;
-                                    let element = this.render_row(row, cx);
+                                    let prev = ix.checked_sub(1).and_then(|p| model.rows.get(p));
+                                    let element = this.render_row(row, prev, ix == last_ix, cx);
                                     match this.row_tint(row.key(), colors) {
                                         Some(tint) => div()
                                             .id(ElementId::named_usize("find-hit", ix))
@@ -2179,7 +2664,9 @@ mod tests {
         let nested: Vec<usize> = model.rows[1..]
             .iter()
             .map(|row| match row {
-                Row::Tool { ix, nested: true } => *ix,
+                Row::Tool {
+                    ix, nested: true, ..
+                } => *ix,
                 other => panic!("expected a nested tool row, got {other:?}"),
             })
             .collect();

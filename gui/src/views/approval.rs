@@ -11,7 +11,8 @@
 //!
 //! Answering:
 //!
-//! - A click on an option row answers with that option's offered id.
+//! - A click on an option button answers with that option's offered
+//!   id.
 //! - The number keys 1 to 9 answer the oldest open ask. The key
 //!   handling is scoped to the card by focus: the card registers its
 //!   own focus handle, takes the window focus when a first ask
@@ -37,25 +38,114 @@
 //! click into the composer takes it back for typing at once.
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::theme::ActiveTheme;
-use gpui_kit::component::{Icon, h_flex, v_flex};
+use gpui_kit::component::theme::{ActiveTheme, ThemeMode};
+use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    AppContext as _, Context, Entity, FocusHandle, Focusable, FontWeight, InteractiveElement as _,
-    IntoElement, KeyDownEvent, Modifiers, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, TestSupportExt as _, Window, div, px,
+    AppContext as _, BoxShadow, Context, Div, Entity, FocusHandle, Focusable, FontWeight, Hsla,
+    InteractiveElement, IntoElement, KeyDownEvent, Modifiers, ParentElement as _, Render,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled, TestSupportExt as _, Window,
+    div, px, rgba,
 };
 use kage_client::wire::PermissionOptionKind;
 use kage_client::{PermissionAsk, PermissionDecision};
 use serde_json::Value;
 
 use crate::store::Store;
+use crate::theme::{
+    FONT_MONO, FS_2XS, FS_BASE, FS_XS, Palette, R_FULL, R_MD, R_XL, SP_3, SP_4, WEIGHT_SEMIBOLD,
+};
 
 /// The keys of a tool input that name its primary argument, most
 /// specific first.
 const SUBJECT_KEYS: [&str; 5] = ["command", "path", "pattern", "url", "description"];
+
+/// The on-color text of a filled success button, which the design
+/// hard codes per button style instead of a palette role.
+const OK_ON: u32 = 0x0B1A10;
+
+/// The palette roles the toolkit theme does not carry, taken from
+/// the active mode's own palette so both palettes stay exact.
+fn palette(mode: ThemeMode) -> &'static Palette {
+    static SHADOW: LazyLock<Palette> = LazyLock::new(Palette::shadow);
+    static DAWN: LazyLock<Palette> = LazyLock::new(Palette::dawn);
+    if mode.is_dark() { &SHADOW } else { &DAWN }
+}
+
+/// The success ring around a card: the design draws the success tint
+/// as a 4px spread shadow with no offset or blur.
+fn ok_ring(pal: &Palette) -> Vec<BoxShadow> {
+    vec![BoxShadow::new(px(0.), px(0.), pal.ok_soft).spread_radius(px(4.))]
+}
+
+/// The three tones an option button carries: the filled success for
+/// the go-ahead answer, the outlined danger for the refuse answers,
+/// and the plain hairline for everything in between.
+enum BtnTone {
+    /// The filled success button.
+    Ok,
+    /// The outlined danger button.
+    Danger,
+    /// The plain hairline button.
+    Plain,
+}
+
+/// One small option button as the design draws it: 26px tall, an 8px
+/// radius, 12px medium text. The filled success tone has no hover
+/// step because the design lifts it with a brightness filter the
+/// toolkit has no equivalent for. Children are the caller's.
+fn option_btn(id: SharedString, tone: BtnTone, pal: &Palette) -> Stateful<Div> {
+    let danger_soft = pal.danger_soft;
+    let fill_hover = pal.fill_hover;
+    let line_strong = pal.line_strong;
+    let ok_on: Hsla = rgba(OK_ON).into();
+    let btn = h_flex()
+        .id(id)
+        .h(px(26.))
+        .px(px(9.))
+        .gap(px(SP_3))
+        .flex_none()
+        .items_center()
+        .rounded(px(R_MD))
+        .border_1()
+        .font_weight(FontWeight::MEDIUM)
+        .text_size(px(FS_XS))
+        .cursor_pointer();
+    match tone {
+        BtnTone::Ok => btn.border_color(pal.ok).bg(pal.ok).text_color(ok_on),
+        BtnTone::Danger => btn
+            .border_color(pal.danger_bd)
+            .text_color(pal.danger)
+            .hover(move |style| style.bg(danger_soft)),
+        BtnTone::Plain => btn
+            .border_color(pal.line)
+            .bg(pal.fill)
+            .text_color(pal.ink)
+            .hover(move |style| style.bg(fill_hover).border_color(line_strong)),
+    }
+}
+
+/// The digit key cap an option button carries: a current-color hairline
+/// box in the mono family at 0.6 opacity.
+fn option_kbd(digit: usize, fg: Hsla) -> Div {
+    div()
+        .h(px(16.))
+        .px(px(4.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .rounded(px(5.))
+        .border_1()
+        .border_color(fg)
+        .font_family(FONT_MONO)
+        .text_size(px(10.))
+        .text_color(fg)
+        .opacity(0.6)
+        .child(digit.to_string())
+}
 
 /// The text one input value renders as, strings verbatim.
 fn value_text(value: &Value) -> String {
@@ -276,14 +366,18 @@ impl ApprovalCard {
         cx.notify();
     }
 
-    /// One ask, rendered as offered.
+    /// One ask, rendered as the design draws the approval card: the
+    /// success-tinted surface with its 4px ring, the ok-colored glyph
+    /// and semibold title, the asking session's byline chip, the mono
+    /// subject block, the reason, and the options as numbered small
+    /// buttons.
     fn ask_view(
         &mut self,
         session_id: &str,
         ask: &PermissionAsk,
+        pal: &'static Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let theme = cx.theme().colors;
         let byline = self.store.read(cx).state().asker_byline(session_id);
         let child = byline
             .as_ref()
@@ -294,133 +388,152 @@ impl ApprovalCard {
             .clone()
             .unwrap_or_else(|| ask.tool_call.tool_call_id.clone());
         let mut head = h_flex()
-            .gap_2()
+            .w_full()
+            .pl(px(14.))
+            .pr(px(14.))
+            .pt(px(12.))
+            .pb(px(8.))
+            .gap(px(8.))
             .items_center()
             .child(
                 Icon::new(if child {
-                    IconName::Network
+                    IconName::Waypoints
                 } else {
                     IconName::ShieldQuestionMark
                 })
-                .text_color(theme.warning),
+                .with_size(px(14.))
+                .text_color(pal.ok),
             )
             .child(
                 div()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.foreground)
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(FS_BASE))
+                    .font_weight(WEIGHT_SEMIBOLD)
+                    .text_color(pal.ink_strong)
                     .child(SharedString::from(title)),
             );
         if let Some(byline) = byline {
             head = head.child(
                 div()
-                    .text_size(px(11.))
-                    .text_color(theme.muted_foreground)
+                    .ml_auto()
+                    .flex_none()
+                    .px(px(8.))
+                    .py(px(2.))
+                    .rounded(px(R_FULL))
+                    .bg(pal.fill)
+                    .text_size(px(FS_2XS))
+                    .text_color(pal.muted)
                     .child(SharedString::from(byline)),
             );
         }
         let mut card = v_flex()
             .id(SharedString::from(format!("approval-{}", ask.request_id)))
             .w_full()
-            .gap_2()
-            .p_3()
-            .rounded(px(6.))
+            .overflow_hidden()
+            .rounded(px(R_XL))
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.secondary)
+            .border_color(pal.ok_bd)
+            .bg(pal.surface)
+            .shadow(ok_ring(pal))
             .child(head);
         if let Some(subject) = subject_of(ask) {
             card = card.child(
                 div()
-                    .text_size(px(12.))
-                    .font_family("JetBrains Mono")
-                    .text_color(theme.foreground)
+                    .mx(px(14.))
+                    .px(px(12.))
+                    .py(px(9.))
+                    .rounded(px(R_MD))
+                    .bg(pal.deep)
+                    .font_family(FONT_MONO)
+                    .text_size(px(12.5))
+                    .text_color(pal.ink_strong)
                     .child(SharedString::from(subject)),
             );
         }
         if let Some(reason) = reason_of(ask) {
             card = card.child(
                 div()
-                    .text_size(px(11.))
-                    .text_color(theme.muted_foreground)
+                    .px(px(14.))
+                    .pt(px(8.))
+                    .text_size(px(FS_XS))
+                    .text_color(pal.muted)
                     .child(SharedString::from(reason)),
             );
         }
-        let mut options = v_flex().gap_1();
+        let ok_on: Hsla = rgba(OK_ON).into();
+        let mut actions = h_flex()
+            .w_full()
+            .flex_wrap()
+            .items_center()
+            .pl(px(14.))
+            .pr(px(14.))
+            .pt(px(12.))
+            .pb(px(12.))
+            .gap(px(SP_4));
         for (index, option) in ask.options.iter().enumerate() {
             let number = index + 1;
-            let danger = matches!(
+            let reject = matches!(
                 option.kind,
                 PermissionOptionKind::RejectOnce | PermissionOptionKind::RejectAlways
             );
+            let tone = if reject {
+                BtnTone::Danger
+            } else if index == 0 {
+                BtnTone::Ok
+            } else {
+                BtnTone::Plain
+            };
+            let fg = match tone {
+                BtnTone::Ok => ok_on,
+                BtnTone::Danger => pal.danger,
+                BtnTone::Plain => pal.ink,
+            };
             let store = self.store.clone();
             let session = session_id.to_owned();
             let request_id = ask.request_id;
             let option_id = option.option_id.clone();
-            options = options.child(
-                h_flex()
-                    .id(SharedString::from(format!(
-                        "approval-{request_id}-{number}"
-                    )))
-                    .test_support()
-                    .w_full()
-                    .px_2()
-                    .py_1()
-                    .gap_2()
-                    .items_center()
-                    .rounded(px(4.))
-                    .hover(|row| row.bg(theme.list_hover))
-                    .aria_label(SharedString::from(format!("{number} {}", option.name)))
-                    .on_click(move |_, _, cx| {
-                        store.update(cx, |store, cx| {
-                            store.reply_permission(
-                                &session,
-                                request_id,
-                                &PermissionDecision::Option(option_id.clone()),
-                            );
-                            cx.notify();
-                        });
-                    })
-                    .child(
-                        div()
-                            .w(px(16.))
-                            .rounded(px(3.))
-                            .border_1()
-                            .border_color(theme.border)
-                            .text_size(px(10.))
-                            .text_color(theme.muted_foreground)
-                            .child(number.to_string()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(if danger {
-                                theme.danger
-                            } else {
-                                theme.foreground
-                            })
-                            .child(SharedString::from(option.name.clone())),
-                    ),
+            actions = actions.child(
+                option_btn(
+                    SharedString::from(format!("approval-{request_id}-{number}")),
+                    tone,
+                    pal,
+                )
+                .test_support()
+                .aria_label(SharedString::from(format!("{number} {}", option.name)))
+                .child(SharedString::from(option.name.clone()))
+                .child(option_kbd(number, fg))
+                .on_click(move |_, _, cx| {
+                    store.update(cx, |store, cx| {
+                        store.reply_permission(
+                            &session,
+                            request_id,
+                            &PermissionDecision::Option(option_id.clone()),
+                        );
+                        cx.notify();
+                    });
+                }),
             );
         }
-        card = card.child(options);
         if let Some(input) = self.feedback.get(&ask.request_id) {
-            card = card.child(
-                h_flex()
+            actions = actions.child(
+                div()
                     .id(SharedString::from(format!(
                         "approval-feedback-{}",
                         ask.request_id
                     )))
-                    .w_full()
+                    .min_w(px(180.))
+                    .flex_1()
                     .child(Input::new(input).flex_1()),
             );
         }
-        card
+        card.child(actions)
     }
 }
 
 impl Render for ApprovalCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pal = palette(cx.theme().mode);
         let asks: Vec<(String, PermissionAsk)> = self
             .store
             .read(cx)
@@ -433,13 +546,13 @@ impl Render for ApprovalCard {
             .id("approval")
             .test_support()
             .w_full()
-            .gap_2()
+            .gap(px(10.))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_key(event, window, cx);
             }));
         for (session_id, ask) in asks {
-            surface = surface.child(self.ask_view(&session_id, &ask, cx));
+            surface = surface.child(self.ask_view(&session_id, &ask, pal, cx));
         }
         surface
     }

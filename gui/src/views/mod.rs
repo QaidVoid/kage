@@ -7,6 +7,7 @@
 pub mod approval;
 pub mod chrome;
 pub mod composer;
+pub mod deferred;
 pub mod dock;
 pub mod sidebar;
 pub mod transcript;

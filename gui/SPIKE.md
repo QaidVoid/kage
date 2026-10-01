@@ -257,15 +257,62 @@ numbers above carry over unchanged.
   artifact. Watch it on real hardware before shipping.
 - One top-level window per page; a second `open_window` is an error
   by design. The shell opens exactly one.
-- The web text system starts with no fonts at all, and the first
-  layout in a family it cannot find would panic. The web entry
-  registers the bundled fonts (IBM Plex Sans, JetBrains Mono, both in
-  `assets/fonts`, OFL licensed) before anything lays out text, then
-  names both families on the theme explicitly. The desktop entry
-  does neither: fontconfig supplies fonts there.
+- The web text system starts with no fonts at all, and resolving a
+  family it cannot find panics rather than falling back. Two things
+  guard that. The web entry registers the bundled fonts (Inter, JetBrains
+  Mono, Schibsted Grotesk, all in `assets/fonts`, OFL licensed) before
+  anything lays out text, then names the body and mono families on the
+  theme explicitly. The desktop entry does neither: fontconfig supplies
+  fonts there.
+- The input engines do not read that theme. `InputState::new` and
+  `TextareaState::new` copy `window.text_style()` once and `DisplayMap`
+  keeps the family it was handed; only the input element's own first
+  prepaint corrects it, with `set_font`. A window with nothing on its
+  text style stack names `.SystemUIFont`, which resolves on the web
+  through no installed name, so a write to a state that has not prepainted
+  yet panics the frame and blanks the window. `views::deferred` holds
+  those writes: each view shares a `LaidOut` signal with
+  `ElementExt::on_prepaint` on the element carrying the input, and the
+  pending text lands on the render after that element's prepaint. Views
+  that write another view's input (the palette and the welcome pane write
+  the composer's textarea) take a copy of the owner's signal, because only
+  the composer renders that element. Focusing a field is not a text write
+  and happens at once. This is not a render count: a view can render many
+  times before anything prepaints, and a render count armed on the first
+  render reproduced the panic 5 runs out of 5.
 - Icons are fetched from `<page origin>/assets/icons/*.svg` on first
   use, so the serving origin must host the icon directory or the UI
   draws labels without icons (logged, non-fatal).
+- The web platform reports `prefers-color-scheme` as the window's
+  appearance, so the System theme default follows the browser here and
+  the platform there. Both entries apply it inside the window's build
+  closure, because the appearance is only known once the window exists,
+  and `observe_window_appearance` keeps it in step on a live change.
+- Comparing a screenshot against the prototype is the only way to catch
+  a palette mistake the unit tests cannot see, and it caught one worth
+  recording. The design writes its fills as RGB triples and its
+  translucencies as 8-digit RGBA (`0xE8E2F51C`), but GPUI's `rgba`
+  reads four bytes either way, so a 6-digit token took its blue as
+  alpha: `bg` was drawn at 7 percent and the whole shell sat off the
+  palette against whatever was behind it. `theme::color` now supplies
+  the missing byte. The check is a colour histogram of the screenshot
+  against the palette, not a visual impression.
+
+### Comparing a screenshot with the prototype
+
+The prototype is a static page, so it needs no token, and the client
+needs the connect form filled before it draws. Both then screenshot at
+one viewport and with the same `colorScheme`, or the comparison measures
+the two themes against each other. Three numbers decide whether the
+client matches: the dominant colours and their share of the frame, the
+panel boundaries along one row, and the content, which differs by
+design when the client sits on the welcome screen and the prototype has
+a session open.
+
+Measured at 1252x1317 after the fixes: both render `#0f0e13`, `#0b0a0e`
+and `#15131b` at 70.8/20.4/4.3 and 55.2/20.8/4.4 percent, the sidebar
+edge at x=270 on both, and the composer column 768 wide on both. Dawn
+matches the same way: `#f7f5f9`, `#eeebf2`, `#ffffff`.
 
 ### What the web cannot see
 

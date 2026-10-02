@@ -44,9 +44,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Created with release-plz's token, so the desktop release names
+      # the same author as the CLI's. release.yml wakes on it too and
+      # skips, as it builds `v` tags only.
       - id: tag
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || github.token }}
           REBUILD: ${{ inputs.tag }}
         run: |
           if [ -n "$REBUILD" ]; then

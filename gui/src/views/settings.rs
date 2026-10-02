@@ -1557,10 +1557,11 @@ impl Render for SettingsView {
                     ),
             );
         card.style().box_shadow = Some(pal.shadow_2.clone());
-        div()
+        let scrim = div()
             .id("settings-scrim")
             .absolute()
             .inset_0()
+            .occlude()
             .bg(Hsla {
                 h: 0.,
                 s: 0.,
@@ -1573,7 +1574,11 @@ impl Render for SettingsView {
             .on_mouse_down(gpui_kit::MouseButton::Left, move |_, _, cx| {
                 scrim_close.update(cx, |this, cx| this.close(cx));
             })
-            .child(card)
+            .child(card);
+        // Deferred, so it paints and hit-tests above everything the shell
+        // draws, popovers included.
+        gpui_kit::deferred(scrim)
+            .with_priority(2)
             .into_any_element()
     }
 }

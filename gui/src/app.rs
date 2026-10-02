@@ -1628,6 +1628,7 @@ impl Render for Shell {
                         .top_0()
                         .bottom_0()
                         .w(px(SIDE_W))
+                        .occlude()
                         .shadow(p.shadow_2.clone())
                         .child(self.sidebar.clone()),
                 )
@@ -1640,6 +1641,7 @@ impl Render for Shell {
                         .top_0()
                         .bottom_0()
                         .w(px(WORKBENCH_W))
+                        .occlude()
                         .shadow(p.shadow_2.clone())
                         .child(self.workbench.clone()),
                 )

@@ -785,10 +785,11 @@ impl Render for DialogView {
                     .child(foot),
             );
         card.style().box_shadow = Some(pal.shadow_2.clone());
-        div()
+        let scrim = div()
             .id("dialog-scrim")
             .absolute()
             .inset_0()
+            .occlude()
             .bg(Hsla {
                 h: 0.,
                 s: 0.,
@@ -801,7 +802,10 @@ impl Render for DialogView {
             .on_mouse_down(gpui_kit::MouseButton::Left, move |_, _, cx| {
                 scrim_close.update(cx, |this, cx| this.close(cx));
             })
-            .child(card)
+            .child(card);
+        // Above Settings, which can open a dialog.
+        gpui_kit::deferred(scrim)
+            .with_priority(3)
             .into_any_element()
     }
 }

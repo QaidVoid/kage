@@ -1121,10 +1121,11 @@ impl Render for PaletteView {
                     ),
             );
         dialog.style().box_shadow = Some(p.shadow_2.clone());
-        div()
+        let overlay = div()
             .id("palette-overlay")
             .absolute()
             .inset_0()
+            .occlude()
             .bg(Hsla {
                 h: 0.,
                 s: 0.,
@@ -1135,7 +1136,9 @@ impl Render for PaletteView {
             .justify_center()
             .items_start()
             .pt(px(top))
-            .child(dialog)
+            .child(dialog);
+        gpui_kit::deferred(overlay)
+            .with_priority(2)
             .into_any_element()
     }
 }

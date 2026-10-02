@@ -55,6 +55,10 @@ const REPLAY_PROMPT: &str = "fix the null check";
 /// default workbench width.
 const WORKBENCH_W: f32 = 460.0;
 
+/// The web client's narrow breakpoint: at or under it the sidebar takes
+/// no column and floats over the content when shown.
+const NARROW_W: f32 = 860.;
+
 /// The narrowest the chat pane gets when a side panel is dragged wider.
 const CHAT_MIN_W: f32 = 360.0;
 
@@ -657,7 +661,7 @@ impl Shell {
     pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         // At the web client's narrow breakpoint the sidebar takes no
         // column, so the toggle floats it over the content instead.
-        if self.viewport_width <= 860. {
+        if self.viewport_width <= NARROW_W {
             self.side_float = !self.side_float;
         } else {
             self.sidebar_visible = !self.sidebar_visible;
@@ -742,7 +746,7 @@ impl Shell {
     fn topbar(&self, cx: &Context<Self>) -> impl IntoElement {
         let p = crate::theme::Palette::active(cx);
         let sidebar_visible = self.sidebar_visible;
-        let side_float = self.side_float;
+        let narrow = self.viewport_width <= NARROW_W;
         let workbench_visible = self.workbench_visible;
         let session = self.store.read(cx).active_session();
         let now = unix_seconds();
@@ -762,7 +766,7 @@ impl Shell {
             .gap(px(SP_4))
             // At the narrow breakpoint the sidebar takes no column, so
             // the web client keeps the show button up permanently.
-            .when(side_float || !sidebar_visible, |bar| {
+            .when(narrow || !sidebar_visible, |bar| {
                 bar.child(
                     Button::new("show-sidebar")
                         .icon(IconName::PanelLeft)
@@ -1566,7 +1570,7 @@ impl Render for Shell {
         let width = window.viewport_size().width;
         self.viewport_width = width.into();
         let mid = width <= px(1180.);
-        let narrow = width <= px(860.);
+        let narrow = width <= px(NARROW_W);
         v_flex()
             .size_full()
             .relative()
@@ -1674,17 +1678,35 @@ impl Render for Shell {
                     ),
             )
             .when(narrow && side_float, |shell| {
-                shell.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .bottom_0()
-                        .w(px(SIDE_W))
-                        .occlude()
-                        .shadow(p.shadow_2.clone())
-                        .child(self.sidebar.clone()),
-                )
+                shell
+                    .child(
+                        div()
+                            .id("side-scrim")
+                            .test_support()
+                            .absolute()
+                            .inset_0()
+                            .occlude()
+                            .bg(gpui_kit::black().opacity(0.3))
+                            .on_mouse_down(
+                                gpui_kit::MouseButton::Left,
+                                cx.listener(|shell, _, _, cx| {
+                                    shell.side_float = false;
+                                    cx.notify();
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .top_0()
+                            .bottom_0()
+                            .w(px(SIDE_W))
+                            .max_w(gpui_kit::relative(0.85))
+                            .occlude()
+                            .shadow(p.shadow_2.clone())
+                            .child(self.sidebar.clone()),
+                    )
             })
             .when(mid && workbench_visible, |shell| {
                 shell.child(
@@ -1797,6 +1819,37 @@ mod tests {
                 .width
         });
         assert_eq!(sidebar, px(crate::theme::SIDE_W));
+    }
+
+    /// On a phone-wide window the sidebar takes no column, so the top
+    /// bar always offers it, and it opens over a scrim that closes it.
+    #[gpui_kit::test]
+    fn a_narrow_window_offers_the_sidebar_and_floats_it(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (shell, visual) =
+            cx.add_window_view(|window: &mut Window, cx| Shell::new(args(), window, cx));
+        let draw = |visual: &mut VisualTestContext| {
+            for _ in 0..2 {
+                visual.update(|window, cx| window.draw(cx).clear(cx));
+            }
+        };
+        let has = |visual: &mut VisualTestContext, id: &'static str| {
+            visual.update(|window, _| window.try_find(ElementId::Name(id.into())).is_some())
+        };
+        visual.simulate_resize(gpui_kit::size(px(1440.), px(900.)));
+        draw(visual);
+        assert!(
+            !has(visual, "show-sidebar"),
+            "a wide window shows the sidebar itself"
+        );
+
+        visual.simulate_resize(gpui_kit::size(px(400.), px(860.)));
+        draw(visual);
+        assert!(has(visual, "show-sidebar"), "a narrow window offers it");
+        assert!(!has(visual, "side-scrim"));
+        visual.update(|_, cx| shell.update(cx, |shell, cx| shell.toggle_sidebar(cx)));
+        draw(visual);
+        assert!(has(visual, "side-scrim"), "the sidebar floats over a scrim");
     }
 
     /// The keys reach the shell through the bindings both builds share:

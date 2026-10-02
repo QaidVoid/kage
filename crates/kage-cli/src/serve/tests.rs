@@ -513,6 +513,23 @@ fn wrong_token_gets_401_and_is_never_logged() {
 }
 
 #[test]
+fn a_head_checks_the_token_without_upgrading() {
+    let server = spawn_server(vec![]);
+    let (_, good) = request_with_token(server.addr, "HEAD /acp", &server.token);
+    assert!(good.starts_with("HTTP/1.1 204 "), "{good}");
+    let wrong = "de".repeat(32);
+    let (_, refused) = http_request(
+        server.addr,
+        &format!(
+            "HEAD /acp HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {wrong}\r\n\r\n",
+            server.addr
+        ),
+    );
+    assert!(refused.starts_with("HTTP/1.1 401 "), "{refused}");
+    server.stop();
+}
+
+#[test]
 fn the_seventeenth_concurrent_connection_gets_503() {
     let server = spawn_server(vec![]);
     let mut held = Vec::new();

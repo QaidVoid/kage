@@ -245,7 +245,10 @@ attach, disconnect, and refusals with the reason (a missing or wrong
 token is `401`, a non-upgrade request on `/acp` is `405`, an unknown
 path is `404`, a path that tries to escape the web directory is a
 `404` logged as a traversal, a full server is `503`). Refusals name
-the peer address, never the value presented.
+the peer address, never the value presented. A `HEAD` on `/acp` with
+a valid token answers `204` and is not logged: the web client checks
+its token that way before it dials, since a browser does not say why
+a WebSocket handshake failed.
 
 ## web client
 

@@ -7,8 +7,9 @@
 //! upgraded and then served exactly like a `kage rpc` connection on the
 //! shared [`Host`]; the `101` response names the connection with
 //! `Acp-Connection-Id`. Every other request gets a plain HTTP reply:
-//! `401` without a valid token, `405` for non-upgrade traffic on
-//! `/acp`, `431` for an oversize request head, and `503` once
+//! `401` without a valid token, `204` for a `HEAD` with a valid one
+//! (the web client's token check), `405` for other non-upgrade traffic
+//! on `/acp`, `431` for an oversize request head, and `503` once
 //! [`MAX_CONNECTIONS`] connections are already being served. The other
 //! routes serve the web client bundle: `GET /` with the page and
 //! `GET /<file>` with a file under the `--web-dir` directory
@@ -370,6 +371,12 @@ fn route(
             .header("upgrade")
             .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
     if !upgraded {
+        // The web client checks a token with a HEAD before it dials,
+        // since a browser hides why a WebSocket handshake failed.
+        if head.method.eq_ignore_ascii_case("HEAD") {
+            reject(stream, 204, "No Content", "");
+            return;
+        }
         log(&format!("refuse {peer} (405)"));
         reject(stream, 405, "Method Not Allowed", BODY_405);
         return;

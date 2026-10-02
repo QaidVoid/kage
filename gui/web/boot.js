@@ -22,6 +22,7 @@ const STYLES = `
   button { background: #f2a65a; color: #0f0e13; border: 0; border-radius: 4px;
            padding: 8px; font: inherit; font-weight: 600; cursor: pointer; }
   p { color: #9895a0; margin: 0; }
+  p.error { color: #f2727f; }
 `;
 
 function applyStyles() {
@@ -52,6 +53,34 @@ function defaultEndpoint() {
   }
   const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
   return scheme + "//" + window.location.host + "/acp";
+}
+
+// Whether the server refuses `token`. A browser does not say why a
+// WebSocket handshake failed, so a refused token would only show as a
+// client that never connects. When the endpoint is this page's own
+// server, a HEAD on it answers 401 for a refused token before the app
+// boots; any other endpoint, or a failed check, is left to the dial.
+async function tokenRefused(endpoint, token) {
+  let url;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return false;
+  }
+  if (url.host !== window.location.host) {
+    return false;
+  }
+  url.protocol = window.location.protocol;
+  try {
+    const reply = await fetch(url, {
+      method: "HEAD",
+      headers: { Authorization: "Bearer " + token },
+      cache: "no-store",
+    });
+    return reply.status === 401;
+  } catch {
+    return false;
+  }
 }
 
 // Loads the wasm bundle. The generated glue fetches the module from
@@ -103,6 +132,11 @@ function connectionForm() {
   token.name = "token";
   token.type = "password";
   token.autocomplete = "off";
+  // Phone keyboards capitalize and correct by default, which mangles
+  // a pasted or typed hex token.
+  token.autocapitalize = "off";
+  token.spellcheck = false;
+  token.setAttribute("autocorrect", "off");
   token.required = true;
   token.autofocus = true;
   tokenLabel.append(token);
@@ -113,12 +147,29 @@ function connectionForm() {
   connect.textContent = "Connect";
   form.append(connect);
 
-  form.addEventListener("submit", (event) => {
+  const error = document.createElement("p");
+  error.className = "error";
+  error.hidden = true;
+  form.append(error);
+
+  form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (!token.value) {
+    const endpoint = server.value.trim();
+    const secret = token.value.trim();
+    if (!secret) {
       return;
     }
-    window.__kageConnect = { server: server.value.trim(), token: token.value };
+    connect.disabled = true;
+    const refused = await tokenRefused(endpoint, secret);
+    connect.disabled = false;
+    if (refused) {
+      error.textContent =
+        "The server refused this token. Copy it from the kage serve output.";
+      error.hidden = false;
+      token.select();
+      return;
+    }
+    window.__kageConnect = { server: endpoint, token: secret };
     document.body.replaceChildren();
     boot();
   });

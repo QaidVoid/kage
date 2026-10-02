@@ -236,7 +236,6 @@ jobs:
             arch: x86_64
             runner: ubuntu-latest
             image: archlinux:latest
-            pkg-ext: pkg.tar.zst
             onelf-sha256: 3a990243790c026c902330a7744e8c21b25fdc8c694a88e79d6fb25d761a6351
             vulkan: vulkan-radeon vulkan-intel vulkan-nouveau
             slim: llvm-libs-nano mesa-nano vulkan-radeon-nano vulkan-intel-nano vulkan-nouveau-nano libxml2-iculess
@@ -244,7 +243,6 @@ jobs:
             arch: aarch64
             runner: ubuntu-24.04-arm
             image: menci/archlinuxarm:latest
-            pkg-ext: pkg.tar.xz
             onelf-sha256: 9b5b2c3d031756a064bd9a71a977e229cb359f324937a5ba8a28db1568bae15b
             vulkan: vulkan-radeon vulkan-nouveau vulkan-panfrost vulkan-broadcom
             slim: llvm-libs-nano mesa-nano vulkan-radeon-nano vulkan-nouveau-nano vulkan-panfrost-nano vulkan-broadcom-nano libxml2-iculess
@@ -285,10 +283,18 @@ jobs:
           base="https://github.com/pkgforge-dev/archlinux-pkgs-debloated/releases/download/continuous"
           mkdir -p debloated
           cd debloated
+          # The archive format varies by package and moves between
+          # builds, so take whichever one is published.
           for pkg in ${{ matrix.slim }}; do
-            curl -fsSL -O "$base/$pkg-${{ matrix.arch }}.${{ matrix.pkg-ext }}"
+            for ext in pkg.tar.zst pkg.tar.xz; do
+              if curl -fsSL -O "$base/$pkg-${{ matrix.arch }}.$ext"; then
+                continue 2
+              fi
+            done
+            echo "no $pkg build for ${{ matrix.arch }}" >&2
+            exit 1
           done
-          pacman -U --disable-sandbox --noconfirm ./*.${{ matrix.pkg-ext }}
+          pacman -U --disable-sandbox --noconfirm ./*.pkg.tar.*
 
       - name: Install onelf
         run: |

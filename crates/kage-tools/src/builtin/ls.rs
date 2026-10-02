@@ -77,7 +77,7 @@ impl Tool for LsTool {
                     continue;
                 }
                 let prefix = entry_prefix(entry.file_type());
-                entries.push(format!("{prefix} {}", rel.to_string_lossy()));
+                entries.push(format!("{prefix} {}", kage_core::fsutil::slashed(rel)));
                 if entries.len() > MAX_ENTRIES {
                     truncated = true;
                     break;

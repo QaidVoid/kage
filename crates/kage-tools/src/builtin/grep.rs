@@ -162,12 +162,8 @@ impl Sink for MatchSink<'_> {
             .flatten()
             .map_or(0, |found| found.start());
         let text = clip_line(mat.bytes(), at);
-        let rel = self
-            .path
-            .strip_prefix(self.root)
-            .unwrap_or(self.path)
-            .to_string_lossy()
-            .into_owned();
+        let rel =
+            kage_core::fsutil::slashed(self.path.strip_prefix(self.root).unwrap_or(self.path));
         self.hits.push(Hit {
             rel_path: rel,
             line,

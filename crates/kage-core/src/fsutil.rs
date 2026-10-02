@@ -1,9 +1,23 @@
 //! Filesystem helpers shared by tools, stores, the TUI, and
-//! credential files: crash-safe writes and tilde expansion.
+//! credential files: crash-safe writes, tilde expansion and the
+//! `/`-separated form of relative paths.
 
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+
+/// `path` with `/` between its components on every platform: the form
+/// tool output and `@` mentions use. On Unix a `\` is a valid file name
+/// character, so only Windows paths change.
+#[must_use]
+pub fn slashed(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.into_owned()
+    }
+}
 
 /// Atomically replace the contents of `target` with `content`.
 ///

@@ -104,7 +104,7 @@ impl Tool for FindTool {
                 continue;
             }
             if glob.is_match(rel) {
-                matches.push(rel.to_string_lossy().into_owned());
+                matches.push(kage_core::fsutil::slashed(rel));
                 if matches.len() > MAX_ENTRIES {
                     truncated = true;
                     break;

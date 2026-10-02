@@ -324,14 +324,15 @@ pub fn file_completions(
         if rel.as_os_str().is_empty() {
             continue;
         }
-        let Some(rel) = rel.to_str() else {
+        if rel.to_str().is_none() {
             continue;
-        };
-        let Some(rank) = match_rank(&query, rel) else {
+        }
+        let rel = kage_core::fsutil::slashed(rel);
+        let Some(rank) = match_rank(&query, &rel) else {
             continue;
         };
         let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
-        scored.push((rank, rel.len(), rel.to_owned(), is_dir));
+        scored.push((rank, rel.len(), rel, is_dir));
     }
     scored.sort_by(|a, b| {
         a.0.cmp(&b.0)

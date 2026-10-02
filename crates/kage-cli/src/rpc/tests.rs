@@ -5147,3 +5147,64 @@ fn skipping_a_question_declines_them_all() {
     });
     assert!(declined, "{sent:#?}");
 }
+
+#[test]
+fn an_interrupted_swarm_gets_its_members_back_from_their_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = SessionId::new();
+    let member = |index: u64| {
+        SessionEntry::Custom(kage_session::Custom {
+            id: EntryId::new(),
+            ts: chrono::Utc::now(),
+            kind: kage_session::list::AGENT_ENTRY_KIND.into(),
+            data: serde_json::json!({
+                "parent": root.to_string(),
+                "tool_call_id": "call_sw",
+                "agent": "general",
+                "description": "audit",
+                "batch_id": "swarm_1",
+                "index": index,
+                "total": 2,
+                "item": format!("item {index}"),
+            }),
+        })
+    };
+    let reply = message(Role::Assistant, vec![text("done")], None);
+    let busy = message(
+        Role::Assistant,
+        vec![Content::ToolCall {
+            id: kage_core::ToolCallId::new("c1"),
+            name: "shell".into(),
+            input: serde_json::json!({}),
+        }],
+        None,
+    );
+    record(dir.path(), "/p", "mock/m", 0, &[member(0), reply]);
+    record(dir.path(), "/p", "mock/m", 0, &[member(1), busy]);
+    let history = vec![Message::new(
+        Role::Assistant,
+        vec![Content::ToolCall {
+            id: kage_core::ToolCallId::new("call_sw"),
+            name: "swarm".into(),
+            input: serde_json::json!({}),
+        }],
+        None,
+    )];
+    let members = super::sessions::orphaned_agents(dir.path(), root, &history);
+    let states: Vec<_> = members
+        .iter()
+        .map(|m| (m.swarm.as_ref().unwrap().index, m.state))
+        .collect();
+    assert_eq!(
+        states,
+        [
+            (0, Some(kage_acp::acp::SubagentState::Completed)),
+            (1, Some(kage_acp::acp::SubagentState::Failed)),
+        ]
+    );
+    assert!(
+        members
+            .iter()
+            .all(|m| m.tool_call_id.as_deref() == Some("call_sw"))
+    );
+}

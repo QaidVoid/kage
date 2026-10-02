@@ -13,9 +13,9 @@ use kage_acp::acp::{
     ToolCallUpdate, TurnPhase, TurnReason, TurnUpdate,
 };
 use kage_acp::agent::{PromptContext, send_update};
-use kage_core::protocol::{AgentNode, AgentState, AgentTree};
+use kage_core::protocol::{AgentNode, AgentState, AgentTree, SwarmMember};
 use kage_core::sync::lock;
-use kage_core::{Content, LoopEvent, Message, MessageId, Role, SessionId, ToolOutput};
+use kage_core::{Content, LoopEvent, Message, MessageId, Role, SessionId, ToolCallId, ToolOutput};
 use kage_jsonrpc::RpcError;
 use kage_loop::TokenBudget;
 use kage_session::{EntryId, SessionEntry, SessionReader, SessionWriter};
@@ -90,6 +90,9 @@ impl super::CliAcpAgent {
                 ctx.update(update);
             }
             self.announce_restored(id, &replay.history, ctx);
+            for update in orphaned_agents(&self.host.sessions, id, &replay.history) {
+                ctx.update(SessionUpdate::SubagentUpdate(update));
+            }
             if let Some(title) = replay.title {
                 ctx.update(SessionUpdate::SessionInfoUpdate(SessionInfoUpdate {
                     title: Some(title),
@@ -397,6 +400,135 @@ pub(super) fn interrupted_calls(history: &[Message]) -> Vec<SessionUpdate> {
             _ => None,
         })
         .collect()
+}
+
+/// The agents that the `agent` and `swarm` calls `history` never got a
+/// result for started, found in `dir` by the `kage:agent` marker each
+/// agent's file starts with. A run cut off mid-swarm leaves no result
+/// to restore them from, yet the members that finished hold their
+/// replies; each reads as completed when its last word is a reply
+/// without calls, and as failed otherwise.
+pub(super) fn orphaned_agents(
+    dir: &Path,
+    root: SessionId,
+    history: &[Message],
+) -> Vec<SubagentUpdate> {
+    let answered: HashSet<String> = history
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            Content::ToolResultBlock { call_id, .. } => Some(call_id.to_string()),
+            _ => None,
+        })
+        .collect();
+    let open: HashSet<String> = history
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            Content::ToolCall { id, name, .. }
+                if (name == "agent" || name == "swarm") && !answered.contains(&id.to_string()) =>
+            {
+                Some(id.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    if open.is_empty() {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut nodes: Vec<AgentNode> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let session = crate::engine::session_id_of(&path)?;
+            let marker = leading_marker(&path)?;
+            let text = |key: &str| {
+                marker
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            let call = text("tool_call_id");
+            if text("parent") != root.to_string() || !open.contains(&call) {
+                return None;
+            }
+            let number = |key: &str| {
+                marker
+                    .get(key)
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|n| u32::try_from(n).ok())
+                    .unwrap_or_default()
+            };
+            let swarm = (!text("batch_id").is_empty()).then(|| SwarmMember {
+                batch: None,
+                item: text("item"),
+                index: number("index"),
+                total: number("total"),
+            });
+            let finished = kage_session::replay(&path).is_ok_and(|replay| replied(&replay.history));
+            Some(AgentNode {
+                session,
+                parent: root,
+                tool_call_id: ToolCallId::new(call),
+                agent: text("agent"),
+                description: text("description"),
+                swarm,
+                state: if finished {
+                    AgentState::Done
+                } else {
+                    AgentState::Failed
+                },
+                model: String::new(),
+                usage: kage_core::protocol::Usage::default(),
+                tool_calls: 0,
+                last_tool: None,
+                waiting: 0,
+                started: None,
+                took: None,
+                restored: true,
+                background: false,
+            })
+        })
+        .collect();
+    nodes.sort_by_key(|node| {
+        (
+            node.tool_call_id.to_string(),
+            node.swarm.as_ref().map(|member| member.index),
+        )
+    });
+    nodes.iter().map(restored_update).collect()
+}
+
+/// The `kage:agent` marker near the top of the session file at `path`,
+/// read without the rest of the file.
+fn leading_marker(path: &Path) -> Option<serde_json::Value> {
+    SessionReader::iter(path)
+        .ok()?
+        .take(4)
+        .find_map(|entry| match entry {
+            Ok(SessionEntry::Custom(custom))
+                if custom.kind == kage_session::list::AGENT_ENTRY_KIND =>
+            {
+                Some(custom.data)
+            }
+            _ => None,
+        })
+}
+
+/// Whether `history` ends on a reply that calls no tool: the agent
+/// finished its run.
+fn replied(history: &[Message]) -> bool {
+    history.last().is_some_and(|message| {
+        message.role == Role::Assistant
+            && !message
+                .content
+                .iter()
+                .any(|block| matches!(block, Content::ToolCall { .. }))
+    })
 }
 
 /// The `_kage/turn` end of the run `start` prompted and `last` closed,

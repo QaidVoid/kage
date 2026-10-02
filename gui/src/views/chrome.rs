@@ -1703,7 +1703,9 @@ impl Render for WelcomeView {
                 )
                 .with_priority(1)
             });
-        let proj_picker = div().child(proj_picker).children(project_menu);
+        // A flex row, so the chip keeps its own width instead of
+        // stretching across the column.
+        let proj_picker = h_flex().w_full().child(proj_picker).children(project_menu);
 
         // The wordmark: the kanji glyph over its hard offset shadow,
         // then the name, as the web client's `.wordmark` draws them.

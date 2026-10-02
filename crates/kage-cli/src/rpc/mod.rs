@@ -258,6 +258,7 @@ impl CliAcpAgent {
             names: HashMap::new(),
             statuses: HashMap::new(),
             fills: HashMap::new(),
+            pruned_cost: HashMap::new(),
             compacting: HashMap::new(),
             paused: HashSet::new(),
             held: Arc::clone(&held),

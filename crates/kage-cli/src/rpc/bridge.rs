@@ -78,6 +78,10 @@ pub(super) struct Bridge {
     /// Last known context fill per session, in tokens, from usage
     /// reports.
     pub(super) fills: HashMap<SessionId, u64>,
+    /// The cost of a client session's agents already pruned from the
+    /// tree, which a client without the subagents capability sees in
+    /// the session's own cost.
+    pub(super) pruned_cost: HashMap<SessionId, f64>,
     /// Compactions waiting for the post-compaction usage: the turn
     /// count kept and the fill before the compaction.
     pub(super) compacting: HashMap<SessionId, (u64, u64)>,
@@ -266,7 +270,12 @@ impl Bridge {
             }
             Event::Host(HostEvent::UsageUpdated { usage }) => {
                 self.fills.insert(session, usage.context_used);
-                if let Some(update) = usage_update(usage) {
+                let mut usage = *usage;
+                if !self.subagents.load(Ordering::SeqCst) {
+                    usage.cost += self.tree.usage_under(session).cost
+                        + self.pruned_cost.get(&session).copied().unwrap_or_default();
+                }
+                if let Some(update) = usage_update(&usage) {
                     self.send(session, &client_id, update);
                 }
             }
@@ -561,15 +570,18 @@ impl Bridge {
         })
     }
 
-    /// Finishes the ended run of `session` once none of its subagents is
-    /// live: a subagent sends its terminal state to its parent, and a
-    /// client session answers its waiting prompt. The RFD wants every
-    /// subagent to end before its parent does.
+    /// Finishes the ended run of `session` once none of its foreground
+    /// subagents is live: a subagent sends its terminal state to its
+    /// parent, and a client session answers its waiting prompt. The RFD
+    /// wants every subagent to end before its parent does; a background
+    /// agent outlives the run that started it, and its end reaches the
+    /// parent later.
     fn settle(&mut self, session: SessionId) {
-        let waits = self
-            .streaming
-            .iter()
-            .any(|s| self.tree.get(*s).is_some_and(|node| node.parent == session));
+        let waits = self.streaming.iter().any(|s| {
+            self.tree
+                .get(*s)
+                .is_some_and(|node| node.parent == session && !node.background)
+        });
         if waits {
             return;
         }
@@ -621,19 +633,23 @@ impl Bridge {
         self.settle(parent);
     }
 
-    /// Forgets the agents under a client session whose run just
-    /// settled. Every member is terminal by then, so the nodes, each
-    /// carrying its agent's latest tool input, would otherwise outlive
-    /// the agents they describe. A later run re-announces its agents
-    /// with fresh `AgentSpawned` envelopes.
+    /// Forgets the finished agents under a client session whose run
+    /// just settled, keeping their cost. The nodes, each carrying its
+    /// agent's latest tool input, would otherwise outlive the agents they
+    /// describe. A later run re-announces its agents with fresh
+    /// `AgentSpawned` envelopes. Background agents still at work stay.
     fn prune_tree(&mut self, session: SessionId) {
         let roots: Vec<SessionId> = self
             .tree
             .under(session)
             .into_iter()
-            .filter_map(|(depth, node)| (depth == 1).then_some(node.session))
+            .filter(|(depth, node)| *depth == 1 && !(node.background && is_live(node)))
+            .map(|(_, node)| node.session)
             .collect();
         for root in roots {
+            let cost = self.tree.get(root).map_or(0.0, |node| node.usage.cost)
+                + self.tree.usage_under(root).cost;
+            *self.pruned_cost.entry(session).or_default() += cost;
             self.tree.remove_subtree(root);
         }
     }
@@ -1136,6 +1152,14 @@ pub(super) fn notice_update(level: NoticeLevel, text: String) -> SessionUpdate {
         },
         text,
     })
+}
+
+/// Whether the agent of `node` is queued or running.
+fn is_live(node: &kage_core::protocol::AgentNode) -> bool {
+    matches!(
+        node.state,
+        kage_core::protocol::AgentState::Queued | kage_core::protocol::AgentState::Running
+    )
 }
 
 /// The `usage_update` for `usage`, or `None` while the context window is

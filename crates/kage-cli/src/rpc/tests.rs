@@ -216,17 +216,38 @@ fn serve_inner(
     agents: AgentSetup,
     record: bool,
 ) -> Harness {
-    let (srv_r, cli_w) = std::io::pipe().unwrap();
-    let (cli_r, srv_w) = std::io::pipe().unwrap();
-    let id = SessionId::new();
-    let sessions = sessions.to_path_buf();
     let mock = MockProvider::sequence(scripts);
     let provider = Listed {
         mock: mock.clone(),
         input,
     };
-    let host = test_host_agents(
+    serve_on(
         Arc::new(provider),
+        mock,
+        workdir,
+        sessions,
+        mcp,
+        agents,
+        record,
+    )
+}
+
+/// [`serve_inner`] on `provider`, with `mock` kept for the harness.
+fn serve_on(
+    provider: Arc<dyn kage_provider::Provider>,
+    mock: MockProvider,
+    workdir: &Path,
+    sessions: &Path,
+    mcp: bool,
+    agents: AgentSetup,
+    record: bool,
+) -> Harness {
+    let (srv_r, cli_w) = std::io::pipe().unwrap();
+    let (cli_r, srv_w) = std::io::pipe().unwrap();
+    let id = SessionId::new();
+    let sessions = sessions.to_path_buf();
+    let host = test_host_agents(
+        provider,
         workdir.to_path_buf(),
         sessions.clone(),
         mcp,
@@ -4872,3 +4893,148 @@ fn the_model_catalog_lists_each_provider_with_its_models() {
 
 #[cfg(unix)]
 mod link;
+
+/// Serves the main session from `main` and its agents from `agents`,
+/// told apart by the `agent` tool only the main session has. A request
+/// without tools, such as the title, gets a fixed answer.
+#[derive(Debug)]
+struct Routed {
+    main: Listed,
+    agents: MockProvider,
+}
+
+impl kage_provider::Provider for Routed {
+    fn metadata(&self) -> &kage_provider::ProviderMetadata {
+        self.main.metadata()
+    }
+
+    fn stream(
+        &self,
+        req: kage_provider::StreamRequest,
+        cancel: &kage_core::CancelFlag,
+    ) -> Result<kage_provider::EventStream, ProviderError> {
+        if req.tools.is_empty() {
+            Ok(Box::new(text_turn("title").into_iter()))
+        } else if req.tools.iter().any(|tool| tool.name == "agent") {
+            self.main.stream(req, cancel)
+        } else {
+            self.agents.stream(req, cancel)
+        }
+    }
+
+    fn models(&self) -> Vec<kage_provider::ProviderModel> {
+        self.main.models()
+    }
+}
+
+#[test]
+fn a_prompt_returns_while_its_background_agent_still_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().display().to_string();
+    let task =
+        serde_json::json!({"description": "list files", "prompt": "list", "background": true});
+    let main = MockProvider::sequence(vec![
+        tool_turn("call_agent", "agent", task),
+        text_turn("the agent is on it"),
+        text_turn("the agent listed the files"),
+    ]);
+    let agents = MockProvider::sequence(vec![
+        tool_turn("call_child", "ls", serde_json::json!({ "path": path })),
+        text_turn("child done"),
+    ]);
+    let routed = Routed {
+        main: Listed::of(main.clone()),
+        agents,
+    };
+    let h = serve_on(
+        Arc::new(routed),
+        main.clone(),
+        dir.path(),
+        dir.path(),
+        false,
+        default_agents(),
+        false,
+    );
+    initialize(&h.client);
+    let first = prompt_async(&h.client, &h.session, "go");
+    let response = first.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+
+    let mut updates = Vec::new();
+    let (ask, _) = until_ask(&h.inbox, &mut updates);
+    assert!(!updates.iter().any(is_terminal), "{updates:#?}");
+    allow(&h.client, &ask);
+    let notes = until_terminal(&h.inbox);
+    let (_, terminal) = notes.last().unwrap();
+    assert_eq!(terminal["sessionId"], h.session);
+    assert_eq!(terminal["update"]["state"], "completed");
+
+    let second = prompt_async(&h.client, &h.session, "anything new?");
+    let response = second.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    let read = main.requests()[2].messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(block, kage_core::Content::Text { text }
+                if text.starts_with("<agent name=\"general\"") && text.contains("child done"))
+        })
+    });
+    assert!(read, "{:#?}", main.requests()[2].messages);
+}
+
+#[test]
+fn a_kage_client_session_wakes_for_a_background_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().display().to_string();
+    let task =
+        serde_json::json!({"description": "list files", "prompt": "list", "background": true});
+    let main = MockProvider::sequence(vec![
+        tool_turn("call_agent", "agent", task),
+        text_turn("the agent is on it"),
+        text_turn("the agent listed the files"),
+    ]);
+    let agents = MockProvider::sequence(vec![text_turn("child done")]);
+    let routed = Routed {
+        main: Listed::of(main.clone()),
+        agents,
+    };
+    let host = test_host_agents(
+        Arc::new(routed),
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+        false,
+        default_agents(),
+        PermissionAction::Allow,
+    );
+    let (srv_r, cli_w) = std::io::pipe().unwrap();
+    let (cli_r, srv_w) = std::io::pipe().unwrap();
+    std::thread::spawn(move || {
+        host.serve_with(BufReader::new(srv_r), srv_w, |_| {})
+            .unwrap();
+    });
+    let (client, inbox, _reader) = kage_jsonrpc::connect(BufReader::new(cli_r), cli_w);
+    let params = serde_json::json!({
+        "protocolVersion": PROTOCOL_VERSION,
+        "clientCapabilities": {"subagents": {}, "_meta": {"kage": {}}},
+    });
+    client.request("initialize", params).unwrap();
+    let params = serde_json::json!({ "cwd": path, "mcpServers": [] });
+    let created = client.request("session/new", params).unwrap();
+    let session = created["sessionId"].as_str().unwrap().to_owned();
+    let response = prompt_async(&client, &session, "go")
+        .recv_timeout(WAIT)
+        .unwrap()
+        .unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    loop {
+        let Inbound::Notification { params, .. } = inbox.recv_timeout(WAIT).expect("no wake run")
+        else {
+            continue;
+        };
+        if params["sessionId"] == session.as_str()
+            && params["update"]["content"]["text"] == "the agent listed the files"
+        {
+            break;
+        }
+    }
+    assert_eq!(main.call_count(), 3);
+}

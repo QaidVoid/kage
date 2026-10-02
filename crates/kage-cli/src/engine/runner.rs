@@ -1,9 +1,13 @@
 //! One agent run on its own thread.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use crossbeam_channel::select_biased;
+use kage_core::agent_report::AgentLimit;
 
 use kage_core::protocol::{HostEvent, McpServerInfo, NoticeLevel, RunOutcome, Usage};
 use kage_core::sync::lock;
@@ -28,6 +32,60 @@ use crate::plugins::PluginEventHooks;
 /// Prompts submitted while a run is in flight, delivered at the next turn
 /// boundary.
 pub(super) type Steering = Arc<Mutex<VecDeque<String>>>;
+
+/// Told to an agent at its turn limit, which then has one more turn.
+const TURN_LIMIT_WARNING: &str =
+    "Turn limit reached. Do not call more tools. Reply now with what you have and what is left.";
+
+/// Bounds on an agent's run. A main session's runs have none.
+#[derive(Default)]
+pub(super) struct Limits {
+    /// Turns with tool calls the run may take before its warning turn.
+    pub max_turns: Option<u32>,
+    /// How long the run may take before it is cancelled.
+    pub timeout: Option<Duration>,
+    /// The token budget the run counts against.
+    pub budget: Option<Budget>,
+}
+
+/// A share of the agent budget of one main session.
+pub(super) struct Budget {
+    pub spend: Arc<Spend>,
+    /// Tokens the agents may use between two user prompts.
+    pub tokens: u64,
+    /// The main session the agents hang under.
+    pub root: SessionId,
+}
+
+/// What the agents of one main session used since its last user
+/// prompt.
+#[derive(Debug, Default)]
+pub(super) struct Spend {
+    tokens: AtomicU64,
+    spent: AtomicBool,
+}
+
+impl Spend {
+    /// Whether the agents used their budget.
+    pub(super) fn is_spent(&self) -> bool {
+        self.spent.load(Ordering::Relaxed)
+    }
+
+    /// Start counting again, at a user prompt.
+    pub(super) fn reset(&self) {
+        self.tokens.store(0, Ordering::Relaxed);
+        self.spent.store(false, Ordering::Relaxed);
+    }
+}
+
+impl Budget {
+    /// Count `tokens` more. True only for the call that crosses the
+    /// budget.
+    fn add(&self, tokens: u64) -> bool {
+        let used = self.spend.tokens.fetch_add(tokens, Ordering::Relaxed) + tokens;
+        used >= self.tokens && !self.spend.spent.swap(true, Ordering::Relaxed)
+    }
+}
 
 /// What a run does.
 pub(super) enum Work {
@@ -92,6 +150,7 @@ pub(super) struct Run {
     pub plugins: Option<Arc<PluginRuntime>>,
     pub mcp: Option<McpLease>,
     pub bus: Arc<Bus>,
+    pub limits: Limits,
 }
 
 /// State a finished run returns to its session. The dispatcher publishes
@@ -106,12 +165,27 @@ pub(super) struct Finished {
     /// Wall-clock time the run was in flight, matching the run span
     /// the clients see between `RunStarted` and `RunEnded`.
     pub run_time: Duration,
+    /// The turn limit or the timeout, when one ended the run.
+    pub limit: Option<AgentLimit>,
 }
 
 impl Run {
     pub(super) fn spawn(self, done: mpsc::Sender<Input>) {
+        let (ended, timed_out) = match self.limits.timeout {
+            Some(limit) => {
+                let (ended, timed_out) = watch_time(limit, self.cancel.clone());
+                (Some(ended), Some(timed_out))
+            }
+            None => (None, None),
+        };
         thread::spawn(move || {
-            let finished = self.execute(&done);
+            let mut finished = self.execute(&done);
+            drop(ended);
+            if finished.outcome == RunOutcome::Cancelled
+                && timed_out.is_some_and(|flag| flag.load(Ordering::Relaxed))
+            {
+                finished.limit = Some(AgentLimit::Time);
+            }
             let _ = done.send(Input::Finished(Box::new(finished)));
         });
     }
@@ -137,6 +211,7 @@ impl Run {
             plugins,
             mcp,
             bus,
+            limits,
         } = self;
 
         let (clients, catalog) = mcp
@@ -163,13 +238,25 @@ impl Run {
             if let Some(turn) = turn_usage {
                 add_turn(&mut usage, &turn, price);
                 bus.publish(session, HostEvent::UsageUpdated { usage });
+                if let Some(budget) = &limits.budget
+                    && budget.add(turn.input + turn.output)
+                {
+                    let _ = done.send(Input::BudgetSpent { root: budget.root });
+                }
             }
         };
 
+        let turn_limited = Arc::new(AtomicBool::new(false));
         let base = RunHooks {
             gate,
             steering,
             inbox,
+            turns: limits.max_turns.map(|max| TurnLimit {
+                max,
+                warning: None,
+                warned: false,
+                hit: Arc::clone(&turn_limited),
+            }),
         };
         let mut hooks: Box<dyn Hooks> = match &plugins {
             Some(rt) => Box::new(PluginEventHooks::new(base, Arc::clone(rt))),
@@ -229,8 +316,33 @@ impl Run {
             usage,
             outcome,
             run_time: started_at.elapsed(),
+            limit: turn_limited
+                .load(Ordering::Relaxed)
+                .then_some(AgentLimit::Turns),
         }
     }
+}
+
+/// Cancel a run through `cancel` once `limit` passes, unless the
+/// returned sender is dropped first, as the run does when it ends.
+/// The flag tells whether the time ran out.
+fn watch_time(
+    limit: Duration,
+    cancel: CancelFlag,
+) -> (crossbeam_channel::Sender<()>, Arc<AtomicBool>) {
+    let (ended, watch) = crossbeam_channel::bounded::<()>(0);
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&timed_out);
+    thread::spawn(move || {
+        select_biased! {
+            recv(watch) -> _ => {}
+            recv(crossbeam_channel::after(limit)) -> _ => {
+                flag.store(true, Ordering::Relaxed);
+                cancel.cancel();
+            }
+        }
+    });
+    (ended, timed_out)
 }
 
 /// `prompt` with its MCP prompt command and resource mentions expanded.
@@ -292,11 +404,24 @@ fn add_turn(usage: &mut Usage, turn: &TokenUsage, price: Option<ModelCost>) {
 }
 
 /// Control hooks every run starts from: the permission gate, the
-/// session's steering queue and its inbox of agent reports.
+/// session's steering queue, its inbox of agent reports and an agent's
+/// turn limit.
 struct RunHooks {
     gate: PermissionGate,
     steering: Steering,
     inbox: Steering,
+    turns: Option<TurnLimit>,
+}
+
+/// An agent run's turn limit: at the limit the agent is warned and gets
+/// one more turn, and a further turn with tool calls ends the run.
+struct TurnLimit {
+    max: u32,
+    /// The warning, until the next turn reads it.
+    warning: Option<&'static str>,
+    warned: bool,
+    /// Set once the limit is reached, for the run's report.
+    hit: Arc<AtomicBool>,
 }
 
 impl RunHooks {
@@ -319,9 +444,28 @@ impl Hooks for RunHooks {
     }
 
     fn get_steering(&mut self) -> Option<String> {
+        if let Some(warning) = self.turns.as_mut().and_then(|t| t.warning.take()) {
+            return Some(warning.to_owned());
+        }
         lock(&self.steering)
             .pop_front()
             .or_else(|| self.drain_inbox())
+    }
+
+    fn should_stop_after_turn(&mut self, summary: &kage_loop::TurnSummary) -> bool {
+        let Some(limit) = self.turns.as_mut() else {
+            return false;
+        };
+        if !summary.had_tool_calls || summary.index + 1 < limit.max {
+            return false;
+        }
+        limit.hit.store(true, Ordering::Relaxed);
+        if limit.warned {
+            return true;
+        }
+        limit.warned = true;
+        limit.warning = Some(TURN_LIMIT_WARNING);
+        false
     }
 
     fn get_followup(&mut self) -> Option<String> {

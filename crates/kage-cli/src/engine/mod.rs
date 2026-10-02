@@ -29,6 +29,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use kage_core::agent_report::AgentLimit;
 use kage_core::agents::AgentDefs;
 use kage_core::config::Config;
 use kage_core::options::{OptionStore, OptionValue};
@@ -60,7 +61,7 @@ use mailbox_tool::{MAILBOX_TOOL, MailboxTool};
 use mcp::{McpDone, restart_failed};
 use plan_tool::ExitPlanTool;
 use plugin_tools::PluginTools;
-use runner::{Finished, McpLease, Run, Steering, Work};
+use runner::{Budget, Finished, Limits, McpLease, Run, Spend, Steering, Work};
 use shell::ShellDone;
 use swarm_tool::{SWARM_TOOL, SwarmTool};
 
@@ -108,6 +109,14 @@ pub(crate) struct AgentSetup {
     /// Whether the main session may start background agents, and what
     /// it does with their results while idle.
     pub background: Background,
+    /// Turns one agent run may take, unless its definition says. 0
+    /// means no limit.
+    pub max_turns: u32,
+    /// How long one agent run may take, unless its definition says.
+    pub timeout: Option<Duration>,
+    /// Tokens all agents of one main session may use between two user
+    /// prompts. 0 means no limit.
+    pub budget: u64,
 }
 
 /// What a main session does with a background agent's result that
@@ -129,7 +138,17 @@ impl AgentSetup {
     /// out-of-range value falls back to its default.
     pub(crate) fn from_config(defs: AgentDefs, config: &Config, background: Background) -> Self {
         let (options, _) = OptionStore::from_config(config);
+        Self::from_options(defs, &options, background)
+    }
+
+    /// `defs` with the agent limits of `options`.
+    pub(crate) fn from_options(
+        defs: AgentDefs,
+        options: &OptionStore,
+        background: Background,
+    ) -> Self {
         let int = |name: &str| options.get(name).and_then(OptionValue::as_int).unwrap_or(0);
+        let timeout = u64::try_from(int("agent_timeout")).unwrap_or(0);
         Self {
             defs: Arc::new(defs),
             max_depth: u8::try_from(int("agent_max_depth")).unwrap_or(0),
@@ -137,6 +156,9 @@ impl AgentSetup {
             swarm_max_items: usize::try_from(int("swarm_max_items")).unwrap_or(32),
             swarm_timeout_ms: u64::try_from(int("swarm_timeout_ms")).unwrap_or(7_200_000),
             background,
+            max_turns: u32::try_from(int("agent_max_turns")).unwrap_or(0),
+            timeout: (timeout > 0).then(|| Duration::from_secs(timeout)),
+            budget: u64::try_from(int("agent_budget")).unwrap_or(0),
         }
     }
 }
@@ -234,6 +256,11 @@ enum Input {
     Publish(HostEvent),
     SetRegistry(Arc<ProviderRegistry>),
     ReloadPluginTools,
+    /// The agents under the main session `root` used the agent budget.
+    /// The engine stops them.
+    BudgetSpent {
+        root: SessionId,
+    },
     /// The user approved a session's plan and `exit_plan` turned plan
     /// mode off in the gate. The engine records and announces it.
     PlanApproved(SessionId),
@@ -452,6 +479,11 @@ struct Session {
     agents: Option<AgentSetup>,
     /// Present on sessions an `agent` call started.
     link: Option<AgentLink>,
+    /// What the agents of this session's tree used since the main
+    /// session's last user prompt. Shared by the whole tree.
+    spend: Arc<Spend>,
+    /// The budget, when it stopped this agent's run, for its report.
+    limit: Option<AgentLimit>,
     /// Read at spawn, while the context is out with a run.
     confine_paths: bool,
     /// Whether the session delegates repeated work through `swarm`.
@@ -572,6 +604,7 @@ impl Dispatcher {
                     }
                 }
                 Input::PlanApproved(id) => self.plan_mode_changed(id, false, false),
+                Input::BudgetSpent { root } => self.budget_spent(root),
             }
             if self.shutting_down
                 && self
@@ -626,6 +659,10 @@ impl Dispatcher {
         let starting_mcp = mcp
             .as_ref()
             .is_some_and(|m| m.starting_names().next().is_some());
+        let spend = link
+            .as_ref()
+            .and_then(|l| self.sessions.get(&l.parent))
+            .map_or_else(Arc::default, |parent| Arc::clone(&parent.spend));
         self.sessions.insert(
             id,
             Session {
@@ -659,6 +696,8 @@ impl Dispatcher {
                 plugin_tools: PluginTools::default(),
                 agents,
                 link,
+                spend,
+                limit: None,
                 confine_paths,
                 swarm_mode: false,
             },
@@ -726,10 +765,11 @@ impl Dispatcher {
         }
         match command.kind {
             CommandKind::Prompt { content, delivery } => {
-                self.sessions
-                    .get_mut(&id)
-                    .expect("session checked")
-                    .goal_turns = 0;
+                let session = self.sessions.get_mut(&id).expect("session checked");
+                session.goal_turns = 0;
+                if session.link.is_none() {
+                    session.spend.reset();
+                }
                 self.prompt(id, content, delivery);
             }
             CommandKind::WithdrawPrompt { delivery } => self.withdraw_prompt(id, delivery),
@@ -1072,6 +1112,10 @@ impl Dispatcher {
     }
 
     fn start_run(&mut self, id: SessionId, work: Work) {
+        if self.over_budget(id) {
+            return;
+        }
+        let root = self.root_of(id);
         let session = self.sessions.get_mut(&id).expect("session checked");
         let model = session.state.model.clone();
         let (provider, bare_model) = match self.registry.resolve(&model) {
@@ -1124,6 +1168,7 @@ impl Dispatcher {
             report_write(&self.bus, id, recorder.set_model(&model));
         }
         let mcp = mcp_lease(&self.bus, id, session);
+        session.limit = None;
 
         session.usage.context_window = cx.context_window;
         session.cancel.reset();
@@ -1140,6 +1185,7 @@ impl Dispatcher {
             Work::Compact => Work::Compact,
         };
         let tools = run_tools(session, id, &self.tx);
+        let limits = run_limits(session, root);
         let run = Run {
             session: id,
             work,
@@ -1156,6 +1202,7 @@ impl Dispatcher {
             plugins: session.plugins.clone(),
             mcp,
             bus: Arc::clone(&self.bus),
+            limits,
         };
         let state = session.state.clone();
         self.bus.publish(id, HostEvent::StateChanged { state });
@@ -1222,6 +1269,7 @@ impl Dispatcher {
             usage,
             outcome,
             run_time,
+            limit,
         } = finished;
         if let Some(armed) = self.watchdogs.remove(&id) {
             armed.store(false, Ordering::Relaxed);
@@ -1240,6 +1288,7 @@ impl Dispatcher {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
+        session.limit = session.limit.or(limit);
         append_history(
             &self.bus,
             id,
@@ -1316,6 +1365,70 @@ impl Dispatcher {
         }
         self.start_waiting();
         self.reap_agent(id);
+    }
+
+    /// Stop every agent under `root`, whose agents used their budget,
+    /// and tell the user. Spawns are refused until the next user prompt
+    /// resets the count.
+    fn budget_spent(&mut self, root: SessionId) {
+        let budget = self
+            .sessions
+            .get(&root)
+            .and_then(|s| s.agents.as_ref())
+            .map_or(0, |setup| setup.budget);
+        let under: Vec<SessionId> = self
+            .sessions
+            .keys()
+            .copied()
+            .filter(|id| self.descends_from(*id, root))
+            .collect();
+        for id in under {
+            let waiting = self.waiting.contains(&id);
+            let session = self.sessions.get_mut(&id).expect("listed above");
+            if waiting {
+                session.limit = Some(AgentLimit::Budget);
+                self.end_waiting(id);
+            } else if session.idle.is_none() {
+                session.limit = Some(AgentLimit::Budget);
+                session.cancel.cancel();
+            }
+        }
+        notice(
+            &self.bus,
+            root,
+            NoticeLevel::Warning,
+            format!(
+                "agents stopped: they used the agent budget of {budget} tokens since your last \
+                 prompt"
+            ),
+        );
+    }
+
+    /// End a run of the agent `id` before it starts when its tree used
+    /// the agent budget, and report that.
+    fn over_budget(&mut self, id: SessionId) -> bool {
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return false;
+        };
+        let budgeted = session.agents.as_ref().is_some_and(|s| s.budget > 0);
+        if session.link.is_none() || !budgeted || !session.spend.is_spent() {
+            return false;
+        }
+        session.limit = Some(AgentLimit::Budget);
+        self.bus.publish(
+            id,
+            HostEvent::RunEnded {
+                outcome: RunOutcome::Cancelled,
+            },
+        );
+        self.deliver(
+            id,
+            &RunOutcome::Cancelled,
+            &[],
+            Usage::default(),
+            Duration::ZERO,
+        );
+        true
     }
 
     /// Whether the agent `id`, whose run completed, has messages it has
@@ -1619,6 +1732,26 @@ fn run_tools(session: &Session, id: SessionId, tx: &mpsc::Sender<Input>) -> Tool
             .collect(),
     );
     tools
+}
+
+/// The bounds of an agent run of `session`, under the main session
+/// `root`: its definition's turn limit and timeout over the setup's,
+/// and the tree's budget. A main session's runs have none.
+fn run_limits(session: &Session, root: SessionId) -> Limits {
+    let (Some(link), Some(setup)) = (&session.link, &session.agents) else {
+        return Limits::default();
+    };
+    let def = setup.defs.get(&link.agent);
+    let max_turns = (setup.max_turns > 0).then_some(setup.max_turns);
+    Limits {
+        max_turns: def.and_then(|d| d.max_turns).or(max_turns),
+        timeout: def.and_then(|d| d.timeout).or(setup.timeout),
+        budget: (setup.budget > 0).then(|| Budget {
+            spend: Arc::clone(&session.spend),
+            tokens: setup.budget,
+            root,
+        }),
+    }
 }
 
 /// Lend the session's MCP servers to its next run with the restarts

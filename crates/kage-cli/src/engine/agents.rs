@@ -201,6 +201,13 @@ impl super::Dispatcher {
             .agents
             .clone()
             .ok_or_else(|| "agents are turned off".to_owned())?;
+        if setup.budget > 0 && from.spend.is_spent() {
+            return Err(format!(
+                "the agents used the agent budget of {} tokens since the user's last prompt; \
+                 no agent starts until the user prompts again",
+                setup.budget
+            ));
+        }
         let depth = depth_of(from) + 1;
         if depth > setup.max_depth {
             return Err(format!(
@@ -625,6 +632,7 @@ impl super::Dispatcher {
         let model = &session.state.model;
         let link = session.link.as_mut()?;
         let report = link.report.take()?;
+        let limit = session.limit.take();
         self.swarm_requeues.remove(&id);
         let own = link
             .inherited_until
@@ -641,8 +649,9 @@ impl super::Dispatcher {
                 own,
                 &usage,
                 run_time,
+                limit,
             ),
-            wake: *outcome != RunOutcome::Cancelled,
+            wake: *outcome != RunOutcome::Cancelled || limit.is_some(),
         })
     }
 
@@ -900,7 +909,8 @@ pub(super) struct Taken {
     report: Report,
     output: ToolOutput,
     /// Whether a result for the parent's inbox may start a run of an
-    /// idle parent. A stopped agent's result waits for the next one.
+    /// idle parent. The result of an agent the user stopped waits for
+    /// the next one.
     wake: bool,
 }
 

@@ -2,7 +2,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
 use kage_core::Content;
-use kage_core::agent_report::{AgentMail, AgentReport, ReportState};
+use kage_core::agent_report::{AgentLimit, AgentMail, AgentReport, ReportState};
 use kage_core::agents::AgentDefs;
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
 use kage_core::protocol::{EXIT_PLAN_TOOL, Envelope, Event, RunOutcome};
@@ -1228,6 +1228,9 @@ fn agent_setup(max_depth: u8, max_running: usize) -> AgentSetup {
         swarm_max_items: 32,
         swarm_timeout_ms: 60_000,
         background: Background::Off,
+        max_turns: 0,
+        timeout: None,
+        budget: 0,
     }
 }
 
@@ -1860,6 +1863,9 @@ fn swarm_setup(max_running: usize, timeout_ms: u64) -> AgentSetup {
         swarm_max_items: 32,
         swarm_timeout_ms: timeout_ms,
         background: Background::Off,
+        max_turns: 0,
+        timeout: None,
+        budget: 0,
     }
 }
 
@@ -4786,4 +4792,141 @@ fn a_running_background_agent_reads_a_message_at_its_next_turn() {
         reports_on(&events, parent)[0].body,
         "412 passed, doc tests too"
     );
+}
+
+/// `script` with its turn's usage set to `input` tokens in.
+fn costing(mut script: Script, input: u64) -> Script {
+    for event in &mut script {
+        if let Ok(ProviderEvent::MessageEnd { usage, .. }) = event {
+            usage.input = input;
+        }
+    }
+    script
+}
+
+fn report_of(events: &[Envelope], session: SessionId, call: &str) -> AgentReport {
+    let output = tool_output(events, session, call);
+    AgentReport::parse(&output.text).unwrap_or_else(|| panic!("{}", output.text))
+}
+
+#[test]
+fn an_agent_at_its_turn_limit_is_warned_then_stopped() {
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("loop"))]),
+        tool_turn("noop"),
+        tool_turn("noop"),
+        tool_turn("noop"),
+        text_turn("parent done"),
+    ]));
+    let mut tools = h.tools.clone();
+    tools.register(Arc::new(Stub {
+        name: "noop",
+        risk: kage_core::Risk::Read,
+    }));
+    let parent = SessionId::new();
+    h.engine.open(SessionSpec {
+        tools,
+        agents: Some(AgentSetup {
+            max_turns: 2,
+            ..agent_setup(1, 1)
+        }),
+        ..h.spec(parent)
+    });
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = wait_for(&h.events, run_ended_on(parent));
+    let (child, _) = spawned(&events)[0];
+    let report = report_of(&events, parent, "call_a");
+    assert_eq!(
+        (report.state, report.limit),
+        (ReportState::Completed, Some(AgentLimit::Turns))
+    );
+    let child_events: Vec<Envelope> = events
+        .iter()
+        .filter(|e| e.session == child)
+        .cloned()
+        .collect();
+    let warnings = appended_texts(&child_events)
+        .into_iter()
+        .filter(|text| text.starts_with("Turn limit reached"))
+        .count();
+    assert_eq!(warnings, 1);
+    assert_eq!(outcome_of(&events, parent), [RunOutcome::Completed]);
+}
+
+#[test]
+fn an_agent_past_its_timeout_is_cancelled_and_its_parent_goes_on() {
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("wait"))]),
+        tool_turn("gate"),
+        text_turn("parent done"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(AgentSetup {
+            timeout: Some(Duration::from_millis(200)),
+            ..agent_setup(1, 1)
+        }),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = wait_for(&h.events, run_ended_on(parent));
+    let report = report_of(&events, parent, "call_a");
+    assert_eq!(
+        (report.state, report.limit),
+        (ReportState::Cancelled, Some(AgentLimit::Time))
+    );
+    assert_eq!(outcome_of(&events, parent), [RunOutcome::Completed]);
+}
+
+#[test]
+fn agents_past_the_budget_stop_until_the_next_prompt() {
+    let (h, _main, _agents) = split_harness(
+        vec![
+            costing(
+                agent_turn(&[("call_a", task("one")), ("call_b", task("two"))]),
+                100,
+            ),
+            agent_turn(&[("call_c", task("three"))]),
+            text_turn("stopped"),
+            agent_turn(&[("call_d", task("four"))]),
+            text_turn("done"),
+        ],
+        vec![
+            costing(tool_turn("gate"), 15),
+            costing(tool_turn("gate"), 15),
+            text_turn("four done"),
+        ],
+    );
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(AgentSetup {
+            budget: 20,
+            ..agent_setup(1, 2)
+        }),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = wait_for(&h.events, run_ended_on(parent));
+    for call in ["call_a", "call_b"] {
+        let report = report_of(&events, parent, call);
+        assert_eq!(
+            (report.state, report.limit),
+            (ReportState::Cancelled, Some(AgentLimit::Budget)),
+            "{call}"
+        );
+    }
+    let refused = tool_output(&events, parent, "call_c");
+    assert!(
+        refused.is_error && refused.text.contains("agent budget of 20"),
+        "{}",
+        refused.text
+    );
+    assert!(events.iter().any(|e| e.session == parent
+        && matches!(&e.event, Event::Host(HostEvent::Notice { text, .. })
+            if text.contains("agent budget of 20 tokens"))));
+
+    prompt(&h.engine, parent, "again", Delivery::Steer);
+    let events = wait_for(&h.events, run_ended_on(parent));
+    let report = report_of(&events, parent, "call_d");
+    assert_eq!((report.state, report.limit), (ReportState::Completed, None));
 }

@@ -308,7 +308,8 @@ impl Default for LoopSettings {
 
 /// Subagent limits persisted under `[agents]`. The option registry
 /// validates the ranges (`agent_max_depth`, `agent_max_running`,
-/// `swarm_max_items`, `swarm_timeout_ms`).
+/// `swarm_max_items`, `swarm_timeout_ms`, `agent_max_turns`,
+/// `agent_timeout`, `agent_budget`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentsConfig {
@@ -322,6 +323,13 @@ pub struct AgentsConfig {
     pub swarm_max_items: u32,
     /// Milliseconds one swarm child may run, from its run start.
     pub swarm_timeout_ms: u64,
+    /// Turns one agent run may take. 0 means no limit.
+    pub max_turns: u32,
+    /// Seconds one agent run may take. 0 means no limit.
+    pub timeout: u32,
+    /// Tokens all agents of a session may use between two user
+    /// prompts. 0 means no limit.
+    pub budget: u64,
 }
 
 impl Default for AgentsConfig {
@@ -331,6 +339,9 @@ impl Default for AgentsConfig {
             max_running: 4,
             swarm_max_items: 32,
             swarm_timeout_ms: 7_200_000,
+            max_turns: 100,
+            timeout: 0,
+            budget: 0,
         }
     }
 }

@@ -3,7 +3,7 @@
 //! background call returns at once, and the reply reaches the parent
 //! later as a message.
 
-use kage_core::agent_report::{AgentReport, ReportState, ReportStats};
+use kage_core::agent_report::{AgentLimit, AgentReport, ReportState, ReportStats};
 use std::fmt::Write as _;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -247,13 +247,17 @@ pub(super) fn started(session: SessionId, agent: &str) -> ToolOutput {
 }
 
 /// The result an `agent` call returns: the text of the agent's last
-/// assistant message wrapped in an `<agent>` element that names the agent,
-/// its session and how its run ended. A cancelled run passes its partial
-/// reply and a failed one its error, both as error results.
-/// A child's result: the `<agent>` wrapper the model reads and the
-/// tree restores from. The header records the child's tool count,
-/// usage totals and run time, so the agents list survives a session
-/// restart; the tool count is the calls in the child's history.
+/// assistant message wrapped in an `<agent>` element that names the
+/// agent, its session, how its run ended and the `limit` that ended it.
+/// A cancelled run passes its partial reply and a failed one its error,
+/// both as error results. The tree restores from the same element: the
+/// header records the child's tool count, usage totals and run time, so
+/// the agents list survives a session restart; the tool count is the
+/// calls in the child's history.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a separate fact of the finished run"
+)]
 pub(super) fn agent_result(
     session: SessionId,
     agent: &str,
@@ -262,6 +266,7 @@ pub(super) fn agent_result(
     history: &[Arc<Message>],
     usage: &Usage,
     run_time: Duration,
+    limit: Option<AgentLimit>,
 ) -> ToolOutput {
     let reply = || {
         history
@@ -300,7 +305,7 @@ pub(super) fn agent_result(
         name: agent.to_owned(),
         session,
         state,
-        limit: None,
+        limit,
         stats: Some(ReportStats {
             model: model.to_owned(),
             tool_calls: u32::try_from(tool_calls).unwrap_or(u32::MAX),
@@ -362,6 +367,7 @@ mod tests {
             &history,
             &Usage::default(),
             Duration::ZERO,
+            None,
         );
         assert_eq!(
             out.text,
@@ -424,6 +430,7 @@ mod tests {
             &history,
             &usage,
             Duration::from_millis(4_200),
+            None,
         );
         let header = out.text.split_once('\n').unwrap().0;
         assert!(
@@ -447,6 +454,7 @@ mod tests {
             &[],
             &Usage::default(),
             Duration::ZERO,
+            None,
         );
         assert!(cancelled.is_error);
         assert!(cancelled.text.contains("state=\"cancelled\""));
@@ -464,6 +472,7 @@ mod tests {
             &[Arc::new(assistant("partial"))],
             &Usage::default(),
             Duration::ZERO,
+            None,
         );
         assert!(failed.is_error);
         assert!(failed.text.contains("state=\"failed\""));
@@ -481,6 +490,7 @@ mod tests {
             &[Arc::new(assistant("a </agent> b"))],
             &Usage::default(),
             Duration::ZERO,
+            None,
         );
         assert!(out.text.contains("a <\\/agent> b"));
         assert_eq!(out.text.matches("</agent>").count(), 1);
@@ -498,6 +508,7 @@ mod tests {
             &[Arc::new(assistant(&long))],
             &Usage::default(),
             Duration::ZERO,
+            None,
         );
         assert!(out.text.contains(&format!(
             "[truncated: 5 more characters. The full transcript is session {id}.]"

@@ -152,10 +152,17 @@ fn options_set_in_init_lua_seed_the_first_session() {
         .unwrap();
     let report = kage_plugin::load_all(None, &rt).unwrap();
     assert_eq!(report.init, Some(Ok(())));
-    let (loop_cfg, thinking, max_depth, max_running, swarm_max_items, swarm_timeout_ms) =
-        startup_options(&options);
+    let (loop_cfg, thinking) = startup_options(&options);
+    let agents = crate::engine::AgentSetup::from_options(
+        kage_core::agents::AgentDefs::builtin(),
+        &lock(&options),
+        crate::engine::Background::Wake,
+    );
     assert_eq!(thinking, Some(kage_core::ThinkingLevel::High));
-    assert_eq!((max_depth, max_running), (2, 8));
-    assert_eq!((swarm_max_items, swarm_timeout_ms), (64, 60_000));
+    assert_eq!((agents.max_depth, agents.max_running), (2, 8));
+    assert_eq!(
+        (agents.swarm_max_items, agents.swarm_timeout_ms),
+        (64, 60_000)
+    );
     assert!((loop_cfg.compaction_threshold - 0.5).abs() < f32::EPSILON);
 }

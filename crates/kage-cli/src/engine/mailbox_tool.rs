@@ -220,7 +220,7 @@ impl super::Dispatcher {
     }
 
     /// The main session `id` hangs under, or `id` itself.
-    fn root_of(&self, mut id: SessionId) -> SessionId {
+    pub(super) fn root_of(&self, mut id: SessionId) -> SessionId {
         while let Some(parent) = self.parent_of(id) {
             id = parent;
         }

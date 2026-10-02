@@ -1032,6 +1032,9 @@ impl SettingsView {
         let agents: Vec<AnyElement> = [
             ("agent_max_depth", "Max depth"),
             ("agent_max_running", "Max running"),
+            ("agent_max_turns", "Turn limit"),
+            ("agent_timeout", "Run timeout"),
+            ("agent_budget", "Token budget"),
         ]
         .into_iter()
         .filter_map(|(name, label)| find(name).map(|option| self.option_row(label, option, pal)))
@@ -1120,6 +1123,15 @@ impl SettingsView {
                         60_000.,
                         format!("{} min", option.value.as_i64().unwrap_or(0) / 60_000),
                     ),
+                    (_, "agent_max_turns" | "agent_timeout" | "agent_budget") => {
+                        let value = option.value.as_i64().unwrap_or(0);
+                        let (step, shown) = match name.as_str() {
+                            "agent_max_turns" => (10., value.to_string()),
+                            "agent_timeout" => (60., format!("{} min", value / 60)),
+                            _ => (100_000., format!("{}k", value / 1000)),
+                        };
+                        (step, if value == 0 { "Off".to_owned() } else { shown })
+                    }
                     _ => (1., option.value.as_i64().unwrap_or(0).to_string()),
                 };
                 let (min, max) = match option.kind.as_str() {

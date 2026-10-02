@@ -303,6 +303,9 @@ fn default_agents() -> AgentSetup {
         swarm_max_items: 32,
         swarm_timeout_ms: 60_000,
         background: crate::engine::Background::Hold,
+        max_turns: 0,
+        timeout: None,
+        budget: 0,
     }
 }
 

@@ -8,10 +8,12 @@
 //!
 //! The file stem is the name, with the skill name rules. Frontmatter
 //! keys are `description` (required), `tools` (a comma list, absent
-//! means every tool of the parent), `model` (`provider/model`) and
-//! `thinking` (a thinking level). `model` and `thinking` also accept
-//! `inherit`, the default. Unknown keys are ignored, so agent files
-//! written for other tools load. The body is the agent's role text.
+//! means every tool of the parent), `model` (`provider/model`),
+//! `thinking` (a thinking level), `max_turns` (also `maxTurns`, a
+//! positive integer) and `timeout` (seconds, or a number with `s`, `m`
+//! or `h`). `model` and `thinking` also accept `inherit`, the default.
+//! Unknown keys are ignored, so agent files written for other tools
+//! load. The body is the agent's role text.
 //!
 //! The built-ins `general` and `explore` come first, then user files,
 //! then project files. A later definition replaces an earlier one of
@@ -20,6 +22,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::skills::{split_frontmatter_pub, validate_name_pub};
 use crate::thinking::ThinkingLevel;
@@ -45,6 +48,11 @@ pub struct AgentDef {
     pub model: Option<String>,
     /// Thinking level. `None` inherits the parent's.
     pub thinking: Option<ThinkingLevel>,
+    /// Turns one run may take. `None` uses the `agent_max_turns` option.
+    pub max_turns: Option<u32>,
+    /// How long one run may take. `None` uses the `agent_timeout`
+    /// option.
+    pub timeout: Option<Duration>,
     /// Role text: the markdown body after the frontmatter.
     pub body: String,
     /// The file the definition was loaded from. `None` for built-ins.
@@ -200,16 +208,49 @@ fn from_frontmatter(
             )
         })?),
     };
+    let max_turns = match front.get("max_turns").or_else(|| front.get("maxTurns")) {
+        None => None,
+        Some(value) => Some(
+            value
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|turns| *turns > 0)
+                .ok_or_else(|| format!("max_turns {value:?} is not a positive integer"))?,
+        ),
+    };
+    let timeout = match front.get("timeout") {
+        None => None,
+        Some(value) => Some(parse_timeout(value).ok_or_else(|| {
+            format!("timeout {value:?} is not seconds or a number with s, m or h")
+        })?),
+    };
     Ok(AgentDef {
         name: name.to_owned(),
         description: description.to_owned(),
         tools,
         model,
         thinking,
+        max_turns,
+        timeout,
         body: body.trim().to_owned(),
         path: None,
         source,
     })
+}
+
+/// A positive duration written as seconds (`90`) or a number with a
+/// unit (`90s`, `10m`, `1h`).
+fn parse_timeout(value: &str) -> Option<Duration> {
+    let value = value.trim();
+    let (number, unit) = match value.char_indices().last()? {
+        (at, 's') => (&value[..at], 1),
+        (at, 'm') => (&value[..at], 60),
+        (at, 'h') => (&value[..at], 3600),
+        _ => (value, 1),
+    };
+    let seconds = number.trim().parse::<u64>().ok()?.checked_mul(unit)?;
+    (seconds > 0).then(|| Duration::from_secs(seconds))
 }
 
 /// The value of `key`, or `None` when it is absent or `inherit`.
@@ -311,6 +352,29 @@ mod tests {
         assert_eq!(def.tools, None);
         assert_eq!(def.model, None);
         assert_eq!(def.thinking, None);
+    }
+
+    #[test]
+    fn turn_limits_and_timeouts_parse() {
+        for (front, turns) in [("max_turns: 60", 60), ("maxTurns: 7", 7)] {
+            let def = load(&format!("---\ndescription: d\n{front}\n---\n")).unwrap();
+            assert_eq!(def.max_turns, Some(turns), "{front}");
+        }
+        for (value, seconds) in [("90", 90), ("90s", 90), ("10m", 600), ("1h", 3600)] {
+            let def = load(&format!("---\ndescription: d\ntimeout: {value}\n---\n")).unwrap();
+            assert_eq!(def.timeout, Some(Duration::from_secs(seconds)), "{value}");
+        }
+        for bad in [
+            "max_turns: 0",
+            "max_turns: many",
+            "timeout: 0",
+            "timeout: 5d",
+        ] {
+            let err = load(&format!("---\ndescription: d\n{bad}\n---\n")).unwrap_err();
+            assert!(err.to_string().contains("reviewer.md"), "{bad}: {err}");
+        }
+        let def = load("---\ndescription: d\n---\n").unwrap();
+        assert_eq!((def.max_turns, def.timeout), (None, None));
     }
 
     #[test]

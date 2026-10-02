@@ -186,8 +186,7 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
     if let Some(out) = crate::runtime_env::max_output_tokens_for(&registry, &qualified_model) {
         cx = cx.with_max_output_tokens(out);
     }
-    let (loop_cfg, thinking_level, max_depth, max_running, swarm_max_items, swarm_timeout_ms) =
-        startup_options(&options);
+    let (loop_cfg, thinking_level) = startup_options(&options);
     if let Some(level) = thinking_level {
         cx = cx.with_thinking_level(level);
     }
@@ -208,14 +207,11 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
         let mut buf = lock(&buffer);
         buf.push_custom("kage:error", err, false);
     }
-    let agents = crate::engine::AgentSetup {
-        defs: Arc::new(agent_defs),
-        max_depth,
-        max_running,
-        swarm_max_items,
-        swarm_timeout_ms,
-        background: crate::engine::Background::Wake,
-    };
+    let agents = crate::engine::AgentSetup::from_options(
+        agent_defs,
+        &lock(&options),
+        crate::engine::Background::Wake,
+    );
     let model_choices = available_model_items(&registry, &qualified_model);
     if let Err(err) = crate::state::record_last_model(&qualified_model) {
         let mut buf = lock(&buffer);
@@ -578,13 +574,12 @@ fn print_exit_summary(
     }
 }
 
-/// Read the options that apply when a session starts: the loop config,
-/// the thinking level, and the agent depth, running and swarm limits.
-/// Called after the runtime loaded `init.lua`, so values set there
-/// reach the first session.
+/// Read the options that apply when a session starts: the loop config
+/// and the thinking level. Called after the runtime loaded `init.lua`,
+/// so values set there reach the first session.
 pub(crate) fn startup_options(
     options: &kage_plugin::SharedOptions,
-) -> (LoopConfig, Option<ThinkingLevel>, u8, usize, usize, u64) {
+) -> (LoopConfig, Option<ThinkingLevel>) {
     let store = lock(options);
     let mut loop_cfg = LoopConfig::default();
     if let Some(threshold) = store
@@ -603,17 +598,5 @@ pub(crate) fn startup_options(
         .get("thinking_level")
         .and_then(OptionValue::as_str)
         .and_then(ThinkingLevel::parse);
-    let int = |name: &str| store.get(name).and_then(OptionValue::as_int);
-    let max_depth = int("agent_max_depth").and_then(|n| u8::try_from(n).ok());
-    let max_running = int("agent_max_running").and_then(|n| usize::try_from(n).ok());
-    let swarm_max_items = int("swarm_max_items").and_then(|n| usize::try_from(n).ok());
-    let swarm_timeout_ms = int("swarm_timeout_ms").and_then(|n| u64::try_from(n).ok());
-    (
-        loop_cfg,
-        thinking,
-        max_depth.unwrap_or(0),
-        max_running.unwrap_or(1),
-        swarm_max_items.unwrap_or(32),
-        swarm_timeout_ms.unwrap_or(7_200_000),
-    )
+    (loop_cfg, thinking)
 }

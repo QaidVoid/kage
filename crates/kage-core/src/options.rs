@@ -209,6 +209,39 @@ pub const OPTIONS: &[OptionDef] = &[
         doc: "Milliseconds one swarm child may run, measured from its run start (not while queued). On deadline the child is cancelled and renders as cancelled in the aggregate.",
         live: false,
     },
+    OptionDef {
+        name: "agent_max_turns",
+        toml: "agents.max_turns",
+        kind: OptionKind::Int {
+            min: 0,
+            max: 10_000,
+            default: 100,
+        },
+        doc: "Turns one agent run may take. The agent gets one warning turn to reply, then stops. 0 means no limit.",
+        live: false,
+    },
+    OptionDef {
+        name: "agent_timeout",
+        toml: "agents.timeout",
+        kind: OptionKind::Int {
+            min: 0,
+            max: 86_400,
+            default: 0,
+        },
+        doc: "Seconds one agent run may take before it is stopped. 0 means no limit.",
+        live: false,
+    },
+    OptionDef {
+        name: "agent_budget",
+        toml: "agents.budget",
+        kind: OptionKind::Int {
+            min: 0,
+            max: 1_000_000_000,
+            default: 0,
+        },
+        doc: "Tokens (input plus output) all agents of a session may use between two of your prompts. Past it, they stop. 0 means no limit.",
+        live: false,
+    },
 ];
 
 /// Look up an option by name.
@@ -515,6 +548,9 @@ fn config_value(name: &str, config: &Config) -> Option<OptionValue> {
         "swarm_timeout_ms" => {
             OptionValue::Int(i64::try_from(config.agents.swarm_timeout_ms).unwrap_or(i64::MAX))
         }
+        "agent_max_turns" => OptionValue::Int(i64::from(config.agents.max_turns)),
+        "agent_timeout" => OptionValue::Int(i64::from(config.agents.timeout)),
+        "agent_budget" => OptionValue::Int(i64::try_from(config.agents.budget).unwrap_or(i64::MAX)),
         _ => return None,
     })
 }
@@ -628,6 +664,9 @@ mod tests {
             ("agent_max_running", "8", OptionValue::Int(8)),
             ("swarm_max_items", "64", OptionValue::Int(64)),
             ("swarm_timeout_ms", "60000", OptionValue::Int(60_000)),
+            ("agent_max_turns", "60", OptionValue::Int(60)),
+            ("agent_timeout", "600", OptionValue::Int(600)),
+            ("agent_budget", "2000000", OptionValue::Int(2_000_000)),
         ] {
             let def = find(name).unwrap();
             let (table, key) = def.toml.rsplit_once('.').unwrap();
@@ -761,6 +800,9 @@ mod tests {
             ("agent_max_running", 1, 16),
             ("swarm_max_items", 2, 128),
             ("swarm_timeout_ms", 1_000, 86_400_000),
+            ("agent_max_turns", 0, 10_000),
+            ("agent_timeout", 0, 86_400),
+            ("agent_budget", 0, 1_000_000_000),
         ] {
             for ok in [low, high] {
                 assert!(

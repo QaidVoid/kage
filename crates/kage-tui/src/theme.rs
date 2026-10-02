@@ -2,10 +2,12 @@
 //!
 //! [`Theme`] is the single source of truth for every color choice the
 //! conversation buffer, status bar, and overlay rendering paths make.
-//! Two palettes are bundled, kage shadow ([`Theme::kage_shadow`]) and
-//! kage dawn ([`Theme::kage_dawn`]). The `default` theme follows the
-//! terminal: shadow on a dark background, dawn on a light one. User
-//! themes load from TOML files.
+//! Four palettes are bundled: kage shadow ([`Theme::kage_shadow`]),
+//! kage dawn ([`Theme::kage_dawn`]), kimi dark ([`Theme::kimi_dark`])
+//! and kimi light ([`Theme::kimi_light`]). The `default` theme follows
+//! the terminal: shadow on a dark background, dawn on a light one.
+//! [`Themes`] lets the `theme_dark` and `theme_light` options pick
+//! other themes for it. User themes load from TOML files.
 //!
 //! The renderer reads the active theme via [`current`] (returns a
 //! cheap clone of the global). The host process picks one with
@@ -20,6 +22,7 @@
 mod depth;
 mod groups;
 mod kage;
+mod kimi;
 mod terminal;
 
 use std::path::Path;
@@ -291,6 +294,8 @@ impl Theme {
         match name {
             "kage-shadow" => Self::kage_shadow(),
             "kage-dawn" => Self::kage_dawn(),
+            "kimi-dark" => Self::kimi_dark(),
+            "kimi-light" => Self::kimi_light(),
             _ => Self::default_for_terminal(),
         }
     }
@@ -299,7 +304,13 @@ impl Theme {
     /// `:theme set`. `default` follows the terminal background.
     #[must_use]
     pub fn bundled_names() -> &'static [&'static str] {
-        &["default", "kage-shadow", "kage-dawn"]
+        &[
+            "default",
+            "kage-shadow",
+            "kage-dawn",
+            "kimi-dark",
+            "kimi-light",
+        ]
     }
 
     /// Every selectable theme name: the bundled set first, then the
@@ -485,7 +496,13 @@ mod tests {
     #[test]
     fn bundled_names_includes_known_themes() {
         let names = Theme::bundled_names();
-        for name in ["default", "kage-shadow", "kage-dawn"] {
+        for name in [
+            "default",
+            "kage-shadow",
+            "kage-dawn",
+            "kimi-dark",
+            "kimi-light",
+        ] {
             assert!(names.contains(&name), "{name}");
             assert_eq!(Theme::by_name(name).name, name);
         }

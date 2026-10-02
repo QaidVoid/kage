@@ -72,7 +72,8 @@ pub fn setup_runtime(
 /// store seeded from the same config, and `sink` receives plugin
 /// output, so nothing is written to stderr while the TUI owns the
 /// screen. Themes resolve against the bundled set and the user themes
-/// dir, which also provide the base highlight groups.
+/// dir, which also provide the base highlight groups. `default`
+/// resolves through the `theme_dark` and `theme_light` options.
 #[expect(
     clippy::too_many_arguments,
     reason = "each argument is separately loaded startup state"
@@ -95,8 +96,10 @@ pub(crate) fn setup_tui_runtime(
         .state_dir(crate::data_root().ok().map(|r| r.join("plugin-state")))
         .user_dir(user_dir.map(Path::to_path_buf))
         .keybindings(keybindings)
-        .options(options)
-        .themes(Arc::new(kage_tui::theme::Themes::new(themes_dir)))
+        .options(Arc::clone(&options))
+        .themes(Arc::new(
+            kage_tui::theme::Themes::new(themes_dir).with_options(options),
+        ))
         .build()
         .map_err(|e| format!("plugin runtime: {e}"))?;
     load_tui_runtime(runtime, plugins_dir)

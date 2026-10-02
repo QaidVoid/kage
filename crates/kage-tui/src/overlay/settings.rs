@@ -59,7 +59,8 @@ pub struct SettingsOverlay {
 
 impl SettingsOverlay {
     /// Build the dialog from the current option values. `themes` are
-    /// the names the `theme` row cycles through.
+    /// the names the `theme` row cycles through. The `theme_dark` and
+    /// `theme_light` rows cycle through them without `default`.
     #[must_use]
     pub fn new(store: &OptionStore, themes: Vec<String>) -> Self {
         let rows: Vec<Row> = OPTIONS
@@ -180,6 +181,12 @@ impl SettingsOverlay {
             (OptionKind::Choice { values, .. }, OptionValue::Str(cur)) => step(values, cur, delta),
             (OptionKind::Str { .. }, OptionValue::Str(cur)) if row.def.name == "theme" => {
                 step(&self.themes, cur, delta)
+            }
+            (OptionKind::Str { .. }, OptionValue::Str(cur))
+                if matches!(row.def.name, "theme_dark" | "theme_light") =>
+            {
+                let picks: Vec<&String> = self.themes.iter().filter(|n| *n != "default").collect();
+                step(&picks, cur, delta)
             }
             _ => return,
         };
@@ -554,6 +561,29 @@ mod tests {
     }
 
     #[test]
+    fn theme_variants_cycle_without_default() {
+        let mut s = sample();
+        select(&mut s, "theme_dark");
+        s.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            value(&s, "theme_dark"),
+            OptionValue::Str("tokyo-night".into())
+        );
+        s.handle_key(key(KeyCode::Right));
+        s.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            value(&s, "theme_dark"),
+            OptionValue::Str("tokyo-night".into())
+        );
+        select(&mut s, "theme_light");
+        s.handle_key(key(KeyCode::Left));
+        assert_eq!(
+            value(&s, "theme_light"),
+            OptionValue::Str("tokyo-night".into())
+        );
+    }
+
+    #[test]
     fn numbers_step_within_bounds() {
         let mut s = sample();
         select(&mut s, "input_min_lines");
@@ -629,7 +659,7 @@ mod tests {
     fn reverts_restore_the_seed_of_edited_options() {
         let mut s = sample();
         s.handle_key(key(KeyCode::Right));
-        s.handle_key(key(KeyCode::Down));
+        select(&mut s, "mouse");
         s.handle_key(key(KeyCode::Right));
         s.handle_key(key(KeyCode::Right));
         assert_eq!(s.reverts(), [("theme", OptionValue::Str("default".into()))]);

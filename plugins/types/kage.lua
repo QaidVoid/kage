@@ -345,6 +345,8 @@
 --- Every option `kage.opt` reads and writes.
 ---@class kage.Options
 ---@field theme string Color theme, bundled or from the themes directory; `default` follows the terminal background.
+---@field theme_dark string The theme `default` picks on a dark terminal background.
+---@field theme_light string The theme `default` picks on a light terminal background.
 ---@field mouse boolean Capture mouse events.
 ---@field editor "vim"|"modeless" Prompt editing style.
 ---@field input_min_lines integer Minimum content rows of the input box.

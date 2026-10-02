@@ -82,6 +82,24 @@ pub const OPTIONS: &[OptionDef] = &[
         live: true,
     },
     OptionDef {
+        name: "theme_dark",
+        toml: "ui.theme_dark",
+        kind: OptionKind::Str {
+            default: "kage-shadow",
+        },
+        doc: "The theme `default` picks on a dark terminal background.",
+        live: true,
+    },
+    OptionDef {
+        name: "theme_light",
+        toml: "ui.theme_light",
+        kind: OptionKind::Str {
+            default: "kage-dawn",
+        },
+        doc: "The theme `default` picks on a light terminal background.",
+        live: true,
+    },
+    OptionDef {
         name: "mouse",
         toml: "ui.mouse",
         kind: OptionKind::Bool { default: true },
@@ -525,6 +543,8 @@ fn config_value(name: &str, config: &Config) -> Option<OptionValue> {
     let ui = &config.ui;
     Some(match name {
         "theme" => OptionValue::Str(ui.theme.clone()),
+        "theme_dark" => return ui.theme_dark.clone().map(OptionValue::Str),
+        "theme_light" => return ui.theme_light.clone().map(OptionValue::Str),
         "mouse" => OptionValue::Bool(ui.mouse),
         "editor" => OptionValue::Str(
             match ui.editor {
@@ -623,6 +643,8 @@ mod tests {
     fn toml_paths_exist_in_serialized_config() {
         let mut cfg = Config::default();
         cfg.ui.thinking_level = Some("high".to_owned());
+        cfg.ui.theme_dark = Some("kimi-dark".to_owned());
+        cfg.ui.theme_light = Some("kimi-light".to_owned());
         cfg.keybindings.leader = ",".to_owned();
         cfg.keybindings.timeoutlen = 300;
         let value = toml::Value::try_from(&cfg).unwrap();
@@ -642,6 +664,16 @@ mod tests {
                 "theme",
                 "\"tokyo-night\"",
                 OptionValue::Str("tokyo-night".into()),
+            ),
+            (
+                "theme_dark",
+                "\"kimi-dark\"",
+                OptionValue::Str("kimi-dark".into()),
+            ),
+            (
+                "theme_light",
+                "\"kimi-light\"",
+                OptionValue::Str("kimi-light".into()),
             ),
             ("mouse", "false", OptionValue::Bool(false)),
             ("editor", "\"vim\"", OptionValue::Str("vim".into())),
@@ -675,6 +707,21 @@ mod tests {
             assert!(errors.is_empty(), "{errors:?}");
             assert_eq!(store.get(name), Some(&expected), "{name}");
             assert_eq!(store.source(name), Some(OptionSource::Toml), "{name}");
+        }
+    }
+
+    #[test]
+    fn unset_theme_variants_read_the_kage_palettes() {
+        let (mut store, errors) = OptionStore::from_config(&load("[ui]\ntheme = \"kage-dawn\"\n"));
+        assert!(errors.is_empty(), "{errors:?}");
+        for (name, theme) in [("theme_dark", "kage-shadow"), ("theme_light", "kage-dawn")] {
+            assert_eq!(store.get(name), Some(&OptionValue::Str(theme.into())));
+            assert_eq!(store.source(name), Some(OptionSource::Default));
+            assert!(
+                store
+                    .set(name, OptionValue::Str(String::new()), OptionSource::Lua)
+                    .is_err()
+            );
         }
     }
 
@@ -789,7 +836,11 @@ mod tests {
         let err = store
             .set("nope", OptionValue::Bool(true), OptionSource::Lua)
             .unwrap_err();
-        assert!(err.to_string().contains("theme, mouse"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("theme, theme_dark, theme_light, mouse"),
+            "{err}"
+        );
     }
 
     #[test]

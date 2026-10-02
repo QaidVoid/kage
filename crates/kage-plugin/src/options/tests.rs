@@ -41,7 +41,10 @@ fn unknown_names_and_bad_values_raise() {
     let store = SharedOptions::default();
     let rt = runtime(&store);
     let err = rt.eval("return kage.opt.nope").unwrap_err().to_string();
-    assert!(err.contains("theme, mouse"), "{err}");
+    assert!(
+        err.contains("theme, theme_dark, theme_light, mouse"),
+        "{err}"
+    );
     let err = rt
         .eval("kage.opt.editor = 'emacs'")
         .unwrap_err()

@@ -10,27 +10,28 @@ use ratatui::style::Color;
 
 use super::Theme;
 
-/// The tokens of one kage variant.
-struct Palette {
-    bg: (u8, u8, u8),
-    bg_dark: (u8, u8, u8),
-    bg_highlight: (u8, u8, u8),
-    bg_raised: (u8, u8, u8),
-    fg: (u8, u8, u8),
-    fg_strong: (u8, u8, u8),
-    fg_dark: (u8, u8, u8),
-    comment: (u8, u8, u8),
-    fg_gutter: (u8, u8, u8),
-    lantern: (u8, u8, u8),
-    violet: (u8, u8, u8),
-    green: (u8, u8, u8),
-    yellow: (u8, u8, u8),
-    red: (u8, u8, u8),
-    blue: (u8, u8, u8),
-    mist: (u8, u8, u8),
-    sand: (u8, u8, u8),
+/// The tokens of one kage variant. Other bundled palettes fill the
+/// same tokens to reuse [`build`].
+pub(super) struct Palette {
+    pub(super) bg: (u8, u8, u8),
+    pub(super) bg_dark: (u8, u8, u8),
+    pub(super) bg_highlight: (u8, u8, u8),
+    pub(super) bg_raised: (u8, u8, u8),
+    pub(super) fg: (u8, u8, u8),
+    pub(super) fg_strong: (u8, u8, u8),
+    pub(super) fg_dark: (u8, u8, u8),
+    pub(super) comment: (u8, u8, u8),
+    pub(super) fg_gutter: (u8, u8, u8),
+    pub(super) lantern: (u8, u8, u8),
+    pub(super) violet: (u8, u8, u8),
+    pub(super) green: (u8, u8, u8),
+    pub(super) yellow: (u8, u8, u8),
+    pub(super) red: (u8, u8, u8),
+    pub(super) blue: (u8, u8, u8),
+    pub(super) mist: (u8, u8, u8),
+    pub(super) sand: (u8, u8, u8),
     /// Percent of violet over `bg` for selections.
-    visual: u16,
+    pub(super) visual: u16,
 }
 
 const SHADOW: Palette = Palette {
@@ -89,7 +90,8 @@ fn blend(fg: (u8, u8, u8), bg: (u8, u8, u8), percent: u16) -> Color {
     Color::Rgb(mix(fg.0, bg.0), mix(fg.1, bg.1), mix(fg.2, bg.2))
 }
 
-fn build(name: &str, p: &Palette) -> Theme {
+/// Map the tokens of `p` onto the renderer's roles.
+pub(super) fn build(name: &str, p: &Palette) -> Theme {
     let visual = blend(p.violet, p.bg, p.visual);
     Theme {
         name: name.into(),

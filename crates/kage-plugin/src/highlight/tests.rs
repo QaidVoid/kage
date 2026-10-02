@@ -195,3 +195,56 @@ fn without_a_resolver_the_table_stays_empty() {
     rt.eval("kage.opt.theme = 'anything'").unwrap();
     assert_eq!(lock(&rt.highlights()).generation(), 0);
 }
+
+#[test]
+fn a_default_pick_change_rebases_default_while_it_is_active() {
+    let rt = runtime();
+    rt.eval(
+        r#"
+        seen = {}
+        kage.api.autocmd_create("color_scheme", {
+          callback = function(ev) seen[#seen + 1] = ev.match end,
+        })
+        kage.opt.theme_dark = "tokyo-night"
+        kage.opt.theme_dark = "tokyo-night"
+        kage.opt.theme = "tokyo-night"
+        kage.opt.theme_light = "default"
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        eval_str(&rt, "return table.concat(seen, ' ')"),
+        "default tokyo-night"
+    );
+    let err = rt
+        .eval("kage.opt.theme_dark = 'nope'")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("\"default\", \"tokyo-night\""), "{err}");
+}
+
+#[test]
+fn an_unloadable_default_pick_logs_at_load() {
+    let (rec, sink) = recording_sink();
+    let store = store_with_theme("default");
+    lock(&store)
+        .set(
+            "theme_light",
+            OptionValue::Str("gone".into()),
+            OptionSource::Toml,
+        )
+        .unwrap();
+    let rt = PluginRuntime::builder()
+        .sink(sink)
+        .options(store)
+        .themes(Arc::new(FakeThemes))
+        .build()
+        .unwrap();
+    assert_eq!(lock(&rt.highlights()).theme(), "default");
+    let logs = rec.snapshot().logs;
+    assert!(
+        logs.iter().any(|(level, msg)| *level == LogLevel::Error
+            && msg.contains("theme_light: unknown theme `gone`")),
+        "{logs:?}"
+    );
+}

@@ -12,13 +12,16 @@
 //!   (`default`, `toml`, `lua` or `runtime`).
 //! * `kage.api.option_set(name, value)` is the assignment as a call.
 //!
-//! A set validates the value (`theme` must be one of the names of the
-//! [`crate::ThemeResolver`] from [`crate::PluginRuntimeBuilder::themes`]
-//! when the host gave one), records the source, queues the change for
-//! the host to apply, and fires `option_set` with
-//! `{ name, old, new, source }`, matched on the option name. A `theme`
-//! set that picks a different theme first switches the base highlight
-//! groups and fires `color_scheme` (see [`crate::highlight`]). Host UI changes go through
+//! A set validates the value (`theme`, `theme_dark` and `theme_light`
+//! must be one of the names of the [`crate::ThemeResolver`] from
+//! [`crate::PluginRuntimeBuilder::themes`] when the host gave one),
+//! records the source, queues the change for the host to apply, and
+//! fires `option_set` with `{ name, old, new, source }`, matched on the
+//! option name. A `theme` set that picks a different theme first
+//! switches the base highlight groups and fires `color_scheme` (see
+//! [`crate::highlight`]). A `theme_dark` or `theme_light` set does the
+//! same for `default` while `default` is active, since the resolver
+//! picks the theme `default` stands for from them. Host UI changes go through
 //! [`crate::PluginRuntime::set_option`], which runs the same set on the
 //! owner thread, so every `option_set` fires there in order.
 //!
@@ -27,7 +30,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use kage_core::options::{self, OptionError, OptionSource, OptionStore, OptionValue};
+use kage_core::options::{self, OptionChange, OptionError, OptionSource, OptionStore, OptionValue};
 use kage_core::sync::lock;
 use mlua::{Lua, MetaMethod, Table, UserData, UserDataMethods, Value};
 
@@ -38,6 +41,10 @@ use crate::highlight::{self, SharedHighlights, SharedThemeResolver, ThemeBase};
 
 /// Option store shared by the host, the runtime and Lua.
 pub type SharedOptions = Arc<Mutex<OptionStore>>;
+
+/// Options naming the theme `default` picks on a dark and on a light
+/// background.
+const DEFAULT_PICKS: [&str; 2] = ["theme_dark", "theme_light"];
 
 /// The option store plus what a set needs besides it.
 #[derive(Clone)]
@@ -54,7 +61,7 @@ impl Options {
         let def = options::lookup(name)?;
         let value = def.validate(value)?;
         if let (Some(themes), OptionValue::Str(theme)) = (&self.themes, &value)
-            && def.name == "theme"
+            && (def.name == "theme" || DEFAULT_PICKS.contains(&def.name))
         {
             let names = themes.names();
             if !names.contains(theme) {
@@ -84,7 +91,11 @@ impl Options {
         let change = lock(&self.store)
             .set(name, value, source)
             .map_err(mlua::Error::external)?;
-        if let (Some(base), OptionValue::Str(theme)) = (base, &change.new) {
+        let switch = match (base, &change.new) {
+            (Some(base), OptionValue::Str(theme)) => Some((theme.as_str(), base)),
+            _ => self.default_switch(&change).map(|base| ("default", base)),
+        };
+        if let Some((theme, base)) = switch {
             highlight::set_base(&self.highlights, theme, base);
             highlight::fire_color_scheme(lua, &self.sink, theme)?;
         }
@@ -102,15 +113,31 @@ impl Options {
     }
 
     /// The base groups to switch to when setting `name` to `value`
-    /// picks a theme other than the one the groups came from.
+    /// picks a theme other than the one the groups came from. A theme
+    /// `default` picks must load as well, but switches nothing here.
     fn theme_switch(&self, name: &str, value: &OptionValue) -> Result<Option<ThemeBase>, String> {
-        let (Some(themes), "theme", OptionValue::Str(theme)) = (&self.themes, name, value) else {
+        let (Some(themes), OptionValue::Str(theme)) = (&self.themes, value) else {
             return Ok(None);
         };
-        if lock(&self.highlights).theme() == theme {
+        if DEFAULT_PICKS.contains(&name) {
+            return themes.groups(theme).map(|_| None);
+        }
+        if name != "theme" || lock(&self.highlights).theme() == theme {
             return Ok(None);
         }
         themes.groups(theme).map(Some)
+    }
+
+    /// The base groups of `default` after `change` gave it a different
+    /// pick while the groups come from `default`.
+    fn default_switch(&self, change: &OptionChange) -> Option<ThemeBase> {
+        if !DEFAULT_PICKS.contains(&change.name)
+            || change.old == change.new
+            || lock(&self.highlights).theme() != "default"
+        {
+            return None;
+        }
+        self.themes.as_ref()?.groups("default").ok()
     }
 
     /// The current value of the `theme` option.
@@ -123,11 +150,28 @@ impl Options {
     }
 
     /// Load the base groups of the current theme. When that fails the
-    /// error is logged and the `default` theme is loaded instead.
+    /// error is logged and the `default` theme is loaded instead. A
+    /// theme `default` picks that fails to load is logged too.
     pub(crate) fn load_theme(&self) {
         let Some(themes) = &self.themes else {
             return;
         };
+        for name in DEFAULT_PICKS {
+            let pick = {
+                let store = lock(&self.store);
+                if store.source(name) == Some(OptionSource::Default) {
+                    continue;
+                }
+                store
+                    .get(name)
+                    .and_then(OptionValue::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            if let Err(err) = themes.groups(&pick) {
+                lock(&self.sink).log(LogLevel::Error, &format!("{name}: {err}"));
+            }
+        }
         let theme = self.theme();
         let loaded = themes
             .groups(&theme)

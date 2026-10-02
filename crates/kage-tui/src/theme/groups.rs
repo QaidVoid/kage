@@ -18,9 +18,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use kage_core::highlight::{self, COLOR_NAMES, Highlights, HlSpec};
+use kage_core::sync::lock;
+use kage_plugin::SharedOptions;
 use ratatui::style::{Color, Modifier, Style};
 
-use super::Theme;
+use super::{Theme, terminal_light};
 
 /// Which color of a group a theme role reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -164,16 +166,45 @@ pub fn groups_for(name: &str, themes_dir: Option<&Path>) -> Result<ThemeGroups, 
 /// The theme registry the plugin runtime resolves the `theme` option
 /// against: the bundled themes plus `<name>.toml` files in a themes
 /// directory.
+///
+/// `default` resolves to the theme the `theme_dark` or `theme_light`
+/// option names, by the terminal background, when the registry reads
+/// an option store ([`Themes::with_options`]). Without one, or when
+/// that theme fails to load, it is kage shadow or kage dawn.
 #[derive(Clone, Debug, Default)]
 pub struct Themes {
     dir: Option<PathBuf>,
+    options: Option<SharedOptions>,
 }
 
 impl Themes {
     /// Themes from the bundled set and, when given, `dir`.
     #[must_use]
     pub fn new(dir: Option<PathBuf>) -> Self {
-        Self { dir }
+        Self { dir, options: None }
+    }
+
+    /// Read the `theme_dark` and `theme_light` options from `options`
+    /// when resolving `default`.
+    #[must_use]
+    pub fn with_options(mut self, options: SharedOptions) -> Self {
+        self.options = Some(options);
+        self
+    }
+
+    fn default_groups(&self) -> ThemeGroups {
+        let option = if terminal_light() {
+            "theme_light"
+        } else {
+            "theme_dark"
+        };
+        self.options
+            .as_ref()
+            .and_then(|options| {
+                let pick = lock(options).get(option)?.as_str()?.to_owned();
+                groups_for(&pick, self.dir.as_deref()).ok()
+            })
+            .unwrap_or_else(|| ThemeGroups::from_theme(&Theme::default_for_terminal()))
     }
 }
 
@@ -183,7 +214,11 @@ impl kage_plugin::ThemeResolver for Themes {
     }
 
     fn groups(&self, name: &str) -> Result<kage_plugin::ThemeBase, String> {
-        let groups = groups_for(name, self.dir.as_deref())?;
+        let groups = if name == "default" {
+            self.default_groups()
+        } else {
+            groups_for(name, self.dir.as_deref())?
+        };
         Ok(kage_plugin::ThemeBase {
             transparent: groups.transparent,
             groups: groups.groups,
@@ -276,6 +311,10 @@ struct ThemeFile {
     /// `[colors]`. Each entry replaces its group.
     #[serde(default)]
     groups: BTreeMap<String, HlSpec>,
+    /// Palette tokens for the desktop and web client under `[gui]`.
+    /// The TUI ignores them.
+    #[serde(default, rename = "gui")]
+    _gui: Option<toml::Table>,
 }
 
 /// Parse a user theme document into its base theme name and groups:
@@ -509,6 +548,59 @@ mod tests {
             theme.group_style("KageDiffDelete"),
             theme.group_style("KageToolErrorRule")
         );
+    }
+
+    #[test]
+    fn default_resolves_through_the_theme_variant_options() {
+        use kage_core::options::{OptionSource, OptionValue};
+        use kage_plugin::ThemeResolver as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("broken.toml"), "wat = 1").expect("write");
+        let options = SharedOptions::default();
+        let themes = Themes::new(Some(dir.path().to_path_buf()))
+            .with_options(std::sync::Arc::clone(&options));
+        let bg = |themes: &Themes| {
+            let base = themes.groups("default").expect("default always resolves");
+            let mut hl = Highlights::new();
+            hl.set_base("default".into(), base.transparent, base.groups);
+            let theme = Theme::from_groups(&hl);
+            assert_eq!(theme.name, "default");
+            theme.bg
+        };
+        let set = |name: &str, theme: &str| {
+            lock(&options)
+                .set(name, OptionValue::Str(theme.into()), OptionSource::Lua)
+                .expect("valid");
+        };
+
+        super::super::set_terminal_light(false);
+        assert_eq!(bg(&themes), Theme::kage_shadow().bg);
+        set("theme_dark", "kimi-dark");
+        assert_eq!(bg(&themes), Theme::kimi_dark().bg);
+
+        super::super::set_terminal_light(true);
+        assert_eq!(bg(&themes), Theme::kage_dawn().bg);
+        set("theme_light", "kimi-light");
+        assert_eq!(bg(&themes), Theme::kimi_light().bg);
+        set("theme_light", "broken");
+        assert_eq!(bg(&themes), Theme::kage_dawn().bg);
+        set("theme_light", "ghost");
+        assert_eq!(bg(&themes), Theme::kage_dawn().bg);
+        assert_eq!(bg(&Themes::new(None)), Theme::kage_dawn().bg);
+        super::super::set_terminal_light(false);
+    }
+
+    #[test]
+    fn a_gui_table_is_accepted_and_ignored() {
+        let (_, groups) = parse_theme_file(
+            "[colors]\nbg = \"#010203\"\n[gui]\nbackground = \"#040506\"\nradius = 6\n",
+        )
+        .expect("ok");
+        let theme = Theme::from_groups(&groups.into_highlights("default"));
+        assert_eq!(theme.bg, Color::Rgb(1, 2, 3));
+        assert!(parse_theme_file("gui = 1").is_err());
+        assert!(parse_theme_file("[tui]\nbg = \"#000000\"").is_err());
     }
 
     #[test]

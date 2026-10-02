@@ -33,8 +33,12 @@ default_model = "anthropic:claude-sonnet-4-6"
 
 [ui]
 # Bundled themes: "default" (kage-shadow or kage-dawn, following the
-# terminal background), "kage-shadow", "kage-dawn".
+# terminal background), "kage-shadow", "kage-dawn", "kimi-dark",
+# "kimi-light".
 theme = "default"
+# The themes "default" picks on a dark and on a light background.
+# theme_dark = "kimi-dark"
+# theme_light = "kimi-light"
 # Capture mouse events (drag-to-select, click-to-focus). Set to false
 # if you prefer your terminal's native selection.
 mouse = true

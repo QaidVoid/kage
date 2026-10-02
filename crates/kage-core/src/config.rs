@@ -605,6 +605,14 @@ pub struct UiConfig {
     /// Theme name (loaded from bundled themes or
     /// `~/.config/kage/themes/<name>.toml`).
     pub theme: String,
+    /// The theme `default` (and a client's System choice) picks on a
+    /// dark background. Unset means `kage-shadow`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_dark: Option<String>,
+    /// The theme `default` (and a client's System choice) picks on a
+    /// light background. Unset means `kage-dawn`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_light: Option<String>,
     /// Whether mouse events are captured by the TUI.
     pub mouse: bool,
     /// Prompt-input editing model.
@@ -635,6 +643,8 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             theme: "default".into(),
+            theme_dark: None,
+            theme_light: None,
             mouse: true,
             editor: EditorMode::default(),
             input_min_lines: 1,

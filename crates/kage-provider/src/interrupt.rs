@@ -27,6 +27,7 @@
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -47,6 +48,8 @@ use ureq::{Error, Timeout};
 #[derive(Debug, Default)]
 pub struct KillRegistry {
     sockets: Mutex<Vec<TcpStream>>,
+    /// Set by [`Self::shutdown_all`], for reads that poll for it.
+    killed: AtomicBool,
 }
 
 impl KillRegistry {
@@ -74,6 +77,7 @@ impl KillRegistry {
     /// Idempotent; a socket that already served its request shuts down
     /// harmlessly.
     pub(crate) fn shutdown_all(&self) {
+        self.killed.store(true, Ordering::Release);
         let mut sockets = lock(&self.sockets);
         for socket in sockets.drain(..) {
             let _ = socket.shutdown(Shutdown::Both);
@@ -124,6 +128,7 @@ impl InterruptibleConnector {
                     );
                     return Ok(InterruptibleTcpTransport {
                         stream,
+                        registry: Arc::clone(&self.registry),
                         buffers,
                         timeout_write: None,
                         timeout_read: None,
@@ -217,6 +222,7 @@ impl Connector<()> for InterruptibleConnector {
 /// the socket before this transport is ever handed out.
 pub(crate) struct InterruptibleTcpTransport {
     stream: TcpStream,
+    registry: Arc<KillRegistry>,
     buffers: LazyBuffers,
     timeout_write: Option<Duration>,
     timeout_read: Option<Duration>,
@@ -229,7 +235,7 @@ impl Transport for InterruptibleTcpTransport {
 
     fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), Error> {
         apply_timeout(
-            timeout,
+            timeout.not_zero().map(|d| *d),
             &mut self.timeout_write,
             &self.stream,
             TcpStream::set_write_timeout,
@@ -244,18 +250,35 @@ impl Transport for InterruptibleTcpTransport {
     }
 
     fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, Error> {
-        apply_timeout(
-            timeout,
-            &mut self.timeout_read,
-            &self.stream,
-            TcpStream::set_read_timeout,
-        )?;
-
-        let input = self.buffers.input_append_buf();
-        let amount = match self.stream.read(input) {
-            Ok(amount) => amount,
-            Err(e) if is_timeout(&e) => return Err(Error::Timeout(timeout.reason)),
-            Err(e) => return Err(e.into()),
+        let wanted: Option<Duration> = timeout.not_zero().map(|d| *d);
+        let deadline = wanted.map(|wait| Instant::now() + wait);
+        let amount = loop {
+            let slice = if POLL_FOR_KILL {
+                let left = deadline.map_or(KILL_POLL, |at| {
+                    at.saturating_duration_since(Instant::now()).min(KILL_POLL)
+                });
+                Some(left.max(Duration::from_millis(1)))
+            } else {
+                wanted
+            };
+            apply_timeout(
+                slice,
+                &mut self.timeout_read,
+                &self.stream,
+                TcpStream::set_read_timeout,
+            )?;
+            match self.stream.read(self.buffers.input_append_buf()) {
+                Ok(amount) => break amount,
+                Err(e) if is_timeout(&e) => {
+                    if self.registry.killed.load(Ordering::Acquire) {
+                        return Err(Error::Io(io::ErrorKind::ConnectionAborted.into()));
+                    }
+                    if !POLL_FOR_KILL || deadline.is_some_and(|at| Instant::now() >= at) {
+                        return Err(Error::Timeout(timeout.reason));
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
         };
         self.buffers.input_appended(amount);
 
@@ -266,6 +289,14 @@ impl Transport for InterruptibleTcpTransport {
         probe_tcp_stream(&mut self.stream).unwrap_or(false)
     }
 }
+
+/// Whether reads wait in [`KILL_POLL`] slices and check the registry
+/// between them. Windows does not wake a read blocked in another thread
+/// when the socket is shut down; Unix does, so it waits in one piece.
+const POLL_FOR_KILL: bool = cfg!(windows);
+
+/// How long one read slice waits when reads poll for a cancel.
+const KILL_POLL: Duration = Duration::from_millis(200);
 
 /// A blocking socket read or write that hit its configured timeout.
 ///
@@ -282,12 +313,11 @@ fn is_timeout(err: &io::Error) -> bool {
 /// Only reset the socket timeout when the requested value changed, to
 /// avoid a syscall per operation (same scheme as ureq's transport).
 fn apply_timeout(
-    timeout: NextTimeout,
+    wanted: Option<Duration>,
     previous: &mut Option<Duration>,
     stream: &TcpStream,
     set: impl Fn(&TcpStream, Option<Duration>) -> io::Result<()>,
 ) -> io::Result<()> {
-    let wanted: Option<Duration> = timeout.not_zero().map(|d| *d);
     if wanted != *previous {
         set(stream, wanted)?;
         *previous = wanted;
@@ -332,7 +362,9 @@ mod tests {
 
     /// A reader blocked on a socket registered in the registry must
     /// return promptly once `shutdown_all` runs; this is the mechanism
-    /// that frees a cancelled turn's connection.
+    /// that frees a cancelled turn's connection. Windows reads poll for
+    /// the cancel instead, which the request test below covers.
+    #[cfg(not(windows))]
     #[test]
     fn shutdown_all_unblocks_a_reader_blocked_on_a_registered_socket() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");

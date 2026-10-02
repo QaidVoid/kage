@@ -20,6 +20,7 @@ pub(crate) mod kit;
 pub(crate) mod mcp_form;
 pub mod pickers;
 pub(crate) mod provider_form;
+pub(crate) mod reveal;
 pub mod settings;
 pub(crate) mod settings_config;
 #[cfg(not(target_arch = "wasm32"))]

@@ -34,6 +34,8 @@ pub struct Prefs {
     pub fuel: bool,
     /// Lab: the turn timeline rail beside the transcript.
     pub rail: bool,
+    /// Whether a reply that arrives in bursts shows at a steady pace.
+    pub smooth_stream: bool,
     /// Vim mode: normal-mode motions over the transcript, a `:` line
     /// and a modeline. Off by default.
     pub vim: bool,
@@ -60,6 +62,7 @@ impl Default for Prefs {
             constellation: true,
             fuel: true,
             rail: true,
+            smooth_stream: true,
             vim: false,
             pinned: BTreeSet::new(),
             starred_models: BTreeSet::new(),

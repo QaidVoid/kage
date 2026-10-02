@@ -1448,6 +1448,18 @@ impl SettingsView {
     fn chat_rows(&self, prefs: &Prefs, pal: &Palette, cx: &Context<Self>) -> Div {
         boxed(pal)
             .child(row(
+                "Smooth streaming",
+                "Show a reply that arrives in bursts at a steady pace, a moment behind",
+                self.toggle(
+                    "set-smooth",
+                    prefs.smooth_stream,
+                    |p| &mut p.smooth_stream,
+                    pal,
+                    cx,
+                ),
+                pal,
+            ))
+            .child(row(
                 "Turn timeline rail",
                 "A minimap beside the transcript with ticks for turns, edits, approvals, failures and swarms",
                 self.toggle("set-rail", prefs.rail, |p| &mut p.rail, pal, cx),

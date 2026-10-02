@@ -42,6 +42,7 @@ use crate::theme::{FS_2XS, FS_SM, FS_XS, R_FULL, R_LG, R_MD, R_SM, SP_1, SP_2, S
 use crate::timing::RunEnd;
 use crate::views::agents::{self, AgentFacts, SwarmCounts, SwarmView, agent_facts, children_of};
 use crate::views::kit::{self, BtnTone};
+use crate::views::reveal::{self, Reveal};
 use crate::views::workbench::{ChangeEntry, change_entries};
 use kage_client::agent_text::{self, AgentText};
 use kage_client::wire::{NoticeTone, ToolCallContent, ToolCallStatus, TurnReason};
@@ -1185,6 +1186,11 @@ pub struct TranscriptView {
     /// Whether the pointer went down on the rail and is still down, so
     /// only a drag that started there scrolls the transcript.
     rail_held: bool,
+    /// The pace of the streamed text on screen.
+    reveal: Reveal,
+    /// How many characters of each paced item show this frame, for the
+    /// items still behind what arrived.
+    revealed: HashMap<usize, usize>,
 }
 
 impl EventEmitter<TranscriptEvent> for TranscriptView {}
@@ -1220,6 +1226,8 @@ impl TranscriptView {
             composer,
             pinned: None,
             born: Instant::now(),
+            reveal: Reveal::default(),
+            revealed: HashMap::new(),
             revise,
             revising: None,
             list: following_list(),
@@ -1665,6 +1673,56 @@ impl TranscriptView {
         )
     }
 
+    /// Advances the pace of the streamed text this frame: a live reply
+    /// or thinking starts being paced, and while any paced text trails
+    /// what arrived, another frame is asked for.
+    fn pace(&mut self, model: &RowModel, window: &mut Window, cx: &Context<Self>) {
+        self.revealed.clear();
+        let store = self.store.read(cx);
+        if !store.prefs().smooth_stream {
+            self.reveal.clear();
+            return;
+        }
+        let Some(session) = self.session(store) else {
+            return;
+        };
+        let now = Instant::now();
+        for row in &model.rows {
+            let (ix, live) = match row {
+                Row::Assistant { ix, live } | Row::Thinking { ix, live, .. } => (*ix, *live),
+                _ => continue,
+            };
+            if live {
+                self.reveal.track(ix, now);
+            }
+            if !self.reveal.tracks(ix) {
+                continue;
+            }
+            let text = match session.items.get(ix) {
+                Some(
+                    TranscriptItem::Assistant { text } | TranscriptItem::Thinking { text, .. },
+                ) => text,
+                _ => continue,
+            };
+            let len = text.chars().count();
+            if let Some(shown) = self.reveal.advance(ix, len, live, now)
+                && shown < len
+            {
+                self.revealed.insert(ix, shown);
+            }
+        }
+        if self.reveal.behind() {
+            window.request_animation_frame();
+        }
+    }
+
+    /// The part of item `ix`'s `text` that shows this frame.
+    fn shown<'a>(&self, ix: usize, text: &'a str) -> &'a str {
+        self.revealed
+            .get(&ix)
+            .map_or(text, |chars| reveal::prefix(text, *chars))
+    }
+
     /// One transcript row, from the model and the session it names,
     /// seated on the design's collapsed margins.
     fn render_row(
@@ -1703,7 +1761,12 @@ impl TranscriptView {
             },
             Row::Assistant { ix, live } => match session.and_then(|s| s.items.get(*ix)) {
                 Some(TranscriptItem::Assistant { text }) => self
-                    .render_assistant(*ix, text, *live, cx)
+                    .render_assistant(
+                        *ix,
+                        self.shown(*ix, text),
+                        *live || self.revealed.contains_key(ix),
+                        cx,
+                    )
                     .into_any_element(),
                 _ => blank_row(*ix).into_any_element(),
             },
@@ -1711,7 +1774,7 @@ impl TranscriptView {
                 Some(TranscriptItem::Thinking { text, .. }) => self
                     .render_thinking(
                         *ix,
-                        text,
+                        self.shown(*ix, text),
                         *live,
                         *expanded,
                         times.and_then(|t| t.thinking(*ix)),
@@ -3634,7 +3697,7 @@ pub(crate) fn render_diff(lines: &[DiffLine], cx: &App) -> Div {
 }
 
 impl Render for TranscriptView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.target(self.store.read(cx));
         if active != self.session_key {
             let left = std::mem::take(&mut self.ui);
@@ -3651,6 +3714,7 @@ impl Render for TranscriptView {
             self.vim_cursor = None;
             self.list = following_list();
             self.signatures.clear();
+            self.reveal.clear();
         }
         let model = {
             let session = self.session(self.store.read(cx));
@@ -3659,8 +3723,9 @@ impl Render for TranscriptView {
                 None => Rc::default(),
             }
         };
+        self.pace(&model, window, cx);
         let signatures = match self.session(self.store.read(cx)) {
-            Some(session) => signatures(session, &model.rows, &self.ui),
+            Some(session) => signatures(session, &model.rows, &self.ui, &self.revealed),
             None => Vec::new(),
         };
         self.sync_list(signatures);
@@ -3867,7 +3932,12 @@ fn following_list() -> ListState {
 
 /// One signature per row: what decides its laid-out height. A row whose
 /// signature is unchanged keeps its measurement.
-fn signatures(session: &Session, rows: &[Row], ui: &UiState) -> Vec<u64> {
+fn signatures(
+    session: &Session,
+    rows: &[Row],
+    ui: &UiState,
+    revealed: &HashMap<usize, usize>,
+) -> Vec<u64> {
     use std::hash::{Hash as _, Hasher as _};
 
     let last = rows.len().saturating_sub(1);
@@ -3887,6 +3957,7 @@ fn signatures(session: &Session, rows: &[Row], ui: &UiState) -> Vec<u64> {
                 RowKey::Item(item) => {
                     item_fingerprint(session, item, &mut hasher);
                     ui.full_output.contains(&item).hash(&mut hasher);
+                    revealed.get(&item).hash(&mut hasher);
                 }
                 RowKey::Changes(end) => {
                     format!("{:?}", run_changes(session, end)).hash(&mut hasher);
@@ -4597,11 +4668,21 @@ mod tests {
             TranscriptItem::Assistant { text: "a".into() },
         ]);
         let ui = UiState::default();
-        let before = super::signatures(&session, &row_model(&session, &ui).rows, &ui);
+        let before = super::signatures(
+            &session,
+            &row_model(&session, &ui).rows,
+            &ui,
+            &std::collections::HashMap::new(),
+        );
         session.items[1] = TranscriptItem::Assistant {
             text: "a longer reply".into(),
         };
-        let after = super::signatures(&session, &row_model(&session, &ui).rows, &ui);
+        let after = super::signatures(
+            &session,
+            &row_model(&session, &ui).rows,
+            &ui,
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(before[0], after[0], "the prompt row keeps its measurement");
         assert_ne!(before[1], after[1], "the growing reply is measured again");
     }

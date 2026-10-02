@@ -382,6 +382,18 @@ fn input_str<'a>(input: Option<&'a serde_json::Value>, key: &str) -> &'a str {
         .unwrap_or("")
 }
 
+/// The first non-blank line of `text`, with an ellipsis when more
+/// follow, so a multi-line command reads as one row.
+fn one_line(text: &str) -> String {
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let first = lines.next().unwrap_or_default();
+    if lines.next().is_some() {
+        format!("{first} \u{2026}")
+    } else {
+        first.to_owned()
+    }
+}
+
 /// The verb and target one tool call renders with: past tense once the
 /// call ended, otherwise in progress.
 pub(crate) fn tool_verb(call: &ToolCallItem) -> (String, String) {
@@ -412,7 +424,7 @@ pub(crate) fn tool_verb(call: &ToolCallItem) -> (String, String) {
             ),
         ),
         "ls" => ("Listed", "Listing", input_str(input, "path").to_owned()),
-        "shell" => ("Ran", "Running", input_str(input, "command").to_owned()),
+        "shell" => ("Ran", "Running", one_line(input_str(input, "command"))),
         "edit" => (
             "Edited",
             "Editing",
@@ -4508,6 +4520,12 @@ mod tests {
         let after = super::signatures(&session, &row_model(&session, &ui).rows, &ui);
         assert_eq!(before[0], after[0], "the prompt row keeps its measurement");
         assert_ne!(before[1], after[1], "the growing reply is measured again");
+    }
+
+    #[test]
+    fn a_multi_line_command_reads_as_its_first_line() {
+        assert_eq!(super::one_line("cargo test"), "cargo test");
+        assert_eq!(super::one_line("\n  cd /w\n  echo hi\n"), "cd /w \u{2026}");
     }
 
     #[test]

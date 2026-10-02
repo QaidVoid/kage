@@ -54,8 +54,6 @@ cargo build --release
 ln -s "$PWD/target/release/kage" ~/.local/bin/kage
 ```
 
-With nix, `nix develop` gives you the pinned toolchain.
-
 ## Quick start
 
 ```sh

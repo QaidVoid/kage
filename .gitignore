@@ -1,5 +1,4 @@
 target/
-/.direnv
 /.kage
 *.swp
 *.swo

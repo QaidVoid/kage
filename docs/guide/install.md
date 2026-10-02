@@ -5,15 +5,12 @@ prebuilt binaries yet.
 
 ## prerequisites
 
-You need a working Rust toolchain at version 1.87 or newer. The
+You need a working Rust toolchain at version 1.89 or newer. The
 project pins 1.95 in `rust-toolchain.toml`, which rustup installs the
 first time you build. You also need a C compiler: the Xcode
 command-line tools on macOS, or a C compiler and `pkg-config` on
 Linux. Lua 5.4 is vendored and built with kage, so no system Lua is
 needed.
-
-If you have nix and direnv, `nix develop` (or `direnv allow`) gives
-you the exact toolchain plus `cargo-nextest` and `bacon`.
 
 ## clone and build
 

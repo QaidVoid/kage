@@ -195,6 +195,8 @@ pub struct Shell {
     composer: Entity<ComposerView>,
     sidebar: Entity<SidebarView>,
     transcript: Entity<TranscriptView>,
+    /// The turn timeline rail on the chat pane's right edge.
+    rail: Entity<crate::views::transcript::RailView>,
     workbench: Entity<WorkbenchView>,
     dock: Entity<DockRow>,
     approval: Entity<ApprovalCard>,
@@ -274,6 +276,7 @@ impl Shell {
         // renders that element.
         let input_laid_out = composer.read(cx).input_laid_out();
         let transcript = cx.new(|cx| TranscriptView::new(store.clone(), input.clone(), window, cx));
+        let rail = cx.new(|cx| crate::views::transcript::RailView::new(transcript.clone(), cx));
         let workbench = cx.new(|cx| WorkbenchView::new(store.clone(), input.clone(), cx));
         let dock = cx.new(|cx| DockRow::new(store.clone(), window, cx));
         let approval = cx.new(|cx| ApprovalCard::new(store.clone(), window, cx));
@@ -435,6 +438,7 @@ impl Shell {
             composer,
             sidebar,
             transcript,
+            rail,
             workbench,
             dock,
             approval,
@@ -1428,9 +1432,13 @@ impl Shell {
             .flex_1()
             .min_h_0()
             .w_full()
+            .relative()
             .flex()
             .justify_center()
             .when(has_session, |column| column.px(px(SP_8)))
+            // The rail hangs on the pane's right edge, as the design
+            // has it, clear of the centered column.
+            .when(has_session, |column| column.child(self.rail.clone()))
             .child(
                 div()
                     .w_full()

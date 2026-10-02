@@ -1015,6 +1015,35 @@ fn plain_row(session: &Session, ix: usize, ui: &UiState, last: usize) -> Option<
     })
 }
 
+/// The turn timeline rail on the right edge of the chat pane, drawn by
+/// the transcript it maps and redrawn whenever that changes.
+pub struct RailView {
+    transcript: Entity<TranscriptView>,
+}
+
+impl RailView {
+    /// A rail over `transcript`.
+    pub fn new(transcript: Entity<TranscriptView>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&transcript, |_, _, cx| cx.notify()).detach();
+        Self { transcript }
+    }
+}
+
+impl Render for RailView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let rail = self
+            .transcript
+            .update(cx, |transcript, cx| transcript.rail_element(cx));
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .w(px(28.))
+            .children(rail)
+    }
+}
+
 /// The middle panel.
 pub struct TranscriptView {
     store: Entity<Store>,
@@ -1334,6 +1363,14 @@ impl TranscriptView {
     /// place in the rows, and the viewport's thumb. Hovering a tick names
     /// it, a click scrolls to it, and a press or drag on the rail scrolls
     /// there.
+    /// The rail of the session shown, while there is one to draw. The
+    /// shell hangs it on the right edge of the chat pane through
+    /// [`RailView`].
+    pub fn rail_element(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let session = self.session(self.store.read(cx))?;
+        self.rail(session, cx)
+    }
+
     fn rail(&self, session: &Session, cx: &Context<Self>) -> Option<AnyElement> {
         let rows = &self.model.rows;
         let count = rows.len();
@@ -1356,7 +1393,7 @@ impl TranscriptView {
             .absolute()
             .top(px(10.))
             .bottom(px(10.))
-            .right(px(-20.))
+            .right(px(6.))
             .w(px(16.))
             .cursor_pointer()
             .on_prepaint(move |laid, _, _| bounds.set(Some(laid)))
@@ -3349,17 +3386,7 @@ impl Render for TranscriptView {
         let follow = self.following();
         let colors = cx.theme().colors;
 
-        // The rail hangs in the column's right gutter, outside the
-        // clipped list, so it never covers a row.
-        let rail = self
-            .session(self.store.read(cx))
-            .and_then(|session| self.rail(session, cx));
-        let mut panel = v_flex()
-            .id("transcript")
-            .size_full()
-            .min_h_0()
-            .relative()
-            .children(rail);
+        let mut panel = v_flex().id("transcript").size_full().min_h_0().relative();
         if let Some(banner) = banner {
             panel = panel.child(banner);
         }

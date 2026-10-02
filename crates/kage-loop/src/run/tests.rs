@@ -23,6 +23,57 @@ fn build_request_forwards_max_output_tokens_from_context() {
 }
 
 #[test]
+fn build_request_answers_calls_a_quit_left_open() {
+    let call = |id: &str| Content::ToolCall {
+        id: ToolCallId::new(id),
+        name: "agent".into(),
+        input: serde_json::json!({}),
+    };
+    let result = |id: &str| {
+        Message::new(
+            Role::ToolResult,
+            vec![Content::ToolResultBlock {
+                call_id: ToolCallId::new(id),
+                output: "done".into(),
+                is_error: false,
+            }],
+            None,
+        )
+    };
+    let mut cx = AgentContext::new("m", "");
+    for message in [
+        user_msg("go"),
+        Message::new(Role::Assistant, vec![call("a"), call("b")], None),
+        result("a"),
+        user_msg("continue"),
+    ] {
+        cx.history.push(Arc::new(message));
+    }
+    let provider = MockProvider::sequence(vec![]);
+    let req = build_request(&cx, &ToolRegistry::new(), &provider);
+    let roles: Vec<Role> = req.messages.iter().map(|m| m.role).collect();
+    assert_eq!(
+        roles,
+        [
+            Role::User,
+            Role::Assistant,
+            Role::ToolResult,
+            Role::ToolResult,
+            Role::User
+        ]
+    );
+    assert!(matches!(
+        &req.messages[3].content[..],
+        [Content::ToolResultBlock { call_id, is_error: true, .. }] if *call_id == ToolCallId::new("b")
+    ));
+    assert_eq!(cx.history.len(), 4, "the stored history keeps the gap");
+
+    cx.history.truncate(2);
+    let req = build_request(&cx, &ToolRegistry::new(), &provider);
+    assert_eq!(req.messages.len(), 4, "a trailing call is answered too");
+}
+
+#[test]
 fn build_request_leaves_max_output_tokens_unset_when_context_default() {
     let mut cx = AgentContext::new("m", "");
     cx.history.push(Arc::new(user_msg("hi")));

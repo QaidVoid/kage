@@ -15,10 +15,11 @@
 //! }
 //! ```
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kage_core::{CancelFlag, Content, LoopError, LoopEvent, Message, MessageId};
+use kage_core::{CancelFlag, Content, LoopError, LoopEvent, Message, MessageId, Role, ToolCallId};
 use kage_provider::{Provider, ProviderError, StreamRequest};
 use kage_tools::ToolRegistry;
 
@@ -373,7 +374,7 @@ fn build_request(
     } else {
         flatten_thinking(&cx.history)
     };
-    let mut req = StreamRequest::new(&cx.model, history);
+    let mut req = StreamRequest::new(&cx.model, close_unanswered_calls(history));
     if !cx.system_prompt.is_empty() {
         req.system = Some(cx.system_prompt.clone());
     }
@@ -382,6 +383,67 @@ fn build_request(
     req.level = cx.reasoning.resolve(cx.thinking_level);
     req.reasoning = cx.reasoning;
     req
+}
+
+/// What a call that never got a result answers with in a request.
+const INTERRUPTED: &str = "Interrupted: kage stopped before this call finished.";
+
+/// `history` with a failed result after every tool call that has none.
+/// A session that kage quit in the middle of a call (a swarm member
+/// reopened for a retry, a resumed main session) still ends on that
+/// call, and providers refuse a call without its result. The stored
+/// history keeps the gap, which clients show as an interrupted call.
+fn close_unanswered_calls(history: Vec<Arc<Message>>) -> Vec<Arc<Message>> {
+    let answered: HashSet<&ToolCallId> = history
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|content| match content {
+            Content::ToolResultBlock { call_id, .. } => Some(call_id),
+            _ => None,
+        })
+        .collect();
+    let unanswered = |message: &Message| -> Vec<ToolCallId> {
+        message
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                Content::ToolCall { id, .. } if !answered.contains(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    if history.iter().all(|message| unanswered(message).is_empty()) {
+        return history;
+    }
+    let mut closed = Vec::with_capacity(history.len() + 1);
+    let mut open: Vec<ToolCallId> = Vec::new();
+    let mut parent = None;
+    let close =
+        |open: &mut Vec<ToolCallId>, parent: Option<MessageId>, closed: &mut Vec<Arc<Message>>| {
+            closed.extend(open.drain(..).map(|call_id| {
+                Arc::new(Message::new(
+                    Role::ToolResult,
+                    vec![Content::ToolResultBlock {
+                        call_id,
+                        output: INTERRUPTED.to_owned(),
+                        is_error: true,
+                    }],
+                    parent,
+                ))
+            }));
+        };
+    for message in &history {
+        if message.role != Role::ToolResult {
+            close(&mut open, parent, &mut closed);
+        }
+        if message.role == Role::Assistant {
+            open = unanswered(message);
+            parent = Some(message.id);
+        }
+        closed.push(Arc::clone(message));
+    }
+    close(&mut open, parent, &mut closed);
+    closed
 }
 
 fn finish_cancelled<F: FnMut(LoopEvent)>(emit: &mut F) -> Result<(), LoopError> {

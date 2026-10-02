@@ -1,0 +1,332 @@
+name: desktop release
+
+# Releases the desktop and web client, which version apart from the
+# CLI: a push to main that raises `version` in gui/Cargo.toml tags
+# `kage-desktop-v<version>`, creates its release (not marked latest, so
+# `releases/latest` stays the CLI's) and builds the web bundle, the
+# desktop archives and the onelf bundles into it. A manual run with no
+# tag releases the current version if it has no tag yet, which is how
+# the first release is cut; with a tag it rebuilds that release.
+on:
+  push:
+    branches: [main]
+    paths: [gui/Cargo.toml]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag of an existing desktop release to rebuild, such as kage-desktop-v0.1.0. Empty releases the current version.
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.tag || github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  attestations: write
+  contents: write
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The tag to build, or nothing when the version already has one. A new
+  # release lists the commits that touched gui/ since the last one.
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REBUILD: ${{ inputs.tag }}
+        run: |
+          if [ -n "$REBUILD" ]; then
+            echo "tag=$REBUILD" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version="$(awk '/^\[package\]/ { p = 1; next } /^\[/ { p = 0 }
+            p && /^version *=/ { gsub(/"/, "", $3); print $3; exit }' gui/Cargo.toml)"
+          tag="kage-desktop-v$version"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "$tag exists; nothing to release"
+            exit 0
+          fi
+          previous="$(git tag --list 'kage-desktop-v*' --sort=-v:refname | head -n 1)"
+          {
+            echo "## What changed"
+            echo
+            git log --no-merges --format='- %s (%h)' ${previous:+"$previous"..}HEAD -- gui/
+          } > notes.md
+          gh release create "$tag" --target "$GITHUB_SHA" \
+            --title "kage-desktop v$version" --notes-file notes.md --latest=false
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  # The browser client `kage serve` hands out: the gui/ workspace built for
+  # wasm, its wasm-bindgen glue, the page and the icon set.
+  web:
+    name: web client
+    needs: release
+    if: needs.release.outputs.tag != ''
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.release.outputs.tag }}
+    defaults:
+      run:
+        working-directory: gui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Toolchain
+        run: rustup toolchain install nightly --profile minimal --target wasm32-unknown-unknown
+
+      # The CLI has to match the wasm-bindgen crate gui/Cargo.lock pins.
+      - uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
+        with:
+          tool: wasm-bindgen@0.2.129
+
+      - name: Build
+        run: |
+          cargo +nightly build --release --locked --target wasm32-unknown-unknown
+          wasm-bindgen --out-dir web --target web \
+            target/wasm32-unknown-unknown/release/kage_desktop.wasm
+
+      - name: Package
+        run: |
+          bundle=../web-bundle/web
+          mkdir -p "$bundle/assets/icons"
+          cp web/index.html web/boot.js web/kage_desktop.js web/kage_desktop_bg.wasm "$bundle/"
+          manifest="$(cargo metadata --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "gpui-kit-assets") | .manifest_path')"
+          cp "$(dirname "$manifest")"/assets/icons/*.svg "$bundle/assets/icons/"
+          tar -C ../web-bundle -cJf ../kage-web.tar.xz web
+          cd ..
+          sha256sum kage-web.tar.xz > kage-web.tar.xz.sha256
+
+      - uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # 2.11.5
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: kage-web.tar.xz*
+          file_glob: true
+          overwrite: true
+          tag: ${{ env.TAG }}
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: kage-web.tar.xz
+
+  # The desktop client lives in its own Cargo workspace under gui/.
+  # Linux links the system display libraries, so the plain archive builds
+  # on the oldest supported Ubuntu for a low glibc floor. The portable
+  # onelf bundle is the desktop-onelf job's.
+  desktop:
+    name: desktop ${{ matrix.name }}
+    needs: release
+    if: needs.release.outputs.tag != ''
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64-linux
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - name: aarch64-linux
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - { name: aarch64-macos, os: macos-latest, target: aarch64-apple-darwin }
+          - { name: x86_64-macos, os: macos-latest, target: x86_64-apple-darwin }
+          - { name: x86_64-windows, os: windows-latest, target: x86_64-pc-windows-msvc }
+    defaults:
+      run:
+        shell: bash
+        working-directory: gui
+    env:
+      TAG: ${{ needs.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install
+          rustup target add "${{ matrix.target }}"
+
+      - name: Install Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libwayland-dev libxcb1-dev
+
+      - name: Build
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Package
+        run: |
+          artifact="kage-desktop-${{ matrix.name }}"
+          bin="target/${{ matrix.target }}/release/kage-desktop"
+          if [ "$RUNNER_OS" = "Windows" ]; then bin="$bin.exe"; fi
+          mkdir -p "$artifact" ../dist
+          cp "$bin" ../LICENSE ../README.md "$artifact/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a "../dist/$artifact.zip" "$artifact"
+          else
+            tar -cJf "../dist/$artifact.tar.xz" "$artifact"
+          fi
+
+      - name: Checksums
+        id: checksums
+        working-directory: dist
+        run: |
+          echo "subjects=$(printf 'dist/%s\n' * | paste -sd, -)" >> "$GITHUB_OUTPUT"
+          for file in *; do
+            if command -v sha256sum >/dev/null; then
+              sha256sum "$file" > "$file.sha256"
+            else
+              shasum -a 256 "$file" > "$file.sha256"
+            fi
+          done
+
+      - uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # 2.11.5
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: dist/*
+          file_glob: true
+          overwrite: true
+          tag: ${{ env.TAG }}
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.checksums.outputs.subjects }}
+
+  # The portable Linux bundle, built in Arch the way aeris builds its own:
+  # a glibc and loader bundled from Ubuntu did not run on other systems.
+  # It carries the Vulkan stack too, slimmed, so it starts on a host
+  # without one; onelf's launch resolver weighs each bundled library
+  # against the host's copy. No lavapipe: no slimmed build of it matches
+  # the slimmed LLVM yet.
+  desktop-onelf:
+    name: desktop onelf ${{ matrix.name }}
+    needs: release
+    if: needs.release.outputs.tag != ''
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64-linux
+            arch: x86_64
+            runner: ubuntu-latest
+            image: archlinux:latest
+            pkg-ext: pkg.tar.zst
+            onelf-sha256: 3a990243790c026c902330a7744e8c21b25fdc8c694a88e79d6fb25d761a6351
+            vulkan: vulkan-radeon vulkan-intel vulkan-nouveau
+            slim: llvm-libs-nano mesa-nano vulkan-radeon-nano vulkan-intel-nano vulkan-nouveau-nano libxml2-iculess
+          - name: aarch64-linux
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+            image: menci/archlinuxarm:latest
+            pkg-ext: pkg.tar.xz
+            onelf-sha256: 9b5b2c3d031756a064bd9a71a977e229cb359f324937a5ba8a28db1568bae15b
+            vulkan: vulkan-radeon vulkan-nouveau vulkan-panfrost vulkan-broadcom
+            slim: llvm-libs-nano mesa-nano vulkan-radeon-nano vulkan-nouveau-nano vulkan-panfrost-nano vulkan-broadcom-nano libxml2-iculess
+    defaults:
+      run:
+        shell: bash
+        working-directory: gui
+    env:
+      ONELF_VERSION: 0.3.3
+      TAG: ${{ needs.release.outputs.tag }}
+    steps:
+      - name: Install Arch packages
+        working-directory: /
+        run: |
+          pacman -Syu --disable-sandbox --noconfirm --needed \
+            base-devel git curl tar xz rustup patchelf pkgconf \
+            libxcb libxkbcommon libxkbcommon-x11 wayland fontconfig \
+            mesa vulkan-icd-loader ${{ matrix.vulkan }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - name: Build
+        run: cargo build --release --locked
+
+      # The graphics stack is most of the bundle and LLVM over half of it.
+      # These builds drop what a bundled renderer never reaches for and
+      # install under the stock names, so onelf picks them up unchanged.
+      # After the build: rustc links the system LLVM, and the slim one
+      # lacks targets it needs.
+      - name: Slim the graphics stack
+        working-directory: /tmp
+        run: |
+          base="https://github.com/pkgforge-dev/archlinux-pkgs-debloated/releases/download/continuous"
+          mkdir -p debloated
+          cd debloated
+          for pkg in ${{ matrix.slim }}; do
+            curl -fsSL -O "$base/$pkg-${{ matrix.arch }}.${{ matrix.pkg-ext }}"
+          done
+          pacman -U --disable-sandbox --noconfirm ./*.${{ matrix.pkg-ext }}
+
+      - name: Install onelf
+        run: |
+          curl -fsSL -o /usr/local/bin/onelf \
+            "https://github.com/QaidVoid/onelf/releases/download/$ONELF_VERSION/onelf-${{ matrix.name }}"
+          echo "${{ matrix.onelf-sha256 }}  /usr/local/bin/onelf" | sha256sum -c -
+          chmod +x /usr/local/bin/onelf
+
+      - name: Pack with onelf
+        run: |
+          mkdir -p AppDir/bin AppDir/.onelf/icons AppDir/.onelf/desktop ../dist
+          cp target/release/kage-desktop AppDir/bin/kage-desktop
+          cp assets/brand/kage-glyph-shadow.png AppDir/.onelf/icons/default.png
+          printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=kage' \
+            'Comment=Desktop client for the kage coding agent' \
+            'Exec=kage-desktop' 'Icon=default' 'Terminal=false' \
+            'Categories=Development;' > AppDir/.onelf/desktop/default.desktop
+          cp onelf.toml AppDir/onelf.toml
+          sed -i "s/^version = .*/version = \"${TAG#kage-desktop-v}\"/" AppDir/onelf.toml
+          onelf build AppDir
+          onelf verify AppDir/kage-desktop.onelf
+          mv AppDir/kage-desktop.onelf "../dist/kage-desktop-${{ matrix.name }}.onelf"
+
+      # The headless platform needs no display, so this proves the bundle
+      # unpacks and starts its event loop. The container has no fonts, and
+      # GPUI needs a system font to start.
+      - name: Smoke run the bundle
+        run: |
+          pacman -S --disable-sandbox --noconfirm --needed ttf-dejavu
+          ZED_HEADLESS=1 timeout 60 "../dist/kage-desktop-${{ matrix.name }}.onelf" --smoke 3000
+
+      - name: Checksum
+        working-directory: dist
+        run: sha256sum "kage-desktop-${{ matrix.name }}.onelf" > "kage-desktop-${{ matrix.name }}.onelf.sha256"
+
+      - uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # 2.11.5
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: dist/kage-desktop-${{ matrix.name }}.onelf*
+          file_glob: true
+          overwrite: true
+          tag: ${{ env.TAG }}
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/kage-desktop-${{ matrix.name }}.onelf

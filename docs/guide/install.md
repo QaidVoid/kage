@@ -5,33 +5,28 @@ from crates.io, or build it from source.
 
 ## release downloads
 
-Every [GitHub release](https://github.com/QaidVoid/kage/releases)
-carries the `kage` binary for each platform, in two archives:
-
-| Archive | Holds |
-| --- | --- |
-| `kage-<platform>.tar.gz` | `kage`, the man page, the license and the readme |
-| `kage-<platform>-web.tar.gz` | the same, plus the browser client in a `web/` folder |
+kage and its desktop and web client release apart, each with its own
+version. A `v<version>` [GitHub release](https://github.com/QaidVoid/kage/releases)
+carries the `kage` binary for each platform, as
+`kage-<platform>.tar.gz` with the man page, the license and the
+readme. A `kage-desktop-v<version>` release carries the
+[desktop client](#desktop-client) and the browser client.
 
 `<platform>` is `x86_64-linux`, `aarch64-linux` or `aarch64-macos`.
 The Linux binaries are static, so they run on any distribution. For
-Windows the archives are `kage-x86_64-windows.zip` and
-`kage-x86_64-windows-web.zip`, holding `kage.exe`; unpack one and put
-its folder on your `PATH`.
+Windows the archive is `kage-x86_64-windows.zip`, holding `kage.exe`;
+unpack it and put its folder on your `PATH`. The latest release is
+always a `kage` one, so the link below fetches the newest `kage`.
 
 ```bash
 curl -fsSL https://github.com/QaidVoid/kage/releases/latest/download/kage-x86_64-linux.tar.gz | tar -xz
 install -m 755 kage-x86_64-linux/kage ~/.local/bin/kage
 ```
 
-Take the `-web` archive if you want `kage serve` to hand out the
-browser client. It serves the `web/` folder beside the executable
-without any flag, so keep the two together: move the whole folder
-where you like and link the binary onto your `PATH`. The browser
-client also ships on its own as `kage-web.tar.xz`, for an install
-that came from crates.io; unpack it anywhere and pass its `web/`
-folder to `kage serve --web-dir`. [remote](/editors/remote#web-client)
-has the rest.
+For `kage serve` to hand out the browser client, take
+`kage-web.tar.xz` from the newest desktop release. `kage serve` finds
+its `web/` folder beside the executable with no flag, or anywhere
+with `--web-dir`. [remote](/editors/remote#web-client) has the rest.
 
 Every file has a `.sha256` beside it, and every archive a build
 provenance attestation that the GitHub CLI checks:
@@ -74,7 +69,8 @@ ln -s "$PWD/target/release/kage" ~/.local/bin/kage
 ## desktop client
 
 `kage-desktop` is a window onto the same engine: it starts `kage rpc`
-and shows its sessions. Each release carries it too:
+and shows its sessions. It ships in the `kage-desktop-v<version>`
+releases on the [releases page](https://github.com/QaidVoid/kage/releases):
 
 | Platform | Files |
 | --- | --- |

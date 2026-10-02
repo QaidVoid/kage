@@ -1,6 +1,7 @@
 # onelf recipe for packing kage-desktop into one portable binary.
 # The release workflow copies the release binary to AppDir/bin, drops
-# this file beside it, and runs `onelf build AppDir`.
+# this file beside it, writes the release's version over the
+# placeholder below, and runs `onelf build AppDir`.
 [package]
 name = "kage-desktop"
 command = "bin/kage-desktop"

@@ -254,15 +254,21 @@ browser needs nothing but the page URL and the token. It serves the
 `web/` folder beside the `kage` executable, or the folder `--web-dir`
 names.
 
-The `-web` release archives ship the client in that `web/` folder,
-so `kage serve` from one of them serves it with no flag. The client
-also ships alone as `kage-web.tar.xz`, for a `kage` that came from
-crates.io or a source build:
+The client ships as `kage-web.tar.xz` in the `kage-desktop-v<version>`
+releases, which version apart from `kage`. Take it from the newest
+one on the [releases page](https://github.com/QaidVoid/kage/releases).
+Unpack it beside the `kage` executable to serve it with no flag, or
+anywhere and name the folder:
 
 ```sh
-curl -fsSL https://github.com/QaidVoid/kage/releases/latest/download/kage-web.tar.xz | tar -xJ
+version=0.1.0   # the newest kage-desktop release
+curl -fsSL "https://github.com/QaidVoid/kage/releases/download/kage-desktop-v$version/kage-web.tar.xz" | tar -xJ
 kage serve --web-dir web
 ```
+
+The client works with any `kage` from 0.1.0 on. When the engine is
+older than the client needs, or lacks a feature it uses, the client
+says so in a banner.
 
 To build the bundle yourself (the full commands and caveats are in
 `gui/SPIKE.md`):

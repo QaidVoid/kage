@@ -81,7 +81,7 @@ use mcp::editor_servers;
 use options::{Settings, Shown, config_options};
 use sessions::list_page;
 
-use crate::engine::{Recorder, SessionSpec, SubscriptionId};
+use crate::engine::{Background, Recorder, SessionSpec, SubscriptionId};
 
 /// What a redacted config value reads as.
 const REDACTED: &str = "<redacted>";
@@ -214,6 +214,9 @@ struct CliAcpAgent {
     /// Whether the client asked for tools without a `[permissions]`
     /// rule to run, as in the TUI, instead of asking first.
     unconfigured_run: AtomicBool,
+    /// Whether the client is a kage client, which shows runs it did not
+    /// prompt, so an idle session wakes for a background agent's result.
+    kage_client: AtomicBool,
     peer: Peer,
     held: Held,
     asks: AskSet,
@@ -272,6 +275,7 @@ impl CliAcpAgent {
             shown,
             subagents,
             unconfigured_run: AtomicBool::new(false),
+            kage_client: AtomicBool::new(false),
             peer,
             held,
             asks,
@@ -289,7 +293,8 @@ impl CliAcpAgent {
 
     /// What a session of this connection runs with: the host's spec,
     /// with the permission fallback the client asked for at
-    /// `initialize`. Agents the session starts inherit its gate.
+    /// `initialize`, and background results waking an idle session for
+    /// kage clients. Agents the session starts inherit its gate.
     fn session_spec(
         &self,
         id: SessionId,
@@ -300,6 +305,11 @@ impl CliAcpAgent {
         let mut spec = (self.host.spec)(&self.host.registry(), id, cwd, model, servers)?;
         if self.unconfigured_run.load(Ordering::SeqCst) {
             spec.gate = spec.gate.with_fallback(PermissionAction::Allow);
+        }
+        if self.kage_client.load(Ordering::SeqCst)
+            && let Some(agents) = spec.agents.as_mut()
+        {
+            agents.background = Background::Wake;
         }
         Ok(spec)
     }
@@ -387,6 +397,13 @@ impl Agent for CliAcpAgent {
         );
         self.unconfigured_run.store(
             req.client_capabilities.unconfigured_tools_run(),
+            Ordering::SeqCst,
+        );
+        self.kage_client.store(
+            req.client_capabilities
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta.kage.is_some()),
             Ordering::SeqCst,
         );
         InitializeResponse {

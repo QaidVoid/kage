@@ -166,13 +166,20 @@ impl super::Dispatcher {
         false
     }
 
-    /// Drop the idle session `id` and its idle agent descendants. A
-    /// session with a run or shell in flight is kept and warned
-    /// instead. Closing the active session leaves the engine without
+    /// Drop the idle session `id` and its idle agent descendants, and
+    /// stop its running background agents. A session with a run or
+    /// shell in flight is kept and warned instead. Closing the active session leaves the engine without
     /// one, so a later command without a session id is refused.
     pub(super) fn close(&mut self, id: SessionId) {
         if !self.ensure_idle(id, "close") {
             return;
+        }
+        // Background agents may still run under an idle session; they
+        // have nobody to report to once it is gone.
+        for (agent, session) in &self.sessions {
+            if session.idle.is_none() && self.descends_from(*agent, id) {
+                session.cancel.cancel();
+            }
         }
         let mut dropped = vec![id];
         dropped.extend(
@@ -488,6 +495,7 @@ impl super::Dispatcher {
         session.title_pending = session.title && !super::has_reply(&cx);
         session.pending_history.clear();
         session.queued.clear();
+        kage_core::sync::lock(&session.inbox).clear();
         session.gate.reset_session();
         session.state.permission_mode = None;
         session.path = Some(path.clone());

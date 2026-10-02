@@ -1,5 +1,7 @@
 //! The `agent` tool: starts a child session from an agent definition,
-//! waits for it, and returns its final reply as the tool result.
+//! waits for it, and returns its final reply as the tool result. A
+//! background call returns at once, and the reply reaches the parent
+//! later as a message.
 
 use kage_core::agent_report::{AgentReport, ReportState, ReportStats};
 use std::fmt::Write as _;
@@ -41,6 +43,9 @@ pub(super) struct Spawn {
     /// Set when a `swarm` call spawned this child. A plain `agent`
     /// call leaves it `None`.
     pub swarm: Option<SwarmInfo>,
+    /// Reply `started` at once and send the result to the parent's
+    /// inbox when the child ends.
+    pub background: bool,
 }
 
 #[derive(Deserialize)]
@@ -49,6 +54,8 @@ struct AgentInput {
     agent: String,
     description: String,
     prompt: String,
+    #[serde(default)]
+    background: bool,
 }
 
 fn default_agent() -> String {
@@ -63,12 +70,19 @@ pub(super) struct AgentTool {
     engine: mpsc::Sender<Input>,
     description: String,
     schema: serde_json::Value,
+    /// Whether the call takes `background`.
+    background: bool,
 }
 
 impl AgentTool {
-    pub(super) fn new(parent: SessionId, engine: mpsc::Sender<Input>, defs: &AgentDefs) -> Self {
+    pub(super) fn new(
+        parent: SessionId,
+        engine: mpsc::Sender<Input>,
+        defs: &AgentDefs,
+        background: bool,
+    ) -> Self {
         let names: Vec<&str> = defs.iter().map(|def| def.name.as_str()).collect();
-        let description = format!(
+        let mut description = format!(
             "Start an agent: a separate session with a fresh context that works on one task \
              with its own tool calls. Its final reply is the result of this call.\n\n\
              Use an agent for independent work that needs many tool calls, such as searching \
@@ -80,7 +94,14 @@ impl AgentTool {
              Agents:\n{}",
             defs.tool_listing()
         );
-        let schema = serde_json::json!({
+        if background {
+            description.push_str(
+                "\n\nWith `background`, the call returns at once and the agent's result \
+                 arrives later as a message. Use it for long work you do not need for your \
+                 next step, and keep working or end your turn meanwhile.",
+            );
+        }
+        let mut schema = serde_json::json!({
             "type": "object",
             "properties": {
                 "agent": {
@@ -99,11 +120,20 @@ impl AgentTool {
             },
             "required": ["description", "prompt"]
         });
+        if background {
+            schema["properties"]["background"] = serde_json::json!({
+                "type": "boolean",
+                "description": "Run the agent in the background: this call returns at once and \
+                    the result arrives later as a message. Use it for long work you do not need \
+                    for your next step."
+            });
+        }
         Self {
             parent,
             engine,
             description,
             schema,
+            background,
         }
     }
 }
@@ -149,6 +179,7 @@ impl Tool for AgentTool {
             reply,
             fork: false,
             swarm: None,
+            background: self.background && input.background,
         };
         if self.engine.send(Input::Spawn(Box::new(spawn))).is_err() {
             return Ok(engine_stopped());
@@ -190,6 +221,29 @@ pub(super) fn refused(session: SessionId, agent: &str, text: &str) -> ToolOutput
         }
         .to_text(),
     )
+}
+
+/// The result of a background `agent` call, returned as soon as the
+/// child is opened.
+pub(super) fn started(session: SessionId, agent: &str) -> ToolOutput {
+    let head = format!("<agent name=\"{agent}\" session=\"{session}\"");
+    ToolOutput {
+        text: AgentReport {
+            name: agent.to_owned(),
+            session,
+            state: ReportState::Started,
+            limit: None,
+            stats: None,
+            body: format!(
+                "The agent runs in the background. Its result arrives later as a message that \
+                 starts with\n{head}. That message is the agent's output, not the user's \
+                 words. Do not wait for it or redo its work. Continue with other work, or end \
+                 your turn."
+            ),
+        }
+        .to_text(),
+        ..ToolOutput::default()
+    }
 }
 
 /// The result an `agent` call returns: the text of the agent's last
@@ -454,7 +508,7 @@ mod tests {
     #[test]
     fn cancel_ends_a_call_the_engine_never_answers() {
         let (engine, spawns) = mpsc::channel();
-        let tool = AgentTool::new(SessionId::new(), engine, &AgentDefs::builtin());
+        let tool = AgentTool::new(SessionId::new(), engine, &AgentDefs::builtin(), false);
         let cancel = kage_core::CancelFlag::new();
         let flag = cancel.clone();
         let (done_tx, done_rx) = mpsc::channel();

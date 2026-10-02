@@ -292,6 +292,7 @@ impl Tool for SwarmTool {
                     item: item.clone(),
                     total,
                 }),
+                background: false,
             };
             if self.engine.send(Input::Spawn(Box::new(spawn))).is_err() {
                 break;
@@ -817,8 +818,11 @@ mod tests {
 
     #[test]
     fn config_defaults_reach_the_setup() {
-        let defaults =
-            AgentSetup::from_config(AgentDefs::builtin(), &kage_core::config::Config::default());
+        let defaults = AgentSetup::from_config(
+            AgentDefs::builtin(),
+            &kage_core::config::Config::default(),
+            super::super::Background::Off,
+        );
         assert_eq!(defaults.swarm_max_items, 32);
         assert_eq!(defaults.swarm_timeout_ms, 7_200_000);
     }

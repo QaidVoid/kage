@@ -66,7 +66,8 @@ pub(crate) fn execute_print_run(
     for err in agent_errors {
         eprintln!("kage: {err}");
     }
-    let agents = crate::engine::AgentSetup::from_config(defs, &layered);
+    let agents =
+        crate::engine::AgentSetup::from_config(defs, &layered, crate::engine::Background::Off);
 
     let session = writer
         .as_ref()

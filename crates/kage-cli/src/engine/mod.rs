@@ -105,12 +105,29 @@ pub(crate) struct AgentSetup {
     pub swarm_max_items: usize,
     /// Overall deadline for one `swarm` call, in milliseconds.
     pub swarm_timeout_ms: u64,
+    /// Whether the main session may start background agents, and what
+    /// it does with their results while idle.
+    pub background: Background,
+}
+
+/// What a main session does with a background agent's result that
+/// arrives while it is idle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Background {
+    /// No background agents. Print mode, whose process ends with its
+    /// run.
+    Off,
+    /// Keep the result until the next prompt starts a run. Editors
+    /// over ACP, which cannot show a run nobody prompted.
+    Hold,
+    /// Start a run to read the result. The TUI and kage clients.
+    Wake,
 }
 
 impl AgentSetup {
     /// `defs` with the limits of `config`'s `[agents]` table, where an
     /// out-of-range value falls back to its default.
-    pub(crate) fn from_config(defs: AgentDefs, config: &Config) -> Self {
+    pub(crate) fn from_config(defs: AgentDefs, config: &Config, background: Background) -> Self {
         let (options, _) = OptionStore::from_config(config);
         let int = |name: &str| options.get(name).and_then(OptionValue::as_int).unwrap_or(0);
         Self {
@@ -119,6 +136,7 @@ impl AgentSetup {
             max_running: usize::try_from(int("agent_max_running")).unwrap_or(1),
             swarm_max_items: usize::try_from(int("swarm_max_items")).unwrap_or(32),
             swarm_timeout_ms: u64::try_from(int("swarm_timeout_ms")).unwrap_or(7_200_000),
+            background,
         }
     }
 }
@@ -392,6 +410,9 @@ struct Session {
     usage: Usage,
     cancel: CancelFlag,
     steering: Steering,
+    /// Reports and messages from agents, read at the next turn
+    /// boundary after the user's steering.
+    inbox: Steering,
     queued: VecDeque<Vec<Content>>,
     tools: ToolRegistry,
     plugins: Option<Arc<PluginRuntime>>,
@@ -615,6 +636,7 @@ impl Dispatcher {
                 usage,
                 cancel,
                 steering: Arc::default(),
+                inbox: Arc::default(),
                 queued: VecDeque::new(),
                 tools,
                 plugins,
@@ -1101,20 +1123,7 @@ impl Dispatcher {
         {
             report_write(&self.bus, id, recorder.set_model(&model));
         }
-        let mcp = if let Some(manager) = session.mcp.take() {
-            let mut restarts = session
-                .plugins
-                .as_ref()
-                .map(|rt| rt.take_mcp_restarts())
-                .unwrap_or_default();
-            restarts.append(&mut session.mcp_restarts);
-            Some(McpLease { manager, restarts })
-        } else {
-            for name in session.mcp_restarts.drain(..) {
-                restart_failed(&self.bus, id, &name, &McpError::Unknown(name.clone()));
-            }
-            None
-        };
+        let mcp = mcp_lease(&self.bus, id, session);
 
         session.usage.context_window = cx.context_window;
         session.cancel.reset();
@@ -1143,6 +1152,7 @@ impl Dispatcher {
             cancel: session.cancel.clone(),
             gate,
             steering: Arc::clone(&session.steering),
+            inbox: Arc::clone(&session.inbox),
             plugins: session.plugins.clone(),
             mcp,
             bus: Arc::clone(&self.bus),
@@ -1258,7 +1268,7 @@ impl Dispatcher {
         } else {
             // The runner's totals carry the price-adjusted cost and
             // the context fill, unlike the budget's raw counters.
-            self.take_reply(id, &outcome, &cx.history, usage, run_time)
+            self.take_report(id, &outcome, &cx.history, usage, run_time)
         };
         let paused = if outcome == RunOutcome::Cancelled {
             self.cancel_children(id)
@@ -1289,21 +1299,16 @@ impl Dispatcher {
         self.bus.publish(id, HostEvent::RunEnded { outcome });
         self.deny_asks_of(id);
         self.bus.publish(id, HostEvent::StateChanged { state });
-        if let Some((reply, output)) = reply {
-            let _ = reply.send(output);
+        if let Some(taken) = reply {
+            self.send_report(taken);
         }
-        if let Some(content) = next {
-            self.start_run(id, Work::Prompt(Message::new(Role::User, content, None)));
+        match next {
+            Some(content) => {
+                self.start_run(id, Work::Prompt(Message::new(Role::User, content, None)));
+            }
+            None => self.wake(id),
         }
-        let orphans: Vec<SessionId> = self
-            .waiting
-            .iter()
-            .copied()
-            .filter(|w| self.parent_of(*w) == Some(id))
-            .collect();
-        for orphan in orphans {
-            self.end_waiting(orphan);
-        }
+        self.end_orphans(id);
         for child in paused {
             self.end_paused(child);
         }
@@ -1311,14 +1316,38 @@ impl Dispatcher {
         self.reap_agent(id);
     }
 
+    /// End the foreground agents of `id` still waiting for a slot: the
+    /// run that waited on them is over.
+    fn end_orphans(&mut self, id: SessionId) {
+        let orphans: Vec<SessionId> = self
+            .waiting
+            .iter()
+            .copied()
+            .filter(|w| {
+                self.sessions[w]
+                    .link
+                    .as_ref()
+                    .is_some_and(|l| l.parent == id && !l.background)
+            })
+            .collect();
+        for orphan in orphans {
+            self.end_waiting(orphan);
+        }
+    }
+
     /// Cancel the running children of `id`, whose run was cancelled,
     /// and return its idle ones for the caller to end once `id` is
     /// idle. Children may not have seen the cancel yet, and `id`'s own
-    /// flag resets when it goes idle, so they get their own.
+    /// flag resets when it goes idle, so they get their own. Background
+    /// children keep running.
     fn cancel_children(&self, id: SessionId) -> Vec<SessionId> {
         let mut idle = Vec::new();
         for (child_id, child) in &self.sessions {
-            if child.link.as_ref().is_some_and(|l| l.parent == id) {
+            if child
+                .link
+                .as_ref()
+                .is_some_and(|l| l.parent == id && !l.background)
+            {
                 match child.idle {
                     None => child.cancel.cancel(),
                     Some(_) => idle.push(*child_id),
@@ -1358,7 +1387,7 @@ impl Dispatcher {
             && session
                 .link
                 .as_ref()
-                .is_some_and(|link| link.reply.is_none());
+                .is_some_and(|link| link.report.is_none());
         let quiet = session.idle.is_some()
             && session.queued.is_empty()
             && session.pending_history.is_empty()
@@ -1403,7 +1432,7 @@ impl Dispatcher {
         let is_pending_swarm_child = session
             .link
             .as_ref()
-            .is_some_and(|link| link.batch_id.is_some() && link.reply.is_some());
+            .is_some_and(|link| link.batch_id.is_some() && link.report.is_some());
         if !is_pending_swarm_child {
             return false;
         }
@@ -1464,7 +1493,7 @@ impl Dispatcher {
             .sessions
             .get(&id)
             .and_then(|s| s.link.as_ref())
-            .is_some_and(|link| link.batch_id.is_some() && link.reply.is_some());
+            .is_some_and(|link| link.batch_id.is_some() && link.report.is_some());
         if !pending {
             self.swarm_requeues.remove(&id);
             return;
@@ -1553,7 +1582,8 @@ fn run_tools(session: &Session, id: SessionId, tx: &mpsc::Sender<Input>) -> Tool
     if let Some(setup) = &session.agents {
         let allows = |name: &str| session.link.as_ref().is_none_or(|l| l.allows(name));
         if depth_of(session) < setup.max_depth {
-            register_delegation_tools(&mut tools, id, tx, setup, allows);
+            let background = session.link.is_none() && setup.background != Background::Off;
+            register_delegation_tools(&mut tools, id, tx, setup, background, allows);
         }
         // Mailboxing does not nest, so every agent-enabled session
         // gets it whatever its depth.
@@ -1577,18 +1607,43 @@ fn run_tools(session: &Session, id: SessionId, tx: &mpsc::Sender<Input>) -> Tool
     tools
 }
 
+/// Lend the session's MCP servers to its next run with the restarts
+/// waiting for it. Without servers, the restarts fail at once.
+fn mcp_lease(bus: &Bus, id: SessionId, session: &mut Session) -> Option<McpLease> {
+    let Some(manager) = session.mcp.take() else {
+        for name in session.mcp_restarts.drain(..) {
+            restart_failed(bus, id, &name, &McpError::Unknown(name.clone()));
+        }
+        return None;
+    };
+    let mut restarts = session
+        .plugins
+        .as_ref()
+        .map(|rt| rt.take_mcp_restarts())
+        .unwrap_or_default();
+    restarts.append(&mut session.mcp_restarts);
+    Some(McpLease { manager, restarts })
+}
+
 /// Register the delegation tools a session may call while its depth
-/// is under the limit: the single `agent` tool and the `swarm` tool,
-/// each when the session's agent definition `allows` it.
+/// is under the limit: the single `agent` tool, taking `background`
+/// when asked, and the `swarm` tool, each when the session's agent
+/// definition `allows` it.
 fn register_delegation_tools(
     tools: &mut ToolRegistry,
     id: SessionId,
     tx: &mpsc::Sender<Input>,
     setup: &AgentSetup,
+    background: bool,
     allows: impl Fn(&str) -> bool,
 ) {
     if allows(AGENT_TOOL) {
-        tools.register(Arc::new(AgentTool::new(id, tx.clone(), &setup.defs)));
+        tools.register(Arc::new(AgentTool::new(
+            id,
+            tx.clone(),
+            &setup.defs,
+            background,
+        )));
     }
     if allows(SWARM_TOOL) {
         tools.register(Arc::new(SwarmTool::new(

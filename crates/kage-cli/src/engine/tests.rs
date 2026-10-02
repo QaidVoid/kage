@@ -2,6 +2,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
 use kage_core::Content;
+use kage_core::agent_report::{AgentReport, ReportState};
 use kage_core::agents::AgentDefs;
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
 use kage_core::protocol::{EXIT_PLAN_TOOL, Envelope, Event, RunOutcome};
@@ -1226,6 +1227,7 @@ fn agent_setup(max_depth: u8, max_running: usize) -> AgentSetup {
         max_running,
         swarm_max_items: 32,
         swarm_timeout_ms: 60_000,
+        background: Background::Off,
     }
 }
 
@@ -1857,6 +1859,7 @@ fn swarm_setup(max_running: usize, timeout_ms: u64) -> AgentSetup {
         max_running,
         swarm_max_items: 32,
         swarm_timeout_ms: timeout_ms,
+        background: Background::Off,
     }
 }
 
@@ -4513,4 +4516,232 @@ fn an_unmet_goal_stops_after_its_turn_cap() {
         1 + MAX_GOAL_TURNS as usize,
         "the prompt plus the capped turns"
     );
+}
+
+/// Serves the main session's turns and its agents' turns from their own
+/// scripts, told apart by the system prompt only agents have, so a
+/// background agent and its parent never race for one queue.
+#[derive(Debug)]
+struct Split {
+    main: MockProvider,
+    agents: MockProvider,
+}
+
+impl kage_provider::Provider for Split {
+    fn metadata(&self) -> &kage_provider::ProviderMetadata {
+        self.main.metadata()
+    }
+
+    fn stream(
+        &self,
+        req: kage_provider::StreamRequest,
+        cancel: &kage_core::CancelFlag,
+    ) -> Result<kage_provider::EventStream, ProviderError> {
+        if req.system.as_deref().is_none_or(str::is_empty) {
+            self.main.stream(req, cancel)
+        } else {
+            self.agents.stream(req, cancel)
+        }
+    }
+}
+
+type Script = Vec<Result<ProviderEvent, ProviderError>>;
+
+/// A harness whose main session reads `main` and whose agents read
+/// `agents`, with both mocks kept for their requests.
+fn split_harness(main: Vec<Script>, agents: Vec<Script>) -> (Harness, MockProvider, MockProvider) {
+    let main = MockProvider::sequence(main);
+    let agents = MockProvider::sequence(agents);
+    let split = Split {
+        main: main.clone(),
+        agents: agents.clone(),
+    };
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(split)));
+    (h, main, agents)
+}
+
+fn background_task(prompt: &str) -> serde_json::Value {
+    serde_json::json!({"description": "a task", "prompt": prompt, "background": true})
+}
+
+fn background_setup(background: Background) -> AgentSetup {
+    AgentSetup {
+        background,
+        ..agent_setup(2, 2)
+    }
+}
+
+fn run_ended_on(session: SessionId) -> impl Fn(&Envelope) -> bool {
+    move |e| e.session == session && matches!(e.event, Event::Host(HostEvent::RunEnded { .. }))
+}
+
+/// The agent reports appended to `session` as user messages.
+fn reports_on(events: &[Envelope], session: SessionId) -> Vec<AgentReport> {
+    events
+        .iter()
+        .filter(|e| e.session == session)
+        .filter_map(|e| match &e.event {
+            Event::Loop(LoopEvent::MessageAppended { message }) if message.role == Role::User => {
+                Some(AgentReport::all_in(&crate::cli_loop_run::first_user_text(
+                    message,
+                )))
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+fn agent_schema(request: &kage_provider::StreamRequest) -> Option<serde_json::Value> {
+    request
+        .tools
+        .iter()
+        .find(|tool| tool.name == "agent")
+        .map(|tool| tool.schema.clone())
+}
+
+#[test]
+fn a_background_agent_returns_at_once_and_wakes_its_idle_parent() {
+    let (h, main, agents) = split_harness(
+        vec![
+            agent_turn(&[("call_a", background_task("test everything"))]),
+            text_turn("waiting for the tests"),
+            text_turn("the tests pass"),
+        ],
+        vec![tool_turn("gate"), text_turn("412 passed")],
+    );
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(background_setup(Background::Wake)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = wait_for(&h.events, run_ended_on(parent));
+    let started = AgentReport::parse(&tool_output(&events, parent, "call_a").text).unwrap();
+    assert_eq!(started.state, ReportState::Started);
+    assert!(events.iter().any(|e| matches!(
+        e.event,
+        Event::Host(HostEvent::AgentSpawned {
+            background: true,
+            ..
+        })
+    )));
+    assert_eq!(outcome_of(&events, parent), [RunOutcome::Completed]);
+
+    h.release.send(()).unwrap();
+    let events = wait_for(&h.events, run_ended_on(parent));
+    let reports = reports_on(&events, parent);
+    assert_eq!(reports.len(), 1, "{events:?}");
+    assert_eq!(reports[0].session, started.session);
+    assert_eq!(reports[0].state, ReportState::Completed);
+    assert_eq!(reports[0].body, "412 passed");
+
+    let first = &main.requests()[0];
+    assert!(agent_schema(first).unwrap()["properties"]["background"].is_object());
+    let child = &agents.requests()[0];
+    let nested = agent_schema(child).expect("depth 1 may start agents");
+    assert!(nested["properties"]["background"].is_null(), "{nested}");
+}
+
+/// Runs until its run is cancelled.
+#[derive(Debug)]
+struct Stall;
+
+impl Tool for Stall {
+    fn name(&self) -> &'static str {
+        "stall"
+    }
+    fn description(&self) -> &'static str {
+        "runs until cancelled"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn risk(&self) -> kage_core::Risk {
+        kage_core::Risk::Read
+    }
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        cx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        while !cx.is_cancelled() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Err(ToolError::Cancelled)
+    }
+}
+
+#[test]
+fn stopping_the_parent_run_leaves_a_background_agent_running() {
+    let (h, _main, _agents) = split_harness(
+        vec![
+            agent_turn(&[("call_a", background_task("test everything"))]),
+            tool_turn("stall"),
+            text_turn("read it"),
+        ],
+        vec![tool_turn("gate"), text_turn("412 passed")],
+    );
+    let mut tools = h.tools.clone();
+    tools.register(Arc::new(Stall));
+    let parent = SessionId::new();
+    h.engine.open(SessionSpec {
+        tools,
+        agents: Some(background_setup(Background::Wake)),
+        ..h.spec(parent)
+    });
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let mut events = wait_for(&h.events, |e| {
+        e.session == parent
+            && matches!(&e.event, Event::Loop(LoopEvent::ToolCallStart { name, .. }) if name == "stall")
+    });
+    h.engine.send(Command::to(parent, CommandKind::Cancel));
+    events.extend(wait_for(&h.events, run_ended_on(parent)));
+    assert_eq!(outcome_of(&events, parent), [RunOutcome::Cancelled]);
+    let (child, _) = spawned(&events)[0];
+    assert!(outcome_of(&events, child).is_empty(), "{events:?}");
+
+    h.release.send(()).unwrap();
+    let events = wait_for(&h.events, run_ended_on(child));
+    assert_eq!(outcome_of(&events, child), [RunOutcome::Completed]);
+    let events = wait_for(&h.events, run_ended_on(parent));
+    assert_eq!(reports_on(&events, parent)[0].body, "412 passed");
+}
+
+#[test]
+fn a_holding_parent_reads_a_background_result_with_its_next_prompt() {
+    let (h, main, _agents) = split_harness(
+        vec![
+            agent_turn(&[("call_a", background_task("test everything"))]),
+            text_turn("waiting for the tests"),
+            text_turn("the tests pass"),
+        ],
+        vec![tool_turn("gate"), text_turn("412 passed")],
+    );
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(background_setup(Background::Hold)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = wait_for(&h.events, run_ended_on(parent));
+    let (child, _) = spawned(&events)[0];
+    h.release.send(()).unwrap();
+    wait_for(&h.events, run_ended_on(child));
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(main.call_count(), 2, "no run starts on its own");
+
+    prompt(&h.engine, parent, "anything new?", Delivery::Steer);
+    let events = wait_for(&h.events, run_ended_on(parent));
+    assert_eq!(main.call_count(), 3);
+    let texts: Vec<String> = main.requests()[2]
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .map(|m| crate::cli_loop_run::first_user_text(m))
+        .collect();
+    assert_eq!(texts[texts.len() - 2], "anything new?");
+    let report = AgentReport::parse(&texts[texts.len() - 1]).unwrap();
+    assert_eq!(report.body, "412 passed");
+    assert_eq!(reports_on(&events, parent).len(), 1);
 }

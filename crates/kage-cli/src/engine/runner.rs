@@ -88,6 +88,7 @@ pub(super) struct Run {
     pub cancel: CancelFlag,
     pub gate: PermissionGate,
     pub steering: Steering,
+    pub inbox: Steering,
     pub plugins: Option<Arc<PluginRuntime>>,
     pub mcp: Option<McpLease>,
     pub bus: Arc<Bus>,
@@ -132,6 +133,7 @@ impl Run {
             cancel,
             gate,
             steering,
+            inbox,
             plugins,
             mcp,
             bus,
@@ -164,7 +166,11 @@ impl Run {
             }
         };
 
-        let base = RunHooks { gate, steering };
+        let base = RunHooks {
+            gate,
+            steering,
+            inbox,
+        };
         let mut hooks: Box<dyn Hooks> = match &plugins {
             Some(rt) => Box::new(PluginEventHooks::new(base, Arc::clone(rt))),
             None => Box::new(base),
@@ -285,11 +291,21 @@ fn add_turn(usage: &mut Usage, turn: &TokenUsage, price: Option<ModelCost>) {
     }
 }
 
-/// Control hooks every run starts from: the permission gate and the
-/// session's steering queue.
+/// Control hooks every run starts from: the permission gate, the
+/// session's steering queue and its inbox of agent reports.
 struct RunHooks {
     gate: PermissionGate,
     steering: Steering,
+    inbox: Steering,
+}
+
+impl RunHooks {
+    /// Every inbox entry, joined with blank lines, so a burst of
+    /// reports lands in one message.
+    fn drain_inbox(&self) -> Option<String> {
+        let entries: Vec<String> = lock(&self.inbox).drain(..).collect();
+        (!entries.is_empty()).then(|| entries.join("\n\n"))
+    }
 }
 
 impl Hooks for RunHooks {
@@ -303,6 +319,12 @@ impl Hooks for RunHooks {
     }
 
     fn get_steering(&mut self) -> Option<String> {
-        lock(&self.steering).pop_front()
+        lock(&self.steering)
+            .pop_front()
+            .or_else(|| self.drain_inbox())
+    }
+
+    fn get_followup(&mut self) -> Option<String> {
+        self.drain_inbox()
     }
 }

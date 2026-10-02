@@ -184,7 +184,7 @@ impl super::Dispatcher {
             target
                 .link
                 .as_ref()
-                .is_some_and(|link| link.reply.is_none())
+                .is_some_and(|link| link.report.is_none())
         });
         if finished {
             return Err(format!(

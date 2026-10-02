@@ -214,6 +214,7 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
         max_running,
         swarm_max_items,
         swarm_timeout_ms,
+        background: crate::engine::Background::Wake,
     };
     let model_choices = available_model_items(&registry, &qualified_model);
     if let Err(err) = crate::state::record_last_model(&qualified_model) {

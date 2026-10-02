@@ -20,7 +20,7 @@ use kage_tools::{ToolRegistry, builtin_registry};
 
 use super::options::{Settings, choice};
 use super::{CliAcpAgent, live::Live, mcp};
-use crate::engine::{AgentSetup, Engine, SessionSpec};
+use crate::engine::{AgentSetup, Background, Engine, SessionSpec};
 use crate::permissions::PermissionGate;
 
 /// Builds the engine session for a client session from the providers
@@ -402,7 +402,7 @@ fn session_spec(
     for err in agent_errors {
         eprintln!("kage: {err}");
     }
-    let agents = AgentSetup::from_config(defs, &config);
+    let agents = AgentSetup::from_config(defs, &config, Background::Hold);
     config
         .permissions
         .validate()

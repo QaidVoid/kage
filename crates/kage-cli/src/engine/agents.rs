@@ -8,7 +8,7 @@ use std::time::Duration;
 use kage_core::agents::AgentDef;
 use kage_core::protocol::{HostEvent, NoticeLevel, RunOutcome, SwarmMember, Usage};
 use kage_core::sync::lock;
-use kage_core::{Content, Message, MessageId, Role, SessionId, ToolCallId, ToolOutput};
+use kage_core::{CancelFlag, Content, Message, MessageId, Role, SessionId, ToolCallId, ToolOutput};
 use kage_loop::{AgentContext, TokenBudget};
 use kage_provider::ProviderRegistry;
 use kage_tools::ToolRegistry;
@@ -18,7 +18,8 @@ use super::mailbox_tool::MAILBOX_TOOL;
 use super::runner::Work;
 use super::swarm_tool::{self, Member, SWARM_TOOL, SwarmInfo};
 use super::{
-    AgentSetup, Attach, CONTINUE_PROMPT, Recorder, ResumeChild, Session, SessionSpec, notice,
+    AgentSetup, Attach, Background, CONTINUE_PROMPT, Recorder, ResumeChild, Session, SessionSpec,
+    notice,
 };
 
 /// Tells a forked child that the conversation it starts with is
@@ -49,10 +50,13 @@ pub(super) struct AgentLink {
     /// spawned it. Names the child in its session marker, so a later
     /// phase can tell swarm children from plain agents.
     pub(super) batch_id: Option<ToolCallId>,
-    /// Delivers the result to the waiting `agent` call. Taken by the
-    /// first run that finishes, so later runs a user starts in the
-    /// agent never answer the parent twice.
-    pub(super) reply: Option<crossbeam_channel::Sender<ToolOutput>>,
+    /// Where the result of the agent's next finished run goes. Taken
+    /// by the first run that finishes, so later runs a user starts in
+    /// the agent never answer the parent twice.
+    pub(super) report: Option<Report>,
+    /// Whether the agent runs in the background: its cancel flag is its
+    /// own, so stopping the parent's run leaves it running.
+    pub(super) background: bool,
     /// Session file whose conversation loads into the context at the
     /// first run start instead of at spawn. Set for forked children:
     /// their copied transcript would otherwise sit in RAM, possibly
@@ -66,6 +70,14 @@ pub(super) struct AgentLink {
     /// The definition's tool list. `None` allows every tool, the
     /// delegation and mailbox tools included.
     pub(super) tools: Option<Vec<String>>,
+}
+
+/// Where an agent's result goes.
+pub(super) enum Report {
+    /// The waiting `agent`, `swarm` or resume call.
+    Call(crossbeam_channel::Sender<ToolOutput>),
+    /// The parent's inbox, read at its next turn boundary.
+    Message,
 }
 
 impl AgentLink {
@@ -90,6 +102,7 @@ impl super::Dispatcher {
             reply,
             fork,
             swarm,
+            background,
         } = spawn;
         let child = swarm.as_ref().map(|info| info.id);
         let fail = |text: String| {
@@ -99,26 +112,12 @@ impl super::Dispatcher {
             };
             let _ = reply.send(output);
         };
-        let Some(from) = self.sessions.get(&parent) else {
-            return fail(format!("session {parent} is gone"));
+        let (setup, depth) = match self.spawn_setup(parent, &agent) {
+            Ok(found) => found,
+            Err(text) => return fail(text),
         };
-        let Some(setup) = from.agents.clone() else {
-            return fail("agents are turned off".to_owned());
-        };
-        let depth = depth_of(from) + 1;
-        if depth > setup.max_depth {
-            return fail(format!(
-                "agents may nest {} level(s) deep (agent_max_depth)",
-                setup.max_depth
-            ));
-        }
-        let Some(def) = setup.defs.get(&agent) else {
-            let names: Vec<&str> = setup.defs.iter().map(|d| d.name.as_str()).collect();
-            return fail(format!(
-                "unknown agent `{agent}`. Available agents: {}",
-                names.join(", ")
-            ));
-        };
+        let from = &self.sessions[&parent];
+        let def = setup.defs.get(&agent).expect("checked by spawn_setup");
 
         // A swarm call names its children up front so the tool can
         // cancel the ones that never reported.
@@ -138,7 +137,14 @@ impl super::Dispatcher {
             let (spec, missing) = agent_spec(from, parent, id, def, &setup);
             (spec, missing, None)
         };
-        let cancel = from.cancel.child();
+        let background = background && depth == 1 && setup.background != Background::Off;
+        // A background agent outlives the run that started it, so the
+        // parent's cancel must not reach it.
+        let cancel = if background {
+            CancelFlag::new()
+        } else {
+            from.cancel.child()
+        };
         if swarm
             .as_ref()
             .is_some_and(|info| info.index + 1 >= info.total)
@@ -146,57 +152,83 @@ impl super::Dispatcher {
             self.fork_snapshot = None;
         }
         let batch_id = swarm.as_ref().map(|info| info.batch_id.clone());
+        let (report, started) = if background {
+            (Report::Message, Some(reply))
+        } else {
+            (Report::Call(reply), None)
+        };
         let link = AgentLink {
             parent,
             agent: agent.clone(),
             depth,
             batch_id,
-            reply: Some(reply),
+            report: Some(report),
+            background,
             lazy_history,
             inherited_until: None,
             tools: def.tools.clone(),
         };
-        let mut marker = serde_json::json!({
-            "parent": parent,
-            "tool_call_id": tool_call_id,
-            "agent": agent,
-            "description": description,
-        });
-        if let Some(info) = &swarm {
-            marker["batch_id"] = serde_json::Value::String(info.batch_id.0.clone());
-            marker["index"] = serde_json::Value::from(info.index);
-            marker["total"] = serde_json::Value::from(info.total);
-            marker["item"] = serde_json::Value::String(info.item.clone());
-        }
-
+        let marker = session_marker(parent, &tool_call_id, &agent, &description, swarm.as_ref());
         let member = swarm.as_ref().map(swarm_member);
-        self.publish_agent_opened(id, parent, tool_call_id, agent, description.clone(), member);
+        let opened = Opened {
+            id,
+            parent,
+            tool_call_id,
+            agent: agent.clone(),
+            description: description.clone(),
+            swarm: member,
+            background,
+        };
+        self.publish_agent_opened(opened);
         self.open(spec, cancel, Some(link));
         self.record_agent_entries(id, marker, description);
         self.warn_all(id, missing.iter().map(missing_tool).collect());
         let content = vec![Content::Text { text: prompt }];
         self.launch_agent(id, setup.max_running, content);
+        if let Some(reply) = started {
+            let _ = reply.send(agent_tool::started(id, &agent));
+        }
+    }
+
+    /// The setup and depth an agent `agent` of `parent` starts with, or
+    /// why it cannot start.
+    fn spawn_setup(&self, parent: SessionId, agent: &str) -> Result<(AgentSetup, u8), String> {
+        let from = self
+            .sessions
+            .get(&parent)
+            .ok_or_else(|| format!("session {parent} is gone"))?;
+        let setup = from
+            .agents
+            .clone()
+            .ok_or_else(|| "agents are turned off".to_owned())?;
+        let depth = depth_of(from) + 1;
+        if depth > setup.max_depth {
+            return Err(format!(
+                "agents may nest {} level(s) deep (agent_max_depth)",
+                setup.max_depth
+            ));
+        }
+        if setup.defs.get(agent).is_none() {
+            let names: Vec<&str> = setup.defs.iter().map(|d| d.name.as_str()).collect();
+            return Err(format!(
+                "unknown agent `{agent}`. Available agents: {}",
+                names.join(", ")
+            ));
+        }
+        Ok((setup, depth))
     }
 
     /// Publish the `AgentSpawned` event that opens a child's card.
-    fn publish_agent_opened(
-        &self,
-        id: SessionId,
-        parent: SessionId,
-        tool_call_id: ToolCallId,
-        agent: String,
-        description: String,
-        swarm: Option<SwarmMember>,
-    ) {
+    fn publish_agent_opened(&self, opened: Opened) {
         self.bus.publish(
-            id,
+            opened.id,
             HostEvent::AgentSpawned {
-                parent,
-                tool_call_id,
-                agent,
-                description,
-                swarm,
-                background: false,
+                parent: opened.parent,
+                tool_call_id: opened.tool_call_id,
+                agent: opened.agent,
+                description: opened.description,
+                swarm: opened.swarm,
+                background: opened.background,
             },
         );
     }
@@ -301,16 +333,23 @@ impl super::Dispatcher {
         if link.parent != parent || link.batch_id.is_none() {
             return fail(format!("session {id} is not a swarm child of this session"));
         }
-        if session.idle.is_none() || link.reply.is_some() || self.waiting.contains(&id) {
+        if session.idle.is_none() || link.report.is_some() || self.waiting.contains(&id) {
             return fail(format!(
                 "session {id} is still working on an earlier call; resume it once that \
                  call has its result"
             ));
         }
-        link.reply = Some(reply);
+        link.report = Some(Report::Call(reply));
         if reopened {
-            let member = swarm.as_ref().map(swarm_member);
-            self.publish_agent_opened(id, parent, tool_call_id, agent, description, member);
+            self.publish_agent_opened(Opened {
+                id,
+                parent,
+                tool_call_id,
+                agent,
+                description,
+                swarm: swarm.as_ref().map(swarm_member),
+                background: false,
+            });
         }
         let content = vec![Content::Text { text: prompt }];
         self.launch_agent(id, setup.max_running, content);
@@ -368,7 +407,8 @@ impl super::Dispatcher {
             agent,
             depth: depth_of(from) + 1,
             batch_id,
-            reply: None,
+            report: None,
+            background: false,
             lazy_history: None,
             inherited_until: None,
             tools: def.tools.clone(),
@@ -476,7 +516,7 @@ impl super::Dispatcher {
                 || session
                     .link
                     .as_ref()
-                    .is_some_and(|link| link.reply.is_some())
+                    .is_some_and(|link| link.report.is_some())
                 || self.waiting.contains(&id)
         })
     }
@@ -555,8 +595,8 @@ impl super::Dispatcher {
         }
     }
 
-    /// Send an agent's result to its `agent` call, once. Callers publish
-    /// the agent's `RunEnded` first, so clients see the agent end before
+    /// Send an agent's result where it goes, once. Callers publish the
+    /// agent's `RunEnded` first, so clients see the agent end before
     /// the parent continues. `usage` and `run_time` are the agent's
     /// final totals; a call that never ran a turn passes the defaults.
     pub(super) fn deliver(
@@ -567,34 +607,90 @@ impl super::Dispatcher {
         usage: Usage,
         run_time: Duration,
     ) {
-        if let Some((reply, output)) = self.take_reply(id, outcome, history, usage, run_time) {
-            let _ = reply.send(output);
+        if let Some(taken) = self.take_report(id, outcome, history, usage, run_time) {
+            self.send_report(taken);
         }
     }
 
-    /// Take an agent's `agent` call reply and its result, once, to send
-    /// later.
-    pub(super) fn take_reply(
+    /// Take an agent's result and where it goes, once, to send later.
+    pub(super) fn take_report(
         &mut self,
         id: SessionId,
         outcome: &RunOutcome,
         history: &[Arc<Message>],
         usage: Usage,
         run_time: Duration,
-    ) -> Option<(crossbeam_channel::Sender<ToolOutput>, ToolOutput)> {
+    ) -> Option<Taken> {
         let session = self.sessions.get_mut(&id)?;
         let model = &session.state.model;
         let link = session.link.as_mut()?;
-        let reply = link.reply.take()?;
+        let report = link.report.take()?;
         self.swarm_requeues.remove(&id);
         let own = link
             .inherited_until
             .and_then(|last| history.iter().position(|m| m.id == last))
             .map_or(history, |at| &history[at + 1..]);
-        Some((
-            reply,
-            agent_tool::agent_result(id, &link.agent, model, outcome, own, &usage, run_time),
-        ))
+        Some(Taken {
+            parent: link.parent,
+            report,
+            output: agent_tool::agent_result(
+                id,
+                &link.agent,
+                model,
+                outcome,
+                own,
+                &usage,
+                run_time,
+            ),
+            wake: *outcome != RunOutcome::Cancelled,
+        })
+    }
+
+    /// Send a taken result: to the waiting call, or into the parent's
+    /// inbox. A parent that wakes and is idle starts a run to read it.
+    pub(super) fn send_report(&mut self, taken: Taken) {
+        let Taken {
+            parent,
+            report,
+            output,
+            wake,
+        } = taken;
+        match report {
+            Report::Call(reply) => {
+                let _ = reply.send(output);
+            }
+            Report::Message => {
+                let Some(session) = self.sessions.get(&parent) else {
+                    return;
+                };
+                lock(&session.inbox).push_back(output.text);
+                if wake {
+                    self.wake(parent);
+                }
+            }
+        }
+    }
+
+    /// Start a run of the idle main session `id` that reads its inbox,
+    /// when its setup wakes for background results.
+    pub(super) fn wake(&mut self, id: SessionId) {
+        let Some(session) = self.sessions.get(&id) else {
+            return;
+        };
+        let wakes = session
+            .agents
+            .as_ref()
+            .is_some_and(|setup| setup.background == Background::Wake);
+        if !wakes || session.idle.is_none() || self.shutting_down {
+            return;
+        }
+        let entries: Vec<String> = lock(&session.inbox).drain(..).collect();
+        if entries.is_empty() {
+            return;
+        }
+        let text = entries.join("\n\n");
+        let prompt = Message::new(Role::User, vec![Content::Text { text }], None);
+        self.start_run(id, Work::Prompt(prompt));
     }
 
     /// Agent runs in flight that hold a slot of the running limit. An
@@ -605,7 +701,7 @@ impl super::Dispatcher {
             self.sessions.values().any(|s| {
                 s.link
                     .as_ref()
-                    .is_some_and(|l| l.parent == *id && l.reply.is_some())
+                    .is_some_and(|l| l.parent == *id && matches!(l.report, Some(Report::Call(_))))
             })
         };
         self.sessions
@@ -670,7 +766,7 @@ impl super::Dispatcher {
         let Some(idle) = session
             .idle
             .as_ref()
-            .filter(|_| session.link.as_ref().is_some_and(|l| l.reply.is_some()))
+            .filter(|_| session.link.as_ref().is_some_and(|l| l.report.is_some()))
         else {
             return;
         };
@@ -759,6 +855,50 @@ fn agent_spec(
         shell: from.shell.clone(),
     };
     (spec, missing)
+}
+
+/// The `kage:agent` marker an agent's session file starts with.
+fn session_marker(
+    parent: SessionId,
+    tool_call_id: &ToolCallId,
+    agent: &str,
+    description: &str,
+    swarm: Option<&SwarmInfo>,
+) -> serde_json::Value {
+    let mut marker = serde_json::json!({
+        "parent": parent,
+        "tool_call_id": tool_call_id,
+        "agent": agent,
+        "description": description,
+    });
+    if let Some(info) = swarm {
+        marker["batch_id"] = serde_json::Value::String(info.batch_id.0.clone());
+        marker["index"] = serde_json::Value::from(info.index);
+        marker["total"] = serde_json::Value::from(info.total);
+        marker["item"] = serde_json::Value::String(info.item.clone());
+    }
+    marker
+}
+
+/// An agent's result, taken from its link, and where it goes.
+pub(super) struct Taken {
+    parent: SessionId,
+    report: Report,
+    output: ToolOutput,
+    /// Whether a result for the parent's inbox may start a run of an
+    /// idle parent. A stopped agent's result waits for the next one.
+    wake: bool,
+}
+
+/// The facts of an agent's `AgentSpawned` event.
+struct Opened {
+    id: SessionId,
+    parent: SessionId,
+    tool_call_id: ToolCallId,
+    agent: String,
+    description: String,
+    swarm: Option<SwarmMember>,
+    background: bool,
 }
 
 /// The card facts of a swarm child.

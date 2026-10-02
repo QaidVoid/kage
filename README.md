@@ -3,8 +3,6 @@
 A coding agent for your terminal. Written in Rust, configured and
 extended in Lua, and small enough to read.
 
-Status: pre-1.0. Things still move.
-
 ## What it does
 
 - **A terminal UI built for long sessions.** Verb-first tool rows,
@@ -30,6 +28,11 @@ Status: pre-1.0. Things still move.
 - **Editors over ACP.** `kage rpc` speaks the Agent Client Protocol,
   so Zed, Neovim and other ACP clients can drive it, with sessions,
   approvals and agents intact.
+- **Desktop and browser.** `kage serve` hosts sessions for the desktop
+  app and its browser build, and the TUI can attach to a session it
+  hosts.
+- **Web search.** A `web_search` tool on DuckDuckGo with no key, or on
+  your SearXNG instance or the Brave Search API.
 - **Sessions you can come back to.** Every conversation is saved.
   Resume, clone or fork it, and compact it when it grows.
 - **Permissions when you want them.** Tools run freely by default.
@@ -99,9 +102,8 @@ cargo xtask check-ascii
 
 ## Credit
 
-kage started from studying [pi](https://github.com/badlogic/pi-mono) by
-Mario Zechner. Its agent loop and plugin-first design shaped kage early
-on.
+kage learned from [pi](https://github.com/earendil-works/pi) and
+[Kimi Code](https://github.com/MoonshotAI/kimi-code).
 
 ## License
 

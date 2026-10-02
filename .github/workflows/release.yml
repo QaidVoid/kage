@@ -44,7 +44,7 @@ jobs:
 
       - name: Toolchain
         run: |
-          rustup show
+          rustup toolchain install
           rustup target add "${{ matrix.target }}"
 
       - name: Install cross
@@ -121,7 +121,7 @@ jobs:
 
       - name: Toolchain
         run: |
-          rustup show
+          rustup toolchain install
           rustup target add "${{ matrix.target }}"
 
       - name: Install Linux system packages

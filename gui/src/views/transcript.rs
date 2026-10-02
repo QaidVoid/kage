@@ -112,6 +112,7 @@ fn margins(row: &Row) -> (f32, f32) {
         Row::Notice { .. } | Row::Compaction { .. } => (10.0, 10.0),
         Row::Plan { .. } => (ROW_MARGIN, 12.0),
         Row::Decision { .. } => (4.0, 4.0),
+        Row::Waiting => (ROW_MARGIN, ROW_MARGIN),
     }
 }
 
@@ -532,6 +533,21 @@ fn spinner(color: Hsla, key: usize) -> impl IntoElement {
         )
 }
 
+/// The working row: a spinner and a quiet label while the run goes on
+/// with nothing streaming yet.
+fn render_waiting(cx: &App) -> impl IntoElement {
+    let theme = cx.theme().colors;
+    h_flex()
+        .id("row-waiting")
+        .min_h(px(ROW_H))
+        .gap(px(SP_4))
+        .items_center()
+        .text_size(px(FS_SM))
+        .text_color(theme.muted_foreground)
+        .child(spinner(theme.primary, usize::MAX))
+        .child("Working")
+}
+
 /// The row's edge chevron: pointing right when closed, down when open.
 fn chevron(open: bool, color: Hsla) -> Icon {
     Icon::new(IconName::ChevronRight)
@@ -646,6 +662,8 @@ pub enum RowKey {
     Group(usize),
     /// The files the run ending at this turn-end index changed.
     Changes(usize),
+    /// The working row at the end of a run in flight.
+    Waiting,
 }
 
 /// How many characters of the newest thinking the live peek shows.
@@ -751,6 +769,9 @@ enum Row {
         /// The item index.
         ix: usize,
     },
+    /// A run is in flight and nothing above moves yet: the model has
+    /// not answered, or works out its next step after a call.
+    Waiting,
 }
 
 impl Row {
@@ -759,6 +780,7 @@ impl Row {
         match self {
             Row::Group { key, .. } => *key,
             Row::Changes { end } => RowKey::Changes(*end),
+            Row::Waiting => RowKey::Waiting,
             Row::User { ix, .. }
             | Row::Assistant { ix, .. }
             | Row::Thinking { ix, .. }
@@ -786,6 +808,7 @@ impl Row {
             Row::Compaction { .. } => "compaction",
             Row::Plan { .. } => "plan",
             Row::Decision { .. } => "decision",
+            Row::Waiting => "waiting",
         }
     }
 }
@@ -893,6 +916,7 @@ fn row_search_text(session: &Session, row: &Row) -> String {
             .collect::<Vec<_>>()
             .join(" "),
         Row::Compaction { .. } => "context compacted".to_owned(),
+        Row::Waiting => String::new(),
         Row::Plan { ix } => match session.items.get(*ix) {
             Some(TranscriptItem::Plan { entries }) => entries
                 .iter()
@@ -1006,10 +1030,30 @@ fn row_model(session: &Session, ui: &UiState) -> RowModel {
         }
         index = end;
     }
+    if waiting(session, rows.last()) {
+        rows.push(Row::Waiting);
+    }
     RowModel {
         rows,
         items: items.len(),
     }
+}
+
+/// Whether a run is in flight with nothing on screen moving: no text
+/// or thinking streams in, no call runs and no ask waits on the user,
+/// so the end of the transcript shows that the run goes on.
+fn waiting(session: &Session, last: Option<&Row>) -> bool {
+    let moving = last.is_some_and(|row| match row {
+        Row::Assistant { live, .. } | Row::Thinking { live, .. } => *live,
+        Row::Tool { ix, .. } => matches!(
+            session.items.get(*ix),
+            Some(TranscriptItem::ToolCall(call))
+                if matches!(call.status, ToolCallStatus::Pending | ToolCallStatus::InProgress)
+        ),
+        Row::Group { running, .. } => *running,
+        _ => false,
+    });
+    session.running && session.permissions.is_empty() && !moving
 }
 
 /// The row one non-grouped transcript item renders as, if any: a turn
@@ -1766,6 +1810,7 @@ impl TranscriptView {
                 }) => render_decision(*ix, subject, label, *allowed, feedback.as_deref(), cx),
                 _ => blank_row(*ix).into_any_element(),
             },
+            Row::Waiting => render_waiting(cx).into_any_element(),
         };
         let mut cell = div()
             .id(ElementId::named_usize("row-cell", cell_ix))
@@ -3846,6 +3891,7 @@ fn signatures(session: &Session, rows: &[Row], ui: &UiState) -> Vec<u64> {
                 RowKey::Changes(end) => {
                     format!("{:?}", run_changes(session, end)).hash(&mut hasher);
                 }
+                RowKey::Waiting => {}
                 RowKey::Group(_) => {
                     for item in members {
                         item_fingerprint(session, *item, &mut hasher);
@@ -4362,6 +4408,44 @@ mod tests {
             }
             other => panic!("expected a turn end, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_run_shows_it_works_until_something_moves() {
+        let mut session = session_with(vec![TranscriptItem::User {
+            content: vec![ContentBlock::text("go")],
+            steered: false,
+        }]);
+        let kinds = |session: &Session| row_model(session, &UiState::default()).kinds();
+        assert_eq!(
+            kinds(&session),
+            vec!["user"],
+            "an idle session waits on no one"
+        );
+        session.running = true;
+        assert_eq!(kinds(&session), vec!["user", "waiting"]);
+        session.items.push(TranscriptItem::Assistant {
+            text: "on it".into(),
+        });
+        assert_eq!(kinds(&session), vec!["user", "assistant"], "text streams");
+        session.items.push(call(
+            "c1",
+            "read",
+            ToolKind::Read,
+            ToolCallStatus::InProgress,
+            vec![],
+            None,
+            None,
+        ));
+        assert_eq!(kinds(&session), vec!["user", "assistant", "tool"]);
+        if let Some(TranscriptItem::ToolCall(call)) = session.items.last_mut() {
+            call.status = ToolCallStatus::Completed;
+        }
+        assert_eq!(
+            kinds(&session),
+            vec!["user", "assistant", "tool", "waiting"],
+            "the model works out its next step"
+        );
     }
 
     #[test]

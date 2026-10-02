@@ -100,7 +100,8 @@ xattr -d com.apple.quarantine kage-desktop
 ```
 
 The desktop client needs `kage` itself: it runs the one on your
-`PATH`, or the one Settings > Connection > kage binary names.
+`PATH`, or the one Settings > Connection > kage binary names. Its
+settings are in [desktop and web client](/guide/desktop).
 
 ## verify
 

@@ -38,6 +38,7 @@ export default defineConfig({
           { text: "lua config", link: "/guide/lua-config" },
           { text: "providers", link: "/guide/providers" },
           { text: "themes", link: "/guide/themes" },
+          { text: "desktop and web", link: "/guide/desktop" },
           { text: "mcp", link: "/guide/mcp" },
           { text: "permissions", link: "/guide/permissions" },
           { text: "agents", link: "/guide/agents" },

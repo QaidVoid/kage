@@ -1794,11 +1794,19 @@ impl ComposerView {
             .as_ref()
             .map(|option| {
                 option
-                    .current_value
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&option.current_value)
-                    .to_owned()
+                    .options
+                    .iter()
+                    .find(|value| value.value == option.current_value)
+                    .map(|value| value.name.clone())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| {
+                        option
+                            .current_value
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(&option.current_value)
+                            .to_owned()
+                    })
             })
             .unwrap_or_else(|| "default".to_owned());
         // The level label trails a middle dot and drops when thinking

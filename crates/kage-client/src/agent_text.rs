@@ -129,7 +129,9 @@ pub fn compaction_summary(text: &str) -> Option<&str> {
         .strip_prefix("The conversation history before this point was compacted")?
         .split_once("<summary>")?
         .1;
-    let body = body.rsplit_once("</summary>").map_or(body, |(body, _)| body);
+    let body = body
+        .rsplit_once("</summary>")
+        .map_or(body, |(body, _)| body);
     Some(body.trim())
 }
 

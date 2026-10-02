@@ -129,7 +129,10 @@ mod aliases;
 mod classes;
 mod funcs;
 mod gated;
+mod stub;
 mod tables;
+
+pub use stub::lua_stub;
 
 #[cfg(test)]
 mod tests;

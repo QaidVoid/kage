@@ -17,12 +17,6 @@ use kage_core::config::Config;
 
 use crate::auth::{self, AuthStore, KNOWN_PROVIDERS};
 
-/// The `lua-language-server` definition stub, embedded so `kage init`
-/// can drop it next to a generated `.luarc.json` regardless of where
-/// the binary runs from. Kept in sync with the repo copy under
-/// `plugins/types/kage.lua`.
-const TYPE_STUB: &str = include_str!("../../../plugins/types/kage.lua");
-
 /// Default starter `config.toml` body. Written verbatim when the
 /// wizard is asked to create a fresh config; mirrors the Rust
 /// [`Config::default`] so the `[provider] default_model =
@@ -183,7 +177,8 @@ fn install_lua_lsp<W: Write>(out: &mut W) -> Result<(), String> {
 fn write_lua_lsp<W: Write>(types_dir: &Path, luarc: &Path, out: &mut W) -> Result<(), String> {
     fs::create_dir_all(types_dir).map_err(|e| format!("mkdir {}: {e}", types_dir.display()))?;
     let stub = types_dir.join("kage.lua");
-    fs::write(&stub, TYPE_STUB).map_err(|e| format!("write {}: {e}", stub.display()))?;
+    fs::write(&stub, kage_plugin::spec::lua_stub())
+        .map_err(|e| format!("write {}: {e}", stub.display()))?;
     let _ = writeln!(out, "  types:   wrote {}", stub.display());
 
     let lib = types_dir.to_string_lossy().into_owned();
@@ -357,7 +352,7 @@ mod tests {
 
         assert_eq!(
             fs::read_to_string(types.join("kage.lua")).unwrap(),
-            TYPE_STUB
+            kage_plugin::spec::lua_stub()
         );
         let doc: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&luarc).unwrap()).unwrap();

@@ -15,7 +15,7 @@ use std::time::Duration;
 use gpui_kit::StyledImage as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState, TextareaState};
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::theme::{ActiveTheme as _, ThemeColor};
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -429,7 +429,7 @@ impl Render for FindBar {
                     .text_color(p.faint),
             )
             .child(
-                Input::new(&self.query)
+                crate::views::kit::input(&self.query)
                     .flex_1()
                     .appearance(false)
                     .bordered(false)
@@ -1079,7 +1079,7 @@ impl Render for PaletteView {
                     })
                     .child(Icon::new(IconName::Search).with_size(px(16.)))
                     .child(
-                        Input::new(&self.query)
+                        crate::views::kit::input(&self.query)
                             .flex_1()
                             .appearance(false)
                             .bordered(false)

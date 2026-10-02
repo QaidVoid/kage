@@ -12,7 +12,7 @@
 use gpui_kit::ScrollHandle;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
-use gpui_kit::component::input::{Escape as InputEscape, Input, InputEvent, InputState};
+use gpui_kit::component::input::{Escape as InputEscape, InputEvent, InputState};
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -25,7 +25,7 @@ use kage_client::wire::{ModelEntry, SessionConfigSelectOption};
 use crate::store::{Store, StoreHandle as _};
 use crate::theme::{FONT_MONO, FS_2XS, FS_SM, FS_XS, Palette, R_MD};
 use crate::views::deferred::Deferred;
-use crate::views::kit::{BtnTone, btn_sm};
+use crate::views::kit::{self, BtnTone, btn_sm};
 
 gpui_kit::actions!(kage_desktop, [PickerUp, PickerDown, PickerRun, PickerClose]);
 
@@ -629,7 +629,7 @@ fn search_row(
         .on_prepaint(move |_, _, _| laid_out.set(true))
         .child(Icon::new(IconName::Search).with_size(px(14.)))
         .child(
-            Input::new(query)
+            kit::input(query)
                 .flex_1()
                 .appearance(false)
                 .bordered(false)

@@ -49,7 +49,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -542,7 +542,7 @@ impl ApprovalCard {
                     )))
                     .min_w(px(180.))
                     .flex_1()
-                    .child(Input::new(input).flex_1()),
+                    .child(crate::views::kit::input(input).flex_1()),
             );
         }
         card.child(actions)
@@ -688,7 +688,7 @@ impl ApprovalCard {
                     .id(SharedString::from(format!("question-words-{request_id}")))
                     .min_w(px(180.))
                     .flex_1()
-                    .child(Input::new(input).flex_1()),
+                    .child(crate::views::kit::input(input).flex_1()),
             );
         }
         if question.multi_select {

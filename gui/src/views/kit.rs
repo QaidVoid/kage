@@ -1,8 +1,9 @@
 //! Small controls more than one view draws the same way.
 
 use gpui_kit::component::h_flex;
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::{
-    Div, FontWeight, InteractiveElement as _, ParentElement as _, SharedString, Stateful,
+    Div, Entity, FontWeight, InteractiveElement as _, ParentElement as _, SharedString, Stateful,
     Styled as _, div, px,
 };
 
@@ -17,6 +18,13 @@ pub(crate) enum BtnTone {
     Primary,
     /// The outlined danger button, for the refuse answer.
     Danger,
+}
+
+/// A single-line input at the default size, without its vertical
+/// padding. The padding leaves a 14px box for a 20px line, and the
+/// field's horizontal clip cuts the glyphs vertically too.
+pub(crate) fn input(state: &Entity<InputState>) -> Input {
+    Input::new(state).py_0()
 }
 
 /// One small action button as the design draws it (`.btn.sm`): 26px

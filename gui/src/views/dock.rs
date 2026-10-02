@@ -15,7 +15,7 @@ use std::rc::Rc;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
@@ -606,7 +606,7 @@ impl DockRow {
                                 goal_laid_out.set(true);
                                 let _ = release.update(cx, |_, cx| cx.notify());
                             })
-                            .child(Input::new(&goal_input).flex_1())
+                            .child(crate::views::kit::input(&goal_input).flex_1())
                             .child(
                                 Button::new("dock-goal-save")
                                     .label("Save")

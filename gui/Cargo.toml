@@ -63,7 +63,10 @@ web-sys = { version = "=0.3.106", features = [
     "Window",
 ] }
 
+# Size and speed for shipped binaries, after soar's profile. Nothing in
+# the client recovers from a panic, so aborting drops the unwind tables.
 [profile.release]
-lto = "thin"
-codegen-units = 16
-strip = "debuginfo"
+codegen-units = 1
+lto = true
+panic = "abort"
+strip = true

@@ -100,3 +100,11 @@ wildcard_imports = "allow"
 [workspace.lints.rust]
 missing_docs = "warn"
 unsafe_code = "forbid"
+
+# Size and speed for shipped binaries, after soar's profile. Panics keep
+# unwinding because the plugin host catches a panicking Lua job and keeps
+# its thread alive.
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true

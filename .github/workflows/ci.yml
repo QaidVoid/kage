@@ -105,10 +105,10 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo build --locked --release
+      - run: cargo build --locked
       # The headless platform needs no display and no GPU, so this
       # exercises the real event loop, window, list, composer, markdown
       # and the 30 Hz stream on every Linux CI run.
       - name: Smoke run
         if: runner.os == 'Linux'
-        run: ZED_HEADLESS=1 timeout 60 ./target/release/kage-desktop --smoke 5000 --stream
+        run: ZED_HEADLESS=1 timeout 60 ./target/debug/kage-desktop --smoke 5000 --stream

@@ -40,6 +40,7 @@ use kage_remote::head::{self, Auth, Head, HeadError};
 use kage_remote::pipe;
 use kage_remote::token::Token;
 use signal_hook::consts::{SIGINT, SIGTERM};
+#[cfg(unix)]
 use signal_hook::iterator::Signals;
 
 use crate::rpc::host::Host;
@@ -214,6 +215,7 @@ fn load_token(rotate: bool) -> Result<(PathBuf, Arc<Token>), String> {
 /// so the accept loop unwinds into the graceful shutdown; a second one
 /// exits immediately. When the handler thread cannot start, a plain
 /// flag still stops the loop.
+#[cfg(unix)]
 fn install_signals(stop: &Arc<AtomicBool>, log: &Log) {
     let Ok(mut signals) = Signals::new([SIGINT, SIGTERM]) else {
         log("warning: cannot register signal handlers; kill the process to stop it");
@@ -235,6 +237,25 @@ fn install_signals(stop: &Arc<AtomicBool>, log: &Log) {
         });
     if spawned.is_err() {
         let _ = signal_hook::flag::register(SIGINT, Arc::clone(stop));
+    }
+}
+
+/// Registers SIGINT and SIGTERM handlers without a handler thread,
+/// which signal-hook offers only on unix. The first signal sets `stop`;
+/// a second one, arriving with `stop` already set, exits immediately.
+#[cfg(not(unix))]
+fn install_signals(stop: &Arc<AtomicBool>, log: &Log) {
+    for signal in [SIGINT, SIGTERM] {
+        let registered = signal_hook::flag::register_conditional_shutdown(
+            signal,
+            130,
+            Arc::clone(stop),
+        )
+        .and_then(|_| signal_hook::flag::register(signal, Arc::clone(stop)));
+        if registered.is_err() {
+            log("warning: cannot register signal handlers; kill the process to stop it");
+            return;
+        }
     }
 }
 

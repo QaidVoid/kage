@@ -429,7 +429,7 @@ impl Agent for CliAcpAgent {
     fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
         let servers = editor_servers(&req.mcp_servers)?;
         let (path, mut header) =
-            crate::plan_session(&self.host.default_model, "").map_err(RpcError::internal)?;
+            crate::plan_session_in(&self.host.sessions, &self.host.default_model, "");
         let id = header.session;
         let mut spec = self.session_spec(id, &req.cwd, &self.host.default_model, servers)?;
         header.cwd.clone_from(&spec.cx.workdir);

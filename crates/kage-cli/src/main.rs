@@ -46,7 +46,7 @@ mod trust;
 mod tui;
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -904,9 +904,13 @@ pub(crate) fn open_session(model: &str, system_prompt: &str) -> Result<SessionWr
 /// quitting (or resuming a different session) doesn't litter the
 /// sessions directory with empty header-only stubs.
 pub(crate) fn plan_session(model: &str, system_prompt: &str) -> Result<(PathBuf, Header), String> {
-    let dir = sessions_dir()?;
+    Ok(plan_session_in(&sessions_dir()?, model, system_prompt))
+}
+
+/// [`plan_session`] in the sessions directory `dir`.
+pub(crate) fn plan_session_in(dir: &Path, model: &str, system_prompt: &str) -> (PathBuf, Header) {
     let session = SessionId::new();
-    let path = build_session_path(&dir, session);
+    let path = build_session_path(dir, session);
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let header = Header {
         version: FORMAT_VERSION,
@@ -919,7 +923,7 @@ pub(crate) fn plan_session(model: &str, system_prompt: &str) -> Result<(PathBuf,
         parent_session: None,
         parent_entry: None,
     };
-    Ok((path, header))
+    (path, header)
 }
 
 /// A `--model` value in the `provider/model` form, an older

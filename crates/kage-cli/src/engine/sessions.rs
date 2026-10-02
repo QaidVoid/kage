@@ -239,14 +239,26 @@ impl super::Dispatcher {
         let Some(idle) = session.idle.as_ref() else {
             return;
         };
-        let (path, mut header) =
-            match crate::plan_session(&session.state.model, &idle.cx.system_prompt) {
-                Ok(planned) => planned,
-                Err(err) => {
-                    self.error(id, format!("new session: {err}"));
-                    return;
-                }
-            };
+        // The new session goes next to the one it replaces.
+        let dir = idle
+            .recorder
+            .as_ref()
+            .and_then(|recorder| recorder.path().parent().map(Path::to_path_buf));
+        let planned = match dir {
+            Some(dir) => Ok(crate::plan_session_in(
+                &dir,
+                &session.state.model,
+                &idle.cx.system_prompt,
+            )),
+            None => crate::plan_session(&session.state.model, &idle.cx.system_prompt),
+        };
+        let (path, mut header) = match planned {
+            Ok(planned) => planned,
+            Err(err) => {
+                self.error(id, format!("new session: {err}"));
+                return;
+            }
+        };
         header.cwd.clone_from(&session.workdir);
         session.gate.set_plan(false);
         let new_id = header.session;

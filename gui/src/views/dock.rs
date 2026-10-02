@@ -1209,6 +1209,7 @@ mod tests {
                 })
                 .collect(),
             plan: None,
+            question: None,
         }
     }
 

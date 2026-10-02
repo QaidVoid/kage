@@ -26,7 +26,7 @@ use crossbeam_channel::{Receiver, select_biased};
 use kage_core::config::Config;
 use kage_core::options::OptionValue;
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
-use kage_core::protocol::{EXIT_PLAN_TOOL, PermissionDecision};
+use kage_core::protocol::{ASK_USER_QUESTION_TOOL, EXIT_PLAN_TOOL, PermissionDecision};
 use kage_core::sync::lock;
 use kage_core::{CancelFlag, Risk, ToolCallId, ToolOutput};
 use kage_loop::Hooks;
@@ -408,6 +408,11 @@ impl Hooks for PermissionGate {
         let subject = PermissionsConfig::subject_for(input);
         let configured = self.configured_action(name, &subject);
         let denied = mode == Some(PermissionAction::Deny) || configured.0 == PermissionAction::Deny;
+        // A question is the user's own say; there is nothing to approve
+        // first, unless a rule denies the tool.
+        if name == ASK_USER_QUESTION_TOOL && configured.0 != PermissionAction::Deny {
+            return None;
+        }
         if self.plan() && !denied {
             let risk = lock(&self.risks).get(name).copied();
             let rule = if name == EXIT_PLAN_TOOL {

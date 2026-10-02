@@ -19,8 +19,8 @@ use kage_acp::acp::{
 };
 use kage_acp::agent::{PromptContext, send_update};
 use kage_core::protocol::{
-    AgentState, AgentTree, Command, CommandKind, EXIT_PLAN_TOOL, Envelope, Event, HostEvent,
-    McpServerInfo, NoticeLevel, RequestId, RunOutcome, SessionState, SwarmMember, Usage,
+    ASK_USER_QUESTION_TOOL, AgentState, AgentTree, Command, CommandKind, Envelope, Event,
+    HostEvent, McpServerInfo, NoticeLevel, RequestId, RunOutcome, SessionState, SwarmMember, Usage,
 };
 use kage_core::sync::lock;
 use kage_core::{LoopError, LoopEvent, MessageId, SessionId, ToolCallId};
@@ -28,7 +28,8 @@ use kage_jsonrpc::RpcError;
 
 use super::CliAcpAgent;
 use super::bridge::{
-    AskKind, permission_call, spawn_ask, to_update, tool_kind, tool_title, top_agent,
+    ask_kind, permission_call, question_input, spawn_ask, to_update, tool_kind, tool_title,
+    top_agent,
 };
 use super::options::{Settings, Shown, config_options};
 use crate::engine::Commander;
@@ -328,28 +329,49 @@ impl Live {
         self.flight.entry(session).or_default()
     }
 
-    fn observe_host(&mut self, session: SessionId, event: &HostEvent, is_agent: bool) {
-        match event {
+    /// Holds the permission request or the questions `event` raises as
+    /// an open ask of `session`, for a client that attaches before the
+    /// answer.
+    fn track_ask(&mut self, session: SessionId, event: &HostEvent) {
+        let ask = match event {
             HostEvent::PermissionRequested {
                 request_id,
                 tool_call_id,
                 tool,
                 subject,
                 input,
-            } => {
-                self.asks.insert(
-                    *request_id,
-                    OpenAsk {
-                        session,
-                        request_id: *request_id,
-                        tool_call_id: tool_call_id.clone(),
-                        tool: tool.clone(),
-                        subject: subject.clone(),
-                        input: input.clone(),
-                    },
-                );
+            } => OpenAsk {
+                session,
+                request_id: *request_id,
+                tool_call_id: tool_call_id.clone(),
+                tool: tool.clone(),
+                subject: subject.clone(),
+                input: input.clone(),
+            },
+            HostEvent::QuestionAsked {
+                request_id,
+                tool_call_id,
+                questions,
+            } => OpenAsk {
+                session,
+                request_id: *request_id,
+                tool_call_id: tool_call_id.clone(),
+                tool: ASK_USER_QUESTION_TOOL.to_owned(),
+                subject: String::new(),
+                input: question_input(questions),
+            },
+            _ => return,
+        };
+        self.asks.insert(ask.request_id, ask);
+    }
+
+    fn observe_host(&mut self, session: SessionId, event: &HostEvent, is_agent: bool) {
+        match event {
+            HostEvent::PermissionRequested { .. } | HostEvent::QuestionAsked { .. } => {
+                self.track_ask(session, event);
             }
-            HostEvent::PermissionResolved { request_id } => {
+            HostEvent::PermissionResolved { request_id }
+            | HostEvent::QuestionClosed { request_id } => {
                 self.asks.remove(request_id);
                 if !is_agent {
                     self.maybe_close(session);
@@ -688,12 +710,21 @@ impl Live {
             .collect();
         asks.sort_by_key(|ask| ask.request_id.0);
         out.extend(asks.into_iter().map(|ask| {
-            let event = HostEvent::PermissionRequested {
-                request_id: ask.request_id,
-                tool_call_id: ask.tool_call_id.clone(),
-                tool: ask.tool.clone(),
-                subject: ask.subject.clone(),
-                input: ask.input.clone(),
+            let event = if ask.tool == ASK_USER_QUESTION_TOOL {
+                HostEvent::QuestionAsked {
+                    request_id: ask.request_id,
+                    tool_call_id: ask.tool_call_id.clone(),
+                    questions: serde_json::from_value(ask.input["questions"].clone())
+                        .unwrap_or_default(),
+                }
+            } else {
+                HostEvent::PermissionRequested {
+                    request_id: ask.request_id,
+                    tool_call_id: ask.tool_call_id.clone(),
+                    tool: ask.tool.clone(),
+                    subject: ask.subject.clone(),
+                    input: ask.input.clone(),
+                }
             };
             at(ask.session, event.into())
         }));
@@ -812,14 +843,7 @@ impl CliAcpAgent {
                     ask.session.to_string(),
                 ),
             };
-            let kind = if ask.tool == EXIT_PLAN_TOOL {
-                AskKind::Review {
-                    tool_call,
-                    plan: ask.input["plan"].as_str().unwrap_or_default().to_owned(),
-                }
-            } else {
-                AskKind::Permission(tool_call)
-            };
+            let kind = ask_kind(&ask.tool, &ask.input, tool_call);
             spawn_ask(
                 &self.peer,
                 &commander,

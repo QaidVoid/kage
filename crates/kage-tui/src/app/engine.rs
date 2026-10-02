@@ -221,25 +221,7 @@ impl App {
                 messages,
                 compaction,
                 ..
-            } => {
-                self.set_focus(None);
-                self.drafts.clear();
-                self.pending.clear();
-                self.agents.clear();
-                self.agent_buffers.clear();
-                self.swarm_oneshot = None;
-                self.restore_agents(self.active_session.unwrap_or_default(), &messages);
-                let durations = crate::events::tool_durations(&messages);
-                {
-                    let mut buf = lock(&self.root_buffer);
-                    buf.clear();
-                    crate::events::populate_from_history(
-                        &mut buf, &messages, &durations, compaction,
-                    );
-                }
-                self.annotate_edits(&self.root_buffer);
-                self.on_session_changed();
-            }
+            } => self.session_changed(&messages, compaction),
             HostEvent::ShellOutput { command, tail } => {
                 show_running_shell(&self.root_buffer, &command, &tail);
             }
@@ -265,7 +247,13 @@ impl App {
                     input,
                 });
             }
-            HostEvent::PermissionResolved { request_id } => self.drop_permission(request_id),
+            HostEvent::PermissionResolved { request_id }
+            | HostEvent::QuestionClosed { request_id } => self.drop_permission(request_id),
+            HostEvent::QuestionAsked {
+                request_id,
+                tool_call_id,
+                questions,
+            } => self.question_asked(request_id, tool_call_id, &questions),
             HostEvent::RunStarted => self.run_started = Some(Instant::now()),
             HostEvent::RunEnded { .. } => {
                 self.run_started = None;
@@ -408,7 +396,10 @@ impl App {
             | HostEvent::TitleChanged { .. }
             | HostEvent::SessionChanged { .. }
             | HostEvent::McpServers { .. }
-            | HostEvent::AgentPaused { .. } => false,
+            | HostEvent::AgentPaused { .. }
+            // Only the main session asks questions.
+            | HostEvent::QuestionAsked { .. }
+            | HostEvent::QuestionClosed { .. } => false,
         }
     }
 
@@ -789,6 +780,62 @@ impl App {
     /// loop reports that it runs. Allowing the tool for the session or
     /// always also approves the waiting requests for the same tool,
     /// which the new rule covers.
+    /// Show the conversation the main session switched to, with its
+    /// agents, and forget the views of the one it left.
+    fn session_changed(
+        &mut self,
+        messages: &[std::sync::Arc<kage_core::Message>],
+        compaction: Option<kage_core::protocol::CompactionCounts>,
+    ) {
+        self.set_focus(None);
+        self.drafts.clear();
+        self.pending.clear();
+        self.agents.clear();
+        self.agent_buffers.clear();
+        self.swarm_oneshot = None;
+        self.restore_agents(self.active_session.unwrap_or_default(), messages);
+        let durations = crate::events::tool_durations(messages);
+        {
+            let mut buf = lock(&self.root_buffer);
+            buf.clear();
+            crate::events::populate_from_history(&mut buf, messages, &durations, compaction);
+        }
+        self.annotate_edits(&self.root_buffer);
+        self.on_session_changed();
+    }
+
+    /// Queue the questions an `ask_user_question` call of the main
+    /// session asks, for the approval panel to ask in turn.
+    fn question_asked(
+        &mut self,
+        request_id: RequestId,
+        tool_call_id: Option<kage_core::ToolCallId>,
+        questions: &[kage_core::protocol::Question],
+    ) {
+        let session = self.active_session.unwrap_or_default();
+        self.push_approval(PendingApproval {
+            request_id,
+            session,
+            agent: None,
+            tool_call_id: tool_call_id.map(|id| id.to_string()),
+            tool: kage_core::protocol::ASK_USER_QUESTION_TOOL.to_owned(),
+            input: serde_json::json!({ "questions": questions }),
+        });
+    }
+
+    /// Send the answers to the questions on screen and show the next
+    /// waiting request.
+    pub(crate) fn answer_question(&mut self, answers: Option<Vec<Vec<String>>>) {
+        let Some(asked) = self.pending_permission.take() else {
+            return;
+        };
+        let _ = self.send_request(RunRequest::AnswerQuestion {
+            request_id: asked.request_id,
+            answers,
+        });
+        self.advance_approvals();
+    }
+
     pub(crate) fn answer_permission(&mut self, decision: PermissionDecision) {
         let Some(approval) = self.pending_permission.take() else {
             return;

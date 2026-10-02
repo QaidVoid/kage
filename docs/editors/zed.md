@@ -251,6 +251,28 @@ When a run ends while a permission request is still open, for example
 because it was cancelled, kage sends `$/cancel_request` for that
 request so the editor can close the dialog.
 
+## questions
+
+The model asks [questions](/guide/questions) with `ask_user_question`.
+Each question arrives as its own `session/request_permission`, one
+after another:
+
+- The tool call is the `ask_user_question` call, titled with the
+  question's header and the question, such as
+  `Store: Where should sessions live?`.
+- The options are `choice-0`, `choice-1` and so on, one per choice
+  with its label as the name and kind `allow_once`, then `skip` with
+  kind `reject_once`.
+- `_meta.kage.question.prompt` carries the whole question:
+  `header`, `question`, `options` (`label`, `description`) and
+  `multiSelect`.
+
+Picking a `choice-<n>` option answers with that choice. A client may
+send `_meta.kage.question.answer`, a list of strings, with its
+response to answer with several choices or the user's own words. It
+takes the place of the option picked. Picking `skip`, or cancelling,
+declines that question and every question after it.
+
 ## agents
 
 Editor sessions can start [agents](/guide/agents). How the editor sees

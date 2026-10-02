@@ -24,6 +24,7 @@ pub mod editor;
 pub mod help;
 pub mod input;
 pub mod picker;
+pub mod question;
 pub mod session_tree;
 pub mod settings;
 pub mod todo_list;

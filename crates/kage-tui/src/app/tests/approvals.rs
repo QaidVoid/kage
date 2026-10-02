@@ -262,3 +262,66 @@ fn answering_moves_the_row_from_waiting_to_approved() {
     app.approval_key_at(code(KeyCode::Enter), past_guard());
     assert_eq!(tool_phase(&app, "c1"), ToolPhase::Approved);
 }
+
+#[test]
+fn a_question_opens_the_panel_and_its_answers_go_back() {
+    use kage_core::protocol::{HostEvent, Question, QuestionOption, RequestId};
+    let (mut app, rx, events) = app_with_events();
+    let choices = |labels: &[&str]| {
+        labels
+            .iter()
+            .map(|label| QuestionOption {
+                label: (*label).into(),
+                description: String::new(),
+            })
+            .collect()
+    };
+    let questions = vec![
+        Question {
+            header: "Store".into(),
+            question: "Where should sessions live?".into(),
+            options: choices(&["Disk", "Memory"]),
+            multi_select: false,
+        },
+        Question {
+            header: "Format".into(),
+            question: "Which formats?".into(),
+            options: choices(&["JSON", "TOML"]),
+            multi_select: true,
+        },
+    ];
+    let request_id = RequestId(9);
+    events
+        .send(envelope(
+            kage_core::SessionId::new(),
+            1,
+            HostEvent::QuestionAsked {
+                request_id,
+                tool_call_id: None,
+                questions,
+            },
+        ))
+        .unwrap();
+    assert!(app.drain_engine_events());
+    assert!(app.approval_panel.is_some());
+    let rows = rendered(&mut app, 80, 24).join("\n");
+    assert!(rows.contains("Where should sessions live?"), "{rows}");
+    assert!(rows.contains("3. Answer in my own words"), "{rows}");
+
+    let now = past_guard();
+    app.approval_key_at(key('2'), now);
+    app.approval_key_at(key('1'), now);
+    app.approval_key_at(key('2'), now);
+    app.approval_key_at(key('4'), now);
+    assert_eq!(
+        rx.try_recv(),
+        Ok(RunRequest::AnswerQuestion {
+            request_id,
+            answers: Some(vec![
+                vec!["Memory".into()],
+                vec!["JSON".into(), "TOML".into()]
+            ]),
+        })
+    );
+    assert!(app.approval_panel.is_none());
+}

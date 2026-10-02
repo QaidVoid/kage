@@ -104,7 +104,7 @@ local SCENARIOS = {
   help = {
     { say = "Test keywords: **fix** (reads, a grep, an edit, a shell run), **read**, **grep**, **edit**, "
       .. "**shell**, **fail**, **todo**, **approval**, **plan** (turn plan mode on first), **subagent**, "
-      .. "**swarm**, **background**, **search**, **think**, **long**, **error**. Keywords combine in the order written." },
+      .. "**swarm**, **background**, **question**, **search**, **think**, **long**, **error**. Keywords combine in the order written." },
   },
   read = {
     { tools = { { "read", { path = "src/retry.rs" } }, { "read", { path = "src/http.rs" } }, { "ls", { path = "src" } } } },
@@ -146,6 +146,18 @@ local SCENARIOS = {
     { tools = { { "agent", { agent = "explore", description = "map the retry call sites", prompt = "List every call to send_with_retry under src and summarize each in one line." } } } },
     { say = "The explorer mapped the call sites; two of them retry on 4xx, which is the bug." },
   },
+  question = {
+    { tools = { { "ask_user_question", { questions = {
+      { header = "Store", question = "Where should sessions live?", options = {
+        { label = "Disk (Recommended)", description = "Survives restarts" },
+        { label = "Memory", description = "Faster, lost on exit" } } },
+      { header = "Format", question = "Which export formats?", multi_select = true, options = {
+        { label = "JSON", description = "Readable by any tool" },
+        { label = "TOML", description = "Matches the config" },
+        { label = "YAML", description = "For the CI files" } } },
+    } } } } },
+    { say = "Noted your answers; the sessions go where you picked." },
+  },
   background = {
     { tools = { { "agent", { agent = "explore", description = "survey the test suite", background = true,
       prompt = "Give the long survey of the test suite." } } } },
@@ -170,7 +182,7 @@ local SCENARIOS = {
   error = { { error = "decode" } },
 }
 
-local ORDER = { "help", "fix", "read", "grep", "edit", "shell", "fail", "todo", "approval", "plan", "subagent", "swarm", "background", "search", "think", "long", "error" }
+local ORDER = { "help", "fix", "read", "grep", "edit", "shell", "fail", "todo", "approval", "plan", "subagent", "swarm", "background", "question", "search", "think", "long", "error" }
 
 -- `fix` is a tour: the other scenarios played back to back.
 local FIX = { "read", "grep", "edit", "shell" }

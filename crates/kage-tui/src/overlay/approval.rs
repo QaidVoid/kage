@@ -12,12 +12,16 @@
 //! build, revise (the same feedback field), or reject and leave plan
 //! mode. Esc keeps planning.
 //!
+//! An `ask_user_question` call asks its questions here one at a time
+//! (see [`super::question`]); the feedback field takes an answer in
+//! the user's own words.
+//!
 //! Keys typed in the first [`TYPE_AHEAD_GUARD`] after the panel opens
 //! are dropped, so type-ahead meant for the prompt cannot answer it.
 
 use std::time::{Duration, Instant};
 
-use kage_core::protocol::{EXIT_PLAN_TOOL, PermissionDecision};
+use kage_core::protocol::{ASK_USER_QUESTION_TOOL, EXIT_PLAN_TOOL, PermissionDecision};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
@@ -27,6 +31,7 @@ use ratatui::widgets::Paragraph;
 use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use super::question::{QuestionFlow, Step};
 use crate::cmdline::{CommandLine, CommandLineEvent};
 use crate::cmdparse::EmptyResolver;
 use crate::theme::Theme;
@@ -63,6 +68,9 @@ pub enum ApprovalOutcome {
     Feedback(String),
     /// Deny the plan under review and turn plan mode off.
     RejectPlan,
+    /// Answer the questions under way: per question, the labels picked
+    /// or the user's own words. `None` declines.
+    Answer(Option<Vec<Vec<String>>>),
 }
 
 /// The approval prompt for one gated tool call, painted into the input
@@ -84,6 +92,8 @@ pub struct ApprovalPanel {
     /// An edit's change as the file shows it, in place of the one its
     /// input describes.
     diff: Option<EditDiff>,
+    /// The questions of an `ask_user_question` call.
+    flow: Option<QuestionFlow>,
 }
 
 impl ApprovalPanel {
@@ -102,6 +112,9 @@ impl ApprovalPanel {
             parked: None,
             opened_at,
             diff: None,
+            flow: (tool == ASK_USER_QUESTION_TOOL)
+                .then(|| QuestionFlow::from_input(input))
+                .flatten(),
         }
     }
 
@@ -127,6 +140,9 @@ impl ApprovalPanel {
     /// agent's name and its task cut to fit. The task is left out when
     /// too little of it would show.
     fn title(&self, room: usize) -> String {
+        if let Some(flow) = &self.flow {
+            return flow.title();
+        }
         let Some((name, task)) = &self.agent else {
             return self.question.clone();
         };
@@ -150,6 +166,8 @@ impl ApprovalPanel {
     pub fn hint(&self) -> String {
         let parts: &[&str] = if self.in_feedback() {
             &["enter to send", "esc to go back"]
+        } else if let Some(flow) = &self.flow {
+            &[flow.hint()]
         } else if self.is_plan() {
             &["y/r/n or 1-3", "enter", "esc keep planning"]
         } else {
@@ -172,12 +190,25 @@ impl ApprovalPanel {
                 return ApprovalOutcome::Stay;
             }
             return match field.handle_key(key, &[], &EmptyResolver) {
-                CommandLineEvent::Submit(text) => ApprovalOutcome::Feedback(text),
+                CommandLineEvent::Submit(text) => match self.flow.as_mut() {
+                    Some(flow) => {
+                        let step = flow.own_words(&text);
+                        if step != Step::Stay {
+                            self.feedback = None;
+                        }
+                        self.step(step)
+                    }
+                    None => ApprovalOutcome::Feedback(text),
+                },
                 CommandLineEvent::Pending | CommandLineEvent::Cancelled => ApprovalOutcome::Stay,
             };
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return ApprovalOutcome::Stay;
+        }
+        if let Some(flow) = self.flow.as_mut() {
+            let step = flow.handle_key(key.code);
+            return self.step(step);
         }
         if self.is_plan() {
             return self.plan_key(key.code);
@@ -213,6 +244,19 @@ impl ApprovalPanel {
                 ApprovalOutcome::Stay
             }
             _ => ApprovalOutcome::Decide(PermissionDecision::Deny),
+        }
+    }
+
+    /// What a step of the questions does to the panel.
+    fn step(&mut self, step: Step) -> ApprovalOutcome {
+        match step {
+            Step::Stay => ApprovalOutcome::Stay,
+            Step::OwnWords => {
+                self.feedback = Some(CommandLine::default());
+                ApprovalOutcome::Stay
+            }
+            Step::Done(answers) => ApprovalOutcome::Answer(Some(answers)),
+            Step::Decline => ApprovalOutcome::Answer(None),
         }
     }
 
@@ -299,6 +343,9 @@ impl ApprovalPanel {
     }
 
     fn summary(&self, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+        if let Some(flow) = &self.flow {
+            return flow.summary(theme, width);
+        }
         let text = Style::default().fg(theme.assistant_fg);
         let muted = theme.group_style("KageMuted");
         let field = |key| self.input.get(key).and_then(Value::as_str).unwrap_or("");
@@ -388,6 +435,23 @@ impl ApprovalPanel {
         } else {
             Vec::new()
         };
+        if let Some(field) = &self.feedback
+            && self.flow.is_some()
+        {
+            let help = "Answer in your own words. Press enter to send it, or esc to go back.";
+            let muted = theme.group_style("KageMuted");
+            lines.push(Line::styled(format!("{INDENT}{help}"), muted));
+            let (visible, _) = field_view(field, width);
+            lines.push(Line::from(vec![
+                Span::styled(" > ", approval),
+                Span::styled(visible, text),
+            ]));
+            return lines;
+        }
+        if let Some(flow) = &self.flow {
+            lines.extend(flow.rows_lines(theme, width));
+            return lines;
+        }
         if let Some(field) = &self.feedback {
             let what = if self.tool == "shell" {
                 "command"

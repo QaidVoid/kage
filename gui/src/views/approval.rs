@@ -28,6 +28,13 @@
 //!   which carries it to the agent under `_meta.kage.planReview`; the
 //!   field renders only when the ask offers a reject.
 //!
+//! An `ask_user_question` ask, one carrying `_meta.kage.question`,
+//! renders as a question card instead: the question, its choices with
+//! their descriptions, a field for an answer in your own words and a
+//! skip button. A choice answers at once; on a question that allows
+//! several, choices toggle and `Done` sends them. The whole answer
+//! rides `_meta.kage.question.answer`.
+//!
 //! When `$/cancel_request` withdraws an ask, the state drops it and
 //! the store surfaces the answered-elsewhere change; the card closes
 //! because its queue is the state's. The toast naming the ask as
@@ -39,24 +46,26 @@
 //! it back when the last ask closes, and takes it no other time; a
 //! click into the composer takes it back for typing at once.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AppContext as _, BoxShadow, Context, Div, Entity, FocusHandle, Focusable, FontWeight, Hsla,
     InteractiveElement, IntoElement, KeyDownEvent, Modifiers, ParentElement as _, Render,
     SharedString, Stateful, StatefulInteractiveElement as _, Styled, TestSupportExt as _, Window,
     div, px,
 };
-use kage_client::wire::PermissionOptionKind;
+use kage_client::wire::{PermissionOptionKind, QuestionPrompt};
 use kage_client::{PermissionAsk, PermissionDecision};
 use serde_json::Value;
 
 use crate::store::{Store, StoreHandle as _};
 use crate::theme::{
-    FONT_MONO, FS_2XS, FS_BASE, FS_XS, Palette, R_FULL, R_MD, R_XL, SP_3, SP_4, WEIGHT_SEMIBOLD,
+    FONT_MONO, FS_2XS, FS_BASE, FS_SM, FS_XS, Palette, R_FULL, R_MD, R_XL, SP_3, SP_4,
+    WEIGHT_SEMIBOLD,
 };
 use kage_client::SUBJECT_KEYS;
 
@@ -208,6 +217,9 @@ pub struct ApprovalCard {
     /// request id. The typed text survives every redraw with the
     /// entity.
     feedback: HashMap<u64, Entity<InputState>>,
+    /// The choices toggled on a question that allows several, by
+    /// request id.
+    picks: HashMap<u64, BTreeSet<usize>>,
 }
 
 impl gpui_kit::EventEmitter<ApprovalEvent> for ApprovalCard {}
@@ -234,6 +246,7 @@ impl ApprovalCard {
             focus: cx.focus_handle(),
             seen: 0,
             feedback: HashMap::new(),
+            picks: HashMap::new(),
         };
         card.sync_open_asks(window, cx);
         card
@@ -244,7 +257,7 @@ impl ApprovalCard {
     /// closes while the card holds it, and keeps one feedback field
     /// per open ask that offers a reject.
     fn sync_open_asks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let asks: Vec<(String, u64, bool)> = self
+        let asks: Vec<(String, u64, bool, bool)> = self
             .store
             .read(cx)
             .active_asks()
@@ -254,6 +267,7 @@ impl ApprovalCard {
                     session_id.to_owned(),
                     ask.request_id,
                     reject_option_id(ask).is_some(),
+                    ask.question.is_some(),
                 )
             })
             .collect();
@@ -266,13 +280,19 @@ impl ApprovalCard {
             cx.emit(ApprovalEvent::Released);
         }
         self.feedback
-            .retain(|request_id, _| asks.iter().any(|(_, id, _)| id == request_id));
-        for (session_id, request_id, rejectable) in asks {
+            .retain(|request_id, _| asks.iter().any(|(_, id, _, _)| id == request_id));
+        self.picks
+            .retain(|request_id, _| asks.iter().any(|(_, id, _, _)| id == request_id));
+        for (session_id, request_id, rejectable, question) in asks {
             if !rejectable || self.feedback.contains_key(&request_id) {
                 continue;
             }
-            let input =
-                cx.new(|cx| InputState::new(window, cx).placeholder("Reject with feedback..."));
+            let placeholder = if question {
+                "Answer in your own words..."
+            } else {
+                "Reject with feedback..."
+            };
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
             let store = self.store.clone();
             cx.subscribe_in(
                 &input,
@@ -284,27 +304,27 @@ impl ApprovalCard {
                             return;
                         }
                         let answered = store.act(cx, |store| {
-                            let reject = store
-                                .state()
-                                .session(&session_id)
-                                .and_then(|session| {
-                                    session
-                                        .permissions
-                                        .iter()
-                                        .find(|ask| ask.request_id == request_id)
-                                })
-                                .and_then(reject_option_id);
-                            let Some(reject) = reject else {
-                                return false;
-                            };
-                            store.reply_permission(
-                                &session_id,
-                                request_id,
-                                &PermissionDecision::Feedback {
-                                    option_id: reject.to_owned(),
-                                    feedback: text.clone(),
+                            let ask = store.state().session(&session_id).and_then(|session| {
+                                session
+                                    .permissions
+                                    .iter()
+                                    .find(|ask| ask.request_id == request_id)
+                            });
+                            let decision = match ask {
+                                Some(ask) if ask.question.is_some() => PermissionDecision::Answer {
+                                    option_id: "choice-0".to_owned(),
+                                    answer: vec![text.clone()],
                                 },
-                            )
+                                Some(ask) => match reject_option_id(ask) {
+                                    Some(reject) => PermissionDecision::Feedback {
+                                        option_id: reject.to_owned(),
+                                        feedback: text.clone(),
+                                    },
+                                    None => return false,
+                                },
+                                None => return false,
+                            };
+                            store.reply_permission(&session_id, request_id, &decision)
                         });
                         if answered {
                             input.update(cx, |state, cx| state.set_value("", window, cx));
@@ -350,6 +370,11 @@ impl ApprovalCard {
         else {
             return;
         };
+        if ask.question.as_ref().is_some_and(|q| q.multi_select) && digit < ask.options.len() {
+            self.toggle_pick(ask.request_id, digit - 1);
+            cx.notify();
+            return;
+        }
         let decision = PermissionDecision::Option(option.option_id);
         self.store.update(cx, |store, cx| {
             store.reply_permission(&session_id, ask.request_id, &decision);
@@ -524,6 +549,218 @@ impl ApprovalCard {
     }
 }
 
+impl ApprovalCard {
+    /// Turn choice `index` of the question `request_id` on or off.
+    fn toggle_pick(&mut self, request_id: u64, index: usize) {
+        let picks = self.picks.entry(request_id).or_default();
+        if !picks.remove(&index) {
+            picks.insert(index);
+        }
+    }
+
+    /// An `ask_user_question` ask: the header and question, a row per
+    /// choice with its description, the own-words field, and skip, plus
+    /// `Done` when several choices may be picked.
+    fn question_view(
+        &mut self,
+        session_id: &str,
+        ask: &PermissionAsk,
+        question: &QuestionPrompt,
+        pal: &'static Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let request_id = ask.request_id;
+        let picked = self.picks.get(&request_id).cloned().unwrap_or_default();
+        let head = v_flex()
+            .px(px(14.))
+            .pt(px(12.))
+            .pb(px(8.))
+            .gap(px(4.))
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .items_center()
+                    .child(
+                        Icon::new(IconName::MessageSquare)
+                            .with_size(px(14.))
+                            .text_color(pal.accent),
+                    )
+                    .child(
+                        div()
+                            .px(px(8.))
+                            .py(px(1.))
+                            .rounded(px(R_FULL))
+                            .bg(pal.accent_soft)
+                            .text_size(px(FS_2XS))
+                            .text_color(pal.accent)
+                            .child(SharedString::from(question.header.clone())),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(FS_BASE))
+                    .font_weight(WEIGHT_SEMIBOLD)
+                    .text_color(pal.ink_strong)
+                    .child(SharedString::from(question.question.clone())),
+            );
+        let mut choices = v_flex().px(px(10.)).gap(px(2.));
+        for (index, choice) in question.options.iter().enumerate() {
+            let on = picked.contains(&index);
+            let store = self.store.clone();
+            let session = session_id.to_owned();
+            let multi = question.multi_select;
+            let hover = pal.hover;
+            let this = cx.entity();
+            choices = choices.child(
+                h_flex()
+                    .id(SharedString::from(format!("question-{request_id}-{index}")))
+                    .gap(px(10.))
+                    .items_start()
+                    .px(px(8.))
+                    .py(px(6.))
+                    .rounded(px(R_MD))
+                    .cursor_pointer()
+                    .when(on, |row| row.bg(pal.selected))
+                    .hover(move |row| row.bg(hover))
+                    .child(option_kbd(index + 1, pal.muted))
+                    .when(multi, |row| {
+                        row.child(
+                            Icon::new(if on {
+                                IconName::CircleCheck
+                            } else {
+                                IconName::Circle
+                            })
+                            .with_size(px(14.))
+                            .text_color(if on {
+                                pal.accent
+                            } else {
+                                pal.faint
+                            }),
+                        )
+                    })
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .flex_1()
+                            .child(
+                                div()
+                                    .text_size(px(FS_SM))
+                                    .text_color(pal.ink_strong)
+                                    .child(SharedString::from(choice.label.clone())),
+                            )
+                            .when(!choice.description.is_empty(), |col| {
+                                col.child(
+                                    div()
+                                        .text_size(px(FS_XS))
+                                        .text_color(pal.muted)
+                                        .child(SharedString::from(choice.description.clone())),
+                                )
+                            }),
+                    )
+                    .on_click(move |_, _, cx| {
+                        if multi {
+                            this.update(cx, |card, cx| {
+                                card.toggle_pick(request_id, index);
+                                cx.notify();
+                            });
+                            return;
+                        }
+                        store.update(cx, |store, cx| {
+                            store.reply_permission(
+                                &session,
+                                request_id,
+                                &PermissionDecision::Option(format!("choice-{index}")),
+                            );
+                            cx.notify();
+                        });
+                    }),
+            );
+        }
+        let mut actions = h_flex()
+            .w_full()
+            .items_center()
+            .px(px(14.))
+            .py(px(12.))
+            .gap(px(SP_4));
+        if let Some(input) = self.feedback.get(&request_id) {
+            actions = actions.child(
+                div()
+                    .id(SharedString::from(format!("question-words-{request_id}")))
+                    .min_w(px(180.))
+                    .flex_1()
+                    .child(Input::new(input).flex_1()),
+            );
+        }
+        if question.multi_select {
+            let store = self.store.clone();
+            let session = session_id.to_owned();
+            let labels: Vec<String> = picked
+                .iter()
+                .filter_map(|index| question.options.get(*index))
+                .map(|choice| choice.label.clone())
+                .collect();
+            let first = picked.iter().next().copied().unwrap_or(0);
+            actions = actions.child(
+                option_btn(
+                    SharedString::from(format!("question-done-{request_id}")),
+                    BtnTone::Ok,
+                    pal,
+                )
+                .child(SharedString::from(format!("Done ({})", labels.len())))
+                .on_click(move |_, _, cx| {
+                    if labels.is_empty() {
+                        return;
+                    }
+                    store.update(cx, |store, cx| {
+                        store.reply_permission(
+                            &session,
+                            request_id,
+                            &PermissionDecision::Answer {
+                                option_id: format!("choice-{first}"),
+                                answer: labels.clone(),
+                            },
+                        );
+                        cx.notify();
+                    });
+                }),
+            );
+        }
+        if let Some(skip) = reject_option_id(ask).map(str::to_owned) {
+            let store = self.store.clone();
+            let session = session_id.to_owned();
+            actions = actions.child(
+                option_btn(
+                    SharedString::from(format!("question-skip-{request_id}")),
+                    BtnTone::Plain,
+                    pal,
+                )
+                .child("Skip")
+                .on_click(move |_, _, cx| {
+                    store.update(cx, |store, cx| {
+                        store.reply_permission(
+                            &session,
+                            request_id,
+                            &PermissionDecision::Option(skip.clone()),
+                        );
+                        cx.notify();
+                    });
+                }),
+            );
+        }
+        v_flex()
+            .id(SharedString::from(format!("approval-{request_id}")))
+            .w_full()
+            .overflow_hidden()
+            .rounded(px(R_XL))
+            .border_1()
+            .border_color(pal.line)
+            .bg(pal.surface)
+            .child(head)
+            .child(choices)
+            .child(actions)
+    }
+}
+
 impl Render for ApprovalCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = Palette::active(cx);
@@ -545,7 +782,12 @@ impl Render for ApprovalCard {
                 this.on_key(event, window, cx);
             }));
         for (session_id, ask) in asks {
-            surface = surface.child(self.ask_view(&session_id, &ask, pal, cx));
+            surface = match ask.question.clone() {
+                Some(question) => {
+                    surface.child(self.question_view(&session_id, &ask, &question, pal, cx))
+                }
+                None => surface.child(self.ask_view(&session_id, &ask, pal, cx)),
+            };
         }
         surface
     }
@@ -652,6 +894,7 @@ mod tests {
             },
             options: Vec::new(),
             plan: None,
+            question: None,
         };
         let shell = ask(Some(serde_json::json!({"command": "cargo test"})));
         assert_eq!(subject_of(&shell).as_deref(), Some("cargo test"));
@@ -691,6 +934,7 @@ mod tests {
                 },
             ],
             plan: None,
+            question: None,
         };
         assert_eq!(super::reject_option_id(&ask), Some("revise"));
         let allow_only = PermissionAsk {
@@ -702,6 +946,7 @@ mod tests {
                 kind: kage_client::wire::PermissionOptionKind::AllowOnce,
             }],
             plan: None,
+            question: None,
         };
         assert_eq!(super::reject_option_id(&allow_only), None);
     }

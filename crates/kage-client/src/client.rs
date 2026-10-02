@@ -17,7 +17,7 @@ use kage_acp_wire::{
     FsOp, FsRequest, Implementation, InitializeRequest, KageMeta, ListSessionsRequest,
     LoadSessionRequest, McpServer, ModelsResponse, NewSessionRequest, OptionSetRequest,
     OptionsResponse, PROTOCOL_VERSION, PermissionOptionKind, PermissionOutcome, PlanReview,
-    PromptDelivery, PromptRef, PromptRequest, PromptResponse, RequestMeta,
+    PromptDelivery, PromptRef, PromptRequest, PromptResponse, QuestionMeta, RequestMeta,
     RequestPermissionRequest, RequestPermissionResult, ResumeSessionRequest, SelectedOption,
     SessionExportResponse, SessionForkRequest, SessionForkResponse, SessionNotification,
     SessionRenameRequest, SessionRequest, SessionUpdate, SetSessionConfigOptionRequest,
@@ -90,6 +90,15 @@ pub enum PermissionDecision {
     /// Pick the option with this id verbatim, for asks whose options
     /// a host shows by id.
     Option(String),
+    /// Answer a question: pick the option with this id and carry the
+    /// whole answer, several choices or the user's own words, through
+    /// `_meta.kage.question`.
+    Answer {
+        /// The offered option the answer picks, verbatim.
+        option_id: String,
+        /// The labels picked, or the user's own words.
+        answer: Vec<String>,
+    },
 }
 
 /// What the client is still waiting to hear back about a request.
@@ -431,6 +440,18 @@ impl Client {
                 PermissionDecision::Reject => ask
                     .option_of(PermissionOptionKind::RejectOnce)
                     .map(str::to_owned),
+                PermissionDecision::Answer { option_id, answer } => {
+                    meta = Some(RequestMeta {
+                        kage: KageMeta {
+                            question: Some(Box::new(QuestionMeta {
+                                prompt: None,
+                                answer: Some(answer.clone()),
+                            })),
+                            ..KageMeta::default()
+                        },
+                    });
+                    Some(option_id.clone())
+                }
                 PermissionDecision::Feedback {
                     option_id,
                     feedback,
@@ -872,15 +893,13 @@ impl Client {
         };
         let session_id = request.session_id;
         let session = self.session_mut(&session_id);
-        let plan = request
-            .meta
-            .and_then(|meta| meta.kage.plan_review)
-            .and_then(|review| review.plan);
+        let kage = request.meta.map(|meta| meta.kage).unwrap_or_default();
         let ask = PermissionAsk {
             request_id: id,
             tool_call: request.tool_call,
             options: request.options,
-            plan,
+            plan: kage.plan_review.and_then(|review| review.plan),
+            question: kage.question.and_then(|question| question.prompt),
         };
         // A re-attach makes the agent raise its open asks again, so a
         // frame whose id is already queued replaces its echo instead
@@ -1357,6 +1376,14 @@ fn decision_record(
             .iter()
             .find(|option| option.option_id == option_id)
     });
+    if let PermissionDecision::Answer { answer, .. } = decision {
+        return TranscriptItem::Decision {
+            subject,
+            label: answer.join(", "),
+            allowed: true,
+            feedback: None,
+        };
+    }
     let label = match chosen {
         Some(option) => option.name.clone(),
         None => option_id.map_or_else(|| "cancelled".to_owned(), str::to_owned),

@@ -260,6 +260,10 @@ pub struct PermissionAsk {
     /// The plan document a plan-mode review asks about, from the
     /// request's `_meta.kage.planReview`.
     pub plan: Option<String>,
+    /// The question an `ask_user_question` call asks, from the
+    /// request's `_meta.kage.question`. Its choices are the options
+    /// `choice-<n>`.
+    pub question: Option<kage_acp_wire::QuestionPrompt>,
 }
 
 /// The tool input keys that name a call's primary argument, most
@@ -632,6 +636,7 @@ mod tests {
                 },
             ],
             plan: None,
+            question: None,
         };
         assert_eq!(
             ask.option_of(PermissionOptionKind::AllowOnce),

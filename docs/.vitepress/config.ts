@@ -41,6 +41,7 @@ export default defineConfig({
           { text: "permissions", link: "/guide/permissions" },
           { text: "agents", link: "/guide/agents" },
           { text: "plan mode", link: "/guide/plan-mode" },
+          { text: "questions", link: "/guide/questions" },
         ],
       },
       {

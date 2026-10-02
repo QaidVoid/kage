@@ -172,6 +172,23 @@ pub enum HostEvent {
         /// Id of the answered request.
         request_id: RequestId,
     },
+    /// The model asks the user questions through
+    /// [`ASK_USER_QUESTION_TOOL`], and its run waits for the answer.
+    /// Durable.
+    QuestionAsked {
+        /// Id to answer with.
+        request_id: RequestId,
+        /// The call that asks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<ToolCallId>,
+        /// What it asks, in order.
+        questions: Vec<Question>,
+    },
+    /// A question was answered, declined or abandoned. Durable.
+    QuestionClosed {
+        /// Id of the closed request.
+        request_id: RequestId,
+    },
     /// A message for the user that is not part of the conversation.
     /// Never recorded. Live.
     Notice {
@@ -307,6 +324,34 @@ pub enum RunOutcome {
 /// Name of the tool the agent calls in plan mode to present its plan
 /// for review. Hosts render its `plan` argument as the plan document.
 pub const EXIT_PLAN_TOOL: &str = "exit_plan";
+
+/// Name of the tool the model asks the user questions with.
+pub const ASK_USER_QUESTION_TOOL: &str = "ask_user_question";
+
+/// One question the model asks the user, with the choices it offers.
+/// The user may also answer in their own words.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Question {
+    /// A short label for the question, such as `Auth method`.
+    pub header: String,
+    /// The whole question.
+    pub question: String,
+    /// The choices, two to four.
+    pub options: Vec<QuestionOption>,
+    /// Whether the user may pick several choices.
+    #[serde(default)]
+    pub multi_select: bool,
+}
+
+/// One choice of a [`Question`].
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct QuestionOption {
+    /// What the user picks, in a few words.
+    pub label: String,
+    /// What picking it means.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+}
 
 /// Snapshot of the settings that shape a session's next run.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -477,6 +522,14 @@ pub enum CommandKind {
         request_id: RequestId,
         /// The decision.
         decision: PermissionDecision,
+    },
+    /// Answer a [`HostEvent::QuestionAsked`].
+    AnswerQuestion {
+        /// Request being answered.
+        request_id: RequestId,
+        /// Per question, in order, the labels picked or the user's own
+        /// words. `None` declines to answer.
+        answers: Option<Vec<Vec<String>>>,
     },
     /// Use a different provider-qualified model from the next run on.
     SetModel {

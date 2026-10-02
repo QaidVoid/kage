@@ -302,7 +302,13 @@ impl App {
             }
         };
         let approving = self.pending_permission.is_some();
-        let doing = if approving {
+        let asking = self
+            .pending_permission
+            .as_ref()
+            .is_some_and(|p| p.tool == kage_core::protocol::ASK_USER_QUESTION_TOOL);
+        let doing = if asking {
+            "Waiting for your answer".to_owned()
+        } else if approving {
             "Waiting for your approval".to_owned()
         } else {
             self.current_work(buffer)

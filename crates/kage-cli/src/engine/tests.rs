@@ -4930,3 +4930,121 @@ fn agents_past_the_budget_stop_until_the_next_prompt() {
     let report = report_of(&events, parent, "call_d");
     assert_eq!((report.state, report.limit), (ReportState::Completed, None));
 }
+
+fn question_turn() -> Script {
+    let id = ToolCallId::new("call_q");
+    let input = serde_json::json!({"questions": [{
+        "header": "Store",
+        "question": "Where should sessions live?",
+        "options": [
+            {"label": "Disk", "description": "Survives restarts"},
+            {"label": "Memory", "description": "Faster, lost on exit"}
+        ]
+    }]});
+    vec![
+        Ok(ProviderEvent::MessageStart),
+        Ok(ProviderEvent::ToolCallStart {
+            id: id.clone(),
+            name: kage_core::protocol::ASK_USER_QUESTION_TOOL.into(),
+        }),
+        Ok(ProviderEvent::ToolCallEnd { id, input }),
+        Ok(ProviderEvent::MessageEnd {
+            stop_reason: StopReason::ToolUse,
+            usage: TokenUsage::default(),
+        }),
+    ]
+}
+
+fn question_asked(events: &[Envelope]) -> Option<kage_core::protocol::RequestId> {
+    events.iter().find_map(|e| match &e.event {
+        Event::Host(HostEvent::QuestionAsked { request_id, .. }) => Some(*request_id),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_question_waits_for_the_answer_and_the_model_reads_it() {
+    let mock = MockProvider::sequence(vec![question_turn(), text_turn("disk it is")]);
+    let h = harness(mock.clone());
+    let id = SessionId::new();
+    h.open(id, None);
+    prompt(&h.engine, id, "store the sessions", Delivery::Steer);
+    let events = wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::QuestionAsked { .. }))
+    });
+    let request_id = question_asked(&events).unwrap();
+    h.engine.send(Command::to(
+        id,
+        CommandKind::AnswerQuestion {
+            request_id,
+            answers: Some(vec![vec!["Disk".into()]]),
+        },
+    ));
+    let events = until_runs_end(&h.events, 1);
+    assert!(events.iter().any(|e| matches!(
+        e.event,
+        Event::Host(HostEvent::QuestionClosed { request_id: closed }) if closed == request_id
+    )));
+    let output = tool_output(&events, id, "call_q");
+    assert_eq!(
+        output.text,
+        "The user answered:\n- Where should sessions live?: Disk"
+    );
+    assert_eq!(outcome_of(&events, id), [RunOutcome::Completed]);
+}
+
+#[test]
+fn cancelling_a_run_closes_its_open_question() {
+    let h = harness(MockProvider::sequence(vec![question_turn()]));
+    let id = SessionId::new();
+    h.open(id, None);
+    prompt(&h.engine, id, "store the sessions", Delivery::Steer);
+    let events = wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::QuestionAsked { .. }))
+    });
+    let request_id = question_asked(&events).unwrap();
+    h.engine.send(Command::to(id, CommandKind::Cancel));
+    let events = until_runs_end(&h.events, 1);
+    assert!(events.iter().any(|e| matches!(
+        e.event,
+        Event::Host(HostEvent::QuestionClosed { request_id: closed }) if closed == request_id
+    )));
+    assert_eq!(outcome_of(&events, id), [RunOutcome::Cancelled]);
+}
+
+#[test]
+fn only_an_answerable_main_session_gets_the_question_tool() {
+    let has_tool = |interactive: bool, agents: bool| {
+        let mock = MockProvider::sequence(vec![
+            agent_turn(&[("call_a", task("look"))]),
+            text_turn("child done"),
+            text_turn("parent done"),
+        ]);
+        let h = harness(mock.clone());
+        let id = SessionId::new();
+        h.engine.open(SessionSpec {
+            interactive,
+            agents: agents.then(|| agent_setup(1, 1)),
+            ..h.spec(id)
+        });
+        prompt(&h.engine, id, "go", Delivery::Steer);
+        until_runs_end(&h.events, if agents { 2 } else { 1 });
+        mock.requests()
+            .iter()
+            .map(|req| {
+                req.tools
+                    .iter()
+                    .any(|t| t.name == kage_core::protocol::ASK_USER_QUESTION_TOOL)
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        has_tool(true, true),
+        [true, false, true],
+        "the agent has none"
+    );
+    assert!(
+        has_tool(false, false).iter().all(|has| !has),
+        "nobody to ask"
+    );
+}

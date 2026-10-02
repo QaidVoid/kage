@@ -21,6 +21,7 @@ conversation once, so the model knows which mode it is in.
 | Tools | In plan mode |
 | --- | --- |
 | `read`, `grep`, `find`, `ls`, `web_search`, `web_fetch`, `todo_list` | run under the normal permission rules |
+| `ask_user_question` | asks you, as outside plan mode (see [questions](/guide/questions)) |
 | `write`, `edit` | refused, with a message that names plan mode |
 | `shell`, `agent`, `swarm`, `send_message`, MCP tools | always ask, even in `allow` mode and even when approved for the session |
 

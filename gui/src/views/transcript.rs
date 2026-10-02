@@ -423,6 +423,20 @@ pub(crate) fn tool_verb(call: &ToolCallItem) -> (String, String) {
             basename(input_str(input, "path")).to_owned(),
         ),
         "todo_list" => ("Updated todos", "Updating todos", String::new()),
+        "ask_user_question" => (
+            "Asked",
+            "Asking",
+            input
+                .and_then(|input| input["questions"].as_array())
+                .map(|questions| {
+                    questions
+                        .iter()
+                        .filter_map(|q| q["header"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default(),
+        ),
         "web_search" => (
             "Searched the web",
             "Searching the web",
@@ -462,6 +476,7 @@ fn tool_icon(title: &str) -> IconName {
         "write" => IconName::FilePlus,
         "web_search" | "web_fetch" => IconName::Globe,
         "todo_list" => IconName::ListTodo,
+        "ask_user_question" => IconName::MessageSquare,
         _ => IconName::Zap,
     }
 }

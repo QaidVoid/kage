@@ -805,6 +805,7 @@ impl App {
                 self.answer_permission(PermissionDecision::Deny);
                 let _ = self.send_request(RunRequest::PlanMode { on: false });
             }
+            ApprovalOutcome::Answer(answers) => self.answer_question(answers),
         }
     }
 }

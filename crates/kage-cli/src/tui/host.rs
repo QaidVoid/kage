@@ -287,6 +287,13 @@ impl Host {
                 request_id,
                 decision,
             }),
+            RunRequest::AnswerQuestion {
+                request_id,
+                answers,
+            } => self.send(CommandKind::AnswerQuestion {
+                request_id,
+                answers,
+            }),
             RunRequest::SwitchModel(model) => self.switch_model(&model),
             RunRequest::CycleThinkingLevel => {
                 let next = {

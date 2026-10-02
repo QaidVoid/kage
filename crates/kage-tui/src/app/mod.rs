@@ -267,6 +267,14 @@ pub enum RunRequest {
         /// The user's decision.
         decision: PermissionDecision,
     },
+    /// Answer the questions an `ask_user_question` call asked.
+    AnswerQuestion {
+        /// Request being answered.
+        request_id: kage_core::protocol::RequestId,
+        /// Per question, the labels picked or the user's own words.
+        /// `None` declines.
+        answers: Option<Vec<Vec<String>>>,
+    },
     /// A plugin file changed on disk. The worker re-evaluates every
     /// `.lua` in the plugins directory and toasts the outcome. Chrome
     /// (`set_header`/`set_footer`), status, autocomplete, terminal

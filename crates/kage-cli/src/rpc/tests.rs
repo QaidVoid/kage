@@ -5049,3 +5049,92 @@ fn a_kage_client_session_wakes_for_a_background_result() {
     );
     assert_eq!(main.call_count(), 3);
 }
+
+fn questions_input() -> serde_json::Value {
+    serde_json::json!({"questions": [
+        {"header": "Store", "question": "Where should sessions live?",
+         "options": [{"label": "Disk", "description": "Survives restarts"}, {"label": "Memory"}]},
+        {"header": "Format", "question": "Which formats?", "multi_select": true,
+         "options": [{"label": "JSON"}, {"label": "TOML"}, {"label": "YAML"}]}
+    ]})
+}
+
+#[test]
+fn questions_reach_an_editor_as_permission_asks_one_at_a_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(
+        vec![
+            tool_turn("call_q", "ask_user_question", questions_input()),
+            text_turn("noted"),
+            text_turn("title"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    let end = prompt_async(&h.client, &h.session, "set it up");
+
+    let (ask, params) = until_ask(&h.inbox, &mut Vec::new());
+    let names: Vec<&str> = params["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Disk", "Memory", "Skip"]);
+    assert_eq!(
+        params["toolCall"]["title"],
+        "Store: Where should sessions live?"
+    );
+    assert_eq!(
+        params["_meta"]["kage"]["question"]["prompt"]["header"],
+        "Store"
+    );
+    let pick = serde_json::json!({"outcome": {"outcome": "selected", "optionId": "choice-1"}});
+    h.client.respond(&ask, Ok(pick)).unwrap();
+
+    let (ask, params) = until_ask(&h.inbox, &mut Vec::new());
+    assert_eq!(
+        params["_meta"]["kage"]["question"]["prompt"]["multiSelect"],
+        true
+    );
+    let several = serde_json::json!({
+        "outcome": {"outcome": "selected", "optionId": "choice-0"},
+        "_meta": {"kage": {"question": {"answer": ["JSON", "YAML"]}}}
+    });
+    h.client.respond(&ask, Ok(several)).unwrap();
+
+    let response = end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    let sent = h.mock.requests()[1].messages.clone();
+    let answered = sent.iter().flat_map(|m| &m.content).any(|block| {
+        matches!(block, kage_core::Content::ToolResultBlock { output, .. }
+            if output == "The user answered:\n- Where should sessions live?: Memory\n\
+                          - Which formats?: JSON, YAML")
+    });
+    assert!(answered, "{sent:#?}");
+}
+
+#[test]
+fn skipping_a_question_declines_them_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(
+        vec![
+            tool_turn("call_q", "ask_user_question", questions_input()),
+            text_turn("ok"),
+            text_turn("title"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    let end = prompt_async(&h.client, &h.session, "set it up");
+    let (ask, _) = until_ask(&h.inbox, &mut Vec::new());
+    let skip = serde_json::json!({"outcome": {"outcome": "selected", "optionId": "skip"}});
+    h.client.respond(&ask, Ok(skip)).unwrap();
+    end.recv_timeout(WAIT).unwrap().unwrap();
+    let sent = h.mock.requests()[1].messages.clone();
+    let declined = sent.iter().flat_map(|m| &m.content).any(|block| {
+        matches!(block, kage_core::Content::ToolResultBlock { output, .. }
+            if output.starts_with("The user declined"))
+    });
+    assert!(declined, "{sent:#?}");
+}

@@ -12,7 +12,7 @@
 
 use kage_core::agent_report::{AgentLimit, AgentReport, ReportState};
 use kage_core::event::AGENT_NO_REPLY_TEXT as NO_REPLY;
-use kage_core::protocol::EXIT_PLAN_TOOL;
+use kage_core::protocol::{ASK_USER_QUESTION_TOOL, EXIT_PLAN_TOOL};
 use serde_json::Value;
 
 use super::modeline::format_token_count;
@@ -353,6 +353,11 @@ pub fn describe(name: &str, input: &Value) -> ToolLabel {
             String::new(),
         )
         .body(ToolBody::Plan),
+        ASK_USER_QUESTION_TOOL => label(
+            ["Ask", "Asking", "Asked"],
+            question_headers(input),
+            String::new(),
+        ),
         _ => label(
             ["Call", "Calling", "Called"],
             display_name(name),
@@ -536,6 +541,21 @@ pub fn agent_stats(tool_calls: u32, tokens: u64) -> String {
         return tools;
     }
     format!("{tools} \u{b7} {} tok", format_token_count(tokens))
+}
+
+/// The headers of the questions an `ask_user_question` input asks,
+/// joined, such as `Auth method, Storage`.
+fn question_headers(input: &Value) -> String {
+    input["questions"]
+        .as_array()
+        .map(|questions| {
+            questions
+                .iter()
+                .filter_map(|q| q["header"].as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default()
 }
 
 /// The approval title for a call, such as `Run this command?` or

@@ -7,16 +7,20 @@ use std::sync::{Arc, Mutex};
 use kage_acp::acp::{
     AvailableCommandsUpdate, CompactionUpdate, ConfigOptionUpdate, ContentBlock, Cost,
     CurrentModeUpdate, DiffContent, KageMeta, McpStatusUpdate, MessageChunk, NoticeTone,
-    NoticeUpdate, Plan, SessionConfigSelectOption, SessionInfoUpdate, SessionUpdate,
-    SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate, SubagentUsage,
-    SwarmMeta, ToolCall, ToolCallContent, ToolCallMeta, ToolCallStatus, ToolCallUpdate, ToolKind,
-    TurnPhase, TurnReason, TurnUpdate, UsageUpdate,
+    NoticeUpdate, Plan, QuestionChoice, QuestionPrompt, SessionConfigSelectOption,
+    SessionInfoUpdate, SessionUpdate, SubagentSessionCapabilities, SubagentState, SubagentSwarm,
+    SubagentUpdate, SubagentUsage, SwarmMeta, ToolCall, ToolCallContent, ToolCallMeta,
+    ToolCallStatus, ToolCallUpdate, ToolKind, TurnPhase, TurnReason, TurnUpdate, UsageUpdate,
 };
-use kage_acp::agent::{PermissionDecision, PlanReviewDecision, request_plan_review, send_update};
+use kage_acp::agent::{
+    PermissionDecision, PlanReviewDecision, QuestionsAnswer, request_plan_review,
+    request_questions, send_update,
+};
 use kage_core::protocol::{
-    AgentNode, AgentTree, Command, CommandKind, Delivery, EXIT_PLAN_TOOL, Envelope, Event,
-    HostEvent, McpServerInfo, McpServerStatus, NoticeLevel, PermissionDecision as Decision,
-    RequestId, RunOutcome, SessionState, Usage, with_canonical_tool_names,
+    ASK_USER_QUESTION_TOOL, AgentNode, AgentTree, Command, CommandKind, Delivery, EXIT_PLAN_TOOL,
+    Envelope, Event, HostEvent, McpServerInfo, McpServerStatus, NoticeLevel,
+    PermissionDecision as Decision, Question, RequestId, RunOutcome, SessionState, Usage,
+    with_canonical_tool_names,
 };
 use kage_core::sync::lock;
 use kage_core::{
@@ -134,6 +138,61 @@ pub(super) enum AskKind {
         /// The plan document under review.
         plan: String,
     },
+    /// Answer the questions of an `ask_user_question` call.
+    Questions {
+        /// The asking call.
+        tool_call: ToolCallUpdate,
+        /// What it asks, in order.
+        questions: Vec<QuestionPrompt>,
+    },
+}
+
+/// What `ask` of `tool` with `input`, shown as `tool_call`, asks the
+/// client: a plan review, questions, or a permission.
+pub(super) fn ask_kind(
+    tool: &str,
+    input: &serde_json::Value,
+    tool_call: ToolCallUpdate,
+) -> AskKind {
+    match tool {
+        EXIT_PLAN_TOOL => AskKind::Review {
+            tool_call,
+            plan: input["plan"].as_str().unwrap_or_default().to_owned(),
+        },
+        ASK_USER_QUESTION_TOOL => AskKind::Questions {
+            tool_call,
+            questions: question_prompts(input),
+        },
+        _ => AskKind::Permission(tool_call),
+    }
+}
+
+/// The wire form of the questions an `ask_user_question` input holds.
+pub(super) fn question_prompts(input: &serde_json::Value) -> Vec<QuestionPrompt> {
+    let questions: Vec<Question> =
+        serde_json::from_value(input["questions"].clone()).unwrap_or_default();
+    questions
+        .into_iter()
+        .map(|q| QuestionPrompt {
+            header: q.header,
+            question: q.question,
+            options: q
+                .options
+                .into_iter()
+                .map(|o| QuestionChoice {
+                    label: o.label,
+                    description: o.description,
+                })
+                .collect(),
+            multi_select: q.multi_select,
+        })
+        .collect()
+}
+
+/// The input an `ask_user_question` request is tracked and replayed
+/// with, as its call's input carries it.
+pub(super) fn question_input(questions: &[Question]) -> serde_json::Value {
+    serde_json::json!({ "questions": questions })
 }
 
 /// Spawns the thread that asks the client on `client_id` about `kind`
@@ -157,6 +216,25 @@ pub(super) fn spawn_ask(
         let (tool_call, review) = match kind {
             AskKind::Permission(tool_call) => (tool_call, None),
             AskKind::Review { tool_call, plan } => (tool_call, Some(plan)),
+            AskKind::Questions {
+                tool_call,
+                questions,
+            } => {
+                let answers =
+                    match request_questions(&peer, &client_id, &tool_call, &questions, &flag) {
+                        QuestionsAnswer::Answered(answers) => Some(answers),
+                        QuestionsAnswer::Declined => None,
+                        QuestionsAnswer::Unanswered => return,
+                    };
+                commander.send(Command::to(
+                    session,
+                    CommandKind::AnswerQuestion {
+                        request_id,
+                        answers,
+                    },
+                ));
+                return;
+            }
         };
         let title = tool_call.title.clone().unwrap_or_default();
         let (decision, revision) = if let Some(plan) = review {
@@ -206,7 +284,10 @@ impl Bridge {
     pub(super) fn handle(&mut self, envelope: &Envelope) {
         self.apply_seeds();
         let envelope = &with_canonical_tool_names(envelope.clone(), &self.aliases);
-        if let Event::Host(HostEvent::PermissionResolved { request_id }) = &envelope.event {
+        if let Event::Host(
+            HostEvent::PermissionResolved { request_id } | HostEvent::QuestionClosed { request_id },
+        ) = &envelope.event
+        {
             self.withdraw(*request_id);
         }
         let session = envelope.session;
@@ -264,9 +345,11 @@ impl Bridge {
                 ..
             }) => {
                 let tool_call = permission_call(tool_call_id.as_ref(), tool, input);
-                let review = (tool == EXIT_PLAN_TOOL)
-                    .then(|| input["plan"].as_str().unwrap_or_default().to_owned());
-                self.ask(session, *request_id, client_id, tool_call, review);
+                let kind = ask_kind(tool, input, tool_call);
+                self.ask(session, *request_id, client_id, kind);
+            }
+            Event::Host(event @ HostEvent::QuestionAsked { .. }) => {
+                self.ask_questions(session, client_id, event);
             }
             Event::Host(HostEvent::UsageUpdated { usage }) => {
                 self.fills.insert(session, usage.context_used);
@@ -712,7 +795,12 @@ impl Bridge {
                     raw_input: Some(input.clone()),
                     ..ToolCallUpdate::default()
                 };
-                self.ask(session, *request_id, client_id, tool_call, None);
+                self.ask(
+                    session,
+                    *request_id,
+                    client_id,
+                    AskKind::Permission(tool_call),
+                );
             }
             Event::Host(HostEvent::RunEnded { outcome }) => {
                 progress(
@@ -739,18 +827,23 @@ impl Bridge {
     /// The ask is withdrawn when that session's run ends first, when
     /// another client's answer resolves it, or when the connection
     /// detaches; a withdrawn ask sends no decision.
-    fn ask(
-        &mut self,
-        session: SessionId,
-        request_id: RequestId,
-        client_id: String,
-        tool_call: ToolCallUpdate,
-        review: Option<String>,
-    ) {
-        let kind = match review {
-            Some(plan) => AskKind::Review { tool_call, plan },
-            None => AskKind::Permission(tool_call),
+    /// Asks the client the questions of a `QuestionAsked` `event`.
+    fn ask_questions(&mut self, session: SessionId, client_id: String, event: &HostEvent) {
+        let HostEvent::QuestionAsked {
+            request_id,
+            tool_call_id,
+            questions,
+        } = event
+        else {
+            return;
         };
+        let input = question_input(questions);
+        let tool_call = permission_call(tool_call_id.as_ref(), ASK_USER_QUESTION_TOOL, &input);
+        let kind = ask_kind(ASK_USER_QUESTION_TOOL, &input, tool_call);
+        self.ask(session, *request_id, client_id, kind);
+    }
+
+    fn ask(&mut self, session: SessionId, request_id: RequestId, client_id: String, kind: AskKind) {
         spawn_ask(
             &self.peer,
             &self.commander,

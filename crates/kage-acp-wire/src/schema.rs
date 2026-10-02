@@ -1802,6 +1802,52 @@ pub struct KageMeta {
     /// as recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// One question of an `ask_user_question` call: the question on
+    /// the request, the user's answer on the response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<Box<QuestionMeta>>,
+}
+
+/// One question's payload. `prompt` rides the
+/// `session/request_permission` request; `answer` may ride the
+/// response, where it takes the place of the option picked: several
+/// choices, or the user's own words.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionMeta {
+    /// The question asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<QuestionPrompt>,
+    /// The labels picked, or the user's own words as one entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<Vec<String>>,
+}
+
+/// A question the model asks, with its choices.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionPrompt {
+    /// A short label, such as `Auth method`.
+    pub header: String,
+    /// The whole question.
+    pub question: String,
+    /// The choices, in order. Option `choice-<n>` of the request picks
+    /// the `n`th, counting from zero.
+    pub options: Vec<QuestionChoice>,
+    /// Whether the user may pick several choices.
+    #[serde(default)]
+    pub multi_select: bool,
+}
+
+/// One choice of a [`QuestionPrompt`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionChoice {
+    /// What the user picks.
+    pub label: String,
+    /// What picking it means.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
 }
 
 /// One plan review's payload. Exactly one field is set per message:

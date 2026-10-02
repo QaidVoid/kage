@@ -16,6 +16,7 @@ mod mailbox_tool;
 mod mcp;
 mod plan_tool;
 mod plugin_tools;
+mod question_tool;
 mod recorder;
 mod runner;
 mod sessions;
@@ -62,6 +63,7 @@ use mailbox_tool::{MAILBOX_TOOL, MailboxTool};
 use mcp::{McpDone, restart_failed};
 use plan_tool::ExitPlanTool;
 use plugin_tools::PluginTools;
+use question_tool::{Answers, QuestionTool, Questions};
 use runner::{Budget, Finished, Limits, McpLease, Run, Spend, Steering, Work};
 use shell::ShellDone;
 use swarm_tool::{SWARM_TOOL, SwarmTool};
@@ -321,6 +323,7 @@ impl Engine {
             tx: tx.clone(),
             asks: Arc::default(),
             next_request: Arc::default(),
+            questions: Arc::default(),
             waiting: VecDeque::new(),
             shutting_down: false,
             engine_shutdown: Arc::new(AtomicBool::new(false)),
@@ -523,6 +526,9 @@ struct Dispatcher {
     tx: mpsc::Sender<Input>,
     asks: Asks,
     next_request: Arc<AtomicU64>,
+    /// Open `ask_user_question` requests, numbered from `next_request`
+    /// like permission asks.
+    questions: Questions,
     /// Agents over the running limit, in spawn order.
     waiting: VecDeque<SessionId>,
     shutting_down: bool,
@@ -753,6 +759,13 @@ impl Dispatcher {
                 self.resolve_permission(command.session, request_id, decision);
                 return;
             }
+            CommandKind::AnswerQuestion {
+                request_id,
+                answers,
+            } => {
+                self.answer_question(request_id, answers);
+                return;
+            }
             _ => {}
         }
         let Some(id) = command.session.or(self.active) else {
@@ -823,7 +836,9 @@ impl Dispatcher {
                     self.plan_mode_changed(id, on, true);
                 }
             }
-            CommandKind::Shutdown | CommandKind::ResolvePermission { .. } => {}
+            CommandKind::Shutdown
+            | CommandKind::ResolvePermission { .. }
+            | CommandKind::AnswerQuestion { .. } => {}
         }
     }
 
@@ -1058,6 +1073,31 @@ impl Dispatcher {
         }
     }
 
+    /// The `ask_user_question` tool of session `id`, when it may ask:
+    /// a main session a client answers for.
+    fn question_tool(&self, id: SessionId) -> Option<Arc<QuestionTool>> {
+        let session = self.sessions.get(&id)?;
+        (session.interactive && session.link.is_none()).then(|| {
+            Arc::new(QuestionTool::new(
+                id,
+                Arc::clone(&self.bus),
+                Arc::clone(&self.questions),
+                Arc::clone(&self.next_request),
+            ))
+        })
+    }
+
+    /// Hand `answers` to the `ask_user_question` call waiting on
+    /// `request_id` and tell clients the question is closed.
+    fn answer_question(&self, request_id: RequestId, answers: Answers) {
+        let Some((asker, reply)) = lock(&self.questions).remove(&request_id) else {
+            return;
+        };
+        let _ = reply.send(answers);
+        self.bus
+            .publish(asker, HostEvent::QuestionClosed { request_id });
+    }
+
     fn update_state(&mut self, id: SessionId, apply: impl FnOnce(&mut Session)) {
         let session = self.sessions.get_mut(&id).expect("session checked");
         apply(session);
@@ -1119,6 +1159,7 @@ impl Dispatcher {
         if self.over_budget(id) {
             return;
         }
+        let question = self.question_tool(id);
         let root = self.root_of(id);
         let session = self.sessions.get_mut(&id).expect("session checked");
         let model = session.state.model.clone();
@@ -1188,7 +1229,7 @@ impl Dispatcher {
             }),
             Work::Compact => Work::Compact,
         };
-        let tools = run_tools(session, id, &self.tx);
+        let tools = run_tools(session, id, &self.tx, question);
         let limits = run_limits(session, root);
         let worktree = session.link.as_ref().and_then(|l| l.worktree.clone());
         let run = Run {
@@ -1712,8 +1753,19 @@ impl Dispatcher {
 /// The tools one run of `session` may call: its own, the delegation
 /// and mailbox tools its agent setup allows, and `exit_plan` in plan
 /// mode. Records their risks in the gate for plan mode to judge.
-fn run_tools(session: &Session, id: SessionId, tx: &mpsc::Sender<Input>) -> ToolRegistry {
+/// The tools of one run: the session's own, the delegation and mailbox
+/// tools its agent setup allows, `question` when the session may ask
+/// its user, and `exit_plan` in plan mode. The gate learns their risks.
+fn run_tools(
+    session: &Session,
+    id: SessionId,
+    tx: &mpsc::Sender<Input>,
+    question: Option<Arc<QuestionTool>>,
+) -> ToolRegistry {
     let mut tools = session.tools.clone();
+    if let Some(question) = question {
+        tools.register(question);
+    }
     if let Some(setup) = &session.agents {
         let allows = |name: &str| session.link.as_ref().is_none_or(|l| l.allows(name));
         if depth_of(session) < setup.max_depth {

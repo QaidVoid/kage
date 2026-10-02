@@ -30,10 +30,10 @@ use crate::acp::{
     ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, ModelsResponse,
     NewSessionRequest, NewSessionResponse, OptionSetRequest, OptionsResponse, PermissionOption,
     PermissionOptionKind, PermissionOutcome, PlanReview, PluginInstallRequest, PluginRemoveRequest,
-    PromptRequest, PromptResponse, RequestMeta, RequestPermissionRequest,
-    RequestPermissionResponse, RequestPermissionResult, ResumeSessionRequest,
-    ResumeSessionResponse, SessionExportResponse, SessionForkRequest, SessionForkResponse,
-    SessionNotification, SessionRenameRequest, SessionRequest, SessionUpdate,
+    PromptRequest, PromptResponse, QuestionMeta, QuestionPrompt, RequestMeta,
+    RequestPermissionRequest, RequestPermissionResponse, RequestPermissionResult,
+    ResumeSessionRequest, ResumeSessionResponse, SessionExportResponse, SessionForkRequest,
+    SessionForkResponse, SessionNotification, SessionRenameRequest, SessionRequest, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SwarmResumeRequest,
     SwarmResumeResponse, ToolCallUpdate,
 };
@@ -204,6 +204,101 @@ pub fn request_plan_review(
         }
         Err(_) => PlanReviewDecision::Reject,
     }
+}
+
+/// How the user answered the questions of an `ask_user_question` call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuestionsAnswer {
+    /// Per question, the labels picked or the user's own words.
+    Answered(Vec<Vec<String>>),
+    /// The user skipped a question, which declines them all.
+    Declined,
+    /// The ask was withdrawn or the connection closed before an answer
+    /// arrived. No answer is sent.
+    Unanswered,
+}
+
+/// Ask the client `questions` of an `ask_user_question` call, shown as
+/// `tool_call`, one `session/request_permission` at a time. Each offers
+/// option `choice-<n>` per choice and `skip`, so any client can pick
+/// one choice. The question rides `_meta.kage.question.prompt`, and a
+/// kage client may answer with several choices or the user's own words
+/// in `_meta.kage.question.answer`. Skipping or cancelling any question
+/// declines them all.
+#[must_use]
+pub fn request_questions(
+    peer: &Peer,
+    session_id: &str,
+    tool_call: &ToolCallUpdate,
+    questions: &[QuestionPrompt],
+    cancel: &CancelFlag,
+) -> QuestionsAnswer {
+    let mut answers = Vec::with_capacity(questions.len());
+    for question in questions {
+        let mut options: Vec<PermissionOption> = question
+            .options
+            .iter()
+            .enumerate()
+            .map(|(n, choice)| PermissionOption {
+                option_id: format!("choice-{n}"),
+                name: choice.label.clone(),
+                kind: PermissionOptionKind::AllowOnce,
+            })
+            .collect();
+        options.push(PermissionOption {
+            option_id: "skip".to_owned(),
+            name: "Skip".to_owned(),
+            kind: PermissionOptionKind::RejectOnce,
+        });
+        let req = RequestPermissionRequest {
+            session_id: session_id.to_owned(),
+            tool_call: ToolCallUpdate {
+                title: Some(format!("{}: {}", question.header, question.question)),
+                ..tool_call.clone()
+            },
+            options,
+            meta: Some(RequestMeta {
+                kage: KageMeta {
+                    question: Some(Box::new(QuestionMeta {
+                        prompt: Some(question.clone()),
+                        answer: None,
+                    })),
+                    ..KageMeta::default()
+                },
+            }),
+        };
+        let Ok(params) = serde_json::to_value(&req) else {
+            return QuestionsAnswer::Declined;
+        };
+        let resp = match peer.request_cancellable("session/request_permission", params, cancel) {
+            Ok(value) => serde_json::from_value::<RequestPermissionResult>(value),
+            Err(e) if e.code == -32800 || e.message == "connection closed" => {
+                return QuestionsAnswer::Unanswered;
+            }
+            Err(_) => return QuestionsAnswer::Declined,
+        };
+        let Ok(resp) = resp else {
+            return QuestionsAnswer::Declined;
+        };
+        let PermissionOutcome::Selected(selected) = resp.outcome else {
+            return QuestionsAnswer::Declined;
+        };
+        let written = resp
+            .meta
+            .and_then(|meta| meta.kage.question)
+            .and_then(|meta| meta.answer);
+        let picked = selected
+            .option_id
+            .strip_prefix("choice-")
+            .and_then(|n| n.parse::<usize>().ok())
+            .and_then(|n| question.options.get(n))
+            .map(|choice| vec![choice.label.clone()]);
+        match written.or(picked) {
+            Some(answer) => answers.push(answer),
+            None => return QuestionsAnswer::Declined,
+        }
+    }
+    QuestionsAnswer::Answered(answers)
 }
 
 /// Handed to [`Agent::prompt`] and [`Agent::load_session`]: streams

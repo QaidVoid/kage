@@ -86,6 +86,8 @@ fn ago(iso: Option<&str>, now: i64) -> Option<SharedString> {
 pub(crate) enum RowState {
     /// A permission ask waits; the row badges Approve.
     Approve,
+    /// A question waits for an answer; the row badges Answer.
+    Answer,
     /// A plan waits for review; the row badges Review.
     Review,
     /// A turn is in flight; the row leads with the orbiting eclipse.
@@ -187,6 +189,12 @@ fn placed(rows: &[&RowItem]) -> Vec<Place> {
 pub(crate) fn row_state(session: &kage_client::Session) -> RowState {
     if crate::store::plan_review(session).is_some() {
         RowState::Review
+    } else if session
+        .permissions
+        .first()
+        .is_some_and(|ask| ask.question.is_some())
+    {
+        RowState::Answer
     } else if !session.permissions.is_empty() {
         RowState::Approve
     } else if session.running || session.in_turn {
@@ -373,6 +381,7 @@ impl SidebarView {
         let unread = item.unread && !active;
         let trailing = match item.state {
             RowState::Approve => Some(pill("Approve", p.ok, p.ok_soft).into_any_element()),
+            RowState::Answer => Some(pill("Answer", p.accent, p.accent_soft).into_any_element()),
             RowState::Review => Some(pill("Review", p.ok, p.ok_soft).into_any_element()),
             RowState::Failed => Some(pill("Failed", p.danger, p.danger_soft).into_any_element()),
             RowState::Running => Some(

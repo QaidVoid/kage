@@ -119,6 +119,10 @@ are part of your prompt, not tool calls.
 | ACP (`kage rpc`) | the editor client is asked through `session/request_permission`, with the options allow, allow for this session, and reject. Every tool without a config entry asks here, built-ins included, unless the client asks for the TUI's rules (the kage desktop app does): then tools without an entry run, as they do in the TUI. A config `allow` skips the round-trip, and a config `deny` refuses locally. When the last client holding the session disconnects while a request is open, the request is denied, so the run goes on. |
 | MCP server (`kage mcp serve`) | the call is refused, since there is no one to ask. |
 
+`ask_user_question` never asks for approval in any mode, since the
+question itself goes to you (see [questions](/guide/questions)). Only a
+config `deny` refuses it.
+
 Over ACP, "Allow for this session" works like the TUI's session
 scope below: the tool stops asking until the session closes, for the
 session and its agents, and nothing is written to disk. The editor's

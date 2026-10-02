@@ -7,11 +7,13 @@
 //! surfaces, read output retained from an earlier job (see
 //! [`crate::retained`]).
 //!
-//! Jobs run one at a time, in submission order. A long Lua tool or a
-//! Lua provider stream therefore occupies the owner thread for its
-//! whole duration. Retained render output stays on screen meanwhile,
-//! but commands, keybindings, event dispatch, and render refreshes
-//! queue behind it. Callbacks queued with `kage.schedule`, `kage.defer`
+//! Jobs run one at a time, in submission order. A long Lua tool
+//! therefore occupies the owner thread for its whole duration.
+//! Retained render output stays on screen meanwhile, but commands,
+//! keybindings, event dispatch, and render refreshes queue behind it.
+//! A Lua provider stream does not: it runs as a coroutine the owner
+//! polls between jobs (see [`crate::tasks`]), yielding while it waits
+//! on the network. Callbacks queued with `kage.schedule`, `kage.defer`
 //! and `kage.timer` run on the same thread between jobs, never during
 //! one (see [`crate::schedule`]).
 //!
@@ -26,6 +28,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Weak};
+use std::task::{Context, Wake, Waker};
 use std::thread;
 use std::time::Duration;
 
@@ -34,12 +37,20 @@ use kage_core::CancelFlag;
 use mlua::Lua;
 
 use crate::error::PluginError;
-use crate::schedule;
+use crate::tasks::Task;
+use crate::{schedule, tasks, watchdog};
 
 /// A queued job. It must call [`State::finish`] once its work is done
 /// and before it replies, so a caller woken by the reply already sees
 /// the job accounted for in [`LuaHost::is_idle`].
 type Job = Box<dyn FnOnce(&Lua, &State) + Send>;
+
+/// What reaches the owner thread: a job, or word that a task it drives
+/// can make progress.
+enum Msg {
+    Job(Job),
+    Wake,
+}
 
 /// Cloneable handle that runs jobs on the Lua owner thread.
 #[derive(Clone)]
@@ -52,7 +63,7 @@ pub(crate) struct LuaHost {
 pub(crate) struct WeakHost(Weak<Inner>);
 
 struct Inner {
-    tx: Sender<Job>,
+    tx: Sender<Msg>,
     state: Arc<State>,
 }
 
@@ -67,8 +78,11 @@ struct State {
 /// Receiving end of a new host, consumed by [`Owner::spawn`] once the
 /// Lua state is fully set up.
 pub(crate) struct Owner {
-    rx: Receiver<Job>,
+    rx: Receiver<Msg>,
     state: Arc<State>,
+    /// Where task wakers post their wakeups. Weak, so a pending task
+    /// never keeps the owner thread alive.
+    host: Weak<Inner>,
 }
 
 impl LuaHost {
@@ -76,16 +90,13 @@ impl LuaHost {
     pub(crate) fn new() -> (Self, Owner) {
         let (tx, rx) = mpsc::channel();
         let state = Arc::new(State::default());
+        let inner = Arc::new(Inner { tx, state });
         let owner = Owner {
             rx,
-            state: Arc::clone(&state),
+            state: Arc::clone(&inner.state),
+            host: Arc::downgrade(&inner),
         };
-        (
-            Self {
-                inner: Arc::new(Inner { tx, state }),
-            },
-            owner,
-        )
+        (Self { inner }, owner)
     }
 
     pub(crate) fn downgrade(&self) -> WeakHost {
@@ -177,7 +188,7 @@ impl LuaHost {
     fn enqueue(&self, job: Job) -> Result<(), PluginError> {
         let state = &self.inner.state;
         state.in_flight.fetch_add(1, Ordering::SeqCst);
-        if self.inner.tx.send(job).is_err() {
+        if self.inner.tx.send(Msg::Job(job)).is_err() {
             state.in_flight.fetch_sub(1, Ordering::SeqCst);
             return Err(gone());
         }
@@ -256,27 +267,37 @@ impl Owner {
     /// [`crate::schedule`]). A panicking job or callback pass is contained
     /// so the thread keeps serving later requests.
     pub(crate) fn spawn(self, lua: Lua) -> Result<(), PluginError> {
-        let Owner { rx, state } = self;
+        let Owner { rx, state, host } = self;
+        tasks::install(&lua);
         thread::Builder::new()
             .name("kage-lua".to_owned())
             .spawn(move || {
+                let mut running: Vec<(Task, Arc<TaskWake>)> = Vec::new();
                 loop {
-                    let job = match schedule::next_wait(&lua) {
+                    let msg = match schedule::next_wait(&lua) {
                         None => match rx.recv() {
-                            Ok(job) => Some(job),
+                            Ok(msg) => Some(msg),
                             Err(_) => break,
                         },
                         Some(wait) => match rx.recv_timeout(wait) {
-                            Ok(job) => Some(job),
+                            Ok(msg) => Some(msg),
                             Err(RecvTimeoutError::Timeout) => None,
                             Err(RecvTimeoutError::Disconnected) => break,
                         },
                     };
-                    if let Some(job) = job
+                    if let Some(Msg::Job(job)) = msg
                         && catch_unwind(AssertUnwindSafe(|| job(&lua, &state))).is_err()
                     {
                         state.finish();
                     }
+                    running.extend(tasks::take_spawned(&lua).into_iter().map(|task| {
+                        let wake = Arc::new(TaskWake {
+                            woken: AtomicBool::new(true),
+                            host: host.clone(),
+                        });
+                        (task, wake)
+                    }));
+                    running.retain_mut(|(task, wake)| poll_task(&lua, task, wake));
                     if schedule::next_wait(&lua) == Some(Duration::ZERO) {
                         state.in_flight.fetch_add(1, Ordering::SeqCst);
                         let _ = catch_unwind(AssertUnwindSafe(|| schedule::run_due(&lua)));
@@ -287,6 +308,43 @@ impl Owner {
             .map(drop)
             .map_err(|e| PluginError::Host(format!("failed to start the Lua thread: {e}")))
     }
+}
+
+/// A driven task's waker: it marks the task woken and wakes the owner
+/// thread, which polls woken tasks between jobs.
+struct TaskWake {
+    woken: AtomicBool,
+    host: Weak<Inner>,
+}
+
+impl Wake for TaskWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        if !self.woken.swap(true, Ordering::SeqCst)
+            && let Some(inner) = self.host.upgrade()
+        {
+            let _ = inner.tx.send(Msg::Wake);
+        }
+    }
+}
+
+/// Poll `task` if it was woken, under the watchdog budget so one resume
+/// cannot run away. `false` once it is done or panicked.
+fn poll_task(lua: &Lua, task: &mut Task, wake: &Arc<TaskWake>) -> bool {
+    if !wake.woken.swap(false, Ordering::SeqCst) {
+        return true;
+    }
+    let waker = Waker::from(Arc::clone(wake));
+    let mut cx = Context::from_waker(&waker);
+    let polled = catch_unwind(AssertUnwindSafe(|| {
+        watchdog::run(lua, watchdog::BUDGET, || {
+            Ok::<_, mlua::Error>(task.as_mut().poll(&mut cx))
+        })
+    }));
+    matches!(polled, Ok(Ok(std::task::Poll::Pending)))
 }
 
 #[cfg(test)]

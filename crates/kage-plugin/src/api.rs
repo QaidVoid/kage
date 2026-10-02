@@ -134,7 +134,7 @@ pub fn install(
     let kage = lua.create_table()?;
 
     kage.set("now_ms", lua.create_function(now_ms)?)?;
-    kage.set("sleep_ms", lua.create_function(sleep_ms)?)?;
+    kage.set("sleep_ms", lua.create_async_function(sleep_ms)?)?;
     kage.set("api_version", lua.create_function(|_, ()| Ok(API_VERSION))?)?;
     kage.set(
         "host_version",
@@ -253,7 +253,9 @@ fn now_ms(_: &Lua, (): ()) -> mlua::Result<i64> {
 /// a host-side cancel never blocks behind a multi-second sleep.
 const SLEEP_MS_MAX: i64 = 500;
 
-fn sleep_ms(_: &Lua, ms: i64) -> mlua::Result<()> {
+/// Inside a driven coroutine (see [`crate::tasks`]) the wait yields the
+/// owner thread to other work; anywhere else it blocks.
+async fn sleep_ms(lua: Lua, ms: i64) -> mlua::Result<()> {
     if ms < 0 {
         return Err(mlua::Error::external(
             "kage.sleep_ms: duration must be non-negative",
@@ -267,7 +269,12 @@ fn sleep_ms(_: &Lua, ms: i64) -> mlua::Result<()> {
     }
     if ms > 0 {
         let duration = u64::try_from(ms).map_err(|e| mlua::Error::external(e.to_string()))?;
-        std::thread::sleep(std::time::Duration::from_millis(duration));
+        let duration = std::time::Duration::from_millis(duration);
+        if crate::tasks::is_driven(&lua) {
+            crate::tasks::sleep(duration).await;
+        } else {
+            std::thread::sleep(duration);
+        }
     }
     Ok(())
 }

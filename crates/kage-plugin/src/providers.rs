@@ -59,7 +59,8 @@
 //! name is visible instead of silently non-retried.
 
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use kage_core::{CancelFlag, Content, sync::lock};
 use kage_provider::{
@@ -72,7 +73,7 @@ use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
 use crate::capabilities::{Capability, CapabilityRegistry};
 use crate::error::PluginError;
 use crate::host::{self, LuaHost, WeakHost};
-use crate::watchdog;
+use crate::tasks;
 
 /// Prefix marking a raised message as a typed provider error. The
 /// separator is a control character so it cannot collide with prose a
@@ -309,21 +310,23 @@ impl Iterator for ChannelStream {
     }
 }
 
-/// Owner-thread job body: install an `emit` callback
-/// that forwards each event onto `tx`, then call the registered Lua
-/// handler. A plugin that calls `emit` streams; one that returns a
-/// table or iterator function is drained after the handler returns.
+/// Owner-thread job body: install an `emit` callback that forwards each
+/// event onto `tx`, then start the registered Lua handler as a driven
+/// coroutine (see [`tasks`]). It runs between other jobs, yielding while
+/// it waits on `kage.http` or `kage.sleep_ms`, so concurrent streams
+/// share the owner thread instead of queueing behind each other. A
+/// plugin that calls `emit` streams; one that returns a table or
+/// iterator function is drained after the handler returns.
 ///
-/// `tx` is wrapped in an `Arc` and the emit closure holds only a
-/// `Weak`, so the channel closes as soon as this function returns even
-/// if the Lua GC has not yet released the closure.
+/// The task holds `tx` in an `Arc` and the emit closure only a `Weak`,
+/// so the channel closes as soon as the task ends even if the Lua GC
+/// has not yet released the closure.
 ///
 /// `cancel` is observed cooperatively: the `emit` callback raises when
 /// the flag is set so a streaming handler unwinds, and the table and
 /// iterator drain loops break. The foreground iterator already returns
 /// `Cancelled` promptly through [`make_cancelable`]; this bounds the
-/// job so it does not hold the owner thread after the turn is
-/// abandoned.
+/// task so it does not linger after the turn is abandoned.
 fn run_handler(
     lua: &Lua,
     handler_key: &Arc<RegistryKey>,
@@ -334,59 +337,106 @@ fn run_handler(
 ) -> Result<(), PluginError> {
     let handler: Function = lua.registry_value(handler_key)?;
     let lua_req = json_to_lua(lua, req)?;
-
     let tx = Arc::new(tx);
-    let emit_tx = Arc::downgrade(&tx);
-    let emit_sink = sink.clone();
-    let emit_cancel = cancel.clone();
-    let emit = lua.create_function(move |_, value: Value| {
-        if emit_cancel.is_cancelled() {
-            return Err(mlua::Error::external("plugin provider stream cancelled"));
+    let emit = emit_function(lua, Arc::downgrade(&tx), sink.clone(), cancel.clone())?;
+    let run = tasks::drive::<Value>(lua, handler, (lua_req, emit))?;
+    let sink = sink.clone();
+    let cancel = cancel.clone();
+    tasks::spawn(lua, async move {
+        let finished = match run.await {
+            Ok(result) => forward_result(result, &tx, &sink, &cancel),
+            Err(err) => Err(err),
+        };
+        if let Err(err) = finished {
+            let _ = tx.send(Err(classify_raised(&err)));
         }
-        if let Some(tx) = emit_tx.upgrade() {
-            let _ = tx.send(value_to_provider_event(value, &emit_sink));
-        }
-        Ok(())
-    })?;
+    });
+    Ok(())
+}
 
-    watchdog::run(lua, watchdog::BUDGET, || {
-        let result: Value = handler.call((lua_req, emit))?;
-        match result {
-            Value::Table(t) => {
-                for pair in t.clone().sequence_values::<Value>() {
-                    if cancel.is_cancelled() {
-                        break;
+/// The `emit` callback a handler streams through. Inside the driven
+/// coroutine a full channel yields until the consumer catches up;
+/// called anywhere else it blocks, as it always did.
+fn emit_function(
+    lua: &Lua,
+    tx: Weak<mpsc::SyncSender<Result<ProviderEvent, ProviderError>>>,
+    sink: SharedHostLog,
+    cancel: CancelFlag,
+) -> mlua::Result<Function> {
+    lua.create_async_function(move |lua, value: Value| {
+        let tx = tx.clone();
+        let sink = sink.clone();
+        let cancel = cancel.clone();
+        async move {
+            if cancel.is_cancelled() {
+                return Err(mlua::Error::external("plugin provider stream cancelled"));
+            }
+            let Some(tx) = tx.upgrade() else {
+                return Ok(());
+            };
+            let mut event = value_to_provider_event(value, &sink);
+            if !tasks::is_driven(&lua) {
+                let _ = tx.send(event);
+                return Ok(());
+            }
+            loop {
+                match tx.try_send(event) {
+                    Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => return Ok(()),
+                    Err(mpsc::TrySendError::Full(back)) => {
+                        event = back;
+                        tasks::sleep(EMIT_RETRY).await;
                     }
-                    let v = pair?;
-                    let _ = tx.send(value_to_provider_event(v, sink));
                 }
             }
-            Value::Function(f) => loop {
+        }
+    })
+}
+
+/// How long a driven `emit` waits before retrying a full channel.
+const EMIT_RETRY: Duration = Duration::from_millis(10);
+
+/// Forward what a handler returned: a table of events, an iterator
+/// function, or nothing when it streamed through `emit`.
+fn forward_result(
+    result: Value,
+    tx: &mpsc::SyncSender<Result<ProviderEvent, ProviderError>>,
+    sink: &SharedHostLog,
+    cancel: &CancelFlag,
+) -> mlua::Result<()> {
+    match result {
+        Value::Table(t) => {
+            for pair in t.sequence_values::<Value>() {
                 if cancel.is_cancelled() {
                     break;
                 }
-                let next: Value = match f.call::<Value>(()) {
-                    Ok(v) => v,
-                    Err(err) => {
-                        let _ = tx.send(Err(classify_raised(&err)));
-                        break;
-                    }
-                };
-                if matches!(next, Value::Nil) {
-                    break;
-                }
-                let _ = tx.send(value_to_provider_event(next, sink));
-            },
-            Value::Nil => {}
-            _ => {
-                let _ = tx.send(Err(ProviderError::Decode(
-                    "plugin provider's stream() returned neither nil, a table, nor a function"
-                        .to_owned(),
-                )));
+                let v = pair?;
+                let _ = tx.send(value_to_provider_event(v, sink));
             }
         }
-        Ok::<(), mlua::Error>(())
-    })?;
+        Value::Function(f) => loop {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let next: Value = match f.call::<Value>(()) {
+                Ok(v) => v,
+                Err(err) => {
+                    let _ = tx.send(Err(classify_raised(&err)));
+                    break;
+                }
+            };
+            if matches!(next, Value::Nil) {
+                break;
+            }
+            let _ = tx.send(value_to_provider_event(next, sink));
+        },
+        Value::Nil => {}
+        _ => {
+            let _ = tx.send(Err(ProviderError::Decode(
+                "plugin provider's stream() returned neither nil, a table, nor a function"
+                    .to_owned(),
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -736,6 +786,70 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A provider whose stream sleeps four times for 100ms between
+    /// deltas, the way a real one waits on the network.
+    fn napping_runtime() -> PluginRuntime {
+        let rt = granted_runtime();
+        eval_provider(
+            &rt,
+            r"
+            kage.register_provider({
+                id = 'napper',
+                stream = function(req, emit)
+                    emit({ type = 'message_start' })
+                    for i = 1, 4 do
+                        kage.sleep_ms(100)
+                        emit({ type = 'text_delta', delta = tostring(i) })
+                    end
+                    emit({ type = 'message_end', stop_reason = 'end_turn',
+                           usage = { input = 0, output = 0, cache_read = 0, cache_write = 0 } })
+                end,
+            })
+            ",
+        )
+        .unwrap();
+        rt
+    }
+
+    fn drain(provider: &super::LuaProvider) -> usize {
+        let cancel = CancelFlag::new();
+        provider
+            .stream(kage_provider::StreamRequest::new("m", vec![]), &cancel)
+            .unwrap()
+            .map(Result::unwrap)
+            .count()
+    }
+
+    #[test]
+    fn concurrent_streams_share_the_owner_thread() {
+        let rt = napping_runtime();
+        let provider = rt.registered_providers().pop().unwrap();
+        let started = std::time::Instant::now();
+        let other = Arc::clone(&provider);
+        let second = std::thread::spawn(move || drain(&other));
+        assert_eq!(drain(&provider), 6);
+        assert_eq!(second.join().unwrap(), 6);
+        // Each stream naps 400ms; one after the other they would take 800.
+        let took = started.elapsed();
+        assert!(
+            took < std::time::Duration::from_millis(700),
+            "took {took:?}"
+        );
+    }
+
+    #[test]
+    fn a_host_job_runs_while_a_stream_naps() {
+        let rt = napping_runtime();
+        let provider = rt.registered_providers().pop().unwrap();
+        let stream = std::thread::spawn(move || drain(&provider));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let started = std::time::Instant::now();
+        rt.eval_plugin("t", "return 1").unwrap();
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_millis(80), "took {took:?}");
+        assert_eq!(stream.join().unwrap(), 6);
     }
 
     #[test]

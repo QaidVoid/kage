@@ -87,8 +87,9 @@ while kage starts show as `kage:log` blocks instead.
 
 ### `kage.sleep_ms(ms: integer)`
 
-Sleep the Lua thread for `ms` milliseconds, at most 500 per call. Loop
-the call to wait longer.
+Sleep for `ms` milliseconds, at most 500 per call. Loop the call to
+wait longer. Inside a provider's `stream` handler the wait lets other
+plugin work run meanwhile; anywhere else it holds the Lua thread.
 
 ### `kage.json.encode(value)` / `kage.json.decode(raw: string)`
 
@@ -977,6 +978,13 @@ provider implementation. This is advanced. A
 streaming provider makes outbound requests via `kage.http.post_stream`,
 so it also needs the `net` capability. See `plugins/types/kage.lua` for the
 full spec shape.
+
+Every plugin shares one Lua thread, and a `stream` handler runs on it
+as a coroutine. While it waits in `kage.http.*`, `kage.sleep_ms` or an
+`emit` the agent is not yet reading, it yields: other streams,
+commands, events and renders run in between, so several agents can
+stream from the same provider at once. Code that busy-loops without
+calling any of these still holds the thread until it returns.
 
 ### `kage.provider_error(kind, message[, status])
 

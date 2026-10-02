@@ -34,6 +34,7 @@ use mlua::{Function, Lua, Table, Value};
 use crate::api::lua_to_json;
 use crate::capabilities::{Capability, CapabilityRegistry};
 use crate::error::PluginError;
+use crate::tasks;
 
 /// Default cap on response body bytes for non-streaming requests.
 const DEFAULT_MAX_BYTES: u64 = 2_000_000;
@@ -86,58 +87,52 @@ pub(crate) fn register(registry: &CapabilityRegistry) {
 /// is attached onto each granted plugin's proxy.
 fn build_http_table(lua: &Lua) -> mlua::Result<Table> {
     let http = lua.create_table()?;
-
-    http.set(
-        "get",
-        lua.create_function(|lua, (url, opts): (String, Option<Table>)| {
-            let request = build_request(opts.as_ref())
-                .map_err(|err| mlua::Error::external(format!("http.get {url}: {err}")))?;
-            let max_bytes = request.max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
-            let result = simple_request("GET", &url, Some(&request), max_bytes)
-                .map_err(|err| mlua::Error::external(format!("http.get {url}: {err}")))?;
-            simple_result_to_table(lua, &result)
-        })?,
-    )?;
-
-    http.set(
-        "post",
-        lua.create_function(|lua, (url, opts): (String, Option<Table>)| {
-            let request = build_request(opts.as_ref())
-                .map_err(|err| mlua::Error::external(format!("http.post {url}: {err}")))?;
-            let max_bytes = request.max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
-            let result = simple_request("POST", &url, Some(&request), max_bytes)
-                .map_err(|err| mlua::Error::external(format!("http.post {url}: {err}")))?;
-            simple_result_to_table(lua, &result)
-        })?,
-    )?;
-
-    http.set(
-        "delete",
-        lua.create_function(|lua, (url, opts): (String, Option<Table>)| {
-            let request = build_request(opts.as_ref())
-                .map_err(|err| mlua::Error::external(format!("http.delete {url}: {err}")))?;
-            let max_bytes = request.max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
-            let result = simple_request("DELETE", &url, Some(&request), max_bytes)
-                .map_err(|err| mlua::Error::external(format!("http.delete {url}: {err}")))?;
-            simple_result_to_table(lua, &result)
-        })?,
-    )?;
-
+    http.set("get", simple_function(lua, "GET", "http.get")?)?;
+    http.set("post", simple_function(lua, "POST", "http.post")?)?;
+    http.set("delete", simple_function(lua, "DELETE", "http.delete")?)?;
     http.set(
         "post_stream",
-        lua.create_function(
-            |lua, (url, opts, on_event): (String, Option<Table>, Function)| {
-                let request = build_request(opts.as_ref()).map_err(|err| {
-                    mlua::Error::external(format!("http.post_stream {url}: {err}"))
-                })?;
+        lua.create_async_function(
+            |lua, (url, opts, on_event): (String, Option<Table>, Function)| async move {
+                let fail =
+                    |err: String| mlua::Error::external(format!("http.post_stream {url}: {err}"));
+                let request = build_request(opts.as_ref()).map_err(fail)?;
                 let max_bytes = request.max_bytes.unwrap_or(DEFAULT_STREAM_MAX_BYTES);
-                stream_request(lua, &url, &request, max_bytes, &on_event)
-                    .map_err(|err| mlua::Error::external(format!("http.post_stream {url}: {err}")))
+                if tasks::is_driven(&lua) {
+                    stream_driven(lua.clone(), url.clone(), request, max_bytes, on_event)
+                        .await
+                        .map_err(fail)
+                } else {
+                    stream_request(&lua, &url, &request, max_bytes, &on_event).map_err(fail)
+                }
             },
         )?,
     )?;
-
     Ok(http)
+}
+
+/// One of `get` / `post` / `delete`. Inside a driven coroutine the
+/// request runs on a worker thread while the coroutine yields; anywhere
+/// else it blocks.
+fn simple_function(lua: &Lua, method: &'static str, name: &'static str) -> mlua::Result<Function> {
+    lua.create_async_function(
+        move |lua, (url, opts): (String, Option<Table>)| async move {
+            let fail = |err: String| mlua::Error::external(format!("{name} {url}: {err}"));
+            let request = build_request(opts.as_ref()).map_err(fail)?;
+            let max_bytes = request.max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
+            let result = if tasks::is_driven(&lua) {
+                let target = url.clone();
+                tasks::off_thread(move || {
+                    simple_request(method, &target, Some(&request), max_bytes)
+                })
+                .await
+                .unwrap_or_else(|| Err("the request thread panicked".to_owned()))
+            } else {
+                simple_request(method, &url, Some(&request), max_bytes)
+            };
+            simple_result_to_table(&lua, &result.map_err(fail)?)
+        },
+    )
 }
 
 /// Caller-supplied request details parsed out of the Lua `opts` table.
@@ -285,17 +280,122 @@ fn stream_request(
     Ok(table)
 }
 
+/// What the stream thread of a driven `post_stream` hands over.
+enum Streamed {
+    Head { status: u16, content_type: String },
+    Body(String),
+    Frame(SseFrame),
+}
+
+/// `post_stream` inside a driven coroutine: a worker thread makes the
+/// request and reads the frames, and the coroutine yields between them.
+/// Each frame's callback runs as a driven coroutine of its own, so an
+/// `emit` inside it can yield too.
+async fn stream_driven(
+    lua: Lua,
+    url: String,
+    spec: RequestSpec,
+    max_bytes: u64,
+    on_event: Function,
+) -> Result<Table, String> {
+    let (tx, mut rx) = tasks::channel::<Result<Streamed, String>>();
+    std::thread::Builder::new()
+        .name("kage-lua-io".to_owned())
+        .spawn(move || {
+            if let Err(err) = read_stream(&url, &spec, max_bytes, &tx) {
+                tx.send(Err(err));
+            }
+        })
+        .map_err(|e| format!("cannot start the stream thread: {e}"))?;
+    let table = lua.create_table().map_err(|e| format!("lua table: {e}"))?;
+    while let Some(item) = rx.recv().await {
+        match item? {
+            Streamed::Head {
+                status,
+                content_type,
+            } => {
+                table
+                    .set("status", status)
+                    .map_err(|e| format!("lua set status: {e}"))?;
+                table
+                    .set("content_type", content_type)
+                    .map_err(|e| format!("lua set content_type: {e}"))?;
+            }
+            Streamed::Body(body) => table
+                .set("body", body)
+                .map_err(|e| format!("lua set body: {e}"))?,
+            Streamed::Frame(frame) => {
+                let payload = frame_table(&lua, frame)?;
+                tasks::drive::<()>(&lua, on_event.clone(), payload)
+                    .map_err(|e| format!("on_event: {e}"))?
+                    .await
+                    .map_err(|e| format!("on_event raised: {e}"))?;
+            }
+        }
+    }
+    Ok(table)
+}
+
+/// The stream thread of a driven `post_stream`: make the request and
+/// hand over its head, then its body or each SSE frame. Stops early
+/// once the coroutine stops listening.
+fn read_stream(
+    url: &str,
+    spec: &RequestSpec,
+    max_bytes: u64,
+    tx: &tasks::Sender<Result<Streamed, String>>,
+) -> Result<(), String> {
+    let (parsed, agent) = prepare(url, None)?;
+    let response = dispatch("POST", &agent, parsed.as_str(), Some(spec))?;
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    if !tx.send(Ok(Streamed::Head {
+        status,
+        content_type,
+    })) {
+        return Ok(());
+    }
+    let raw_reader: Box<dyn Read + Send> = Box::new(response.into_body().into_reader());
+    let mut capped = raw_reader.take(max_bytes);
+    if !(200..300).contains(&status) {
+        let mut buf = Vec::new();
+        let _ = capped.read_to_end(&mut buf);
+        tx.send(Ok(Streamed::Body(
+            String::from_utf8_lossy(&buf).into_owned(),
+        )));
+        return Ok(());
+    }
+    let mut reader = BufReader::new(capped);
+    while let Some(frame) = read_sse_frame(&mut reader)? {
+        if !tx.send(Ok(Streamed::Frame(frame))) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// The `{ event, data }` table a frame's callback receives.
+fn frame_table(lua: &Lua, frame: SseFrame) -> Result<Table, String> {
+    let payload = lua.create_table().map_err(|e| format!("lua table: {e}"))?;
+    payload
+        .set("event", frame.event)
+        .map_err(|e| format!("lua set event: {e}"))?;
+    payload
+        .set("data", frame.data)
+        .map_err(|e| format!("lua set data: {e}"))?;
+    Ok(payload)
+}
+
 fn run_sse_loop<R: BufRead>(lua: &Lua, reader: &mut R, on_event: &Function) -> Result<(), String> {
     loop {
         match read_sse_frame(reader)? {
             Some(frame) => {
-                let payload = lua.create_table().map_err(|e| format!("lua table: {e}"))?;
-                payload
-                    .set("event", frame.event)
-                    .map_err(|e| format!("lua set event: {e}"))?;
-                payload
-                    .set("data", frame.data)
-                    .map_err(|e| format!("lua set data: {e}"))?;
+                let payload = frame_table(lua, frame)?;
                 on_event
                     .call::<()>(payload)
                     .map_err(|e| format!("on_event raised: {e}"))?;

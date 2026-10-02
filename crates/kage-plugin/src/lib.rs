@@ -68,6 +68,7 @@ pub mod spec;
 pub mod status;
 pub(crate) mod stdlib;
 pub(crate) mod store;
+pub(crate) mod tasks;
 pub mod terminal_input;
 #[cfg(test)]
 mod test_support;

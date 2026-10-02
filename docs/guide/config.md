@@ -23,6 +23,9 @@ default_model = "anthropic/claude-sonnet-4-6"
 [ui]
 # bundled theme name, or a user theme under ~/.config/kage/themes/<name>.toml.
 theme = "default"
+# the themes "default" picks on a dark and on a light terminal background.
+# theme_dark = "kage-shadow"
+# theme_light = "kage-dawn"
 # capture terminal mouse events. Toggle at runtime with /mouse.
 mouse = true
 # prompt editing style: "modeless" or "vim".

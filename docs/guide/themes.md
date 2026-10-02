@@ -1,21 +1,48 @@
 # themes
 
-kage ships two palettes, kage shadow and kage dawn, and loads any
-additional ones you drop into `~/.config/kage/themes/`.
+kage ships four palettes, kage shadow, kage dawn, kimi dark and kimi
+light, and loads any additional ones you drop into
+`~/.config/kage/themes/`.
 
 | Name | Palette |
 |---|---|
-| `default` | follows the terminal: `kage-shadow` on a dark background, `kage-dawn` on a light one |
+| `default` | follows the terminal: `theme_dark` on a dark background, `theme_light` on a light one |
 | `kage-shadow` | dark: ink surfaces with a violet undertone and one warm orange accent |
 | `kage-dawn` | light: the same roles on a violet-tinted paper |
+| `kimi-dark` | dark: Kimi Code's palette on neutral grey surfaces with a blue accent |
+| `kimi-light` | light: Kimi Code's palette on white |
 
 `default` asks the terminal for its background color once at startup
 (the OSC 11 query). When the terminal does not answer, kage reads
-`COLORFGBG`, and failing that picks `kage-shadow`. Set any other name
-to pin a palette.
+`COLORFGBG`, and failing that assumes a dark background. Set any other
+name to pin a palette.
 
 The kage palettes match the [kage-theme](https://github.com/QaidVoid/kage-theme)
-Neovim colorscheme and its terminal configs.
+Neovim colorscheme and its terminal configs. The kimi palettes take
+their text and accent colors from Kimi Code's terminal UI and their
+surfaces from its desktop app.
+
+## the default pair
+
+`theme_dark` and `theme_light` choose what `default` shows. They take
+any bundled or user theme name and fall back to `kage-shadow` and
+`kage-dawn` when unset. The desktop and web client use the same pair
+for their System choice.
+
+```toml
+[ui]
+theme = "default"
+theme_dark = "kimi-dark"
+theme_light = "kimi-light"
+```
+
+`init.lua` sets them with `kage.opt.theme_dark = "name"` and
+`kage.opt.theme_light = "name"`, and the `/settings` dialog cycles
+through them too. A change applies at once while `default` is the
+active theme. When the named theme is unknown or fails to load at
+startup, kage reports the error inline and `default` shows the kage
+palette instead. From `init.lua` or `/settings`, such a name is
+rejected.
 
 ## switching themes
 
@@ -49,7 +76,7 @@ an unknown name. Every switch fires the `color_scheme` event (see
 
 A user theme is a TOML file at `~/.config/kage/themes/<name>.toml`
 (honoring `XDG_CONFIG_HOME`). The file name is the theme name. There
-is no `name` key. Four top-level keys are accepted, and an unknown key
+is no `name` key. Five top-level keys are accepted, and an unknown key
 is an error:
 
 ```toml
@@ -71,6 +98,9 @@ match_color = "#fbbf24"
 KageToolError = { fg = "#ff6b6b", bg = "#2a1618" }
 KageMarkdownLink = { link = "KageWarning" }
 MyAccent = { fg = "#f4a72b", bold = true }
+
+# Palette tokens for the desktop and web client. See "the gui section".
+[gui]
 ```
 
 Every key under `[colors]` is a role name (full list below). A typo
@@ -181,6 +211,101 @@ renderer reads only the colors of `Kage*` groups. Attributes such as
 
 `init.lua` can change groups at runtime with `kage.api.hl_set`. See
 [lua config](/guide/lua-config#highlight-groups).
+
+## the gui section
+
+`[gui]` holds palette tokens for the desktop and web client, which
+draw their own palette. The terminal ignores the table, so one file
+themes both.
+
+```toml
+base = "kimi-dark"
+
+[colors]
+focus_color = "#fe8019"
+
+[gui]
+accent = "#fe8019"
+accent_soft = "#fe80191f"
+bg = "#1d2021"
+surface = "#282828"
+```
+
+The client asks the engine for the themes, so it lists the ones on
+the machine kage runs on, a remote engine's included. A theme shows
+in Settings as a card beside the bundled ones. Settings rereads the
+folder each time it opens, so a new or edited file needs no restart.
+
+The client draws a user theme as its `base` with the `[gui]` tokens
+over it, and takes light or dark from the base. A theme without a
+`base`, or with `default`, starts from `kage-shadow` on a dark
+desktop and `kage-dawn` on a light one. A color is `#rrggbb`, or
+`#rrggbbaa` for one with alpha. An unknown token or an unparseable
+color is skipped, and the base's value stays.
+
+The System choice draws `theme_dark` on a dark desktop and
+`theme_light` on a light one (see [the default pair](#the-default-pair)).
+Settings sets both from its Appearance page.
+
+| Token | Role |
+|---|---|
+| `bg` | App background |
+| `sidebar` | Sidebar and workbench background |
+| `surface` | Cards, panels and inputs |
+| `raised` | Raised elements above `surface` |
+| `sunken` | Pressed-in areas |
+| `deep` | The deepest level, used behind on-color glyphs |
+| `well` | Wells that read as inset surfaces |
+| `fill` | Barely-there fill for chips and pills |
+| `fill_hover` | `fill` one step up, for hover |
+| `ink` | Primary text |
+| `ink_strong` | Emphasized text |
+| `muted` | Secondary text |
+| `faint` | Tertiary text |
+| `ghost` | Quaternary text and the faintest marks |
+| `line` | Hairline borders |
+| `subtle` | The faintest fills, below `line` |
+| `line_strong` | Stronger borders, hovered states |
+| `hover` | Row and control hover fill |
+| `selected` | Selected row fill |
+| `selected_hover` | Selected row fill on hover |
+| `accent` | The warm lantern accent |
+| `accent_hover` | Accent hover step |
+| `accent_soft` | Accent tint background |
+| `accent_bd` | Accent border |
+| `ok` | Success green |
+| `ok_soft` | Success tint background |
+| `ok_bd` | Success border |
+| `ok_ink` | Text on a solid success fill |
+| `warn` | Warning yellow |
+| `warn_soft` | Warning tint background |
+| `warn_bd` | Warning border |
+| `danger` | Danger red |
+| `danger_soft` | Danger tint background |
+| `danger_bd` | Danger border |
+| `done` | Swarm violet |
+| `done_soft` | Violet tint background |
+| `done_bd` | Violet border |
+| `info` | Informational blue |
+| `composer_bg` | The composer's background |
+| `composer_line` | The composer's idle border |
+| `composer_focus_line` | The composer's focused border |
+| `send_bg` | The send button background |
+| `send_bg_hover` | The send button hover background |
+| `send_icon` | The glyph on the send button |
+| `send_bg_off` | The send button when disabled |
+| `send_icon_off` | The glyph on the disabled send button |
+| `stop_glyph` | The stop glyph, a softened danger red |
+| `diff_add` | Diff added lines |
+| `diff_add_bg` | Diff added line background |
+| `diff_del` | Diff deleted lines |
+| `diff_del_bg` | Diff deleted line background |
+| `bubble` | The user bubble fill |
+| `selection` | Text selection fill |
+| `menu` | Menus and popovers, slightly translucent |
+| `code_inline` | Inline code fill |
+| `orb_1` | Brand orb gradient start |
+| `orb_2` | Brand orb gradient end |
 
 ## transparency
 

@@ -110,6 +110,8 @@ value)` is the same as assigning.
 | Option | TOML key | Type | Default | Applies |
 | --- | --- | --- | --- | --- |
 | `theme` | `ui.theme` | a bundled or user theme name | `"default"` | immediately |
+| `theme_dark` | `ui.theme_dark` | a bundled or user theme name | `"kage-shadow"` | immediately |
+| `theme_light` | `ui.theme_light` | a bundled or user theme name | `"kage-dawn"` | immediately |
 | `mouse` | `ui.mouse` | boolean | `true` | immediately |
 | `editor` | `ui.editor` | `"vim"` or `"modeless"` | `"modeless"` | immediately |
 | `input_min_lines` | `ui.input_min_lines` | integer, 1 to 64 | `1` | immediately |

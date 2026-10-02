@@ -719,6 +719,8 @@ fn action_icon(action: AppAction) -> IconName {
 /// session directory. The query narrows, the arrows move, Enter runs
 /// and Esc closes.
 pub struct PaletteView {
+    /// Where the focus goes when this closes.
+    focus_return: crate::views::kit::FocusReturn,
     store: Entity<Store>,
     composer: Entity<TextareaState>,
     query: Entity<InputState>,
@@ -755,6 +757,7 @@ impl PaletteView {
         })
         .detach();
         Self {
+            focus_return: crate::views::kit::FocusReturn::default(),
             store,
             composer,
             query,
@@ -821,6 +824,7 @@ impl PaletteView {
     pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
         self.selected = 0;
+        self.focus_return.remember(window, cx);
         let query = self.query.clone();
         self.query_mirror.set(String::new(), |text| {
             query.update(cx, |state, cx| state.set_value(text, window, cx));
@@ -829,12 +833,13 @@ impl PaletteView {
         cx.notify();
     }
 
-    /// Closes the palette.
+    /// Closes the palette and hands the focus back.
     pub fn close(&mut self, cx: &mut Context<Self>) {
         if !self.open {
             return;
         }
         self.open = false;
+        self.focus_return.restore(cx);
         cx.notify();
     }
 

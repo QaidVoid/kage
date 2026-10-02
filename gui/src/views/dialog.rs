@@ -131,6 +131,8 @@ fn counted(n: usize, one: &str, many: &str) -> String {
 
 /// The dialog layer over the shell.
 pub struct DialogView {
+    /// Where the focus goes when this closes.
+    focus_return: crate::views::kit::FocusReturn,
     store: Entity<Store>,
     open: Option<DialogKind>,
     focus: FocusHandle,
@@ -169,6 +171,7 @@ impl DialogView {
         })
         .detach();
         Self {
+            focus_return: crate::views::kit::FocusReturn::default(),
             store,
             open: None,
             focus: cx.focus_handle(),
@@ -193,6 +196,7 @@ impl DialogView {
             return;
         }
         self.open = Some(kind);
+        self.focus_return.remember(window, cx);
         match kind {
             DialogKind::Goal => {
                 let current = self.store.read(cx).active_session().and_then(|session| {
@@ -223,6 +227,7 @@ impl DialogView {
 
     fn close(&mut self, cx: &mut Context<Self>) {
         self.open = None;
+        self.focus_return.restore(cx);
         cx.notify();
     }
 

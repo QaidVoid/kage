@@ -207,6 +207,8 @@ pub fn shortcuts(bindings: &[KeyBinding]) -> Vec<Shortcut> {
 
 /// The settings dialog over the shell.
 pub struct SettingsView {
+    /// Where the focus goes when this closes.
+    focus_return: crate::views::kit::FocusReturn,
     store: Entity<Store>,
     open: bool,
     section: Section,
@@ -246,6 +248,7 @@ impl SettingsView {
     pub fn new(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
         Self {
+            focus_return: crate::views::kit::FocusReturn::default(),
             store,
             open: false,
             section: Section::General,
@@ -273,6 +276,7 @@ impl SettingsView {
     pub fn open(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
         self.go(section, cx);
+        self.focus_return.remember(window, cx);
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -472,6 +476,7 @@ impl SettingsView {
 
     fn close(&mut self, cx: &mut Context<Self>) {
         self.open = false;
+        self.focus_return.restore(cx);
         cx.notify();
     }
 

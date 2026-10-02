@@ -77,3 +77,34 @@ pub(crate) fn switch(id: impl Into<SharedString>, on: bool, pal: &Palette) -> St
                 .bg(gpui_kit::white()),
         )
 }
+
+/// Where the focus goes back to when an overlay closes: the element
+/// that held it when the overlay opened, or none. Without it the focus
+/// stays on the overlay's own handle, which no longer renders, and
+/// every action a button or shortcut dispatches from the focus is
+/// lost.
+#[derive(Default)]
+pub(crate) struct FocusReturn(Option<(gpui_kit::AnyWindowHandle, Option<gpui_kit::FocusHandle>)>);
+
+impl FocusReturn {
+    /// Remembers the focus `window` holds, before the overlay takes it.
+    /// An overlay opened again while open keeps the first one.
+    pub(crate) fn remember(&mut self, window: &gpui_kit::Window, cx: &gpui_kit::App) {
+        if self.0.is_none() {
+            self.0 = Some((window.window_handle(), window.focused(cx)));
+        }
+    }
+
+    /// Hands the focus back, once the current update is done.
+    pub(crate) fn restore(&mut self, cx: &mut gpui_kit::App) {
+        let Some((handle, focus)) = self.0.take() else {
+            return;
+        };
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, cx| match &focus {
+                Some(focus) => window.focus(focus, cx),
+                None => window.blur(cx),
+            });
+        });
+    }
+}

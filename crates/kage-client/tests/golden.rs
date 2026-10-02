@@ -951,6 +951,45 @@ fn a_config_write_answers_with_the_snapshot_or_fails() {
 }
 
 #[test]
+fn directory_and_plugin_answers_arrive_under_their_ids() {
+    let mut client = Client::new();
+    client.initialize(ClientCapabilities::default(), None);
+    let _ = client.take_outgoing();
+    let id = client.providers_directory(None, None);
+    let sent = client.take_outgoing();
+    assert!(matches!(
+        &sent[0],
+        Frame::Request { method, params, .. }
+            if method == "_kage/providers/directory" && params.get("url").is_none()
+    ));
+    let changes = drive(
+        &mut client,
+        &[Frame::Success {
+            id,
+            result: serde_json::json!({"providers": [
+                {"id": "lab", "name": "Lab", "env": [], "models": [{"id": "m", "name": "M"}]}
+            ]}),
+        }],
+    );
+    let [Change::ProviderDirectory { request, providers }] = changes.as_slice() else {
+        panic!("{changes:?}");
+    };
+    assert_eq!(*request, id);
+    assert_eq!(providers[0].models[0].id, "m");
+
+    let id = client.plugin_install("https://example.com/clock.lua", false);
+    let _ = client.take_outgoing();
+    let changes = drive(
+        &mut client,
+        &[Frame::Success {
+            id,
+            result: serde_json::json!({"name": "clock"}),
+        }],
+    );
+    assert_eq!(changes, vec![Change::Plugins { request: id }]);
+}
+
+#[test]
 fn one_shot_answers_arrive_as_changes() {
     let mut client = Client::new();
     client.initialize(ClientCapabilities::default(), None);

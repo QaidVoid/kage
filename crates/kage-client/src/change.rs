@@ -106,6 +106,18 @@ pub enum Change {
         /// What the engine found.
         result: kage_acp_wire::ConfigTestResult,
     },
+    /// A `_kage/providers/directory` answer arrived.
+    ProviderDirectory {
+        /// The id of the request, so a picker matches its answer.
+        request: u64,
+        /// The providers the directory lists.
+        providers: Vec<kage_acp_wire::DirectoryProvider>,
+    },
+    /// A plugin was installed or removed.
+    Plugins {
+        /// The id of the request answered.
+        request: u64,
+    },
     /// A `_kage/auth/set` answer arrived: the provider's key was saved
     /// or removed.
     KeySaved {
@@ -140,6 +152,8 @@ impl Change {
             | Self::Models { .. }
             | Self::Options { .. }
             | Self::Tested { .. }
+            | Self::ProviderDirectory { .. }
+            | Self::Plugins { .. }
             | Self::KeySaved { .. }
             | Self::Failed { .. } => None,
         }

@@ -31,6 +31,7 @@
 mod bridge;
 mod config_set;
 mod content;
+mod directory;
 mod fs;
 pub(crate) mod host;
 #[cfg(unix)]
@@ -39,6 +40,7 @@ mod live;
 mod mcp;
 mod models;
 mod options;
+mod plugin_files;
 mod probe;
 mod registry;
 mod sessions;
@@ -53,15 +55,15 @@ use std::sync::{Arc, Mutex, mpsc};
 use kage_acp::acp::{
     AgentCapabilities, AgentMeta, AuthSetRequest, CloseSessionRequest, CloseSessionResponse,
     ConfigGetRequest, ConfigGetResult, ConfigSetRequest, ConfigTestRequest, ConfigTestResult,
-    FsRequest, FsResult, Implementation, InitializeRequest, InitializeResponse, InstalledPlugin,
-    KageAgentInfo, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, McpCapabilities, ModelsResponse, NewSessionRequest, NewSessionResponse,
-    OptionSetRequest, OptionsResponse, PROTOCOL_VERSION, PromptCapabilities, PromptDelivery,
-    PromptRequest, PromptResponse, ResumeSessionRequest, ResumeSessionResponse,
-    SessionCapabilities, SessionConfigOption, SessionExportResponse, SessionForkRequest,
-    SessionForkResponse, SessionRenameRequest, SessionRequest, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, Supported,
-    SwarmResumeRequest, SwarmResumeResponse,
+    DirectoryRequest, DirectoryResult, FsRequest, FsResult, Implementation, InitializeRequest,
+    InitializeResponse, InstalledPlugin, KageAgentInfo, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, LoadSessionResponse, McpCapabilities, ModelsResponse, NewSessionRequest,
+    NewSessionResponse, OptionSetRequest, OptionsResponse, PROTOCOL_VERSION, PluginInstallRequest,
+    PluginRemoveRequest, PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse,
+    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionConfigOption,
+    SessionExportResponse, SessionForkRequest, SessionForkResponse, SessionRenameRequest,
+    SessionRequest, SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+    StopReason, Supported, SwarmResumeRequest, SwarmResumeResponse,
 };
 use kage_acp::agent::{Agent, PromptContext, send_update};
 use kage_core::config::{Config, McpServer as McpSpec};
@@ -126,6 +128,9 @@ fn redact_secrets(config: &mut Config) {
     for server in config.mcp.servers.values_mut() {
         blank(&mut server.headers);
         blank(&mut server.env);
+    }
+    for agent in config.acp.agents.values_mut() {
+        blank(&mut agent.env);
     }
     for settings in config.plugins.config.values_mut() {
         *settings = serde_json::Value::String(REDACTED.to_owned());
@@ -541,6 +546,7 @@ impl Agent for CliAcpAgent {
             permissions: config.permissions,
             plugins: config.plugins,
             ui: config.ui,
+            acp: config.acp,
             installed_plugins,
             provider_keys,
         })
@@ -557,7 +563,7 @@ impl Agent for CliAcpAgent {
         if req
             .path
             .first()
-            .is_some_and(|section| section == "providers")
+            .is_some_and(|section| section == "providers" || section == "acp")
         {
             self.host.reload_providers().map_err(RpcError::internal)?;
         }
@@ -570,9 +576,38 @@ impl Agent for CliAcpAgent {
     /// filling what the probe leaves out.
     fn config_test(&self, req: ConfigTestRequest) -> Result<ConfigTestResult, RpcError> {
         let config = Config::load_default().map_err(|e| RpcError::internal(e.to_string()))?;
-        let store =
-            crate::auth::AuthStore::load().unwrap_or_else(|_| crate::auth::AuthStore::empty());
-        Ok(probe::probe(&req.provider, &config, &store))
+        if let Some(provider) = &req.provider {
+            let store =
+                crate::auth::AuthStore::load().unwrap_or_else(|_| crate::auth::AuthStore::empty());
+            return Ok(probe::probe(provider, &config, &store));
+        }
+        let path =
+            Config::default_path().ok_or_else(|| RpcError::internal("no user config directory"))?;
+        let saved = |keys: &[&str]| {
+            kage_core::config_edit::current(&path, keys)
+                .map_err(|e| RpcError::internal(e.to_string()))
+        };
+        let invalid = |e: serde_json::Error| RpcError::new(-32602, e.to_string());
+        if let Some(mcp) = &req.mcp {
+            let old = saved(&["mcp", "servers", &mcp.name])?;
+            let server = config_set::unredacted(&mcp.server, old.as_ref(), &mcp.name)?;
+            let spec = serde_json::from_value(server).map_err(invalid)?;
+            return Ok(probe::probe_mcp(&mcp.name, &spec));
+        }
+        if let Some(acp) = &req.acp {
+            let old = saved(&["acp", "agents", &acp.name, "env"])?;
+            let env = config_set::unredacted(&serde_json::json!(acp.env), old.as_ref(), "env")?;
+            let agent = kage_core::config::AcpAgent {
+                command: acp.command.clone(),
+                args: acp.args.clone(),
+                env: serde_json::from_value(env).map_err(invalid)?,
+            };
+            return Ok(probe::probe_acp(&agent));
+        }
+        Err(RpcError::new(
+            -32602,
+            "name a provider, MCP server or ACP agent to test",
+        ))
     }
 
     /// Saves or removes the key, then reloads the providers so one that
@@ -592,6 +627,22 @@ impl Agent for CliAcpAgent {
         }
         store.save().map_err(RpcError::internal)?;
         self.host.reload_providers().map_err(RpcError::internal)?;
+        Ok(serde_json::json!({}))
+    }
+
+    fn providers_directory(&self, req: DirectoryRequest) -> Result<DirectoryResult, RpcError> {
+        directory::directory(&req)
+    }
+
+    fn plugin_install(&self, req: PluginInstallRequest) -> Result<serde_json::Value, RpcError> {
+        let dir = crate::plugins_dir().map_err(RpcError::internal)?;
+        let name = plugin_files::install(&dir, &req)?;
+        Ok(serde_json::json!({ "name": name }))
+    }
+
+    fn plugin_remove(&self, req: PluginRemoveRequest) -> Result<serde_json::Value, RpcError> {
+        let dir = crate::plugins_dir().map_err(RpcError::internal)?;
+        plugin_files::remove(&dir, &req)?;
         Ok(serde_json::json!({}))
     }
 

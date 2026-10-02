@@ -16,28 +16,30 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use kage_acp_wire as wire;
-use kage_core::config::{McpConfig, PluginsConfig, ProvidersConfig, UiConfig};
+use kage_core::config::{AcpConfig, McpConfig, PluginsConfig, ProvidersConfig, UiConfig};
 use kage_core::permissions::PermissionsConfig;
 use kage_core::protocol::McpServerStatus;
 
 pub use kage_acp_wire::schema::{
-    AgentCapabilities, AgentMeta, AuthSetRequest, AvailableCommandsUpdate, BlobContent,
+    AcpProbe, AgentCapabilities, AgentMeta, AuthSetRequest, AvailableCommandsUpdate, BlobContent,
     CancelNotification, ChunkMeta, ClientCapabilities, CloseSessionRequest, CloseSessionResponse,
     CompactionUpdate, ConfigGetRequest, ConfigOptionUpdate, ConfigSetRequest, ConfigTestRequest,
-    ConfigTestResult, ContentBlock, Cost, CurrentModeUpdate, DiffContent, EmbeddedResource,
+    ConfigTestResult, ContentBlock, Cost, CurrentModeUpdate, DiffContent, DirectoryCost,
+    DirectoryModel, DirectoryProvider, DirectoryRequest, DirectoryResult, EmbeddedResource,
     EnvVariable, FsCapability, FsEntry, FsKind, FsListResult, FsOp, FsReadResult, FsRequest,
     FsResult, HttpHeader, Implementation, InitializeRequest, InitializeResponse, KageAgentInfo,
     KageMeta, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
-    McpCapabilities, McpServer, McpServerHttp, McpServerStdio, MessageChunk, ModelEntry,
+    McpCapabilities, McpProbe, McpServer, McpServerHttp, McpServerStdio, MessageChunk, ModelEntry,
     ModelProvider, ModelsResponse, NewSessionRequest, NewSessionResponse, NoticeTone, NoticeUpdate,
     OptionEntry, OptionSetRequest, OptionsResponse, PROTOCOL_VERSION, PermissionOption,
-    PermissionOptionKind, PermissionOutcome, Plan, PlanReview, ProbeModel, PromptCapabilities,
-    PromptDelivery, PromptRef, PromptRequest, PromptResponse, ProviderProbe, RequestMeta,
-    RequestPermissionRequest, RequestPermissionResponse, RequestPermissionResult, ResourceLink,
-    ResumeSessionRequest, ResumeSessionResponse, SelectedOption, SessionCapabilities,
-    SessionConfigCategory, SessionConfigKind, SessionConfigOption, SessionConfigSelectOption,
-    SessionExportResponse, SessionForkRequest, SessionForkResponse, SessionInfo, SessionInfoKage,
-    SessionInfoMeta, SessionInfoUpdate, SessionNotification, SessionRenameRequest, SessionRequest,
+    PermissionOptionKind, PermissionOutcome, Plan, PlanReview, PluginInstallRequest,
+    PluginRemoveRequest, ProbeModel, ProbeTool, PromptCapabilities, PromptDelivery, PromptRef,
+    PromptRequest, PromptResponse, ProviderProbe, RequestMeta, RequestPermissionRequest,
+    RequestPermissionResponse, RequestPermissionResult, ResourceLink, ResumeSessionRequest,
+    ResumeSessionResponse, SelectedOption, SessionCapabilities, SessionConfigCategory,
+    SessionConfigKind, SessionConfigOption, SessionConfigSelectOption, SessionExportResponse,
+    SessionForkRequest, SessionForkResponse, SessionInfo, SessionInfoKage, SessionInfoMeta,
+    SessionInfoUpdate, SessionNotification, SessionRenameRequest, SessionRequest,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
     SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate, SubagentUsage,
     Supported, SwarmMeta, SwarmResumeRequest, SwarmResumeResponse, TerminalRef, TextContent,
@@ -60,6 +62,9 @@ pub struct ConfigGetResult {
     pub plugins: PluginsConfig,
     /// User interface settings.
     pub ui: UiConfig,
+    /// External ACP agents usable as `acp:<name>`.
+    #[serde(default)]
+    pub acp: AcpConfig,
     /// The plugin files in the plugin directory, by name.
     #[serde(default)]
     pub installed_plugins: Vec<InstalledPlugin>,

@@ -25,10 +25,11 @@ use kage_jsonrpc::{CancelNotice, Inbound, Peer, RpcError, connect_with};
 
 use crate::acp::{
     AuthSetRequest, CloseSessionRequest, CloseSessionResponse, ConfigGetRequest, ConfigGetResult,
-    ConfigSetRequest, ConfigTestRequest, ConfigTestResult, FsRequest, FsResult, InitializeRequest,
-    InitializeResponse, KageMeta, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, ModelsResponse, NewSessionRequest, NewSessionResponse, OptionSetRequest,
-    OptionsResponse, PermissionOption, PermissionOptionKind, PermissionOutcome, PlanReview,
+    ConfigSetRequest, ConfigTestRequest, ConfigTestResult, DirectoryRequest, DirectoryResult,
+    FsRequest, FsResult, InitializeRequest, InitializeResponse, KageMeta, ListSessionsRequest,
+    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, ModelsResponse,
+    NewSessionRequest, NewSessionResponse, OptionSetRequest, OptionsResponse, PermissionOption,
+    PermissionOptionKind, PermissionOutcome, PlanReview, PluginInstallRequest, PluginRemoveRequest,
     PromptRequest, PromptResponse, RequestMeta, RequestPermissionRequest,
     RequestPermissionResponse, RequestPermissionResult, ResumeSessionRequest,
     ResumeSessionResponse, SessionExportResponse, SessionForkRequest, SessionForkResponse,
@@ -474,6 +475,40 @@ pub trait Agent: Send + Sync + 'static {
         Err(RpcError::method_not_found("_kage/auth/set"))
     }
 
+    /// Lists the providers of a directory in the models.dev `api.json`
+    /// shape (`_kage/providers/directory`), fetched by the agent. The
+    /// default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the directory cannot be fetched or
+    /// read.
+    fn providers_directory(&self, _req: DirectoryRequest) -> Result<DirectoryResult, RpcError> {
+        Err(RpcError::method_not_found("_kage/providers/directory"))
+    }
+
+    /// Installs a plugin file into the plugin directory
+    /// (`_kage/plugins/install`). The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the source cannot be read, is not a
+    /// Lua plugin, or the plugin directory cannot be written.
+    fn plugin_install(&self, _req: PluginInstallRequest) -> Result<serde_json::Value, RpcError> {
+        Err(RpcError::method_not_found("_kage/plugins/install"))
+    }
+
+    /// Removes a plugin file from the plugin directory
+    /// (`_kage/plugins/remove`). The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if no such plugin is installed or the
+    /// file cannot be removed.
+    fn plugin_remove(&self, _req: PluginRemoveRequest) -> Result<serde_json::Value, RpcError> {
+        Err(RpcError::method_not_found("_kage/plugins/remove"))
+    }
+
     /// Run one prompt turn to completion, streaming `session/update`
     /// notifications through `ctx`.
     ///
@@ -754,6 +789,20 @@ fn handle_kage_request<A: Agent>(
         },
         "_kage/auth/set" => match parse::<AuthSetRequest>(params) {
             Ok(req) => spawn_op(peer, agent, id, move |a| a.auth_set(req)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/providers/directory" => match parse::<DirectoryRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| {
+                a.providers_directory(req).map(jval)
+            }),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/plugins/install" => match parse::<PluginInstallRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.plugin_install(req)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/plugins/remove" => match parse::<PluginRemoveRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.plugin_remove(req)),
             Err(e) => return parse_failed(peer, &id, e),
         },
         "_kage/session/rename" => match parse::<SessionRenameRequest>(params) {

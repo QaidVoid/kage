@@ -6,7 +6,9 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use kage_acp::acp::{ConfigTestResult, KeySource, ProbeModel, ProviderKey, ProviderProbe};
+use kage_acp::acp::{
+    ConfigTestResult, KeySource, ProbeModel, ProbeTool, ProviderKey, ProviderProbe,
+};
 use kage_core::config::{Config, CustomProviderKind};
 use kage_provider::catalog;
 use kage_provider::compat::COMPAT_PROVIDERS;
@@ -178,6 +180,138 @@ pub(super) fn provider_keys(config: &Config, store: &AuthStore) -> BTreeMap<Stri
         .collect()
 }
 
+/// How long an MCP server or ACP agent may take to answer.
+const START_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Connects to MCP server `name` as `spec` describes and lists its
+/// tools. The worker owns the connection and closes it when done; a
+/// server that never answers leaves only that worker behind.
+pub(super) fn probe_mcp(name: &str, spec: &kage_core::config::McpServer) -> ConfigTestResult {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let server = name.to_owned();
+    let spec = spec.clone();
+    let started = Instant::now();
+    std::thread::spawn(move || {
+        let listed = kage_mcp::McpServerHandle::spawn(&server, &spec, &[], None)
+            .map_err(|e| e.to_string())
+            .and_then(|handle| handle.connection().list_tools().map_err(|e| e.to_string()));
+        let _ = tx.send(listed);
+    });
+    let outcome = rx
+        .recv_timeout(START_TIMEOUT)
+        .unwrap_or_else(|_| Err(format!("no answer within {}s", START_TIMEOUT.as_secs())));
+    let millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match outcome {
+        Ok(tools) => ConfigTestResult {
+            ok: true,
+            message: format!("connected \u{b7} {} tools \u{b7} {millis} ms", tools.len()),
+            millis,
+            tools: tools
+                .into_iter()
+                .map(|tool| ProbeTool {
+                    name: tool.name,
+                    description: tool.description,
+                })
+                .collect(),
+            ..ConfigTestResult::default()
+        },
+        Err(why) => ConfigTestResult {
+            message: why,
+            millis,
+            ..ConfigTestResult::default()
+        },
+    }
+}
+
+/// Starts ACP agent `agent`, sends `initialize` and waits for the
+/// answer, then stops it.
+pub(super) fn probe_acp(agent: &kage_core::config::AcpAgent) -> ConfigTestResult {
+    use std::io::{BufRead as _, Write as _};
+
+    let started = Instant::now();
+    let failed = |message: String| ConfigTestResult {
+        message,
+        millis: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        ..ConfigTestResult::default()
+    };
+    let mut child = match std::process::Command::new(&agent.command)
+        .args(&agent.args)
+        .envs(&agent.env)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => return failed(format!("cannot start {}: {e}", agent.command)),
+    };
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "protocolVersion": 1, "clientCapabilities": {} },
+    });
+    // Held open until the answer: closing stdin ends some agents.
+    let mut stdin = child.stdin.take();
+    if let Some(stdin) = &mut stdin {
+        let _ = writeln!(stdin, "{request}");
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    if let Some(stdout) = child.stdout.take() {
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok)
+            {
+                let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                if value["id"] == 1 {
+                    let _ = tx.send(value);
+                    return;
+                }
+            }
+        });
+    }
+    let answer = rx.recv_timeout(START_TIMEOUT);
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    let Ok(answer) = answer else {
+        return failed(format!(
+            "no initialize answer within {}s",
+            START_TIMEOUT.as_secs()
+        ));
+    };
+    if let Some(error) = answer.get("error") {
+        return failed(format!(
+            "initialize failed: {}",
+            error["message"].as_str().unwrap_or("error")
+        ));
+    }
+    let info = &answer["result"]["agentInfo"];
+    let who = [info["name"].as_str(), info["version"].as_str()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    ConfigTestResult {
+        ok: true,
+        message: format!(
+            "initialize \u{b7} {} \u{b7} {millis} ms",
+            if who.is_empty() {
+                "agent answered"
+            } else {
+                who.as_str()
+            }
+        ),
+        millis,
+        agent: (!who.is_empty()).then_some(who),
+        ..ConfigTestResult::default()
+    }
+}
+
 /// Lists the models of provider `id` at `target`.
 fn list(id: &str, target: &Target) -> ConfigTestResult {
     let url = match target.kind {
@@ -251,6 +385,7 @@ fn list(id: &str, target: &Target) -> ConfigTestResult {
         ),
         millis,
         models,
+        ..ConfigTestResult::default()
     }
 }
 
@@ -450,6 +585,50 @@ mod tests {
             KeySource::Auth | KeySource::Env
         ));
         assert!(keys.contains_key("anthropic"));
+    }
+
+    #[test]
+    fn an_acp_agent_answers_its_handshake() {
+        let answer = r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"fake","version":"1.0"}}}"#;
+        let agent = kage_core::config::AcpAgent {
+            command: "sh".into(),
+            args: vec![
+                "-c".into(),
+                format!("read line; printf '%s\\n' '{answer}'; sleep 5"),
+            ],
+            env: std::collections::BTreeMap::new(),
+        };
+        let result = super::probe_acp(&agent);
+        assert!(result.ok, "{}", result.message);
+        assert_eq!(result.agent.as_deref(), Some("fake 1.0"));
+        let missing = kage_core::config::AcpAgent {
+            command: "/nonexistent/agent".into(),
+            ..agent
+        };
+        let result = super::probe_acp(&missing);
+        assert!(!result.ok);
+        assert!(
+            result.message.contains("cannot start"),
+            "{}",
+            result.message
+        );
+    }
+
+    #[test]
+    fn an_mcp_server_that_cannot_start_says_why() {
+        let spec = kage_core::config::McpServer {
+            command: Some("/nonexistent/server".into()),
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            url: None,
+            headers: std::collections::BTreeMap::new(),
+            disabled: false,
+            oauth: None,
+            disabled_tools: Vec::new(),
+        };
+        let result = super::probe_mcp("gone", &spec);
+        assert!(!result.ok);
+        assert!(!result.message.is_empty());
     }
 
     #[test]

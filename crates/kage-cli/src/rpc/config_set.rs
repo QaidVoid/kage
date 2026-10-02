@@ -16,7 +16,7 @@ use serde_json::Value;
 use super::REDACTED;
 
 /// The top-level tables a client may edit.
-const SECTIONS: [&str; 4] = ["providers", "mcp", "permissions", "plugins"];
+const SECTIONS: [&str; 5] = ["providers", "mcp", "permissions", "plugins", "acp"];
 
 /// Sets the entry at `keys` of the config at `path` to `value`, or
 /// removes it when `value` is `None`.
@@ -56,7 +56,7 @@ pub(super) fn set(path: &Path, keys: &[String], value: Option<&Value>) -> Result
 /// `value` with every redacted string replaced by the value `old` holds
 /// at the same place. `at` names the place for the error a redacted
 /// value with nothing on file gets.
-fn unredacted(value: &Value, old: Option<&Value>, at: &str) -> Result<Value, RpcError> {
+pub(super) fn unredacted(value: &Value, old: Option<&Value>, at: &str) -> Result<Value, RpcError> {
     Ok(match value {
         Value::String(text) if text == REDACTED => old.cloned().ok_or_else(|| {
             RpcError::new(-32602, format!("{at} is redacted and has no value on file"))
@@ -104,6 +104,11 @@ fn validate(config: &Config) -> Result<(), String> {
                 ));
             }
             _ => {}
+        }
+    }
+    for (name, agent) in &config.acp.agents {
+        if agent.command.trim().is_empty() {
+            return Err(format!("[acp.agents.{name}] needs a command"));
         }
     }
     for (plugin, grants) in &config.plugins.capabilities {

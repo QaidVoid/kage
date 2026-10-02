@@ -634,8 +634,44 @@ pub struct ConfigSetRequest {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigTestRequest {
-    /// The provider to reach.
-    pub provider: ProviderProbe,
+    /// A provider to list the models of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderProbe>,
+    /// An MCP server to connect to and list the tools of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpProbe>,
+    /// An external ACP agent to start and run the handshake with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp: Option<AcpProbe>,
+}
+
+/// An MCP server to connect to, as the config holds it or as a form
+/// holds it before it is saved.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpProbe {
+    /// The server's name. A redacted value in `server` keeps the one
+    /// saved under this name.
+    pub name: String,
+    /// The `[mcp.servers.<name>]` table in the snapshot's shape.
+    pub server: serde_json::Value,
+}
+
+/// An external ACP agent to start.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpProbe {
+    /// The agent's name. A redacted value in `env` keeps the one saved
+    /// under this name.
+    pub name: String,
+    /// The executable.
+    pub command: String,
+    /// Its arguments.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment variables.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 /// A provider to reach, as the config holds it or as a form holds it
@@ -681,6 +717,107 @@ pub struct ConfigTestResult {
     /// endpoint or the model catalog knows.
     #[serde(default)]
     pub models: Vec<ProbeModel>,
+    /// The tools an MCP server listed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ProbeTool>,
+    /// The name and version an ACP agent gave in its handshake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+}
+
+/// One tool an MCP server listed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeTool {
+    /// The tool's name on its server.
+    pub name: String,
+    /// What it does, as the server describes it.
+    #[serde(default)]
+    pub description: String,
+}
+
+/// `_kage/providers/directory` request params: a provider directory in
+/// the models.dev `api.json` shape.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryRequest {
+    /// Where the directory is; models.dev when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// A key the directory needs, sent as a bearer token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+/// `_kage/providers/directory` result.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryResult {
+    /// The providers the directory lists, by id.
+    pub providers: Vec<DirectoryProvider>,
+}
+
+/// One provider of a directory.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryProvider {
+    /// The provider id.
+    pub id: String,
+    /// Its display name.
+    pub name: String,
+    /// Its API endpoint, when the directory names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<String>,
+    /// The environment variables its key is read from.
+    #[serde(default)]
+    pub env: Vec<String>,
+    /// The protocol kage speaks to it (`openai`, `anthropic` or
+    /// `gemini`), when it speaks one kage knows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Its models that can call tools.
+    pub models: Vec<DirectoryModel>,
+}
+
+/// One model of a directory provider.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryModel {
+    /// The model id.
+    pub id: String,
+    /// Its display name.
+    pub name: String,
+    /// The context window in tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u64>,
+    /// The most output tokens per turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<u64>,
+    /// Whether it thinks.
+    #[serde(default)]
+    pub reasoning: bool,
+    /// The inputs it takes (`text`, `image`, `pdf`, ...).
+    #[serde(default)]
+    pub input: Vec<String>,
+    /// Prices in USD per million tokens, when listed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<DirectoryCost>,
+}
+
+/// A model's prices in USD per million tokens.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryCost {
+    /// Input tokens.
+    pub input: f64,
+    /// Output tokens.
+    pub output: f64,
+    /// Cached input reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<f64>,
+    /// Cached input writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<f64>,
 }
 
 /// One model a provider listed.
@@ -698,6 +835,29 @@ pub struct ProbeModel {
     /// The most output tokens per turn, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output: Option<u64>,
+}
+
+/// `_kage/plugins/install` request params.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallRequest {
+    /// Where the plugin is: an `https://` URL or a path on the agent's
+    /// machine, to one `.lua` file.
+    pub source: String,
+    /// The name to install it as; the source file's stem when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Whether an installed plugin of the same name is replaced.
+    #[serde(default)]
+    pub replace: bool,
+}
+
+/// `_kage/plugins/remove` request params.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRemoveRequest {
+    /// The plugin's name, its file stem.
+    pub name: String,
 }
 
 /// `_kage/auth/set` request params.

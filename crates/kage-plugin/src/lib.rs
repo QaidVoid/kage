@@ -27,6 +27,19 @@ pub(crate) mod capabilities;
 pub fn check_capability(name: &str) -> Result<(), String> {
     capabilities::Capability::parse(name).map(|_| ())
 }
+
+/// Checks that `source` compiles as a Lua chunk, without running it.
+///
+/// # Errors
+///
+/// The compiler's message for the first syntax error.
+pub fn check_syntax(source: &str) -> Result<(), String> {
+    mlua::Lua::new()
+        .load(source)
+        .into_function()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
 pub mod chrome;
 pub mod commands;
 pub(crate) mod crypto;

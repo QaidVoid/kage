@@ -147,6 +147,8 @@ enum Pending {
     AuthSet {
         provider: String,
     },
+    Directory,
+    Plugins,
 }
 
 /// The client side of an ACP connection.
@@ -528,10 +530,57 @@ impl Client {
     /// a form holds it. The answer arrives as [`Change::Tested`] under
     /// the returned request id.
     pub fn config_test(&mut self, provider: kage_acp_wire::ProviderProbe) -> u64 {
+        self.test(&kage_acp_wire::ConfigTestRequest {
+            provider: Some(provider),
+            ..Default::default()
+        })
+    }
+
+    /// Asks the engine to connect to an MCP server or start an ACP agent
+    /// as `request` describes, or to list a provider's models. The
+    /// answer arrives as [`Change::Tested`] under the returned id.
+    pub fn test(&mut self, request: &kage_acp_wire::ConfigTestRequest) -> u64 {
+        self.request("_kage/config/test", params(request), Pending::ConfigTest)
+    }
+
+    /// Asks the engine for the providers of a directory in the
+    /// models.dev `api.json` shape: models.dev itself without `url`. The
+    /// answer arrives as [`Change::ProviderDirectory`] under the returned id.
+    pub fn providers_directory(&mut self, url: Option<&str>, api_key: Option<&str>) -> u64 {
         self.request(
-            "_kage/config/test",
-            params(&kage_acp_wire::ConfigTestRequest { provider }),
-            Pending::ConfigTest,
+            "_kage/providers/directory",
+            params(&kage_acp_wire::DirectoryRequest {
+                url: url.map(str::to_owned),
+                api_key: api_key.map(str::to_owned),
+            }),
+            Pending::Directory,
+        )
+    }
+
+    /// Installs a plugin file from `source`, an `https://` URL or a
+    /// path on the engine's machine. The answer arrives as
+    /// [`Change::Plugins`].
+    pub fn plugin_install(&mut self, source: &str, replace: bool) -> u64 {
+        self.request(
+            "_kage/plugins/install",
+            params(&kage_acp_wire::PluginInstallRequest {
+                source: source.to_owned(),
+                name: None,
+                replace,
+            }),
+            Pending::Plugins,
+        )
+    }
+
+    /// Removes the installed plugin `name`. The answer arrives as
+    /// [`Change::Plugins`].
+    pub fn plugin_remove(&mut self, name: &str) -> u64 {
+        self.request(
+            "_kage/plugins/remove",
+            params(&kage_acp_wire::PluginRemoveRequest {
+                name: name.to_owned(),
+            }),
+            Pending::Plugins,
         )
     }
 
@@ -942,6 +991,8 @@ impl Client {
             pending @ (Pending::ConfigGet
             | Pending::ConfigTest
             | Pending::AuthSet { .. }
+            | Pending::Directory
+            | Pending::Plugins
             | Pending::Models
             | Pending::Options) => settings_answer(id, pending, result),
             Pending::SwarmResume { session_id }
@@ -1368,6 +1419,18 @@ fn settings_answer(id: u64, pending: Pending, result: Value) -> Vec<Change> {
             }
         }
         Pending::AuthSet { provider } => vec![Change::KeySaved { provider }],
+        Pending::Directory => match answer::<kage_acp_wire::DirectoryResult>(
+            id,
+            result,
+            "_kage/providers/directory result",
+        ) {
+            Err(failed) => failed,
+            Ok(result) => vec![Change::ProviderDirectory {
+                request: id,
+                providers: result.providers,
+            }],
+        },
+        Pending::Plugins => vec![Change::Plugins { request: id }],
         Pending::Models => match answer::<ModelsResponse>(id, result, "_kage/models result") {
             Err(failed) => failed,
             Ok(answer) => vec![Change::Models {

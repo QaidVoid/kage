@@ -1,0 +1,77 @@
+name: release
+
+# Builds the `kage` binary for each target when release-plz publishes
+# a GitHub release, and attaches the archives to it.
+on:
+  release:
+    types: [published]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  attestations: write
+  contents: write
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  binaries:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: x86_64-linux, os: ubuntu-latest, target: x86_64-unknown-linux-musl, cross: true }
+          - { name: aarch64-linux, os: ubuntu-latest, target: aarch64-unknown-linux-musl, cross: true }
+          - { name: aarch64-macos, os: macos-latest, target: aarch64-apple-darwin, cross: false }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Toolchain
+        run: |
+          rustup show
+          rustup target add "${{ matrix.target }}"
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked --git https://github.com/cross-rs/cross
+
+      - name: Build
+        shell: bash
+        env:
+          # Static musl binaries that run on any Linux.
+          RUSTFLAGS: ${{ matrix.cross && '-C target-feature=+crt-static' || '' }}
+        run: |
+          tool=cargo
+          if [ "${{ matrix.cross }}" = "true" ]; then tool=cross; fi
+          "$tool" build --release --locked -p kage-cli --target "${{ matrix.target }}"
+
+      - name: Package
+        shell: bash
+        run: |
+          artifact="kage-${{ matrix.name }}"
+          mkdir -p "$artifact"
+          cp "target/${{ matrix.target }}/release/kage" LICENSE README.md man/kage.1 "$artifact/"
+          tar -czf "$artifact.tar.gz" "$artifact"
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$artifact.tar.gz" > "$artifact.tar.gz.sha256"
+          else
+            shasum -a 256 "$artifact.tar.gz" > "$artifact.tar.gz.sha256"
+          fi
+
+      - uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # 2.11.5
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: kage-${{ matrix.name }}.tar.gz*
+          file_glob: true
+          overwrite: true
+          tag: ${{ github.ref }}
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: kage-${{ matrix.name }}.tar.gz

@@ -1,0 +1,51 @@
+name: release-plz
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  # Publishes the crates and tags the release once a release PR is
+  # merged. crates.io trusted publishing hands out the token through
+  # the OIDC id-token, so no registry secret is set.
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - run: rustup show
+      - uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5 # v0.5.139
+        with:
+          command: release
+        env:
+          # A personal token, so the GitHub release it creates starts
+          # the binary release workflow.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+  # Opens or updates the release PR with the next version and the
+  # changelog of the commits since the last release.
+  release-pr:
+    name: release PR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      - run: rustup show
+      - uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5 # v0.5.139
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}

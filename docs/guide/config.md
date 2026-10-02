@@ -77,10 +77,14 @@ scrub_env = []
 # web_fetch = "browse"
 
 [tools.web_search]
-# the engine `web_search` asks: "duckduckgo" (the default, no key) or
-# "searxng", a SearXNG instance at `url` that allows the json format.
+# the engine `web_search` asks: "duckduckgo" (the default, no key),
+# "searxng", a SearXNG instance at `url` that allows the json format,
+# or "brave", the Brave Search API with the key in `api_key_env`
+# (default BRAVE_API_KEY).
 # engine = "searxng"
 # url = "https://searx.example.org"
+# engine = "brave"
+# api_key_env = "BRAVE_API_KEY"
 
 [keybindings]
 # the key <leader> expands to in bindings: one key, default a backslash.

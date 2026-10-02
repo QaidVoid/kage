@@ -1,9 +1,10 @@
 //! `web_search` tool: search the web and return the results' titles,
 //! URLs and snippets.
 //!
-//! DuckDuckGo's HTML endpoint answers by default and needs no key. A
-//! SearXNG instance's JSON API answers instead when `[tools.web_search]`
-//! names one, for a search that does not depend on scraping a page.
+//! DuckDuckGo's HTML endpoint answers by default and needs no key.
+//! `[tools.web_search]` can name a SearXNG instance's JSON API instead,
+//! or the Brave Search API with a key, for a search that does not
+//! depend on scraping a page.
 
 use std::fmt::Write as _;
 use std::io::Read as _;
@@ -15,6 +16,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{Tool, ToolContext, ToolError, schema_for};
+
+/// The variable the Brave Search key is read from by default.
+const BRAVE_KEY_ENV: &str = "BRAVE_API_KEY";
 
 /// Whole-request budget.
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -103,6 +107,16 @@ impl Tool for WebSearchTool {
                 })?;
                 searxng(base, query)?
             }
+            SearchEngine::Brave => {
+                let env = self.config.api_key_env.as_deref().unwrap_or(BRAVE_KEY_ENV);
+                let key = std::env::var(env)
+                    .ok()
+                    .filter(|key| !key.is_empty())
+                    .ok_or_else(|| {
+                        ToolError::Other(format!("Brave Search needs a key: {env} is not set"))
+                    })?;
+                brave(&key, query, count)?
+            }
         };
         results.truncate(count);
         Ok(output(query, &results))
@@ -130,22 +144,22 @@ fn output(query: &str, results: &[SearchResult]) -> ToolOutput {
     }
 }
 
-fn get(url: &url::Url) -> Result<String, ToolError> {
+fn get(url: &url::Url, headers: &[(&str, &str)]) -> Result<String, ToolError> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
+        .http_status_as_error(false)
         .build()
         .into();
-    let response = agent
+    let mut request = agent
         .get(url.as_str())
-        .header("user-agent", "kage/0.1 (+https://github.com/QaidVoid/kage)")
+        .header("user-agent", "kage/0.1 (+https://github.com/QaidVoid/kage)");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = request
         .call()
-        .map_err(|e| match e {
-            ureq::Error::StatusCode(code) => ToolError::Other(format!(
-                "{} answered http {code}",
-                url.host_str().unwrap_or("the engine")
-            )),
-            other => ToolError::Other(format!("search failed: {other}")),
-        })?;
+        .map_err(|e| ToolError::Other(format!("search failed: {e}")))?;
+    let status = response.status().as_u16();
     let mut body = String::new();
     response
         .into_body()
@@ -153,18 +167,38 @@ fn get(url: &url::Url) -> Result<String, ToolError> {
         .take(MAX_BYTES)
         .read_to_string(&mut body)
         .map_err(|e| ToolError::Other(format!("read search results: {e}")))?;
+    if !(200..300).contains(&status) {
+        let host = url.host_str().unwrap_or("the engine");
+        return Err(ToolError::Other(match error_detail(&body) {
+            Some(detail) => format!("{host} answered http {status}: {detail}"),
+            None => format!("{host} answered http {status}"),
+        }));
+    }
     Ok(body)
+}
+
+/// The reason a JSON error answer gives, as Brave Search and most JSON
+/// APIs put it.
+fn error_detail(body: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+    [
+        &json["error"]["detail"],
+        &json["error"]["message"],
+        &json["message"],
+    ]
+    .into_iter()
+    .find_map(|detail| detail.as_str().map(str::to_owned))
 }
 
 fn duckduckgo(query: &str) -> Result<Vec<SearchResult>, ToolError> {
     let mut url = url::Url::parse("https://html.duckduckgo.com/html/").expect("static url");
     url.query_pairs_mut().append_pair("q", query);
-    let page = get(&url)?;
+    let page = get(&url, &[])?;
     let results = parse_duckduckgo(&page);
     if results.is_empty() && page.contains("anomaly") {
         return Err(ToolError::Other(
             "DuckDuckGo refused the search as automated; try again later, or set a SearXNG \
-             instance under [tools.web_search]"
+             instance or a Brave Search key under [tools.web_search]"
                 .to_owned(),
         ));
     }
@@ -270,7 +304,7 @@ fn searxng(base: &str, query: &str) -> Result<Vec<SearchResult>, ToolError> {
     url.query_pairs_mut()
         .append_pair("q", query)
         .append_pair("format", "json");
-    let body = get(&url)?;
+    let body = get(&url, &[])?;
     let json: serde_json::Value = serde_json::from_str(&body).map_err(|_| {
         ToolError::Other(format!(
             "{} did not answer with JSON; enable the json format in its settings",
@@ -294,9 +328,94 @@ fn searxng(base: &str, query: &str) -> Result<Vec<SearchResult>, ToolError> {
         .unwrap_or_default())
 }
 
+fn brave(key: &str, query: &str, count: usize) -> Result<Vec<SearchResult>, ToolError> {
+    let mut url =
+        url::Url::parse("https://api.search.brave.com/res/v1/web/search").expect("static url");
+    url.query_pairs_mut()
+        .append_pair("q", query)
+        .append_pair("count", &count.to_string());
+    let body = get(
+        &url,
+        &[
+            ("accept", "application/json"),
+            ("x-subscription-token", key),
+        ],
+    )?;
+    let json: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| ToolError::Other(format!("Brave Search answered something else: {e}")))?;
+    Ok(parse_brave(&json))
+}
+
+/// The web results of a Brave Search API answer.
+fn parse_brave(json: &serde_json::Value) -> Vec<SearchResult> {
+    json["web"]["results"]
+        .as_array()
+        .map(|results| {
+            results
+                .iter()
+                .filter_map(|result| {
+                    Some(SearchResult {
+                        title: text_of(result["title"].as_str()?),
+                        url: result["url"].as_str()?.to_owned(),
+                        snippet: text_of(result["description"].as_str().unwrap_or_default()),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{output, parse_duckduckgo, result_url};
+    use super::{output, parse_brave, parse_duckduckgo, result_url};
+
+    #[test]
+    fn brave_without_a_key_names_the_variable() {
+        use crate::{Tool as _, ToolContext};
+
+        let tool = super::WebSearchTool::new(kage_core::config::WebSearchConfig {
+            engine: kage_core::config::SearchEngine::Brave,
+            url: None,
+            api_key_env: Some("KAGE_TEST_UNSET_BRAVE_KEY".into()),
+        });
+        let cancel = kage_core::CancelFlag::new();
+        let err = tool
+            .execute(
+                serde_json::json!({"query": "x"}),
+                &ToolContext::new(std::path::Path::new("."), &cancel),
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("KAGE_TEST_UNSET_BRAVE_KEY"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_error_answer_gives_its_reason() {
+        let brave = r#"{"error":{"code":"SUBSCRIPTION_TOKEN_INVALID","detail":"The provided subscription token is invalid.","status":422}}"#;
+        assert_eq!(
+            super::error_detail(brave).as_deref(),
+            Some("The provided subscription token is invalid.")
+        );
+        assert_eq!(super::error_detail("<html>busy</html>"), None);
+    }
+
+    #[test]
+    fn a_brave_answer_reads_as_results() {
+        let json = serde_json::json!({"web": {"results": [
+            {"title": "Backoff &amp; jitter", "url": "https://a.example/",
+             "description": "Add <strong>jitter</strong> to retries."},
+            {"title": "No url"},
+            {"title": "Bare", "url": "https://b.example/"}
+        ]}});
+        let results = parse_brave(&json);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Backoff & jitter");
+        assert_eq!(results[0].snippet, "Add jitter to retries.");
+        assert_eq!(results[1].snippet, "");
+        assert!(parse_brave(&serde_json::json!({})).is_empty());
+    }
 
     const PAGE: &str = r#"
         <div class="result results_links">

@@ -84,12 +84,16 @@ impl ToolsConfig {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebSearchConfig {
-    /// `duckduckgo` (the default, no key) or `searxng`.
+    /// `duckduckgo` (the default, no key), `searxng` or `brave`.
     pub engine: SearchEngine,
     /// The SearXNG instance's base URL, for `engine = "searxng"`. The
     /// instance must allow the `json` format.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// The environment variable holding the Brave Search API key, for
+    /// `engine = "brave"`. Defaults to `BRAVE_API_KEY`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
 }
 
 impl WebSearchConfig {
@@ -109,6 +113,8 @@ pub enum SearchEngine {
     Duckduckgo,
     /// A SearXNG instance's JSON API.
     Searxng,
+    /// The Brave Search API, with a key.
+    Brave,
 }
 
 impl Config {

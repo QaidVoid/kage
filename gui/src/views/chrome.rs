@@ -1396,8 +1396,10 @@ impl WelcomeView {
             cx.spawn_in(window, async move |this, cx| {
                 let picked = match chosen.await {
                     Ok(Ok(Some(paths))) => paths.first().map(|path| path.display().to_string()),
-                    // No platform picker answered: type the path instead.
-                    Ok(Err(_)) => {
+                    // No platform picker answered: say why, and type the
+                    // path instead.
+                    Ok(Err(err)) => {
+                        eprintln!("kage-desktop: the folder dialog failed: {err:#}");
                         let _ = this.update_in(cx, |this, window, cx| {
                             this.dialog.update(cx, |dialog, cx| {
                                 dialog.open(

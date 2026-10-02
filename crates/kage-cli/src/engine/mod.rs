@@ -21,6 +21,7 @@ mod runner;
 mod sessions;
 mod shell;
 mod swarm_tool;
+mod worktree;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -482,8 +483,10 @@ struct Session {
     /// What the agents of this session's tree used since the main
     /// session's last user prompt. Shared by the whole tree.
     spend: Arc<Spend>,
-    /// The budget, when it stopped this agent's run, for its report.
+    /// The limit that ended this agent's run, for its report.
     limit: Option<AgentLimit>,
+    /// Where a worktree agent's work is after its run, for its report.
+    note: Option<String>,
     /// Read at spawn, while the context is out with a run.
     confine_paths: bool,
     /// Whether the session delegates repeated work through `swarm`.
@@ -698,6 +701,7 @@ impl Dispatcher {
                 link,
                 spend,
                 limit: None,
+                note: None,
                 confine_paths,
                 swarm_mode: false,
             },
@@ -1186,6 +1190,7 @@ impl Dispatcher {
         };
         let tools = run_tools(session, id, &self.tx);
         let limits = run_limits(session, root);
+        let worktree = session.link.as_ref().and_then(|l| l.worktree.clone());
         let run = Run {
             session: id,
             work,
@@ -1203,6 +1208,7 @@ impl Dispatcher {
             mcp,
             bus: Arc::clone(&self.bus),
             limits,
+            worktree,
         };
         let state = session.state.clone();
         self.bus.publish(id, HostEvent::StateChanged { state });
@@ -1270,6 +1276,7 @@ impl Dispatcher {
             outcome,
             run_time,
             limit,
+            note,
         } = finished;
         if let Some(armed) = self.watchdogs.remove(&id) {
             armed.store(false, Ordering::Relaxed);
@@ -1289,6 +1296,7 @@ impl Dispatcher {
             return;
         };
         session.limit = session.limit.or(limit);
+        session.note = note;
         append_history(
             &self.bus,
             id,

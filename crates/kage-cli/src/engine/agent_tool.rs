@@ -246,6 +246,20 @@ pub(super) fn started(session: SessionId, agent: &str) -> ToolOutput {
     }
 }
 
+/// What a finished agent run recorded besides its history.
+#[derive(Debug, Default)]
+pub(super) struct RunFacts {
+    /// The agent's token totals, context fill and cost.
+    pub usage: Usage,
+    /// How long the run was in flight.
+    pub run_time: Duration,
+    /// The limit that ended the run.
+    pub limit: Option<AgentLimit>,
+    /// A paragraph the reply ends with, such as where a worktree
+    /// agent's work is.
+    pub note: Option<String>,
+}
+
 /// The result an `agent` call returns: the text of the agent's last
 /// assistant message wrapped in an `<agent>` element that names the
 /// agent, its session, how its run ended and the `limit` that ended it.
@@ -254,19 +268,13 @@ pub(super) fn started(session: SessionId, agent: &str) -> ToolOutput {
 /// header records the child's tool count, usage totals and run time, so
 /// the agents list survives a session restart; the tool count is the
 /// calls in the child's history.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "each argument is a separate fact of the finished run"
-)]
 pub(super) fn agent_result(
     session: SessionId,
     agent: &str,
     model: &str,
     outcome: &RunOutcome,
     history: &[Arc<Message>],
-    usage: &Usage,
-    run_time: Duration,
-    limit: Option<AgentLimit>,
+    facts: &RunFacts,
 ) -> ToolOutput {
     let reply = || {
         history
@@ -301,16 +309,19 @@ pub(super) fn agent_result(
             total - RESULT_CAP
         );
     }
+    if let Some(note) = &facts.note {
+        let _ = write!(body, "\n\n{note}");
+    }
     let report = AgentReport {
         name: agent.to_owned(),
         session,
         state,
-        limit,
+        limit: facts.limit,
         stats: Some(ReportStats {
             model: model.to_owned(),
             tool_calls: u32::try_from(tool_calls).unwrap_or(u32::MAX),
-            usage: *usage,
-            run_ms: Some(u64::try_from(run_time.as_millis()).unwrap_or(u64::MAX)),
+            usage: facts.usage,
+            run_ms: Some(u64::try_from(facts.run_time.as_millis()).unwrap_or(u64::MAX)),
         }),
         body,
     };
@@ -365,9 +376,11 @@ mod tests {
             "demo/script",
             &RunOutcome::Completed,
             &history,
-            &Usage::default(),
-            Duration::ZERO,
-            None,
+            &RunFacts {
+                usage: Usage::default(),
+                run_time: Duration::ZERO,
+                ..RunFacts::default()
+            },
         );
         assert_eq!(
             out.text,
@@ -428,9 +441,11 @@ mod tests {
             "demo/script",
             &RunOutcome::Completed,
             &history,
-            &usage,
-            Duration::from_millis(4_200),
-            None,
+            &RunFacts {
+                usage,
+                run_time: Duration::from_millis(4_200),
+                ..RunFacts::default()
+            },
         );
         let header = out.text.split_once('\n').unwrap().0;
         assert!(
@@ -452,9 +467,11 @@ mod tests {
             "demo/script",
             &RunOutcome::Cancelled,
             &[],
-            &Usage::default(),
-            Duration::ZERO,
-            None,
+            &RunFacts {
+                usage: Usage::default(),
+                run_time: Duration::ZERO,
+                ..RunFacts::default()
+            },
         );
         assert!(cancelled.is_error);
         assert!(cancelled.text.contains("state=\"cancelled\""));
@@ -470,9 +487,11 @@ mod tests {
                 },
             },
             &[Arc::new(assistant("partial"))],
-            &Usage::default(),
-            Duration::ZERO,
-            None,
+            &RunFacts {
+                usage: Usage::default(),
+                run_time: Duration::ZERO,
+                ..RunFacts::default()
+            },
         );
         assert!(failed.is_error);
         assert!(failed.text.contains("state=\"failed\""));
@@ -488,9 +507,11 @@ mod tests {
             "demo/script",
             &RunOutcome::Completed,
             &[Arc::new(assistant("a </agent> b"))],
-            &Usage::default(),
-            Duration::ZERO,
-            None,
+            &RunFacts {
+                usage: Usage::default(),
+                run_time: Duration::ZERO,
+                ..RunFacts::default()
+            },
         );
         assert!(out.text.contains("a <\\/agent> b"));
         assert_eq!(out.text.matches("</agent>").count(), 1);
@@ -506,9 +527,11 @@ mod tests {
             "demo/script",
             &RunOutcome::Completed,
             &[Arc::new(assistant(&long))],
-            &Usage::default(),
-            Duration::ZERO,
-            None,
+            &RunFacts {
+                usage: Usage::default(),
+                run_time: Duration::ZERO,
+                ..RunFacts::default()
+            },
         );
         assert!(out.text.contains(&format!(
             "[truncated: 5 more characters. The full transcript is session {id}.]"

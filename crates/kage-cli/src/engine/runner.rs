@@ -26,6 +26,7 @@ use super::Input;
 use super::bus::Bus;
 use super::mcp::{McpDone, ToolDelta};
 use super::recorder::Recorder;
+use super::worktree::Worktree;
 use crate::permissions::PermissionGate;
 use crate::plugins::PluginEventHooks;
 
@@ -151,6 +152,8 @@ pub(super) struct Run {
     pub mcp: Option<McpLease>,
     pub bus: Arc<Bus>,
     pub limits: Limits,
+    /// A worktree agent's checkout, checkpointed when the run ends.
+    pub worktree: Option<Arc<Worktree>>,
 }
 
 /// State a finished run returns to its session. The dispatcher publishes
@@ -167,6 +170,8 @@ pub(super) struct Finished {
     pub run_time: Duration,
     /// The turn limit or the timeout, when one ended the run.
     pub limit: Option<AgentLimit>,
+    /// Where a worktree agent's work is now.
+    pub note: Option<String>,
 }
 
 impl Run {
@@ -178,9 +183,11 @@ impl Run {
             }
             None => (None, None),
         };
+        let worktree = self.worktree.clone();
         thread::spawn(move || {
             let mut finished = self.execute(&done);
             drop(ended);
+            finished.note = worktree.map(|w| w.checkpoint());
             if finished.outcome == RunOutcome::Cancelled
                 && timed_out.is_some_and(|flag| flag.load(Ordering::Relaxed))
             {
@@ -212,6 +219,7 @@ impl Run {
             mcp,
             bus,
             limits,
+            worktree: _,
         } = self;
 
         let (clients, catalog) = mcp
@@ -319,6 +327,7 @@ impl Run {
             limit: turn_limited
                 .load(Ordering::Relaxed)
                 .then_some(AgentLimit::Turns),
+            note: None,
         }
     }
 }

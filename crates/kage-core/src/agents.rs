@@ -10,8 +10,8 @@
 //! keys are `description` (required), `tools` (a comma list, absent
 //! means every tool of the parent), `model` (`provider/model`),
 //! `thinking` (a thinking level), `max_turns` (also `maxTurns`, a
-//! positive integer) and `timeout` (seconds, or a number with `s`, `m`
-//! or `h`). `model` and `thinking` also accept `inherit`, the default.
+//! positive integer), `timeout` (seconds, or a number with `s`, `m`
+//! or `h`) and `isolation` (`none` or `worktree`). `model` and `thinking` also accept `inherit`, the default.
 //! Unknown keys are ignored, so agent files written for other tools
 //! load. The body is the agent's role text.
 //!
@@ -53,12 +53,24 @@ pub struct AgentDef {
     /// How long one run may take. `None` uses the `agent_timeout`
     /// option.
     pub timeout: Option<Duration>,
+    /// Where the agent works.
+    pub isolation: Isolation,
     /// Role text: the markdown body after the frontmatter.
     pub body: String,
     /// The file the definition was loaded from. `None` for built-ins.
     pub path: Option<PathBuf>,
     /// Where the definition came from.
     pub source: AgentSource,
+}
+
+/// Where an agent works.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Isolation {
+    /// In its parent's checkout.
+    #[default]
+    None,
+    /// In a checkout of its own: a jj workspace or a git worktree.
+    Worktree,
 }
 
 /// Where an [`AgentDef`] came from.
@@ -225,6 +237,11 @@ fn from_frontmatter(
             format!("timeout {value:?} is not seconds or a number with s, m or h")
         })?),
     };
+    let isolation = match front.get("isolation").map(|value| value.trim()) {
+        None | Some("none") => Isolation::None,
+        Some("worktree") => Isolation::Worktree,
+        Some(other) => return Err(format!("isolation {other:?} is not none or worktree")),
+    };
     Ok(AgentDef {
         name: name.to_owned(),
         description: description.to_owned(),
@@ -233,6 +250,7 @@ fn from_frontmatter(
         thinking,
         max_turns,
         timeout,
+        isolation,
         body: body.trim().to_owned(),
         path: None,
         source,
@@ -375,6 +393,16 @@ mod tests {
         }
         let def = load("---\ndescription: d\n---\n").unwrap();
         assert_eq!((def.max_turns, def.timeout), (None, None));
+    }
+
+    #[test]
+    fn isolation_is_none_or_worktree() {
+        let def = load("---\ndescription: d\nisolation: worktree\n---\n").unwrap();
+        assert_eq!(def.isolation, Isolation::Worktree);
+        let def = load("---\ndescription: d\nisolation: none\n---\n").unwrap();
+        assert_eq!(def.isolation, Isolation::None);
+        let err = load("---\ndescription: d\nisolation: sandbox\n---\n").unwrap_err();
+        assert!(err.to_string().contains("reviewer.md"), "{err}");
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use kage_core::agents::AgentDef;
+use kage_core::agents::{AgentDef, Isolation};
 use kage_core::protocol::{HostEvent, NoticeLevel, RunOutcome, SwarmMember, Usage};
 use kage_core::sync::lock;
 use kage_core::{CancelFlag, Content, Message, MessageId, Role, SessionId, ToolCallId, ToolOutput};
@@ -13,10 +13,11 @@ use kage_loop::{AgentContext, TokenBudget};
 use kage_provider::ProviderRegistry;
 use kage_tools::ToolRegistry;
 
-use super::agent_tool::{self, AGENT_TOOL, Spawn};
+use super::agent_tool::{self, AGENT_TOOL, RunFacts, Spawn};
 use super::mailbox_tool::MAILBOX_TOOL;
 use super::runner::Work;
 use super::swarm_tool::{self, Member, SWARM_TOOL, SwarmInfo};
+use super::worktree::Worktree;
 use super::{
     AgentSetup, Attach, Background, CONTINUE_PROMPT, Recorder, ResumeChild, Session, SessionSpec,
     notice,
@@ -70,6 +71,9 @@ pub(super) struct AgentLink {
     /// The definition's tool list. `None` allows every tool, the
     /// delegation and mailbox tools included.
     pub(super) tools: Option<Vec<String>>,
+    /// The agent's own checkout, when its definition asks for one.
+    /// Dropped with the agent, which removes the checkout.
+    pub(super) worktree: Option<Arc<Worktree>>,
 }
 
 /// Where an agent's result goes.
@@ -125,18 +129,29 @@ impl super::Dispatcher {
             Some(info) => (info.id, Some(info)),
             None => (SessionId::new(), None),
         };
-        let (spec, missing, lazy_history) = if fork {
+        let worktree = match checkout(from, def, id, &description) {
+            Ok(worktree) => worktree,
+            Err(text) => return fail(text),
+        };
+        let workdir = worktree
+            .as_ref()
+            .map_or_else(|| from.workdir.clone(), |w| w.workdir().to_path_buf());
+        let (mut spec, missing, lazy_history) = if fork {
             let batch = swarm.as_ref().map(|info| &info.batch_id);
-            let forked = fork_snapshot(&mut self.fork_snapshot, from, batch)
-                .and_then(|snapshot| forked_spec(from, parent, id, def, &setup, snapshot));
+            let forked = fork_snapshot(&mut self.fork_snapshot, from, batch).and_then(|snapshot| {
+                forked_spec(from, parent, id, def, &setup, snapshot, &workdir)
+            });
             match forked {
                 Ok((spec, missing, path)) => (spec, missing, Some(path)),
                 Err(text) => return fail(text),
             }
         } else {
-            let (spec, missing) = agent_spec(from, parent, id, def, &setup);
+            let (spec, missing) = agent_spec(from, parent, id, def, &setup, &workdir);
             (spec, missing, None)
         };
+        if worktree.is_some() {
+            spec.cx.confine_paths = true;
+        }
         let background = background && depth == 1 && setup.background != Background::Off;
         // A background agent outlives the run that started it, so the
         // parent's cancel must not reach it.
@@ -145,12 +160,7 @@ impl super::Dispatcher {
         } else {
             from.cancel.child()
         };
-        if swarm
-            .as_ref()
-            .is_some_and(|info| info.index + 1 >= info.total)
-        {
-            self.fork_snapshot = None;
-        }
+        self.release_snapshot(swarm.as_ref());
         let batch_id = swarm.as_ref().map(|info| info.batch_id.clone());
         let (report, started) = if background {
             (Report::Message, Some(reply))
@@ -167,6 +177,7 @@ impl super::Dispatcher {
             lazy_history,
             inherited_until: None,
             tools: def.tools.clone(),
+            worktree,
         };
         let marker = session_marker(parent, &tool_call_id, &agent, &description, swarm.as_ref());
         let member = swarm.as_ref().map(swarm_member);
@@ -187,6 +198,14 @@ impl super::Dispatcher {
         self.launch_agent(id, setup.max_running, content);
         if let Some(reply) = started {
             let _ = reply.send(agent_tool::started(id, &agent));
+        }
+    }
+
+    /// Drop the parent conversation a forking swarm call copies once its
+    /// last child has spawned.
+    fn release_snapshot(&mut self, swarm: Option<&SwarmInfo>) {
+        if swarm.is_some_and(|info| info.index + 1 >= info.total) {
+            self.fork_snapshot = None;
         }
     }
 
@@ -404,6 +423,11 @@ impl super::Dispatcher {
         let def = setup.defs.get(&agent).ok_or_else(|| {
             format!("agent definition `{agent}` is gone; cannot reopen session {id}")
         })?;
+        if def.isolation == Isolation::Worktree {
+            return Err(format!(
+                "session {id} worked in a worktree that was removed. Start a new agent."
+            ));
+        }
         let (spec, missing, note) =
             resumed_spec(from, id, replay, def, &setup, writer, &self.registry);
         let batch_id = Some(text("batch_id"))
@@ -419,6 +443,7 @@ impl super::Dispatcher {
             lazy_history: None,
             inherited_until: None,
             tools: def.tools.clone(),
+            worktree: None,
         };
         let cancel = from.cancel.child();
         self.open(spec, cancel, Some(link));
@@ -632,7 +657,12 @@ impl super::Dispatcher {
         let model = &session.state.model;
         let link = session.link.as_mut()?;
         let report = link.report.take()?;
-        let limit = session.limit.take();
+        let facts = RunFacts {
+            usage,
+            run_time,
+            limit: session.limit.take(),
+            note: session.note.take(),
+        };
         self.swarm_requeues.remove(&id);
         let own = link
             .inherited_until
@@ -641,17 +671,8 @@ impl super::Dispatcher {
         Some(Taken {
             parent: link.parent,
             report,
-            output: agent_tool::agent_result(
-                id,
-                &link.agent,
-                model,
-                outcome,
-                own,
-                &usage,
-                run_time,
-                limit,
-            ),
-            wake: *outcome != RunOutcome::Cancelled || limit.is_some(),
+            wake: *outcome != RunOutcome::Cancelled || facts.limit.is_some(),
+            output: agent_tool::agent_result(id, &link.agent, model, outcome, own, &facts),
         })
     }
 
@@ -822,16 +843,18 @@ impl super::Dispatcher {
     }
 }
 
-/// The session an agent of `from` runs in: the definition's model,
-/// thinking, role and tools over `from`'s, `from`'s gate and loop
-/// settings, no plugins or MCP of its own, and a file next to `from`'s
-/// when `from` records. Also returns listed tools that match nothing.
+/// The session an agent of `from` runs in, in `workdir`: the
+/// definition's model, thinking, role and tools over `from`'s, `from`'s
+/// gate and loop settings, no plugins or MCP of its own, and a file
+/// next to `from`'s when `from` records. Also returns listed tools that
+/// match nothing.
 fn agent_spec(
     from: &Session,
     parent: SessionId,
     id: SessionId,
     def: &AgentDef,
     setup: &AgentSetup,
+    workdir: &Path,
 ) -> (SessionSpec, Vec<String>) {
     let model = def
         .model
@@ -839,12 +862,12 @@ fn agent_spec(
         .unwrap_or_else(|| from.state.model.clone());
     let system_prompt = crate::runtime_env::build_system_prompt(
         &def.body,
-        &from.workdir,
+        workdir,
         &model,
         &[],
         from.shell.as_deref(),
     );
-    let mut cx = AgentContext::new(model.clone(), &system_prompt).with_workdir(&from.workdir);
+    let mut cx = AgentContext::new(model.clone(), &system_prompt).with_workdir(workdir);
     cx.confine_paths = from.confine_paths;
     cx.thinking_level = def.thinking.or(from.state.thinking);
     let (tools, missing) = agent_tools(&from.tools, def.tools.as_deref());
@@ -854,7 +877,7 @@ fn agent_spec(
             session: id,
             id: kage_session::EntryId::new(),
             ts: chrono::Utc::now(),
-            cwd: from.workdir.clone(),
+            cwd: workdir.to_path_buf(),
             model: model.clone(),
             system_prompt,
             parent_session: Some(parent),
@@ -878,6 +901,22 @@ fn agent_spec(
         shell: from.shell.clone(),
     };
     (spec, missing)
+}
+
+/// A checkout of its own for the agent `id` of `from`, when its
+/// definition asks for one, under the state directory.
+fn checkout(
+    from: &Session,
+    def: &AgentDef,
+    id: SessionId,
+    description: &str,
+) -> Result<Option<Arc<Worktree>>, String> {
+    if def.isolation != Isolation::Worktree {
+        return Ok(None);
+    }
+    let dir = crate::paths::state_root()?.join("worktrees");
+    let label = format!("{}: {description}", def.name);
+    Worktree::create(&from.workdir, &dir, id, label).map(|w| Some(Arc::new(w)))
 }
 
 /// The `kage:agent` marker an agent's session file starts with.
@@ -999,6 +1038,7 @@ fn forked_spec(
     def: &AgentDef,
     setup: &AgentSetup,
     snapshot: &kage_session::Snapshot,
+    workdir: &Path,
 ) -> Result<(SessionSpec, Vec<String>, PathBuf), String> {
     let dir = from
         .path
@@ -1011,7 +1051,7 @@ fn forked_spec(
         .unwrap_or_else(|| from.state.model.clone());
     let system_prompt = crate::runtime_env::build_system_prompt(
         &def.body,
-        &from.workdir,
+        workdir,
         &model,
         &[],
         from.shell.as_deref(),
@@ -1022,7 +1062,7 @@ fn forked_spec(
         session: id,
         id: kage_session::EntryId::new(),
         ts: chrono::Utc::now(),
-        cwd: from.workdir.clone(),
+        cwd: workdir.to_path_buf(),
         model: model.clone(),
         system_prompt: system_prompt.clone(),
         parent_session: Some(parent),
@@ -1048,7 +1088,8 @@ fn forked_spec(
             .append(&notice)
             .map_err(|err| format!("cannot write the fork notice into session {id}: {err}"))?;
     }
-    let mut cx = AgentContext::new(model.clone(), system_prompt).with_workdir(from.workdir.clone());
+    let mut cx =
+        AgentContext::new(model.clone(), system_prompt).with_workdir(workdir.to_path_buf());
     cx.confine_paths = from.confine_paths;
     cx.thinking_level = def.thinking.or(from.state.thinking);
     let (tools, missing) = agent_tools(&from.tools, def.tools.as_deref());

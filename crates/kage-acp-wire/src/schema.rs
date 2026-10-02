@@ -736,6 +736,37 @@ pub struct ProbeTool {
     pub description: String,
 }
 
+/// `_kage/folders` request params: the folder to list, on the machine
+/// kage runs on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FoldersRequest {
+    /// An absolute path, or one starting with `~`. Missing or empty
+    /// lists the home folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// `_kage/folders` result: the folders inside one folder, for a client
+/// to browse to the folder a session opens in.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FoldersResult {
+    /// The listed folder, absolute and resolved.
+    pub path: String,
+    /// Its parent, unless it is the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// The home folder of the user kage runs as, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
+    /// The names of the folders inside, hidden ones left out, sorted.
+    pub folders: Vec<String>,
+    /// Whether the list was cut at its cap.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
 /// `_kage/providers/directory` request params: a provider directory in
 /// the models.dev `api.json` shape.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

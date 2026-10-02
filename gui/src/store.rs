@@ -48,6 +48,10 @@ impl StoreHandle for Entity<Store> {
 /// A directory read's answer: the providers it lists, or why it failed.
 pub type DirectoryRead = Result<Vec<kage_client::wire::DirectoryProvider>, String>;
 
+/// The folders one folder holds, as the engine listed them, or why it
+/// could not.
+pub type FoldersRead = Result<kage_client::wire::FoldersResult, String>;
+
 /// What the store asks the shell to carry out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -243,6 +247,8 @@ pub struct Store {
     /// Directory reads by request id: `None` while in flight, then the
     /// providers, or why the read failed.
     directories: HashMap<u64, Option<DirectoryRead>>,
+    /// Folder listings asked for, by request id, until they answer.
+    folders: HashMap<u64, Option<FoldersRead>>,
     /// Forks waiting for their copy, by source session.
     forking: HashMap<String, ForkPlan>,
     /// Copies waiting to open, with their source, by copy.
@@ -288,6 +294,7 @@ impl Store {
             writes: HashMap::new(),
             tests: HashMap::new(),
             directories: HashMap::new(),
+            folders: HashMap::new(),
             models: None,
             forking: HashMap::new(),
             forked: HashMap::new(),
@@ -617,6 +624,12 @@ impl Store {
                     if let Some(read) = self.directories.get_mut(request) {
                         *read = Some(Err(error.message.clone()));
                     }
+                    if let Some(read) = self.folders.get_mut(request) {
+                        *read = Some(Err(error.message.clone()));
+                    }
+                }
+                Change::Folders { request, result } => {
+                    self.folders.insert(*request, Some(Ok(result.clone())));
                 }
                 Change::ProviderDirectory { request, providers } => {
                     self.directories
@@ -1080,6 +1093,21 @@ impl Store {
         let id = self.client.providers_directory(url, api_key);
         self.directories.insert(id, None);
         id
+    }
+
+    /// Asks the engine for the folders inside `path`, the home folder
+    /// without one. The answer lands under the returned id in
+    /// [`Store::folders`].
+    pub fn ask_folders(&mut self, path: Option<&str>) -> u64 {
+        let id = self.client.folders(path);
+        self.folders.insert(id, None);
+        id
+    }
+
+    /// The answer to folder listing `id`, once it arrived.
+    #[must_use]
+    pub fn folders(&self, id: u64) -> Option<&FoldersRead> {
+        self.folders.get(&id)?.as_ref()
     }
 
     /// The answer to directory read `id`, once it arrived.

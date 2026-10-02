@@ -32,6 +32,7 @@ mod bridge;
 mod config_set;
 mod content;
 mod directory;
+mod folders;
 mod fs;
 pub(crate) mod host;
 #[cfg(unix)]
@@ -55,15 +56,16 @@ use std::sync::{Arc, Mutex, mpsc};
 use kage_acp::acp::{
     AgentCapabilities, AgentMeta, AuthSetRequest, CloseSessionRequest, CloseSessionResponse,
     ConfigGetRequest, ConfigGetResult, ConfigSetRequest, ConfigTestRequest, ConfigTestResult,
-    DirectoryRequest, DirectoryResult, FsRequest, FsResult, Implementation, InitializeRequest,
-    InitializeResponse, InstalledPlugin, KageAgentInfo, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, McpCapabilities, ModelsResponse, NewSessionRequest,
-    NewSessionResponse, OptionSetRequest, OptionsResponse, PROTOCOL_VERSION, PluginInstallRequest,
-    PluginRemoveRequest, PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse,
-    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionConfigOption,
-    SessionExportResponse, SessionForkRequest, SessionForkResponse, SessionRenameRequest,
-    SessionRequest, SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
-    StopReason, Supported, SwarmResumeRequest, SwarmResumeResponse,
+    DirectoryRequest, DirectoryResult, FoldersRequest, FoldersResult, FsRequest, FsResult,
+    Implementation, InitializeRequest, InitializeResponse, InstalledPlugin, KageAgentInfo,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
+    McpCapabilities, ModelsResponse, NewSessionRequest, NewSessionResponse, OptionSetRequest,
+    OptionsResponse, PROTOCOL_VERSION, PluginInstallRequest, PluginRemoveRequest,
+    PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse, ResumeSessionRequest,
+    ResumeSessionResponse, SessionCapabilities, SessionConfigOption, SessionExportResponse,
+    SessionForkRequest, SessionForkResponse, SessionRenameRequest, SessionRequest, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, Supported,
+    SwarmResumeRequest, SwarmResumeResponse,
 };
 use kage_acp::agent::{Agent, PromptContext, send_update};
 use kage_core::config::{Config, McpServer as McpSpec};
@@ -650,6 +652,10 @@ impl Agent for CliAcpAgent {
 
     fn providers_directory(&self, req: DirectoryRequest) -> Result<DirectoryResult, RpcError> {
         directory::directory(&req)
+    }
+
+    fn folders(&self, req: FoldersRequest) -> Result<FoldersResult, RpcError> {
+        folders::folders(&req)
     }
 
     fn plugin_install(&self, req: PluginInstallRequest) -> Result<serde_json::Value, RpcError> {

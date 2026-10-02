@@ -113,6 +113,13 @@ pub enum Change {
         /// The providers the directory lists.
         providers: Vec<kage_acp_wire::DirectoryProvider>,
     },
+    /// A `_kage/folders` answer arrived.
+    Folders {
+        /// The id of the request, so a browser matches its answer.
+        request: u64,
+        /// The folder listed and the folders inside it.
+        result: kage_acp_wire::FoldersResult,
+    },
     /// A plugin was installed or removed.
     Plugins {
         /// The id of the request answered.
@@ -153,6 +160,7 @@ impl Change {
             | Self::Options { .. }
             | Self::Tested { .. }
             | Self::ProviderDirectory { .. }
+            | Self::Folders { .. }
             | Self::Plugins { .. }
             | Self::KeySaved { .. }
             | Self::Failed { .. } => None,

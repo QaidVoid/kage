@@ -157,6 +157,7 @@ enum Pending {
         provider: String,
     },
     Directory,
+    Folders,
     Plugins,
 }
 
@@ -575,6 +576,19 @@ impl Client {
                 api_key: api_key.map(str::to_owned),
             }),
             Pending::Directory,
+        )
+    }
+
+    /// Asks the engine for the folders inside `path` on its machine, the
+    /// home folder without one. The answer arrives as
+    /// [`Change::Folders`] under the returned id.
+    pub fn folders(&mut self, path: Option<&str>) -> u64 {
+        self.request(
+            "_kage/folders",
+            params(&kage_acp_wire::FoldersRequest {
+                path: path.map(str::to_owned),
+            }),
+            Pending::Folders,
         )
     }
 
@@ -1011,6 +1025,7 @@ impl Client {
             | Pending::ConfigTest
             | Pending::AuthSet { .. }
             | Pending::Directory
+            | Pending::Folders
             | Pending::Plugins
             | Pending::Models
             | Pending::Options) => settings_answer(id, pending, result),
@@ -1457,6 +1472,15 @@ fn settings_answer(id: u64, pending: Pending, result: Value) -> Vec<Change> {
                 providers: result.providers,
             }],
         },
+        Pending::Folders => {
+            match answer::<kage_acp_wire::FoldersResult>(id, result, "_kage/folders result") {
+                Err(failed) => failed,
+                Ok(result) => vec![Change::Folders {
+                    request: id,
+                    result,
+                }],
+            }
+        }
         Pending::Plugins => vec![Change::Plugins { request: id }],
         Pending::Models => match answer::<ModelsResponse>(id, result, "_kage/models result") {
             Err(failed) => failed,

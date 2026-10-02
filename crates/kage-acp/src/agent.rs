@@ -26,11 +26,11 @@ use kage_jsonrpc::{CancelNotice, Inbound, Peer, RpcError, connect_with};
 use crate::acp::{
     AuthSetRequest, CloseSessionRequest, CloseSessionResponse, ConfigGetRequest, ConfigGetResult,
     ConfigSetRequest, ConfigTestRequest, ConfigTestResult, DirectoryRequest, DirectoryResult,
-    FsRequest, FsResult, InitializeRequest, InitializeResponse, KageMeta, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, ModelsResponse,
-    NewSessionRequest, NewSessionResponse, OptionSetRequest, OptionsResponse, PermissionOption,
-    PermissionOptionKind, PermissionOutcome, PlanReview, PluginInstallRequest, PluginRemoveRequest,
-    PromptRequest, PromptResponse, QuestionMeta, QuestionPrompt, RequestMeta,
+    FoldersRequest, FoldersResult, FsRequest, FsResult, InitializeRequest, InitializeResponse,
+    KageMeta, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
+    ModelsResponse, NewSessionRequest, NewSessionResponse, OptionSetRequest, OptionsResponse,
+    PermissionOption, PermissionOptionKind, PermissionOutcome, PlanReview, PluginInstallRequest,
+    PluginRemoveRequest, PromptRequest, PromptResponse, QuestionMeta, QuestionPrompt, RequestMeta,
     RequestPermissionRequest, RequestPermissionResponse, RequestPermissionResult,
     ResumeSessionRequest, ResumeSessionResponse, SessionExportResponse, SessionForkRequest,
     SessionForkResponse, SessionNotification, SessionRenameRequest, SessionRequest, SessionUpdate,
@@ -582,6 +582,17 @@ pub trait Agent: Send + Sync + 'static {
         Err(RpcError::method_not_found("_kage/providers/directory"))
     }
 
+    /// Lists the folders inside one folder on the machine the agent runs
+    /// on (`_kage/folders`), for a client choosing where a session
+    /// opens. The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the folder cannot be read.
+    fn folders(&self, _req: FoldersRequest) -> Result<FoldersResult, RpcError> {
+        Err(RpcError::method_not_found("_kage/folders"))
+    }
+
     /// Installs a plugin file into the plugin directory
     /// (`_kage/plugins/install`). The default rejects.
     ///
@@ -884,6 +895,10 @@ fn handle_kage_request<A: Agent>(
         },
         "_kage/auth/set" => match parse::<AuthSetRequest>(params) {
             Ok(req) => spawn_op(peer, agent, id, move |a| a.auth_set(req)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/folders" => match parse::<FoldersRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.folders(req).map(jval)),
             Err(e) => return parse_failed(peer, &id, e),
         },
         "_kage/providers/directory" => match parse::<DirectoryRequest>(params) {

@@ -7,7 +7,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, AppContext as _, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
@@ -143,6 +143,11 @@ pub struct DialogView {
     folder: Entity<InputState>,
     /// The folder path, held like the goal text.
     folder_mirror: Deferred,
+    /// The folder listing asked for, until it answers.
+    browsing: Option<u64>,
+    /// The folders of the folder on show, or why they could not be
+    /// listed.
+    listing: Option<crate::store::FoldersRead>,
 }
 
 impl Focusable for DialogView {
@@ -164,10 +169,33 @@ impl DialogView {
         })
         .detach();
         let folder = cx.new(|cx| InputState::new(window, cx).placeholder("/path/to/project"));
-        cx.subscribe_in(&folder, window, |this, _, event: &InputEvent, _, cx| {
-            if let InputEvent::PressEnter { .. } = event {
-                this.save_folder(cx);
+        cx.subscribe_in(
+            &folder,
+            window,
+            |this, folder, event: &InputEvent, _, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    let typed = folder.read(cx).value().trim().to_owned();
+                    this.browse(Some(&typed), cx);
+                }
+            },
+        )
+        .detach();
+        cx.observe_in(&store, window, |this, store, window, cx| {
+            let Some(id) = this.browsing else {
+                return;
+            };
+            let Some(read) = store.read(cx).folders(id).cloned() else {
+                return;
+            };
+            this.browsing = None;
+            if let Ok(listing) = &read {
+                let folder = this.folder.clone();
+                this.folder_mirror.set(listing.path.clone(), |text| {
+                    folder.update(cx, |state, cx| state.set_value(text, window, cx));
+                });
             }
+            this.listing = Some(read);
+            cx.notify();
         })
         .detach();
         Self {
@@ -179,6 +207,8 @@ impl DialogView {
             goal_mirror: Deferred::new(),
             folder,
             folder_mirror: Deferred::new(),
+            browsing: None,
+            listing: None,
         }
     }
 
@@ -215,10 +245,13 @@ impl DialogView {
             DialogKind::OpenFolder => {
                 let current = self.store.read(cx).session_dir().map(str::to_owned);
                 let folder = self.folder.clone();
-                self.folder_mirror.set(current.unwrap_or_default(), |text| {
-                    folder.update(cx, |state, cx| state.set_value(text, window, cx));
-                });
+                self.folder_mirror
+                    .set(current.clone().unwrap_or_default(), |text| {
+                        folder.update(cx, |state, cx| state.set_value(text, window, cx));
+                    });
                 folder.update(cx, |state, cx| state.focus(window, cx));
+                self.listing = None;
+                self.browse(current.as_deref(), cx);
             }
             DialogKind::ConfirmSwarm | DialogKind::Rewind(_) => window.focus(&self.focus, cx),
         }
@@ -235,6 +268,13 @@ impl DialogView {
         let text = self.goal.read(cx).value().trim().to_owned();
         self.store.act(cx, |store| store.set_option("goal", &text));
         self.close(cx);
+    }
+
+    /// Lists the folders inside `path` on the engine's machine, the
+    /// home folder without one; the answer replaces the listing.
+    fn browse(&mut self, path: Option<&str>, cx: &mut Context<Self>) {
+        self.browsing = Some(self.store.act(cx, |store| store.ask_folders(path)));
+        cx.notify();
     }
 
     fn save_folder(&mut self, cx: &mut Context<Self>) {
@@ -442,7 +482,7 @@ impl DialogView {
                         laid_out.set(true);
                         let _ = release.update(cx, |_, cx| cx.notify());
                     })
-                    .child(Input::new(&self.goal)),
+                    .child(kit::input(&self.goal)),
             )
             .into_any_element();
         let cancel = view.clone();
@@ -470,21 +510,57 @@ impl DialogView {
         let view = cx.entity();
         let laid_out = self.folder_mirror.laid_out().flag();
         let release = cx.entity().downgrade();
-        let body =
-            v_flex()
-                .gap(px(10.))
-                .child(div().text_size(px(FS_SM)).text_color(pal.muted).child(
-                    "A directory on the machine kage runs on. The next session opens there.",
-                ))
-                .child(
-                    div()
-                        .on_prepaint(move |_, _, cx| {
-                            laid_out.set(true);
-                            let _ = release.update(cx, |_, cx| cx.notify());
-                        })
-                        .child(Input::new(&self.folder)),
-                )
-                .into_any_element();
+        let listed = self.listing.as_ref().and_then(|read| read.as_ref().ok());
+        let parent = listed.and_then(|listing| listing.parent.clone());
+        let home = listed.and_then(|listing| listing.home.clone());
+        let nav = |id: &'static str, icon: IconName, tip: &'static str, to: Option<String>| {
+            let view = view.clone();
+            let enabled = to.is_some();
+            kit::btn_sm(id, BtnTone::Plain, pal)
+                .px(px(7.))
+                .when(!enabled, |btn| btn.opacity(0.4))
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
+                })
+                .on_click(move |_, _, cx| {
+                    if let Some(to) = &to {
+                        view.update(cx, |this, cx| this.browse(Some(to), cx));
+                    }
+                })
+                .child(Icon::new(icon).with_size(px(14.)))
+        };
+        let body = v_flex()
+            .gap(px(10.))
+            .child(
+                div()
+                    .text_size(px(FS_SM))
+                    .text_color(pal.muted)
+                    .child("A folder on the machine kage runs on. The next session opens there."),
+            )
+            .child(
+                h_flex()
+                    .gap(px(6.))
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .on_prepaint(move |_, _, cx| {
+                                laid_out.set(true);
+                                let _ = release.update(cx, |_, cx| cx.notify());
+                            })
+                            .child(kit::input(&self.folder)),
+                    )
+                    .child(nav(
+                        "folder-up",
+                        IconName::FolderUp,
+                        "Up one folder",
+                        parent,
+                    ))
+                    .child(nav("folder-home", IconName::House, "Home folder", home)),
+            )
+            .child(self.folder_list(pal, cx))
+            .into_any_element();
         let cancel = view.clone();
         let foot = h_flex()
             .gap(px(8.))
@@ -500,6 +576,75 @@ impl DialogView {
             )
             .into_any_element();
         (IconName::FolderOpen, "Open folder", body, foot)
+    }
+
+    /// The folders inside the folder on show, each opening on a click,
+    /// or why they could not be listed.
+    fn folder_list(&self, pal: &Palette, cx: &Context<Self>) -> AnyElement {
+        let note = |text: String| {
+            div()
+                .px(px(10.))
+                .py(px(8.))
+                .text_size(px(FS_SM))
+                .text_color(pal.muted)
+                .child(SharedString::from(text))
+        };
+        let list = v_flex()
+            .id("folder-list")
+            .h(px(260.))
+            .overflow_y_scroll()
+            .p(px(4.))
+            .border_1()
+            .border_color(pal.line)
+            .rounded(px(R_MD))
+            .bg(pal.surface);
+        let listing = match &self.listing {
+            None => {
+                return list
+                    .child(note("Listing\u{2026}".to_owned()))
+                    .into_any_element();
+            }
+            Some(Err(why)) => return list.child(note(why.clone())).into_any_element(),
+            Some(Ok(listing)) => listing,
+        };
+        if listing.folders.is_empty() {
+            return list
+                .child(note("No folders inside.".to_owned()))
+                .into_any_element();
+        }
+        let view = cx.entity();
+        let hover = pal.hover;
+        let base = listing.path.trim_end_matches('/').to_owned();
+        let mut list = list.children(listing.folders.iter().enumerate().map(|(n, name)| {
+            let view = view.clone();
+            let to = format!("{base}/{name}");
+            h_flex()
+                .id(gpui_kit::ElementId::named_usize("folder", n))
+                .gap(px(8.))
+                .items_center()
+                .px(px(8.))
+                .py(px(5.))
+                .rounded(px(crate::theme::R_SM))
+                .cursor_pointer()
+                .hover(move |row| row.bg(hover))
+                .text_size(px(FS_SM))
+                .text_color(pal.ink)
+                .on_click(move |_, _, cx| {
+                    view.update(cx, |this, cx| this.browse(Some(&to), cx));
+                })
+                .child(
+                    Icon::new(IconName::Folder)
+                        .with_size(px(14.))
+                        .text_color(pal.muted),
+                )
+                .child(div().truncate().child(SharedString::from(name.clone())))
+        }));
+        if listing.truncated {
+            list = list.child(note(
+                "More folders than shown; type a path to go further.".to_owned(),
+            ));
+        }
+        list.into_any_element()
     }
 
     fn swarm_body(

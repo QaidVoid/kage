@@ -402,7 +402,7 @@ mod tests {
         assert_eq!(
             explore.tools.as_deref(),
             Some(
-                ["read", "grep", "find", "ls", "web_fetch"]
+                ["read", "grep", "find", "ls", "web_fetch", "web_search"]
                     .map(str::to_owned)
                     .as_slice()
             )

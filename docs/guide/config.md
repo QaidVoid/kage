@@ -76,6 +76,12 @@ scrub_env = []
 # shell = "run_command"
 # web_fetch = "browse"
 
+[tools.web_search]
+# the engine `web_search` asks: "duckduckgo" (the default, no key) or
+# "searxng", a SearXNG instance at `url` that allows the json format.
+# engine = "searxng"
+# url = "https://searx.example.org"
+
 [keybindings]
 # the key <leader> expands to in bindings: one key, default a backslash.
 # leader = "<C-x>"

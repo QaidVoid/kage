@@ -313,6 +313,13 @@ fn chips_for(call: &ToolCallItem) -> Vec<Chip> {
                 if files.len() == 1 { "" } else { "s" },
             ))]
         }
+        "web_search" => search_results(call)
+            .map(|results| {
+                let n = results.len();
+                Chip::neutral(format!("{n} result{}", if n == 1 { "" } else { "s" }))
+            })
+            .into_iter()
+            .collect(),
         "find" | "ls" => {
             let entries = output.lines().filter(|line| !line.is_empty()).count();
             if entries == 0 {
@@ -2090,6 +2097,16 @@ impl TranscriptView {
                     ix,
                     cx,
                 ));
+            } else if let Some(results) = search_results(call)
+                && !results.is_empty()
+            {
+                unit = unit.child(render_detail(
+                    None,
+                    render_search_results(&results, cx),
+                    None,
+                    ix,
+                    cx,
+                ));
             } else if !output.is_empty() {
                 let head = match call.title.as_str() {
                     "read" => Some(DetailHead {
@@ -3105,6 +3122,73 @@ struct DetailHead {
 
 /// One detail box under a tool row: the head, the body capped at the
 /// design's 320px and scrolling past it, and an optional footer.
+/// One result a `web_search` call returned.
+struct SearchResult {
+    title: String,
+    url: String,
+    snippet: String,
+}
+
+/// The results a finished `web_search` call carried as data.
+fn search_results(call: &ToolCallItem) -> Option<Vec<SearchResult>> {
+    if call.title != "web_search" {
+        return None;
+    }
+    let results = call.raw_output.as_ref()?.get("results")?.as_array()?;
+    Some(
+        results
+            .iter()
+            .map(|result| {
+                let text = |key: &str| result[key].as_str().unwrap_or_default().to_owned();
+                SearchResult {
+                    title: text("title"),
+                    url: text("url"),
+                    snippet: text("snippet"),
+                }
+            })
+            .collect(),
+    )
+}
+
+/// The results of a `web_search` call: title, URL and snippet each.
+fn render_search_results(results: &[SearchResult], cx: &Context<TranscriptView>) -> Div {
+    let pal = crate::theme::Palette::active(cx);
+    let mono = cx.theme().mono_font_family.clone();
+    let mut list = v_flex().w_full().py(px(4.));
+    for (ix, result) in results.iter().enumerate() {
+        list = list.child(
+            v_flex()
+                .px(px(12.))
+                .py(px(7.))
+                .gap(px(1.))
+                .when(ix > 0, |row| row.border_t_1().border_color(pal.subtle))
+                .child(
+                    div()
+                        .text_size(px(FS_SM))
+                        .text_color(pal.ink_strong)
+                        .child(result.title.clone()),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .font_family(mono.clone())
+                        .text_size(px(11.))
+                        .text_color(pal.faint)
+                        .child(result.url.clone()),
+                )
+                .when(!result.snippet.is_empty(), |row| {
+                    row.child(
+                        div()
+                            .text_size(px(FS_XS))
+                            .text_color(pal.muted)
+                            .child(result.snippet.clone()),
+                    )
+                }),
+        );
+    }
+    list
+}
+
 fn render_detail(
     head: Option<DetailHead>,
     body: Div,

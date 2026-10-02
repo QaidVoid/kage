@@ -389,6 +389,7 @@ fn session_spec(
     );
     let mut tools = builtin_registry()
         .with_shell_config(&config.shell)
+        .with_web_search(&config.tools.web_search)
         .with_renames(&config.tools.rename);
     let aliases = tools.alias_map();
     let editor: Vec<String> = servers.keys().cloned().collect();

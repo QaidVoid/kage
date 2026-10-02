@@ -216,7 +216,7 @@ agents cost no memory.
 | Agent | Tools | For |
 | --- | --- | --- |
 | `general` | every tool of the parent | a self-contained task that needs many tool calls. It can read, edit and run commands. |
-| `explore` | `read`, `grep`, `find`, `ls`, `web_fetch` | searching and reading files and web pages to answer a question. It cannot change anything. |
+| `explore` | `read`, `grep`, `find`, `ls`, `web_fetch`, `web_search` | searching and reading files and web pages to answer a question. It cannot change anything. |
 
 Both reply with exactly what the task asked for, since the reply is
 all the caller sees. A file of the same name in your config directory

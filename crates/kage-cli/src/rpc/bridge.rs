@@ -1176,7 +1176,7 @@ pub(super) fn tool_title(name: &str) -> String {
 pub(super) fn tool_kind(name: &str) -> ToolKind {
     match name {
         "read" | "ls" => ToolKind::Read,
-        "grep" | "find" => ToolKind::Search,
+        "grep" | "find" | "web_search" => ToolKind::Search,
         "write" | "edit" => ToolKind::Edit,
         "shell" => ToolKind::Execute,
         "web_fetch" => ToolKind::Fetch,

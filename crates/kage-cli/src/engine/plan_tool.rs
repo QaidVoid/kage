@@ -17,8 +17,8 @@ use crate::permissions::PermissionGate;
 
 /// Context block injected once when a session's plan mode turns on.
 pub(crate) const PLAN_MODE_ON: &str = "[plan mode on] Plan before changing anything. \
-Investigate with read-only tools such as read, grep, find, ls and web_fetch; write and edit are \
-refused, and commands wait for the user's approval. When you understand the task, call \
+Investigate with read-only tools such as read, grep, find, ls, web_search and web_fetch; write \
+and edit are refused, and commands wait for the user's approval. When you understand the task, call \
 `exit_plan` once with the whole plan in Markdown: a `#` title, the goal, the steps with the \
 files each one touches, and how to verify the result. The user approves it, asks for changes or \
 rejects it. Do not start the work until the plan is approved. The user leaves plan mode with \

@@ -104,7 +104,7 @@ local SCENARIOS = {
   help = {
     { say = "Test keywords: **fix** (reads, a grep, an edit, a shell run), **read**, **grep**, **edit**, "
       .. "**shell**, **fail**, **todo**, **approval**, **plan** (turn plan mode on first), **subagent**, "
-      .. "**swarm**, **think**, **long**, **error**. Keywords combine in the order written." },
+      .. "**swarm**, **search**, **think**, **long**, **error**. Keywords combine in the order written." },
   },
   read = {
     { tools = { { "read", { path = "src/retry.rs" } }, { "read", { path = "src/http.rs" } }, { "ls", { path = "src" } } } },
@@ -153,6 +153,10 @@ local SCENARIOS = {
         items = { "src/retry.rs", "src/http.rs", "src/lib.rs", "tests/retry.rs" } } } } },
     { say = "The swarm reviewed four files; `src/http.rs` has two unwraps on the response path." },
   },
+  search = {
+    { tools = { { "web_search", { query = "exponential backoff jitter", count = 5 } } } },
+    { say = "The AWS write-up is the classic reference: full jitter spreads retries best." },
+  },
   think = {
     { think = "The flaky test sleeps for real time, so a slow runner misses the deadline. A fake clock would make the backoff deterministic, and the budget belongs to the client, not the call.",
       say = "The fix is a fake clock plus a shared retry budget." },
@@ -161,7 +165,7 @@ local SCENARIOS = {
   error = { { error = "decode" } },
 }
 
-local ORDER = { "help", "fix", "read", "grep", "edit", "shell", "fail", "todo", "approval", "plan", "subagent", "swarm", "think", "long", "error" }
+local ORDER = { "help", "fix", "read", "grep", "edit", "shell", "fail", "todo", "approval", "plan", "subagent", "swarm", "search", "think", "long", "error" }
 
 -- `fix` is a tour: the other scenarios played back to back.
 local FIX = { "read", "grep", "edit", "shell" }

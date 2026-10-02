@@ -8,6 +8,7 @@ pub mod read;
 pub mod shell;
 pub mod todo;
 pub mod web_fetch;
+pub mod web_search;
 pub mod write;
 
 use std::sync::Arc;
@@ -20,9 +21,10 @@ pub use read::ReadTool;
 pub use shell::ShellTool;
 pub use todo::{TodoList, TodoListTool};
 pub use web_fetch::WebFetchTool;
+pub use web_search::WebSearchTool;
 pub use write::WriteTool;
 
-use kage_core::config::ShellConfig;
+use kage_core::config::{ShellConfig, WebSearchConfig};
 
 use crate::ToolRegistry;
 
@@ -40,7 +42,7 @@ where
 /// Construct a [`ToolRegistry`] with all built-in tools registered.
 ///
 /// Includes: `read`, `write`, `edit`, `shell`, `grep`, `find`, `ls`,
-/// `web_fetch`, `todo_list`. A caller that carries the todo list
+/// `web_fetch`, `web_search` (on DuckDuckGo), `todo_list`. A caller that carries the todo list
 /// across a session registers its own with [`ToolRegistry::with_todo_list`].
 #[must_use]
 pub fn builtin_registry() -> ToolRegistry {
@@ -53,6 +55,7 @@ pub fn builtin_registry() -> ToolRegistry {
         .with(Arc::new(FindTool))
         .with(Arc::new(LsTool))
         .with(Arc::new(WebFetchTool))
+        .with(Arc::new(WebSearchTool::default()))
         .with_todo_list(TodoList::new())
 }
 
@@ -61,6 +64,17 @@ impl ToolRegistry {
     #[must_use]
     pub fn with_todo_list(mut self, todos: TodoList) -> Self {
         self.register(Arc::new(TodoListTool::new(todos)));
+        self
+    }
+
+    /// Replace the registered `web_search` tool with one asking the
+    /// engine `cfg` names. The default config leaves the registry
+    /// unchanged.
+    #[must_use]
+    pub fn with_web_search(mut self, cfg: &WebSearchConfig) -> Self {
+        if !cfg.is_default() {
+            self.register(Arc::new(WebSearchTool::new(cfg.clone())));
+        }
         self
     }
 
@@ -86,9 +100,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registers_all_nine_tools() {
+    fn registers_all_ten_tools() {
         let r = builtin_registry();
-        assert_eq!(r.len(), 9);
+        assert_eq!(r.len(), 10);
         let mut names: Vec<&str> = r.names().collect();
         names.sort_unstable();
         assert_eq!(
@@ -102,6 +116,7 @@ mod tests {
                 "shell",
                 "todo_list",
                 "web_fetch",
+                "web_search",
                 "write"
             ],
         );

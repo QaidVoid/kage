@@ -1,1 +1,2 @@
 msrv = "1.89"
+doc-valid-idents = ["DuckDuckGo", "SearXNG", ".."]

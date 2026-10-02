@@ -11,6 +11,15 @@ use kage_session::{SessionId, SessionWriter};
 
 use crate::cli_printing::{print_envelope_json, print_event};
 
+/// The layered config for `workdir`, refused when its permission rules
+/// or shell policy do not validate.
+fn checked_config(workdir: &std::path::Path) -> Result<kage_core::config::Config, String> {
+    let layered = kage_core::config::Config::load_layered(workdir).map_err(|e| e.to_string())?;
+    layered.permissions.validate().map_err(|e| e.to_string())?;
+    layered.shell.validate().map_err(|e| e.to_string())?;
+    Ok(layered)
+}
+
 /// Drive one print-mode run on the engine. Streams events to stdout as
 /// text or JSONL, records the conversation when a writer is supplied, and
 /// maps the outcome to a process exit code. Text mode prints the opened
@@ -35,22 +44,16 @@ pub(crate) fn execute_print_run(
 
     let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     crate::trust::warn_if_untrusted(&workdir);
-    let layered = match kage_core::config::Config::load_layered(&workdir) {
-        Ok(c) => c,
+    let layered = match checked_config(&workdir) {
+        Ok(config) => config,
         Err(e) => {
             eprintln!("kage: {e}");
             return ExitCode::from(1);
         }
     };
-    if let Err(e) = layered.permissions.validate() {
-        eprintln!("kage: {e}");
-        return ExitCode::from(1);
-    }
-    if let Err(e) = layered.shell.validate() {
-        eprintln!("kage: {e}");
-        return ExitCode::from(1);
-    }
-    let tools = tools.with_shell_config(&layered.shell);
+    let tools = tools
+        .with_shell_config(&layered.shell)
+        .with_web_search(&layered.tools.web_search);
     if layered.permissions.confine_paths {
         cx.confine_paths = true;
     }

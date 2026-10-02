@@ -67,14 +67,48 @@ pub struct ToolsConfig {
     /// real one. Renames of unknown tools are ignored.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub rename: BTreeMap<String, String>,
+    /// The engine the `web_search` tool asks (`[tools.web_search]`).
+    #[serde(default, skip_serializing_if = "WebSearchConfig::is_default")]
+    pub web_search: WebSearchConfig,
 }
 
 impl ToolsConfig {
-    /// Whether no renames are configured.
+    /// Whether nothing is configured.
     #[must_use]
     pub fn is_default(&self) -> bool {
-        self.rename.is_empty()
+        self.rename.is_empty() && self.web_search.is_default()
     }
+}
+
+/// The engine the `web_search` tool asks (`[tools.web_search]`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebSearchConfig {
+    /// `duckduckgo` (the default, no key) or `searxng`.
+    pub engine: SearchEngine,
+    /// The SearXNG instance's base URL, for `engine = "searxng"`. The
+    /// instance must allow the `json` format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+impl WebSearchConfig {
+    /// Whether the defaults are in effect.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// A search engine `web_search` can ask.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchEngine {
+    /// DuckDuckGo's HTML results page.
+    #[default]
+    Duckduckgo,
+    /// A SearXNG instance's JSON API.
+    Searxng,
 }
 
 impl Config {

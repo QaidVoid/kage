@@ -14,8 +14,15 @@ pr_labels = ["release"]
 publish_allow_dirty = false
 semver_check = false
 release_always = false
+# GitHub refuses release notes over 125,000 characters, as the first
+# release's full history was, so a longer changelog links the file.
 git_release_body = """
+{% if changelog | length > 100000 -%}
+The changes are too many to list here; see
+[CHANGELOG.md](https://github.com/QaidVoid/kage/blob/v{{ version }}/CHANGELOG.md).
+{%- else -%}
 {{ changelog }}
+{%- endif %}
 {% if remote.contributors %}
 ### Contributors
 {% for contributor in remote.contributors %}

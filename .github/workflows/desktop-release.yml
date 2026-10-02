@@ -31,8 +31,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # The tag to build, or nothing when the version already has one. A new
-  # release lists the commits that touched gui/ since the last one.
+  # The tag to build, or nothing when the version already has one. A
+  # release after the first lists the commits that touched gui/ since
+  # the one before.
   release:
     name: release
     runs-on: ubuntu-latest
@@ -60,11 +61,15 @@ jobs:
             exit 0
           fi
           previous="$(git tag --list 'kage-desktop-v*' --sort=-v:refname | head -n 1)"
-          {
-            echo "## What changed"
-            echo
-            git log --no-merges --format='- %s (%h)' ${previous:+"$previous"..}HEAD -- gui/
-          } > notes.md
+          if [ -n "$previous" ]; then
+            {
+              echo "## What changed"
+              echo
+              git log --no-merges --format='- %s (%h)' "$previous..HEAD" -- gui/
+            } > notes.md
+          else
+            echo "The first release of the desktop and web client." > notes.md
+          fi
           gh release create "$tag" --target "$GITHUB_SHA" \
             --title "kage-desktop v$version" --notes-file notes.md --latest=false
           echo "tag=$tag" >> "$GITHUB_OUTPUT"

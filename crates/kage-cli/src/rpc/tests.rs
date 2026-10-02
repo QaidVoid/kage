@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
@@ -33,6 +34,7 @@ const WAIT: Duration = Duration::from_secs(5);
 
 /// How long a turn that runs a real shell loop may take. A loaded CI
 /// runner spawns processes slowly, and a passing run returns early.
+#[cfg(unix)]
 const SHELL_WAIT: Duration = Duration::from_secs(30);
 
 type Script = Vec<Result<ProviderEvent, ProviderError>>;
@@ -2662,6 +2664,7 @@ fn a_provider_retry_reaches_the_client_as_an_info_notice() {
 
 /// The client's notifications until the prompt resolves, each with the
 /// time it arrived.
+#[cfg(unix)]
 fn streamed_until_response(
     h: &Harness,
     prompt_end: &mpsc::Receiver<Result<serde_json::Value, kage_jsonrpc::RpcError>>,
@@ -2698,6 +2701,7 @@ fn final_shell_update<'a>(
         .expect("no final shell update")
 }
 
+#[cfg(unix)]
 #[test]
 fn shell_progress_streams_the_latest_tail_and_ends_with_the_exit_code() {
     let dir = tempfile::tempdir().unwrap();
@@ -2800,6 +2804,7 @@ fn shell_failure_reports_the_exit_code() {
     assert_eq!(final_update["rawOutput"]["exit_code"], 7);
 }
 
+#[cfg(unix)]
 #[test]
 fn shell_signal_reports_a_null_exit_code() {
     let dir = tempfile::tempdir().unwrap();

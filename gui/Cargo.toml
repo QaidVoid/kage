@@ -63,6 +63,13 @@ web-sys = { version = "=0.3.106", features = [
     "Window",
 ] }
 
+# gpui-base 0.7.0 reads `std::time::Instant` on every touch that lands on
+# an input, which panics in a browser and leaves the web client dead after
+# the first tap. Upstream fixed it after the release (longbridge/gpui-kit#3271);
+# this pins that commit, three past 0.7.0. Drop it once a release carries it.
+[patch.crates-io]
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "5a3892ce7fb23f056462b9391b4e523a8a5f3623" }
+
 # Size and speed for shipped binaries, after soar's profile. Nothing in
 # the client recovers from a panic, so aborting drops the unwind tables.
 [profile.release]

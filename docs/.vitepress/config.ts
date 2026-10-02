@@ -2,11 +2,12 @@ import { defineConfig } from "vitepress";
 
 export default defineConfig({
   title: "kage",
-  description: "A minimal, extensible coding agent in your terminal.",
+  description: "A coding agent for your terminal, your editor and your browser.",
   appearance: "dark",
   cleanUrls: true,
   lastUpdated: true,
   head: [
+    ["link", { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" }],
     ["meta", { name: "theme-color", content: "#0a0a0a" }],
     ["meta", { name: "viewport", content: "width=device-width, initial-scale=1" }],
   ],

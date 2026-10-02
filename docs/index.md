@@ -2,8 +2,8 @@
 layout: home
 title: kage
 hero:
-  title: the keyboard agent
-  tagline: A minimal, extensible coding agent that lives in your terminal. Rust core, Lua plugins, append-only sessions, no surprises.
+  title: your coding shadow
+  tagline: A coding agent for your terminal, your editor and your browser. Hand it a task, split it across a swarm or send it to the background, and see every step it takes. Rust core, Lua plugins, sessions as plain files.
   actions:
     - text: get started
       link: /guide/install
@@ -12,22 +12,28 @@ hero:
       link: https://github.com/QaidVoid/kage
       theme: ghost
 features:
-  - tag: 01
-    title: keyboard TUI
-    text: a modeless editor with an optional vim mode, sticky search, and slash commands with argument completion.
-  - tag: 02
+  - tag: "01"
+    title: terminal first
+    text: a TUI built for long sessions, with a modeless editor or vim keys, live tool output, inline approvals and search.
+  - tag: "02"
+    title: agents and swarms
+    text: delegate work to agents, fan one task out over a swarm, or send agents to the background and keep going.
+  - tag: "03"
+    title: any client
+    text: the same engine in the terminal, in a desktop and browser client, and in Zed or any ACP editor.
+  - tag: "04"
     title: lua plugins
-    text: tools, commands, keybindings, blocking dialogs, status widgets, and ~25 event hooks defined in sandboxed Lua. Hot reload on file change.
-  - tag: 03
-    title: append-only sessions
-    text: every turn lands in a JSONL session file you can inspect with cat, search with rg, fork at any entry, and resume.
-  - tag: 04
-    title: multi-provider
-    text: anthropic, openai, gemini, z.ai and more from a bundled model catalog, plus your own endpoints. Switch mid-session with ctrl+p.
-  - tag: 05
-    title: markdown rendering
-    text: assistant responses render headings, lists, quotes, tables, fenced code blocks, and inline styles.
-  - tag: 06
-    title: real diffs, no magic
-    text: tool calls show their arguments, results, and timing. Compaction emits a labelled summary card you can read.
+    text: tools, commands, keybindings, dialogs, status widgets and event hooks in sandboxed Lua, reloaded when you save.
+  - tag: "05"
+    title: sessions are files
+    text: every turn lands in an append-only JSONL file you can read with cat, search with rg, fork at any entry and resume.
+  - tag: "06"
+    title: your models, your tools
+    text: anthropic, openai, gemini, z.ai and more, local models and your own endpoints, plus MCP servers. Switch models mid-session.
+  - tag: "07"
+    title: plan before it acts
+    text: plan mode reads and investigates, then presents a plan you approve, revise or reject before anything changes.
+  - tag: "08"
+    title: you stay in charge
+    text: permission rules per tool, command and path, a read-only mode, and questions whenever a choice is yours to make.
 ---

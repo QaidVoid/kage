@@ -1,6 +1,6 @@
 [package]
 name = "kage-cli"
-description = "kage: a minimal, extensible coding agent in your terminal."
+description = "kage: a coding agent for your terminal, your editor and your browser."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

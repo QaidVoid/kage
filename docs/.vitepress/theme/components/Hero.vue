@@ -21,12 +21,12 @@ const { frontmatter } = useData();
         </div>
         <div class="kage-hero__output">
           <h1 class="kage-hero__title">
-            {{ frontmatter.hero?.title ?? "the keyboard agent" }}
+            {{ frontmatter.hero?.title ?? "your coding shadow" }}
           </h1>
           <p class="kage-hero__tagline">
             {{
               frontmatter.hero?.tagline ??
-              "A minimal, extensible coding agent that lives in your terminal."
+              "A coding agent for your terminal, your editor and your browser."
             }}
           </p>
         </div>

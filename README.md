@@ -1,7 +1,8 @@
 # kage
 
-A coding agent for your terminal. Written in Rust, configured and
-extended in Lua, and small enough to read.
+A coding agent for your terminal, your editor and your browser.
+Written in Rust, configured and extended in Lua, and small enough to
+read.
 
 ## What it does
 

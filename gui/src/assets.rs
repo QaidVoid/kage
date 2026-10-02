@@ -59,6 +59,7 @@ gpui_kit::assets::icon_assets!(
     AppIcons,
     [
         ALargeSmall,
+        Archive,
         ArrowDown,
         ArrowLeft,
         ArrowRight,
@@ -88,6 +89,8 @@ gpui_kit::assets::icon_assets!(
         Circle,
         CircleAlert,
         CircleCheck,
+        CirclePause,
+        CircleSlash,
         CircleUser,
         CircleX,
         Close,
@@ -98,6 +101,7 @@ gpui_kit::assets::icon_assets!(
         Cpu,
         Dash,
         Delete,
+        Download,
         Ellipsis,
         EllipsisVertical,
         ExternalLink,
@@ -109,7 +113,9 @@ gpui_kit::assets::icon_assets!(
         FileText,
         Folder,
         FolderClosed,
+        FolderLock,
         FolderOpen,
+        FolderUp,
         Frame,
         GalleryVerticalEnd,
         GitBranch,
@@ -120,6 +126,7 @@ gpui_kit::assets::icon_assets!(
         HardDrive,
         Heart,
         HeartOff,
+        House,
         Inbox,
         Info,
         Inspector,
@@ -155,7 +162,6 @@ gpui_kit::assets::icon_assets!(
         Pencil,
         Pin,
         PinOff,
-        Archive,
         Play,
         Plus,
         Redo,
@@ -186,6 +192,7 @@ gpui_kit::assets::icon_assets!(
         Terminal,
         ThumbsDown,
         ThumbsUp,
+        Trash,
         TriangleAlert,
         Undo,
         Undo2,
@@ -197,7 +204,7 @@ gpui_kit::assets::icon_assets!(
         WindowMinimize,
         WindowRestore,
         X,
-        Zap
+        Zap,
     ]
 );
 

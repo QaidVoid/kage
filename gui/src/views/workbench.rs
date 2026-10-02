@@ -1555,8 +1555,11 @@ impl WorkbenchView {
         if let Some(code) = run.exit.filter(|code| *code != 0) {
             head = head.child(chip(format!("exit {code}"), p.danger, p.danger_soft));
         }
+        // A clipped card has no content floor, so in the scrolling column
+        // it would shrink to fit instead of overflowing.
         let mut card = v_flex()
             .id(SharedString::from(format!("term-{}", run.id)))
+            .flex_none()
             .mx(px(12.))
             .mt(px(8.))
             .rounded(px(R_MD))

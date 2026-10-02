@@ -1,6 +1,8 @@
 //! The MCP server form: adds a server to `config.toml` or edits one,
 //! through `_kage/config/set`.
 
+use gpui_kit::assets::IconName;
+use gpui_kit::component::Icon;
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::{Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -9,11 +11,14 @@ use gpui_kit::{
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
     div, px,
 };
+use kage_client::wire::{ConfigTestRequest, McpProbe, ProbeTool};
 use serde_json::{Map, Value, json};
 
 use crate::store::Store;
 use crate::theme::{FONT_MONO, FS_SM, FS_XS, Palette, R_FULL};
-use crate::views::config_forms::{Pairs, Saving, field, form_head, segments, text_field};
+use crate::views::config_forms::{
+    Pairs, Saving, field, form_head, preview_block, segments, text_field, toml_preview,
+};
 use crate::views::kit::{BtnTone, btn_sm, switch};
 use crate::views::settings_config::McpServer;
 
@@ -76,6 +81,16 @@ pub struct McpForm {
     client_id: Entity<InputState>,
     scope: Entity<InputState>,
     disabled: bool,
+    /// The tools the model does not see, by the server's names.
+    disabled_tools: Vec<String>,
+    /// The tools the server listed, once listed.
+    tools: Option<Vec<ProbeTool>>,
+    /// The listing in flight.
+    listing: Option<u64>,
+    /// Why the last listing failed.
+    list_error: Option<String>,
+    /// Whether the config.toml preview shows.
+    preview: bool,
     saving: Saving,
 }
 
@@ -92,6 +107,17 @@ impl McpForm {
         cx.observe(&store, |this, store, cx| {
             if this.saving.settle(store.read(cx)) {
                 cx.emit(FormDone);
+            }
+            if let Some(id) = this.listing
+                && let Some(result) = store.read(cx).test_result(id)
+            {
+                this.listing = None;
+                if result.ok {
+                    this.tools = Some(result.tools.clone());
+                    this.list_error = None;
+                } else {
+                    this.list_error = Some(result.message.clone());
+                }
             }
             cx.notify();
         })
@@ -129,6 +155,11 @@ impl McpForm {
             client_id: text_field(window, cx, "pre-registered client id", &text("client_id")),
             scope: text_field(window, cx, "scope the server advertises", &text("scope")),
             disabled: server.disabled,
+            disabled_tools: server.disabled_tools.clone(),
+            tools: None,
+            listing: None,
+            list_error: None,
+            preview: false,
             saving: Saving::Idle,
             store,
         }
@@ -213,6 +244,9 @@ impl McpForm {
         if self.disabled {
             table.insert("disabled".into(), json!(true));
         }
+        if !self.disabled_tools.is_empty() {
+            table.insert("disabled_tools".into(), json!(self.disabled_tools));
+        }
         Ok((name, Value::Object(table)))
     }
 
@@ -244,6 +278,147 @@ impl McpForm {
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
         cx.emit(FormDone);
+    }
+
+    /// Asks the engine to connect to the server as the form describes
+    /// it and list its tools.
+    fn list_tools(&mut self, cx: &mut Context<Self>) {
+        match self.entry(cx) {
+            Ok((name, server)) => {
+                let request = ConfigTestRequest {
+                    mcp: Some(McpProbe { name, server }),
+                    ..ConfigTestRequest::default()
+                };
+                let id = self.store.update(cx, |store, cx| {
+                    cx.notify();
+                    store.config_probe(&request)
+                });
+                self.listing = Some(id);
+                self.list_error = None;
+            }
+            Err(why) => self.list_error = Some(why),
+        }
+        cx.notify();
+    }
+
+    /// Shows tool `name` to the model, or hides it.
+    fn flip_tool(&mut self, name: &str, cx: &mut Context<Self>) {
+        if let Some(at) = self.disabled_tools.iter().position(|held| held == name) {
+            self.disabled_tools.remove(at);
+        } else {
+            self.disabled_tools.push(name.to_owned());
+            self.disabled_tools.sort();
+        }
+        cx.notify();
+    }
+
+    /// The tools section: the button that lists them, then a chip per
+    /// tool, filled while the model sees it.
+    fn tools_section(&self, this: &Entity<Self>, pal: &'static Palette) -> gpui_kit::Div {
+        let list = this.clone();
+        let mut head = h_flex().gap(px(8.)).items_center().child(
+            btn_sm("mcp-list-tools", BtnTone::Plain, pal)
+                .when(self.listing.is_some(), |button| button.opacity(0.6))
+                .on_click(move |_, _, cx| list.update(cx, |form, cx| form.list_tools(cx)))
+                .child(if self.listing.is_some() {
+                    "Connecting\u{2026}"
+                } else {
+                    "List tools"
+                }),
+        );
+        let names: Vec<String> = match &self.tools {
+            Some(tools) => tools.iter().map(|tool| tool.name.clone()).collect(),
+            None => self.disabled_tools.clone(),
+        };
+        if let Some(tools) = &self.tools {
+            let shown = tools
+                .iter()
+                .filter(|tool| !self.disabled_tools.contains(&tool.name))
+                .count();
+            let (all, none) = (this.clone(), this.clone());
+            let every: Vec<String> = names.clone();
+            head = head
+                .child(
+                    div()
+                        .text_size(px(FS_XS))
+                        .text_color(pal.muted)
+                        .child(format!("{shown} of {} enabled", tools.len())),
+                )
+                .child(
+                    btn_sm("mcp-tools-all", BtnTone::Plain, pal)
+                        .on_click(move |_, _, cx| {
+                            all.update(cx, |form, cx| {
+                                form.disabled_tools.clear();
+                                cx.notify();
+                            });
+                        })
+                        .child("Enable all"),
+                )
+                .child(
+                    btn_sm("mcp-tools-none", BtnTone::Plain, pal)
+                        .on_click(move |_, _, cx| {
+                            let every = every.clone();
+                            none.update(cx, |form, cx| {
+                                form.disabled_tools = every;
+                                cx.notify();
+                            });
+                        })
+                        .child("Disable all"),
+                );
+        }
+        let mut grid = h_flex().gap(px(6.)).flex_wrap();
+        for name in names {
+            let on = !self.disabled_tools.contains(&name);
+            let flip = this.clone();
+            let tool = name.clone();
+            grid = grid.child(
+                h_flex()
+                    .id(SharedString::from(format!("mcp-tool-{name}")))
+                    .gap(px(5.))
+                    .px(px(8.))
+                    .h(px(24.))
+                    .items_center()
+                    .rounded(px(R_FULL))
+                    .border_1()
+                    .border_color(if on { pal.accent } else { pal.line })
+                    .bg(if on { pal.accent_soft } else { pal.surface })
+                    .cursor_pointer()
+                    .font_family(FONT_MONO)
+                    .text_size(px(FS_XS))
+                    .text_color(if on { pal.ink_strong } else { pal.muted })
+                    .when(on, |chip| {
+                        chip.child(Icon::new(IconName::Check).with_size(px(12.)))
+                    })
+                    .child(name)
+                    .on_click(move |_, _, cx| {
+                        flip.update(cx, |form, cx| form.flip_tool(&tool, cx))
+                    }),
+            );
+        }
+        let hint = match (&self.tools, &self.list_error) {
+            (_, Some(why)) => Some((why.clone(), pal.danger)),
+            (None, None) if self.disabled_tools.is_empty() => Some((
+                "List the server's tools to choose which the model sees.".to_owned(),
+                pal.faint,
+            )),
+            (None, None) => Some((
+                "Hidden from the model. List the tools to change them.".to_owned(),
+                pal.faint,
+            )),
+            (Some(_), None) => Some((
+                "Per-tool approval rules live on the Permissions page.".to_owned(),
+                pal.faint,
+            )),
+        };
+        field(
+            "Tools",
+            false,
+            None,
+            v_flex().gap(px(8.)).child(head).child(grid).children(
+                hint.map(|(text, color)| div().text_size(px(FS_XS)).text_color(color).child(text)),
+            ),
+            pal,
+        )
     }
 }
 
@@ -378,7 +553,18 @@ impl Render for McpForm {
                         .child("Disabled: configured but not started"),
                 ),
         );
-        form.children(self.saving.line(pal))
+        let entry = self
+            .entry(cx)
+            .map(|(name, value)| toml_preview(&["mcp".into(), "servers".into(), name], &value));
+        form.child(self.tools_section(&this, pal))
+            .child(preview_block(
+                self.preview,
+                entry,
+                &this,
+                |form: &mut Self| &mut form.preview,
+                pal,
+            ))
+            .children(self.saving.line(pal))
             .child(self.actions(&this, pal))
     }
 }

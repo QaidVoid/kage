@@ -33,6 +33,8 @@ web-time = "1"
 # Local wall-clock labels; already in the toolkit tree with its clock
 # and wasm features.
 chrono = "0.4"
+# The config.toml preview the settings forms show.
+toml = "1"
 
 [dev-dependencies]
 # The same pinned toolkit with headless windows and input dispatch, for

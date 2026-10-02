@@ -40,6 +40,22 @@ pub(crate) struct Snapshot {
     installed_plugins: Vec<InstalledPlugin>,
     #[serde(rename = "providerKeys")]
     provider_keys: BTreeMap<String, KeyState>,
+    acp: Acp,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Acp {
+    agents: BTreeMap<String, AcpAgent>,
+}
+
+/// One `[acp.agents.<name>]` entry as the snapshot shows it.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub(crate) struct AcpAgent {
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
 }
 
 /// Where one provider finds its key, as the snapshot says.
@@ -73,6 +89,12 @@ impl Snapshot {
             .keys()
             .map(String::as_str)
             .filter(|id| !self.providers.custom.contains_key(*id))
+    }
+
+    /// The ACP agent configured as `name`.
+    #[must_use]
+    pub(crate) fn acp_agent(&self, name: &str) -> Option<&AcpAgent> {
+        self.acp.agents.get(name)
     }
 
     /// The MCP server configured as `name`.
@@ -135,6 +157,7 @@ pub(crate) struct McpServer {
     pub headers: BTreeMap<String, String>,
     pub disabled: bool,
     pub oauth: Option<serde_json::Value>,
+    pub disabled_tools: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -406,6 +429,11 @@ pub(crate) enum ProviderNav {
     Back,
     /// The form on a provider.
     Open(Target),
+    /// The form on ACP agent `name`, or on a new one.
+    Acp(Option<String>),
+    /// A provider directory to import from: models.dev, or one the
+    /// user names when `true`.
+    Directory(bool),
 }
 
 /// The Model Providers page: the providers, grouped by whether their
@@ -461,7 +489,52 @@ pub(crate) fn providers_page(
         }
         out.push(list.into_any_element());
     }
-    if rows.is_empty() {
+    if !snapshot.acp.agents.is_empty() {
+        out.push(
+            div()
+                .mt(px(4.))
+                .mb(px(6.))
+                .text_size(px(FS_XS))
+                .text_color(pal.faint)
+                .child(format!("ACP agents \u{b7} {}", snapshot.acp.agents.len()))
+                .into_any_element(),
+        );
+        let mut list = boxed(pal);
+        for (name, agent) in &snapshot.acp.agents {
+            let open = on_open.clone();
+            let edited = name.clone();
+            let hover = pal.fill_hover;
+            let line = std::iter::once(agent.command.clone())
+                .chain(agent.args.iter().cloned())
+                .collect::<Vec<_>>()
+                .join(" ");
+            list = list.child(
+                list_row(
+                    initials(name, pal),
+                    h_flex()
+                        .gap(px(6.))
+                        .items_center()
+                        .child(
+                            div()
+                                .text_size(px(FS_SM))
+                                .text_color(pal.ink)
+                                .child(format!("acp:{name}")),
+                        )
+                        .child(plain_badge("acp", pal)),
+                    Some(SharedString::from(line)),
+                    pal,
+                )
+                .id(SharedString::from(format!("acp-row-{name}")))
+                .cursor_pointer()
+                .hover(move |row| row.bg(hover))
+                .on_click(move |_, window, cx| {
+                    open(ProviderNav::Acp(Some(edited.clone())), window, cx)
+                }),
+            );
+        }
+        out.push(list.into_any_element());
+    }
+    if rows.is_empty() && snapshot.acp.agents.is_empty() {
         out.push(note("No providers configured yet.", pal).into_any_element());
     }
     out.push(
@@ -545,6 +618,31 @@ fn provider_row(
     .into_any_element()
 }
 
+/// A chooser chip that goes to `nav`.
+fn nav_chip(
+    id: &'static str,
+    label: &'static str,
+    nav: ProviderNav,
+    on_open: impl Fn(ProviderNav, &mut Window, &mut App) + 'static,
+    pal: &Palette,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px(px(10.))
+        .h(px(28.))
+        .flex()
+        .items_center()
+        .rounded(px(R_FULL))
+        .border_1()
+        .border_color(pal.line)
+        .bg(pal.surface)
+        .text_size(px(FS_XS))
+        .text_color(pal.ink)
+        .cursor_pointer()
+        .child(label)
+        .on_click(move |_, window, cx| on_open(nav.clone(), window, cx))
+}
+
 /// The providers to start a new one from: each registered provider not
 /// listed yet, a local server, and a custom endpoint.
 fn provider_chooser(
@@ -594,6 +692,24 @@ fn provider_chooser(
             .into_any_element(),
         note("A provider kage knows: give it a key.", pal).into_any_element(),
         registered.into_any_element(),
+        note("Or import one from a directory.", pal).into_any_element(),
+        h_flex()
+            .gap(px(6.))
+            .child(nav_chip(
+                "provider-pick-modelsdev",
+                "From models.dev",
+                ProviderNav::Directory(false),
+                on_open.clone(),
+                pal,
+            ))
+            .child(nav_chip(
+                "provider-pick-apijson",
+                "api.json",
+                ProviderNav::Directory(true),
+                on_open.clone(),
+                pal,
+            ))
+            .into_any_element(),
         note("Or an endpoint of your own.", pal).into_any_element(),
         h_flex()
             .gap(px(6.))
@@ -603,6 +719,13 @@ fn provider_chooser(
                 Target::Local,
             ))
             .child(chip("custom".into(), "Custom".into(), Target::Custom(None)))
+            .child(nav_chip(
+                "provider-pick-acp",
+                "ACP agent",
+                ProviderNav::Acp(None),
+                on_open.clone(),
+                pal,
+            ))
             .into_any_element(),
     ]
 }
@@ -1375,9 +1498,94 @@ fn plugin_row(
                         .text_color(pal.muted)
                         .child("Capabilities granted in config.toml. A plugin still asks for each one before it gets it."),
                 )
-                .child(grants),
+                .child(grants)
+                .when(row.enabled.is_some(), |section| {
+                    let store = store.clone();
+                    let name = row.name.clone();
+                    section.child(
+                        h_flex().child(
+                            btn_sm(format!("plugin-remove-{}", row.name), BtnTone::Danger, pal)
+                                .on_click(move |_, _, cx| {
+                                    store.act(cx, |store| store.remove_plugin(&name));
+                                })
+                                .child("Remove plugin"),
+                        ),
+                    )
+                }),
         )
         .into_any_element()
+}
+
+/// The plugin install field and where its install stands.
+pub(crate) struct PluginInstall {
+    /// The field, while it shows.
+    pub input: Option<Entity<InputState>>,
+    /// The install in flight, or how the last one went.
+    pub status: Option<Option<Result<(), String>>>,
+    /// Shows or hides the field.
+    pub on_toggle: OnToggle,
+    /// Installs what the field holds.
+    pub on_submit: OnSubmit,
+}
+
+/// Shows a field, or hides it.
+pub(crate) type OnToggle = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+
+/// Acts on what a field holds.
+pub(crate) type OnSubmit = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// The install field with its buttons, and the install's outcome.
+fn install_row(install: &PluginInstall, pal: &'static Palette) -> Vec<AnyElement> {
+    let mut out = Vec::new();
+    if let Some(input) = &install.input {
+        let (submit, hide) = (install.on_submit.clone(), install.on_toggle.clone());
+        out.push(
+            v_flex()
+                .gap(px(6.))
+                .mb(px(10.))
+                .child(
+                    h_flex()
+                        .gap(px(8.))
+                        .items_center()
+                        .child(div().flex_1().font_family(FONT_MONO).child(Input::new(input).small()))
+                        .child(
+                            btn_sm("plugin-install", BtnTone::Primary, pal)
+                                .on_click(move |_, window, cx| submit(window, cx))
+                                .child("Install"),
+                        )
+                        .child(
+                            btn_sm("plugin-install-cancel", BtnTone::Plain, pal)
+                                .on_click(move |_, window, cx| hide(false, window, cx))
+                                .child("Cancel"),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(FS_XS))
+                        .text_color(pal.faint)
+                        .child("An https:// URL or a path on the engine's machine, to one .lua file. It is checked to compile, then loads with the next session."),
+                )
+                .into_any_element(),
+        );
+    }
+    let line = match &install.status {
+        Some(None) => Some(("Installing\u{2026}".to_owned(), pal.muted)),
+        Some(Some(Ok(()))) => Some((
+            "Installed. It loads with the next session.".to_owned(),
+            pal.ok,
+        )),
+        Some(Some(Err(why))) => Some((why.clone(), pal.danger)),
+        None => None,
+    };
+    out.extend(line.map(|(text, color)| {
+        div()
+            .mb(px(8.))
+            .text_size(px(FS_XS))
+            .text_color(color)
+            .child(text)
+            .into_any_element()
+    }));
+    out
 }
 
 /// The Plugins page: the directory and the allowlist, then every plugin
@@ -1389,6 +1597,7 @@ pub(crate) fn plugins_page(
     store: &Entity<Store>,
     open: Option<&str>,
     on_open: impl Fn(Option<String>, &mut App) + Clone + 'static,
+    install: &PluginInstall,
     pal: &'static Palette,
 ) -> Vec<AnyElement> {
     let plugins = &snapshot.plugins;
@@ -1430,8 +1639,20 @@ pub(crate) fn plugins_page(
             .into_any_element(),
     ];
     let rows = plugin_rows(snapshot);
+    let show = install.on_toggle.clone();
+    out.push(
+        group("Plugins", pal)
+            .justify_between()
+            .child(
+                btn_sm("plugin-install-open", BtnTone::Plain, pal)
+                    .on_click(move |_, window, cx| show(true, window, cx))
+                    .child(Icon::new(IconName::Plus).with_size(px(12.)))
+                    .child("Install a plugin"),
+            )
+            .into_any_element(),
+    );
+    out.extend(install_row(install, pal));
     if !rows.is_empty() {
-        out.push(group("Plugins", pal).into_any_element());
         let mut list = boxed(pal);
         for row in rows {
             let expanded = open == Some(row.name.as_str());

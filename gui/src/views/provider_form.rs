@@ -25,7 +25,7 @@ use serde_json::{Map, Value, json};
 use crate::store::Store;
 use crate::theme::{FONT_MONO, FS_XS, Palette, R_FULL};
 use crate::views::config_forms::{
-    Pairs, Saving, field, form_head, icon_button, segments, text_field,
+    Pairs, Saving, field, form_head, icon_button, preview_block, segments, text_field, toml_preview,
 };
 use crate::views::kit::{BtnTone, btn_sm};
 use crate::views::mcp_form::FormDone;
@@ -47,6 +47,15 @@ pub enum Target {
     Custom(Option<String>),
     /// A new custom provider for a local server that needs no key.
     Local,
+    /// A new custom provider imported from a directory: its id and the
+    /// entry to start from.
+    Import {
+        /// The id the directory gives it.
+        id: String,
+        /// The `[providers.custom.<id>]` table, models and prices
+        /// included.
+        entry: Value,
+    },
 }
 
 /// Where the key comes from.
@@ -85,6 +94,8 @@ pub struct ProviderForm {
     headers: Pairs,
     models: Vec<ModelRow>,
     saving: Saving,
+    /// Whether the config.toml preview shows.
+    preview: bool,
     /// The test or fetch in flight, and whether it fills the models.
     probing: Option<(u64, bool)>,
     tested: Option<ConfigTestResult>,
@@ -114,6 +125,7 @@ impl ProviderForm {
                 "local".to_owned(),
                 json!({ "base_url": "http://localhost:11434/v1", "api_key_env": "" }),
             ),
+            Target::Import { id, entry } => (id.clone(), entry.clone()),
         };
         let base = base.as_object().cloned().unwrap_or_default();
         let text = |key: &str| {
@@ -186,6 +198,7 @@ impl ProviderForm {
             headers: Pairs::new(window, cx, &headers),
             models,
             saving: Saving::Idle,
+            preview: false,
             probing: None,
             tested: None,
             fetched: Vec::new(),
@@ -204,7 +217,9 @@ impl ProviderForm {
     fn provider_id(&self, cx: &App) -> String {
         match &self.target {
             Target::Registered(id) | Target::Custom(Some(id)) => id.clone(),
-            Target::Custom(None) | Target::Local => self.id.read(cx).value().trim().to_owned(),
+            Target::Custom(None) | Target::Local | Target::Import { .. } => {
+                self.id.read(cx).value().trim().to_owned()
+            }
         }
     }
 
@@ -481,7 +496,9 @@ impl Render for ProviderForm {
                 format!("Set up {id}")
             }
             Target::Registered(id) | Target::Custom(Some(id)) => format!("Edit {id}"),
-            Target::Custom(None) | Target::Local => "Add provider".to_owned(),
+            Target::Custom(None) | Target::Local | Target::Import { .. } => {
+                "Add provider".to_owned()
+            }
         };
         let mut form = v_flex()
             .gap(px(14.))
@@ -523,16 +540,30 @@ impl Render for ProviderForm {
         if !self.registered() {
             form = form.child(self.models_table(&this, pal));
         }
-        form.children(self.test_line(pal))
-            .children(self.saving.line(pal))
-            .child(self.actions(&this, pal))
+        let entry = self.entry(cx).map(|(path, value)| match value {
+            Some(value) => toml_preview(&path, &value),
+            None => "# Saving removes this override.".to_owned(),
+        });
+        form.child(preview_block(
+            self.preview,
+            entry,
+            &this,
+            |form: &mut Self| &mut form.preview,
+            pal,
+        ))
+        .children(self.test_line(pal))
+        .children(self.saving.line(pal))
+        .child(self.actions(&this, pal))
     }
 }
 
 impl ProviderForm {
     fn identity(&self, form: Div, this: &Entity<Self>, pal: &'static Palette) -> Div {
         let pick = this.clone();
-        let new = matches!(self.target, Target::Custom(None) | Target::Local);
+        let new = matches!(
+            self.target,
+            Target::Custom(None) | Target::Local | Target::Import { .. }
+        );
         form.when(new, |form| {
             form.child(field(
                 "Name",
@@ -788,7 +819,7 @@ impl ProviderForm {
         let saved = match &self.target {
             Target::Registered(_) => !self.base.is_empty(),
             Target::Custom(id) => id.is_some(),
-            Target::Local => false,
+            Target::Local | Target::Import { .. } => false,
         };
         h_flex()
             .gap(px(8.))

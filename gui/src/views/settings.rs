@@ -23,8 +23,10 @@ use crate::theme::{
     FONT_MONO, FS_SM, FS_XS, Palette, R_FULL, R_LG, R_MD, ThemeChoice, WEIGHT_BOLD, WEIGHT_SEMIBOLD,
 };
 use crate::transport::State;
+use crate::views::acp_form::AcpForm;
+use crate::views::directory_picker::{DirectoryPicker, Picked};
 use crate::views::mcp_form::{FormDone, McpForm};
-use crate::views::provider_form::ProviderForm;
+use crate::views::provider_form::{ProviderForm, Target as ProviderTarget};
 use crate::views::settings_config as config;
 
 gpui_kit::actions!(kage_desktop, [SettingsClose]);
@@ -228,6 +230,14 @@ pub struct SettingsView {
     provider_choosing: bool,
     /// The provider form, while one is open.
     provider_form: Option<Entity<ProviderForm>>,
+    /// The ACP agent form, while one is open.
+    acp_form: Option<Entity<AcpForm>>,
+    /// The provider directory picker, while one is open.
+    directory: Option<Entity<DirectoryPicker>>,
+    /// The plugin install field, while it shows.
+    plugin_input: Option<Entity<InputState>>,
+    /// The last plugin install sent.
+    plugin_install: Option<u64>,
 }
 
 impl Focusable for SettingsView {
@@ -251,6 +261,10 @@ impl SettingsView {
             mcp_form: None,
             provider_choosing: false,
             provider_form: None,
+            acp_form: None,
+            directory: None,
+            plugin_input: None,
+            plugin_install: None,
         }
     }
 
@@ -283,6 +297,31 @@ impl SettingsView {
                 return;
             }
             config::ProviderNav::Open(target) => target,
+            config::ProviderNav::Acp(name) => {
+                self.open_acp(name, window, cx);
+                return;
+            }
+            config::ProviderNav::Directory(named) => {
+                let store = self.store.clone();
+                let picker = cx.new(|cx| DirectoryPicker::new(store, named, window, cx));
+                cx.subscribe(&picker, |this, _, _: &FormDone, cx| {
+                    this.directory = None;
+                    cx.notify();
+                })
+                .detach();
+                cx.subscribe_in(&picker, window, |this, _, picked: &Picked, window, cx| {
+                    this.directory = None;
+                    let target = ProviderTarget::Import {
+                        id: picked.id.clone(),
+                        entry: picked.entry.clone(),
+                    };
+                    this.open_provider(config::ProviderNav::Open(target), window, cx);
+                })
+                .detach();
+                self.directory = Some(picker);
+                cx.notify();
+                return;
+            }
         };
         let config = self.store.read(cx).config().cloned().unwrap_or_default();
         let store = self.store.clone();
@@ -294,6 +333,68 @@ impl SettingsView {
         })
         .detach();
         self.provider_form = Some(form);
+        cx.notify();
+    }
+
+    /// Shows the plugin install field, or hides it.
+    fn show_plugin_input(&mut self, show: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if show {
+            // A new field each time: one not shown yet cannot have its
+            // text set on the web.
+            let input = cx
+                .new(|cx| InputState::new(window, cx).placeholder("https://example.com/clock.lua"));
+            cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.install_plugin(window, cx);
+                }
+            })
+            .detach();
+            input.update(cx, |state, cx| state.focus(window, cx));
+            self.plugin_input = Some(input);
+            self.plugin_install = None;
+        } else {
+            self.plugin_input = None;
+        }
+        cx.notify();
+    }
+
+    /// Installs the plugin the install field names.
+    fn install_plugin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = &self.plugin_input else {
+            return;
+        };
+        let source = input.read(cx).value().trim().to_owned();
+        if source.is_empty() {
+            return;
+        }
+        let id = self.store.update(cx, |store, cx| {
+            cx.notify();
+            store.install_plugin(&source, false)
+        });
+        self.plugin_install = Some(id);
+        self.show_plugin_input(false, window, cx);
+    }
+
+    /// Opens the ACP agent form on agent `name`, or on a new agent.
+    fn open_acp(&mut self, name: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let snapshot = self
+            .store
+            .read(cx)
+            .config()
+            .map(config::Snapshot::parse)
+            .unwrap_or_default();
+        let existing = name
+            .as_deref()
+            .and_then(|name| Some((name, snapshot.acp_agent(name)?)));
+        let store = self.store.clone();
+        let form = cx.new(|cx| AcpForm::new(store, existing, window, cx));
+        cx.subscribe(&form, |this, _, _: &FormDone, cx| {
+            this.acp_form = None;
+            this.provider_choosing = false;
+            cx.notify();
+        })
+        .detach();
+        self.acp_form = Some(form);
         cx.notify();
     }
 
@@ -387,6 +488,8 @@ impl SettingsView {
         self.mcp_form = None;
         self.provider_choosing = false;
         self.provider_form = None;
+        self.acp_form = None;
+        self.directory = None;
         if matches!(
             section,
             Section::Providers | Section::Mcp | Section::Permissions | Section::Plugins
@@ -630,6 +733,12 @@ impl SettingsView {
                 if let Some(form) = &self.provider_form {
                     return vec![form.clone().into_any_element()];
                 }
+                if let Some(form) = &self.acp_form {
+                    return vec![form.clone().into_any_element()];
+                }
+                if let Some(picker) = &self.directory {
+                    return vec![picker.clone().into_any_element()];
+                }
                 let view = cx.entity();
                 config::providers_page(
                     &snapshot,
@@ -693,6 +802,19 @@ impl SettingsView {
             }
             _ => {
                 let view = cx.entity();
+                let (toggle, submit) = (view.clone(), view.clone());
+                let install = config::PluginInstall {
+                    input: self.plugin_input.clone(),
+                    status: self
+                        .plugin_install
+                        .map(|id| store.write_outcome(id).cloned()),
+                    on_toggle: std::rc::Rc::new(move |show, window, cx| {
+                        toggle.update(cx, |this, cx| this.show_plugin_input(show, window, cx));
+                    }),
+                    on_submit: std::rc::Rc::new(move |window, cx| {
+                        submit.update(cx, |this, cx| this.install_plugin(window, cx));
+                    }),
+                };
                 config::plugins_page(
                     &snapshot,
                     &self.store,
@@ -700,9 +822,11 @@ impl SettingsView {
                     move |name, cx| {
                         view.update(cx, |this, cx| {
                             this.plugin_open = name;
+                            this.plugin_install = None;
                             cx.notify();
                         });
                     },
+                    &install,
                     pal,
                 )
             }

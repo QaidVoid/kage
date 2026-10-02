@@ -45,6 +45,9 @@ impl StoreHandle for Entity<Store> {
     }
 }
 
+/// A directory read's answer: the providers it lists, or why it failed.
+pub type DirectoryRead = Result<Vec<kage_client::wire::DirectoryProvider>, String>;
+
 /// What the store asks the shell to carry out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -237,6 +240,9 @@ pub struct Store {
     writes: HashMap<u64, Option<Result<(), String>>>,
     /// Provider tests by request id, once answered.
     tests: HashMap<u64, kage_client::wire::ConfigTestResult>,
+    /// Directory reads by request id: `None` while in flight, then the
+    /// providers, or why the read failed.
+    directories: HashMap<u64, Option<DirectoryRead>>,
     /// Forks waiting for their copy, by source session.
     forking: HashMap<String, ForkPlan>,
     /// Copies waiting to open, with their source, by copy.
@@ -281,6 +287,7 @@ impl Store {
             engine_options: None,
             writes: HashMap::new(),
             tests: HashMap::new(),
+            directories: HashMap::new(),
             models: None,
             forking: HashMap::new(),
             forked: HashMap::new(),
@@ -607,6 +614,19 @@ impl Store {
                     if let Some(outcome) = self.writes.get_mut(request) {
                         *outcome = Some(Err(error.message.clone()));
                     }
+                    if let Some(read) = self.directories.get_mut(request) {
+                        *read = Some(Err(error.message.clone()));
+                    }
+                }
+                Change::ProviderDirectory { request, providers } => {
+                    self.directories
+                        .insert(*request, Some(Ok(providers.clone())));
+                }
+                Change::Plugins { request } => {
+                    if let Some(outcome) = self.writes.get_mut(request) {
+                        *outcome = Some(Ok(()));
+                    }
+                    self.ask_config();
                 }
                 Change::Tested { request, result } => {
                     self.tests.insert(*request, result.clone());
@@ -1044,6 +1064,45 @@ impl Store {
     /// under the returned id in [`Store::test_result`].
     pub fn config_test(&mut self, provider: kage_client::wire::ProviderProbe) -> u64 {
         self.client.config_test(provider)
+    }
+
+    /// Asks the engine to connect to an MCP server or start an ACP
+    /// agent; the answer lands under the returned id in
+    /// [`Store::test_result`].
+    pub fn config_probe(&mut self, request: &kage_client::wire::ConfigTestRequest) -> u64 {
+        self.client.test(request)
+    }
+
+    /// Asks the engine for a provider directory: models.dev without
+    /// `url`. The answer lands under the returned id in
+    /// [`Store::directory`].
+    pub fn ask_directory(&mut self, url: Option<&str>, api_key: Option<&str>) -> u64 {
+        let id = self.client.providers_directory(url, api_key);
+        self.directories.insert(id, None);
+        id
+    }
+
+    /// The answer to directory read `id`, once it arrived.
+    #[must_use]
+    pub fn directory(&self, id: u64) -> Option<&DirectoryRead> {
+        self.directories.get(&id)?.as_ref()
+    }
+
+    /// Installs a plugin from `source`, an `https://` URL or a path on
+    /// the engine's machine; [`Store::write_outcome`] reports it under
+    /// the returned id.
+    pub fn install_plugin(&mut self, source: &str, replace: bool) -> u64 {
+        let id = self.client.plugin_install(source, replace);
+        self.writes.insert(id, None);
+        id
+    }
+
+    /// Removes the installed plugin `name`; [`Store::write_outcome`]
+    /// reports it under the returned id.
+    pub fn remove_plugin(&mut self, name: &str) -> u64 {
+        let id = self.client.plugin_remove(name);
+        self.writes.insert(id, None);
+        id
     }
 
     /// The answer to provider test `id`, once it arrived.

@@ -4,6 +4,7 @@
 //! sends commands back through it. No view parses frames or names
 //! wire types beyond the transcript items it renders.
 
+pub(crate) mod acp_form;
 pub(crate) mod agents;
 pub mod approval;
 pub mod chrome;
@@ -12,6 +13,7 @@ pub(crate) mod config_forms;
 pub(crate) mod constellation;
 pub mod deferred;
 pub mod dialog;
+pub(crate) mod directory_picker;
 pub mod dock;
 pub(crate) mod eclipse;
 pub(crate) mod kit;

@@ -244,6 +244,8 @@ pub struct Shell {
     #[cfg(not(target_arch = "wasm32"))]
     setup: Entity<crate::views::setup::SetupView>,
     streamed: usize,
+    /// The boot splash over the window until the first handshake.
+    splash: crate::views::splash::Splash,
 }
 
 impl Shell {
@@ -463,6 +465,7 @@ impl Shell {
             #[cfg(not(target_arch = "wasm32"))]
             setup,
             streamed: 0,
+            splash: crate::views::splash::Splash::Showing,
         }
     }
 
@@ -1479,6 +1482,11 @@ impl Render for Shell {
                 });
             });
         }
+        {
+            let store = self.store.read(cx);
+            let answered = store.state().agent.is_some() || store.state().capabilities.is_some();
+            self.splash.follow(store.connect(), answered);
+        }
         let theme = cx.theme().colors;
         let sidebar_visible = self.sidebar_visible;
         let side_float = self.side_float;
@@ -1625,6 +1633,7 @@ impl Render for Shell {
             .child(self.dialog.clone())
             .child(self.settings.clone())
             .child(self.toasts.clone())
+            .children(self.splash.element(window, p))
     }
 }
 

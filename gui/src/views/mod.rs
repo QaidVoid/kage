@@ -25,6 +25,7 @@ pub(crate) mod settings_config;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod setup;
 pub mod sidebar;
+pub(crate) mod splash;
 pub mod transcript;
 pub mod vim;
 pub mod workbench;

@@ -22,8 +22,9 @@ use gpui_kit::component::{Icon, Sizable as _, h_flex, h_resizable, resizable_pan
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, App, AppContext, ClickEvent, ClipboardItem, Context, Entity, FocusHandle,
-    Focusable as _, InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    Focusable as _, InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Pixels,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    px,
 };
 
 use crate::clock::unix_seconds;
@@ -53,6 +54,9 @@ const REPLAY_PROMPT: &str = "fix the null check";
 /// The workbench panel's open width, matching the web client's
 /// default workbench width.
 const WORKBENCH_W: f32 = 460.0;
+
+/// The narrowest the chat pane gets when a side panel is dragged wider.
+const CHAT_MIN_W: f32 = 360.0;
 
 /// The short name a session's directory carries in the crumbs: the
 /// last path segment, or `local` when the session has none.
@@ -1585,18 +1589,18 @@ impl Render for Shell {
                     .child(
                         resizable_panel()
                             .size(px(SIDE_W))
-                            .size_range(px(160.)..px(420.))
+                            .size_range(px(160.)..Pixels::MAX)
                             .flex_none()
                             .visible(sidebar_visible && !narrow)
                             .child(self.sidebar.clone()),
                     )
                     .child(
-                        resizable_panel().child(
-                            v_flex()
-                                .size_full()
-                                .min_h_0()
-                                .child(self.topbar(cx))
-                                .map(|panel| {
+                        // The side panels grow without a cap, so the chat
+                        // keeps a floor of its own to shrink to.
+                        resizable_panel()
+                            .size_range(px(CHAT_MIN_W)..Pixels::MAX)
+                            .child(v_flex().size_full().min_h_0().child(self.topbar(cx)).map(
+                                |panel| {
                                     #[cfg(not(target_arch = "wasm32"))]
                                     if self.needs_setup(cx) {
                                         return panel.child(
@@ -1608,13 +1612,13 @@ impl Render for Shell {
                                         .child(self.content_column(cx))
                                         .child(self.bottom_band(cx))
                                         .children(self.vim_bar(window, cx))
-                                }),
-                        ),
+                                },
+                            )),
                     )
                     .child(
                         resizable_panel()
                             .size(px(WORKBENCH_W))
-                            .size_range(px(200.)..px(520.))
+                            .size_range(px(200.)..Pixels::MAX)
                             .flex_none()
                             .visible(workbench_visible && !mid)
                             .child(self.workbench.clone()),

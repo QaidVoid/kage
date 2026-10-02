@@ -99,8 +99,6 @@ pub(crate) fn with_value(value: String) -> Token {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
     use super::*;
 
     fn token_file() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -109,8 +107,16 @@ mod tests {
         (dir, path)
     }
 
-    fn mode(path: &std::path::Path) -> u32 {
-        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    /// Only the owner may read the file, where the platform has modes.
+    fn assert_private(path: &std::path::Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = path;
     }
 
     #[test]
@@ -122,14 +128,14 @@ mod tests {
             first.as_str().bytes().all(|b| b.is_ascii_hexdigit()),
             "{first:?}"
         );
-        assert_eq!(mode(&path), 0o600);
+        assert_private(&path);
 
         let second = Token::load_or_create(&path).unwrap();
         assert_eq!(first.as_str(), second.as_str(), "restart must reuse");
 
         let third = Token::rotate(&path).unwrap();
         assert_ne!(first.as_str(), third.as_str(), "rotate must replace");
-        assert_eq!(mode(&path), 0o600);
+        assert_private(&path);
         let fourth = Token::load_or_create(&path).unwrap();
         assert_eq!(third.as_str(), fourth.as_str());
     }

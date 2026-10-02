@@ -321,6 +321,8 @@ pub struct Subagent {
     pub usage: Option<kage_acp_wire::SubagentUsage>,
     /// The model the child runs, as `provider/model`.
     pub model: Option<String>,
+    /// Whether the child runs in the background.
+    pub background: bool,
 }
 
 impl Subagent {
@@ -358,6 +360,8 @@ impl Subagent {
         if update.model.is_some() {
             self.model.clone_from(&update.model);
         }
+        // Only the announcement says so; later updates leave it out.
+        self.background |= update.background;
     }
 }
 

@@ -359,12 +359,19 @@ enum Filter {
     Running,
     /// Only the agents that ended.
     Done,
+    /// Only the agents that run in the background.
+    Background,
 }
 
 impl Filter {
     /// The filters in chip order.
-    fn all() -> [Filter; 3] {
-        [Filter::All, Filter::Running, Filter::Done]
+    fn all() -> [Filter; 4] {
+        [
+            Filter::All,
+            Filter::Running,
+            Filter::Done,
+            Filter::Background,
+        ]
     }
 
     /// The label the chip carries.
@@ -373,6 +380,7 @@ impl Filter {
             Filter::All => "All",
             Filter::Running => "Running",
             Filter::Done => "Done",
+            Filter::Background => "Background",
         }
     }
 
@@ -395,6 +403,7 @@ impl Filter {
                         | kage_client::wire::SubagentState::Cancelled
                 )
             ),
+            Filter::Background => agent.background,
         }
     }
 }
@@ -723,6 +732,12 @@ impl WorkbenchView {
     pub fn open_agents(&mut self, cx: &mut Context<Self>) {
         self.tab = Tab::Agents;
         cx.notify();
+    }
+
+    /// Shows the agents list narrowed to the background agents.
+    pub fn open_background_agents(&mut self, cx: &mut Context<Self>) {
+        self.filter = Filter::Background;
+        self.open_agents(cx);
     }
 
     /// Shows the fetched pages.
@@ -1279,6 +1294,18 @@ impl WorkbenchView {
                 div()
                     .truncate()
                     .child(SharedString::from(facts.name.clone())),
+            );
+        }
+        if facts.background {
+            name = name.child(
+                div()
+                    .flex_none()
+                    .px(px(6.))
+                    .rounded(px(R_FULL))
+                    .bg(p.accent_soft)
+                    .text_size(px(10.))
+                    .text_color(p.accent)
+                    .child("bg"),
             );
         }
         let mut row = h_flex()

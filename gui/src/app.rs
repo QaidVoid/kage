@@ -308,6 +308,13 @@ impl Shell {
                 DockEvent::ScrollToPlan => shell
                     .transcript
                     .update(cx, |transcript, cx| transcript.scroll_to_plan(cx)),
+                DockEvent::OpenBackgroundAgents => {
+                    shell.workbench_visible = true;
+                    shell
+                        .workbench
+                        .update(cx, |workbench, cx| workbench.open_background_agents(cx));
+                    cx.notify();
+                }
             },
         )
         .detach();

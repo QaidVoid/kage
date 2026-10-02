@@ -17,6 +17,7 @@ use gpui_kit::{
     IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
     div, px, relative,
 };
+use kage_client::agent_text::{self, AgentText, Report};
 use kage_client::wire::{NoticeTone, SubagentState};
 use kage_client::{Session, Subagent, ToolCallItem, TranscriptItem};
 
@@ -117,6 +118,8 @@ pub(crate) struct AgentFacts {
     pub stoppable: bool,
     /// The swarm item it works on, and its launch index.
     pub item: Option<(String, u32)>,
+    /// Whether it runs in the background.
+    pub background: bool,
 }
 
 /// The children the call `call_id` started, in launch order.
@@ -201,14 +204,32 @@ pub(crate) fn agent_facts(
             .swarm
             .as_ref()
             .map(|swarm| (swarm.item.clone(), swarm.index)),
+        background: agent.background,
     }
 }
 
-/// The first line of the reply the parent's call `call_id` recorded for
-/// child `id`, read from the `<agent session="id" ...>` element of the
-/// call's result. A card shows it while the child's own transcript is
-/// not loaded.
+/// The first line of the reply the parent recorded for child `id`: in
+/// the `<agent session="id" ...>` report its call `call_id` returned,
+/// or for a background agent in the report that reached the parent
+/// later as a message. A card shows it while the child's own
+/// transcript is not loaded.
 fn recorded_reply(parent: &Session, call_id: &str, id: &str) -> Option<String> {
+    let delivered = parent.items.iter().rev().find_map(|item| match item {
+        TranscriptItem::User { content, .. } => content.iter().find_map(|block| {
+            let text = block.as_text()?;
+            agent_text::split(text)?
+                .1
+                .into_iter()
+                .find_map(|part| match part {
+                    AgentText::Report(report) if report.session == id => first_line(&report.body),
+                    _ => None,
+                })
+        }),
+        _ => None,
+    });
+    if delivered.is_some() {
+        return delivered;
+    }
     let text = parent.items.iter().find_map(|item| match item {
         TranscriptItem::ToolCall(call) if call.tool_call_id == call_id => Some(call.text()),
         _ => None,
@@ -217,6 +238,115 @@ fn recorded_reply(parent: &Session, call_id: &str, id: &str) -> Option<String> {
     let body = &text[at..];
     let body = &body[body.find('>')? + 1..];
     first_line(body.split("</agent>").next()?)
+}
+
+/// The card an agent's report renders as when it reaches its parent as
+/// a message: who finished and how, its run time and the reply. A click
+/// opens the agent.
+pub(crate) fn report_card(
+    n: usize,
+    report: &Report,
+    view: &Entity<TranscriptView>,
+    cx: &App,
+) -> AnyElement {
+    const SHOWN: usize = 6;
+    let pal = Palette::active(cx);
+    let hover = pal.hover;
+    let phase = match report.state.as_str() {
+        "completed" => Phase::Done,
+        "failed" => Phase::Failed,
+        "cancelled" => Phase::Cancelled,
+        _ => Phase::Running,
+    };
+    let word = match report.limit.as_deref() {
+        Some("turns") => "Turn limit",
+        Some("time") => "Timed out",
+        Some("budget") => "Over budget",
+        _ => phase.label(),
+    };
+    let open = {
+        let view = view.clone();
+        let id = report.session.clone();
+        move |_: &gpui_kit::ClickEvent, _: &mut gpui_kit::Window, cx: &mut App| {
+            let id = id.clone();
+            view.update(cx, |_, cx| cx.emit(TranscriptEvent::OpenAgent(id)));
+        }
+    };
+    let lines: Vec<&str> = report.body.lines().collect();
+    let mut reply = lines
+        .iter()
+        .take(SHOWN)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if lines.len() > SHOWN {
+        let more = lines.len() - SHOWN;
+        reply.push_str(&format!(
+            "\n... {more} more {}",
+            if more == 1 { "line" } else { "lines" }
+        ));
+    }
+    v_flex()
+        .id(ElementId::named_usize("report", n))
+        .w_full()
+        .border_1()
+        .border_color(pal.line)
+        .rounded(px(R_LG))
+        .bg(pal.surface)
+        .overflow_hidden()
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover))
+        .on_click(open)
+        .child(
+            h_flex()
+                .gap(px(10.))
+                .items_center()
+                .px(px(12.))
+                .py(px(SP_4))
+                .child(avatar(&report.name, pal))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(FS_SM))
+                        .text_color(pal.ink_strong)
+                        .child(SharedString::from(format!("{} finished", report.name))),
+                )
+                .child(
+                    h_flex()
+                        .gap(px(5.))
+                        .items_center()
+                        .whitespace_nowrap()
+                        .text_size(px(FS_XS))
+                        .text_color(phase.color(pal))
+                        .child(Icon::new(phase.icon()).with_size(px(12.)))
+                        .child(word),
+                )
+                .when_some(report.run_ms, |row, ms| {
+                    row.child(
+                        div()
+                            .font_family(FONT_MONO)
+                            .text_size(px(11.))
+                            .text_color(pal.faint)
+                            .child(crate::clock::span(Duration::from_millis(ms))),
+                    )
+                }),
+        )
+        .when(!reply.trim().is_empty(), |card| {
+            card.child(
+                div()
+                    .px(px(12.))
+                    .py(px(SP_4))
+                    .border_t_1()
+                    .border_color(pal.subtle)
+                    .text_size(px(FS_XS))
+                    .text_color(pal.muted)
+                    .child(SharedString::from(reply)),
+            )
+        })
+        .into_any_element()
 }
 
 /// The first non-empty line of `text`, without inline code ticks.
@@ -360,10 +490,22 @@ pub(crate) fn agent_card(
                                 .px(px(7.))
                                 .py(px(1.))
                                 .rounded(px(R_FULL))
-                                .bg(pal.fill)
+                                .bg(if facts.background {
+                                    pal.accent_soft
+                                } else {
+                                    pal.fill
+                                })
                                 .text_size(px(11.))
-                                .text_color(pal.muted)
-                                .child(SharedString::from(facts.name.clone())),
+                                .text_color(if facts.background {
+                                    pal.accent
+                                } else {
+                                    pal.muted
+                                })
+                                .child(if facts.background {
+                                    SharedString::from("background")
+                                } else {
+                                    SharedString::from(facts.name.clone())
+                                }),
                         ),
                 )
                 .child(

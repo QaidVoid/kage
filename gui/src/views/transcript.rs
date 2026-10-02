@@ -42,6 +42,7 @@ use crate::timing::RunEnd;
 use crate::views::agents::{self, AgentFacts, SwarmCounts, SwarmView, agent_facts, children_of};
 use crate::views::kit::{self, BtnTone};
 use crate::views::workbench::{ChangeEntry, change_entries};
+use kage_client::agent_text::{self, AgentText};
 use kage_client::wire::{NoticeTone, ToolCallContent, ToolCallStatus, TurnReason};
 use kage_client::{Session, ToolCallItem, TranscriptItem};
 
@@ -1558,6 +1559,12 @@ impl TranscriptView {
         let times = session.and_then(|session| store.timings(&session.id));
         let element = match row {
             Row::User { ix, text } => match session.and_then(|s| s.items.get(*ix)) {
+                Some(TranscriptItem::User { steered, .. })
+                    if let Some((words, parts)) = agent_text::split(text) =>
+                {
+                    self.render_delivered(*ix, words, &parts, *steered, cx)
+                        .into_any_element()
+                }
                 Some(TranscriptItem::User { content, steered }) => self
                     .render_user(*ix, text, &attachments(content), *steered, cx)
                     .into_any_element(),
@@ -1686,6 +1693,50 @@ impl TranscriptView {
 
     /// A user message: its attachments, a right-aligned bubble, the
     /// steered tag when it rode into a running turn, and hover actions.
+    /// A prompt the engine built from agent text: the words the user
+    /// typed in front, if any, as their bubble, then each agent report
+    /// as a card and each message between sessions as a row.
+    fn render_delivered(
+        &self,
+        ix: usize,
+        words: &str,
+        parts: &[AgentText],
+        steered: bool,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let pal = crate::theme::Palette::active(cx);
+        let view = cx.entity();
+        let mut column = v_flex()
+            .id(ElementId::named_usize("row-delivered", ix))
+            .w_full()
+            .gap(px(SP_3));
+        if !words.is_empty() {
+            column = column.child(self.render_user(ix, words, &[], steered, cx));
+        }
+        column.children(parts.iter().enumerate().map(|(n, part)| {
+            match part {
+                AgentText::Report(report) => agents::report_card(n, report, &view, cx),
+                AgentText::Mail { from, body } => h_flex()
+                    .gap(px(SP_3))
+                    .items_start()
+                    .text_size(px(FS_XS))
+                    .text_color(pal.muted)
+                    .child(
+                        Icon::new(IconName::MessageSquare)
+                            .with_size(px(ICON_XS))
+                            .text_color(pal.faint),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(SharedString::from(format!("Message from {from}: {body}"))),
+                    )
+                    .into_any_element(),
+            }
+        }))
+    }
+
     fn render_user(
         &self,
         ix: usize,
@@ -2747,7 +2798,9 @@ fn run_texts(session: &Session, end: usize) -> (Option<String>, String) {
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n");
-    (prompt.filter(|text| !text.is_empty()), reply)
+    // A run woken by agent text has no prompt of the user's to retry.
+    let typed = |text: &String| !text.is_empty() && agent_text::split(text).is_none();
+    (prompt.filter(typed), reply)
 }
 
 /// The design's markdown (`.md`): headings at 17, 15 and 14px for one,

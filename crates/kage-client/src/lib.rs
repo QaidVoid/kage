@@ -18,6 +18,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent_text;
 mod change;
 mod client;
 mod frame;

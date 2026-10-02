@@ -1,14 +1,13 @@
 //! The dock row above the composer: the goal pill with its popover,
 //! the plan pill that leads to the plan card under review, the running
-//! swarm and todos pills, and the queued prompt rows.
+//! swarm, background agents and todos pills, and the queued prompt
+//! rows.
 //!
 //! Every pill derives its state from the active session the store
 //! holds, so the dock counts only what frames delivered and hides
-//! what is incomputable. Two pieces of the full dock are absent on
-//! purpose: the background-agents pill, which waits for the wire to
-//! carry background agent events, and the approval card, a separate
-//! view the shell mounts beside this row. The plan review itself is
-//! answered on its card in the transcript.
+//! what is incomputable. The approval card is a separate view the shell
+//! mounts beside this row, and the plan review itself is answered on
+//! its card in the transcript.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -223,17 +222,53 @@ fn member_word(state: Option<SubagentState>) -> &'static str {
     }
 }
 
+/// The background agents pill's state: how many of the session's
+/// background agents run, and how many it started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BackgroundState {
+    /// Running or paused.
+    pub live: usize,
+    pub total: usize,
+}
+
+/// The background agents of a session, while it has any.
+#[must_use]
+pub(crate) fn background_state(session: &Session) -> Option<BackgroundState> {
+    let background: Vec<_> = session
+        .agents
+        .values()
+        .filter(|agent| agent.background)
+        .collect();
+    (!background.is_empty()).then(|| BackgroundState {
+        live: background
+            .iter()
+            .filter(|agent| {
+                matches!(
+                    agent.state,
+                    None | Some(SubagentState::Running | SubagentState::Paused)
+                )
+            })
+            .count(),
+        total: background.len(),
+    })
+}
+
 /// The swarm state of a session, while it still has running or paused
-/// members. A member never given a state is running.
+/// members. A member never given a state is running. Background agents
+/// have a pill of their own.
 #[must_use]
 pub(crate) fn swarm_state(session: &Session) -> Option<SwarmState> {
-    let total = session.agents.len();
+    let foreground: Vec<_> = session
+        .agents
+        .iter()
+        .filter(|(_, agent)| !agent.background)
+        .collect();
+    let total = foreground.len();
     if total == 0 {
         return None;
     }
-    let members: Vec<(String, &'static str)> = session
-        .agents
-        .iter()
+    let members: Vec<(String, &'static str)> = foreground
+        .into_iter()
         .map(|(id, agent)| {
             (
                 agent.name.clone().unwrap_or_else(|| id.clone()),
@@ -370,6 +405,8 @@ pub enum DockEvent {
     /// The dock cannot scroll the transcript itself; the shell
     /// subscribes and forwards the request.
     ScrollToPlan,
+    /// Show the background agents in the workbench's agents list.
+    OpenBackgroundAgents,
 }
 
 /// The pills row the shell mounts above its composer.
@@ -655,6 +692,34 @@ impl DockRow {
     /// The swarm pill, in the violet swarm color with its mono count,
     /// and the member list popover. The violet stays on through the
     /// hover lift, as the design pins the pill's color inline.
+    /// The background agents pill: a spinner and how many run while any
+    /// does, else how many there were. A click lists them.
+    fn background_pill(
+        &self,
+        state: BackgroundState,
+        pal: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let noun = |n: usize| if n == 1 { "agent" } else { "agents" };
+        let (icon, label) = if state.live > 0 {
+            (
+                IconName::LoaderCircle,
+                format!("{} background {} running", state.live, noun(state.live)),
+            )
+        } else {
+            (
+                IconName::Bot,
+                format!("{} background {}", state.total, noun(state.total)),
+            )
+        };
+        pill(div().id("dock-background-pill"), pal)
+            .cursor_pointer()
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(DockEvent::OpenBackgroundAgents)))
+            .child(Icon::new(icon).with_size(px(12.)))
+            .child(SharedString::from(label))
+            .into_any_element()
+    }
+
     fn swarm_pill(&self, swarm: &SwarmState, pal: &'static Palette) -> AnyElement {
         let count = format!("{}/{}", swarm.done, swarm.total);
         let (raised, line_strong) = (pal.raised, pal.line_strong);
@@ -919,12 +984,13 @@ impl Render for DockRow {
         let goal_laid_out = self.goal_mirror.laid_out().flag();
         let pal = Palette::active(cx);
         let plan_on = self.store.read(cx).plan_on();
-        let (goal, review, swarm, todos, queue) = {
+        let (goal, review, swarm, background, todos, queue) = {
             let session = self.store.read(cx).active_session();
             (
                 session.and_then(goal_state),
                 session.and_then(plan_review),
                 session.and_then(swarm_state),
+                session.and_then(background_state),
                 session.and_then(todos_state),
                 session.map(queue_rows).unwrap_or_default(),
             )
@@ -944,7 +1010,13 @@ impl Render for DockRow {
         };
 
         let mut dock = v_flex().w_full();
-        if goal.is_some() || review.is_some() || plan_on || swarm.is_some() || todos.is_some() {
+        let pills_on = goal.is_some()
+            || review.is_some()
+            || plan_on
+            || swarm.is_some()
+            || background.is_some()
+            || todos.is_some();
+        if pills_on {
             let mut pills = h_flex()
                 .w_full()
                 .flex_wrap()
@@ -959,6 +1031,9 @@ impl Render for DockRow {
             }
             if let Some(swarm) = &swarm {
                 pills = pills.child(self.swarm_pill(swarm, pal));
+            }
+            if let Some(background) = background {
+                pills = pills.child(self.background_pill(background, pal, cx));
             }
             if let Some(todos) = &todos {
                 let entries = self
@@ -998,8 +1073,9 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        DockEvent, DockRow, GoalState, QueueRow, SwarmState, TodosState, goal_state, prompt_text,
-        queue_rows, swarm_state, todos_state, truncate_text,
+        BackgroundState, DockEvent, DockRow, GoalState, QueueRow, SwarmState, TodosState,
+        background_state, goal_state, prompt_text, queue_rows, swarm_state, todos_state,
+        truncate_text,
     };
     use crate::store::{Command, PlanChoice, PlanReviewState, Store, plan_review};
     use crate::transport::State;
@@ -1297,6 +1373,36 @@ mod tests {
             None,
             "no running or paused member, no pill"
         );
+    }
+
+    #[test]
+    fn background_agents_have_their_own_pill_and_leave_the_swarm() {
+        let mut session = Session::new("s1");
+        assert!(background_state(&session).is_none());
+        for (id, state) in [
+            ("a", SubagentState::Running),
+            ("b", SubagentState::Completed),
+        ] {
+            session.agents.insert(
+                id.into(),
+                Subagent {
+                    background: true,
+                    ..agent_with(Some(state))
+                },
+            );
+        }
+        assert_eq!(
+            background_state(&session),
+            Some(BackgroundState { live: 1, total: 2 })
+        );
+        assert!(
+            swarm_state(&session).is_none(),
+            "background agents are no swarm"
+        );
+        session
+            .agents
+            .insert("c".into(), agent_with(Some(SubagentState::Running)));
+        assert_eq!(swarm_state(&session).map(|swarm| swarm.total), Some(1));
     }
 
     #[test]

@@ -1606,6 +1606,11 @@ impl TranscriptView {
         let element = match row {
             Row::User { ix, text } => match session.and_then(|s| s.items.get(*ix)) {
                 Some(TranscriptItem::User { .. })
+                    if let Some(summary) = agent_text::compaction_summary(text) =>
+                {
+                    self.render_summary(*ix, summary, cx).into_any_element()
+                }
+                Some(TranscriptItem::User { .. })
                     if let Some(note) = agent_text::engine_note(text) =>
                 {
                     render_engine_note(*ix, &note, cx).into_any_element()
@@ -1957,6 +1962,67 @@ impl TranscriptView {
     }
 
     /// Assistant reasoning: a live peek, then a collapsible body.
+    /// The summary a compaction left in place of the history before it,
+    /// folded under one line and read as markdown when opened.
+    fn render_summary(&self, ix: usize, summary: &str, cx: &Context<Self>) -> Stateful<Div> {
+        let theme = cx.theme().colors;
+        let ink = crate::theme::Palette::active(cx);
+        let view = cx.entity();
+        let expanded = self.ui.expanded.contains(&RowKey::Item(ix));
+        let head = h_flex()
+            .id("head")
+            .min_h(px(ROW_H))
+            .ml(px(-SP_3))
+            .px(px(SP_3))
+            .py(px(SP_1))
+            .gap(px(SP_4))
+            .items_center()
+            .rounded(px(R_SM))
+            .cursor_pointer()
+            .text_size(px(FS_SM))
+            .hover(move |style| style.bg(theme.list_hover))
+            .on_click(move |_, _, cx| {
+                view.update(cx, |this, cx| {
+                    this.toggle(RowKey::Item(ix));
+                    cx.notify();
+                });
+            })
+            .child(icon(IconName::Layers, theme.muted_foreground))
+            .child(
+                div()
+                    .whitespace_nowrap()
+                    .text_color(theme.foreground)
+                    .child("Context summary"),
+            )
+            .child(chevron(expanded, ink.faint));
+        let mut row = div()
+            .id(ElementId::named_usize("row-summary", ix))
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(head);
+        if expanded {
+            row = row.child(
+                div()
+                    .mt(px(SP_2))
+                    .ml(px(DETAIL_INDENT))
+                    .pl(px(SP_5))
+                    .border_l_2()
+                    .border_color(theme.border)
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        TextView::markdown(
+                            ElementId::named_usize("summary-md", ix),
+                            summary.to_owned(),
+                        )
+                        .style(markdown_style(cx))
+                        .text_color(theme.muted_foreground),
+                    ),
+            );
+        }
+        row
+    }
+
     fn render_thinking(
         &self,
         ix: usize,
@@ -2860,6 +2926,7 @@ fn run_texts(session: &Session, end: usize) -> (Option<String>, String) {
         !text.is_empty()
             && agent_text::split(text).is_none()
             && agent_text::engine_note(text).is_none()
+            && agent_text::compaction_summary(text).is_none()
     };
     (prompt.filter(typed), reply)
 }
@@ -3639,6 +3706,7 @@ fn rail_tick(session: &Session, row: &Row) -> Option<(Tick, String)> {
     let item = |ix: usize| session.items.get(ix);
     let short = |text: &str| text.chars().take(60).collect::<String>();
     match row {
+        Row::User { text, .. } if agent_text::compaction_summary(text).is_some() => None,
         Row::User { text, .. } => Some((Tick::Turn, format!("You: {}", short(text)))),
         Row::Tool { ix, .. } => {
             let Some(TranscriptItem::ToolCall(call)) = item(*ix) else {

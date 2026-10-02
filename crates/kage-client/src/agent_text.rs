@@ -119,6 +119,20 @@ pub fn engine_note(text: &str) -> Option<String> {
     Some(format!("Goal check: {first}"))
 }
 
+/// The body of the summary the engine writes in place of compacted
+/// history, which a replayed session carries as a user message. `None`
+/// for any other text. The framing is `kage_core`'s
+/// `COMPACTION_SUMMARY_PREFIX` and `COMPACTION_SUMMARY_SUFFIX`.
+#[must_use]
+pub fn compaction_summary(text: &str) -> Option<&str> {
+    let body = text
+        .strip_prefix("The conversation history before this point was compacted")?
+        .split_once("<summary>")?
+        .1;
+    let body = body.rsplit_once("</summary>").map_or(body, |(body, _)| body);
+    Some(body.trim())
+}
+
 /// The value of `key="..."` in an attribute list.
 fn attr(attrs: &str, key: &str) -> Option<String> {
     let padded = format!(" {attrs}");
@@ -170,6 +184,18 @@ mod tests {
             Some("Goal check: The goal is not met yet: tests pass.")
         );
         assert_eq!(engine_note("swarm mode on please"), None);
+    }
+
+    #[test]
+    fn a_compaction_summary_reads_without_its_framing() {
+        let text = format!(
+            "{}## Goal\nShip it.{}",
+            kage_core::message::COMPACTION_SUMMARY_PREFIX,
+            kage_core::message::COMPACTION_SUMMARY_SUFFIX
+        );
+        let text = text.as_str();
+        assert_eq!(compaction_summary(text), Some("## Goal\nShip it."));
+        assert_eq!(compaction_summary("<summary>typed by hand</summary>"), None);
     }
 
     #[test]

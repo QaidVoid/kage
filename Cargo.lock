@@ -1789,6 +1789,7 @@ name = "kage-client"
 version = "0.1.0"
 dependencies = [
  "kage-acp-wire",
+ "kage-core",
  "serde",
  "serde_json",
 ]

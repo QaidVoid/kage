@@ -225,7 +225,11 @@ pub(super) fn render_input(
         };
         // Lines are pre-wrapped at the body width to match
         // input_visual_cursor exactly; no Paragraph::wrap needed.
-        let lines = build_input_body_lines(input.text(), range, highlight, body_area.width);
+        let command = status
+            .command_end
+            .map(|end| (end, theme.group_style("KageInputCommand")));
+        let lines =
+            build_input_body_lines(input.text(), range, highlight, command, body_area.width);
         let body = Paragraph::new(lines).scroll((scroll_off, 0));
         frame.render_widget(body, body_area);
     }
@@ -693,13 +697,13 @@ fn build_input_body_lines(
     text: &str,
     highlight_range: Option<(usize, usize)>,
     highlight: Style,
+    command: Option<(usize, Style)>,
     body_width: u16,
 ) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
-    for (start, end) in wrap_input_rows(text, body_width) {
-        push_input_row(&mut out, text, start, end, highlight_range, highlight);
-    }
-    out
+    wrap_input_rows(text, body_width)
+        .into_iter()
+        .map(|(start, end)| input_row(text, start, end, highlight_range, highlight, command))
+        .collect()
 }
 
 /// Word-aware wrap plan for the input area.
@@ -771,51 +775,86 @@ fn wrap_one_logical_line(
     rows.push((row_start_abs, line_end_abs));
 }
 
-/// Append one wrapped visual row spanning `text[start..end]` to
-/// `out`, splitting into selection-aware spans when `visual_range`
-/// overlaps the slice.
-fn push_input_row(
-    out: &mut Vec<Line<'static>>,
+/// One wrapped visual row spanning `text[start..end]`, split into
+/// spans where `visual_range` or the command ending at `command`
+/// cross the slice.
+fn input_row(
     text: &str,
     start: usize,
     end: usize,
     visual_range: Option<(usize, usize)>,
     highlight: Style,
-) {
-    let chunk = &text[start..end];
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    if let Some((vs, ve)) = visual_range {
-        let sel_start = if vs <= start {
-            0
-        } else if vs >= end {
-            chunk.len()
-        } else {
-            vs - start
-        };
-        let sel_end = if ve <= start {
-            0
-        } else if ve >= end {
-            chunk.len()
-        } else {
-            ve - start
-        };
-        if sel_start > 0 {
-            spans.push(Span::raw(chunk[..sel_start].to_owned()));
-        }
-        if sel_end > sel_start {
-            spans.push(Span::styled(
-                chunk[sel_start..sel_end].to_owned(),
-                highlight,
-            ));
-        }
-        if sel_end < chunk.len() {
-            spans.push(Span::raw(chunk[sel_end..].to_owned()));
-        }
-    } else {
-        spans.push(Span::raw(chunk.to_owned()));
-    }
+    command: Option<(usize, Style)>,
+) -> Line<'static> {
+    let mut cuts = vec![start, end];
+    cuts.extend(
+        visual_range
+            .into_iter()
+            .flat_map(|(from, to)| [from, to])
+            .chain(command.map(|(command_end, _)| command_end))
+            .map(|at| at.clamp(start, end)),
+    );
+    cuts.sort_unstable();
+    cuts.dedup();
+    let spans: Vec<Span<'static>> = cuts
+        .windows(2)
+        .map(|piece| {
+            let (from, to) = (piece[0], piece[1]);
+            let mut style = Style::default();
+            if let Some((command_end, command_style)) = command
+                && from < command_end
+            {
+                style = command_style;
+            }
+            if visual_range.is_some_and(|(vs, ve)| vs <= from && to <= ve) {
+                style = style.patch(highlight);
+            }
+            Span::styled(text[from..to].to_owned(), style)
+        })
+        .collect();
     if spans.is_empty() {
-        spans.push(Span::raw(String::new()));
+        return Line::from(Span::raw(String::new()));
     }
-    out.push(Line::from(spans));
+    Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_command_paints_apart_and_keeps_the_selection_over_it() {
+        let command = Style::default().fg(Color::Blue);
+        let select = Style::default().bg(Color::Red);
+        let lines =
+            build_input_body_lines("/model opus", Some((4, 8)), select, Some((6, command)), 40);
+        let spans: Vec<(&str, Style)> = lines[0]
+            .spans
+            .iter()
+            .map(|span| (span.content.as_ref(), span.style))
+            .collect();
+        assert_eq!(
+            spans,
+            [
+                ("/mod", command),
+                ("el", command.patch(select)),
+                (" o", select),
+                ("pus", Style::default()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_command_reaches_only_the_first_row() {
+        let command = Style::default().fg(Color::Blue);
+        let lines = build_input_body_lines(
+            "/plan\nnext",
+            None,
+            Style::default(),
+            Some((5, command)),
+            40,
+        );
+        assert_eq!(lines[0].spans[0].style, command);
+        assert_eq!(lines[1].spans[0].style, Style::default());
+    }
 }

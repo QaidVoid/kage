@@ -508,6 +508,19 @@ impl App {
     /// Unified command registry the completion engine consumes: builtin
     /// commands first, then plugin commands, then MCP prompt commands
     /// (built at registration time and stored as `&'static` refs).
+    /// The byte length of the command that opens the draft, slash
+    /// included, when its name or an alias is a registered command.
+    fn draft_command_end(&self) -> Option<usize> {
+        let rest = self.input.text().strip_prefix('/')?;
+        let name = rest.split(char::is_whitespace).next()?;
+        let known = !name.is_empty()
+            && self
+                .command_registry()
+                .iter()
+                .any(|spec| spec.name == name || spec.aliases.contains(&name));
+        known.then_some(1 + name.len())
+    }
+
     fn command_registry(&self) -> Vec<&'static CommandSpec> {
         let mut out: Vec<&'static CommandSpec> = BUILTIN_COMMANDS.iter().collect();
         out.extend(self.plugin_command_specs.iter().copied());

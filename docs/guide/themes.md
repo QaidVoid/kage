@@ -193,6 +193,7 @@ another group, and `[groups]` can replace them like any other:
 | --- | --- | --- |
 | `KageWorking` | `KageMuted` | the working row above the input |
 | `KagePlan` | `KageInputBorderInsert` | the `plan` footer chip while [plan mode](/guide/plan-mode) is on |
+| `KageInputCommand` | `KageInputGlyph` | a command that opens the draft, such as `/model` |
 | `KageApproval` | `KageWarning` | approval panel rules, title and selected option, and the bullet of a tool call waiting for approval |
 | `KageDiffAdd` | `KageSuccess` | `+` lines in edit rows and approvals |
 | `KageDiffDelete` | `KageToolErrorRule` | `-` lines in edit rows and approvals |

@@ -434,6 +434,7 @@ impl App {
             agents_key: agents_key.as_deref(),
             breadcrumb: breadcrumb.as_ref(),
             placeholder: placeholder.as_deref(),
+            command_end: self.draft_command_end(),
         };
         let screen_selection = self.screen_selection;
         let mut captured_rows = std::mem::take(&mut self.captured_rows);

@@ -88,9 +88,10 @@ pub const ROLE_GROUPS: [(&str, &str, Slot); 46] = [
 /// Chrome groups that are not theme roles, as `(group, default link)`.
 /// Every theme gets them as links, and a theme file may replace them
 /// under `[groups]`.
-pub const EXTRA_GROUPS: [(&str, &str); 5] = [
+pub const EXTRA_GROUPS: [(&str, &str); 6] = [
     ("KageWorking", "KageMuted"),
     ("KagePlan", "KageInputBorderInsert"),
+    ("KageInputCommand", "KageInputGlyph"),
     ("KageApproval", "KageWarning"),
     ("KageDiffAdd", "KageSuccess"),
     ("KageDiffDelete", "KageToolErrorRule"),

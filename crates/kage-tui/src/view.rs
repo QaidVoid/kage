@@ -125,6 +125,9 @@ pub struct StatusCtx<'a> {
     /// Placeholder of the empty draft in insert mode and the modeless
     /// editor, in place of the default one.
     pub placeholder: Option<&'a str>,
+    /// The byte length of the command that opens the draft, slash
+    /// included, which the input paints apart from the prompt.
+    pub command_end: Option<usize>,
 }
 
 /// The agent on screen, as the `breadcrumb` component shows it.

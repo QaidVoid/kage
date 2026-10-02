@@ -818,6 +818,8 @@ pub struct FindMarks {
 struct RowModel {
     /// The rows, oldest first.
     rows: Vec<Row>,
+    /// How many transcript items the rows were built from.
+    items: usize,
 }
 
 impl RowModel {
@@ -988,7 +990,10 @@ fn row_model(session: &Session, ui: &UiState) -> RowModel {
         }
         index = end;
     }
-    RowModel { rows }
+    RowModel {
+        rows,
+        items: items.len(),
+    }
 }
 
 /// The row one non-grouped transcript item renders as, if any: a turn
@@ -1412,7 +1417,11 @@ impl TranscriptView {
     fn rail(&self, session: &Session, cx: &Context<Self>) -> Option<AnyElement> {
         let rows = &self.model.rows;
         let count = rows.len();
-        if !self.store.read(cx).prefs().rail || count == 0 || self.pinned.is_some() {
+        if !self.store.read(cx).prefs().rail
+            || count == 0
+            || self.pinned.is_some()
+            || self.model.items != session.items.len()
+        {
             return None;
         }
         let pal = crate::theme::Palette::active(cx);
@@ -3537,6 +3546,17 @@ impl Render for TranscriptView {
                             let Some(row) = model.rows.get(ix) else {
                                 return div().into_any_element();
                             };
+                            // The session can change between this frame's
+                            // render and the list drawing its rows, such as
+                            // a newly selected session still loading. Rows
+                            // built for other items would index past them.
+                            let items = this
+                                .session(this.store.read(cx))
+                                .map_or(0, |session| session.items.len());
+                            if items != model.items {
+                                cx.notify();
+                                return div().into_any_element();
+                            }
                             *this.render_counts.entry(row.key()).or_insert(0) += 1;
                             let prev = ix.checked_sub(1).and_then(|p| model.rows.get(p));
                             let last = ix + 1 == model.rows.len();

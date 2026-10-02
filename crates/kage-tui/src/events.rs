@@ -338,6 +338,10 @@ fn is_compaction_summary(text: &str) -> bool {
 /// bubble, then each agent report as a folded report block and each
 /// message from another session as a one-line row.
 fn push_user_text(buf: &mut Buffer, text: String) {
+    if let Some(note) = engine_note(&text) {
+        buf.push_custom("kage:mode", note, false);
+        return;
+    }
     let Some((words, parts)) = split_agent_text(&text) else {
         buf.push_user(text);
         return;
@@ -357,11 +361,36 @@ fn push_user_text(buf: &mut Buffer, text: String) {
     }
 }
 
+/// What a note the engine adds to the conversation as a user message
+/// says, as the quiet line shown in place of a user bubble: plan or
+/// swarm mode switching, resumed swarm members reporting back, or a
+/// goal check sending the model back to work. `None` for anything else.
+fn engine_note(text: &str) -> Option<String> {
+    const MODES: [(&str, &str); 4] = [
+        ("[plan mode on]", "plan mode on"),
+        ("[plan mode off]", "plan mode off"),
+        ("[swarm mode on]", "swarm mode on"),
+        ("[swarm mode off]", "swarm mode off"),
+    ];
+    let text = text.trim_start();
+    if let Some((_, label)) = MODES.iter().find(|(tag, _)| text.starts_with(tag)) {
+        return Some((*label).to_owned());
+    }
+    if text.starts_with("[swarm resume]") {
+        return Some("resumed swarm members reported back".to_owned());
+    }
+    let goal = text.strip_prefix("[goal]")?.trim_start();
+    let first = goal.split_inclusive(". ").next().unwrap_or(goal).trim();
+    Some(format!("goal check: {first}"))
+}
+
 /// Whether a user message carries words someone typed, rather than
 /// only agent reports and messages the engine delivered.
 pub(crate) fn typed_by_the_user(message: &Message) -> bool {
-    user_text(message)
-        .is_none_or(|text| split_agent_text(&text).is_none_or(|(words, _)| !words.is_empty()))
+    user_text(message).is_none_or(|text| {
+        engine_note(&text).is_none()
+            && split_agent_text(&text).is_none_or(|(words, _)| !words.is_empty())
+    })
 }
 
 /// The text of a user message as its bubble shows it: every text
@@ -423,6 +452,34 @@ mod tests {
 
     use super::*;
     use crate::buffer::Block;
+
+    #[test]
+    fn engine_notes_are_quiet_lines_not_user_bubbles() {
+        let mut buf = Buffer::new();
+        push_user_text(&mut buf, "[swarm mode on] Split the work early.".into());
+        push_user_text(
+            &mut buf,
+            "[goal] The goal is not met yet: tests pass. Keep working.".into(),
+        );
+        let lines: Vec<_> = buf
+            .blocks()
+            .iter()
+            .map(|block| match block.as_ref() {
+                Block::Custom { kind, text, .. } => (kind.clone(), text.clone()),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("kage:mode".to_owned(), "swarm mode on".to_owned()),
+                (
+                    "kage:mode".to_owned(),
+                    "goal check: The goal is not met yet: tests pass.".to_owned()
+                ),
+            ]
+        );
+    }
 
     #[test]
     fn a_shell_block_ends_with_a_clear_status() {

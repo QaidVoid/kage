@@ -246,12 +246,9 @@ fn install_signals(stop: &Arc<AtomicBool>, log: &Log) {
 #[cfg(not(unix))]
 fn install_signals(stop: &Arc<AtomicBool>, log: &Log) {
     for signal in [SIGINT, SIGTERM] {
-        let registered = signal_hook::flag::register_conditional_shutdown(
-            signal,
-            130,
-            Arc::clone(stop),
-        )
-        .and_then(|_| signal_hook::flag::register(signal, Arc::clone(stop)));
+        let registered =
+            signal_hook::flag::register_conditional_shutdown(signal, 130, Arc::clone(stop))
+                .and_then(|_| signal_hook::flag::register(signal, Arc::clone(stop)));
         if registered.is_err() {
             log("warning: cannot register signal handlers; kill the process to stop it");
             return;

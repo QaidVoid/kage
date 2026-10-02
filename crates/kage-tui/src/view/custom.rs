@@ -43,7 +43,7 @@ enum Chrome {
 fn chrome_for(kind: &str) -> Chrome {
     match kind {
         "kage:help" | "kage:notify" | "kage:retry" | "kage:theme" | "kage:image"
-        | "kage:plugin" | "kage:mcp" | "kage:log" | "kage:mail" => Chrome::Quiet,
+        | "kage:plugin" | "kage:mcp" | "kage:log" | "kage:mail" | "kage:mode" => Chrome::Quiet,
         "kage:agent" => Chrome::Report,
         "kage:error" => Chrome::Error,
         "kage:usage" => Chrome::Usage,

@@ -1,7 +1,8 @@
 //! Agent text in a user message: the `<agent>` reports and `<message>`
 //! mail the engine hands a session as a prompt of its own, such as a
-//! background agent's result. A client shows them as report cards and
-//! message rows instead of words the user typed.
+//! background agent's result, and the notes it adds when a mode
+//! switches. A client shows them as report cards, message rows and
+//! note lines instead of words the user typed.
 //!
 //! ```text
 //! <agent name="general" session="01K6..." state="completed" run_ms="4200">
@@ -93,6 +94,31 @@ pub fn split(text: &str) -> Option<(&str, Vec<AgentText>)> {
     Some((text[..first].trim(), parts))
 }
 
+/// What a note the engine adds to the conversation as a user message
+/// says, in the line a client shows instead of a user bubble: plan or
+/// swarm mode switching, resumed swarm members reporting back, or a
+/// goal check sending the model back to work. `None` for anything
+/// else.
+#[must_use]
+pub fn engine_note(text: &str) -> Option<String> {
+    const MODES: [(&str, &str); 4] = [
+        ("[plan mode on]", "Plan mode on"),
+        ("[plan mode off]", "Plan mode off"),
+        ("[swarm mode on]", "Swarm mode on"),
+        ("[swarm mode off]", "Swarm mode off"),
+    ];
+    let text = text.trim_start();
+    if let Some((_, label)) = MODES.iter().find(|(tag, _)| text.starts_with(tag)) {
+        return Some((*label).to_owned());
+    }
+    if text.starts_with("[swarm resume]") {
+        return Some("Resumed swarm members reported back".to_owned());
+    }
+    let goal = text.strip_prefix("[goal]")?.trim_start();
+    let first = goal.split_inclusive(". ").next().unwrap_or(goal).trim();
+    Some(format!("Goal check: {first}"))
+}
+
 /// The value of `key="..."` in an attribute list.
 fn attr(attrs: &str, key: &str) -> Option<String> {
     let padded = format!(" {attrs}");
@@ -131,6 +157,19 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn engine_notes_read_as_one_line() {
+        assert_eq!(
+            engine_note("[swarm mode on] Split the work early.").as_deref(),
+            Some("Swarm mode on")
+        );
+        assert_eq!(
+            engine_note("[goal] The goal is not met yet: tests pass. Keep working.").as_deref(),
+            Some("Goal check: The goal is not met yet: tests pass.")
+        );
+        assert_eq!(engine_note("swarm mode on please"), None);
     }
 
     #[test]

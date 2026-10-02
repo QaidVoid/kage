@@ -423,6 +423,25 @@ pub(crate) fn tool_verb(call: &ToolCallItem) -> (String, String) {
             basename(input_str(input, "path")).to_owned(),
         ),
         "todo_list" => ("Updated todos", "Updating todos", String::new()),
+        "agent" => (
+            "Delegated",
+            "Delegating",
+            input_str(input, "description").to_owned(),
+        ),
+        "swarm" => {
+            let items = input
+                .and_then(|input| input["items"].as_array())
+                .map_or(0, Vec::len);
+            (
+                "Swarmed",
+                "Swarming",
+                format!(
+                    "{} ({items} {})",
+                    input_str(input, "description"),
+                    if items == 1 { "item" } else { "items" }
+                ),
+            )
+        }
         "ask_user_question" => (
             "Asked",
             "Asking",
@@ -477,6 +496,8 @@ fn tool_icon(title: &str) -> IconName {
         "web_search" | "web_fetch" => IconName::Globe,
         "todo_list" => IconName::ListTodo,
         "ask_user_question" => IconName::MessageSquare,
+        "agent" => IconName::Bot,
+        "swarm" => IconName::Waypoints,
         _ => IconName::Zap,
     }
 }
@@ -1574,6 +1595,11 @@ impl TranscriptView {
         let times = session.and_then(|session| store.timings(&session.id));
         let element = match row {
             Row::User { ix, text } => match session.and_then(|s| s.items.get(*ix)) {
+                Some(TranscriptItem::User { .. })
+                    if let Some(note) = agent_text::engine_note(text) =>
+                {
+                    render_engine_note(*ix, &note, cx).into_any_element()
+                }
                 Some(TranscriptItem::User { steered, .. })
                     if let Some((words, parts)) = agent_text::split(text) =>
                 {
@@ -2814,7 +2840,11 @@ fn run_texts(session: &Session, end: usize) -> (Option<String>, String) {
         .collect::<Vec<_>>()
         .join("\n\n");
     // A run woken by agent text has no prompt of the user's to retry.
-    let typed = |text: &String| !text.is_empty() && agent_text::split(text).is_none();
+    let typed = |text: &String| {
+        !text.is_empty()
+            && agent_text::split(text).is_none()
+            && agent_text::engine_note(text).is_none()
+    };
     (prompt.filter(typed), reply)
 }
 
@@ -2884,6 +2914,21 @@ fn blank_row(ix: usize) -> Stateful<Div> {
 
 /// The design's notice row: the text between two flanking hairlines,
 /// in the tone's color.
+/// A note the engine added as a user message, such as swarm mode
+/// switching on: one quiet line, not a bubble the user typed.
+fn render_engine_note(ix: usize, note: &str, cx: &Context<TranscriptView>) -> Stateful<Div> {
+    let pal = crate::theme::Palette::active(cx);
+    h_flex()
+        .id(ElementId::named_usize("row-note", ix))
+        .w_full()
+        .gap(px(SP_2))
+        .items_center()
+        .text_size(px(FS_XS))
+        .text_color(pal.faint)
+        .child(Icon::new(IconName::Info).with_size(px(ICON_XS)))
+        .child(SharedString::from(note.to_owned()))
+}
+
 fn render_notice(
     ix: usize,
     tone: NoticeTone,

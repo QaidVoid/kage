@@ -3,6 +3,8 @@
 //! its file listing, the announced agents, the shell calls and the
 //! fetched pages, read straight from the session transcript.
 
+use std::collections::HashSet;
+
 use gpui_kit::AnyElement;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -15,7 +17,7 @@ use gpui_kit::{
     ParentElement as _, Render, SharedString, Stateful, StatefulInteractiveElement as _,
     Styled as _, Window, div, px,
 };
-use kage_client::wire::{ToolCallContent, ToolKind};
+use kage_client::wire::{ToolCallContent, ToolCallStatus, ToolKind};
 use kage_client::{ToolCallItem, TranscriptItem};
 
 use crate::app::ToggleWorkbench;
@@ -149,6 +151,25 @@ fn find_call<'a>(
     })
 }
 
+/// How many shell calls `session` and the subagents under it ran.
+fn session_run_count(store: &Store, session: &kage_client::Session) -> usize {
+    let shells = |items: &[TranscriptItem]| {
+        items
+            .iter()
+            .filter(|item| {
+                matches!(item, TranscriptItem::ToolCall(call) if call.kind == ToolKind::Execute)
+            })
+            .count()
+    };
+    shells(&session.items)
+        + session
+            .agents
+            .keys()
+            .filter_map(|id| store.state().session(id))
+            .map(|child| shells(&child.items))
+            .sum::<usize>()
+}
+
 /// The shell calls `session` and the subagents under it ran: the
 /// session's own, then each child's, named by its agent.
 fn session_runs(store: &Store, session: &kage_client::Session) -> Vec<TermEntry> {
@@ -201,19 +222,49 @@ pub(crate) fn strip_ansi(text: &str) -> String {
     out
 }
 
+/// How many output lines an open run shows, from the end.
+const TERM_TAIL: usize = 40;
+
 /// One shell call's facts, collected from the transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TermEntry {
+    /// The tool call id, which keys the run's open state.
+    pub id: String,
     /// The command the call ran.
     pub command: String,
-    /// The output tail the call streamed, if any.
+    /// The last [`TERM_TAIL`] lines of output, without the shell
+    /// tool's `stdout:` and `exit:` framing.
     pub output: String,
-    /// The exit code, when the output carried one.
+    /// How many output lines the tail leaves out.
+    pub hidden: usize,
+    /// The exit code, from the raw output or the `exit:` line.
     pub exit: Option<i64>,
+    /// Whether the call is still running.
+    pub running: bool,
     /// Whether the call failed.
     pub failed: bool,
     /// The subagent that ran it, when one did.
     pub who: Option<String>,
+}
+
+/// The shell tool's text without its framing: the output with the
+/// `stdout:` header and the `(no output)` stand-in dropped, and the
+/// exit code its closing `exit: N` line names.
+fn shell_text(text: &str) -> (&str, Option<i64>) {
+    let (body, exit) = match text.rsplit_once("\nexit: ") {
+        Some((body, code)) if !code.contains('\n') => (body, code.trim().parse().ok()),
+        _ => (text, None),
+    };
+    let body = body.strip_prefix("stdout:\n").unwrap_or(body);
+    let body = if body == "(no output)" { "" } else { body };
+    (body.trim_end(), exit)
+}
+
+/// The last [`TERM_TAIL`] lines of `text`, and how many come before.
+fn tail(text: &str) -> (String, usize) {
+    let lines: Vec<&str> = text.lines().collect();
+    let hidden = lines.len().saturating_sub(TERM_TAIL);
+    (lines[hidden..].join("\n"), hidden)
 }
 
 /// The shell calls the transcript holds, in transcript order.
@@ -234,17 +285,30 @@ pub(crate) fn term_entries(items: &[TranscriptItem]) -> Vec<TermEntry> {
             .and_then(|command| command.as_str())
             .unwrap_or(&call.title)
             .to_owned();
-        let exit = call.raw_output.as_ref().and_then(|output| {
-            output
-                .get("exitCode")
-                .or_else(|| output.get("exit_code"))
-                .and_then(|code| code.as_i64())
-        });
+        let text = call.text();
+        let (body, text_exit) = shell_text(&text);
+        let exit = call
+            .raw_output
+            .as_ref()
+            .and_then(|output| {
+                output
+                    .get("exitCode")
+                    .or_else(|| output.get("exit_code"))
+                    .and_then(|code| code.as_i64())
+            })
+            .or(text_exit);
+        let (output, hidden) = tail(&strip_ansi(body));
         out.push(TermEntry {
-            command,
-            output: call.text(),
+            id: call.tool_call_id.clone(),
+            command: command.trim().to_owned(),
+            output,
+            hidden,
             exit,
-            failed: call.status == kage_client::wire::ToolCallStatus::Failed,
+            running: matches!(
+                call.status,
+                ToolCallStatus::Pending | ToolCallStatus::InProgress
+            ),
+            failed: call.status == ToolCallStatus::Failed,
             who: None,
         });
     }
@@ -498,6 +562,9 @@ pub struct WorkbenchView {
     files_asked: bool,
     /// The session the files ask belongs to.
     loaded: Option<String>,
+    /// Shell runs the user opened or closed against their default: the
+    /// latest run and running ones start open, the rest folded.
+    term_flipped: HashSet<String>,
 }
 
 impl EventEmitter<WorkbenchEvent> for WorkbenchView {}
@@ -524,6 +591,7 @@ impl WorkbenchView {
             selected: None,
             files_asked: false,
             loaded: None,
+            term_flipped: HashSet::new(),
         }
     }
 
@@ -1392,79 +1460,151 @@ impl WorkbenchView {
                 .into_any_element(),
             ];
         }
+        let last = runs.len() - 1;
         let mut out = Vec::new();
-        for run in runs {
-            let mut head = h_flex()
-                .items_center()
-                .gap(px(8.))
-                .px(px(14.))
-                .pt(px(10.))
-                .pb(px(4.))
-                .child(
-                    div()
-                        .flex_none()
-                        .font_family(FONT_MONO)
-                        .text_size(px(FS_XS))
-                        .text_color(p.accent)
-                        .child("$"),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .truncate()
-                        .font_family(FONT_MONO)
-                        .text_size(px(FS_XS))
-                        .text_color(p.ink)
-                        .child(run.command.clone()),
-                );
-            if let Some(who) = &run.who {
-                head = head.child(
-                    div()
-                        .px(px(7.))
-                        .py(px(1.))
-                        .rounded(px(R_FULL))
-                        .border_1()
-                        .border_color(p.line)
-                        .bg(p.fill)
-                        .text_size(px(10.5))
-                        .text_color(p.muted)
-                        .child(SharedString::from(who.clone())),
-                );
-            }
-            head = match run.exit {
-                Some(0) => head.child(chip("exit 0".to_owned(), p.ok, p.ok_soft)),
-                Some(code) => head.child(chip(format!("exit {code}"), p.danger, p.danger_soft)),
-                None if run.failed => {
-                    head.child(chip("failed".to_owned(), p.danger, p.danger_soft))
-                }
-                None => head.child(
-                    Spinner::new()
-                        .icon(IconName::LoaderCircle)
-                        .color(p.accent)
-                        .with_size(px(12.)),
-                ),
-            };
-            out.push(head.into_any_element());
-            if !run.output.is_empty() {
-                out.push(
-                    div()
-                        .mx(px(14.))
-                        .mb(px(6.))
-                        .px(px(10.))
-                        .py(px(8.))
-                        .rounded(px(R_MD))
-                        .bg(p.deep)
-                        .font_family(FONT_MONO)
-                        .text_size(px(12.))
-                        .line_height(px(18.))
-                        .text_color(p.muted)
-                        .child(SharedString::from(strip_ansi(&run.output)))
-                        .into_any_element(),
-                );
-            }
+        for (ix, run) in runs.into_iter().enumerate() {
+            let open = (ix == last || run.running) != self.term_flipped.contains(&run.id);
+            out.push(self.term_run(run, open, p, cx).into_any_element());
         }
         out
+    }
+
+    /// One shell run as a card: its state, the command's first line and
+    /// who ran it on a row that folds the rest, then the whole command
+    /// and the tail of its output.
+    fn term_run(
+        &self,
+        run: TermEntry,
+        open: bool,
+        p: &'static crate::theme::Palette,
+        cx: &Context<Self>,
+    ) -> gpui_kit::Stateful<Div> {
+        let state = match run.exit {
+            _ if run.running => Spinner::new()
+                .icon(IconName::LoaderCircle)
+                .color(p.accent)
+                .with_size(px(12.))
+                .into_any_element(),
+            Some(0) => Icon::new(IconName::Check)
+                .with_size(px(12.))
+                .text_color(p.ok)
+                .into_any_element(),
+            Some(_) => Icon::new(IconName::X)
+                .with_size(px(12.))
+                .text_color(p.danger)
+                .into_any_element(),
+            None if run.failed => Icon::new(IconName::X)
+                .with_size(px(12.))
+                .text_color(p.danger)
+                .into_any_element(),
+            None => Icon::new(IconName::Minus)
+                .with_size(px(12.))
+                .text_color(p.faint)
+                .into_any_element(),
+        };
+        let first = run.command.lines().next().unwrap_or_default().to_owned();
+        let more = run.command.lines().count() > 1;
+        let this = cx.entity();
+        let id = run.id.clone();
+        let mut head = h_flex()
+            .id("term-head")
+            .items_center()
+            .gap(px(8.))
+            .px(px(10.))
+            .py(px(7.))
+            .cursor_pointer()
+            .hover(move |style| style.bg(p.fill_hover))
+            .on_click(move |_, _, cx| {
+                this.update(cx, |this, cx| {
+                    if !this.term_flipped.remove(&id) {
+                        this.term_flipped.insert(id.clone());
+                    }
+                    cx.notify();
+                });
+            })
+            .child(div().flex_none().child(state))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .font_family(FONT_MONO)
+                    .text_size(px(FS_XS))
+                    .text_color(p.ink)
+                    .child(SharedString::from(if more && !open {
+                        format!("{first} \u{2026}")
+                    } else {
+                        first
+                    })),
+            );
+        if let Some(who) = &run.who {
+            head = head.child(
+                div()
+                    .flex_none()
+                    .px(px(7.))
+                    .py(px(1.))
+                    .rounded(px(R_FULL))
+                    .border_1()
+                    .border_color(p.line)
+                    .bg(p.fill)
+                    .text_size(px(10.5))
+                    .text_color(p.muted)
+                    .child(SharedString::from(who.clone())),
+            );
+        }
+        if let Some(code) = run.exit.filter(|code| *code != 0) {
+            head = head.child(chip(format!("exit {code}"), p.danger, p.danger_soft));
+        }
+        let mut card = v_flex()
+            .id(SharedString::from(format!("term-{}", run.id)))
+            .mx(px(12.))
+            .mt(px(8.))
+            .rounded(px(R_MD))
+            .border_1()
+            .border_color(p.line)
+            .bg(p.deep)
+            .overflow_hidden()
+            .child(head);
+        if !open {
+            return card;
+        }
+        let rest: Vec<&str> = run.command.lines().skip(1).collect();
+        let mut body = v_flex()
+            .border_t_1()
+            .border_color(p.line)
+            .px(px(10.))
+            .py(px(8.))
+            .gap(px(6.))
+            .font_family(FONT_MONO)
+            .text_size(px(12.))
+            .line_height(px(18.));
+        if !rest.is_empty() {
+            body = body.child(
+                div()
+                    .text_color(p.muted)
+                    .child(SharedString::from(rest.join("\n"))),
+            );
+        }
+        if run.hidden > 0 {
+            body = body.child(div().text_size(px(FS_2XS)).text_color(p.faint).child(
+                SharedString::from(format!(
+                    "\u{2026} {} earlier line{}",
+                    run.hidden,
+                    if run.hidden == 1 { "" } else { "s" }
+                )),
+            ));
+        }
+        if !run.output.is_empty() {
+            body = body.child(
+                div()
+                    .text_color(p.ink)
+                    .child(SharedString::from(run.output)),
+            );
+        } else if !run.running {
+            body = body.child(div().text_color(p.faint).child("(no output)"));
+        }
+        card = card.child(body);
+        card
     }
 
     /// The browser pane: the latest fetched page as reader text, its
@@ -1588,8 +1728,8 @@ impl Render for WorkbenchView {
                         }
                     }
                     Tab::Terminal => {
-                        let runs = session_runs(self.store.read(cx), session);
-                        (!runs.is_empty()).then(|| runs.len().to_string())
+                        let runs = session_run_count(self.store.read(cx), session);
+                        (runs > 0).then(|| runs.to_string())
                     }
                     Tab::Browser => {
                         let pages = fetch_entries(&session.items);
@@ -1790,7 +1930,36 @@ mod tests {
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].command, "cargo test");
         assert_eq!(runs[0].exit, Some(0));
+        assert!(!runs[0].running);
         assert!(runs[1].exit.is_none(), "a running call has no exit yet");
+        assert!(runs[1].running);
+    }
+
+    #[test]
+    fn a_replayed_shell_call_reads_its_exit_from_the_text() {
+        let mut shell = call("t1", ToolKind::Execute);
+        shell.status = kage_client::wire::ToolCallStatus::Completed;
+        shell.content = vec![ToolCallContent::Content(MessageChunk {
+            content: kage_client::wire::ContentBlock::Text(kage_client::wire::TextContent {
+                text: "stdout:\nok\n\nexit: 3".into(),
+            }),
+            meta: None,
+        })];
+        let runs = term_entries(&[TranscriptItem::ToolCall(shell)]);
+        assert_eq!(runs[0].exit, Some(3));
+        assert_eq!(runs[0].output, "ok");
+        assert!(!runs[0].running, "a finished call never spins");
+    }
+
+    #[test]
+    fn long_output_keeps_its_tail() {
+        let text = (1..=50)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (kept, hidden) = super::tail(&text);
+        assert_eq!(hidden, 10);
+        assert!(kept.starts_with("11\n") && kept.ends_with("50"));
     }
 
     #[test]

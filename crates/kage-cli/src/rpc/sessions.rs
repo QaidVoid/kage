@@ -9,8 +9,8 @@ use kage_acp::acp::{
     ContentBlock, ListSessionsRequest, ListSessionsResponse, McpServer, PromptRef,
     SessionConfigOption, SessionExportResponse, SessionForkRequest, SessionForkResponse,
     SessionInfo, SessionInfoKage, SessionInfoMeta, SessionInfoUpdate, SessionUpdate,
-    SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate, TurnPhase,
-    TurnReason, TurnUpdate,
+    SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate, ToolCallStatus,
+    ToolCallUpdate, TurnPhase, TurnReason, TurnUpdate,
 };
 use kage_acp::agent::{PromptContext, send_update};
 use kage_core::protocol::{AgentNode, AgentState, AgentTree};
@@ -81,7 +81,12 @@ impl super::CliAcpAgent {
         }
         let replay = kage_session::replay(&path).map_err(|e| RpcError::internal(e.to_string()))?;
         if replay_file && let Some(ctx) = ctx {
-            for update in replay_updates(&replay.history) {
+            // Nothing runs this session, so a call the file never closed
+            // ended with the engine that made it.
+            for update in replay_updates(&replay.history)
+                .into_iter()
+                .chain(interrupted_calls(&replay.history))
+            {
                 ctx.update(update);
             }
             self.announce_restored(id, &replay.history, ctx);
@@ -363,6 +368,37 @@ pub(super) fn replay_updates(history: &[Message]) -> Vec<SessionUpdate> {
     updates
 }
 
+/// A failed update for each tool call in `history` with no recorded
+/// result: the engine stopped before the call finished, such as a
+/// desktop app that quit mid-run, so nothing will ever answer it.
+pub(super) fn interrupted_calls(history: &[Message]) -> Vec<SessionUpdate> {
+    let answered: HashSet<String> = history
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            Content::ToolResultBlock { call_id, .. } => Some(call_id.to_string()),
+            _ => None,
+        })
+        .collect();
+    history
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            Content::ToolCall { id, .. } if !answered.contains(&id.to_string()) => {
+                Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+                    tool_call_id: id.to_string(),
+                    status: Some(ToolCallStatus::Failed),
+                    content: vec![super::bridge::text_content(
+                        "Interrupted: kage stopped before this call finished.".to_owned(),
+                    )],
+                    ..ToolCallUpdate::default()
+                }))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// The `_kage/turn` end of the run `start` prompted and `last` closed,
 /// with when it ended and how long it took.
 fn run_end(start: &Message, last: &Message) -> Option<SessionUpdate> {
@@ -493,4 +529,42 @@ pub(super) fn list_page(
         sessions,
         next_cursor,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use kage_core::{Content, Message, Role, ToolCallId};
+
+    use super::{SessionUpdate, interrupted_calls};
+
+    fn call(id: &str) -> Content {
+        Content::ToolCall {
+            id: ToolCallId::new(id),
+            name: "shell".to_owned(),
+            input: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn only_calls_without_a_result_read_as_interrupted() {
+        let history = vec![
+            Message::new(Role::Assistant, vec![call("done"), call("swarm")], None),
+            Message::new(
+                Role::ToolResult,
+                vec![Content::ToolResultBlock {
+                    call_id: ToolCallId::new("done"),
+                    output: "ok".to_owned(),
+                    is_error: false,
+                }],
+                None,
+            ),
+        ];
+        let updates = interrupted_calls(&history);
+        assert_eq!(updates.len(), 1);
+        let SessionUpdate::ToolCallUpdate(update) = &updates[0] else {
+            panic!("{updates:?}");
+        };
+        assert_eq!(update.tool_call_id, "swarm");
+        assert_eq!(update.status, Some(kage_acp::acp::ToolCallStatus::Failed));
+    }
 }

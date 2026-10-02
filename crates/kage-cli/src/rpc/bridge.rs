@@ -1287,7 +1287,7 @@ pub(super) fn usage_update(usage: &Usage) -> Option<SessionUpdate> {
     }))
 }
 
-fn text_content(text: String) -> ToolCallContent {
+pub(super) fn text_content(text: String) -> ToolCallContent {
     ToolCallContent::Content(MessageChunk {
         content: ContentBlock::text(text),
         meta: None,

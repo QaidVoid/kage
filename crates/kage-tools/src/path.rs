@@ -168,6 +168,11 @@ mod tests {
         tempfile::tempdir().expect("tempdir")
     }
 
+    /// The root `/` means from `dir`: on Windows, the root of its drive.
+    fn root_of(dir: &Path) -> PathBuf {
+        dir.ancestors().last().unwrap().canonicalize().unwrap()
+    }
+
     #[test]
     fn resolve_relative_existing_file() {
         let dir = workdir();
@@ -205,7 +210,7 @@ mod tests {
     fn resolve_accepts_absolute_outside_workdir() {
         let dir = workdir();
         let resolved = resolve(dir.path(), Path::new("/")).unwrap();
-        assert_eq!(resolved, Path::new("/").canonicalize().unwrap());
+        assert_eq!(resolved, root_of(dir.path()));
     }
 
     #[test]
@@ -347,7 +352,7 @@ mod tests {
     fn resolve_absolute_traversal_clamps_at_root() {
         let dir = workdir();
         let resolved = resolve(dir.path(), Path::new("/../")).unwrap();
-        assert_eq!(resolved, Path::new("/").canonicalize().unwrap());
+        assert_eq!(resolved, root_of(dir.path()));
     }
 
     #[test]

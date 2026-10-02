@@ -102,8 +102,8 @@ mod tests {
 
     #[test]
     fn plugin_dir_override_absolute_asis() {
-        let p = resolve_plugin_dir(PathBuf::from("/opt/kage-plugins"));
-        assert_eq!(p, PathBuf::from("/opt/kage-plugins"));
+        let dir = std::env::temp_dir().join("kage-plugins");
+        assert_eq!(resolve_plugin_dir(dir.clone()), dir);
     }
 
     #[test]

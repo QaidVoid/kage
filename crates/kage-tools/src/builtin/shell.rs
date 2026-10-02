@@ -597,14 +597,14 @@ mod tests {
     #[test]
     fn a_null_string_cwd_runs_in_the_workdir() {
         let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("marker.txt"), "in the workdir").unwrap();
         for cwd in ["null", ""] {
-            let out = run(dir.path(), serde_json::json!({"command":"pwd","cwd":cwd})).unwrap();
-            let workdir = dir.path().canonicalize().unwrap();
-            assert!(
-                out.text.contains(&*workdir.to_string_lossy()),
-                "{}",
-                out.text
-            );
+            let out = run(
+                dir.path(),
+                serde_json::json!({"command":"cat marker.txt","cwd":cwd}),
+            )
+            .unwrap();
+            assert!(out.text.contains("in the workdir"), "{}", out.text);
         }
     }
 
@@ -710,7 +710,7 @@ mod tests {
             "{}",
             tool.description()
         );
-        let bash = ShellTool::default();
+        let bash = ShellTool::default().with_shell(Some("bash"));
         assert!(
             !bash.description().contains("NOT bash"),
             "{}",

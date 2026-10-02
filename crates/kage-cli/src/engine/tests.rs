@@ -142,7 +142,7 @@ impl Harness {
         SessionSpec {
             id,
             model: "mock/m".into(),
-            cx: AgentContext::new("m", "").with_workdir("/tmp"),
+            cx: AgentContext::new("m", "").with_workdir(std::env::temp_dir()),
             recorder: None,
             tools: self.tools.clone(),
             plugins: None,
@@ -593,11 +593,10 @@ fn run_shell_capture_truncates_large_output() {
 
 #[test]
 fn run_shell_capture_runs_in_the_given_workdir() {
-    // `pwd` prints the physical path; on macOS temp_dir sits behind the
-    // /var -> /private/var symlink, so compare against the real path.
-    let dir = std::env::temp_dir().canonicalize().unwrap();
-    let (_, out) = capture("pwd", &dir);
-    assert!(out.trim().starts_with(dir.to_str().unwrap()), "{out}");
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("marker.txt"), "in the workdir").unwrap();
+    let (_, out) = capture("cat marker.txt", dir.path());
+    assert_eq!(out.trim(), "in the workdir");
 }
 
 /// A session with one recorded exchange in `dir`.
@@ -1091,7 +1090,7 @@ fn first_exchange_records_a_title() {
     h.engine.open(SessionSpec {
         id,
         model: "mock/m".into(),
-        cx: AgentContext::new("m", "").with_workdir("/tmp"),
+        cx: AgentContext::new("m", "").with_workdir(std::env::temp_dir()),
         recorder: Some(recorder),
         tools: h.tools.clone(),
         plugins: None,
@@ -1201,7 +1200,7 @@ fn plugin_turn_end_entries_land_in_the_session_file() {
     h.engine.open(SessionSpec {
         id,
         model: "mock/m".into(),
-        cx: AgentContext::new("m", "").with_workdir("/tmp"),
+        cx: AgentContext::new("m", "").with_workdir(std::env::temp_dir()),
         recorder: Some(Recorder::new(writer, Some(Arc::clone(&runtime)))),
         tools: h.tools.clone(),
         plugins: Some(runtime),

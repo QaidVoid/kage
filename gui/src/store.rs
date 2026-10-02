@@ -214,6 +214,12 @@ pub struct Store {
     /// The options a welcome card chose, set on the session the welcome
     /// prompt opens before the prompt goes out.
     held_options: Vec<(String, String)>,
+    /// Plan mode chosen on the welcome pane. It is held apart from the
+    /// permission mode, which plan mode returns to.
+    held_plan: bool,
+    /// The main session the welcome template last came from, whose
+    /// commands the welcome slash menu offers.
+    template_session: Option<String>,
     /// Sessions whose transcript moved while another one showed.
     unread: std::collections::HashSet<String>,
     /// The client's own preferences.
@@ -284,6 +290,8 @@ impl Store {
             opening: None,
             returned_prompt: None,
             held_options: Vec::new(),
+            held_plan: false,
+            template_session: None,
             permissions: HashMap::new(),
             prefs: Prefs::default(),
             prefs_rev: 0,
@@ -542,11 +550,16 @@ impl Store {
         self.pending_prompt = None;
         self.opening = None;
         self.held_options.clear();
+        self.held_plan = false;
     }
 
     /// Holds config option `id` at `value` for the session the welcome
     /// prompt opens. A later hold of the same option replaces it.
     pub fn hold_option(&mut self, id: &str, value: &str) {
+        if id == "mode" && value == PLAN_MODE {
+            self.held_plan = true;
+            return;
+        }
         self.held_options.retain(|(held, _)| held != id);
         self.held_options.push((id.to_owned(), value.to_owned()));
     }
@@ -687,6 +700,11 @@ impl Store {
         });
         match opened {
             Some(id) => {
+                let held_mode = self
+                    .held_options
+                    .iter()
+                    .find(|(option, _)| option == "mode")
+                    .map(|(_, value)| value.clone());
                 for (option, value) in std::mem::take(&mut self.held_options) {
                     let offered = self.state().session(&id).is_some_and(|session| {
                         session.config_options.iter().any(|offer| {
@@ -698,6 +716,14 @@ impl Store {
                     if offered {
                         self.client.set_config_option(&id, &option, &value);
                     }
+                }
+                if std::mem::take(&mut self.held_plan) {
+                    let mode =
+                        held_mode.or_else(|| self.state().session(&id).and_then(active_mode));
+                    if let Some(mode) = mode {
+                        self.permissions.insert(id.clone(), mode);
+                    }
+                    self.client.set_config_option(&id, "mode", PLAN_MODE);
                 }
                 if let Some(text) = self.pending_prompt.take() {
                     let _ = self.client.prompt(&id, vec![ContentBlock::text(text)]);
@@ -1217,6 +1243,17 @@ impl Store {
         Some(option)
     }
 
+    /// The slash commands the composer offers: the active session's, or
+    /// on the welcome pane the last main session's.
+    #[must_use]
+    pub fn composer_commands(&self) -> &[serde_json::Value] {
+        self.active
+            .as_deref()
+            .or(self.template_session.as_deref())
+            .and_then(|id| self.state().session(id))
+            .map_or(&[], |session| &session.commands)
+    }
+
     /// Remembers the model, thinking and mode options of session `id`,
     /// the plan mode aside, for the welcome pane to offer.
     fn keep_template(&mut self, id: &str) {
@@ -1230,10 +1267,13 @@ impl Store {
         let mut template: Vec<SessionConfigOption> = session
             .config_options
             .iter()
-            .filter(|option| matches!(option.id.as_str(), "model" | "thinking" | "mode"))
+            .filter(|option| matches!(option.id.as_str(), "model" | "thinking" | "mode" | "swarm"))
             .cloned()
             .collect();
         for option in &mut template {
+            if option.id == "swarm" {
+                option.current_value = "off".to_owned();
+            }
             if option.id == "mode" && option.current_value == PLAN_MODE {
                 option.current_value = self
                     .permissions
@@ -1242,6 +1282,7 @@ impl Store {
                     .unwrap_or_else(|| "default".to_owned());
             }
         }
+        self.template_session = Some(id.to_owned());
         if !template.is_empty() {
             self.update_prefs(|prefs| prefs.template = template);
         }
@@ -1435,19 +1476,39 @@ impl Store {
         self.prefs_rev
     }
 
-    /// Whether the active session is in plan mode.
+    /// Whether the active session is in plan mode, or on the welcome
+    /// pane whether the next session opens in it.
     #[must_use]
     pub fn plan_on(&self) -> bool {
-        self.active_session()
-            .and_then(active_mode)
-            .is_some_and(|mode| mode == PLAN_MODE)
+        match self.active_session() {
+            Some(session) => active_mode(session).is_some_and(|mode| mode == PLAN_MODE),
+            None => self.held_plan,
+        }
+    }
+
+    /// Whether swarm mode is on for what the composer sends to: the
+    /// active session, or the session the welcome prompt opens.
+    #[must_use]
+    pub fn swarm_on(&self) -> bool {
+        self.composer_option("swarm")
+            .is_some_and(|option| option.current_value == "on")
     }
 
     /// The permission mode of the active session: its mode, or under
     /// plan mode the mode plan mode will return to.
     #[must_use]
     pub fn permission_mode(&self) -> Option<String> {
-        let session = self.active_session()?;
+        let Some(session) = self.active_session() else {
+            return self
+                .held_options
+                .iter()
+                .find(|(option, _)| option == "mode")
+                .map(|(_, value)| value.clone())
+                .or_else(|| {
+                    self.composer_option("mode")
+                        .map(|option| option.current_value)
+                });
+        };
         let mode = active_mode(session)?;
         if mode != PLAN_MODE {
             return Some(mode);
@@ -1480,6 +1541,10 @@ impl Store {
         if self.plan_on() {
             return false;
         }
+        if self.active.is_none() {
+            self.held_plan = true;
+            return true;
+        }
         self.set_option("mode", PLAN_MODE)
     }
 
@@ -1487,6 +1552,10 @@ impl Store {
     pub fn exit_plan(&mut self) -> bool {
         if !self.plan_on() {
             return false;
+        }
+        if self.active.is_none() {
+            self.held_plan = false;
+            return true;
         }
         let mode = self
             .permission_mode()
@@ -2468,8 +2537,10 @@ mod tests {
                 "configOptions": [
                     {"id": "model", "name": "Model", "type": "select", "currentValue": "a:one",
                      "options": [{"value": "a:one", "name": "One"}, {"value": "a:two", "name": "Two"}]},
-                    {"id": "swarm", "name": "Swarm", "type": "select", "currentValue": "off",
+                    {"id": "swarm", "name": "Swarm", "type": "select", "currentValue": "on",
                      "options": [{"value": "off", "name": "Off"}, {"value": "on", "name": "On"}]},
+                    {"id": "goal", "name": "Goal", "type": "select", "currentValue": "",
+                     "options": []},
                 ],
             }),
         });
@@ -2479,7 +2550,11 @@ mod tests {
             .iter()
             .map(|o| o.id.as_str())
             .collect();
-        assert_eq!(ids, ["model"], "only the options a new session starts from");
+        assert_eq!(
+            ids,
+            ["model", "swarm"],
+            "only the options a new session starts from"
+        );
 
         store.show_welcome();
         assert_eq!(
@@ -2494,9 +2569,52 @@ mod tests {
             store.composer_option("model").unwrap().current_value,
             "a:two"
         );
+        assert!(!store.swarm_on(), "a new session starts with swarm off");
         assert!(
             requests(store.take_outgoing()).is_empty(),
             "nothing goes out yet"
+        );
+    }
+
+    #[test]
+    fn plan_on_the_welcome_keeps_the_permission_mode() {
+        let mut store = welcome_store();
+        store.set_permission("accept-edits");
+        assert!(store.enter_plan());
+        assert!(store.plan_on());
+        assert_eq!(store.permission_mode().as_deref(), Some("accept-edits"));
+        assert_eq!(store.held_options, [("mode".into(), "accept-edits".into())]);
+        assert!(store.exit_plan());
+        assert!(!store.plan_on());
+        store.enter_plan();
+
+        store.new_session();
+        let (id, ..) = requests(store.take_outgoing()).remove(0);
+        store.absorb(Frame::Success {
+            id,
+            result: serde_json::json!({
+                "sessionId": "s1",
+                "configOptions": [
+                    {"id": "mode", "name": "Mode", "type": "select", "currentValue": "default",
+                     "options": [{"value": "default", "name": "Default"},
+                                 {"value": "accept-edits", "name": "Accept edits"},
+                                 {"value": "plan", "name": "Plan"}]},
+                ],
+            }),
+        });
+        let sent: Vec<serde_json::Value> = requests(store.take_outgoing())
+            .into_iter()
+            .filter(|(_, method, _)| method == "session/set_config_option")
+            .map(|(_, _, params)| params["value"].clone())
+            .collect();
+        assert_eq!(
+            sent,
+            ["accept-edits", "plan"],
+            "the mode, then plan over it"
+        );
+        assert_eq!(
+            store.permissions.get("s1").map(String::as_str),
+            Some("accept-edits")
         );
     }
 }

@@ -18,7 +18,9 @@ use web_time::Instant;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable;
-use gpui_kit::component::input::{Escape, InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{
+    Escape, InlineToken, InputContent, InputEvent, InputToken, Textarea, TextareaState,
+};
 use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::progress::ProgressCircle;
@@ -612,6 +614,19 @@ pub(crate) fn builtin(text: &str) -> Option<Builtin<'_>> {
         })
 }
 
+/// The length of the command that opens `text`, slash included, when
+/// it is one the composer offers and a space already follows it.
+#[must_use]
+pub(crate) fn command_len(text: &str, commands: &[Value]) -> Option<usize> {
+    let rest = text.strip_prefix('/')?;
+    let (name, _) = rest.split_once(char::is_whitespace)?;
+    let known = BUILTINS.iter().any(|(builtin, ..)| *builtin == name)
+        || commands
+            .iter()
+            .any(|command| command.get("name").and_then(Value::as_str) == Some(name));
+    (!name.is_empty() && known).then_some(1 + name.len())
+}
+
 /// The slash menu rows the session's available commands deliver for
 /// `query`, in the order the agent listed them.
 #[must_use]
@@ -814,7 +829,10 @@ impl ComposerView {
                             .update(cx, |state, cx| state.insert("\n", window, cx));
                     }
                 }
-                InputEvent::Change => this.on_input_change(cx),
+                InputEvent::Change => {
+                    this.on_input_change(cx);
+                    this.mark_command(window, cx);
+                }
                 InputEvent::Blur => {
                     if this.esc_armed.take().is_some() {
                         cx.notify();
@@ -953,18 +971,13 @@ impl ComposerView {
     /// queueing while a run is in flight, then swarm, then plan, then
     /// an open ask, then the default.
     fn sync_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let session = self.store.read(cx).active_session();
+        let store = self.store.read(cx);
+        let session = store.active_session();
         let wanted = if self.running(cx) {
             "Queue a follow-up, or Ctrl+Enter to steer the running turn"
-        } else if session
-            .and_then(|session| select_option(session, "swarm"))
-            .is_some_and(|option| option.current_value == "on")
-        {
+        } else if store.swarm_on() {
             "Describe work to split across parallel agents..."
-        } else if session
-            .and_then(active_mode)
-            .is_some_and(|mode| mode == "plan")
-        {
+        } else if store.plan_on() {
             "Describe what to plan..."
         } else if session.is_some_and(|session| !session.permissions.is_empty()) {
             "Answer the request above first, or type to queue"
@@ -1154,6 +1167,28 @@ impl ComposerView {
         });
     }
 
+    /// Turns the command that opens the text into a token, so it reads
+    /// apart from the prompt. The text stays the same.
+    fn mark_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let content = self.input.read(cx).content();
+        if content.tokens().iter().any(|span| span.range().start == 0) {
+            return;
+        }
+        let text = content.text().clone();
+        let Some(len) = command_len(&text, self.store.read(cx).composer_commands()) else {
+            return;
+        };
+        let token = InlineToken::new("command", &text[..len]);
+        let Ok(marked) = InputContent::new(text.clone()).with_token(0..len, token) else {
+            return;
+        };
+        let caret = self.input_cursor(cx);
+        self.input.update(cx, |state, cx| {
+            state.set_value(marked, window, cx);
+            state.set_selected_range(caret..caret, cx);
+        });
+    }
+
     /// Replaces the slash token before the caret with the picked
     /// command, ready for its arguments.
     fn pick_slash(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1246,8 +1281,7 @@ impl ComposerView {
         let this = cx.entity();
         match suggest_for(&value, cursor)? {
             Suggest::Slash { query } => {
-                let session = self.store.read(cx).active_session()?;
-                let items = slash_items(&session.commands, &query);
+                let items = slash_items(self.store.read(cx).composer_commands(), &query);
                 if items.is_empty() {
                     return None;
                 }
@@ -1440,13 +1474,9 @@ impl ComposerView {
         let store = self.store.clone();
         let dialog = self.dialog.clone();
         let goal = session_goal(self.store.read(cx).active_session());
-        let session = self.store.read(cx).active_session();
-        let plan_on = session
-            .and_then(active_mode)
-            .is_some_and(|mode| mode == "plan");
-        let swarm_option = session.and_then(|session| select_option(session, "swarm"));
-        let swarm_on = swarm_option.is_some_and(|option| option.current_value == "on");
-        let swarm_known = swarm_option.is_some();
+        let plan_on = self.store.read(cx).plan_on();
+        let swarm_on = self.store.read(cx).swarm_on();
+        let swarm_known = self.store.read(cx).composer_option("swarm").is_some();
 
         let close = |this: &Entity<Self>, cx: &mut App| {
             this.update(cx, |this, cx| {
@@ -2055,13 +2085,8 @@ impl ComposerView {
 
     /// The toolbar row under the input.
     fn toolbar(&self, cx: &Context<Self>, pal: &'static Palette) -> Div {
-        let session = self.store.read(cx).active_session();
-        let plan_on = session
-            .and_then(active_mode)
-            .is_some_and(|mode| mode == "plan");
-        let swarm_on = session
-            .and_then(|session| select_option(session, "swarm"))
-            .is_some_and(|option| option.current_value == "on");
+        let plan_on = self.store.read(cx).plan_on();
+        let swarm_on = self.store.read(cx).swarm_on();
         h_flex()
             .w_full()
             .min_w_0()
@@ -2118,13 +2143,8 @@ impl Render for ComposerView {
         let theme = cx.theme().colors;
         let pal = Palette::active(cx);
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
-        let session = self.store.read(cx).active_session();
-        let plan_on = session
-            .and_then(active_mode)
-            .is_some_and(|mode| mode == "plan");
-        let swarm_on = session
-            .and_then(|session| select_option(session, "swarm"))
-            .is_some_and(|option| option.current_value == "on");
+        let plan_on = self.store.read(cx).plan_on();
+        let swarm_on = self.store.read(cx).swarm_on();
         let border = if plan_on {
             pal.accent_bd
         } else if swarm_on {
@@ -2170,6 +2190,16 @@ impl Render for ComposerView {
                             })
                             .child(
                                 Textarea::new(&self.input)
+                                    .token(move |token, _, _| {
+                                        let chip = InputToken::new(token);
+                                        if token.is_selected() {
+                                            chip
+                                        } else {
+                                            chip.text_color(pal.accent)
+                                                .bg(pal.accent_soft)
+                                                .border_color(pal.accent_bd)
+                                        }
+                                    })
                                     .appearance(false)
                                     .pt(px(14.))
                                     .px(px(16.))
@@ -2191,8 +2221,8 @@ mod tests {
     use gpui_kit::{AppContext as _, Entity, TestAppContext};
 
     use super::{
-        ComposerView, ESC_WINDOW, EscStep, Suggest, active_mode, esc_step, mention_items,
-        next_mode_value, select_option, slash_items, suggest_for,
+        ComposerView, ESC_WINDOW, EscStep, Suggest, active_mode, command_len, esc_step,
+        mention_items, next_mode_value, select_option, slash_items, suggest_for,
     };
     use crate::store::Store;
     use crate::transport::State;
@@ -2417,6 +2447,16 @@ mod tests {
             "agent commands go to the agent"
         );
         assert!(super::builtin("plan on").is_none());
+    }
+
+    #[test]
+    fn a_command_is_marked_once_a_space_follows_it() {
+        let commands = vec![serde_json::json!({"name": "review"})];
+        assert_eq!(command_len("/plan on", &[]), Some(5));
+        assert_eq!(command_len("/review ", &commands), Some(7));
+        assert_eq!(command_len("/plan", &[]), None, "still being typed");
+        assert_eq!(command_len("/usr/bin is big", &[]), None, "not a command");
+        assert_eq!(command_len(" /plan on", &[]), None);
     }
 
     #[test]

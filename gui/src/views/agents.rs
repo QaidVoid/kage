@@ -891,8 +891,10 @@ pub(crate) fn swarm_card(
                 )
                 .child(
                     div()
-                        .min_w(px(120.))
-                        .whitespace_nowrap()
+                        .flex_initial()
+                        .min_w(px(60.))
+                        .max_w(gpui_kit::relative(0.6))
+                        .truncate()
                         .text_color(pal.ink)
                         .child(SharedString::from(item)),
                 )

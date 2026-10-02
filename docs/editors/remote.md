@@ -250,8 +250,22 @@ the peer address, never the value presented.
 ## web client
 
 `kage serve` can serve the repository's own browser client, so a
-browser needs nothing but the page URL and the token. Build the
-bundle once (the full commands and caveats are in `gui/SPIKE.md`):
+browser needs nothing but the page URL and the token. It serves the
+`web/` folder beside the `kage` executable, or the folder `--web-dir`
+names.
+
+The `-web` release archives ship the client in that `web/` folder,
+so `kage serve` from one of them serves it with no flag. The client
+also ships alone as `kage-web.tar.xz`, for a `kage` that came from
+crates.io or a source build:
+
+```sh
+curl -fsSL https://github.com/QaidVoid/kage/releases/latest/download/kage-web.tar.xz | tar -xJ
+kage serve --web-dir web
+```
+
+To build the bundle yourself (the full commands and caveats are in
+`gui/SPIKE.md`):
 
 ```sh
 rustup target add --toolchain nightly wasm32-unknown-unknown

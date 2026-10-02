@@ -199,6 +199,7 @@ with a breadcrumb in the header.
 | `home` / `end` | overlay | Jump to the first / last row |
 | `enter` | overlay | Open the selected agent, or the main view from the `kage` row |
 | `x` | overlay | Stop the selected agent and the agents under it |
+| `X` | overlay | Stop every live agent of the session |
 | `esc` | overlay | Close the overlay |
 
 In vim mode, `esc` in Insert mode still enters Normal mode, and `esc`

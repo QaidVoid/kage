@@ -34,7 +34,10 @@ and how the run ended:
 `state` is `completed`, `cancelled` or `failed`. A cancelled agent
 returns its partial reply and a failed one returns its error. Both
 come back as error results, so the model knows the task did not
-finish. A reply over 20,000 characters is cut, and a trailer names the
+finish. When a limit ended the run, a `limit` attribute says which:
+`turns`, `time` or `budget` (see [limits](#limits)). A worktree
+agent's reply ends with where its work is (see
+[worktree agents](#worktree-agents)). A reply over 20,000 characters is cut, and a trailer names the
 agent's session, which holds the full transcript.
 
 The header also records the child's tool count, token usage and run
@@ -53,6 +56,40 @@ other tools runs its calls one after another. The tool description
 tells the model to use agents for independent work that needs many
 tool calls, and to let agents edit in parallel only while each
 touches its own files, leaving shared files to one of them.
+
+## background agents
+
+The main session can start an agent in the background. The `agent`
+call then takes `background: true`:
+
+```json
+{"agent": "general", "description": "run the whole test suite", "background": true,
+ "prompt": "Run cargo test --workspace and reply with the failing tests and their first error line."}
+```
+
+The call returns at once with `state="started"`, and the model goes on
+with other work or ends its turn. When the agent ends, its result
+reaches the main session as a message of its own, the same `<agent>`
+element a foreground call returns. A running main session reads it at
+its next turn boundary. An idle one depends on the client:
+
+| Client | An idle main session |
+| --- | --- |
+| The TUI, the desktop and browser clients | starts a run to read the result |
+| Editors over ACP | keeps the result for your next prompt, whose run reads it first |
+
+Several results that arrive together are read as one message. A
+result of an agent you stopped waits for the next run instead of
+starting one.
+
+Only the main session starts background agents. Print mode offers no
+`background` parameter, since its process ends with its run.
+
+Background agents outlive the run that started them. `esc` on the
+main run leaves them running, and they stop when you stop them (`x` or
+`X` in the agents overlay), when the session closes, or when kage
+quits. Starting a new session, resuming another one or cloning waits
+until they end, as for any running agent.
 
 ## swarms
 
@@ -180,31 +217,42 @@ run, an `N bg` segment names their count.
 ## the send_message mailbox
 
 Every agent-enabled session, the parent and its children alike, gets
-a `send_message` tool. It drops a message into another live session's
-mailbox and returns at once, so a child can report a finding or ask
-the parent a question without blocking on an answer:
+a `send_message` tool. It drops a message into another running
+session's inbox and returns at once, so the main session can steer a
+background agent, and a child can report a finding or ask the parent
+a question without blocking on an answer:
 
 ```json
-{"to": "parent", "message": "Found a failing test in kage-loop; fixing it before the summary."}
+{"to": "01K62W8Q3T9V5M2C7X4B1N0R6S", "message": "Also run the doc tests, then reply with both results."}
 ```
 
 `to` is `parent` or the session id of another running session of the
-same conversation, for example a sibling still at work. A session
-under another main session refuses the message, and so does an agent
-that has finished: its result already reached its parent, so a reply
-or a change it made would never get there. Continue a finished swarm
-child with a `swarm` resume instead, whose result does come back. The message
-becomes the target's next prompt: it runs at once when the target is
-idle, else right after its current run ends, through the same queue
-as a queued prompt. An idle agent also waits for a free slot under
-`agent_max_running`, and the sender's ack says which happened. The target sees a header naming the sender and its session
-id, so it can answer with a `send_message` call of its own.
+same conversation, such as an agent's id from its `started` result or
+a sibling still at work. A session under another main session refuses
+the message, and so does an agent that has finished: its result
+already reached its parent, so a reply or a change it made would never
+get there. Continue a finished swarm child with a `swarm` resume
+instead, whose result does come back.
 
-Delivery is fire-and-forget: the caller learns when the message was
-queued, never what the target replied. The reply lands in the
-target's own transcript and card. When you need the answer in hand
-before continuing, make an `agent` call or a `swarm` resume instead,
-both of which block on the result.
+A running target reads the message at its next turn boundary, wrapped
+so it knows who sent it:
+
+```text
+<message from="kage" session="01K62W7ZB1D6XKQ5H8M3T2V9CE">
+Also run the doc tests, then reply with both results.
+</message>
+```
+
+`from` is `kage` for a main session, else the sending agent's name. A
+target waiting for a slot reads it when it starts. An idle main
+session reads it the way it reads a background result. An agent whose
+run ends before it read a message runs again to read it, and only
+then reports, so the sender's words reach its result.
+
+Delivery is fire-and-forget: the call returns once the message is in
+the inbox, never with the answer. An agent you started covers it in
+its own result. When you need an answer in hand before continuing,
+make an `agent` call or a `swarm` resume instead.
 
 An agent that delivered its result is dropped from memory, and its
 transcript stays in its session file, and a `swarm` resume reopens a
@@ -259,6 +307,9 @@ Saved as `~/.config/kage/agents/reviewer.md`, this defines the agent
 | `tools` | no | A comma list of tool names. Without it the agent gets every tool its parent has. With it, the agent may start agents, swarms or send messages only when the list names `agent`, `swarm` or `send_message`. A listed name that matches no tool of the parent shows a warning when the agent starts. |
 | `model` | no | The model, as `provider/model`, or `inherit` (the default) for the parent's current model. A model that is not available fails the agent's run. |
 | `thinking` | no | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `inherit` (the default) for the parent's current level. The level is fitted to the agent's model like the main session's. |
+| `max_turns` | no | Turns with tool calls one run may take, a positive integer. `maxTurns` works too. Without it, `agent_max_turns` applies (see [limits](#limits)). |
+| `timeout` | no | How long one run may take: seconds (`90`), or a number with `s`, `m` or `h` (`90s`, `10m`, `1h`). Without it, `agent_timeout` applies. |
+| `isolation` | no | `none` (the default) or `worktree`, which gives the agent a checkout of its own (see [worktree agents](#worktree-agents)). |
 | `name` | no | Must equal the file stem when present. |
 
 The frontmatter takes one `key: value` per line. A value may be
@@ -277,6 +328,48 @@ agents of its own whenever the depth limit allows it (see
 A file that fails to load, such as one without a `description` or
 with a malformed `model`, is skipped. The TUI shows the error as a
 block at startup. Print mode and `kage rpc` print it on stderr.
+
+## worktree agents
+
+An agent whose definition says `isolation: worktree` works in a
+checkout of its own, so it can edit and build without touching yours:
+
+```markdown
+---
+description: Implements one change in its own checkout. Give it the whole change to make.
+isolation: worktree
+max_turns: 60
+timeout: 20m
+---
+You implement the change you are given in your own checkout ...
+```
+
+At each start of such an agent, kage makes the checkout under
+`~/.local/state/kage/worktrees/<agent session id>`:
+
+- In a jj repository, a jj workspace named `kage-<id>` whose working
+  copy starts on top of yours, so it sees your uncommitted changes.
+- Otherwise in a git repository, a git worktree on a new branch
+  `kage/agent-<id>` from `HEAD`. It starts without your uncommitted
+  changes.
+- Outside a repository the agent does not start, and the call returns
+  `worktree isolation needs a git or jj repository`.
+
+The agent works in the same subdirectory of the checkout that its
+parent works in, with paths confined to it. A `shell` command can
+still `cd` elsewhere. At the end of each run kage records the work,
+committing it on the branch for git, and the agent's reply ends with
+where it is and how to take it:
+
+```text
+Worktree: jj change qzmtwvpn in workspace kage-6s0r1xkq (2 files changed, 48 insertions(+), 3 deletions(-)). To take it: jj squash --from qzmtwvpn. Nothing was merged.
+```
+
+Nothing is ever merged for you. Once the agent is done, kage removes
+the checkout: jj forgets the workspace, and git removes the worktree
+and deletes the branch when it holds no commits. The change or the
+branch with the agent's work stays in the repository until you take
+or drop it.
 
 ## project agents and trust
 
@@ -306,7 +399,7 @@ asks on the next start.
 | Tools | the parent's tools narrowed by `tools`, including plugin and MCP tools, plus `agent` while the depth limit allows it |
 | Permissions | the parent's rules, permission mode and session approvals, shared live (see [permissions](/guide/permissions#agents)) |
 | Asking | it asks you when the parent can ask. Print mode refuses its asks, like the main session's. |
-| Working directory | the parent's |
+| Working directory | the parent's, or its own checkout for a [worktree agent](#worktree-agents) |
 | History | only the task prompt |
 | Plugins | plugin tools only. Plugins get no events from agent runs, and their hooks do not run there. |
 | Session file | a file next to the parent's when the parent is recorded |
@@ -324,6 +417,9 @@ covers every agent of the session.
 | `agent_max_running` | `agents.max_running` | 1 to 16 | `4` | How many agents run at once. Further agents wait in a queue and start in order as others finish. |
 | `swarm_max_items` | `agents.swarm_max_items` | 2 to 128 | `32` | Most members one `swarm` call may run: items plus resumed children together. |
 | `swarm_timeout_ms` | `agents.swarm_timeout_ms` | 1,000 to 86,400,000 | `7,200,000` | Milliseconds one swarm child may run, measured from its run start (not while queued). On deadline the child is cancelled and renders as cancelled in the aggregate. |
+| `agent_max_turns` | `agents.max_turns` | 0 to 10,000 | `100` | Turns with tool calls one agent run may take. `0` means no limit. |
+| `agent_timeout` | `agents.timeout` | 0 to 86,400 | `0` | Seconds one agent run may take. `0` means no limit. |
+| `agent_budget` | `agents.budget` | 0 to 1,000,000,000 | `0` | Tokens (input plus output) all agents of a session may use between two of your prompts. `0` means no limit. |
 
 Set them in `config.toml`:
 
@@ -345,6 +441,25 @@ Print mode and `kage rpc` read the `[agents]` table of your config
 files. With `agent_max_depth = 0` the model sees neither the `agent`
 nor the `swarm` tool. The swarm limits in the table above apply the
 same way, and are described in [swarms](#swarms).
+
+A definition's `max_turns` and `timeout` take the place of
+`agent_max_turns` and `agent_timeout` for that agent.
+
+- **Turn limit.** When a turn with tool calls reaches the limit, the
+  agent is told `Turn limit reached. Do not call more tools. Reply now
+  with what you have and what is left.` and gets one more turn. If it
+  calls tools again, the run ends there without running them.
+  Either way its result says `limit="turns"`.
+- **Timeout.** A run past its time is stopped like `x` stops it, its
+  own agents included, and its result reads `state="cancelled"
+  limit="time"` with the partial reply.
+- **Budget.** Every agent turn counts its input and output tokens
+  toward the session's budget. The main session's own turns never
+  count. The agent run that crosses it stops every agent of the
+  session with `limit="budget"`, the main session shows `agents
+  stopped: they used the agent budget of N tokens since your last
+  prompt`, and no agent starts until your next prompt resets the
+  count. Results and wake-ups do not reset it.
 
 An agent that waits for its own agents does not count against
 `agent_max_running`, so nested agents cannot stall the queue. A
@@ -376,8 +491,23 @@ approval reads `Waiting for approval` with what it asks for.
 ```
 
 A finished card shows the head of the agent's reply and its end state
-on the right: `done`, `stopped` or `failed`. The wrapper the model
+on the right: `done`, `stopped` or `failed`, or the limit that ended
+it: `turn limit`, `timed out` or `over budget`. The wrapper the model
 reads is hidden. `ctrl+o` unfolds the full reply, like any tool row.
+A background agent's card ends at once with `background`.
+
+When a background agent's result reaches the main session, it shows
+as a report block, not as a prompt of yours, folded to the first line
+of the reply:
+
+```text
+ Agent general finished . done . 4m 40s
+   412 passed, 2 failed: provider::stream::retries, tui::view::tests::toast_width
+   ... 14 more lines
+```
+
+A message from another session shows as one row in the target's
+view, such as `< message from kage: Also run the doc tests`.
 
 ```text
  * Agent explore: map exports under src/components                                       done . 52s
@@ -389,13 +519,15 @@ reads is hidden. `ctrl+o` unfolds the full reply, like any tool row.
 
 ### the working row and the pinned list
 
-While agents run, the working row counts them, such as
-`Waiting for 3 agents (41s, esc to interrupt)`. Below it, a pinned
+While agents run, the working row counts the ones the run waits for,
+such as `Waiting for 3 agents (41s, esc to interrupt)`. Background
+agents do not count there, since nothing waits for them. Below it, a pinned
 list keeps every queued, running or waiting agent in view after its
 card scrolls away, in the order of their cards. Agents started by
 agents sit indented under their parent. The list shows at most four
 rows, then `+N more . ctrl+t for agents`, and it hides while the
-approval panel is open.
+approval panel is open. A background agent's row tags it `bg`, and the
+row stays after the main run ends.
 
 ```text
   Waiting for 3 agents (41s, esc to interrupt)
@@ -406,7 +538,9 @@ approval panel is open.
 
 While agents are queued or running and the prompt is empty, the
 footer names the key that opens the agents overlay, `ctrl+t for
-agents` by default, in place of `tab to queue`. When every agent has
+agents` by default, in place of `tab to queue`, also while the main
+session is idle. Quitting then says how many agents it stops, such as
+`ctrl+c again to quit and stop 2 agents`. When every agent has
 finished, the pinned list gives way to one summary row, such as
 `2 agents · ctrl+t for agents`, and a click on it opens the list.
 
@@ -461,7 +595,7 @@ counts the agents per state and totals their tokens and cost.
 |     / test    run the provider tests             Ran cargo test                      4s   3k tok |
 |   * general   check the router tests             done                            1m 05s  12k tok |
 |   o explore   find dead code                     stopped                            12s   2k tok |
-+- enter to open . x to stop . esc to close -------------------------------------------------------+
++- enter to open . x to stop . X to stop all . esc to close ---------------------------------------+
 ```
 
 | Key | Effect |
@@ -470,6 +604,7 @@ counts the agents per state and totals their tokens and cost.
 | `home` / `end` | Jump to the first / last row |
 | `enter` | Open the selected agent. On the `kage` row, return to the main view. |
 | `x` | Stop the selected agent and the agents under it. Only live agents stop. |
+| `X` | Stop every live agent of the session |
 | `esc` | Close the overlay |
 
 As over any overlay, `ctrl+c` interrupts the run of the session on
@@ -489,7 +624,9 @@ agent, not to the main session.
 ### stopping agents
 
 - `esc` or `ctrl+c` on an empty prompt in the main view interrupts the
-  main run, which stops every agent under it.
+  main run, which stops every agent under it except background
+  agents.
+- `X` in the agents overlay stops every live agent.
 - `ctrl+c` in an agent view, or `x` in the agents overlay, stops that
   agent and the agents under it. Its parent keeps running and reads
   the partial reply as a cancelled result.
@@ -522,6 +659,8 @@ any session go to stderr. An `agent` call prints
 `[agent explore: map exports]` when it starts and
 `[agent explore completed]` when it ends. A cancelled agent prints
 `cancelled`, and a failed one prints `failed` followed by its error.
+A limit follows the state, such as
+`[agent general completed: turn limit]`.
 
 `kage -p --json` prints every envelope, the agents' included. Each
 envelope names its session, and an agent's first envelope is
@@ -532,7 +671,8 @@ envelope names its session, and an agent's first envelope is
 ```
 
 `parent` is the session whose `agent` call started this one, and
-`tool_call_id` is that call. The agent's later envelopes carry its own
+`tool_call_id` is that call. A background agent's envelope also
+carries `"background": true`. The agent's later envelopes carry its own
 session id, so a reader can build the tree from these events.
 
 ## editors over ACP
@@ -562,8 +702,17 @@ its own session:
   `explore: shell`, and `rawInput` is the agent's tool input.
 
 In both cases `session/cancel` on the editor's session stops the run
-and every agent under it. See [zed](/editors/zed#agents) for the wire
-details.
+and every agent under it except background agents. See
+[zed](/editors/zed#agents) for the wire details.
+
+A prompt that starts a background agent ends with the main run and
+does not wait for the agent. The agent's `subagent_update` carries
+`background: true`, and its final `subagent_update` arrives whenever
+it ends. Its result waits for your next prompt, whose run reads it
+first. An editor without the `subagents` capability sees the cost of
+the session's agents in the session's own `usage_update`. The kage
+desktop and browser clients identify themselves to `kage rpc`, and
+their idle sessions start a run to read a result, as the TUI does.
 
 ACP asks for every tool without a config entry, and `agent` is no
 exception, so the editor approves the start of each agent unless your

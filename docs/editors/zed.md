@@ -268,8 +268,13 @@ counts.
   arrive on its own session id, like any session.
 - When the child ends, a `subagent_update` on the parent sets `state`
   to `completed`, `failed` or `cancelled`. It comes after every update
-  of the child, and every child ends before its parent's
+  of the child, and every foreground child ends before its parent's
   `session/prompt` answers.
+- A [background agent](/guide/agents#background-agents) is announced
+  with `background: true`. The parent's `session/prompt` answers when
+  the main run ends, and the child's final `subagent_update` arrives
+  whenever it ends, also between prompts. Its result waits for your
+  next prompt, whose run reads it first.
 - `session/cancel` with the child's id stops that agent and its own
   agents. Clients cannot prompt a child.
 - The parent's `agent` tool call is still announced and completed.
@@ -289,7 +294,8 @@ the top-level `agent` tool call of your session:
   `rawInput`.
 
 Either way, `session/cancel` on your session stops the turn and every
-agent under it. Every tool without a config rule asks over ACP, so Zed
+agent under it except background agents. Without subagents, the
+session's `usage_update` cost includes what its agents spent. Every tool without a config rule asks over ACP, so Zed
 asks before each agent starts and before each of its tool calls,
 unless your `[permissions]` allow them. Limits come from the
 `[agents]` table of your config files.

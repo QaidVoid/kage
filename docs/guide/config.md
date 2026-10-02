@@ -107,6 +107,14 @@ compaction_threshold = 0.8
 max_depth = 1
 # how many agents run at once (1 to 16). further agents wait their turn.
 max_running = 4
+# turns with tool calls one agent run may take (0 to 10000, 0 for no
+# limit). the agent gets one warning turn to reply first.
+max_turns = 100
+# seconds one agent run may take (0 to 86400, 0 for no limit).
+timeout = 0
+# tokens all agents of a session may use between two of your prompts
+# (0 to 1000000000, 0 for no limit).
+budget = 0
 
 [permissions]
 # tool permission rules. built-in tools are allowed unless configured

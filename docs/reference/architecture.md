@@ -129,19 +129,47 @@ permission gate: while it is on, the gate refuses write tools, asks
 before command tools, and asks about every `exit_plan` call, whose
 approval turns the mode off mid-run.
 
+**Reports and the inbox.** An agent's link records where the result
+of its next finished run goes: the waiting call (`agent`, `swarm` or
+a resume) or, for a background agent, the parent's inbox. Every
+session has an inbox next to its steering queue. The run hooks hand
+out the user's steering first, then the whole inbox joined into one
+message, at each turn boundary and once more before a run would end.
+A result that lands in an idle main session's inbox starts a run to
+read it when the session's setup wakes (the TUI and kage clients), or
+waits for the next prompt when it holds (plain ACP editors). A
+background agent's cancel flag is its own rather than a child of the
+parent's run flag, so interrupting the main run leaves it running.
+The `<agent>` report and `<message>` mail formats live in
+`kage_core::agent_report`, read by the engine, the TUI, print mode
+and the ACP bridge alike.
+
 **The mailbox.** Every agent-enabled session also gets a
 `send_message` tool, whatever its depth, because sending does not
-nest; an agent whose definition lists tools gets it only when the
+nest. An agent whose definition lists tools gets it only when the
 list names it, like `agent` and `swarm`. It delivers fire-and-forget:
 the engine resolves `parent` or a session id to a running session
 under the sender's own main session, refusing an agent whose result
-was already delivered, and wraps the text with a sender
-header naming the agent and its session id. A busy target queues it
-behind its run, an idle agent goes through the same launch as a
-spawn, so it waits for a slot under `agent_max_running`, and an idle
-main session runs it at once. The ack tells the sender which
-happened; the target's reply lands only in the target's own
-transcript.
+was already delivered, and puts the text, wrapped as a `<message>`
+naming the sender, into the target's inbox. An idle target wakes as
+for a report. An agent that ends a run with unread mail runs again
+before its result is taken, so the message reaches its result.
+
+**Limits.** An agent run carries its turn limit, timeout and the
+budget counter of its main session's tree. The run hooks warn at the
+turn limit and stop at the next turn with tool calls. A watcher
+thread cancels a run past its timeout. Each agent turn adds its
+tokens to the shared counter, and the run that crosses the budget
+asks the dispatcher to stop every agent under the main session. The
+next user prompt resets the counter. The limit that ended a run rides
+into its report as `limit`.
+
+**Worktrees.** An agent whose definition sets `isolation: worktree`
+gets a jj workspace or git worktree under the state directory at
+spawn, held on its link. The run thread checkpoints it when the run
+ends and appends where the work is to the report. Dropping the agent
+drops the checkout, which forgets the workspace or removes the
+worktree.
 
 **Forked children.** A `swarm` call with `fork: true` gives each new
 child the parent's conversation instead of zero context. The

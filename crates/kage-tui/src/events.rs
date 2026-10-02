@@ -9,6 +9,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use kage_core::agent_report::{AgentText, split_agent_text};
 use kage_core::protocol::CompactionCounts;
 use kage_core::resource_block::{self, ResourceRef};
 use kage_core::{Content, LoopError, LoopEvent, Message, MessageId, Role, StopReason};
@@ -138,7 +139,7 @@ pub fn apply_loop_event(buf: &mut Buffer, event: &LoopEvent) {
 /// it already has its `attached` line in the bubble.
 fn push_user_message(buf: &mut Buffer, message: &Message) {
     if let Some(text) = user_text(message) {
-        buf.push_user(text);
+        push_user_text(buf, text);
     }
     let mut labelled = false;
     for block in &message.content {
@@ -264,7 +265,7 @@ pub fn populate_from_history(
                         let body = shell_block(&run.command, &run.output, run.exit_code);
                         buf.push_custom("kage:shell", body, false);
                     } else {
-                        buf.push_user(text);
+                        push_user_text(buf, text);
                     }
                 }
             }
@@ -331,6 +332,36 @@ pub fn populate_from_history(
 fn is_compaction_summary(text: &str) -> bool {
     text.starts_with(kage_core::message::COMPACTION_SUMMARY_PREFIX)
         || text.contains("<summary>") && text.contains("</summary>")
+}
+
+/// Push the text of a user message: the person's own words as a
+/// bubble, then each agent report as a folded report block and each
+/// message from another session as a one-line row.
+fn push_user_text(buf: &mut Buffer, text: String) {
+    let Some((words, parts)) = split_agent_text(&text) else {
+        buf.push_user(text);
+        return;
+    };
+    if !words.is_empty() {
+        buf.push_user(words.to_owned());
+    }
+    for part in parts {
+        match part {
+            AgentText::Report(report) => buf.push_custom("kage:agent", report.to_text(), true),
+            AgentText::Mail(mail) => buf.push_custom(
+                "kage:mail",
+                format!("< message from {}: {}", mail.from, mail.body),
+                true,
+            ),
+        }
+    }
+}
+
+/// Whether a user message carries words someone typed, rather than
+/// only agent reports and messages the engine delivered.
+pub(crate) fn typed_by_the_user(message: &Message) -> bool {
+    user_text(message)
+        .is_none_or(|text| split_agent_text(&text).is_none_or(|(words, _)| !words.is_empty()))
 }
 
 /// The text of a user message as its bubble shows it: every text

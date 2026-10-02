@@ -82,6 +82,7 @@ impl App {
             Event::Loop(event) => {
                 if let LoopEvent::MessageAppended { message } = &event
                     && message.role == Role::User
+                    && crate::events::typed_by_the_user(message)
                 {
                     self.pending_delivered(None);
                 }
@@ -296,6 +297,7 @@ impl App {
             Event::Loop(event) => {
                 if let LoopEvent::MessageAppended { message } = &event
                     && message.role == Role::User
+                    && crate::events::typed_by_the_user(message)
                 {
                     self.pending_delivered(Some(session));
                 }

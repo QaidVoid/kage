@@ -690,7 +690,8 @@ impl App {
     }
 
     /// Drive the agents overlay. Enter closes it on the selected
-    /// session's view, `x` stops the selected agent and keeps it open.
+    /// session's view, `x` stops the selected agent and `X` every live
+    /// agent, keeping it open.
     /// Keys it does not use reach an approval panel under it.
     pub(crate) fn dispatch_agents_key(
         &mut self,
@@ -717,6 +718,19 @@ impl App {
                     }
                     Some("stop") => {
                         let _ = self.send_request(RunRequest::Cancel { session });
+                    }
+                    Some("stop-all") => {
+                        let live: Vec<_> = self
+                            .agents_overlay_rows()
+                            .into_iter()
+                            .filter(|row| row.state.is_live())
+                            .filter_map(|row| row.session)
+                            .collect();
+                        for session in live {
+                            let _ = self.send_request(RunRequest::Cancel {
+                                session: Some(session),
+                            });
+                        }
                     }
                     _ => {}
                 }

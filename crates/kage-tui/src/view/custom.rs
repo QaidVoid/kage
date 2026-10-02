@@ -33,6 +33,9 @@ enum Chrome {
     Usage,
     /// One line in the warning color.
     Warning,
+    /// An agent's report: a header with its end word and run time
+    /// above the reply.
+    Report,
     /// The plugin-debug view: `[kind]` header, custom accent body.
     Raw,
 }
@@ -40,7 +43,8 @@ enum Chrome {
 fn chrome_for(kind: &str) -> Chrome {
     match kind {
         "kage:help" | "kage:notify" | "kage:retry" | "kage:theme" | "kage:image"
-        | "kage:plugin" | "kage:mcp" | "kage:log" => Chrome::Quiet,
+        | "kage:plugin" | "kage:mcp" | "kage:log" | "kage:mail" => Chrome::Quiet,
+        "kage:agent" => Chrome::Report,
         "kage:error" => Chrome::Error,
         "kage:usage" => Chrome::Usage,
         "kage:shell" => Chrome::Shell,
@@ -101,6 +105,7 @@ impl CustomBlockWidget {
                 out
             }
             Chrome::Usage => usage_lines(&self.text, self.folded),
+            Chrome::Report => report_lines(&self.text, self.folded),
             Chrome::Shell => {
                 let mut lines = self.text.lines();
                 let header = lines.next().unwrap_or_default();
@@ -133,6 +138,46 @@ impl CustomBlockWidget {
         };
         mark_emphasis(out, width, emphasis)
     }
+}
+
+/// An agent report block: `Agent <name> finished`, its end word and run
+/// time, then the reply, of which a folded block shows the first line
+/// and how many more there are.
+fn report_lines(text: &str, folded: bool) -> Vec<Line<'static>> {
+    use super::tool_view::{agent_output, format_elapsed};
+    let Some(report) = kage_core::agent_report::AgentReport::parse(text) else {
+        return plain_lines(text, custom_style());
+    };
+    let (body, end) = agent_output(text);
+    let mut header = format!("Agent {} finished", report.name);
+    if let Some(end) = end {
+        header.push_str(" \u{b7} ");
+        header.push_str(end.word());
+    }
+    if let Some(ms) = report.stats.as_ref().and_then(|stats| stats.run_ms) {
+        header.push_str(" \u{b7} ");
+        header.push_str(&format_elapsed(ms));
+    }
+    let mut out = vec![Line::from(Span::styled(
+        header,
+        tool_call_style().add_modifier(Modifier::BOLD),
+    ))];
+    let reply = Style::default().fg(current().assistant_fg);
+    let shown = if folded { 1 } else { body.len() };
+    for line in body.iter().take(shown) {
+        out.push(Line::from(Span::styled(format!("  {}", line.text), reply)));
+    }
+    if body.len() > shown {
+        let more = body.len() - shown;
+        out.push(Line::from(Span::styled(
+            format!(
+                "  ... {more} more {}",
+                if more == 1 { "line" } else { "lines" }
+            ),
+            Style::default().fg(current().muted_fg),
+        )));
+    }
+    out
 }
 
 /// Styled `/usage` panel. Parses the stable body the usage command

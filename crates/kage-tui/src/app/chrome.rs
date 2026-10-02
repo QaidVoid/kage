@@ -17,6 +17,22 @@ fn swarm_item(node: &kage_core::protocol::AgentNode) -> String {
     format!("{cut}\u{2026}")
 }
 
+/// The name a row shows for the agent of `node`, tagged `bg` when it
+/// runs in the background.
+fn tagged_name(node: &kage_core::protocol::AgentNode) -> String {
+    if node.background {
+        format!("{} bg", node.agent)
+    } else {
+        node.agent.clone()
+    }
+}
+
+/// Whether the agent of `node` is queued or running.
+fn is_live(node: &kage_core::protocol::AgentNode) -> bool {
+    use kage_core::protocol::AgentState;
+    matches!(node.state, AgentState::Queued | AgentState::Running)
+}
+
 impl App {
     /// Snapshot the slot specs for one frame and report the frame's
     /// width and editor mode to the plugin runtime.
@@ -44,8 +60,13 @@ impl App {
         }
         let now = Instant::now();
         let note = self.escalation.filter(|(_, until)| *until > now);
+        let live = self.live_agents_under_main();
         if note.is_some() {
-            return "ctrl+c again to quit".to_owned();
+            return match live {
+                0 => "ctrl+c again to quit".to_owned(),
+                1 => "ctrl+c again to quit and stop 1 agent".to_owned(),
+                n => format!("ctrl+c again to quit and stop {n} agents"),
+            };
         }
         let working = self.is_run_in_flight();
         let draft = !self.input.text().is_empty();
@@ -68,17 +89,7 @@ impl App {
             .iter()
             .any(|(s, _)| *s == self.focus)
             .then(|| "up to edit pending".to_owned());
-        let has_agents = working
-            && self.active_session.is_some_and(|main| {
-                self.agents.under(main).iter().any(|(_, node)| {
-                    matches!(
-                        node.state,
-                        kage_core::protocol::AgentState::Queued
-                            | kage_core::protocol::AgentState::Running
-                    )
-                })
-            });
-        let agents = label(self, "OpenAgents", "for agents").filter(|_| has_agents);
+        let agents = label(self, "OpenAgents", "for agents").filter(|_| live > 0);
         let (queue, agents) = (queue.as_deref(), agents.as_deref());
         let mut parts: Vec<&str> = Vec::new();
         if self.input.is_modeless() {
@@ -97,7 +108,13 @@ impl App {
                 (false, false) if self.search_pattern.is_some() => {
                     parts.extend(["esc to clear the search", "? for shortcuts"]);
                 }
-                (false, false) => parts.extend(["? for shortcuts", "/ for commands"]),
+                (false, false) => {
+                    parts.extend(agents);
+                    parts.push("? for shortcuts");
+                    if agents.is_none() {
+                        parts.push("/ for commands");
+                    }
+                }
             }
             return parts.join(HINT_SEP);
         }
@@ -126,7 +143,10 @@ impl App {
                     parts.push("ctrl+c to interrupt");
                 }
                 (false, true) => parts.extend(["enter to send", "esc for normal mode"]),
-                (false, false) => parts.push("esc for normal mode"),
+                (false, false) => {
+                    parts.extend(agents);
+                    parts.push("esc for normal mode");
+                }
             },
             Mode::Visual => parts.push("esc to leave visual mode"),
         }
@@ -272,17 +292,27 @@ impl App {
         Some(format!("{doing}{tail}"))
     }
 
-    /// How many agents directly under the session on screen are queued
-    /// or running. Their own agents are theirs to wait for.
+    /// How many foreground agents directly under the session on screen
+    /// are queued or running: the ones its run waits for. Their own
+    /// agents are theirs to wait for, and background agents nobody's.
     fn live_agents(&self) -> usize {
-        use kage_core::protocol::AgentState;
         self.view_root().map_or(0, |root| {
             self.agents
                 .under(root)
                 .into_iter()
-                .filter(|(depth, node)| {
-                    *depth == 1 && matches!(node.state, AgentState::Queued | AgentState::Running)
-                })
+                .filter(|(depth, node)| *depth == 1 && !node.background && is_live(node))
+                .count()
+        })
+    }
+
+    /// How many agents of the main session, at any depth and in the
+    /// background or not, are queued or running.
+    pub(crate) fn live_agents_under_main(&self) -> usize {
+        self.active_session.map_or(0, |main| {
+            self.agents
+                .under(main)
+                .into_iter()
+                .filter(|(_, node)| is_live(node))
                 .count()
         })
     }
@@ -432,7 +462,7 @@ impl App {
                 Some(view::AgentRow {
                     session: node.session,
                     depth,
-                    agent: node.agent.clone(),
+                    agent: tagged_name(node),
                     description: node.description.clone(),
                     item: swarm_item(node),
                     state,
@@ -507,7 +537,7 @@ impl App {
             AgentsRow {
                 session: Some(node.session),
                 depth,
-                name: node.agent.clone(),
+                name: tagged_name(node),
                 title: node.description.clone(),
                 item: swarm_item(node),
                 state,

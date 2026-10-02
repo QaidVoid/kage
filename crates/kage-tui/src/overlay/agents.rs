@@ -536,7 +536,7 @@ impl OverlayWidget for AgentsOverlay {
     }
 
     fn footer_hint(&self) -> &'static str {
-        "enter to open \u{b7} \u{2190}\u{2192} to fold \u{b7} x to stop \u{b7} esc to close"
+        "enter to open \u{b7} \u{2190}\u{2192} to fold \u{b7} x to stop \u{b7} X to stop all \u{b7} esc to close"
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> OverlayAction {
@@ -549,7 +549,7 @@ impl OverlayWidget for AgentsOverlay {
         match key.code {
             KeyCode::Esc => OverlayAction::Close,
             _ if self.rows.is_empty() && key.code != KeyCode::Enter => match key.code {
-                KeyCode::Char('x') => OverlayAction::Stay,
+                KeyCode::Char('x' | 'X') => OverlayAction::Stay,
                 _ => OverlayAction::PropagateKey,
             },
             KeyCode::Up | KeyCode::Char('k') => {
@@ -597,7 +597,15 @@ impl OverlayWidget for AgentsOverlay {
             {
                 OverlayAction::Resolve("stop".into())
             }
-            KeyCode::Char('x') => OverlayAction::Stay,
+            KeyCode::Char('X')
+                if self
+                    .rows
+                    .iter()
+                    .any(|r| r.session.is_some() && r.state.is_live()) =>
+            {
+                OverlayAction::Resolve("stop-all".into())
+            }
+            KeyCode::Char('x' | 'X') => OverlayAction::Stay,
             _ => OverlayAction::PropagateKey,
         }
     }

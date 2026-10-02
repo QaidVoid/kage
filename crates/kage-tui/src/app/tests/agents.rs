@@ -1661,3 +1661,179 @@ fn the_footer_counts_the_agents_under_the_viewed_session() {
     assert_eq!(rows[0].tokens, 100, "the main row shows the main session");
     assert!((rows[0].cost - 1.0).abs() < 1e-9);
 }
+
+/// Run the main session's background `agent` call `call`, which ends
+/// at once, and start the agent it announces. Returns its session.
+fn spawn_background(
+    app: &mut App,
+    events: &mpsc::Sender<kage_core::protocol::Envelope>,
+    call: &str,
+    agent: &str,
+) -> kage_core::SessionId {
+    let child = kage_core::SessionId::new();
+    let started = kage_core::agent_report::AgentReport {
+        name: agent.into(),
+        session: child,
+        state: kage_core::agent_report::ReportState::Started,
+        limit: None,
+        stats: None,
+        body: "runs in the background".into(),
+    };
+    let input = serde_json::json!({"agent": agent, "description": "a task", "prompt": "go"});
+    let id = kage_core::ToolCallId::new(call);
+    feed(
+        app,
+        events,
+        vec![
+            kage_core::LoopEvent::ToolCallStart {
+                id: id.clone(),
+                name: "agent".into(),
+                input_partial: input,
+            }
+            .into(),
+            kage_core::LoopEvent::ToolCallEnd {
+                id,
+                output: kage_core::ToolOutput {
+                    text: started.to_text(),
+                    ..kage_core::ToolOutput::default()
+                },
+            }
+            .into(),
+        ],
+    );
+    let spawned = kage_core::protocol::HostEvent::AgentSpawned {
+        parent: app.active_session.unwrap(),
+        tool_call_id: kage_core::ToolCallId::new(call),
+        agent: agent.into(),
+        description: format!("{agent} task"),
+        swarm: None,
+        background: true,
+    };
+    send_to(
+        app,
+        events,
+        child,
+        vec![
+            spawned.into(),
+            kage_core::protocol::HostEvent::RunStarted.into(),
+        ],
+    );
+    child
+}
+
+fn report_text(session: kage_core::SessionId, body: &str) -> String {
+    kage_core::agent_report::AgentReport {
+        name: "general".into(),
+        session,
+        state: kage_core::agent_report::ReportState::Completed,
+        limit: None,
+        stats: Some(kage_core::agent_report::ReportStats {
+            run_ms: Some(4_000),
+            ..kage_core::agent_report::ReportStats::default()
+        }),
+        body: body.into(),
+    }
+    .to_text()
+}
+
+#[test]
+fn the_working_row_waits_only_for_foreground_agents() {
+    let (mut app, _rx, events) = app_with_events();
+    app.set_editor_modeless(true);
+    app.run_started = Instant::now().checked_sub(Duration::from_secs(5));
+    spawn_agent(&mut app, &events, "a1", "explore");
+    spawn_background(&mut app, &events, "a2", "general");
+    let label = app.activity_label(&lock(&app.buffer), 80).unwrap();
+    assert!(label.starts_with("Waiting for 1 agent ("), "{label}");
+}
+
+#[test]
+fn an_idle_session_pins_its_background_agent_and_names_the_key() {
+    let (mut app, _rx, events) = app_with_events();
+    app.set_editor_modeless(true);
+    spawn_background(&mut app, &events, "a1", "general");
+    assert_eq!(pinned(&app)[0].1, "general bg");
+    assert!(
+        app.footer_hint().starts_with("ctrl+t for agents"),
+        "{}",
+        app.footer_hint()
+    );
+    let rows = rendered(&mut app, 100, 30);
+    assert!(
+        rows.iter().any(|row| row.contains("general bg")),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn a_report_is_a_report_block_and_leaves_the_pending_rows() {
+    let (mut app, _rx, events) = app_with_events();
+    let child = spawn_background(&mut app, &events, "a1", "general");
+    lock(app.session_usage.as_ref().unwrap()).working = true;
+    app.handle_submit("later".into(), true);
+    assert_eq!(app.pending.len(), 1);
+    feed(
+        &mut app,
+        &events,
+        vec![user_message(&report_text(child, "412 passed\n2 failed"))],
+    );
+    assert_eq!(app.pending.len(), 1, "agent text delivers no prompt");
+    let buffer = lock(&app.root_buffer);
+    let last = buffer.blocks().last().unwrap();
+    assert!(
+        matches!(last.as_ref(), crate::Block::Custom { kind, folded: true, .. } if kind == "kage:agent"),
+        "{last:?}"
+    );
+    drop(buffer);
+    let rows = rendered(&mut app, 100, 30).join("\n");
+    assert!(
+        rows.contains("Agent general finished \u{b7} done \u{b7} 4.0s"),
+        "{rows}"
+    );
+    assert!(rows.contains("412 passed"), "{rows}");
+    assert!(rows.contains("... 1 more line"), "{rows}");
+}
+
+#[test]
+fn a_message_from_the_parent_is_a_row_in_the_agent_view() {
+    let (mut app, _rx, events) = app_with_events();
+    let child = spawn_background(&mut app, &events, "a1", "general");
+    let mail = kage_core::agent_report::AgentMail {
+        from: "kage".into(),
+        session: app.active_session.unwrap(),
+        body: "also run the doc tests".into(),
+    };
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![user_message(&mail.to_text())],
+    );
+    let buffer = lock(&app.agent_buffers[&child]);
+    let last = buffer.blocks().last().unwrap();
+    assert!(
+        matches!(last.as_ref(), crate::Block::Custom { kind, text, .. }
+            if kind == "kage:mail" && text == "< message from kage: also run the doc tests"),
+        "{last:?}"
+    );
+}
+
+#[test]
+fn shift_x_in_the_agents_overlay_stops_every_live_agent() {
+    let (mut app, rx, _events, [general, test, _]) = agents_app();
+    app.handle_key(ctrl('t'));
+    app.handle_key(key('X'));
+    let stopped: Vec<_> = rx.try_iter().collect();
+    assert_eq!(
+        stopped,
+        [
+            RunRequest::Cancel {
+                session: Some(general)
+            },
+            RunRequest::Cancel {
+                session: Some(test)
+            },
+        ]
+    );
+    assert!(app.agents_overlay.is_some());
+}

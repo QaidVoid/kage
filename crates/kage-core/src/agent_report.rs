@@ -297,6 +297,54 @@ impl AgentMail {
     }
 }
 
+/// One element of agent text in a user message.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentText {
+    /// An agent's report.
+    Report(AgentReport),
+    /// A message from another session.
+    Mail(AgentMail),
+}
+
+/// A user message the engine built from agent text, split into the
+/// person's own words in front (empty when there are none) and the
+/// reports and messages after them. A run reads a burst of agent text
+/// as one message, after any steering the user typed. `None` when the
+/// text holds no agent element, or one that does not parse: it is
+/// plain user text then.
+#[must_use]
+pub fn split_agent_text(text: &str) -> Option<(&str, Vec<AgentText>)> {
+    let starts = |at: usize| at == 0 || text[..at].ends_with('\n');
+    let first = ["<agent ", "<message "]
+        .iter()
+        .filter_map(|open| {
+            text.match_indices(open)
+                .map(|(at, _)| at)
+                .find(|at| starts(*at))
+        })
+        .min()?;
+    let mut parts = Vec::new();
+    let mut rest = &text[first..];
+    while !rest.is_empty() {
+        let (close, report) = if rest.starts_with("<agent ") {
+            ("\n</agent>", true)
+        } else if rest.starts_with("<message ") {
+            ("\n</message>", false)
+        } else {
+            return None;
+        };
+        let end = rest.find(close)? + close.len();
+        let element = &rest[..end];
+        parts.push(if report {
+            AgentText::Report(AgentReport::parse(element)?)
+        } else {
+            AgentText::Mail(AgentMail::parse(element)?)
+        });
+        rest = rest[end..].trim_start();
+    }
+    Some((text[..first].trim(), parts))
+}
+
 /// The value of `key="..."` in an attribute list, matched as a whole
 /// attribute name.
 fn attr_value<'a>(attrs: &'a str, key: &str) -> Option<&'a str> {
@@ -444,6 +492,32 @@ mod tests {
             AgentMail::parse(&finished(ReportState::Completed).to_text()),
             None
         );
+    }
+
+    #[test]
+    fn agent_text_splits_from_the_words_in_front() {
+        let report = finished(ReportState::Completed);
+        let mail = AgentMail {
+            from: "kage".into(),
+            session: session(),
+            body: "hi\n\nthere".into(),
+        };
+        let burst = format!("{}\n\n{}", report.to_text(), mail.to_text());
+        assert_eq!(
+            split_agent_text(&burst),
+            Some((
+                "",
+                vec![AgentText::Report(report.clone()), AgentText::Mail(mail)]
+            ))
+        );
+        let steered = format!("stop after this\n\n{}", report.to_text());
+        assert_eq!(
+            split_agent_text(&steered),
+            Some(("stop after this", vec![AgentText::Report(report.clone())]))
+        );
+        assert_eq!(split_agent_text("plain words"), None);
+        let broken = format!("{} and more", report.to_text());
+        assert_eq!(split_agent_text(&broken), None);
     }
 
     #[test]

@@ -8,6 +8,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::select_biased;
+use kage_core::agent_report::AgentReport;
 use kage_core::agents::AgentDefs;
 use kage_core::protocol::{Command, CommandKind};
 use kage_core::{Risk, SessionId, ToolCallId, ToolOutput};
@@ -660,22 +661,12 @@ fn is_agent(result: &ToolOutput) -> bool {
 
 /// The session id in a result's `<agent ...>` header line.
 fn session_in(result: &ToolOutput) -> Option<SessionId> {
-    let line = result.text.lines().next()?;
-    let rest = line.split("session=\"").nth(1)?;
-    Ulid::from_string(rest.split('"').next()?)
-        .ok()
-        .map(SessionId)
+    AgentReport::header(result.text.lines().next()?).map(|report| report.session)
 }
 
 /// The run state in a result's `<agent ...>` header line.
 fn state_in(result: &ToolOutput) -> Option<&'static str> {
-    let line = result.text.lines().next()?;
-    match line.split("state=\"").nth(1)?.split('"').next()? {
-        "completed" => Some("completed"),
-        "failed" => Some("failed"),
-        "cancelled" => Some("cancelled"),
-        _ => None,
-    }
+    AgentReport::header(result.text.lines().next()?).map(|report| report.state.as_str())
 }
 
 /// Make `value` safe inside a double-quoted attribute on one line.

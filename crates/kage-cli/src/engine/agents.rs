@@ -196,6 +196,7 @@ impl super::Dispatcher {
                 agent,
                 description,
                 swarm,
+                background: false,
             },
         );
     }

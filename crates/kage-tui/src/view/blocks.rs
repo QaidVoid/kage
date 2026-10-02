@@ -89,7 +89,7 @@ pub(crate) fn tool_row_lines(
         _ => (text_lines(row.output), None, None),
     };
     // A stopped agent reads like an interrupted call, not a failure.
-    let look = if end == Some(AgentEnd::Stopped) {
+    let look = if end.is_some_and(AgentEnd::interrupted) {
         ToolPhase::Interrupted
     } else {
         row.phase

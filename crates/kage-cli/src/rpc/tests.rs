@@ -3922,7 +3922,11 @@ fn a_cancel_from_the_second_client_ends_the_owners_run() {
 #[test]
 fn a_new_session_is_recorded_in_the_host_sessions_directory() {
     let dir = tempfile::tempdir().unwrap();
-    let h = serve(vec![text_turn("hi"), text_turn("title")], dir.path(), dir.path());
+    let h = serve(
+        vec![text_turn("hi"), text_turn("title")],
+        dir.path(),
+        dir.path(),
+    );
     let params = serde_json::json!({"cwd": dir.path(), "mcpServers": []});
     let created = h.client.request("session/new", params).unwrap();
     let session = created["sessionId"].as_str().unwrap().to_owned();

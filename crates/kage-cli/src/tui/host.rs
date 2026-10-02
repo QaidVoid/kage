@@ -634,6 +634,7 @@ mod tests {
             agent: "explore".into(),
             description: "map".into(),
             swarm: None,
+            background: false,
         });
         apply(&envelope(child, 1, spawned));
         apply(&envelope(child, 2, state("agent:m")));

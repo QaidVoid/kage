@@ -1,6 +1,7 @@
 //! The `agent` tool: starts a child session from an agent definition,
 //! waits for it, and returns its final reply as the tool result.
 
+use kage_core::agent_report::{AgentReport, ReportState, ReportStats};
 use std::fmt::Write as _;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -178,9 +179,17 @@ pub(super) fn error_output(text: String) -> ToolOutput {
 /// The engine refusing to start or resume the child `session`: a
 /// failed `<agent>` element, so a swarm places it on that child.
 pub(super) fn refused(session: SessionId, agent: &str, text: &str) -> ToolOutput {
-    error_output(format!(
-        "<agent name=\"{agent}\" session=\"{session}\" state=\"failed\">\n{text}\n</agent>"
-    ))
+    error_output(
+        AgentReport {
+            name: agent.to_owned(),
+            session,
+            state: ReportState::Failed,
+            limit: None,
+            stats: None,
+            body: text.to_owned(),
+        }
+        .to_text(),
+    )
 }
 
 /// The result an `agent` call returns: the text of the agent's last
@@ -210,16 +219,16 @@ pub(super) fn agent_result(
             .unwrap_or_else(|| NO_REPLY.to_owned())
     };
     let (state, body, is_error) = match outcome {
-        RunOutcome::Completed => ("completed", reply(), false),
-        RunOutcome::Cancelled => ("cancelled", reply(), true),
-        RunOutcome::Failed { error } => ("failed", error.to_string(), true),
+        RunOutcome::Completed => (ReportState::Completed, reply(), false),
+        RunOutcome::Cancelled => (ReportState::Cancelled, reply(), true),
+        RunOutcome::Failed { error } => (ReportState::Failed, error.to_string(), true),
     };
     let tool_calls = history
         .iter()
         .flat_map(|message| &message.content)
         .filter(|block| matches!(block, Content::ToolCall { .. }))
         .count();
-    let mut body = body.replace("</agent", "<\\/agent");
+    let mut body = body;
     let total = body.chars().count();
     if total > RESULT_CAP {
         let cut = body
@@ -233,21 +242,21 @@ pub(super) fn agent_result(
             total - RESULT_CAP
         );
     }
-    let run_ms = u64::try_from(run_time.as_millis()).unwrap_or(u64::MAX);
+    let report = AgentReport {
+        name: agent.to_owned(),
+        session,
+        state,
+        limit: None,
+        stats: Some(ReportStats {
+            model: model.to_owned(),
+            tool_calls: u32::try_from(tool_calls).unwrap_or(u32::MAX),
+            usage: *usage,
+            run_ms: Some(u64::try_from(run_time.as_millis()).unwrap_or(u64::MAX)),
+        }),
+        body,
+    };
     ToolOutput {
-        text: format!(
-            "<agent name=\"{agent}\" session=\"{session}\" state=\"{state}\" \
-             model=\"{model}\" tools=\"{tool_calls}\" in=\"{}\" out=\"{}\" cache_read=\"{}\" \
-             cache_write=\"{}\" cost=\"{:.4}\" ctx=\"{}\" win=\"{}\" run_ms=\"{run_ms}\">\n\
-             {body}\n</agent>",
-            usage.total.input,
-            usage.total.output,
-            usage.total.cache_read,
-            usage.total.cache_write,
-            usage.cost,
-            usage.context_used,
-            usage.context_window,
-        ),
+        text: report.to_text(),
         is_error,
         ..ToolOutput::default()
     }

@@ -10,6 +10,7 @@
 //! is never touched: [`shell_output`] and [`agent_output`] strip the
 //! model-facing labels and wrapper from a copy for painting only.
 
+use kage_core::agent_report::{AgentLimit, AgentReport, ReportState};
 use kage_core::event::AGENT_NO_REPLY_TEXT as NO_REPLY;
 use kage_core::protocol::EXIT_PLAN_TOOL;
 use serde_json::Value;
@@ -233,6 +234,10 @@ pub enum AgentEnd {
     Stopped,
     /// The agent's run failed.
     Failed,
+    /// The agent runs in the background; its result comes later.
+    Background,
+    /// A limit ended the agent's run.
+    Limited(AgentLimit),
 }
 
 impl AgentEnd {
@@ -243,7 +248,19 @@ impl AgentEnd {
             Self::Done => "done",
             Self::Stopped => "stopped",
             Self::Failed => "failed",
+            Self::Background => "background",
+            Self::Limited(limit) => limit.label(),
         }
+    }
+
+    /// Whether the run was cut short, so it reads like an interrupted
+    /// call rather than a finished or failed one.
+    #[must_use]
+    pub fn interrupted(self) -> bool {
+        matches!(
+            self,
+            Self::Stopped | Self::Limited(AgentLimit::Time | AgentLimit::Budget)
+        )
     }
 }
 
@@ -463,34 +480,46 @@ pub fn shell_output(text: &str) -> (Vec<BodyLine>, Option<ShellExit>) {
 /// wrapper, such as a refused start, comes back whole with no end.
 #[must_use]
 pub fn agent_output(text: &str) -> (Vec<BodyLine>, Option<AgentEnd>) {
-    let unwrapped = text.strip_prefix("<agent ").and_then(|rest| {
-        let (attrs, rest) = rest.split_once(">\n")?;
-        let body = rest.strip_suffix("\n</agent>")?;
-        let state = attrs.split_once("state=\"")?.1.split_once('"')?.0;
-        let end = match state {
-            "completed" => AgentEnd::Done,
-            "cancelled" => AgentEnd::Stopped,
-            "failed" => AgentEnd::Failed,
-            _ => return None,
-        };
-        Some((body, end))
-    });
-    let Some((body, end)) = unwrapped else {
+    let Some(report) = AgentReport::parse(text) else {
         let lines = text.lines().map(|l| BodyLine::new(LineKind::Text, l));
         return (lines.collect(), None);
     };
+    let end = match (report.state, report.limit) {
+        (ReportState::Started, _) => {
+            let line = "Runs in the background. Its result arrives as a message.";
+            return (
+                vec![BodyLine::new(LineKind::Text, line)],
+                Some(AgentEnd::Background),
+            );
+        }
+        (ReportState::Failed, _) => AgentEnd::Failed,
+        (_, Some(limit)) => AgentEnd::Limited(limit),
+        (ReportState::Completed, None) => AgentEnd::Done,
+        (ReportState::Cancelled, None) => AgentEnd::Stopped,
+    };
+    let body = report.body.as_str();
     let mut lines: Vec<BodyLine> = body
         .lines()
         .map(|l| BodyLine::new(LineKind::Text, l))
         .collect();
-    if end == AgentEnd::Stopped {
+    let why = match end {
+        AgentEnd::Stopped => Some("Stopped by you"),
+        AgentEnd::Limited(AgentLimit::Time) => Some("Stopped at the time limit"),
+        AgentEnd::Limited(AgentLimit::Budget) => {
+            Some("Stopped when the agents reached the token budget")
+        }
+        _ => None,
+    };
+    if let Some(why) = why {
         match lines.first_mut() {
             Some(first) if body != NO_REPLY => {
-                first.text = format!("Stopped by you. Partial reply: {}", first.text);
+                first.text = format!("{why}. Partial reply: {}", first.text);
             }
             _ => {
-                let text = "Stopped by you before it replied.";
-                lines = vec![BodyLine::new(LineKind::Text, text)];
+                lines = vec![BodyLine::new(
+                    LineKind::Text,
+                    format!("{why} before it replied."),
+                )];
             }
         }
     }
@@ -1178,7 +1207,9 @@ mod tests {
     #[test]
     fn agent_output_strips_the_wrapper() {
         let wrap = |state: &str, body: &str| {
-            format!("<agent name=\"explore\" session=\"01K\" state=\"{state}\">\n{body}\n</agent>")
+            format!(
+                "<agent name=\"explore\" session=\"01K62W8Q3T9V5M2C7X4B1N0R6S\" state=\"{state}\">\n{body}\n</agent>"
+            )
         };
         let (lines, end) = agent_output(&wrap("completed", "one\ntwo"));
         assert_eq!(

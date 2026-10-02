@@ -9,7 +9,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use super::{Envelope, Event, HostEvent, RunOutcome, SessionId, SwarmMember, TokenUsage, Usage};
+use super::{Envelope, Event, HostEvent, RunOutcome, SessionId, SwarmMember, Usage};
+use crate::agent_report::{AgentReport, ReportState};
 use crate::{Content, LoopEvent, Message, ToolCallId};
 
 /// What a client knows about agent sessions, built from envelopes.
@@ -55,6 +56,9 @@ pub struct AgentNode {
     /// Rebuilt from a stored conversation by [`AgentTree::restore`]. No
     /// engine runs it, so it cannot be messaged.
     pub restored: bool,
+    /// It runs in the background: its parent's call returned at once
+    /// and its result arrives as a message.
+    pub background: bool,
 }
 
 impl AgentNode {
@@ -95,8 +99,20 @@ impl AgentTree {
             agent,
             description,
             swarm,
+            background,
         }) = &envelope.event
         {
+            // An agent rebuilt from a stored conversation runs again
+            // when the engine announces it anew.
+            if let Some(&i) = self.index.get(&session)
+                && self.nodes[i].restored
+            {
+                let node = &mut self.nodes[i];
+                node.restored = false;
+                node.state = AgentState::Queued;
+                node.background = *background;
+                return true;
+            }
             return self.insert(AgentNode {
                 session,
                 parent: *parent,
@@ -113,6 +129,7 @@ impl AgentTree {
                 started: None,
                 took: None,
                 restored: false,
+                background: *background,
             });
         }
         let Some(&i) = self.index.get(&session) else {
@@ -224,12 +241,42 @@ impl AgentTree {
                                 started: None,
                                 took,
                                 restored: true,
+                                background: agent.background,
                             });
+                        }
+                    }
+                    // A background agent's report arrives as a message
+                    // after its `started` result and settles its node.
+                    Content::Text { text } if message.role == crate::Role::User => {
+                        for report in AgentReport::all_in(text) {
+                            self.settle_restored(&report);
                         }
                     }
                     _ => {}
                 }
             }
+        }
+    }
+
+    /// Applies a background agent's delivered report to its restored
+    /// node.
+    fn settle_restored(&mut self, report: &AgentReport) {
+        let Some(&i) = self.index.get(&report.session) else {
+            return;
+        };
+        let node = &mut self.nodes[i];
+        node.state = match report.state {
+            ReportState::Completed => AgentState::Done,
+            ReportState::Failed => AgentState::Failed,
+            ReportState::Cancelled | ReportState::Started => AgentState::Cancelled,
+        };
+        if let Some(stats) = &report.stats {
+            node.usage = stats.usage;
+            node.tool_calls = stats.tool_calls;
+            if !stats.model.is_empty() {
+                node.model.clone_from(&stats.model);
+            }
+            node.took = stats.run_ms.map(Duration::from_millis);
         }
     }
 
@@ -247,6 +294,20 @@ impl AgentTree {
             session = node.parent;
         }
         session
+    }
+
+    /// What every agent under `root` has spent, at every depth.
+    #[must_use]
+    pub fn usage_under(&self, root: SessionId) -> Usage {
+        let mut sum = Usage::default();
+        for (_, node) in self.under(root) {
+            sum.total.input += node.usage.total.input;
+            sum.total.output += node.usage.total.output;
+            sum.total.cache_read += node.usage.total.cache_read;
+            sum.total.cache_write += node.usage.total.cache_write;
+            sum.cost += node.usage.cost;
+        }
+        sum
     }
 
     /// Agents under `root`, depth first in spawn order. Depth 1 is a
@@ -342,44 +403,30 @@ struct RestoredAgent {
     model: String,
     /// Recorded run time in milliseconds, when the header carries it.
     run_ms: Option<u64>,
+    /// It was started in the background; its report comes later.
+    background: bool,
 }
 
 /// The `<agent ...>` header of a stored result, parsed. The stats
 /// attrs are written by the engine and may be missing on older
-/// transcripts; they default to zero.
+/// transcripts; they default to zero. A background agent's `started`
+/// header reads as cancelled until a later report says otherwise.
 fn agent_header(line: &str) -> Option<RestoredAgent> {
-    let attrs = line.strip_prefix("<agent ")?.split_once('>')?.0;
-    let attr = |key: &str| attr_value(attrs, key);
-    let num = |key: &str| -> u64 { attr(key).and_then(|value| value.parse().ok()).unwrap_or(0) };
-    let session = ulid::Ulid::from_string(attr("session")?).ok()?;
-    let state = match attr("state")? {
-        "completed" => AgentState::Done,
-        "cancelled" => AgentState::Cancelled,
-        "failed" => AgentState::Failed,
-        _ => return None,
-    };
+    let report = AgentReport::header(line)?;
+    let stats = report.stats.unwrap_or_default();
     Some(RestoredAgent {
-        agent: attr("name")?.to_owned(),
-        session: SessionId(session),
-        state,
-        tool_calls: u32::try_from(num("tools")).unwrap_or(u32::MAX),
-        model: attr("model")
-            .map(crate::canonical_model)
-            .unwrap_or_default(),
-        usage: Usage {
-            total: TokenUsage {
-                input: num("in"),
-                output: num("out"),
-                cache_read: num("cache_read"),
-                cache_write: num("cache_write"),
-            },
-            context_used: num("ctx"),
-            context_window: num("win"),
-            cost: attr("cost")
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(0.0),
+        agent: report.name,
+        session: report.session,
+        state: match report.state {
+            ReportState::Completed => AgentState::Done,
+            ReportState::Failed => AgentState::Failed,
+            ReportState::Cancelled | ReportState::Started => AgentState::Cancelled,
         },
-        run_ms: attr("run_ms").and_then(|value| value.parse().ok()),
+        tool_calls: stats.tool_calls,
+        model: stats.model,
+        usage: stats.usage,
+        run_ms: stats.run_ms,
+        background: report.state == ReportState::Started,
     })
 }
 
@@ -434,6 +481,7 @@ mod tests {
             agent: agent.into(),
             description: format!("{agent} task"),
             swarm: None,
+            background: false,
         };
         assert!(tree.apply(&envelope(session, spawned)));
         session
@@ -578,6 +626,7 @@ mod tests {
             agent: "explore".into(),
             description: "loop".into(),
             swarm: None,
+            background: false,
         };
         assert!(!tree.apply(&envelope(root, spawned)));
         assert_eq!(tree.root_of(child), root);
@@ -795,6 +844,115 @@ mod tests {
         assert_eq!(node.took, Some(Duration::from_secs(15)));
         let node = tree.get(second).unwrap();
         assert_eq!(node.took, Some(Duration::from_secs(9)));
+    }
+
+    fn started_and_report(child: SessionId, report: Option<&str>) -> Vec<Message> {
+        let parent_call = Message::new(
+            crate::Role::Assistant,
+            vec![Content::ToolCall {
+                id: ToolCallId("a1".into()),
+                name: "agent".into(),
+                input: serde_json::json!({ "agent": "general", "description": "run the tests" }),
+            }],
+            None,
+        );
+        let started = Message::new(
+            crate::Role::ToolResult,
+            vec![Content::ToolResultBlock {
+                call_id: ToolCallId("a1".into()),
+                output: format!(
+                    "<agent name=\"general\" session=\"{child}\" state=\"started\">\nruns\n</agent>"
+                ),
+                is_error: false,
+            }],
+            None,
+        );
+        let mut messages = vec![parent_call, started];
+        if let Some(state) = report {
+            messages.push(Message::new(
+                crate::Role::User,
+                vec![Content::Text {
+                    text: format!(
+                        "<agent name=\"general\" session=\"{child}\" state=\"{state}\" model=\"m/x\" \
+                         tools=\"4\" in=\"10\" out=\"5\" cache_read=\"0\" cache_write=\"0\" \
+                         cost=\"0.5000\" ctx=\"15\" win=\"100\" run_ms=\"3000\">\n412 passed\n</agent>"
+                    ),
+                }],
+                None,
+            ));
+        }
+        messages
+    }
+
+    #[test]
+    fn a_background_agent_restores_from_its_later_report() {
+        let parent = SessionId::new();
+        let child = SessionId::new();
+        let mut tree = AgentTree::default();
+        tree.restore(parent, &started_and_report(child, Some("completed")));
+        let node = tree.get(child).unwrap();
+        assert!(node.background);
+        assert_eq!(node.state, AgentState::Done);
+        assert_eq!(node.tool_calls, 4);
+        assert_eq!(node.model, "m/x");
+        assert_eq!(node.took, Some(Duration::from_secs(3)));
+
+        let mut unfinished = AgentTree::default();
+        unfinished.restore(parent, &started_and_report(child, None));
+        assert_eq!(
+            unfinished.get(child).unwrap().state,
+            AgentState::Cancelled,
+            "the process ended before the report"
+        );
+    }
+
+    #[test]
+    fn a_restored_agent_runs_again_when_announced() {
+        let parent = SessionId::new();
+        let child = SessionId::new();
+        let mut tree = AgentTree::default();
+        tree.restore(parent, &started_and_report(child, Some("completed")));
+        let spawned = HostEvent::AgentSpawned {
+            parent,
+            tool_call_id: ToolCallId("a2".into()),
+            agent: "general".into(),
+            description: "again".into(),
+            swarm: None,
+            background: true,
+        };
+        assert!(tree.apply(&envelope(child, spawned)));
+        let node = tree.get(child).unwrap();
+        assert!(!node.restored);
+        assert_eq!(node.state, AgentState::Queued);
+        assert_eq!(
+            end(&mut tree, child, RunOutcome::Completed),
+            AgentState::Done
+        );
+    }
+
+    #[test]
+    fn usage_under_sums_every_depth() {
+        let mut tree = AgentTree::default();
+        let root = SessionId::new();
+        let child = spawn(&mut tree, root, "general");
+        let grandchild = spawn(&mut tree, child, "explore");
+        for (session, input, cost) in [(child, 100, 0.25), (grandchild, 50, 0.5)] {
+            let usage = Usage {
+                total: crate::TokenUsage {
+                    input,
+                    output: 10,
+                    ..crate::TokenUsage::default()
+                },
+                cost,
+                ..Usage::default()
+            };
+            tree.apply(&envelope(session, HostEvent::UsageUpdated { usage }));
+        }
+        let sum = tree.usage_under(root);
+        assert_eq!(sum.total.input, 150);
+        assert_eq!(sum.total.output, 20);
+        assert!((sum.cost - 0.75).abs() < 1e-9);
+        assert_eq!(tree.usage_under(grandchild).total.input, 0);
     }
 
     #[test]

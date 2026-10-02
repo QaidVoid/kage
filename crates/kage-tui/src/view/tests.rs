@@ -1549,7 +1549,9 @@ fn agent_call(buffer: &mut Buffer, id: &str, description: &str) {
 }
 
 fn agent_result(state: &str, body: &str) -> String {
-    format!("<agent name=\"explore\" session=\"01K62W8Q\" state=\"{state}\">\n{body}\n</agent>")
+    format!(
+        "<agent name=\"explore\" session=\"01K62W8Q3T9V5M2C7X4B1N0R6S\" state=\"{state}\">\n{body}\n</agent>"
+    )
 }
 
 #[test]

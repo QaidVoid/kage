@@ -302,6 +302,7 @@ fn spawn_agent(
         agent: agent.into(),
         description: format!("{agent} task"),
         swarm: None,
+        background: false,
     };
     send_to(app, events, child, vec![spawned.into()]);
     child

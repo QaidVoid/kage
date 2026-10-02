@@ -10,6 +10,7 @@ use kage_provider::ProviderRegistry;
 use kage_session::{SessionId, SessionWriter};
 
 use crate::cli_printing::{print_envelope_json, print_event};
+use kage_core::agent_report::{AgentReport, ReportState};
 
 /// The layered config for `workdir`, refused when its permission rules
 /// or shell policy do not validate.
@@ -179,33 +180,27 @@ fn print_loop_event<W: io::Write>(out: &mut W, event: &LoopEvent) {
             let _ = writeln!(out, "\n[agent {agent}: {description}]");
             let _ = out.flush();
         }
-        LoopEvent::ToolCallEnd { output, .. } => match agent_end(&output.text) {
-            Some((agent, "failed", error)) => {
-                let _ = writeln!(out, "[agent {agent} failed] {error}");
+        LoopEvent::ToolCallEnd { output, .. } => match AgentReport::parse(&output.text) {
+            Some(report) if report.state == ReportState::Failed => {
+                let _ = writeln!(out, "[agent {} failed] {}", report.name, report.body);
                 let _ = out.flush();
             }
-            Some((agent, state, _)) => {
-                let _ = writeln!(out, "[agent {agent} {state}]");
+            Some(report) => {
+                let state = report.state.as_str();
+                match report.limit {
+                    Some(limit) => {
+                        let _ = writeln!(out, "[agent {} {state}: {}]", report.name, limit.label());
+                    }
+                    None => {
+                        let _ = writeln!(out, "[agent {} {state}]", report.name);
+                    }
+                }
                 let _ = out.flush();
             }
             None => print_event(out, event),
         },
         _ => print_event(out, event),
     }
-}
-
-/// The agent name, end state and body of an `agent` call result, or
-/// `None` when the text is not wrapped in an `<agent>` element.
-fn agent_end(text: &str) -> Option<(&str, &str, &str)> {
-    let (attrs, rest) = text.strip_prefix("<agent ")?.split_once(">\n")?;
-    let body = rest.strip_suffix("\n</agent>")?;
-    let attr = |key: &str| {
-        attrs
-            .split_once(&format!("{key}=\""))
-            .and_then(|(_, value)| value.split_once('"'))
-            .map(|(value, _)| value)
-    };
-    Some((attr("name")?, attr("state")?, body))
 }
 
 /// Extract the first text block from a user message, joined with newlines

@@ -1,0 +1,386 @@
+//! The text an agent's run reports back to the session that started
+//! it: one `<agent>` element naming the agent, its session and how the
+//! run ended, with the reply as its body.
+//!
+//! The same element is a foreground `agent` call's result, a background
+//! agent's report delivered as a message, and what a resumed session's
+//! agent list is rebuilt from, so it is written and read in one place.
+//!
+//! ```text
+//! <agent name="general" session="01K6..." state="completed" model="anthropic/claude"
+//!   tools="3" in="1200" out="300" cache_read="0" cache_write="0" cost="0.0120" ctx="4000"
+//!   win="200000" run_ms="4200">
+//! the reply
+//! </agent>
+//! ```
+//!
+//! A report without stats (a refusal, or a background agent that just
+//! started) carries only the name, session and state.
+
+use std::fmt::Write as _;
+
+use crate::TokenUsage;
+use crate::protocol::{SessionId, Usage};
+
+/// How an agent's run stands, as its report says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportState {
+    /// A background agent started; its result comes later.
+    Started,
+    /// The run finished.
+    Completed,
+    /// The run was stopped.
+    Cancelled,
+    /// The run failed, or never started.
+    Failed,
+}
+
+impl ReportState {
+    /// The `state` attribute's value.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "started" => Self::Started,
+            "completed" => Self::Completed,
+            "cancelled" => Self::Cancelled,
+            "failed" => Self::Failed,
+            _ => return None,
+        })
+    }
+}
+
+/// Why an agent's run stopped before it was done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentLimit {
+    /// It reached its turn limit.
+    Turns,
+    /// It ran out of time.
+    Time,
+    /// The agents of its session spent their token budget.
+    Budget,
+}
+
+impl AgentLimit {
+    /// The `limit` attribute's value.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Turns => "turns",
+            Self::Time => "time",
+            Self::Budget => "budget",
+        }
+    }
+
+    /// How a client names the limit: `turn limit`, `timed out`,
+    /// `over budget`.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Turns => "turn limit",
+            Self::Time => "timed out",
+            Self::Budget => "over budget",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "turns" => Self::Turns,
+            "time" => Self::Time,
+            "budget" => Self::Budget,
+            _ => return None,
+        })
+    }
+}
+
+/// What a finished run recorded about itself.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReportStats {
+    /// The model it ran, as `provider/model`.
+    pub model: String,
+    /// The tool calls it made.
+    pub tool_calls: u32,
+    /// Its token totals, context fill and cost.
+    pub usage: Usage,
+    /// How long it ran, in milliseconds, when recorded.
+    pub run_ms: Option<u64>,
+}
+
+/// One agent's report.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentReport {
+    /// The agent definition's name.
+    pub name: String,
+    /// The agent's session.
+    pub session: SessionId,
+    /// How its run stands.
+    pub state: ReportState,
+    /// Why the run stopped early, when a limit stopped it.
+    pub limit: Option<AgentLimit>,
+    /// What the run recorded; `None` for a refusal or a start.
+    pub stats: Option<ReportStats>,
+    /// The reply, the error, or what a start tells the model.
+    pub body: String,
+}
+
+impl AgentReport {
+    /// The report as the `<agent>` element, its body escaped so it
+    /// cannot close the element early.
+    #[must_use]
+    pub fn to_text(&self) -> String {
+        let mut text = format!(
+            "<agent name=\"{}\" session=\"{}\" state=\"{}\"",
+            self.name,
+            self.session,
+            self.state.as_str()
+        );
+        if let Some(limit) = self.limit {
+            let _ = write!(text, " limit=\"{}\"", limit.as_str());
+        }
+        if let Some(stats) = &self.stats {
+            let usage = &stats.usage;
+            let _ = write!(
+                text,
+                " model=\"{}\" tools=\"{}\" in=\"{}\" out=\"{}\" cache_read=\"{}\" \
+                 cache_write=\"{}\" cost=\"{:.4}\" ctx=\"{}\" win=\"{}\"",
+                stats.model,
+                stats.tool_calls,
+                usage.total.input,
+                usage.total.output,
+                usage.total.cache_read,
+                usage.total.cache_write,
+                usage.cost,
+                usage.context_used,
+                usage.context_window,
+            );
+            if let Some(run_ms) = stats.run_ms {
+                let _ = write!(text, " run_ms=\"{run_ms}\"");
+            }
+        }
+        let _ = write!(
+            text,
+            ">\n{}\n</agent>",
+            self.body.replace("</agent", "<\\/agent")
+        );
+        text
+    }
+
+    /// The report `text` holds, when it is one `<agent>` element, with
+    /// its body unescaped. Plain text and other elements are not.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let (header, rest) = text.split_once('\n')?;
+        let mut report = Self::header(header)?;
+        let body = rest.strip_suffix("</agent>")?;
+        let body = body.strip_suffix('\n').unwrap_or(body);
+        report.body = body.replace("<\\/agent", "</agent");
+        Some(report)
+    }
+
+    /// Every report `text` holds: a delivered message joins several
+    /// with blank lines. Text around and between them is skipped.
+    #[must_use]
+    pub fn all_in(text: &str) -> Vec<Self> {
+        let mut found = Vec::new();
+        let mut rest = text;
+        while let Some(start) = rest.find("<agent ") {
+            let from = &rest[start..];
+            let Some(end) = from.find("\n</agent>") else {
+                break;
+            };
+            let element = &from[..end + "\n</agent>".len()];
+            found.extend(Self::parse(element));
+            rest = &from[element.len()..];
+        }
+        found
+    }
+
+    /// The report an `<agent ...>` header line describes, without a
+    /// body. Attributes an older transcript lacks read as zero.
+    #[must_use]
+    pub fn header(line: &str) -> Option<Self> {
+        let attrs = line.strip_prefix("<agent ")?.split_once('>')?.0;
+        let attr = |key: &str| attr_value(attrs, key);
+        let num =
+            |key: &str| -> u64 { attr(key).and_then(|value| value.parse().ok()).unwrap_or(0) };
+        let session = ulid::Ulid::from_string(attr("session")?).ok()?;
+        let recorded = ["tools", "model", "in", "out", "cost", "run_ms"]
+            .iter()
+            .any(|key| attr(key).is_some());
+        let stats = recorded.then(|| ReportStats {
+            model: attr("model")
+                .map(crate::canonical_model)
+                .unwrap_or_default(),
+            tool_calls: u32::try_from(num("tools")).unwrap_or(u32::MAX),
+            usage: Usage {
+                total: TokenUsage {
+                    input: num("in"),
+                    output: num("out"),
+                    cache_read: num("cache_read"),
+                    cache_write: num("cache_write"),
+                },
+                context_used: num("ctx"),
+                context_window: num("win"),
+                cost: attr("cost")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0.0),
+            },
+            run_ms: attr("run_ms").and_then(|value| value.parse().ok()),
+        });
+        Some(Self {
+            name: attr("name")?.to_owned(),
+            session: SessionId(session),
+            state: ReportState::parse(attr("state")?)?,
+            limit: attr("limit").and_then(AgentLimit::parse),
+            stats,
+            body: String::new(),
+        })
+    }
+}
+
+/// The value of `key="..."` in an attribute list, matched as a whole
+/// attribute name.
+fn attr_value<'a>(attrs: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!(" {key}=\"");
+    let padded = format!(" {attrs}");
+    let start = padded.find(&needle)? + needle.len();
+    let value = &padded[start..];
+    let end = value.find('"')?;
+    // `padded` is `attrs` with one leading space, so the slice maps
+    // back into `attrs` one byte earlier.
+    let from = start - 1;
+    Some(&attrs[from..from + end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session() -> SessionId {
+        SessionId(ulid::Ulid::from_string("01K62W8Q3T9V5M2C7X4B1N0R6S").unwrap())
+    }
+
+    fn finished(state: ReportState) -> AgentReport {
+        AgentReport {
+            name: "general".into(),
+            session: session(),
+            state,
+            limit: None,
+            stats: Some(ReportStats {
+                model: "anthropic/claude".into(),
+                tool_calls: 3,
+                usage: Usage {
+                    total: TokenUsage {
+                        input: 1200,
+                        output: 300,
+                        cache_read: 5,
+                        cache_write: 6,
+                    },
+                    context_used: 4000,
+                    context_window: 200_000,
+                    cost: 0.012,
+                },
+                run_ms: Some(4200),
+            }),
+            body: "the reply".into(),
+        }
+    }
+
+    #[test]
+    fn a_finished_report_reads_as_the_engine_has_always_written_it() {
+        assert_eq!(
+            finished(ReportState::Completed).to_text(),
+            "<agent name=\"general\" session=\"01K62W8Q3T9V5M2C7X4B1N0R6S\" state=\"completed\" \
+             model=\"anthropic/claude\" tools=\"3\" in=\"1200\" out=\"300\" cache_read=\"5\" \
+             cache_write=\"6\" cost=\"0.0120\" ctx=\"4000\" win=\"200000\" run_ms=\"4200\">\n\
+             the reply\n</agent>"
+        );
+    }
+
+    #[test]
+    fn every_state_and_limit_round_trips() {
+        for state in [
+            ReportState::Started,
+            ReportState::Completed,
+            ReportState::Cancelled,
+            ReportState::Failed,
+        ] {
+            for limit in [
+                None,
+                Some(AgentLimit::Turns),
+                Some(AgentLimit::Time),
+                Some(AgentLimit::Budget),
+            ] {
+                let mut report = finished(state);
+                report.limit = limit;
+                assert_eq!(AgentReport::parse(&report.to_text()), Some(report));
+            }
+        }
+        let bare = AgentReport {
+            stats: None,
+            ..finished(ReportState::Failed)
+        };
+        assert_eq!(
+            bare.to_text(),
+            "<agent name=\"general\" session=\"01K62W8Q3T9V5M2C7X4B1N0R6S\" state=\"failed\">\nthe reply\n</agent>"
+        );
+        assert_eq!(AgentReport::parse(&bare.to_text()), Some(bare));
+    }
+
+    #[test]
+    fn a_closing_tag_in_the_body_is_escaped_and_restored() {
+        let mut report = finished(ReportState::Completed);
+        report.body = "before </agent> after".into();
+        let text = report.to_text();
+        assert_eq!(text.matches("</agent>").count(), 1, "{text}");
+        assert_eq!(
+            AgentReport::parse(&text).unwrap().body,
+            "before </agent> after"
+        );
+    }
+
+    #[test]
+    fn several_reports_in_one_message_are_all_found() {
+        let one = finished(ReportState::Completed);
+        let mut two = finished(ReportState::Cancelled);
+        two.limit = Some(AgentLimit::Time);
+        let text = format!("{}\n\n{}", one.to_text(), two.to_text());
+        assert_eq!(AgentReport::all_in(&text), vec![one, two]);
+        assert!(AgentReport::all_in("no reports here").is_empty());
+    }
+
+    #[test]
+    fn plain_text_and_other_elements_are_not_reports() {
+        assert_eq!(AgentReport::parse("hello"), None);
+        assert_eq!(
+            AgentReport::parse("<message from=\"kage\">\nhi\n</message>"),
+            None
+        );
+        assert_eq!(
+            AgentReport::parse(
+                "<agent name=\"x\" session=\"bad\" state=\"completed\">\nhi\n</agent>"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn an_old_header_without_stats_or_model_reads() {
+        let old = AgentReport::header(
+            "<agent name=\"general\" session=\"01K62W8Q3T9V5M2C7X4B1N0R6S\" state=\"completed\" tools=\"2\">",
+        )
+        .unwrap();
+        let stats = old.stats.unwrap();
+        assert_eq!(stats.tool_calls, 2);
+        assert_eq!(stats.model, "");
+        assert_eq!(stats.run_ms, None);
+    }
+}

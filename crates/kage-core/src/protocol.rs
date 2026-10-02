@@ -240,6 +240,10 @@ pub enum HostEvent {
         /// agent. `None` for a plain `agent` call.
         #[serde(default)]
         swarm: Option<SwarmMember>,
+        /// The agent runs in the background: the `agent` call returned
+        /// at once and the result reaches the parent as a message.
+        #[serde(default)]
+        background: bool,
     },
     /// A swarm child hit a provider rate limit and the engine requeued
     /// it: its result is still pending, so it is paused rather than
@@ -698,6 +702,7 @@ mod tests {
                 agent: "explore".into(),
                 description: "map the exports".into(),
                 swarm: None,
+                background: true,
             }
             .into(),
             HostEvent::McpServers {
@@ -941,6 +946,7 @@ mod tests {
                     index: 1,
                     total: 3,
                 }),
+                background: false,
             },
             HostEvent::AgentPaused {
                 reason: "rate limited".into(),
@@ -977,6 +983,28 @@ mod tests {
             let back: Envelope = serde_json::from_str(&line).unwrap();
             assert_eq!(back, env, "{line}");
         }
+    }
+
+    #[test]
+    fn an_agent_spawned_envelope_from_before_background_reads() {
+        let event = HostEvent::AgentSpawned {
+            parent: SessionId::new(),
+            tool_call_id: ToolCallId("c".into()),
+            agent: "general".into(),
+            description: "d".into(),
+            swarm: None,
+            background: true,
+        };
+        let mut value = serde_json::to_value(&event).unwrap();
+        value.as_object_mut().unwrap().remove("background");
+        let read: HostEvent = serde_json::from_value(value).unwrap();
+        assert!(matches!(
+            read,
+            HostEvent::AgentSpawned {
+                background: false,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1054,6 +1082,7 @@ mod tests {
             agent: "explore".into(),
             description: "map the exports".into(),
             swarm: None,
+            background: false,
         }));
         assert_eq!(value["type"], "agent_spawned");
         assert_eq!(value["parent"], parent.to_string());

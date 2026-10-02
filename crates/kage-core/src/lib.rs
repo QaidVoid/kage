@@ -2,6 +2,7 @@
 //!
 //! Layering: workspace leaf; depends on no other `kage-*` crate.
 
+pub mod agent_report;
 pub mod agents;
 pub mod cancel;
 pub mod config;

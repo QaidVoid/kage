@@ -464,6 +464,7 @@ impl Bridge {
             agent,
             description,
             swarm,
+            ..
         }) = event
         {
             let Some(parent_id) = self.client_of(*parent) else {

@@ -150,6 +150,7 @@ impl Spawn {
                 agent: self.agent.clone(),
                 description: self.description.clone(),
                 swarm: self.swarm.clone(),
+                background: false,
             }
             .into(),
         }

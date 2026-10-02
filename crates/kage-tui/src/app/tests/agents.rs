@@ -414,6 +414,7 @@ fn the_working_row_reports_swarm_batch_progress() {
             index,
             total: 3,
         }),
+        background: false,
     };
     let children = [SessionId::new(), SessionId::new(), SessionId::new()];
     for (index, (child, item)) in children
@@ -565,6 +566,7 @@ fn a_nested_agent_is_pinned_under_its_parent() {
         agent: "test".into(),
         description: "run the provider tests".into(),
         swarm: None,
+        background: false,
     };
     send_to(&mut app, &events, nested, vec![spawned.into()]);
     for session in [parent, sibling, nested] {
@@ -939,6 +941,7 @@ fn agents_app() -> (
         agent: "test".into(),
         description: "run the provider tests".into(),
         swarm: None,
+        background: false,
     };
     send_to(&mut app, &events, test, vec![spawned.into()]);
     for session in [general, test] {
@@ -1148,6 +1151,7 @@ fn pinned_agents_follow_their_cards_and_finished_ones_leave_the_queue_hint() {
             agent: agent.into(),
             description: format!("{agent} task"),
             swarm: None,
+            background: false,
         };
         send_to(&mut app, &events, child, vec![spawned.into()]);
         children.push(child);
@@ -1617,6 +1621,7 @@ fn the_footer_counts_the_agents_under_the_viewed_session() {
         agent: "explore".into(),
         description: "look".into(),
         swarm: None,
+        background: false,
     };
     send_to(&mut app, &events, nested, vec![spawned.into()]);
     let usage = |input: u64, cost: f64| Usage {

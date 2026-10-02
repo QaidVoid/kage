@@ -1,6 +1,6 @@
 # install
 
-kage runs on Linux, macOS, and WSL. Download a release, install it
+kage runs on Linux, macOS and Windows. Download a release, install it
 from crates.io, or build it from source.
 
 ## release downloads
@@ -14,7 +14,10 @@ carries the `kage` binary for each platform, in two archives:
 | `kage-<platform>-web.tar.gz` | the same, plus the browser client in a `web/` folder |
 
 `<platform>` is `x86_64-linux`, `aarch64-linux` or `aarch64-macos`.
-The Linux binaries are static, so they run on any distribution.
+The Linux binaries are static, so they run on any distribution. For
+Windows the archives are `kage-x86_64-windows.zip` and
+`kage-x86_64-windows-web.zip`, holding `kage.exe`; unpack one and put
+its folder on your `PATH`.
 
 ```bash
 curl -fsSL https://github.com/QaidVoid/kage/releases/latest/download/kage-x86_64-linux.tar.gz | tar -xz

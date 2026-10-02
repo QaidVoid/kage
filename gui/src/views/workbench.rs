@@ -358,7 +358,7 @@ pub enum WorkbenchEvent {
 }
 
 /// The panes the workbench tabs switch between.
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 enum Tab {
     /// The file changes the session made.
     #[default]
@@ -1802,8 +1802,10 @@ impl Render for WorkbenchView {
                 .min_h_0()
                 .child(self.agent_detail(p, cx))
         } else if has_session {
+            // One scroll area per tab, so a long tab's position never
+            // lands past the end of a shorter one.
             v_flex()
-                .id("wb-body")
+                .id(SharedString::from(format!("wb-body-{:?}", self.tab)))
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()

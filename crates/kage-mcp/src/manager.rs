@@ -412,6 +412,7 @@ impl McpManager {
             headers: std::collections::BTreeMap::new(),
             disabled: false,
             oauth: None,
+            disabled_tools: Vec::new(),
         };
         let handle = McpServerHandle::from_connection(conn);
         self.servers
@@ -593,16 +594,19 @@ impl McpManager {
                 .expect("reload called on a live server")
                 .connection(),
         );
-        reload_connection(&conn, &mut managed.registered, reg)
+        let disabled = managed.spec.disabled_tools.clone();
+        reload_connection(&conn, &disabled, &mut managed.registered, reg)
     }
 }
 
 /// Connection-level reload: list `conn`'s tools, unregister the names
-/// in `registered`, register the current set, and update `registered`
-/// to match. Factored out of [`McpManager::reload`] so it can be
-/// exercised without spawning a process.
+/// in `registered`, register the current set but the `disabled` ones,
+/// and update `registered` to match. Factored out of
+/// [`McpManager::reload`] so it can be exercised without spawning a
+/// process.
 fn reload_connection(
     conn: &Arc<McpConnection>,
+    disabled: &[String],
     registered: &mut Vec<String>,
     reg: &mut ToolRegistry,
 ) -> Result<(), McpError> {
@@ -611,6 +615,12 @@ fn reload_connection(
         reg.unregister(&stale);
     }
     for tool in tools {
+        if disabled
+            .iter()
+            .any(|name| tool.name() == format!("{}__{name}", conn.name()))
+        {
+            continue;
+        }
         registered.push(tool.name().to_owned());
         reg.register(tool);
     }
@@ -652,14 +662,24 @@ mod tests {
         let mut reg = ToolRegistry::new();
         let mut registered = Vec::new();
 
-        reload_connection(&conn, &mut registered, &mut reg).unwrap();
+        reload_connection(&conn, &[], &mut registered, &mut reg).unwrap();
         assert_eq!(registered, ["x__old"]);
         assert!(reg.get("x__old").is_some());
 
-        reload_connection(&conn, &mut registered, &mut reg).unwrap();
+        reload_connection(&conn, &[], &mut registered, &mut reg).unwrap();
         assert_eq!(registered, ["x__new"]);
         assert!(reg.get("x__new").is_some());
         assert!(reg.get("x__old").is_none(), "stale tool was unregistered");
+    }
+
+    #[test]
+    fn a_disabled_tool_is_never_registered() {
+        let conn = flipping_server();
+        let mut reg = ToolRegistry::new();
+        let mut registered = Vec::new();
+        reload_connection(&conn, &["old".to_owned()], &mut registered, &mut reg).unwrap();
+        assert!(registered.is_empty());
+        assert!(reg.get("x__old").is_none());
     }
 
     #[test]
@@ -677,6 +697,7 @@ mod tests {
                 headers: std::collections::BTreeMap::new(),
                 disabled: true,
                 oauth: None,
+                disabled_tools: Vec::new(),
             },
         );
         cfg.servers.insert(
@@ -689,6 +710,7 @@ mod tests {
                 headers: std::collections::BTreeMap::new(),
                 disabled: false,
                 oauth: None,
+                disabled_tools: Vec::new(),
             },
         );
         let (mgr, errors) = McpManager::spawn_all(&cfg, vec![], None);
@@ -708,6 +730,7 @@ mod tests {
             headers: std::collections::BTreeMap::new(),
             disabled: false,
             oauth: None,
+            disabled_tools: Vec::new(),
         };
         cfg.servers.insert("broken".to_owned(), spec.clone());
         cfg.servers.insert(
@@ -760,6 +783,7 @@ mod tests {
                 headers: std::collections::BTreeMap::new(),
                 disabled: false,
                 oauth: None,
+                disabled_tools: Vec::new(),
             },
         );
         cfg.servers.insert(
@@ -863,6 +887,7 @@ mod tests {
             headers: std::collections::BTreeMap::new(),
             disabled: false,
             oauth: None,
+            disabled_tools: Vec::new(),
         };
         let mut mgr = McpManager::default();
         mgr.adopt("x", Arc::clone(&conn));
@@ -949,6 +974,7 @@ mod tests {
                 headers: std::collections::BTreeMap::new(),
                 disabled: false,
                 oauth: None,
+                disabled_tools: Vec::new(),
             },
         );
         let (mut mgr, _errors) = McpManager::spawn_all(&cfg, vec![], None);
@@ -1051,6 +1077,7 @@ mod tests {
                 headers: std::collections::BTreeMap::new(),
                 disabled: false,
                 oauth: None,
+                disabled_tools: Vec::new(),
             },
         );
         cfg

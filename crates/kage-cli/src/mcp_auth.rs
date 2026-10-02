@@ -668,6 +668,7 @@ mod tests {
             headers: BTreeMap::new(),
             disabled: false,
             oauth: None,
+            disabled_tools: Vec::new(),
         }
     }
 

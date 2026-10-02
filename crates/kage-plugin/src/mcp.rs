@@ -143,6 +143,7 @@ fn add_server_fn(lua: &Lua, servers: SharedMcpServers) -> mlua::Result<mlua::Fun
                     headers: BTreeMap::new(),
                     disabled,
                     oauth: None,
+                    disabled_tools: Vec::new(),
                 },
             );
         Ok(())

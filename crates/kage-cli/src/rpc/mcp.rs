@@ -31,6 +31,7 @@ pub(super) fn editor_servers(servers: &[McpServer]) -> Result<BTreeMap<String, M
                     headers: BTreeMap::new(),
                     disabled: false,
                     oauth: None,
+                    disabled_tools: Vec::new(),
                 },
             )),
             McpServer::Http(http) => Ok((
@@ -47,6 +48,7 @@ pub(super) fn editor_servers(servers: &[McpServer]) -> Result<BTreeMap<String, M
                         .collect(),
                     disabled: false,
                     oauth: None,
+                    disabled_tools: Vec::new(),
                 },
             )),
             McpServer::Sse(sse) => Err(RpcError::new(

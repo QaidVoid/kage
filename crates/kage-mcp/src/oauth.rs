@@ -1608,6 +1608,7 @@ mod tests {
             headers: BTreeMap::new(),
             disabled: false,
             oauth: None,
+            disabled_tools: Vec::new(),
         };
         let source = StaticTokens::new(&tokens.access_token, None);
         let handle =

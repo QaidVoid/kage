@@ -19,6 +19,7 @@ fn kage_serve_config() -> McpServer {
         headers: BTreeMap::new(),
         disabled: false,
         oauth: None,
+        disabled_tools: Vec::new(),
     }
 }
 

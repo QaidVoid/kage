@@ -921,6 +921,7 @@ mod tests {
             headers: std::collections::BTreeMap::new(),
             disabled: false,
             oauth: None,
+            disabled_tools: Vec::new(),
         }
     }
 

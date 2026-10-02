@@ -49,6 +49,15 @@ Setting both `command` and `url`, or neither, is an error. Add
 `disabled = true` to keep a server configured without connecting to
 it.
 
+To hide some of a server's tools from the model, list them by the
+server's own names in `disabled_tools`:
+
+```toml
+[mcp.servers.github]
+url = "https://api.githubcopilot.com/mcp/"
+disabled_tools = ["delete_repository", "merge_pull_request"]
+```
+
 Servers in your user config start right away. Servers in a
 project's `.kage/config.toml` start only once you trust that project:
 the TUI asks at startup, and print mode, `kage rpc` and

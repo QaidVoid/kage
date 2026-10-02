@@ -2933,6 +2933,7 @@ fn config_get_names_headers_and_env_without_their_values() {
             env: [("TOKEN".to_owned(), "t0ps3cret".to_owned())].into(),
             disabled: false,
             oauth: None,
+            disabled_tools: Vec::new(),
         },
     );
     config.plugins.config.insert(

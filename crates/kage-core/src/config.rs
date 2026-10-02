@@ -804,6 +804,10 @@ pub struct McpServer {
     /// When `true`, the server is configured but not spawned/connected.
     #[serde(default)]
     pub disabled: bool,
+    /// Tools of this server, by the server's own name, that are never
+    /// registered: the model does not see them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_tools: Vec<String>,
     /// OAuth settings for an HTTP server that needs a login
     /// (`[mcp.servers.<name>.oauth]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]

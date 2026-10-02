@@ -21,6 +21,7 @@ use web_time::Instant;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ElementExt as _;
+use gpui_kit::base::SelectableText;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::input::{Input, InputEvent, InputState, TextareaState};
@@ -1836,7 +1837,10 @@ impl TranscriptView {
                     .when(!steered, |bubble| {
                         bubble.bg(ink.bubble).text_color(ink.ink_strong)
                     })
-                    .child(SharedString::from(text.to_owned())),
+                    .child(SelectableText::new(
+                        ElementId::named_usize("user-text", ix),
+                        text.to_owned(),
+                    )),
             )
             .when(steered, |row| {
                 row.child(
@@ -2025,7 +2029,10 @@ impl TranscriptView {
                     .text_size(px(FS_SM))
                     .line_height(px(THINK_LINE))
                     .text_color(theme.muted_foreground)
-                    .child(SharedString::from(text.to_owned())),
+                    .child(SelectableText::new(
+                        ElementId::named_usize("think-text", ix),
+                        text.to_owned(),
+                    )),
             );
         }
         row
@@ -3407,6 +3414,15 @@ fn render_detail(
 
 /// The mono body of a detail box: the design's deep well at its 12px
 /// detail size.
+/// A stable key for `text`, naming the selectable element that shows
+/// it, so the selection follows the same text across frames.
+fn text_key(text: &str) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn render_pre(text: &str, cx: &Context<TranscriptView>) -> Div {
     div()
         .w_full()
@@ -3416,7 +3432,10 @@ fn render_pre(text: &str, cx: &Context<TranscriptView>) -> Div {
         .font_family(cx.theme().mono_font_family.clone())
         .text_size(px(DETAIL_SIZE))
         .line_height(px(DETAIL_LINE))
-        .child(SharedString::from(text.to_owned()))
+        .child(SelectableText::new(
+            ElementId::Name(format!("pre-{:x}", text_key(text)).into()),
+            text.to_owned(),
+        ))
 }
 
 /// A unified diff with per-line added and removed coloring, computed

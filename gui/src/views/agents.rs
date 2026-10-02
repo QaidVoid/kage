@@ -343,7 +343,10 @@ pub(crate) fn report_card(
                     .border_color(pal.subtle)
                     .text_size(px(FS_XS))
                     .text_color(pal.muted)
-                    .child(SharedString::from(reply)),
+                    .child(gpui_kit::base::SelectableText::new(
+                        ElementId::named_usize("report-reply", n),
+                        reply,
+                    )),
             )
         })
         .into_any_element()

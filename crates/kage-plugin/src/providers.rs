@@ -788,7 +788,7 @@ mod tests {
         ));
     }
 
-    /// A provider whose stream sleeps four times for 100ms between
+    /// A provider whose stream sleeps four times for 200ms between
     /// deltas, the way a real one waits on the network.
     fn napping_runtime() -> PluginRuntime {
         let rt = granted_runtime();
@@ -800,7 +800,7 @@ mod tests {
                 stream = function(req, emit)
                     emit({ type = 'message_start' })
                     for i = 1, 4 do
-                        kage.sleep_ms(100)
+                        kage.sleep_ms(200)
                         emit({ type = 'text_delta', delta = tostring(i) })
                     end
                     emit({ type = 'message_end', stop_reason = 'end_turn',
@@ -813,29 +813,32 @@ mod tests {
         rt
     }
 
-    fn drain(provider: &super::LuaProvider) -> usize {
+    /// When each text delta of one stream arrived.
+    fn drain(provider: &super::LuaProvider) -> Vec<std::time::Instant> {
         let cancel = CancelFlag::new();
         provider
             .stream(kage_provider::StreamRequest::new("m", vec![]), &cancel)
             .unwrap()
             .map(Result::unwrap)
-            .count()
+            .filter(|event| matches!(event, kage_provider::ProviderEvent::TextDelta { .. }))
+            .map(|_| std::time::Instant::now())
+            .collect()
     }
 
     #[test]
     fn concurrent_streams_share_the_owner_thread() {
         let rt = napping_runtime();
         let provider = rt.registered_providers().pop().unwrap();
-        let started = std::time::Instant::now();
         let other = Arc::clone(&provider);
         let second = std::thread::spawn(move || drain(&other));
-        assert_eq!(drain(&provider), 6);
-        assert_eq!(second.join().unwrap(), 6);
-        // Each stream naps 400ms; one after the other they would take 800.
-        let took = started.elapsed();
+        let first = drain(&provider);
+        let second = second.join().unwrap();
+        assert_eq!((first.len(), second.len()), (4, 4));
+        // One after the other, a stream would deliver nothing until the
+        // other finished. Sharing the thread, their deltas interleave.
         assert!(
-            took < std::time::Duration::from_millis(700),
-            "took {took:?}"
+            first[0] < second[3] && second[0] < first[3],
+            "the streams ran one after the other"
         );
     }
 
@@ -845,11 +848,11 @@ mod tests {
         let provider = rt.registered_providers().pop().unwrap();
         let stream = std::thread::spawn(move || drain(&provider));
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let started = std::time::Instant::now();
         rt.eval_plugin("t", "return 1").unwrap();
-        let took = started.elapsed();
-        assert!(took < std::time::Duration::from_millis(80), "took {took:?}");
-        assert_eq!(stream.join().unwrap(), 6);
+        // The stream naps 800ms in all, so a job that waited for it
+        // would return only once it finished.
+        assert!(!stream.is_finished(), "the job waited for the stream");
+        assert_eq!(stream.join().unwrap().len(), 4);
     }
 
     #[test]

@@ -97,10 +97,12 @@ version_group = "kage"
 
 [[package]]
 name = "kage-client"
+publish = false
 release = false
 
 [[package]]
 name = "xtask"
+publish = false
 release = false
 
 [changelog]

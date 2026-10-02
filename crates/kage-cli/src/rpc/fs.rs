@@ -95,7 +95,7 @@ fn list(workdir: &Path, root: &Path) -> FsListResult {
             0
         };
         result.entries.push(FsEntry {
-            path: path.display().to_string(),
+            path: kage_core::fsutil::slashed(path),
             kind,
             size,
         });

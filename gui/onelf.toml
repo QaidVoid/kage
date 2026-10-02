@@ -1,0 +1,24 @@
+# onelf recipe for packing kage-desktop into one portable binary.
+# The release workflow copies the release binary to AppDir/bin, drops
+# this file beside it, and runs `onelf build AppDir`.
+[package]
+name = "kage-desktop"
+command = "bin/kage-desktop"
+output = "kage-desktop.onelf"
+version = "0.0.0"
+description = "Desktop client for the kage coding agent"
+license = "MIT"
+homepage = "https://github.com/QaidVoid/kage"
+
+[compression]
+level = 22
+
+# GPUI draws through Vulkan, so the loader and the slimmed GPU drivers
+# ride along. onelf's launch resolver weighs each bundled library
+# against the host's copy and takes the newer. Lavapipe, the software
+# driver, stays out until a slimmed build matches the slimmed LLVM.
+[bundle]
+strip = true
+scan-dlopen = true
+vulkan = true
+include = ["libvulkan.so.1"]

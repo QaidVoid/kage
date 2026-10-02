@@ -636,21 +636,25 @@ pub enum RowKey {
     Changes(usize),
 }
 
-/// The last sentence of a thinking text, for the live peek.
+/// How many characters of the newest thinking the live peek shows.
+const PEEK_CHARS: usize = 60;
+
+/// The newest words of a thinking text, for the live peek: the tail of
+/// the sentence being written, so the line moves as text streams in
+/// even while one long sentence is still open.
 fn last_sentence(text: &str) -> String {
     let trimmed = text.trim();
-    let mut last = trimmed;
-    for sentence in trimmed.split(['.', '!', '?']) {
-        let sentence = sentence.trim();
-        if !sentence.is_empty() {
-            last = sentence;
-        }
+    let last = trimmed
+        .split(['.', '!', '?', '\u{3002}', '\u{ff01}', '\u{ff1f}'])
+        .map(str::trim)
+        .rfind(|sentence| !sentence.is_empty())
+        .unwrap_or(trimmed);
+    let count = last.chars().count();
+    if count <= PEEK_CHARS {
+        return last.to_owned();
     }
-    let mut peek: String = last.chars().take(120).collect();
-    if last.chars().count() > 120 {
-        peek.push('\u{2026}');
-    }
-    peek
+    let tail: String = last.chars().skip(count - PEEK_CHARS).collect();
+    format!("\u{2026}{}", tail.trim_start())
 }
 
 /// One row the transcript renders.
@@ -3889,8 +3893,8 @@ mod tests {
     use gpui_kit::{AppContext as _, ElementId, TestAppContext, Window};
 
     use super::{
-        ChipTone, Outcome, Row, RowKey, UiState, chips_for, diff_lines, diff_stat, last_sentence,
-        row_model, tool_verb,
+        ChipTone, Outcome, PEEK_CHARS, Row, RowKey, UiState, chips_for, diff_lines, diff_stat,
+        last_sentence, row_model, tool_verb,
     };
     use crate::store::{Command, Store};
     use crate::transport::State;
@@ -4513,9 +4517,15 @@ mod tests {
             "Second thought"
         );
         assert_eq!(last_sentence("no terminator"), "no terminator");
-        let peek = last_sentence(&"word ".repeat(40));
-        assert!(peek.chars().count() <= 121);
-        assert!(peek.ends_with('\u{2026}'));
+        let long = format!("{} newest", "word ".repeat(40));
+        let peek = last_sentence(&long);
+        assert!(peek.chars().count() <= PEEK_CHARS + 1);
+        assert!(peek.starts_with('\u{2026}'));
+        assert!(peek.ends_with("newest"), "the peek follows the stream");
+        assert_eq!(
+            last_sentence("\u{7b2c}\u{4e00}\u{3002}\u{7b2c}\u{4e8c}"),
+            "\u{7b2c}\u{4e8c}"
+        );
     }
 
     /// Carries out `commands` the way the shell does.

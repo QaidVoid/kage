@@ -158,6 +158,7 @@ enum Pending {
     },
     Directory,
     Folders,
+    Themes,
     Plugins,
 }
 
@@ -589,6 +590,16 @@ impl Client {
                 path: path.map(str::to_owned),
             }),
             Pending::Folders,
+        )
+    }
+
+    /// Asks the engine for the user themes on its machine. The answer
+    /// arrives as [`Change::Themes`].
+    pub fn themes(&mut self) -> u64 {
+        self.request(
+            "_kage/themes",
+            params(&kage_acp_wire::ThemesRequest {}),
+            Pending::Themes,
         )
     }
 
@@ -1026,6 +1037,7 @@ impl Client {
             | Pending::AuthSet { .. }
             | Pending::Directory
             | Pending::Folders
+            | Pending::Themes
             | Pending::Plugins
             | Pending::Models
             | Pending::Options) => settings_answer(id, pending, result),
@@ -1478,6 +1490,14 @@ fn settings_answer(id: u64, pending: Pending, result: Value) -> Vec<Change> {
                 Ok(result) => vec![Change::Folders {
                     request: id,
                     result,
+                }],
+            }
+        }
+        Pending::Themes => {
+            match answer::<kage_acp_wire::ThemesResult>(id, result, "_kage/themes result") {
+                Err(failed) => failed,
+                Ok(result) => vec![Change::Themes {
+                    themes: result.themes,
                 }],
             }
         }

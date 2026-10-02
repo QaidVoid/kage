@@ -35,7 +35,7 @@ use crate::acp::{
     ResumeSessionRequest, ResumeSessionResponse, SessionExportResponse, SessionForkRequest,
     SessionForkResponse, SessionNotification, SessionRenameRequest, SessionRequest, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SwarmResumeRequest,
-    SwarmResumeResponse, ToolCallUpdate,
+    SwarmResumeResponse, ThemesRequest, ThemesResult, ToolCallUpdate,
 };
 
 /// The client's answer to a `session/request_permission`.
@@ -593,6 +593,17 @@ pub trait Agent: Send + Sync + 'static {
         Err(RpcError::method_not_found("_kage/folders"))
     }
 
+    /// Lists the user themes on the machine the agent runs on
+    /// (`_kage/themes`), for a client that draws its own palette. The
+    /// default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the themes cannot be listed.
+    fn themes(&self, _req: ThemesRequest) -> Result<ThemesResult, RpcError> {
+        Err(RpcError::method_not_found("_kage/themes"))
+    }
+
     /// Installs a plugin file into the plugin directory
     /// (`_kage/plugins/install`). The default rejects.
     ///
@@ -899,6 +910,10 @@ fn handle_kage_request<A: Agent>(
         },
         "_kage/folders" => match parse::<FoldersRequest>(params) {
             Ok(req) => spawn_op(peer, agent, id, move |a| a.folders(req).map(jval)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/themes" => match parse::<ThemesRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.themes(req).map(jval)),
             Err(e) => return parse_failed(peer, &id, e),
         },
         "_kage/providers/directory" => match parse::<DirectoryRequest>(params) {

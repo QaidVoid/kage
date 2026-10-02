@@ -45,6 +45,7 @@ mod plugin_files;
 mod probe;
 mod registry;
 mod sessions;
+mod themes;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufReader;
@@ -65,7 +66,7 @@ use kage_acp::acp::{
     ResumeSessionResponse, SessionCapabilities, SessionConfigOption, SessionExportResponse,
     SessionForkRequest, SessionForkResponse, SessionRenameRequest, SessionRequest, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, Supported,
-    SwarmResumeRequest, SwarmResumeResponse,
+    SwarmResumeRequest, SwarmResumeResponse, ThemesRequest, ThemesResult,
 };
 use kage_acp::agent::{Agent, PromptContext, send_update};
 use kage_core::config::{Config, McpServer as McpSpec};
@@ -656,6 +657,11 @@ impl Agent for CliAcpAgent {
 
     fn folders(&self, req: FoldersRequest) -> Result<FoldersResult, RpcError> {
         folders::folders(&req)
+    }
+
+    fn themes(&self, _req: ThemesRequest) -> Result<ThemesResult, RpcError> {
+        let dir = crate::themes_dir().map_err(RpcError::internal)?;
+        Ok(themes::themes(&dir))
     }
 
     fn plugin_install(&self, req: PluginInstallRequest) -> Result<serde_json::Value, RpcError> {

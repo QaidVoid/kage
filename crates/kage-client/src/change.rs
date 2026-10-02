@@ -120,6 +120,12 @@ pub enum Change {
         /// The folder listed and the folders inside it.
         result: kage_acp_wire::FoldersResult,
     },
+    /// A `_kage/themes` answer arrived: the user themes on the engine's
+    /// machine.
+    Themes {
+        /// The themes, sorted by name.
+        themes: Vec<kage_acp_wire::UserTheme>,
+    },
     /// A plugin was installed or removed.
     Plugins {
         /// The id of the request answered.
@@ -161,6 +167,7 @@ impl Change {
             | Self::Tested { .. }
             | Self::ProviderDirectory { .. }
             | Self::Folders { .. }
+            | Self::Themes { .. }
             | Self::Plugins { .. }
             | Self::KeySaved { .. }
             | Self::Failed { .. } => None,

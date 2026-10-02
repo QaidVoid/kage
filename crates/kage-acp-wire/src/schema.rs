@@ -767,6 +767,33 @@ pub struct FoldersResult {
     pub truncated: bool,
 }
 
+/// `_kage/themes` request params: none.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThemesRequest {}
+
+/// `_kage/themes` result: the user themes in the themes folder on the
+/// machine the agent runs on, for a client that draws its own palette.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemesResult {
+    /// One entry per theme file, sorted by name.
+    pub themes: Vec<UserTheme>,
+}
+
+/// One user theme file, as a client that draws its own palette reads it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserTheme {
+    /// The file name without its `.toml`.
+    pub name: String,
+    /// The bundled theme it starts from, when it names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    /// Its `[gui]` table: palette token names to colors.
+    #[serde(default)]
+    pub gui: BTreeMap<String, String>,
+}
+
 /// `_kage/providers/directory` request params: a provider directory in
 /// the models.dev `api.json` shape.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

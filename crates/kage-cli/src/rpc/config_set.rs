@@ -18,6 +18,9 @@ use super::REDACTED;
 /// The top-level tables a client may edit.
 const SECTIONS: [&str; 5] = ["providers", "mcp", "permissions", "plugins", "acp"];
 
+/// The `[ui]` keys a client may edit: the themes a System choice picks.
+const UI_KEYS: [&str; 2] = ["theme_dark", "theme_light"];
+
 /// Sets the entry at `keys` of the config at `path` to `value`, or
 /// removes it when `value` is `None`.
 pub(super) fn set(path: &Path, keys: &[String], value: Option<&Value>) -> Result<(), RpcError> {
@@ -25,9 +28,11 @@ pub(super) fn set(path: &Path, keys: &[String], value: Option<&Value>) -> Result
     let Some(section) = keys.first() else {
         return Err(invalid("name the entry to set".to_owned()));
     };
-    if !SECTIONS.contains(&section.as_str()) {
+    let ui_key = section == "ui" && keys.len() == 2 && UI_KEYS.contains(&keys[1].as_str());
+    if !SECTIONS.contains(&section.as_str()) && !ui_key {
         return Err(invalid(format!(
-            "`{section}` cannot be set here; settable sections are {}",
+            "`{}` cannot be set here; settable are {}, ui.theme_dark and ui.theme_light",
+            keys.join("."),
             SECTIONS.join(", ")
         )));
     }
@@ -140,6 +145,24 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("# mine\n[ui]"), "{text}");
         assert!(text.contains("[mcp.servers.hub]"), "{text}");
+    }
+
+    #[test]
+    fn only_the_system_theme_keys_of_ui_are_settable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[ui]\ntheme = \"kage-dawn\"\n").unwrap();
+        set(&path, &keys("ui.theme_dark"), Some(&json!("kimi-dark"))).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("theme_dark = \"kimi-dark\""), "{text}");
+        assert!(set(&path, &keys("ui.theme"), Some(&json!("kimi-dark"))).is_err());
+        assert!(set(&path, &keys("ui"), Some(&json!({}))).is_err());
+        set(&path, &keys("ui.theme_dark"), None).unwrap();
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("theme_dark")
+        );
     }
 
     #[test]

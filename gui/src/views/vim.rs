@@ -130,10 +130,13 @@ pub fn parse(line: &str) -> Command {
     match word {
         "" => Command::Nothing,
         "theme" => Command::Theme(match arg.to_lowercase().as_str() {
+            "" => None,
             "system" => Some(ThemeChoice::System),
-            "shadow" | "kage" | "kage shadow" | "dark" => Some(ThemeChoice::Shadow),
-            "dawn" | "kage-dawn" | "kage dawn" | "light" => Some(ThemeChoice::Dawn),
-            _ => None,
+            "shadow" | "kage" | "kage shadow" | "dark" => {
+                Some(ThemeChoice::Named("kage-shadow".to_owned()))
+            }
+            "dawn" | "kage dawn" | "light" => Some(ThemeChoice::Named("kage-dawn".to_owned())),
+            _ => Some(ThemeChoice::Named(arg.to_owned())),
         }),
         "model" => Command::Model(arg.to_owned()),
         "swarm" => Command::Swarm(on),
@@ -277,8 +280,15 @@ mod tests {
 
     #[test]
     fn the_command_table_parses_like_the_prototype() {
-        assert_eq!(parse("theme dawn"), Command::Theme(Some(ThemeChoice::Dawn)));
-        assert_eq!(parse("theme mauve"), Command::Theme(None));
+        assert_eq!(
+            parse("theme dawn"),
+            Command::Theme(Some(ThemeChoice::Named("kage-dawn".into())))
+        );
+        assert_eq!(
+            parse("theme kimi-dark"),
+            Command::Theme(Some(ThemeChoice::Named("kimi-dark".into())))
+        );
+        assert_eq!(parse("theme"), Command::Theme(None));
         assert_eq!(parse("swarm off"), Command::Swarm(false));
         assert_eq!(parse("swarm"), Command::Swarm(true));
         assert_eq!(parse("plan on"), Command::Plan(true));

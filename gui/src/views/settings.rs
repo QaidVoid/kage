@@ -6,13 +6,17 @@
 //! shell stores; everything about the engine is read from what the
 //! connection reported and says unknown where it reported nothing.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui_kit::assets::IconName;
+use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Div, ElementId, Entity, FocusHandle, Focusable,
-    Hsla, InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render,
-    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    AnyElement, App, AppContext as _, Bounds, Context, Div, ElementId, Entity, FocusHandle,
+    Focusable, Hsla, InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Pixels,
+    Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 
 use gpui_kit::component::input::{Escape as InputEscape, InputEvent, InputState};
@@ -30,6 +34,12 @@ use crate::views::provider_form::{ProviderForm, Target as ProviderTarget};
 use crate::views::settings_config as config;
 
 gpui_kit::actions!(kage_desktop, [SettingsClose]);
+
+/// The width of a theme pick and its menu.
+const PICK_W: f32 = 220.0;
+
+/// How tall a theme pick menu grows before it scrolls.
+const PICK_MENU_H: f32 = 280.0;
 
 /// The pages of the settings dialog, in nav order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,6 +219,11 @@ pub fn shortcuts(bindings: &[KeyBinding]) -> Vec<Shortcut> {
 pub struct SettingsView {
     /// Where the focus goes when this closes.
     focus_return: crate::views::kit::FocusReturn,
+    /// The open theme pick menu: `Some(true)` for the dark desktop's.
+    pick_open: Option<bool>,
+    /// Where each theme pick trigger last laid out, dark first, so its
+    /// menu hangs below it.
+    pick_bounds: [Rc<Cell<Option<Bounds<Pixels>>>>; 2],
     store: Entity<Store>,
     open: bool,
     section: Section,
@@ -249,6 +264,8 @@ impl SettingsView {
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
         Self {
             focus_return: crate::views::kit::FocusReturn::default(),
+            pick_open: None,
+            pick_bounds: Default::default(),
             store,
             open: false,
             section: Section::General,
@@ -275,6 +292,10 @@ impl SettingsView {
     /// Shows the dialog on `section`, taking the focus.
     pub fn open(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
         self.open = true;
+        self.store.act(cx, |store| {
+            store.ask_themes();
+            store.ask_config();
+        });
         self.go(section, cx);
         self.focus_return.remember(window, cx);
         window.focus(&self.focus, cx);
@@ -504,8 +525,9 @@ impl SettingsView {
 
     /// Applies and stores a theme choice.
     fn choose_theme(&mut self, choice: ThemeChoice, window: &mut Window, cx: &mut Context<Self>) {
+        let stored = choice.clone();
         self.store
-            .act(cx, |store| store.update_prefs(|prefs| prefs.theme = choice));
+            .act(cx, |store| store.update_prefs(|prefs| prefs.theme = stored));
         cx.set_global(choice);
         crate::theme::apply_choice(cx, window.appearance());
         window.refresh();
@@ -584,81 +606,8 @@ impl SettingsView {
 
     fn general(&self, window: &Window, pal: &Palette, cx: &Context<Self>) -> Vec<AnyElement> {
         let prefs = self.store.read(cx).prefs().clone();
-        let mut cards = h_flex().gap(px(10.));
-        let light = matches!(
-            window.appearance(),
-            gpui_kit::WindowAppearance::Light | gpui_kit::WindowAppearance::VibrantLight
-        );
-        for choice in [ThemeChoice::System, ThemeChoice::Shadow, ThemeChoice::Dawn] {
-            let (side, main, accent) = match choice {
-                ThemeChoice::System => {
-                    let (shadow, dawn) = (Palette::shadow(), Palette::dawn());
-                    let (side, main) = (shadow.bg, dawn.bg);
-                    let accent = if light { dawn.accent } else { shadow.accent };
-                    (side, main, accent)
-                }
-                ThemeChoice::Shadow => {
-                    let shadow = Palette::shadow();
-                    (shadow.bg, shadow.surface, shadow.accent)
-                }
-                ThemeChoice::Dawn => {
-                    let dawn = Palette::dawn();
-                    (dawn.bg, dawn.surface, dawn.accent)
-                }
-            };
-            let on = prefs.theme == choice;
-            let line_strong = pal.line_strong;
-            cards = cards.child(
-                v_flex()
-                    .id(SharedString::from(format!("theme-{}", choice.label())))
-                    .flex_1()
-                    .p(px(8.))
-                    .gap(px(8.))
-                    .rounded(px(R_LG))
-                    .border_1()
-                    .border_color(if on { pal.accent } else { pal.line })
-                    .bg(pal.surface)
-                    .when(!on, |card| {
-                        card.hover(move |card| card.border_color(line_strong))
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.choose_theme(choice, window, cx);
-                    }))
-                    .child(
-                        h_flex()
-                            .h(px(58.))
-                            .rounded(px(R_MD))
-                            .overflow_hidden()
-                            .child(div().w(gpui_kit::relative(0.28)).h_full().bg(side))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .h_full()
-                                    .bg(main)
-                                    .flex()
-                                    .items_end()
-                                    .p(px(8.))
-                                    .child(
-                                        div()
-                                            .w(gpui_kit::relative(0.4))
-                                            .h(px(8.))
-                                            .rounded(px(4.))
-                                            .bg(accent),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .px(px(2.))
-                            .text_size(px(FS_XS))
-                            .text_color(pal.ink)
-                            .child(choice.label()),
-                    ),
-            );
-        }
-        vec![
-            group("Appearance", pal).into_any_element(),
-            cards.into_any_element(),
+        let mut out = self.appearance(window, &prefs, pal, cx);
+        out.extend([
             group("Input", pal).into_any_element(),
             boxed(pal)
                 .child(row(
@@ -709,7 +658,291 @@ impl SettingsView {
                     pal,
                 ))
                 .into_any_element(),
+        ]);
+        out
+    }
+
+    /// The theme cards, then the themes a System choice draws on a dark
+    /// and a light desktop.
+    fn appearance(
+        &self,
+        window: &Window,
+        prefs: &Prefs,
+        pal: &Palette,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let light = matches!(
+            window.appearance(),
+            gpui_kit::WindowAppearance::Light | gpui_kit::WindowAppearance::VibrantLight
+        );
+        let catalog = cx
+            .try_global::<crate::themes::Catalog>()
+            .cloned()
+            .unwrap_or_default();
+        let resolve = |name: &str, light: bool| {
+            crate::themes::resolve(name, &catalog, light).map(|(palette, _)| palette)
+        };
+        let mut cards = h_flex().flex_wrap().gap(px(10.));
+        let choices = std::iter::once(ThemeChoice::System)
+            .chain(catalog.names().into_iter().map(ThemeChoice::Named));
+        for choice in choices {
+            let swatch = match &choice {
+                ThemeChoice::System => {
+                    let (Some(dark), Some(day)) = (
+                        resolve(&catalog.system(false), false),
+                        resolve(&catalog.system(true), true),
+                    ) else {
+                        continue;
+                    };
+                    let accent = if light { day.accent } else { dark.accent };
+                    (dark.bg, day.bg, accent)
+                }
+                ThemeChoice::Named(name) => {
+                    let Some(palette) = resolve(name, light) else {
+                        continue;
+                    };
+                    (palette.bg, palette.surface, palette.accent)
+                }
+            };
+            cards = cards.child(self.theme_card(choice, swatch, prefs, pal, cx));
+        }
+        vec![
+            group("Appearance", pal).into_any_element(),
+            cards.into_any_element(),
+            boxed(pal)
+                .mt(px(10.))
+                .child(row_el(
+                    "System on a dark desktop",
+                    "The theme System draws when the desktop is dark".into(),
+                    self.system_picks(true, &catalog, Palette::active(cx), cx),
+                    pal,
+                ))
+                .child(row_el(
+                    "System on a light desktop",
+                    "The theme System draws when the desktop is light".into(),
+                    self.system_picks(false, &catalog, Palette::active(cx), cx),
+                    pal,
+                ))
+                .into_any_element(),
         ]
+    }
+
+    /// One theme card: a swatch of its side, main and accent colors over
+    /// its name, outlined when chosen.
+    fn theme_card(
+        &self,
+        choice: ThemeChoice,
+        (side, main, accent): (Hsla, Hsla, Hsla),
+        prefs: &Prefs,
+        pal: &Palette,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let on = prefs.theme == choice;
+        let line_strong = pal.line_strong;
+        let label = choice.label();
+        v_flex()
+            .id(SharedString::from(format!("theme-{label}")))
+            .w(px(150.))
+            .p(px(8.))
+            .gap(px(8.))
+            .rounded(px(R_LG))
+            .border_1()
+            .border_color(if on { pal.accent } else { pal.line })
+            .bg(pal.surface)
+            .when(!on, |card| {
+                card.hover(move |card| card.border_color(line_strong))
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.choose_theme(choice.clone(), window, cx);
+            }))
+            .child(
+                h_flex()
+                    .h(px(58.))
+                    .rounded(px(R_MD))
+                    .overflow_hidden()
+                    .child(div().w(gpui_kit::relative(0.28)).h_full().bg(side))
+                    .child(
+                        div()
+                            .flex_1()
+                            .h_full()
+                            .bg(main)
+                            .flex()
+                            .items_end()
+                            .p(px(8.))
+                            .child(
+                                div()
+                                    .w(gpui_kit::relative(0.4))
+                                    .h(px(8.))
+                                    .rounded(px(4.))
+                                    .bg(accent),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .px(px(2.))
+                    .truncate()
+                    .text_size(px(FS_XS))
+                    .text_color(pal.ink)
+                    .child(label),
+            )
+    }
+
+    /// The pick that names the theme System draws on a dark or a light
+    /// desktop: a trigger showing the current theme and, while open, a
+    /// menu of every theme with a swatch of its colors. The kage theme
+    /// of that mode clears the pick.
+    fn system_picks(
+        &self,
+        dark: bool,
+        catalog: &crate::themes::Catalog,
+        pal: &'static Palette,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let current = catalog.system(!dark);
+        let open = self.pick_open == Some(dark);
+        let bounds = self.pick_bounds[usize::from(!dark)].clone();
+        let palette =
+            |name: &str| crate::themes::resolve(name, catalog, !dark).map(|(palette, _)| palette);
+        let line_strong = pal.line_strong;
+        let mut trigger = h_flex()
+            .id(if dark { "system-dark" } else { "system-light" })
+            .w(px(PICK_W))
+            .h(px(32.))
+            .px(px(10.))
+            .gap(px(9.))
+            .items_center()
+            .rounded(px(R_MD))
+            .border_1()
+            .border_color(if open { pal.accent } else { pal.line })
+            .bg(pal.surface)
+            .cursor_pointer()
+            .when(!open, |row| {
+                row.hover(move |row| row.border_color(line_strong))
+            })
+            .on_prepaint(move |at, _, _| bounds.set(Some(at)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.pick_open = (this.pick_open != Some(dark)).then_some(dark);
+                cx.notify();
+            }));
+        if let Some(theme) = palette(&current) {
+            trigger = trigger.child(swatch(theme, pal));
+        }
+        let trigger = trigger
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(FS_SM))
+                    .text_color(pal.ink)
+                    .child(crate::themes::label(&current)),
+            )
+            .child(
+                Icon::new(IconName::ChevronDown)
+                    .with_size(px(12.))
+                    .text_color(pal.faint),
+            );
+        let menu = self.pick_bounds[usize::from(!dark)]
+            .get()
+            .filter(|_| open)
+            .map(|at| self.pick_menu(dark, catalog, at, pal, cx));
+        div().child(trigger).children(menu)
+    }
+
+    /// The open menu of a theme pick, hung below its trigger at `at`.
+    fn pick_menu(
+        &self,
+        dark: bool,
+        catalog: &crate::themes::Catalog,
+        at: Bounds<Pixels>,
+        pal: &'static Palette,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let current = catalog.system(!dark);
+        let kage = if dark { "kage-shadow" } else { "kage-dawn" };
+        let mut rows = v_flex()
+            .id(if dark {
+                "pick-menu-dark"
+            } else {
+                "pick-menu-light"
+            })
+            .max_h(px(PICK_MENU_H))
+            .overflow_y_scroll()
+            .p(px(4.))
+            .gap(px(1.));
+        for name in catalog.names() {
+            let Some((theme, _)) = crate::themes::resolve(&name, catalog, !dark) else {
+                continue;
+            };
+            let on = name == current;
+            let pick = (name != kage).then(|| name.clone());
+            let hover = pal.accent_soft;
+            rows = rows.child(
+                h_flex()
+                    .id(SharedString::from(format!("pick-{dark}-{name}")))
+                    .h(px(32.))
+                    .px(px(8.))
+                    .gap(px(9.))
+                    .items_center()
+                    .rounded(px(R_MD))
+                    .cursor_pointer()
+                    .when(on, |row| row.bg(pal.selected))
+                    .hover(move |row| row.bg(hover))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.pick_open = None;
+                        let pick = pick.clone();
+                        this.store
+                            .act(cx, |store| store.set_system_theme(dark, pick.as_deref()));
+                    }))
+                    .child(swatch(theme, pal))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(FS_SM))
+                            .text_color(if on { pal.ink_strong } else { pal.ink })
+                            .child(crate::themes::label(&name)),
+                    )
+                    .when(on, |row| {
+                        row.child(
+                            Icon::new(IconName::Check)
+                                .with_size(px(13.))
+                                .text_color(pal.accent),
+                        )
+                    }),
+            );
+        }
+        let close = cx.entity();
+        let mut surface = div()
+            .occlude()
+            .w(px(PICK_W))
+            .bg(pal.bg)
+            .border_1()
+            .border_color(pal.line)
+            .rounded(px(R_LG))
+            .overflow_hidden()
+            .on_mouse_down_out(move |event, _, cx| {
+                if at.contains(&event.position) {
+                    return;
+                }
+                close.update(cx, |this, cx| {
+                    this.pick_open = None;
+                    cx.notify();
+                });
+            })
+            .child(rows);
+        surface.style().box_shadow = Some(pal.shadow_menu.clone());
+        // Above the settings overlay, which is deferred at priority 2.
+        gpui_kit::deferred(
+            gpui_kit::anchored()
+                .anchor(gpui_kit::Anchor::TopLeft)
+                .position(gpui_kit::point(at.left(), at.bottom() + px(4.)))
+                .snap_to_window_with_margin(px(8.))
+                .child(surface),
+        )
+        .with_priority(3)
     }
 
     /// One of the pages the configuration snapshot backs.
@@ -1396,6 +1629,30 @@ fn title(text: &'static str, pal: &Palette) -> Div {
         .font_weight(WEIGHT_BOLD)
         .text_color(pal.ink_strong)
         .child(text)
+}
+
+/// A theme's colors in small: its sidebar beside its background, with
+/// a dot of its accent.
+fn swatch(theme: &Palette, pal: &Palette) -> Div {
+    h_flex()
+        .flex_none()
+        .w(px(26.))
+        .h(px(16.))
+        .rounded(px(4.))
+        .overflow_hidden()
+        .border_1()
+        .border_color(pal.line)
+        .child(div().w(px(9.)).h_full().bg(theme.sidebar))
+        .child(
+            div()
+                .flex_1()
+                .h_full()
+                .bg(theme.bg)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(div().size(px(6.)).rounded(px(3.)).bg(theme.accent)),
+        )
 }
 
 fn group(text: &'static str, pal: &Palette) -> Div {

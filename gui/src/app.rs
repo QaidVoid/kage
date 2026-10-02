@@ -225,6 +225,9 @@ pub struct Shell {
     /// breakpoint, where it takes no column. Opening or creating a
     /// session closes it, as the web client does.
     side_float: bool,
+    /// Whether the user themes and the config's System picks were asked
+    /// for on this link.
+    themes_asked: bool,
     /// The viewport width as of the last rendered frame, so panel
     /// toggles off the render path can read the breakpoints.
     viewport_width: f32,
@@ -402,6 +405,7 @@ impl Shell {
         .detach();
 
         cx.observe(&store, |shell, _, cx| {
+            shell.sync_themes(cx);
             shell.flush_outgoing(cx);
             shell.save_prefs(cx);
             shell.raise_notes(cx);
@@ -467,6 +471,7 @@ impl Shell {
             // default narrows the transcript on every launch.
             workbench_visible: false,
             side_float: false,
+            themes_asked: false,
             // Measured on the first frame; until then behave wide.
             viewport_width: f32::MAX,
             last_active: None,
@@ -568,6 +573,32 @@ impl Shell {
                 toasts.push(draft, cx);
             }
         });
+    }
+
+    /// Keeps the theme catalog in step with what the engine lists and
+    /// the System picks its config names, and redraws in the theme they
+    /// resolve to once either changes.
+    fn sync_themes(&mut self, cx: &mut Context<Self>) {
+        if !self.themes_asked && self.store.read(cx).live() {
+            self.themes_asked = true;
+            self.store.act(cx, |store| {
+                store.ask_themes();
+                store.ask_config();
+            });
+        }
+        let store = self.store.read(cx);
+        let catalog = crate::themes::Catalog {
+            user: store.themes().to_vec(),
+            dark: store.system_theme(true).map(str::to_owned),
+            light: store.system_theme(false).map(str::to_owned),
+        };
+        if cx.try_global::<crate::themes::Catalog>() == Some(&catalog) {
+            return;
+        }
+        cx.set_global(catalog);
+        let appearance = cx.window_appearance();
+        crate::theme::apply_choice(cx, appearance);
+        cx.refresh_windows();
     }
 
     /// Drains the client's outgoing frames into the transport. Runs
@@ -920,14 +951,32 @@ impl Shell {
         };
         match command {
             vim::Command::Theme(Some(choice)) => {
+                let known = match &choice {
+                    crate::theme::ThemeChoice::System => true,
+                    crate::theme::ThemeChoice::Named(name) => cx
+                        .try_global::<crate::themes::Catalog>()
+                        .cloned()
+                        .unwrap_or_default()
+                        .names()
+                        .contains(name),
+                };
+                if !known {
+                    warn(self, format!("Unknown theme: {}", choice.label()), cx);
+                    return;
+                }
+                let stored = choice.clone();
                 self.store
-                    .act(cx, |store| store.update_prefs(|prefs| prefs.theme = choice));
+                    .act(cx, |store| store.update_prefs(|prefs| prefs.theme = stored));
                 cx.set_global(choice);
                 crate::theme::apply_choice(cx, window.appearance());
                 window.refresh();
             }
             vim::Command::Theme(None) => {
-                warn(self, "Unknown theme; try system, shadow or dawn".into(), cx);
+                warn(
+                    self,
+                    "Name a theme: system, or one from Settings".into(),
+                    cx,
+                );
             }
             vim::Command::Model(name) => {
                 let wanted = name.to_lowercase();

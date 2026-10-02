@@ -99,7 +99,7 @@ pub fn start() {
             };
             let (server, token) = connection();
             let prefs = crate::prefs::load();
-            cx.set_global(prefs.theme);
+            cx.set_global(prefs.theme.clone());
             gpui_kit::open_window(options, cx, |window, cx| {
                 // `gpui_web` reads `prefers-color-scheme` for the window's
                 // appearance, so the System default follows the browser and

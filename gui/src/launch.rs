@@ -150,7 +150,7 @@ pub fn run() {
             theme::install_fonts(cx);
             gpui_kit::init(cx);
             cx.bind_keys(crate::app::key_bindings());
-            cx.set_global(prefs.theme);
+            cx.set_global(prefs.theme.clone());
             let options = WindowOptions {
                 titlebar: Some(TitlebarOptions {
                     title: Some("kage client".into()),

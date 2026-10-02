@@ -18,6 +18,7 @@ pub mod prefs;
 #[doc(hidden)]
 pub mod store;
 pub mod theme;
+pub mod themes;
 pub mod timing;
 pub mod transport;
 pub mod views;

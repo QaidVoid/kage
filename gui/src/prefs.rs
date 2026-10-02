@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn a_document_round_trips_and_missing_fields_take_defaults() {
         let mut prefs = Prefs {
-            theme: ThemeChoice::Dawn,
+            theme: ThemeChoice::Named("kimi-light".into()),
             enter_sends: false,
             ..Prefs::default()
         };
@@ -163,7 +163,11 @@ mod tests {
         assert_eq!(Prefs::parse(&prefs.to_json()), prefs);
 
         let old = Prefs::parse(r#"{"theme": "shadow"}"#);
-        assert_eq!(old.theme, ThemeChoice::Shadow);
+        assert_eq!(
+            old.theme,
+            ThemeChoice::Named("kage-shadow".into()),
+            "an older client's name still reads"
+        );
         assert!(
             old.enter_sends && old.constellation,
             "absent fields default"

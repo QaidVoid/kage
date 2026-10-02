@@ -249,6 +249,8 @@ pub struct Store {
     directories: HashMap<u64, Option<DirectoryRead>>,
     /// Folder listings asked for, by request id, until they answer.
     folders: HashMap<u64, Option<FoldersRead>>,
+    /// The user themes on the engine's machine, once listed.
+    themes: Vec<kage_client::wire::UserTheme>,
     /// Forks waiting for their copy, by source session.
     forking: HashMap<String, ForkPlan>,
     /// Copies waiting to open, with their source, by copy.
@@ -295,6 +297,7 @@ impl Store {
             tests: HashMap::new(),
             directories: HashMap::new(),
             folders: HashMap::new(),
+            themes: Vec::new(),
             models: None,
             forking: HashMap::new(),
             forked: HashMap::new(),
@@ -430,6 +433,13 @@ impl Store {
     #[must_use]
     pub fn connect(&self) -> &State {
         &self.connect
+    }
+
+    /// Whether a live link has booted: connected and initialized, not
+    /// playing a recording.
+    #[must_use]
+    pub fn live(&self) -> bool {
+        self.booted && !self.replay
     }
 
     /// What the last initialize answer fell short of.
@@ -631,6 +641,7 @@ impl Store {
                 Change::Folders { request, result } => {
                     self.folders.insert(*request, Some(Ok(result.clone())));
                 }
+                Change::Themes { themes } => self.themes.clone_from(themes),
                 Change::ProviderDirectory { request, providers } => {
                     self.directories
                         .insert(*request, Some(Ok(providers.clone())));
@@ -1150,6 +1161,34 @@ impl Store {
     #[must_use]
     pub fn config(&self) -> Option<&serde_json::Value> {
         self.config.as_ref()
+    }
+
+    /// The user themes on the engine's machine.
+    #[must_use]
+    pub fn themes(&self) -> &[kage_client::wire::UserTheme] {
+        &self.themes
+    }
+
+    /// Asks the engine for its user themes again, as the appearance
+    /// settings open.
+    pub fn ask_themes(&mut self) {
+        self.client.themes();
+    }
+
+    /// The theme the config names for a System choice on a dark or a
+    /// light desktop (`[ui] theme_dark` / `theme_light`), when it names
+    /// one.
+    #[must_use]
+    pub fn system_theme(&self, dark: bool) -> Option<&str> {
+        let key = if dark { "theme_dark" } else { "theme_light" };
+        self.config.as_ref()?.get("ui")?.get(key)?.as_str()
+    }
+
+    /// Names `name` as the theme a System choice draws on a dark or a
+    /// light desktop, or clears the pick back to the kage theme.
+    pub fn set_system_theme(&mut self, dark: bool, name: Option<&str>) -> u64 {
+        let key = if dark { "theme_dark" } else { "theme_light" };
+        self.config_set(&["ui", key], name.map(serde_json::Value::from))
     }
 
     /// The config options the composer shows for `id`: the active

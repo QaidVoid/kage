@@ -9,7 +9,6 @@
 //! client.
 
 use std::borrow::Cow;
-use std::sync::LazyLock;
 
 use gpui_kit::base::motion::Easing;
 use gpui_kit::component::theme::{ActiveTheme as _, Theme, ThemeColor, ThemeMode};
@@ -382,6 +381,13 @@ fn color(hex: u32) -> Hsla {
     rgba(opaque).into()
 }
 
+/// Black at `alpha`. [`color`] cannot carry it: an 8-digit black
+/// literal such as `0x000000E6` has no top byte and reads as the opaque
+/// blue `#0000E6`.
+fn black(alpha: u8) -> Hsla {
+    rgba(u32::from(alpha)).into()
+}
+
 /// Builds one box shadow layer from the design's shadow recipe. Shadow
 /// colors always carry alpha, so `hex` is read as all four bytes: black
 /// at 55 percent is `0x0000008C`, which [`color`] would take for blue.
@@ -391,17 +397,25 @@ fn layer(hex: u32, x: f32, y: f32, blur: f32, spread: f32) -> BoxShadow {
         .spread_radius(px(spread))
 }
 
+/// The palette the running app draws with, set by [`apply`].
+struct ActivePalette(&'static Palette);
+
+impl gpui_kit::Global for ActivePalette {}
+
 impl Palette {
-    /// The palette of the active theme mode.
+    /// The palette the running app draws with: the theme last applied,
+    /// or before any the kage theme of the active mode.
     #[must_use]
     pub fn active(cx: &App) -> &'static Self {
-        static SHADOW: LazyLock<Palette> = LazyLock::new(Palette::shadow);
-        static DAWN: LazyLock<Palette> = LazyLock::new(Palette::dawn);
-        if cx.theme().mode.is_dark() {
-            &SHADOW
-        } else {
-            &DAWN
+        if let Some(active) = cx.try_global::<ActivePalette>() {
+            return active.0;
         }
+        let kage = if cx.theme().mode.is_dark() {
+            "kage-shadow"
+        } else {
+            "kage-dawn"
+        };
+        crate::themes::builtin(kage).map_or_else(|| unreachable!(), |(palette, _)| palette)
     }
 
     /// The dark palette: ink surfaces with a violet undertone, one
@@ -623,6 +637,138 @@ impl Palette {
     }
 }
 
+impl Palette {
+    /// Kimi Code's dark desktop palette: neutral grey surfaces and its
+    /// blue accent. Avatars and shadows are kage shadow's.
+    pub fn kimi_dark() -> Self {
+        Self {
+            bg: color(0x121212),
+            sidebar: color(0x0D0D0D),
+            surface: color(0x1F1F1F),
+            raised: color(0x292929),
+            sunken: color(0x121212),
+            deep: color(0x0D0D0D),
+            well: color(0x1F1F1F),
+            fill: color(0xFFFFFF0D),
+            fill_hover: color(0xFFFFFF1A),
+            ink: color(0xFFFFFFD6),
+            ink_strong: color(0xFFFFFF),
+            muted: color(0xFFFFFF8F),
+            faint: color(0xFFFFFF6B),
+            ghost: color(0xFFFFFF42),
+            line: color(0xFFFFFF1F),
+            subtle: color(0xFFFFFF0D),
+            line_strong: color(0xFFFFFF2E),
+            hover: color(0xFFFFFF0D),
+            selected: color(0xFFFFFF1A),
+            selected_hover: color(0xFFFFFF24),
+            accent: color(0x1A88FF),
+            accent_hover: color(0x258EFF),
+            accent_soft: color(0x1A88FF1A),
+            accent_bd: color(0x1A88FF47),
+            ok: color(0x3FB950),
+            ok_soft: color(0x3FB95024),
+            ok_bd: color(0x3FB95047),
+            ok_ink: color(0x0D0D0D),
+            warn: color(0xD29922),
+            warn_soft: color(0xD2992224),
+            warn_bd: color(0xD2992247),
+            danger: color(0xF85149),
+            danger_soft: color(0xF8514924),
+            danger_bd: color(0xF8514947),
+            done: color(0xA371F7),
+            done_soft: color(0xA371F724),
+            done_bd: color(0xA371F747),
+            info: color(0x1A88FF),
+            composer_bg: color(0x1F1F1F),
+            composer_line: color(0xFFFFFF1F),
+            composer_focus_line: color(0xFFFFFF40),
+            send_bg: color(0xFFFFFFD6),
+            send_bg_hover: color(0xFFFFFFD8),
+            send_icon: color(0x1F1F1F),
+            send_bg_off: color(0xFFFFFF1A),
+            send_icon_off: color(0xFFFFFF47),
+            stop_glyph: color(0xF85149B8),
+            diff_add: color(0x3FB950),
+            diff_add_bg: color(0x3FB95024),
+            diff_del: color(0xF85149),
+            diff_del_bg: color(0xF8514924),
+            bubble: color(0x292929),
+            selection: color(0x1A88FF45),
+            menu: color(0x292929F2),
+            code_inline: color(0xFFFFFF1A),
+            orb_1: color(0x1A88FF),
+            orb_2: color(0x76E3EA),
+            ..Self::shadow()
+        }
+    }
+
+    /// Kimi Code's light desktop palette: white and pale grey surfaces
+    /// and its blue accent. Avatars and shadows are kage dawn's.
+    pub fn kimi_light() -> Self {
+        Self {
+            bg: color(0xFFFFFF),
+            sidebar: color(0xF9FBFC),
+            surface: color(0xF5F5F5),
+            raised: color(0xFFFFFF),
+            sunken: color(0xF5F5F5),
+            deep: color(0xFFFFFF),
+            well: color(0xF5F5F5),
+            fill: black(0x08),
+            fill_hover: black(0x0D),
+            ink: black(0xE6),
+            ink_strong: color(0x000000),
+            muted: black(0x99),
+            faint: black(0x73),
+            ghost: black(0x4D),
+            line: black(0x21),
+            subtle: black(0x0D),
+            line_strong: black(0x26),
+            hover: black(0x08),
+            selected: black(0x0D),
+            selected_hover: black(0x14),
+            accent: color(0x1783FF),
+            accent_hover: color(0x167FF7),
+            accent_soft: color(0xE8F3FF),
+            accent_bd: color(0x1783FF40),
+            ok: color(0x0E7A38),
+            ok_soft: color(0xE7F6EE),
+            ok_bd: color(0xBFE3CC),
+            ok_ink: color(0xFFFFFF),
+            warn: color(0xA9610A),
+            warn_soft: color(0xFBF1E0),
+            warn_bd: color(0xF0D9B8),
+            danger: color(0xC0392B),
+            danger_soft: color(0xFBEAEA),
+            danger_bd: color(0xF0CCCC),
+            done: color(0x8250DF),
+            done_soft: color(0xF3E8FF),
+            done_bd: color(0xE0CCFF),
+            info: color(0x1783FF),
+            composer_bg: color(0xFFFFFF),
+            composer_line: black(0x21),
+            composer_focus_line: black(0x40),
+            send_bg: black(0xE6),
+            send_bg_hover: color(0x252525),
+            send_icon: color(0xFFFFFF),
+            send_bg_off: black(0x0D),
+            send_icon_off: black(0x45),
+            stop_glyph: color(0xC0392B),
+            diff_add: color(0x16C456),
+            diff_add_bg: color(0x16C4561A),
+            diff_del: color(0xFF4756),
+            diff_del_bg: color(0xFF4D4D1A),
+            bubble: color(0xF5F5F5),
+            selection: color(0x1783FF58),
+            menu: color(0xFFFFFFF2),
+            code_inline: black(0x08),
+            orb_1: color(0x1783FF),
+            orb_2: color(0x1B7C83),
+            ..Self::dawn()
+        }
+    }
+}
+
 /// Maps one palette onto the component library's theme roles. Roles
 /// the design has no token for carry the nearest palette value: the
 /// on-color glyph tokens (`send_icon`, `deep`) sit behind accent and
@@ -705,7 +851,8 @@ fn theme_colors(p: &Palette, mode: ThemeMode) -> ThemeColor {
 
 /// Installs one palette as the theme of the running app and names the
 /// bundled families and the metric tokens on it.
-fn apply(palette: &Palette, mode: ThemeMode, cx: &mut App) {
+fn apply(palette: &'static Palette, mode: ThemeMode, cx: &mut App) {
+    cx.set_global(ActivePalette(palette));
     // Both families are named in the same edit as the colors, after the mode
     // change, so the library's own font probes find a real family to keep and
     // skip the `.SystemUIFont` lookup that the web cannot satisfy.
@@ -721,66 +868,92 @@ fn apply(palette: &Palette, mode: ThemeMode, cx: &mut App) {
     });
 }
 
+/// Installs the bundled theme `name` as the theme of the running app.
+fn apply_builtin(name: &str, cx: &mut App) {
+    if let Some((palette, mode)) = crate::themes::builtin(name) {
+        apply(palette, mode, cx);
+    }
+}
+
 /// Installs the dark kage theme as the theme of the running app.
 pub fn apply_shadow(cx: &mut App) {
-    apply(&Palette::shadow(), ThemeMode::Dark, cx);
+    apply_builtin("kage-shadow", cx);
 }
 
 /// Installs the light kage theme as the theme of the running app.
 pub fn apply_dawn(cx: &mut App) {
-    apply(&Palette::dawn(), ThemeMode::Light, cx);
+    apply_builtin("kage-dawn", cx);
 }
 
-/// The theme the user chose: one of the two kage themes, or System,
-/// which follows the platform's appearance.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+/// The theme the user chose: System, which follows the platform's
+/// appearance, or one theme by name.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
 pub enum ThemeChoice {
-    /// Dawn on a light desktop, shadow otherwise.
+    /// The config's dark or light pick, following the desktop.
     #[default]
     System,
-    /// The dark kage theme.
-    Shadow,
-    /// The light kage theme.
-    Dawn,
+    /// One bundled or user theme.
+    Named(String),
 }
 
 impl gpui_kit::Global for ThemeChoice {}
 
+impl From<String> for ThemeChoice {
+    /// Reads a stored choice, the names older clients stored included.
+    fn from(name: String) -> Self {
+        match name.as_str() {
+            "system" => Self::System,
+            "shadow" => Self::Named("kage-shadow".to_owned()),
+            "dawn" => Self::Named("kage-dawn".to_owned()),
+            _ => Self::Named(name),
+        }
+    }
+}
+
+impl From<ThemeChoice> for String {
+    fn from(choice: ThemeChoice) -> Self {
+        match choice {
+            ThemeChoice::System => "system".to_owned(),
+            ThemeChoice::Named(name) => name,
+        }
+    }
+}
+
 impl ThemeChoice {
     /// The label the theme cards show.
     #[must_use]
-    pub fn label(self) -> &'static str {
+    pub fn label(&self) -> String {
         match self {
-            Self::System => "System",
-            Self::Shadow => "kage shadow",
-            Self::Dawn => "kage dawn",
+            Self::System => "System".to_owned(),
+            Self::Named(name) => crate::themes::label(name),
         }
     }
 }
 
 /// Installs the theme the stored choice names, reading the platform's
-/// `appearance` for System. Without a stored choice this is System.
+/// `appearance` for System and the user themes and System picks from the
+/// [`crate::themes::Catalog`]. A theme no longer known falls back to the
+/// kage theme of the desktop's mode.
 pub fn apply_choice(cx: &mut App, appearance: WindowAppearance) {
-    match cx.try_global::<ThemeChoice>().copied().unwrap_or_default() {
-        ThemeChoice::System => apply_system(cx, appearance),
-        ThemeChoice::Shadow => apply_shadow(cx),
-        ThemeChoice::Dawn => apply_dawn(cx),
-    }
-}
-
-/// Installs whichever palette the platform's appearance asks for: dawn on a
-/// light desktop, shadow otherwise. This is the System default: no stored
-/// choice, so the platform decides.
-pub fn apply_system(cx: &mut App, appearance: WindowAppearance) {
     let light = matches!(
         appearance,
         WindowAppearance::Light | WindowAppearance::VibrantLight
     );
-    if light {
-        apply_dawn(cx);
-    } else {
-        apply_shadow(cx);
+    let choice = cx.try_global::<ThemeChoice>().cloned().unwrap_or_default();
+    let catalog = cx
+        .try_global::<crate::themes::Catalog>()
+        .cloned()
+        .unwrap_or_default();
+    let name = match choice {
+        ThemeChoice::System => catalog.system(light),
+        ThemeChoice::Named(name) => name,
+    };
+    let kage = if light { "kage-dawn" } else { "kage-shadow" };
+    let resolved =
+        crate::themes::resolve(&name, &catalog, light).or_else(|| crate::themes::builtin(kage));
+    if let Some((palette, mode)) = resolved {
+        apply(palette, mode, cx);
     }
 }
 
@@ -824,6 +997,26 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn a_named_theme_installs_its_own_colors(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(|app| {
+            gpui_kit::init(app);
+            app.set_global(ThemeChoice::Named("kimi-light".to_owned()));
+            apply_choice(app, WindowAppearance::Dark);
+            let ink = Palette::kimi_light().ink;
+            assert_eq!(app.theme().mode, ThemeMode::Light);
+            assert_eq!(app.theme().colors.foreground, ink);
+            assert_eq!(Palette::active(app).ink, ink);
+        });
+    }
+
+    #[test]
+    fn translucent_black_inks_stay_black() {
+        let ink = Palette::kimi_light().ink;
+        assert_eq!(ink.l, 0.0, "black, not blue");
+        assert!((ink.a - 0xE6 as f32 / 255.0).abs() < 1e-6);
+    }
+
+    #[gpui_kit::test]
     fn the_system_default_follows_the_appearance(cx: &mut gpui_kit::TestAppContext) {
         // Dawn on a light desktop, shadow otherwise, which is what E7.1
         // step 3 asks for.
@@ -835,7 +1028,7 @@ mod tests {
         ] {
             cx.update(|app| {
                 gpui_kit::init(app);
-                apply_system(app, appearance);
+                apply_choice(app, appearance);
                 let theme = app.theme();
                 assert_eq!(
                     theme.mode,

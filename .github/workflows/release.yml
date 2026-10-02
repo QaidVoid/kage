@@ -1,7 +1,8 @@
 name: release
 
-# Builds the `kage` binary for each target when release-plz publishes
-# a GitHub release, and attaches the archives to it.
+# Builds the `kage` binary and the `kage-desktop` client for each
+# target when release-plz publishes a GitHub release, and attaches the
+# archives to it.
 on:
   release:
     types: [published]
@@ -75,3 +76,120 @@ jobs:
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: kage-${{ matrix.name }}.tar.gz
+
+  # The desktop client lives in its own Cargo workspace under gui/.
+  # Linux links the system display libraries, so it builds on the oldest
+  # supported Ubuntu for a low glibc floor and also ships an onelf bundle
+  # that carries those libraries with it.
+  desktop:
+    name: desktop ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64-linux
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            onelf-sha256: 3a990243790c026c902330a7744e8c21b25fdc8c694a88e79d6fb25d761a6351
+          - name: aarch64-linux
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            onelf-sha256: 9b5b2c3d031756a064bd9a71a977e229cb359f324937a5ba8a28db1568bae15b
+          - { name: aarch64-macos, os: macos-latest, target: aarch64-apple-darwin }
+          - { name: x86_64-macos, os: macos-latest, target: x86_64-apple-darwin }
+          - { name: x86_64-windows, os: windows-latest, target: x86_64-pc-windows-msvc }
+    defaults:
+      run:
+        shell: bash
+        working-directory: gui
+    env:
+      ONELF_VERSION: 0.3.3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Toolchain
+        run: |
+          rustup show
+          rustup target add "${{ matrix.target }}"
+
+      - name: Install Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libwayland-dev libxcb1-dev patchelf
+
+      - name: Install onelf
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/onelf" \
+            "https://github.com/QaidVoid/onelf/releases/download/$ONELF_VERSION/onelf-${{ matrix.name }}"
+          echo "${{ matrix.onelf-sha256 }}  $RUNNER_TEMP/onelf" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/onelf"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Package
+        run: |
+          artifact="kage-desktop-${{ matrix.name }}"
+          bin="target/${{ matrix.target }}/release/kage-desktop"
+          if [ "$RUNNER_OS" = "Windows" ]; then bin="$bin.exe"; fi
+          mkdir -p "$artifact" ../dist
+          cp "$bin" ../LICENSE ../README.md "$artifact/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a "../dist/$artifact.zip" "$artifact"
+          else
+            tar -cJf "../dist/$artifact.tar.xz" "$artifact"
+          fi
+
+      # The bundle carries every library the client links or loads by
+      # name, glibc included. The GPU driver stack still comes from the
+      # host at launch, so it matches the user's hardware.
+      - name: Bundle with onelf
+        if: runner.os == 'Linux'
+        run: |
+          appdir="$RUNNER_TEMP/kage-desktop"
+          onelf bundle-libs "$appdir" --scan-dlopen --strip \
+            --from-binary "target/${{ matrix.target }}/release/kage-desktop"
+          mkdir -p "$appdir/.onelf/icons" "$appdir/.onelf/desktop"
+          cp assets/brand/kage-glyph-shadow.png "$appdir/.onelf/icons/kage-desktop.png"
+          printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=kage' \
+            'Comment=Desktop client for the kage coding agent' \
+            'Exec=kage-desktop' 'Icon=kage-desktop' 'Terminal=false' \
+            'Categories=Development;' > "$appdir/.onelf/desktop/kage-desktop.desktop"
+          onelf pack "$appdir" --name kage-desktop --command bin/kage-desktop \
+            -o "../dist/kage-desktop-${{ matrix.name }}.onelf"
+
+      # The headless platform needs no display, so this proves the bundle
+      # unpacks and starts its event loop on a stock runner.
+      - name: Smoke run the bundle
+        if: runner.os == 'Linux'
+        run: ZED_HEADLESS=1 timeout 60 "../dist/kage-desktop-${{ matrix.name }}.onelf" --smoke 3000
+
+      - name: Checksums
+        id: checksums
+        working-directory: dist
+        run: |
+          echo "subjects=$(printf 'dist/%s\n' * | paste -sd, -)" >> "$GITHUB_OUTPUT"
+          for file in *; do
+            if command -v sha256sum >/dev/null; then
+              sha256sum "$file" > "$file.sha256"
+            else
+              shasum -a 256 "$file" > "$file.sha256"
+            fi
+          done
+
+      - uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # 2.11.5
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: dist/*
+          file_glob: true
+          overwrite: true
+          tag: ${{ github.ref }}
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.checksums.outputs.subjects }}

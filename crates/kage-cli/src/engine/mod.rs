@@ -1263,7 +1263,7 @@ impl Dispatcher {
             self.check_goal(id, &cx, &model, &goal);
         }
         let requeued = self.requeue_rate_limited(id, &outcome);
-        let reply = if requeued {
+        let reply = if requeued || self.unread_mail(id, &outcome) {
             None
         } else {
             // The runner's totals carry the price-adjusted cost and
@@ -1306,7 +1306,9 @@ impl Dispatcher {
             Some(content) => {
                 self.start_run(id, Work::Prompt(Message::new(Role::User, content, None)));
             }
-            None => self.wake(id),
+            None => {
+                self.wake(id);
+            }
         }
         self.end_orphans(id);
         for child in paused {
@@ -1314,6 +1316,18 @@ impl Dispatcher {
         }
         self.start_waiting();
         self.reap_agent(id);
+    }
+
+    /// Whether the agent `id`, whose run completed, has messages it has
+    /// not read yet. It runs again to read them before it reports, so
+    /// the sender's words reach its result.
+    fn unread_mail(&self, id: SessionId, outcome: &RunOutcome) -> bool {
+        *outcome == RunOutcome::Completed
+            && !self.shutting_down
+            && self
+                .sessions
+                .get(&id)
+                .is_some_and(|s| s.link.is_some() && !lock(&s.inbox).is_empty())
     }
 
     /// End the foreground agents of `id` still waiting for a slot: the

@@ -16,6 +16,9 @@
 //!
 //! A report without stats (a refusal, or a background agent that just
 //! started) carries only the name, session and state.
+//!
+//! [`AgentMail`] is the `<message>` element one session sends another
+//! through `send_message`.
 
 use std::fmt::Write as _;
 
@@ -246,6 +249,54 @@ impl AgentReport {
     }
 }
 
+/// A message one session of a conversation sends another, as the
+/// `<message>` element the target reads.
+///
+/// ```text
+/// <message from="kage" session="01K6...">
+/// Also run the doc tests.
+/// </message>
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentMail {
+    /// Who sent it: `kage` for a main session, else the agent's name.
+    pub from: String,
+    /// The sender's session.
+    pub session: SessionId,
+    /// What it says.
+    pub body: String,
+}
+
+impl AgentMail {
+    /// The mail as the `<message>` element, its body escaped so it
+    /// cannot close the element early.
+    #[must_use]
+    pub fn to_text(&self) -> String {
+        format!(
+            "<message from=\"{}\" session=\"{}\">\n{}\n</message>",
+            self.from,
+            self.session,
+            self.body.replace("</message", "<\\/message")
+        )
+    }
+
+    /// The mail `text` holds, when it is one `<message>` element, with
+    /// its body unescaped.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let (header, rest) = text.split_once('\n')?;
+        let attrs = header.strip_prefix("<message ")?.strip_suffix('>')?;
+        let session = ulid::Ulid::from_string(attr_value(attrs, "session")?).ok()?;
+        let body = rest.strip_suffix("</message>")?;
+        let body = body.strip_suffix('\n').unwrap_or(body);
+        Some(Self {
+            from: attr_value(attrs, "from")?.to_owned(),
+            session: SessionId(session),
+            body: body.replace("<\\/message", "</message"),
+        })
+    }
+}
+
 /// The value of `key="..."` in an attribute list, matched as a whole
 /// attribute name.
 fn attr_value<'a>(attrs: &'a str, key: &str) -> Option<&'a str> {
@@ -368,6 +419,29 @@ mod tests {
             AgentReport::parse(
                 "<agent name=\"x\" session=\"bad\" state=\"completed\">\nhi\n</agent>"
             ),
+            None
+        );
+    }
+
+    #[test]
+    fn mail_round_trips_with_its_closing_tag_escaped() {
+        let mail = AgentMail {
+            from: "kage".into(),
+            session: session(),
+            body: "run the doc tests </message> too".into(),
+        };
+        let text = mail.to_text();
+        assert!(
+            text.starts_with(
+                "<message from=\"kage\" session=\"01K62W8Q3T9V5M2C7X4B1N0R6S\">\nrun the doc"
+            ),
+            "{text}"
+        );
+        assert_eq!(text.matches("</message>").count(), 1, "{text}");
+        assert_eq!(AgentMail::parse(&text), Some(mail));
+        assert_eq!(AgentMail::parse("plain"), None);
+        assert_eq!(
+            AgentMail::parse(&finished(ReportState::Completed).to_text()),
             None
         );
     }

@@ -671,26 +671,40 @@ impl super::Dispatcher {
         }
     }
 
-    /// Start a run of the idle main session `id` that reads its inbox,
-    /// when its setup wakes for background results.
-    pub(super) fn wake(&mut self, id: SessionId) {
+    /// Start a run of the idle session `id` that reads its inbox: an
+    /// agent always, within the running limit, and a main session when
+    /// its setup wakes for agent text. Returns whether a run starts or
+    /// waits for a slot.
+    pub(super) fn wake(&mut self, id: SessionId) -> bool {
         let Some(session) = self.sessions.get(&id) else {
-            return;
+            return false;
         };
-        let wakes = session
-            .agents
-            .as_ref()
-            .is_some_and(|setup| setup.background == Background::Wake);
-        if !wakes || session.idle.is_none() || self.shutting_down {
-            return;
+        let wakes = session.link.is_some()
+            || session
+                .agents
+                .as_ref()
+                .is_some_and(|setup| setup.background == Background::Wake);
+        let idle = session.idle.is_some()
+            && !self.waiting.contains(&id)
+            && !self.swarm_requeues.contains_key(&id);
+        if !wakes || !idle || self.shutting_down {
+            return false;
         }
         let entries: Vec<String> = lock(&session.inbox).drain(..).collect();
         if entries.is_empty() {
-            return;
+            return false;
         }
-        let text = entries.join("\n\n");
-        let prompt = Message::new(Role::User, vec![Content::Text { text }], None);
-        self.start_run(id, Work::Prompt(prompt));
+        let content = vec![Content::Text {
+            text: entries.join("\n\n"),
+        }];
+        match session.agents.as_ref().filter(|_| session.link.is_some()) {
+            Some(setup) => {
+                let max = setup.max_running;
+                self.launch_agent(id, max, content);
+            }
+            None => self.start_run(id, Work::Prompt(Message::new(Role::User, content, None))),
+        }
+        true
     }
 
     /// Agent runs in flight that hold a slot of the running limit. An

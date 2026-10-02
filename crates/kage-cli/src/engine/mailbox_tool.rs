@@ -1,12 +1,13 @@
-//! The `send_message` tool: drop a message into another agent
-//! session's mailbox. Delivery is fire-and-forget: the target runs the
-//! message as its next prompt, and the caller keeps going.
+//! The `send_message` tool: drop a message into another session's
+//! inbox. Delivery is fire-and-forget: a running target reads the
+//! message at its next turn boundary, and the caller keeps going.
 
 use std::sync::mpsc;
 use std::time::Duration;
 
-use kage_core::protocol::Delivery;
-use kage_core::{Content, Risk, SessionId, ToolOutput};
+use kage_core::agent_report::AgentMail;
+use kage_core::sync::lock;
+use kage_core::{Risk, SessionId, ToolOutput};
 use kage_tools::{Tool, ToolContext, ToolError};
 use serde::Deserialize;
 use ulid::Ulid;
@@ -41,25 +42,24 @@ pub(super) struct MailboxTool {
 impl MailboxTool {
     pub(super) fn new(from: SessionId, engine: mpsc::Sender<Input>) -> Self {
         let description = format!(
-            "Send a message to another agent session's mailbox and continue without \
-             waiting. The message becomes the target's next prompt: it runs at once \
-             when the target is idle and the agent running limit allows, else after \
-             its current run ends or a slot frees. The target's reply never comes back \
-             to you; it lands in the target's own transcript, so ask it to report back \
-             another way, such as a follow-up `swarm` resume or a message of its own.\n\n\
-             `to` is `parent` (the session that started you) or the id of another \
-             running session of this conversation, for example a sibling still at \
-             work; an agent that has finished takes no messages. Your own id is {from}.\n\n\
-             Use it to hand findings to a sibling, ask the parent a question mid-task \
-             or answer the parent without being asked. For work you must wait on, \
-             make an `agent` call instead."
+            "Send a message to another session of this conversation and continue without \
+             waiting. A running target reads it at its next turn boundary. The answer is \
+             not this call's result: an agent you started covers it in its own result, \
+             and any other session can message you back.\n\n\
+             `to` is `parent` (the session that started you) or the session id of a \
+             running agent, such as one you started in the background or a sibling still \
+             at work. An agent that has finished takes no messages; start a new agent \
+             instead. Your own id is {from}.\n\n\
+             Use it to steer an agent you started, hand findings to a sibling or ask the \
+             parent a question mid-task. For work you must wait on, make an `agent` call \
+             instead."
         );
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
                 "to": {
                     "type": "string",
-                    "description": "`parent` or the session id of a live agent session."
+                    "description": "`parent` or the session id of a running agent."
                 },
                 "message": {
                     "type": "string",
@@ -147,13 +147,14 @@ impl Tool for MailboxTool {
 }
 
 impl super::Dispatcher {
-    /// Resolve and queue one mailbox message. `None` targets address
-    /// the sender's parent, and a target must share the sender's main
-    /// session and still be running: the main session or an agent
-    /// whose result is not delivered yet. The message is wrapped so the
-    /// target knows who sent it and where to answer. An idle main session runs it at once; an
-    /// idle agent runs it once the running limit allows; a busy target
-    /// runs it after its current run ends.
+    /// Resolve one message and leave it in the target's inbox. `None`
+    /// targets address the sender's parent, and a target must share the
+    /// sender's main session and still be running: the main session or
+    /// an agent whose result is not delivered yet. The message travels
+    /// as an [`AgentMail`], so the target knows who sent it. A busy
+    /// target reads it at its next turn boundary; an idle one wakes to
+    /// read it, unless it is a main session that holds agent text for
+    /// its next prompt.
     pub(super) fn deliver_message(
         &mut self,
         from: SessionId,
@@ -169,14 +170,11 @@ impl super::Dispatcher {
         if to == from {
             return Err("cannot send a message to yourself".to_owned());
         }
-        let label = self
+        let sender = self
             .sessions
             .get(&from)
             .and_then(|s| s.link.as_ref())
-            .map_or_else(
-                || "the main session".to_owned(),
-                |l| format!("the {} agent", l.agent),
-            );
+            .map_or_else(|| "kage".to_owned(), |l| l.agent.clone());
         // A finished agent already delivered its result, so a reply to
         // a later message, and anything it changed, would never reach
         // its parent.
@@ -197,26 +195,27 @@ impl super::Dispatcher {
                 "session {to} belongs to another conversation; message sessions of your own"
             ));
         }
+        let mail = AgentMail {
+            from: sender,
+            session: from,
+            body: message.to_owned(),
+        };
         let target = &self.sessions[&to];
-        let content = vec![Content::Text {
-            text: format!("[message from {label} session {from}]\n\n{message}"),
-        }];
-        let busy = target.idle.is_none() || self.waiting.contains(&to);
-        let max = target.agents.as_ref().map_or(usize::MAX, |a| a.max_running);
-        if busy || target.link.is_none() {
-            self.prompt(to, content, Delivery::Queue);
-            return Ok(if busy {
-                format!("message queued for session {to}; it runs when its current work ends")
-            } else {
-                format!("message delivered to session {to}; it runs now")
-            });
+        lock(&target.inbox).push_back(mail.to_text());
+        if target.idle.is_none() {
+            return Ok(format!(
+                "Delivered to session {to}. It reads the message at its next turn boundary."
+            ));
         }
-        let starts = self.running_agents() < max;
-        self.launch_agent(to, max, content);
-        Ok(if starts {
-            format!("message delivered to session {to}; it runs now")
+        if self.waiting.contains(&to) {
+            return Ok(format!(
+                "Delivered to session {to}. It reads the message when it starts."
+            ));
+        }
+        Ok(if self.wake(to) {
+            format!("Delivered to session {to}. It starts a run to read the message.")
         } else {
-            format!("message queued for session {to}; it runs when an agent slot frees")
+            format!("Delivered to session {to}. It reads the message with its next prompt.")
         })
     }
 

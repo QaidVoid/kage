@@ -2,7 +2,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
 use kage_core::Content;
-use kage_core::agent_report::{AgentReport, ReportState};
+use kage_core::agent_report::{AgentMail, AgentReport, ReportState};
 use kage_core::agents::AgentDefs;
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
 use kage_core::protocol::{EXIT_PLAN_TOOL, Envelope, Event, RunOutcome};
@@ -2608,13 +2608,12 @@ fn send_message_turn(
 }
 
 #[test]
-fn a_child_messages_its_parent_and_the_parent_runs_it() {
+fn a_child_messages_its_busy_parent_at_its_next_turn() {
     let mock = MockProvider::sequence(vec![
         agent_turn(&[("call_a", task("watch the build"))]),
         send_message_turn("call_m", "parent", "found the bug"),
         text_turn("child done"),
         text_turn("parent done"),
-        text_turn("handled the message"),
     ]);
     let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
     let parent = h.open_parent(
@@ -2623,35 +2622,28 @@ fn a_child_messages_its_parent_and_the_parent_runs_it() {
         Some(agent_setup(1, 1)),
     );
     prompt(&h.engine, parent, "go", Delivery::Steer);
-    let events = until_runs_end(&h.events, 3);
+    let events = until_runs_end(&h.events, 2);
     h.engine.shutdown();
 
     let child = spawned(&events).first().unwrap().0;
     let ack = tool_output(&events, child, "call_m");
     assert!(!ack.is_error, "{}", ack.text);
-    assert!(ack.text.contains("queued"), "{}", ack.text);
+    assert!(ack.text.contains("next turn boundary"), "{}", ack.text);
 
     let requests = mock.requests();
     let last = requests.last().unwrap().messages.clone();
-    let texts: Vec<String> = last
-        .iter()
-        .flat_map(|m| &m.content)
-        .filter_map(|c| match c {
-            Content::Text { text } => Some(text.clone()),
-            _ => None,
-        })
-        .collect();
+    let mail = AgentMail {
+        from: "general".into(),
+        session: child,
+        body: "found the bug".into(),
+    };
     assert!(
-        texts
-            .iter()
-            .any(|t| t
-                == &format!("[message from the general agent session {child}]\n\nfound the bug")),
-        "{texts:?}"
+        last.iter()
+            .flat_map(|m| &m.content)
+            .any(|c| matches!(c, Content::Text { text } if *text == mail.to_text())),
+        "{last:?}"
     );
-    assert_eq!(
-        outcome_of(&events, parent).last(),
-        Some(&RunOutcome::Completed)
-    );
+    assert_eq!(outcome_of(&events, parent), [RunOutcome::Completed]);
 }
 
 #[test]
@@ -4744,4 +4736,54 @@ fn a_holding_parent_reads_a_background_result_with_its_next_prompt() {
     let report = AgentReport::parse(&texts[texts.len() - 1]).unwrap();
     assert_eq!(report.body, "412 passed");
     assert_eq!(reports_on(&events, parent).len(), 1);
+}
+
+#[test]
+fn a_running_background_agent_reads_a_message_at_its_next_turn() {
+    let (h, _main, agents) = split_harness(
+        vec![
+            agent_turn(&[("call_a", background_task("test everything"))]),
+            text_turn("waiting for the tests"),
+            text_turn("the tests pass"),
+        ],
+        vec![tool_turn("gate"), text_turn("412 passed, doc tests too")],
+    );
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(background_setup(Background::Wake)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = wait_for(&h.events, run_ended_on(parent));
+    let (child, _) = spawned(&events)[0];
+    let (reply, ack) = crossbeam_channel::bounded(1);
+    h.engine
+        .commander()
+        .0
+        .send(Input::Deliver {
+            from: parent,
+            to: Some(child),
+            message: "also run the doc tests".into(),
+            reply,
+        })
+        .unwrap();
+    let ack = ack.recv_timeout(WAIT).unwrap().unwrap();
+    assert!(ack.contains("next turn boundary"), "{ack}");
+
+    h.release.send(()).unwrap();
+    let events = wait_for(&h.events, run_ended_on(parent));
+    let mail = AgentMail {
+        from: "kage".into(),
+        session: parent,
+        body: "also run the doc tests".into(),
+    };
+    let read = agents.requests()[1]
+        .messages
+        .iter()
+        .any(|m| m.role == Role::User && crate::cli_loop_run::first_user_text(m) == mail.to_text());
+    assert!(read, "{:?}", agents.requests()[1].messages);
+    assert_eq!(
+        reports_on(&events, parent)[0].body,
+        "412 passed, doc tests too"
+    );
 }

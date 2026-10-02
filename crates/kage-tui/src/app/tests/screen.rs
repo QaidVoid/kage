@@ -464,12 +464,13 @@ fn the_footer_opens_with_the_mode_and_holds_the_facts_at_60_columns() {
     }
     let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
     app.render_into(&mut terminal).unwrap();
-    let footer = snapshot_rows(&terminal).pop().unwrap();
-    assert!(footer.starts_with(" ask mode"), "{footer:?}");
-    assert!(
-        footer.ends_with("Fake \u{B7} in 14k out 0 \u{B7} 12% ctx (24k/200k)"),
-        "{footer:?}"
-    );
+    let mut rows = snapshot_rows(&terminal);
+    let facts = rows.pop().unwrap();
+    let top = rows.pop().unwrap();
+    // At 60 columns the model name yields to the context share.
+    assert!(top.ends_with(" 12% ctx (24k/200k)"), "{top:?}");
+    assert!(facts.starts_with(" ask mode"), "{facts:?}");
+    assert!(facts.ends_with("in 14k out 0"), "{facts:?}");
 }
 
 #[test]

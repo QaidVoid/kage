@@ -734,16 +734,38 @@ pub(super) fn push_builtin(
                 out.push(Span::styled(format!("  {hint}"), styles.hint));
             }
         }
-        "cwd" => {
-            if let Some(cwd) = status.cwd.filter(|c| !c.is_empty()) {
-                out.push(Span::styled(cwd.to_owned(), styles.text));
-            }
+        "cwd" => out.extend(cwd_text(status).map(|text| Span::styled(text, styles.text))),
+        "agents" => {
+            out.extend(agents_text(status.agents).map(|text| Span::styled(text, styles.text)));
         }
         "version" => out.push(Span::styled(
             format!("v{}", env!("CARGO_PKG_VERSION")),
             styles.text,
         )),
         _ => {}
+    }
+}
+
+/// The `cwd` component: the working directory with `~` for home, and
+/// the git branch after it.
+fn cwd_text(status: &StatusCtx<'_>) -> Option<String> {
+    let cwd = home_relative(status.cwd.filter(|c| !c.is_empty())?);
+    Some(match status.branch {
+        Some(branch) => format!("{cwd} ({branch})"),
+        None => cwd,
+    })
+}
+
+/// The `agents` component: how many agents are live and how many of
+/// them run in the background, or nothing while none is.
+fn agents_text(agents: &[AgentRow]) -> Option<String> {
+    let live = agents.len();
+    let noun = if live == 1 { "agent" } else { "agents" };
+    let background = agents.iter().filter(|a| a.background).count();
+    match (live, background) {
+        (0, _) => None,
+        (_, 0) => Some(format!("{live} {noun}")),
+        _ => Some(format!("{live} {noun} ({background} bg)")),
     }
 }
 
@@ -887,7 +909,11 @@ fn push_usage(name: &str, u: &SessionUsage, styles: &Styles, out: &mut Vec<Span<
         "plan" | "swarm" => push_session_mode(name, u, out),
         "tasks" if u.shells > 0 => {
             out.push(Span::styled(
-                format!("{} bg", u.shells),
+                format!(
+                    "{} {}",
+                    u.shells,
+                    if u.shells == 1 { "shell" } else { "shells" }
+                ),
                 Style::default()
                     .fg(crate::theme::current().muted_fg)
                     .add_modifier(Modifier::BOLD),
@@ -931,7 +957,19 @@ mod tests {
             ..SessionUsage::default()
         };
         let widgets = ["w".to_owned()];
+        let agents = [crate::view::AgentRow {
+            session: kage_core::SessionId::new(),
+            depth: 1,
+            agent: "general".into(),
+            description: String::new(),
+            item: String::new(),
+            state: crate::view::AgentRowState::Running,
+            activity: String::new(),
+            elapsed_ms: None,
+            background: true,
+        }];
         let status = StatusCtx {
+            agents: &agents,
             model: Some("m"),
             session_id: Some("s"),
             title: Some("t"),

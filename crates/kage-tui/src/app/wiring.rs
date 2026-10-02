@@ -67,6 +67,7 @@ impl App {
             autocomplete_providers: Vec::new(),
             input_completion: None,
             completion_workdir: None,
+            branch: None,
             themes_dir: None,
             terminal_hooks: None,
             slots: None,

@@ -1202,7 +1202,11 @@ fn live_pinned_rows_leave_no_summary_row() {
     let (mut app, _rx, _events, _) = agents_app();
     assert!(!app.agent_rows().is_empty());
     let rows = rendered(&mut app, 80, 24);
-    assert!(rows.iter().all(|r| !r.contains(" for agents")), "{rows:#?}");
+    let above_footer = &rows[..rows.len() - 2];
+    assert!(
+        above_footer.iter().all(|r| !r.contains(" for agents")),
+        "{rows:#?}"
+    );
 }
 
 #[test]
@@ -1752,7 +1756,7 @@ fn an_idle_session_pins_its_background_agent_and_names_the_key() {
     let (mut app, _rx, events) = app_with_events();
     app.set_editor_modeless(true);
     spawn_background(&mut app, &events, "a1", "general");
-    assert_eq!(pinned(&app)[0].1, "general bg");
+    assert!(app.agent_rows()[0].background);
     assert!(
         app.footer_hint().starts_with("ctrl+t for agents"),
         "{}",

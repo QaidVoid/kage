@@ -11,13 +11,14 @@ fn the_help_overlay_never_overlaps_the_input_rows() {
     app.handle_key(key('?'));
     assert!(app.help_overlay.is_some());
     let rows = snapshot_rows(&render_app(&mut app));
+    // Without session usage the footer is the hint row alone, and it
+    // names the overlay's keys.
     let (input_top, footer) = (blank.len() - 4, blank.len() - 1);
     assert_eq!(
         rows[input_top..footer],
         blank[input_top..footer],
         "{rows:?}"
     );
-    assert_eq!(rows[footer], blank[footer]);
     assert_ne!(rows[..input_top], blank[..input_top], "{rows:?}");
 }
 

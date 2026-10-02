@@ -810,6 +810,9 @@ pub struct App {
     /// Workdir the built-in `@file` completion lists under. `None`
     /// disables that fallback (plugin providers still work).
     completion_workdir: Option<std::path::PathBuf>,
+    /// The git branch of the workdir and when it was read, so the
+    /// footer rereads it every few seconds rather than every frame.
+    branch: Option<(Instant, Option<String>)>,
     /// User theme directory (`~/.config/kage/themes`). Names that are
     /// not bundled are resolved to `<name>.toml` here. `None` (tests,
     /// no home) restricts theme switching to the bundled set.

@@ -484,16 +484,18 @@ Slots are the fixed chrome regions, from top to bottom:
 | `start` | the start card above the input while the conversation is empty | `{ lines }` |
 | `activity` | the working row above the input, collapsed while it paints nothing | `{ left, right, sep }` |
 | `input_pill` | the input's top rule | `{ left, right, sep }` |
-| `footer` | the bottom row | `{ left, right, sep }` |
+| `footer` | the bottom rows | `{ left, right, sep }` for one row, or `{ rows = { row, ... } }` for up to four, each row a `{ left, right, sep }` |
 
 `kage.ui.set_slot(name, spec)` replaces a slot's spec, and
 `kage.ui.set_slot(name, nil)` restores the one `_defaults.lua` set.
 To remove a row, give it an empty spec, such as
 `kage.ui.set_slot("activity", { left = {} })`.
 `left` items paint from the left edge and `right` items against the
-right edge. `sep` goes between two items that both have output. The
-`:` command line and the `/` search line paint over the footer row
-while they are open.
+right edge. `sep` goes between two items that both have output. When
+a row is too narrow, the right side drops its items from the front.
+A footer row that paints nothing collapses, and one row always stays.
+The `:` command line and the `/` search line paint over the footer's
+top row while they are open.
 
 `start` paints while the conversation holds nothing but notices: no
 prompt, reply, thinking, tool call or shell command yet. Errors such
@@ -510,11 +512,12 @@ kage's defaults are:
 local dot = " \u{B7} "
 kage.ui.set_slot("header", { left = { "breadcrumb", "title" }, right = { "widgets", "search" } })
 kage.ui.set_slot("activity", { left = { "activity" } })
-kage.ui.set_slot("input_pill", { left = { "working", "mode" }, right = { "thinking" } })
+kage.ui.set_slot("input_pill", { left = { "mode" }, right = { "thinking" } })
 kage.ui.set_slot("footer", {
-  left = { "hint" },
-  right = { "model", "permission", "context", "tokens" },
-  sep = dot,
+  rows = {
+    { left = { "hint" }, right = { "model", "context" }, sep = dot },
+    { left = { "permission", "plan", "swarm", "agents", "tasks" }, right = { "cwd", "tokens" }, sep = dot },
+  },
 })
 
 local blank = { text = "" }
@@ -553,12 +556,16 @@ An item is one of:
 | `working` | a spinner while a run is in flight |
 | `activity` | what the run is doing and for how long, such as `Running cargo test (14s, esc to interrupt)`. The label is `Working`, `Thinking`, the running tool, `Waiting for N agents`, or `Waiting for your approval`. In an agent view it follows that agent. |
 | `context` | context use against the window, such as `12% ctx` |
-| `tokens` | total tokens and the cost when known, such as `14k tok $0.02` |
+| `tokens` | input and output tokens, the cached share and the cost when known, such as `in 14k out 2k cached 9k (40.00%) $0.02`. Agents under the session on screen count too. |
 | `thinking` | the thinking level the next run sends, such as `thinking high (auto)` (`auto` when you have not chosen one), hidden when off |
-| `permission` | a session permission override, such as `ask mode`, hidden when there is none |
+| `permission` | the session's permission mode: `ask when needed`, or an override such as `ask mode` |
+| `plan` | `plan` while [plan mode](/guide/plan-mode) is on |
+| `swarm` | `swarm` while swarm mode is on |
+| `agents` | the live agents under the session on screen and how many of them run in the background, such as `3 agents (2 bg)`, hidden while none runs |
+| `tasks` | the `!` shell commands still running, such as `1 shell` |
 | `mode` | `NORMAL`, `INSERT` or `VISUAL` in vim mode, `shell` while `!` shell mode is armed, nothing otherwise |
 | `hint` | what the next keys do: the pending keys of a mapping sequence, the keys of the open picker, dialog, approval panel, `:` line or search line, `ctrl+c again to quit` or `draft cleared, up restores it`, else a hint for the current state such as `? for shortcuts`, `tab to queue`, `ctrl+t for agents`, or `enter to steer`, `esc to go back` and `ctrl+c to stop` in an agent view |
-| `cwd` | the working directory |
+| `cwd` | the working directory with `~` for your home, and the git branch checked out, such as `~/dev/kage (main)` |
 | `version` | the kage version |
 | `sessions` | `start` only: the three most recent sessions with their titles and times |
 | `notices` | `start` only: startup notices, such as a missing credential and the `/login` command that fixes it |

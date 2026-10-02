@@ -818,7 +818,7 @@ fn the_activity_row_sits_above_the_input_only_while_it_has_text() {
 }
 
 #[test]
-fn the_footer_row_opens_with_the_mode_and_holds_the_facts() {
+fn the_footer_rows_hold_the_hint_the_model_and_the_session_facts() {
     let usage = SessionUsage {
         model: "fake:m".into(),
         input_tokens: 14_000,
@@ -826,8 +826,16 @@ fn the_footer_row_opens_with_the_mode_and_holds_the_facts() {
         context_window: 200_000,
         ..SessionUsage::default()
     };
+    let agents = [AgentRow {
+        background: true,
+        ..agent_row(1, "general", "run the tests", "", 3)
+    }];
     let status = StatusCtx {
         model: Some("Fake"),
+        hint: Some("? for shortcuts"),
+        cwd: Some("/work/kage"),
+        branch: Some("main"),
+        agents: &agents,
         ..StatusCtx::default()
     };
     let rows = snapshot_frame(
@@ -836,13 +844,20 @@ fn the_footer_row_opens_with_the_mode_and_holds_the_facts() {
         None,
         &status,
         Some(&usage),
-        Rect::new(0, 0, 100, 6),
+        Rect::new(0, 0, 100, 8),
     );
-    let footer = rows.last().unwrap();
-    assert!(footer.starts_with(" ask when needed"), "{footer:?}");
+    let [top, bottom] = &rows[rows.len() - 2..] else {
+        unreachable!()
+    };
+    assert!(top.starts_with("  ? for shortcuts"), "{top:?}");
+    assert!(top.ends_with("Fake \u{B7} 12% ctx (24k/200k)"), "{top:?}");
     assert!(
-        footer.ends_with("Fake \u{B7} in 14k out 0 \u{B7} 12% ctx (24k/200k)"),
-        "{footer:?}"
+        bottom.starts_with(" ask when needed \u{B7} 1 agent (1 bg)"),
+        "{bottom:?}"
+    );
+    assert!(
+        bottom.ends_with("/work/kage (main) \u{B7} in 14k out 0"),
+        "{bottom:?}"
     );
 }
 
@@ -888,7 +903,7 @@ fn the_footer_shows_swarm_and_background_task_segments() {
     );
     let footer = rows.last().unwrap();
     assert!(
-        footer.starts_with(" ask when needed \u{b7} swarm \u{b7} 2 bg"),
+        footer.starts_with(" ask when needed \u{b7} swarm \u{b7} 2 shells"),
         "{footer:?}"
     );
 
@@ -1285,7 +1300,7 @@ fn error_line_truncates_in_narrow_viewport() {
 }
 
 fn modeline_rows(usage: Option<&SessionUsage>, width: u16) -> Vec<String> {
-    let backend = TestBackend::new(width, 1);
+    let backend = TestBackend::new(width, 2);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|frame| {
@@ -1446,7 +1461,7 @@ fn shell_output_hides_the_card() {
 fn the_card_ends_directly_above_the_input_rule() {
     let info = start_info(3);
     let rows = card_rows(&mut Buffer::new(), &info, Rect::new(0, 0, 120, 36));
-    let rule = rows.len() - 4;
+    let rule = rows.len() - 5;
     assert!(rows[rule].starts_with(RULE), "{rows:#?}");
     assert_eq!(rows[rule - 1], TIP, "{rows:#?}");
 }
@@ -1666,6 +1681,7 @@ fn agent_row(depth: usize, agent: &str, description: &str, activity: &str, secs:
         state: AgentRowState::Running,
         activity: activity.to_owned(),
         elapsed_ms: Some(secs * 1000),
+        background: false,
     }
 }
 

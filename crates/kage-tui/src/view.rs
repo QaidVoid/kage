@@ -95,6 +95,9 @@ pub struct StatusCtx<'a> {
     pub activity: Option<&'a str>,
     /// Working directory, for the `cwd` component.
     pub cwd: Option<&'a str>,
+    /// The git branch checked out in the working directory, for the
+    /// `cwd` component.
+    pub branch: Option<&'a str>,
     /// Id of the active model, shown next to its label on the start
     /// card.
     pub model_id: Option<&'a str>,

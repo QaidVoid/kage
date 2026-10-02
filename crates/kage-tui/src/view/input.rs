@@ -92,6 +92,8 @@ pub struct AgentRow {
     pub activity: String,
     /// Time since its run started. `None` while queued.
     pub elapsed_ms: Option<u64>,
+    /// Whether it runs in the background, tagged `bg` after its name.
+    pub background: bool,
 }
 
 /// A prompt sent during a run that the engine has not delivered yet.
@@ -408,7 +410,7 @@ fn paint_agents(
     let shown = &agents[..agents.len().min(AGENT_MAX_ROWS)];
     let name_column = shown
         .iter()
-        .map(|row| agent_name_offset(row) + row.agent.width())
+        .map(|row| agent_name_offset(row) + name_width(row))
         .max()
         .unwrap_or(0);
     let width = usize::from(area.width);
@@ -433,6 +435,14 @@ fn paint_agents(
     }
     frame.render_widget(Paragraph::new(lines), area);
 }
+
+/// Cells a pinned agent's name takes, its `bg` tag included.
+fn name_width(row: &AgentRow) -> usize {
+    row.agent.width() + if row.background { BG_TAG.len() } else { 0 }
+}
+
+/// The tag after a background agent's name.
+const BG_TAG: &str = " bg";
 
 /// Cells before a pinned agent's name: its indent, the glyph and a
 /// space.
@@ -464,7 +474,8 @@ fn agent_line(row: &AgentRow, name_column: usize, width: usize) -> Line<'static>
         .elapsed_ms
         .map(|ms| format!(" \u{b7} {}", super::tool_view::format_seconds(ms)))
         .unwrap_or_default();
-    let name = pad_to_width(&row.agent, name_column - agent_name_offset(row) + 2);
+    let pad = name_column + 2 - agent_name_offset(row) - name_width(row);
+    let tag = if row.background { BG_TAG } else { "" };
     let room = width.saturating_sub(AGENT_LEAD.len() + name_column + 2 + 1);
     // A swarm child names its item instead of the batch description
     // every sibling repeats.
@@ -498,7 +509,12 @@ fn agent_line(row: &AgentRow, name_column: usize, width: usize) -> Line<'static>
         Span::raw(AGENT_INDENT.repeat(row.depth.saturating_sub(1))),
         Span::styled(glyph, glyph_style.add_modifier(Modifier::BOLD)),
         Span::raw(" "),
-        Span::styled(name, Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            row.agent.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(tag, muted),
+        Span::raw(" ".repeat(pad)),
         Span::raw(description),
         Span::raw(" ".repeat(gap)),
         Span::styled(doing, doing_style),

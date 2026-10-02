@@ -7,12 +7,13 @@ local dot = " \u{B7} "
 kage.ui.set_slot("header", { left = { "breadcrumb", "title" }, right = { "widgets", "search" } })
 kage.ui.set_slot("activity", { left = { "activity" } })
 kage.ui.set_slot("input_pill", { left = { "mode" }, right = { "thinking" } })
+-- Drop order for a tight row: the right side's first item yields
+-- first, so the context share and the spend survive longest.
 kage.ui.set_slot("footer", {
-  left = { "permission", "plan", "swarm", "tasks" },
-  -- Drop order for a tight row: the model name yields first, the
-  -- context share survives longest.
-  right = { "model", "tokens", "context" },
-  sep = dot,
+  rows = {
+    { left = { "hint" }, right = { "model", "context" }, sep = dot },
+    { left = { "permission", "plan", "swarm", "agents", "tasks" }, right = { "cwd", "tokens" }, sep = dot },
+  },
 })
 
 local tips = {

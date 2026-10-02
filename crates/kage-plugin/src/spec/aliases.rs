@@ -83,6 +83,7 @@ pub(super) const ALIASES: &[Alias] = &[
             "permission",
             "plan",
             "swarm",
+            "agents",
             "tasks",
             "mode",
             "hint",

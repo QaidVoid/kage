@@ -354,6 +354,7 @@ impl App {
             None
         };
         let render_width = terminal.size().map_or(80, |r| r.width);
+        let branch = self.branch();
         self.refresh_plugin_widget_texts_if_due(render_width);
         let (mut buffer, buffer_version) = self.take_draw_snapshot();
         let todos = view::todo::from_blocks(buffer.blocks());
@@ -423,6 +424,7 @@ impl App {
             hint: Some(hint.as_str()),
             activity: activity.as_deref(),
             cwd: cwd.as_deref(),
+            branch: branch.as_deref(),
             model_id: model_id.as_deref(),
             start: self.start_info.as_ref(),
             start_keys,

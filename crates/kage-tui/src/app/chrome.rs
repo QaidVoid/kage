@@ -27,6 +27,28 @@ fn tagged_name(node: &kage_core::protocol::AgentNode) -> String {
     }
 }
 
+/// How long the footer trusts a branch it read.
+const BRANCH_TTL: Duration = Duration::from_secs(3);
+
+/// The branch checked out in the git repository that holds `dir`, read
+/// from its `HEAD`. `None` outside a repository and on a detached
+/// `HEAD`, as in a jj repository.
+fn git_branch(dir: &std::path::Path) -> Option<String> {
+    let dot_git = dir
+        .ancestors()
+        .map(|d| d.join(".git"))
+        .find(|p| p.exists())?;
+    // A linked worktree's `.git` is a file naming its git directory.
+    let git_dir = match std::fs::read_to_string(&dot_git) {
+        Ok(link) => std::path::PathBuf::from(link.strip_prefix("gitdir:")?.trim()),
+        Err(_) => dot_git,
+    };
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    head.trim()
+        .strip_prefix("ref: refs/heads/")
+        .map(str::to_owned)
+}
+
 /// Whether the agent of `node` is queued or running.
 fn is_live(node: &kage_core::protocol::AgentNode) -> bool {
     use kage_core::protocol::AgentState;
@@ -34,6 +56,20 @@ fn is_live(node: &kage_core::protocol::AgentNode) -> bool {
 }
 
 impl App {
+    /// The branch the `cwd` component shows, reread once
+    /// [`BRANCH_TTL`] has passed.
+    pub(crate) fn branch(&mut self) -> Option<String> {
+        let dir = self.completion_workdir.as_deref()?;
+        let fresh = self
+            .branch
+            .as_ref()
+            .is_some_and(|(read, _)| read.elapsed() < BRANCH_TTL);
+        if !fresh {
+            self.branch = Some((Instant::now(), git_branch(dir)));
+        }
+        self.branch.as_ref().and_then(|(_, branch)| branch.clone())
+    }
+
     /// Snapshot the slot specs for one frame and report the frame's
     /// width and editor mode to the plugin runtime.
     pub(crate) fn slot_frame(&self, width: u16) -> kage_plugin::SlotSpecs {
@@ -462,7 +498,8 @@ impl App {
                 Some(view::AgentRow {
                     session: node.session,
                     depth,
-                    agent: tagged_name(node),
+                    background: node.background,
+                    agent: node.agent.clone(),
                     description: node.description.clone(),
                     item: swarm_item(node),
                     state,

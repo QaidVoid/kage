@@ -72,6 +72,7 @@
 ---| "permission"
 ---| "plan"
 ---| "swarm"
+---| "agents"
 ---| "tasks"
 ---| "mode"
 ---| "hint"

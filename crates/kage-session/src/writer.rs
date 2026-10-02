@@ -117,7 +117,7 @@ impl SessionWriter {
             })?;
             acquire_lock(dup, &path)?
         };
-        repair_torn_tail(&mut file).map_err(|err| SessionError::Io {
+        repair_torn_tail(&mut file, &path).map_err(|err| SessionError::Io {
             path: path.clone(),
             source: err,
         })?;
@@ -213,7 +213,7 @@ fn check_version(file: &File, path: &Path) -> Result<(), SessionError> {
 /// away. The reader would have skipped those bytes anyway, so truncation
 /// changes nothing it could see; it only keeps the next append from being
 /// glued onto the fragment.
-fn repair_torn_tail(file: &mut File) -> std::io::Result<()> {
+fn repair_torn_tail(file: &mut File, path: &Path) -> std::io::Result<()> {
     file.rewind()?;
     let len = file.metadata()?.len();
     if len == 0 {
@@ -237,8 +237,10 @@ fn repair_torn_tail(file: &mut File) -> std::io::Result<()> {
     if ends_with_newline {
         return Ok(());
     }
-    file.set_len(last_newline.map_or(0, |pos| pos + 1))?;
-    file.sync_all()
+    // Windows refuses to truncate through an append-only handle.
+    let writer = OpenOptions::new().write(true).open(path)?;
+    writer.set_len(last_newline.map_or(0, |pos| pos + 1))?;
+    writer.sync_all()
 }
 
 /// Whether another writer holds the advisory lock on the session file

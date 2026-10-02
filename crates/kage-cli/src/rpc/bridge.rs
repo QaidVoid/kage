@@ -473,7 +473,7 @@ impl Bridge {
             agent,
             description,
             swarm,
-            ..
+            background,
         }) = event
         {
             let Some(parent_id) = self.client_of(*parent) else {
@@ -504,6 +504,7 @@ impl Bridge {
                 tool_call_id: Some(tool_call_id.to_string()),
                 usage: None,
                 model: None,
+                background: *background,
             };
             send_update(
                 &self.peer,
@@ -792,26 +793,40 @@ impl Bridge {
 
     /// Shows the user message a run opened with to the attached clients
     /// that did not send it, so their reply does not arrive without its
-    /// question. The client that owns the run sees nothing.
+    /// question. The client that owns the run sees only the agent
+    /// reports and messages the engine added, which it never sent.
     fn echo(&self, session: SessionId, client_id: &str, message: &Message) {
         if message.role != Role::User {
             return;
         }
-        let owner = lock(&self.live).owner_of(session);
-        if owner.is_none_or(|owner| owner == self.connection) {
-            return;
-        }
+        let ours = lock(&self.live)
+            .owner_of(session)
+            .is_none_or(|owner| owner == self.connection);
         for block in &message.content {
             let block = match block {
+                Content::Text { text } if ours => match agent_part(text) {
+                    Some(part) => kage_acp::acp::ContentBlock::text(part.to_owned()),
+                    None => continue,
+                },
                 Content::Text { text } if !text.is_empty() => {
                     kage_acp::acp::ContentBlock::text(text.clone())
                 }
-                Content::Image { source, mime } => image_block(source, mime),
+                Content::Image { source, mime } if !ours => image_block(source, mime),
                 _ => continue,
             };
             self.send(session, client_id, user_chunk(block));
         }
     }
+}
+
+/// The agent reports and messages `text` carries after the words a
+/// user typed, if any.
+fn agent_part(text: &str) -> Option<&str> {
+    let (words, _) = kage_core::agent_report::split_agent_text(text)?;
+    if words.is_empty() {
+        return Some(text.trim());
+    }
+    text.split_once(words).map(|(_, rest)| rest.trim())
 }
 
 /// The `user_message_chunk` showing `content` to a client that did not

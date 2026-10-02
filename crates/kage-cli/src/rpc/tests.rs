@@ -5025,16 +5025,27 @@ fn a_kage_client_session_wakes_for_a_background_result() {
         .unwrap()
         .unwrap();
     assert_eq!(response["stopReason"], "end_turn");
+    let mut report = None;
     loop {
         let Inbound::Notification { params, .. } = inbox.recv_timeout(WAIT).expect("no wake run")
         else {
             continue;
         };
-        if params["sessionId"] == session.as_str()
-            && params["update"]["content"]["text"] == "the agent listed the files"
-        {
+        if params["sessionId"] != session.as_str() {
+            continue;
+        }
+        let update = &params["update"];
+        if update["sessionUpdate"] == "user_message_chunk" {
+            report = update["content"]["text"].as_str().map(str::to_owned);
+        }
+        if update["content"]["text"] == "the agent listed the files" {
             break;
         }
     }
+    let report = report.expect("the report reaches the client that owns the session");
+    assert!(
+        report.starts_with("<agent name=\"general\"") && report.contains("child done"),
+        "{report}"
+    );
     assert_eq!(main.call_count(), 3);
 }

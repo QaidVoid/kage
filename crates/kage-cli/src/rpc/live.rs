@@ -73,6 +73,8 @@ pub(super) struct SubagentSeed {
     pub(super) usage: Option<SubagentUsage>,
     /// The model it runs, once known.
     pub(super) model: Option<String>,
+    /// Whether it runs in the background.
+    pub(super) background: bool,
 }
 
 impl SubagentSeed {
@@ -531,6 +533,7 @@ impl Live {
                     swarm: node.swarm.clone(),
                     usage: super::bridge::agent_usage(node),
                     model: super::bridge::agent_model(node),
+                    background: node.background,
                 }
             })
             .collect();
@@ -883,6 +886,7 @@ impl CliAcpAgent {
                     tool_call_id: Some(seed.tool_call_id.clone()),
                     usage: seed.usage.clone(),
                     model: seed.model.clone(),
+                    background: seed.background,
                 }),
             );
             if seed.live() {

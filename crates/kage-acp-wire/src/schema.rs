@@ -1525,6 +1525,10 @@ pub struct SubagentUpdate {
     /// The model the child runs, as `provider/model`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Whether the child runs in the background: the parent's turn does
+    /// not wait for it, and its end arrives on its own later.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub background: bool,
 }
 
 /// A subagent's token totals, cost and run time.

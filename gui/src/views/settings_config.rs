@@ -350,7 +350,9 @@ fn note(text: impl Into<SharedString>, pal: &Palette) -> Div {
 }
 
 fn boxed(pal: &Palette) -> Div {
+    // The page scrolls; a box keeps its height rather than shrinking.
     v_flex()
+        .flex_none()
         .rounded(px(R_LG))
         .bg(pal.surface)
         .border_1()

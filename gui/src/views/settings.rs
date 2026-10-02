@@ -2,7 +2,7 @@
 //! right, over the shell like the other dialogs.
 //!
 //! Pages render thin over the store. The client's own choices (theme,
-//! Enter behavior, the Lab toggles, the archive) are preferences the
+//! Enter behavior, the chat display toggles, the archive) are preferences the
 //! shell stores; everything about the engine is read from what the
 //! connection reported and says unknown where it reported nothing.
 
@@ -50,8 +50,6 @@ pub enum Section {
     Connection,
     /// The shortcut table.
     Keyboard,
-    /// Experiments behind toggles.
-    Lab,
     /// Sessions taken out of the sidebar.
     Archived,
     /// The engine and protocol versions.
@@ -60,7 +58,7 @@ pub enum Section {
 
 impl Section {
     /// Every section, in nav order.
-    pub const ALL: [Section; 11] = [
+    pub const ALL: [Section; 10] = [
         Section::General,
         Section::Agents,
         Section::Providers,
@@ -69,7 +67,6 @@ impl Section {
         Section::Plugins,
         Section::Connection,
         Section::Keyboard,
-        Section::Lab,
         Section::Archived,
         Section::About,
     ];
@@ -86,7 +83,6 @@ impl Section {
             Section::Plugins => "Plugins",
             Section::Connection => "Connection",
             Section::Keyboard => "Keyboard",
-            Section::Lab => "Lab",
             Section::Archived => "Archived Sessions",
             Section::About => "About",
         }
@@ -102,7 +98,6 @@ impl Section {
             Section::Plugins => IconName::LayoutDashboard,
             Section::Connection => IconName::Network,
             Section::Keyboard => IconName::Command,
-            Section::Lab => IconName::Lightbulb,
             Section::Archived => IconName::Archive,
             Section::About => IconName::Info,
         }
@@ -576,7 +571,6 @@ impl SettingsView {
             }
             Section::Connection => out.extend(self.connection(pal, cx)),
             Section::Keyboard => out.extend(self.keyboard(pal, cx)),
-            Section::Lab => out.extend(self.lab(pal, cx)),
             Section::Archived => out.extend(self.archived(pal, cx)),
             Section::About => out.extend(self.about(pal, cx)),
         }
@@ -681,6 +675,8 @@ impl SettingsView {
                     pal,
                 ))
                 .into_any_element(),
+            group("Chat", pal).into_any_element(),
+            self.chat_rows(&prefs, pal, cx).into_any_element(),
             group("Sessions", pal).into_any_element(),
             boxed(pal)
                 .child(row(
@@ -1197,37 +1193,34 @@ impl SettingsView {
         .into_any_element()
     }
 
-    fn lab(&self, pal: &Palette, cx: &Context<Self>) -> Vec<AnyElement> {
-        let prefs = self.store.read(cx).prefs().clone();
-        vec![
-            note("Experiments that may change or go away.", pal).into_any_element(),
-            boxed(pal)
-                .child(row(
-                    "Turn timeline rail",
-                    "A minimap beside the transcript with ticks for turns, edits, approvals, failures and swarms",
-                    self.toggle("set-rail", prefs.rail, |p| &mut p.rail, pal, cx),
+    /// The Chat group of the General page: how the transcript and the
+    /// composer draw.
+    fn chat_rows(&self, prefs: &Prefs, pal: &Palette, cx: &Context<Self>) -> Div {
+        boxed(pal)
+            .child(row(
+                "Turn timeline rail",
+                "A minimap beside the transcript with ticks for turns, edits, approvals, failures and swarms",
+                self.toggle("set-rail", prefs.rail, |p| &mut p.rail, pal, cx),
+                pal,
+            ))
+            .child(row(
+                "Context gauge",
+                "The context ring opens a gauge with Compact now",
+                self.toggle("set-fuel", prefs.fuel, |p| &mut p.fuel, pal, cx),
+                pal,
+            ))
+            .child(row(
+                "Swarm constellation",
+                "Swarm cards draw one star per worker, lit by state",
+                self.toggle(
+                    "set-constellation",
+                    prefs.constellation,
+                    |p| &mut p.constellation,
                     pal,
-                ))
-                .child(row(
-                    "Swarm constellation",
-                    "Swarm cards draw one star per worker, lit by state",
-                    self.toggle(
-                        "set-constellation",
-                        prefs.constellation,
-                        |p| &mut p.constellation,
-                        pal,
-                        cx,
-                    ),
-                    pal,
-                ))
-                .child(row(
-                    "Context gauge",
-                    "The context ring opens a gauge with Compact now",
-                    self.toggle("set-fuel", prefs.fuel, |p| &mut p.fuel, pal, cx),
-                    pal,
-                ))
-                .into_any_element(),
-        ]
+                    cx,
+                ),
+                pal,
+            ))
     }
 
     fn archived(&self, pal: &Palette, cx: &Context<Self>) -> Vec<AnyElement> {
@@ -1409,7 +1402,9 @@ fn note(text: &'static str, pal: &Palette) -> Div {
 
 /// The rounded box rows sit in; rows after the first carry a hairline.
 fn boxed(pal: &Palette) -> Div {
+    // The page scrolls; a box keeps its height rather than shrinking.
     v_flex()
+        .flex_none()
         .rounded(px(R_LG))
         .bg(pal.surface)
         .border_1()

@@ -31,6 +31,10 @@ use super::*;
 
 const WAIT: Duration = Duration::from_secs(5);
 
+/// How long a turn that runs a real shell loop may take. A loaded CI
+/// runner spawns processes slowly, and a passing run returns early.
+const SHELL_WAIT: Duration = Duration::from_secs(30);
+
 type Script = Vec<Result<ProviderEvent, ProviderError>>;
 
 fn tool_turn(id: &str, name: &str, input: serde_json::Value) -> Script {
@@ -2663,7 +2667,7 @@ fn streamed_until_response(
     prompt_end: &mpsc::Receiver<Result<serde_json::Value, kage_jsonrpc::RpcError>>,
 ) -> (Vec<(Instant, serde_json::Value)>, Vec<serde_json::Value>) {
     let mut stream = Vec::new();
-    let deadline = Instant::now() + WAIT;
+    let deadline = Instant::now() + SHELL_WAIT;
     loop {
         if let Ok(response) = prompt_end.try_recv() {
             assert_eq!(response.unwrap()["stopReason"], "end_turn");

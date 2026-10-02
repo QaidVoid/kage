@@ -33,6 +33,8 @@ pub struct AnthropicProvider {
     /// Models advertised from `Provider::models` (custom providers);
     /// empty lets the catalog drive the picker.
     models: Vec<ProviderModel>,
+    /// The endpoint counts cached tokens inside `input_tokens`.
+    input_includes_cache: bool,
 }
 
 impl AnthropicProvider {
@@ -57,6 +59,7 @@ impl AnthropicProvider {
             },
             extra_headers: BTreeMap::new(),
             models: Vec::new(),
+            input_includes_cache: false,
         }
     }
 
@@ -80,6 +83,15 @@ impl AnthropicProvider {
     #[must_use]
     pub fn with_models(mut self, models: Vec<ProviderModel>) -> Self {
         self.models = models;
+        self
+    }
+
+    /// Whether the endpoint counts cached tokens inside `input_tokens`,
+    /// as some compatible gateways do. When set, they are taken back out
+    /// so the context fill and the cost count each token once.
+    #[must_use]
+    pub fn with_input_including_cache(mut self, includes: bool) -> Self {
+        self.input_includes_cache = includes;
         self
     }
 
@@ -392,13 +404,27 @@ impl Provider for AnthropicProvider {
         }
 
         let reader: Box<dyn Read + Send> = Box::new(response.into_body().into_reader());
-        let inner: EventStream = Box::new(AnthropicStream::new(reader, cancel.clone()));
+        let mut inner: EventStream = Box::new(AnthropicStream::new(reader, cancel.clone()));
+        if self.input_includes_cache {
+            inner = uncached_input(inner);
+        }
         Ok(crate::cancelable::make_cancelable(
             inner,
             cancel.clone(),
             kill,
         ))
     }
+}
+
+/// `events` with the cached tokens taken out of the final usage's input.
+fn uncached_input(events: EventStream) -> EventStream {
+    Box::new(events.map(|event| match event {
+        Ok(ProviderEvent::MessageEnd { stop_reason, usage }) => Ok(ProviderEvent::MessageEnd {
+            stop_reason,
+            usage: crate::event::without_cached_input(usage),
+        }),
+        other => other,
+    }))
 }
 
 /// Iterator over a streaming Anthropic Messages response.

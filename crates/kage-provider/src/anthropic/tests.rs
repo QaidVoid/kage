@@ -512,6 +512,23 @@ fn zero_counts_in_message_delta_keep_the_start_usage() {
 }
 
 #[test]
+fn a_gateway_counting_cache_inside_input_counts_it_once() {
+    let bytes: &[u8] = b"event: message_start\n\
+         data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":340412,\"cache_read_input_tokens\":339875,\"cache_creation_input_tokens\":200,\"output_tokens\":1}}}\n\n\
+         event: message_stop\n\
+         data: {\"type\":\"message_stop\"}\n\n";
+    let usage = uncached_input(Box::new(stream_from_bytes(bytes)))
+        .find_map(|event| match event {
+            Ok(ProviderEvent::MessageEnd { usage, .. }) => Some(usage),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(usage.input, 337);
+    assert_eq!(usage.cache_read, 339_875);
+    assert_eq!(usage.cache_write, 200);
+}
+
+#[test]
 fn eof_before_message_start_invents_nothing() {
     let mut events = stream_from_bytes(b"");
     assert!(events.next().is_none());

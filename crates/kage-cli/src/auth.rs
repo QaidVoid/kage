@@ -867,6 +867,7 @@ mod tests {
                 tool_use: true,
                 thinking: false,
                 caching: false,
+                input_includes_cache: false,
             },
         );
         assert!(login_target_is_known(

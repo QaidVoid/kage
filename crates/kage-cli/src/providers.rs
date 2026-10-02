@@ -245,7 +245,8 @@ fn register_custom_providers(
                 anthropic::AnthropicProvider::with_base_url(key, cfg.base_url.clone())
                     .with_metadata(metadata)
                     .with_extra_headers(cfg.headers.clone())
-                    .with_models(models),
+                    .with_models(models)
+                    .with_input_including_cache(cfg.input_includes_cache),
             ),
             kage_core::config::CustomProviderKind::Gemini => Arc::new(
                 gemini::GeminiProvider::with_base_url(key, cfg.base_url.clone())

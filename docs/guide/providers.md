@@ -195,6 +195,12 @@ The provider keys `tool_use`, `thinking` and `caching` are accepted
 but change nothing: kage always sends tool definitions, and thinking
 goes back to the model as described under [thinking](#thinking).
 
+Some `anthropic` gateways count cached tokens inside `input_tokens`
+instead of beside it, which makes the context gauge and the cost read
+about double. Set `input_includes_cache = true` on such a provider and
+kage takes the cached tokens back out of the input. `openai` endpoints
+always count this way, so kage corrects them without the key.
+
 Five optional model keys describe what a model accepts and costs,
 since kage has no catalog entry for it:
 

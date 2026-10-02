@@ -472,6 +472,10 @@ pub enum CustomProviderKind {
 
 /// One custom provider definition (`[providers.custom.<id>]`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors independent flags of a config table"
+)]
 pub struct CustomProviderConfig {
     /// Which wire protocol the endpoint speaks. Defaults to `openai`.
     #[serde(default)]
@@ -502,6 +506,11 @@ pub struct CustomProviderConfig {
     /// Whether the endpoint supports prompt caching. Defaults to false.
     #[serde(default)]
     pub caching: bool,
+    /// Whether an `anthropic` endpoint counts cached tokens inside
+    /// `input_tokens`, as some gateways do. Set it when the context
+    /// gauge reads about double. Defaults to false.
+    #[serde(default)]
+    pub input_includes_cache: bool,
 }
 
 impl CustomProviderConfig {
@@ -1379,6 +1388,7 @@ default = "ask"   # keep asking
             tool_use: true,
             thinking: false,
             caching: false,
+            input_includes_cache: false,
         }
     }
 

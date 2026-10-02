@@ -1122,6 +1122,9 @@ pub struct TranscriptView {
     vim_cursor: Option<usize>,
     /// Where the rail last laid out, so a press on it maps to a row.
     rail_bounds: Rc<Cell<Option<gpui_kit::Bounds<gpui_kit::Pixels>>>>,
+    /// Whether the pointer went down on the rail and is still down, so
+    /// only a drag that started there scrolls the transcript.
+    rail_held: bool,
 }
 
 impl EventEmitter<TranscriptEvent> for TranscriptView {}
@@ -1169,6 +1172,7 @@ impl TranscriptView {
             find: None,
             vim_cursor: None,
             rail_bounds: Rc::default(),
+            rail_held: false,
         }
     }
 
@@ -1447,12 +1451,23 @@ impl TranscriptView {
             .on_mouse_down(
                 gpui_kit::MouseButton::Left,
                 cx.listener(|this, event: &gpui_kit::MouseDownEvent, _, cx| {
+                    this.rail_held = true;
                     this.rail_seek(event.position.y, cx);
                 }),
             )
+            .on_mouse_up(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _: &gpui_kit::MouseUpEvent, _, _| this.rail_held = false),
+            )
+            .on_mouse_up_out(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _: &gpui_kit::MouseUpEvent, _, _| this.rail_held = false),
+            )
+            // Moves arrive wherever the pointer is, so a drag that began on
+            // a resize handle beside the rail would otherwise seek too.
             .on_mouse_move(
                 cx.listener(|this, event: &gpui_kit::MouseMoveEvent, _, cx| {
-                    if event.dragging() {
+                    if this.rail_held && event.dragging() {
                         this.rail_seek(event.position.y, cx);
                     }
                 }),

@@ -8,7 +8,7 @@ from crates.io, or build it from source.
 kage and its desktop and web client release apart, each with its own
 version. A `v<version>` [GitHub release](https://github.com/QaidVoid/kage/releases)
 carries the `kage` binary for each platform, as
-`kage-<platform>.tar.gz` with the man page, the license and the
+`kage-<platform>.tar.xz` with the man page, the license and the
 readme. A `kage-desktop-v<version>` release carries the
 [desktop client](#desktop-client) and the browser client.
 
@@ -19,7 +19,7 @@ unpack it and put its folder on your `PATH`. The latest release is
 always a `kage` one, so the link below fetches the newest `kage`.
 
 ```bash
-curl -fsSL https://github.com/QaidVoid/kage/releases/latest/download/kage-x86_64-linux.tar.gz | tar -xz
+curl -fsSL https://github.com/QaidVoid/kage/releases/latest/download/kage-x86_64-linux.tar.xz | tar -xJ
 install -m 755 kage-x86_64-linux/kage ~/.local/bin/kage
 ```
 
@@ -28,11 +28,11 @@ For `kage serve` to hand out the browser client, take
 its `web/` folder beside the executable with no flag, or anywhere
 with `--web-dir`. [remote](/editors/remote#web-client) has the rest.
 
-Every file has a `.sha256` beside it, and every archive a build
-provenance attestation that the GitHub CLI checks:
+Every archive carries a build provenance attestation, which the
+GitHub CLI checks:
 
 ```bash
-gh attestation verify kage-x86_64-linux.tar.gz -R QaidVoid/kage
+gh attestation verify kage-x86_64-linux.tar.xz -R QaidVoid/kage
 ```
 
 ## crates.io

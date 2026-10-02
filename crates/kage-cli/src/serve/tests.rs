@@ -444,23 +444,19 @@ fn two_clients_initialize_open_sessions_and_prompt() {
         "{lines:?}"
     );
 
-    drop(first);
-    drop(second);
-    let lines = server.wait_line(|l| l.starts_with("disconnect "));
     // Connection ids are process-wide, so a test running beside this one
     // may hold the low ones; the first client's id is in its attach line.
     let first_id = lines
         .iter()
         .find_map(|l| l.strip_prefix("attach ")?.split_once("(connection "))
-        .map(|(_, id)| id.trim_end_matches(')'))
+        .map(|(_, id)| id.trim_end_matches(')').to_owned())
         .expect("an attach line");
-    assert!(
-        lines
-            .iter()
-            .any(|l| l.starts_with("disconnect ")
-                && l.ends_with(&format!("(connection {first_id})"))),
-        "{lines:?}"
-    );
+    drop(first);
+    drop(second);
+    // The two disconnects land in either order, so wait for the first
+    // client's own.
+    let gone = format!("(connection {first_id})");
+    let lines = server.wait_line(|l| l.starts_with("disconnect ") && l.ends_with(&gone));
     assert!(
         !lines.iter().any(|l| l.contains(server.token.as_str())),
         "the token must never be logged: {lines:?}"

@@ -4420,6 +4420,70 @@ fn an_unmet_goal_keeps_the_session_working_until_it_is_met() {
 }
 
 #[test]
+fn a_goal_check_without_a_verdict_stops_instead_of_looping() {
+    let mock = MockProvider::sequence(vec![text_turn("working"), text_turn("Hmm, hard to say")]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let id = SessionId::new();
+    h.open(id, None);
+    h.engine.send(Command::to(
+        id,
+        CommandKind::SetGoal {
+            goal: Some("ship it".into()),
+        },
+    ));
+    prompt(&h.engine, id, "go", Delivery::Steer);
+    let stopped = wait_for(&h.events, |e| {
+        notices(std::slice::from_ref(e))
+            .iter()
+            .any(|n| n.starts_with("could not check the goal"))
+    });
+    h.engine.shutdown();
+    assert_eq!(outcomes(&stopped).len(), 1, "no turn follows");
+    assert_eq!(mock.call_count(), 2);
+}
+
+#[test]
+fn a_missing_part_is_named_in_the_notice() {
+    let mock = MockProvider::sequence(vec![
+        text_turn("working"),
+        text_turn("NO: the tests still fail"),
+        text_turn("fixed"),
+        text_turn("YES"),
+    ]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let id = SessionId::new();
+    h.open(id, None);
+    h.engine.send(Command::to(
+        id,
+        CommandKind::SetGoal {
+            goal: Some("tests pass".into()),
+        },
+    ));
+    prompt(&h.engine, id, "go", Delivery::Steer);
+    let met = wait_for(&h.events, |e| {
+        notices(std::slice::from_ref(e))
+            .iter()
+            .any(|n| n.starts_with("goal met"))
+    });
+    h.engine.shutdown();
+    let seen = notices(&met);
+    assert!(
+        seen.iter()
+            .any(|n| n == "goal not met yet: the tests still fail; continuing (1/8)"),
+        "{seen:?}"
+    );
+    let nudge = &mock.requests()[2];
+    let last = nudge.messages.last().unwrap();
+    let Content::Text { text } = &last.content[0] else {
+        panic!("text nudge");
+    };
+    assert!(
+        text.contains("Still missing: the tests still fail"),
+        "{text}"
+    );
+}
+
+#[test]
 fn an_unmet_goal_stops_after_its_turn_cap() {
     let mut scripts = Vec::new();
     for _ in 0..=MAX_GOAL_TURNS {

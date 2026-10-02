@@ -211,7 +211,7 @@ enum Input {
     GoalChecked {
         session: SessionId,
         goal: String,
-        met: bool,
+        verdict: crate::goal::Verdict,
     },
     Publish(HostEvent),
     SetRegistry(Arc<ProviderRegistry>),
@@ -531,8 +531,12 @@ impl Dispatcher {
                         self.record_title(session, title);
                     }
                 }
-                Input::GoalChecked { session, goal, met } => {
-                    self.goal_checked(session, &goal, met);
+                Input::GoalChecked {
+                    session,
+                    goal,
+                    verdict,
+                } => {
+                    self.goal_checked(session, &goal, verdict);
                 }
                 Input::Publish(event) => {
                     if let Some(id) = self.active {
@@ -849,24 +853,37 @@ impl Dispatcher {
     /// for a goal that changed since is dropped. A met goal is
     /// announced once; an unmet one keeps the session working: a turn
     /// toward it starts while the session is idle with nothing queued,
-    /// up to [`MAX_GOAL_TURNS`] in a row.
-    fn goal_checked(&mut self, id: SessionId, goal: &str, met: bool) {
+    /// up to [`MAX_GOAL_TURNS`] in a row. A check without a verdict
+    /// says so and stops there.
+    fn goal_checked(&mut self, id: SessionId, goal: &str, verdict: crate::goal::Verdict) {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
         if session.state.goal.as_deref() != Some(goal) || session.goal_met {
             return;
         }
-        if met {
-            session.goal_met = true;
-            notice(
-                &self.bus,
-                id,
-                NoticeLevel::Success,
-                format!("goal met: {goal}"),
-            );
-            return;
-        }
+        let missing = match verdict {
+            crate::goal::Verdict::Met => {
+                session.goal_met = true;
+                notice(
+                    &self.bus,
+                    id,
+                    NoticeLevel::Success,
+                    format!("goal met: {goal}"),
+                );
+                return;
+            }
+            crate::goal::Verdict::Unknown(why) => {
+                notice(
+                    &self.bus,
+                    id,
+                    NoticeLevel::Warning,
+                    format!("could not check the goal ({why}); send a prompt to keep going"),
+                );
+                return;
+            }
+            crate::goal::Verdict::NotMet(missing) => missing,
+        };
         let busy =
             session.idle.is_none() || !session.queued.is_empty() || self.waiting.contains(&id);
         if busy {
@@ -885,14 +902,19 @@ impl Dispatcher {
         }
         session.goal_turns += 1;
         let turn = session.goal_turns;
+        let (said, still) = if missing.is_empty() {
+            (String::new(), String::new())
+        } else {
+            (format!(": {missing}"), format!(" Still missing: {missing}"))
+        };
         notice(
             &self.bus,
             id,
             NoticeLevel::Info,
-            format!("goal not met yet; continuing ({turn}/{MAX_GOAL_TURNS})"),
+            format!("goal not met yet{said}; continuing ({turn}/{MAX_GOAL_TURNS})"),
         );
         let text = format!(
-            "[goal] The goal is not met yet: {goal}. Keep working toward it. If it \
+            "[goal] The goal is not met yet: {goal}.{still} Keep working toward it. If it \
              cannot be met, say why and stop."
         );
         let prompt = Message::new(Role::User, vec![Content::Text { text }], None);
@@ -1465,39 +1487,32 @@ impl Dispatcher {
 
     /// Ask the model for a short title for the session's first exchange,
     /// off the dispatcher thread.
-    /// Ask the model, off the run thread, whether the finished turn
-    /// met the session's goal, and publish a success notice when it
-    /// did. A failed or unreadable check stays silent.
+    /// Ask the model, off the run thread, whether the work since the
+    /// user's last prompt met the session's goal; the verdict comes
+    /// back as [`Input::GoalChecked`].
     fn check_goal(&self, id: SessionId, cx: &AgentContext, model: &str, goal: &str) {
-        let Ok(resolved) = self.registry.resolve(model) else {
-            return;
-        };
-        let provider = Arc::clone(resolved.provider);
-        let bare_model = resolved.model;
-        let last_text = |role: Role| {
-            cx.history
-                .iter()
-                .rev()
-                .find(|m| m.role == role)
-                .map(|m| crate::cli_loop_run::first_user_text(m))
-                .unwrap_or_default()
-        };
-        let (user, reply) = (last_text(Role::User), last_text(Role::Assistant));
         let tx = self.tx.clone();
         let goal = goal.to_owned();
+        let resolved = self
+            .registry
+            .resolve(model)
+            .map(|resolved| (Arc::clone(resolved.provider), resolved.model.clone()));
+        let history = cx.history.clone();
         thread::spawn(move || {
-            let met = crate::goal::met(
-                provider.as_ref(),
-                &bare_model,
-                &goal,
-                &user,
-                &reply,
-                &CancelFlag::new(),
-            );
+            let verdict = match resolved {
+                Ok((provider, bare_model)) => crate::goal::judge(
+                    provider.as_ref(),
+                    &bare_model,
+                    &goal,
+                    &history,
+                    &CancelFlag::new(),
+                ),
+                Err(e) => crate::goal::Verdict::Unknown(e.to_string()),
+            };
             let _ = tx.send(Input::GoalChecked {
                 session: id,
                 goal,
-                met,
+                verdict,
             });
         });
     }

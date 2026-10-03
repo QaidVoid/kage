@@ -3515,6 +3515,15 @@ fn a_tool_call_is_announced_once_then_updated_when_something_changed() {
         update.raw_input,
         Some(serde_json::json!({ "command": "ls" }))
     );
+    // The running call carries the complete input, so a client showing
+    // the call as it runs can name what is running.
+    let SessionUpdate::ToolCallUpdate(update) = &updates[2] else {
+        unreachable!()
+    };
+    assert_eq!(
+        update.raw_input,
+        Some(serde_json::json!({ "command": "ls" }))
+    );
 }
 
 #[test]

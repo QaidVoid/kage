@@ -1015,6 +1015,10 @@ pub(super) fn to_update(
             Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
                 tool_call_id: id.to_string(),
                 status: Some(ToolCallStatus::InProgress),
+                // The complete input, so a client showing the call as it
+                // runs can name what is running. The streamed updates
+                // before this carried only fragments.
+                raw_input: seen.get(&id.to_string()).map(|call| call.input.clone()),
                 ..ToolCallUpdate::default()
             }))
         }

@@ -1,4 +1,15 @@
 # Changelog
+## [0.1.1](https://github.com/QaidVoid/kage/compare/v0.1.0...v0.1.1) - 2026-10-03
+
+### Features
+
+- *(serve)* Let the web client check its token before it dials - ([ef82a4f](https://github.com/QaidVoid/kage/commit/ef82a4fd8202cf8e311c72f70b55a6321f1b6dc6))
+
+### Bug Fixes
+
+- Carry complete tool input while a tool runs - ([8e71ecc](https://github.com/QaidVoid/kage/commit/8e71eccae2404af70c752add0399bc61f7d0ca6d))
+- Ride the operator proxy in plugin http - ([1f37198](https://github.com/QaidVoid/kage/commit/1f37198b1d4c5180be4b785a4845893e556f6140))
+
 ## [0.1.0] - 2026-10-02
 
 ### Features

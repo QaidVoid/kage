@@ -3,7 +3,11 @@
 //! All requests share the SSRF guards used by the built-in `web_fetch`
 //! tool: the URL must be `http(s)`, the host must resolve to a routable
 //! address, and the response body is capped to keep one malicious link
-//! from filling memory.
+//! from filling memory. When the operator's environment names an egress
+//! proxy (`HTTPS_PROXY`), requests ride it instead of dialing directly:
+//! the proxy resolves the target's name on its own side, so local
+//! address vetting is replaced by the proxy's egress policy, with only
+//! a literal-form check kept on the target.
 //!
 //! Available:
 //!
@@ -30,6 +34,8 @@ use std::time::Duration;
 use kage_core::sync::lock;
 use kage_tools::ssrf;
 use mlua::{Function, Lua, Table, Value};
+use ureq::unversioned::resolver::DefaultResolver;
+use ureq::unversioned::transport::DefaultConnector;
 
 use crate::api::lua_to_json;
 use crate::capabilities::{Capability, CapabilityRegistry};
@@ -450,13 +456,59 @@ fn read_sse_frame<R: BufRead>(reader: &mut R) -> Result<Option<SseFrame>, String
 }
 
 fn prepare(url: &str, timeout: Option<Duration>) -> Result<(url::Url, ureq::Agent), String> {
+    prepare_with(url, timeout, ureq::Proxy::try_from_env())
+}
+
+/// [`prepare`], with the egress proxy supplied. `None` dials directly
+/// under the SSRF guard; `Some` rides the operator's proxy, which
+/// dials by name on its own side, so the target is not resolved (or
+/// vetted) here. Hosts the operator exempted via `NO_PROXY` ride
+/// straight past the vet as well.
+fn prepare_with(
+    url: &str,
+    timeout: Option<Duration>,
+    proxy: Option<ureq::Proxy>,
+) -> Result<(url::Url, ureq::Agent), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
     match parsed.scheme() {
         "http" | "https" => {}
         other => return Err(format!("unsupported scheme: {other}")),
     }
+    if let Some(proxy) = proxy {
+        let uri: ureq::http::Uri = url.parse().map_err(|e| format!("invalid url: {e}"))?;
+        if !proxy.is_no_proxy(&uri) {
+            vet_proxied_target(&parsed)?;
+        }
+        return Ok((parsed, build_agent_bounded(timeout, Some(proxy))));
+    }
     ssrf::check(&parsed).map_err(|e| e.to_string())?;
-    Ok((parsed, build_agent_bounded(timeout)))
+    Ok((parsed, build_agent_bounded(timeout, None)))
+}
+
+/// The DNS-free vet of a target that will be dialed through the
+/// operator's proxy. The proxy resolves the name on its own side, so
+/// addresses cannot be vetted before the dial; what is left to refuse
+/// is the literal form: an IP naming a non-routable range, or the
+/// loopback name. Anything else rides the operator's egress policy.
+fn vet_proxied_target(url: &url::Url) -> Result<(), String> {
+    let Some(host) = url.host_str() else {
+        return Err("url has no host".to_owned());
+    };
+    let literal = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = literal.parse::<std::net::IpAddr>()
+        && ssrf::is_unsafe(&ip)
+    {
+        return Err(format!(
+            "refusing {host}: a proxied request must not name a non-routable address"
+        ));
+    }
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err(
+            "refusing localhost: a proxied request must not name the proxy's own loopback"
+                .to_owned(),
+        );
+    }
+    Ok(())
 }
 
 /// Build a ureq agent for plugin HTTP calls. `SameHost` preserves the
@@ -468,10 +520,14 @@ fn prepare(url: &str, timeout: Option<Duration>) -> Result<(url::Url, ureq::Agen
 /// `None` bounds only the connection phases, leaving the response
 /// stream free to run (streaming calls).
 ///
-/// Every DNS lookup ureq performs (the dial itself and each redirect
-/// hop) goes through [`ssrf::guarded_agent`]'s resolver, so only vetted
-/// addresses can ever be dialed.
-fn build_agent_bounded(global: Option<Duration>) -> ureq::Agent {
+/// Without a proxy, every DNS lookup ureq performs (the dial itself and
+/// each redirect hop) goes through [`ssrf::guarded_agent`]'s resolver,
+/// so only vetted addresses can ever be dialed. With the operator's
+/// proxy, the target is never resolved locally - the proxy dials by
+/// name - and the proxy address itself is often link-local by design,
+/// so the plain resolver rides in the agent's seat and the proxy's
+/// egress policy is the boundary.
+fn build_agent_bounded(global: Option<Duration>, proxy: Option<ureq::Proxy>) -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         .redirect_auth_headers(ureq::config::RedirectAuthHeaders::SameHost)
         .http_status_as_error(false);
@@ -481,9 +537,14 @@ fn build_agent_bounded(global: Option<Duration>) -> ureq::Agent {
             .timeout_resolve(Some(STREAM_PHASE_TIMEOUT))
             .timeout_connect(Some(STREAM_PHASE_TIMEOUT))
             .timeout_send_request(Some(STREAM_PHASE_TIMEOUT)),
+    };
+    let proxied = proxy.is_some();
+    let config = config.proxy(proxy).build();
+    if proxied {
+        ureq::Agent::with_parts(config, DefaultConnector::new(), DefaultResolver::default())
+    } else {
+        ssrf::guarded_agent(config)
     }
-    .build();
-    ssrf::guarded_agent(config)
 }
 
 /// Fallback user agent, sent only when the caller did not name its own.
@@ -711,5 +772,112 @@ mod tests {
 
         let opts: Table = lua.load("{ timeout_secs = 0 }").eval().unwrap();
         assert!(super::build_request(Some(&opts)).is_err());
+    }
+
+    /// A proxied dial cannot vet addresses, only literal forms: an IP
+    /// naming a non-routable range, or the loopback name.
+    #[test]
+    fn proxied_target_vet_refuses_non_routable_literals() {
+        let refused = [
+            "http://127.0.0.1/x",
+            "http://169.254.169.254/meta",
+            "http://[::1]/x",
+        ];
+        for url in refused {
+            let parsed = url::Url::parse(url).unwrap();
+            assert!(super::vet_proxied_target(&parsed).is_err(), "{url}");
+        }
+        let refused_names = ["http://localhost/x", "http://LOCALHOST:8080/x"];
+        for url in refused_names {
+            let parsed = url::Url::parse(url).unwrap();
+            assert!(super::vet_proxied_target(&parsed).is_err(), "{url}");
+        }
+        let allowed = [
+            "https://zcode.z.ai/api/v1/agent/configs",
+            "http://8.8.8.8/dns-query",
+            "http://[2606:4700:4700::1111]/x",
+        ];
+        for url in allowed {
+            let parsed = url::Url::parse(url).unwrap();
+            assert!(super::vet_proxied_target(&parsed).is_ok(), "{url}");
+        }
+    }
+
+    /// Serves one CONNECT: reads the tunnel head, opens it, then reads
+    /// the request inside and answers `200` with body `ok`. The target
+    /// name is never looked up, which is the point: the caller picks a
+    /// name that cannot resolve.
+    fn one_connect_proxy() -> (u16, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                std::io::Read::read_exact(&mut sock, &mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            assert!(
+                head.starts_with(b"CONNECT kage-proxy-test.invalid:80"),
+                "{head:?}"
+            );
+            std::io::Write::write_all(&mut sock, b"HTTP/1.1 200 ok\r\n\r\n").unwrap();
+            let mut inner = Vec::new();
+            while let Ok(1) = std::io::Read::read(&mut sock, &mut byte) {
+                inner.push(byte[0]);
+                if inner.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            std::io::Write::write_all(
+                &mut sock,
+                b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+            )
+            .unwrap();
+        });
+        (port, handle)
+    }
+
+    #[test]
+    fn a_proxy_resolves_the_target_on_its_own_side() {
+        let (port, server) = one_connect_proxy();
+        let proxy = ureq::Proxy::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let url = "http://kage-proxy-test.invalid/x";
+        let (parsed, agent) = super::prepare_with(url, None, Some(proxy)).unwrap();
+        let response = super::dispatch("GET", &agent, parsed.as_str(), None).unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let mut body = String::new();
+        std::io::Read::read_to_string(&mut response.into_body().into_reader(), &mut body).unwrap();
+        server.join().unwrap();
+        assert_eq!(body, "ok");
+    }
+
+    #[test]
+    fn a_no_proxy_host_is_exempt_from_the_proxied_vet() {
+        let proxy = ureq::Proxy::builder(ureq::ProxyProtocol::Http)
+            .host("127.0.0.1")
+            .port(9)
+            .no_proxy("169.254.169.1")
+            .build()
+            .unwrap();
+        // `NO_PROXY` names the operator's own broker address; the vet
+        // must not second-guess the exemption.
+        let res = super::prepare_with(
+            "http://169.254.169.1:9/x",
+            Some(Duration::from_secs(1)),
+            Some(proxy),
+        );
+        assert!(res.is_ok(), "{res:?}");
+
+        // Without the exemption the same target is refused up front.
+        let proxy = ureq::Proxy::new("http://127.0.0.1:9").unwrap();
+        let res = super::prepare_with(
+            "http://169.254.169.1:9/x",
+            Some(Duration::from_secs(1)),
+            Some(proxy),
+        );
+        let err = res.unwrap_err();
+        assert!(err.contains("must not name"), "{err}");
     }
 }

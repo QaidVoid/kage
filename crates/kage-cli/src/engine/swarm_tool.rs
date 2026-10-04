@@ -101,6 +101,12 @@ struct SwarmInput {
     /// instead of zero context.
     #[serde(default)]
     fork: bool,
+    /// Model every new child runs, over the agent definition's.
+    #[serde(default)]
+    model: Option<String>,
+    /// Thinking level for every new child, over the definition's.
+    #[serde(default)]
+    thinking: Option<String>,
 }
 
 fn default_agent() -> String {
@@ -180,6 +186,15 @@ impl SwarmTool {
                 "fork": {
                     "type": "boolean",
                     "description": "Spawn every new child from a snapshot of this conversation instead of zero context. Default false. Cannot be combined with resume."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Model every new child runs, as provider/model. Overrides the agent definition's model. Resumed children keep their own."
+                },
+                "thinking": {
+                    "type": "string",
+                    "enum": ["off", "minimal", "low", "medium", "high", "xhigh"],
+                    "description": "Thinking level for every new child. Overrides the agent definition's thinking. Resumed children keep their own."
                 }
             },
             "required": ["description"]
@@ -292,6 +307,8 @@ impl Tool for SwarmTool {
                     item: item.clone(),
                     total,
                 }),
+                model: call.overrides.model.clone(),
+                thinking: call.overrides.thinking,
                 background: false,
             };
             if self.engine.send(Input::Spawn(Box::new(spawn))).is_err() {
@@ -406,12 +423,15 @@ struct Call {
     /// New children start from a snapshot of the parent's
     /// conversation instead of zero context.
     fork: bool,
+    /// Model and thinking every new child runs with.
+    overrides: agent_tool::Overrides,
 }
 
 /// Expand the call into one prompt per item plus the resume entries,
 /// or the reason it is invalid. The rules are whole-call: nothing
 /// spawns or attaches unless every check passes.
 fn expand(input: &SwarmInput, defs: &AgentDefs, max_items: usize) -> Result<Call, String> {
+    let overrides = agent_tool::parse_overrides(input.model.as_deref(), input.thinking.as_deref())?;
     if input.fork && !input.resume.is_empty() {
         return Err(
             "fork applies to new children; drop resume to spawn forked children instead".to_owned(),
@@ -493,6 +513,7 @@ fn expand(input: &SwarmInput, defs: &AgentDefs, max_items: usize) -> Result<Call
         items,
         resume,
         fork: input.fork,
+        overrides,
     })
 }
 
@@ -684,6 +705,7 @@ fn escape(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::engine::AgentSetup;
+    use kage_core::thinking::ThinkingLevel;
 
     fn input(items: &[&str]) -> SwarmInput {
         SwarmInput {
@@ -693,6 +715,8 @@ mod tests {
             items: items.iter().map(|item| (*item).to_owned()).collect(),
             resume: BTreeMap::new(),
             fork: false,
+            model: None,
+            thinking: None,
         }
     }
 
@@ -747,6 +771,27 @@ mod tests {
         call.agent = "nope".into();
         let err = expand(&call, &defs, 32).unwrap_err();
         assert!(err.contains("explore, general"), "{err}");
+    }
+
+    #[test]
+    fn expand_validates_the_model_and_thinking_overrides() {
+        let defs = AgentDefs::builtin();
+        let mut call = input(&["a", "b"]);
+        call.model = Some("sonnet".into());
+        let err = expand(&call, &defs, 32).unwrap_err();
+        assert!(err.contains("provider/model"), "{err}");
+
+        call = input(&["a", "b"]);
+        call.thinking = Some("much".into());
+        let err = expand(&call, &defs, 32).unwrap_err();
+        assert!(err.contains("thinking"), "{err}");
+
+        call = input(&["a", "b"]);
+        call.model = Some("mock:other".into());
+        call.thinking = Some("high".into());
+        let call = expand(&call, &defs, 32).unwrap();
+        assert_eq!(call.overrides.model.as_deref(), Some("mock/other"));
+        assert_eq!(call.overrides.thinking, Some(ThinkingLevel::High));
     }
 
     #[test]

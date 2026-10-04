@@ -1958,6 +1958,148 @@ fn a_swarm_aggregates_its_children_in_item_order() {
 }
 
 #[test]
+fn an_agent_call_overrides_the_child_model_and_thinking() {
+    let mock = MockProvider::sequence(vec![
+        agent_turn(&[(
+            "call_a",
+            serde_json::json!({
+                "description": "a task",
+                "prompt": "find it",
+                "model": "mock/other",
+                "thinking": "high"
+            }),
+        )]),
+        text_turn("child reply"),
+        text_turn("parent done"),
+    ]);
+    let h = harness(mock.clone());
+    let parent_id = SessionId::new();
+    h.engine.open(SessionSpec {
+        agents: Some(agent_setup(1, 1)),
+        ..h.spec(parent_id)
+    });
+    prompt(&h.engine, parent_id, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 2);
+    h.engine.shutdown();
+
+    assert_eq!(spawned(&events).len(), 1);
+    let output = tool_output(&events, parent_id, "call_a");
+    assert!(!output.is_error, "{}", output.text);
+    assert!(
+        output.text.contains("model=\"mock/other\""),
+        "{}",
+        output.text
+    );
+    let requests = mock.requests();
+    assert_eq!(requests[0].model, "m");
+    assert_eq!(requests[0].level, None);
+    assert_eq!(requests[1].model, "other");
+    assert_eq!(requests[1].level, Some(ThinkingLevel::High));
+}
+
+#[test]
+fn an_agent_call_rejects_a_model_without_a_provider() {
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[(
+            "call_a",
+            serde_json::json!({
+                "description": "a task",
+                "prompt": "find it",
+                "model": "sonnet",
+                "thinking": "much"
+            }),
+        )]),
+        text_turn("parent done"),
+    ]));
+    let parent_id = SessionId::new();
+    h.engine.open(SessionSpec {
+        agents: Some(agent_setup(1, 1)),
+        ..h.spec(parent_id)
+    });
+    prompt(&h.engine, parent_id, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+    h.engine.shutdown();
+
+    assert!(spawned(&events).is_empty(), "no child spawned");
+    let output = tool_output(&events, parent_id, "call_a");
+    assert!(output.is_error);
+    assert!(output.text.contains("provider/model"), "{}", output.text);
+}
+
+#[test]
+fn a_swarm_override_reaches_every_new_child() {
+    let mut task = swarm_task(&["a", "b"]);
+    task["model"] = serde_json::json!("mock/other");
+    task["thinking"] = serde_json::json!("high");
+    let mock = MockProvider::sequence(vec![
+        swarm_turn(&[("call_s", task)]),
+        text_turn("reply a"),
+        text_turn("reply b"),
+        text_turn("parent done"),
+    ]);
+    let h = harness(mock.clone());
+    let parent = SessionId::new();
+    h.engine.open(SessionSpec {
+        agents: Some(swarm_setup(1, 60_000)),
+        ..h.spec(parent)
+    });
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 3);
+    h.engine.shutdown();
+
+    assert_eq!(spawned(&events).len(), 2);
+    let output = tool_output(&events, parent, "call_s");
+    assert!(!output.is_error, "{}", output.text);
+    assert_eq!(
+        output.text.matches("model=\"mock/other\"").count(),
+        2,
+        "{}",
+        output.text
+    );
+    let requests = mock.requests();
+    assert_eq!(requests[1].model, "other");
+    assert_eq!(requests[1].level, Some(ThinkingLevel::High));
+    assert_eq!(requests[2].model, "other");
+    assert_eq!(requests[2].level, Some(ThinkingLevel::High));
+}
+
+#[test]
+fn a_forked_child_follows_the_call_model_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut task = forked_swarm_task(&["a", "b"]);
+    task["model"] = serde_json::json!("mock/other");
+    let h = harness(MockProvider::sequence(vec![
+        swarm_turn(&[("call_s", task)]),
+        text_turn("child a one"),
+        text_turn("child b one"),
+        text_turn("parent done"),
+    ]));
+    let parent = SessionId::new();
+    let (recorder, _) = recorder_in(dir.path(), parent);
+    h.engine.open(SessionSpec {
+        recorder: Some(recorder),
+        agents: Some(swarm_setup(1, 60_000)),
+        ..h.spec(parent)
+    });
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 3);
+    h.engine.shutdown();
+
+    for (child, _) in spawned(&events) {
+        let path = dir.path().join(format!("{child}.jsonl"));
+        let replay = kage_session::replay(&path).unwrap();
+        assert_eq!(replay.header.model, "mock/other");
+    }
+    let output = tool_output(&events, parent, "call_s");
+    assert_eq!(
+        output.text.matches("model=\"mock/other\"").count(),
+        2,
+        "{}",
+        output.text
+    );
+}
+
+#[test]
 fn a_swarm_timeout_cancels_stragglers_and_renders() {
     let h = harness(MockProvider::sequence(vec![
         swarm_turn(&[("call_s", swarm_task(&["quick", "slow"]))]),

@@ -12,7 +12,10 @@ use crossbeam_channel::select_biased;
 use kage_core::agents::AgentDefs;
 use kage_core::event::AGENT_NO_REPLY_TEXT as NO_REPLY;
 use kage_core::protocol::{RunOutcome, Usage};
-use kage_core::{Content, Message, Risk, Role, SessionId, ToolCallId, ToolOutput};
+use kage_core::thinking::ThinkingLevel;
+use kage_core::{
+    Content, Message, Risk, Role, SessionId, ToolCallId, ToolOutput, qualify_model, split_model,
+};
 use kage_tools::{ExecMode, Tool, ToolContext, ToolError};
 use serde::Deserialize;
 
@@ -43,6 +46,12 @@ pub(super) struct Spawn {
     /// Set when a `swarm` call spawned this child. A plain `agent`
     /// call leaves it `None`.
     pub swarm: Option<SwarmInfo>,
+    /// Model this child runs, in `provider/model` form, over its
+    /// definition's. `None` follows the definition, then the parent.
+    pub model: Option<String>,
+    /// Thinking level over the definition's. `None` follows the
+    /// definition, then the parent.
+    pub thinking: Option<ThinkingLevel>,
     /// Reply `started` at once and send the result to the parent's
     /// inbox when the child ends.
     pub background: bool,
@@ -56,10 +65,44 @@ struct AgentInput {
     prompt: String,
     #[serde(default)]
     background: bool,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
 }
 
 fn default_agent() -> String {
     "general".to_owned()
+}
+
+/// Model and thinking one call set over the agent definition's.
+#[derive(Clone, Debug, Default)]
+pub(super) struct Overrides {
+    pub model: Option<String>,
+    pub thinking: Option<ThinkingLevel>,
+}
+
+/// Parse the call-level `model` and `thinking` of an `agent` or
+/// `swarm` call, or the reason one is invalid.
+pub(super) fn parse_overrides(
+    model: Option<&str>,
+    thinking: Option<&str>,
+) -> Result<Overrides, String> {
+    let model = model
+        .map(|model| {
+            split_model(model)
+                .map(|(provider, id)| qualify_model(provider, id))
+                .ok_or_else(|| format!("model {model:?} is not `provider/model`"))
+        })
+        .transpose()?;
+    let thinking = thinking
+        .map(|level| {
+            ThinkingLevel::parse(level).ok_or_else(|| {
+                format!("thinking {level:?} is not one of off, minimal, low, medium, high or xhigh")
+            })
+        })
+        .transpose()?;
+    Ok(Overrides { model, thinking })
 }
 
 /// Starts agents for one session's run. The dispatcher registers it into
@@ -116,6 +159,15 @@ impl AgentTool {
                 "prompt": {
                     "type": "string",
                     "description": "The whole task, including what the reply must contain."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Model this agent runs, as provider/model. Overrides the agent definition's model."
+                },
+                "thinking": {
+                    "type": "string",
+                    "enum": ["off", "minimal", "low", "medium", "high", "xhigh"],
+                    "description": "Thinking level for this agent. Overrides the agent definition's thinking."
                 }
             },
             "required": ["description", "prompt"]
@@ -165,6 +217,10 @@ impl Tool for AgentTool {
         cx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
         let input: AgentInput = serde_json::from_value(input)?;
+        let overrides = match parse_overrides(input.model.as_deref(), input.thinking.as_deref()) {
+            Ok(overrides) => overrides,
+            Err(text) => return Ok(error_output(text)),
+        };
         let tool_call_id = cx
             .call_id()
             .cloned()
@@ -179,6 +235,8 @@ impl Tool for AgentTool {
             reply,
             fork: false,
             swarm: None,
+            model: overrides.model,
+            thinking: overrides.thinking,
             background: self.background && input.background,
         };
         if self.engine.send(Input::Spawn(Box::new(spawn))).is_err() {

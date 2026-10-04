@@ -20,7 +20,11 @@ agent definition, a short description you see, and the whole task:
  "prompt": "Map the named exports of every file under src/components. Reply with one JSON object that maps each file to its export names, and nothing else."}
 ```
 
-`agent` defaults to `general` when the call leaves it out. The call
+`agent` defaults to `general` when the call leaves it out. A call may
+also set `model` (`provider/model`) and `thinking` (a level name) for
+this one child. They override the definition's `model` and `thinking`;
+left out, the definition decides, and without a definition value the
+parent's current model and level apply. The call
 waits until the agent's run ends, then returns the text of the agent's
 last reply, wrapped in an element that names the agent, its session
 and how the run ended:
@@ -104,6 +108,10 @@ replaced by its item:
  "prompt_template": "Fix every clippy warning in {{item}}. Run `cargo clippy -p {{item}}` to see them. Reply with the warnings you fixed.",
  "items": ["kage-core", "kage-loop", "kage-tui"]}
 ```
+
+A `model` (`provider/model`) and `thinking` on the call apply to every
+new child, over the definition's, the same way an `agent` call's do.
+Resumed children keep the model their session file records.
 
 The call blocks until every child settles, then returns one aggregate:
 a summary line, then each child's `<agent>` element wrapped in a
@@ -305,8 +313,8 @@ Saved as `~/.config/kage/agents/reviewer.md`, this defines the agent
 | --- | --- | --- |
 | `description` | yes | What the agent is for, at most 1024 characters. The model picks agents by it, so say when to use this one and what to give it. |
 | `tools` | no | A comma list of tool names. Without it the agent gets every tool its parent has. With it, the agent may start agents, swarms or send messages only when the list names `agent`, `swarm` or `send_message`. A listed name that matches no tool of the parent shows a warning when the agent starts. |
-| `model` | no | The model, as `provider/model`, or `inherit` (the default) for the parent's current model. A model that is not available fails the agent's run. |
-| `thinking` | no | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `inherit` (the default) for the parent's current level. The level is fitted to the agent's model like the main session's. |
+| `model` | no | The model, as `provider/model`, or `inherit` (the default) for the parent's current model. A model that is not available fails the agent's run. An `agent` or `swarm` call's `model` overrides this. |
+| `thinking` | no | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `inherit` (the default) for the parent's current level. The level is fitted to the agent's model like the main session's. A call's `thinking` overrides this. |
 | `max_turns` | no | Turns with tool calls one run may take, a positive integer. `maxTurns` works too. Without it, `agent_max_turns` applies (see [limits](#limits)). |
 | `timeout` | no | How long one run may take: seconds (`90`), or a number with `s`, `m` or `h` (`90s`, `10m`, `1h`). Without it, `agent_timeout` applies. |
 | `isolation` | no | `none` (the default) or `worktree`, which gives the agent a checkout of its own (see [worktree agents](#worktree-agents)). |
@@ -394,8 +402,8 @@ asks on the next start.
 
 | Aspect | The agent gets |
 | --- | --- |
-| Model | the definition's `model`, else the parent's current model |
-| Thinking | the definition's `thinking`, else the parent's current level |
+| Model | the call's `model`, else the definition's, else the parent's current model |
+| Thinking | the call's `thinking`, else the definition's, else the parent's current level |
 | Tools | the parent's tools narrowed by `tools`, including plugin and MCP tools, plus `agent` while the depth limit allows it |
 | Permissions | the parent's rules, permission mode and session approvals, shared live (see [permissions](/guide/permissions#agents)) |
 | Asking | it asks you when the parent can ask. Print mode refuses its asks, like the main session's. |

@@ -107,6 +107,7 @@ impl super::Dispatcher {
             fork,
             swarm,
             background,
+            ..
         } = spawn;
         let child = swarm.as_ref().map(|info| info.id);
         let fail = |text: String| {
@@ -122,6 +123,11 @@ impl super::Dispatcher {
         };
         let from = &self.sessions[&parent];
         let def = setup.defs.get(&agent).expect("checked by spawn_setup");
+        let def = AgentDef {
+            model: spawn.model.or_else(|| def.model.clone()),
+            thinking: spawn.thinking.or(def.thinking),
+            ..def.clone()
+        };
 
         // A swarm call names its children up front so the tool can
         // cancel the ones that never reported.
@@ -129,29 +135,24 @@ impl super::Dispatcher {
             Some(info) => (info.id, Some(info)),
             None => (SessionId::new(), None),
         };
-        let worktree = match checkout(from, def, id, &description) {
-            Ok(worktree) => worktree,
+        let (worktree, workdir) = match child_workdir(from, &def, id, &description) {
+            Ok(found) => found,
             Err(text) => return fail(text),
         };
-        let workdir = worktree
-            .as_ref()
-            .map_or_else(|| from.workdir.clone(), |w| w.workdir().to_path_buf());
         let (mut spec, missing, lazy_history) = if fork {
             let batch = swarm.as_ref().map(|info| &info.batch_id);
             let forked = fork_snapshot(&mut self.fork_snapshot, from, batch).and_then(|snapshot| {
-                forked_spec(from, parent, id, def, &setup, snapshot, &workdir)
+                forked_spec(from, parent, id, &def, &setup, snapshot, &workdir)
             });
             match forked {
                 Ok((spec, missing, path)) => (spec, missing, Some(path)),
                 Err(text) => return fail(text),
             }
         } else {
-            let (spec, missing) = agent_spec(from, parent, id, def, &setup, &workdir);
+            let (spec, missing) = agent_spec(from, parent, id, &def, &setup, &workdir);
             (spec, missing, None)
         };
-        if worktree.is_some() {
-            spec.cx.confine_paths = true;
-        }
+        spec.cx.confine_paths |= worktree.is_some();
         let background = background && depth == 1 && setup.background != Background::Off;
         // A background agent outlives the run that started it, so the
         // parent's cancel must not reach it.
@@ -917,6 +918,21 @@ fn checkout(
     let dir = crate::paths::state_root()?.join("worktrees");
     let label = format!("{}: {description}", def.name);
     Worktree::create(&from.workdir, &dir, id, label).map(|w| Some(Arc::new(w)))
+}
+
+/// The worktree of the agent `id` of `from`, when its definition asks
+/// for one, and the directory the agent works in.
+fn child_workdir(
+    from: &Session,
+    def: &AgentDef,
+    id: SessionId,
+    description: &str,
+) -> Result<(Option<Arc<Worktree>>, PathBuf), String> {
+    let worktree = checkout(from, def, id, description)?;
+    let workdir = worktree
+        .as_ref()
+        .map_or_else(|| from.workdir.clone(), |w| w.workdir().to_path_buf());
+    Ok((worktree, workdir))
 }
 
 /// The `kage:agent` marker an agent's session file starts with.

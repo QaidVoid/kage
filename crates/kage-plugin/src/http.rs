@@ -34,8 +34,6 @@ use std::time::Duration;
 use kage_core::sync::lock;
 use kage_tools::ssrf;
 use mlua::{Function, Lua, Table, Value};
-use ureq::unversioned::resolver::DefaultResolver;
-use ureq::unversioned::transport::DefaultConnector;
 
 use crate::api::lua_to_json;
 use crate::capabilities::{Capability, CapabilityRegistry};
@@ -474,76 +472,32 @@ fn prepare_with(
         "http" | "https" => {}
         other => return Err(format!("unsupported scheme: {other}")),
     }
-    if let Some(proxy) = proxy {
-        let uri: ureq::http::Uri = url.parse().map_err(|e| format!("invalid url: {e}"))?;
-        if !proxy.is_no_proxy(&uri) {
-            vet_proxied_target(&parsed)?;
-        }
-        return Ok((parsed, build_agent_bounded(timeout, Some(proxy))));
-    }
-    ssrf::check(&parsed).map_err(|e| e.to_string())?;
-    Ok((parsed, build_agent_bounded(timeout, None)))
+    let agent =
+        ssrf::agent_for(agent_config(timeout), &parsed, proxy).map_err(|e| e.to_string())?;
+    Ok((parsed, agent))
 }
 
-/// The DNS-free vet of a target that will be dialed through the
-/// operator's proxy. The proxy resolves the name on its own side, so
-/// addresses cannot be vetted before the dial; what is left to refuse
-/// is the literal form: an IP naming a non-routable range, or the
-/// loopback name. Anything else rides the operator's egress policy.
-fn vet_proxied_target(url: &url::Url) -> Result<(), String> {
-    let Some(host) = url.host_str() else {
-        return Err("url has no host".to_owned());
-    };
-    let literal = host.trim_start_matches('[').trim_end_matches(']');
-    if let Ok(ip) = literal.parse::<std::net::IpAddr>()
-        && ssrf::is_unsafe(&ip)
-    {
-        return Err(format!(
-            "refusing {host}: a proxied request must not name a non-routable address"
-        ));
-    }
-    if host.eq_ignore_ascii_case("localhost") {
-        return Err(
-            "refusing localhost: a proxied request must not name the proxy's own loopback"
-                .to_owned(),
-        );
-    }
-    Ok(())
-}
-
-/// Build a ureq agent for plugin HTTP calls. `SameHost` preserves the
+/// The plugin HTTP configuration: `SameHost` preserves the
 /// `Authorization` header across apex-to-www redirects, and disabling
 /// `http_status_as_error` lets the plugin read the response body on
 /// non-2xx instead of seeing only a generic transport error.
 ///
 /// `Some(global)` bounds the entire request (non-streaming calls);
 /// `None` bounds only the connection phases, leaving the response
-/// stream free to run (streaming calls).
-///
-/// Without a proxy, every DNS lookup ureq performs (the dial itself and
-/// each redirect hop) goes through [`ssrf::guarded_agent`]'s resolver,
-/// so only vetted addresses can ever be dialed. With the operator's
-/// proxy, the target is never resolved locally - the proxy dials by
-/// name - and the proxy address itself is often link-local by design,
-/// so the plain resolver rides in the agent's seat and the proxy's
-/// egress policy is the boundary.
-fn build_agent_bounded(global: Option<Duration>, proxy: Option<ureq::Proxy>) -> ureq::Agent {
+/// stream free to run (streaming calls). The proxy decision and the
+/// SSRF vet ride in [`ssrf::agent_for`].
+fn agent_config(
+    global: Option<Duration>,
+) -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
     let config = ureq::Agent::config_builder()
         .redirect_auth_headers(ureq::config::RedirectAuthHeaders::SameHost)
         .http_status_as_error(false);
-    let config = match global {
+    match global {
         Some(global) => config.timeout_global(Some(global)),
         None => config
             .timeout_resolve(Some(STREAM_PHASE_TIMEOUT))
             .timeout_connect(Some(STREAM_PHASE_TIMEOUT))
             .timeout_send_request(Some(STREAM_PHASE_TIMEOUT)),
-    };
-    let proxied = proxy.is_some();
-    let config = config.proxy(proxy).build();
-    if proxied {
-        ureq::Agent::with_parts(config, DefaultConnector::new(), DefaultResolver::default())
-    } else {
-        ssrf::guarded_agent(config)
     }
 }
 
@@ -620,6 +574,7 @@ fn dispatch_with_body(
 mod tests {
     use std::time::Duration;
 
+    use kage_tools::ssrf;
     use mlua::{Lua, Table};
 
     use crate::PluginRuntime;
@@ -785,12 +740,12 @@ mod tests {
         ];
         for url in refused {
             let parsed = url::Url::parse(url).unwrap();
-            assert!(super::vet_proxied_target(&parsed).is_err(), "{url}");
+            assert!(ssrf::vet_proxied(&parsed).is_err(), "{url}");
         }
         let refused_names = ["http://localhost/x", "http://LOCALHOST:8080/x"];
         for url in refused_names {
             let parsed = url::Url::parse(url).unwrap();
-            assert!(super::vet_proxied_target(&parsed).is_err(), "{url}");
+            assert!(ssrf::vet_proxied(&parsed).is_err(), "{url}");
         }
         let allowed = [
             "https://zcode.z.ai/api/v1/agent/configs",
@@ -799,7 +754,7 @@ mod tests {
         ];
         for url in allowed {
             let parsed = url::Url::parse(url).unwrap();
-            assert!(super::vet_proxied_target(&parsed).is_ok(), "{url}");
+            assert!(ssrf::vet_proxied(&parsed).is_ok(), "{url}");
         }
     }
 

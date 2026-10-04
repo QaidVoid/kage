@@ -107,6 +107,72 @@ pub fn check(url: &url::Url) -> Result<(), ToolError> {
     Ok(())
 }
 
+/// An agent for `url` under the operator's egress proxy, when the
+/// environment names one.
+///
+/// With no proxy, `url` is vetted by [`check`] and the agent resolves
+/// through the SSRF guard. With one, the proxy dials by name on its own
+/// side, so the target is never resolved locally: the only vet left is
+/// the literal form (see [`vet_proxied`]), and the proxy's egress policy
+/// is the boundary. A host the operator exempted through `NO_PROXY`
+/// rides past the vet.
+pub fn agent_for(
+    config: ureq::config::ConfigBuilder<ureq::typestate::AgentScope>,
+    url: &url::Url,
+    proxy: Option<ureq::Proxy>,
+) -> Result<ureq::Agent, ToolError> {
+    let Some(proxy) = proxy else {
+        check(url)?;
+        return Ok(guarded_agent(config.build()));
+    };
+    let uri: ureq::http::Uri = url
+        .as_str()
+        .parse()
+        .map_err(|e| ToolError::InvalidInput(format!("invalid url: {e}")))?;
+    if !proxy.is_no_proxy(&uri) {
+        vet_proxied(url)?;
+    }
+    let config = config.proxy(Some(proxy)).build();
+    Ok(ureq::Agent::with_parts(
+        config,
+        DefaultConnector::new(),
+        DefaultResolver::default(),
+    ))
+}
+
+/// [`agent_for`] with the proxy read from the environment.
+pub fn agent_for_url(
+    config: ureq::config::ConfigBuilder<ureq::typestate::AgentScope>,
+    url: &url::Url,
+) -> Result<ureq::Agent, ToolError> {
+    agent_for(config, url, ureq::Proxy::try_from_env())
+}
+
+/// The DNS-free vet of a proxied target: the proxy resolves the name on
+/// its own side, so the check is over the literal form only. An IP
+/// naming a non-routable range, or the loopback name, is refused even
+/// through the proxy; anything else rides the operator's egress policy.
+pub fn vet_proxied(url: &url::Url) -> Result<(), ToolError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| ToolError::InvalidInput("url has no host".into()))?;
+    let literal = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = literal.parse::<std::net::IpAddr>()
+        && is_unsafe(&ip)
+    {
+        return Err(ToolError::InvalidInput(format!(
+            "refusing to fetch {host}: a proxied request must not name a non-routable address"
+        )));
+    }
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err(ToolError::InvalidInput(
+            "refusing to fetch localhost: a proxied request must not name the proxy's own loopback"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// True if `ip` is non-routable (loopback, private, multicast, etc.).
 #[must_use]
 pub fn is_unsafe(ip: &IpAddr) -> bool {

@@ -15,7 +15,7 @@ use kage_core::{Risk, ToolOutput};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{Tool, ToolContext, ToolError, schema_for};
+use crate::{Tool, ToolContext, ToolError, schema_for, ssrf};
 
 /// The variable the Brave Search key is read from by default.
 const BRAVE_KEY_ENV: &str = "BRAVE_API_KEY";
@@ -145,11 +145,12 @@ fn output(query: &str, results: &[SearchResult]) -> ToolOutput {
 }
 
 fn get(url: &url::Url, headers: &[(&str, &str)]) -> Result<String, ToolError> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(TIMEOUT))
-        .http_status_as_error(false)
-        .build()
-        .into();
+    let agent = ssrf::agent_for_url(
+        ureq::Agent::config_builder()
+            .timeout_global(Some(TIMEOUT))
+            .http_status_as_error(false),
+        url,
+    )?;
     let mut request = agent
         .get(url.as_str())
         .header("user-agent", "kage/0.1 (+https://github.com/QaidVoid/kage)");

@@ -86,22 +86,19 @@ impl Tool for WebFetchTool {
                 )));
             }
         }
-        ssrf::check(&parsed)?;
-
         let max_bytes = effective_max_bytes(input.max_bytes);
-        fetch(
-            &ssrf::guarded_agent(agent_config(TIMEOUT)),
-            &parsed,
-            max_bytes,
-        )
+        let agent = ssrf::agent_for_url(agent_config(TIMEOUT), &parsed)?;
+        fetch(&agent, &parsed, max_bytes)
     }
 }
 
-fn agent_config(timeout: Duration) -> ureq::config::Config {
+/// The agent configuration web fetches share: one whole-request budget
+/// and the redirect cap. The proxy decision and SSRF vet ride in
+/// [`ssrf::agent_for_url`].
+fn agent_config(timeout: Duration) -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
     ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
         .max_redirects(MAX_REDIRECTS)
-        .build()
 }
 
 /// The body budget in effect: the model's request, never above the
@@ -261,7 +258,7 @@ mod tests {
         timeout: Duration,
         max_bytes: u64,
     ) -> Result<ToolOutput, ToolError> {
-        let agent = ssrf::guarded_agent_allowing(agent_config(timeout), addr);
+        let agent = ssrf::guarded_agent_allowing(agent_config(timeout).build(), addr);
         let url = url::Url::parse(&format!("http://{addr}{path}")).unwrap();
         fetch(&agent, &url, max_bytes)
     }

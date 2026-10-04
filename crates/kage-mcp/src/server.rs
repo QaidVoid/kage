@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use kage_core::CancelFlag;
 use kage_core::config::McpServer;
+use kage_core::reaper;
 
 use kage_jsonrpc::{CancelNotice, Inbound, Peer, RpcError, connect_with};
 
@@ -733,10 +734,8 @@ impl McpServerHandle {
     pub fn exit_status(&mut self) -> Option<String> {
         let status = self
             .child
-            .as_mut()?
-            .try_wait()
-            .ok()
-            .flatten()
+            .as_mut()
+            .and_then(|child| reaper::try_wait(child).ok().flatten())
             .map(|status| status.to_string())?;
         let stderr = self
             .stderr

@@ -109,6 +109,7 @@ pub(crate) fn run(
     rotate_token: bool,
     web_dir: Option<&Path>,
 ) -> ExitCode {
+    kage_core::reaper::start();
     let log: Log = Arc::new(|line| eprintln!("kage serve: {line}"));
     let host = match Host::start(model, system_role) {
         Ok(host) => host,

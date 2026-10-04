@@ -27,6 +27,10 @@ toml.workspace = true
 toml_edit.workspace = true
 ulid.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+nix.workspace = true
+
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
 tempfile.workspace = true

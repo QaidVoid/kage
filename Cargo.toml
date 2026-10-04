@@ -66,8 +66,9 @@ globset = "0.4.20"
 grep = "0.4.1"
 html2text = "0.17.1"
 ignore = "0.4.33"
+libc = "0.2.189"
 mlua = { version = "0.12.1", features = ["lua54", "send", "vendored", "async"] }
-nix = { version = "0.31.3", default-features = false, features = ["fs", "signal", "socket", "user"] }
+nix = { version = "0.31.3", default-features = false, features = ["fs", "process", "signal", "socket", "user"] }
 notify = "8.2.0"
 pulldown-cmark = { version = "0.13.4", default-features = false, features = [
   "simd"

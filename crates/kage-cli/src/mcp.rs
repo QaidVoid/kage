@@ -34,6 +34,7 @@ use kage_tools::ToolRegistry;
 /// Calls are checked against the layered `[permissions]`; an `ask`
 /// verdict is refused because there is no one to ask.
 pub(crate) fn run_serve(tools: &[String]) -> ExitCode {
+    kage_core::reaper::start();
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let config = match Config::load_layered(&workdir) {
         Ok(c) => c,

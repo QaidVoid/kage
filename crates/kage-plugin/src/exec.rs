@@ -25,6 +25,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use kage_core::reaper;
 use kage_core::sync::lock;
 use kage_tools::resolve_under;
 use mlua::{Lua, Table};
@@ -114,12 +115,12 @@ pub(crate) fn register(registry: &CapabilityRegistry, workdir: PathBuf) {
                     let deadline = Instant::now() + timeout;
                     let mut timed_out = false;
                     let status = loop {
-                        match child.try_wait() {
+                        match reaper::try_wait(&mut child) {
                             Ok(Some(status)) => break status,
                             Ok(None) => {
                                 if Instant::now() >= deadline {
                                     let _ = child.kill();
-                                    let status = child.wait().map_err(|e| {
+                                    let status = reaper::wait(&mut child).map_err(|e| {
                                         mlua::Error::external(format!("kage.exec: wait {cmd}: {e}"))
                                     })?;
                                     timed_out = true;

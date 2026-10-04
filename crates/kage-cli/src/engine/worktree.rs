@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use kage_core::SessionId;
+use kage_core::reaper;
 
 /// One agent's checkout. Dropping it removes the checkout; work the
 /// agent left stays in the repository as a jj change or a git branch.
@@ -168,11 +169,9 @@ impl Drop for Worktree {
 /// The trimmed output of `program args` run in `dir`, or what it
 /// printed on failure.
 fn run(dir: &Path, program: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(program)
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .map_err(|err| format!("{program}: {err}"))?;
+    let mut command = Command::new(program);
+    command.args(args).current_dir(dir);
+    let output = reaper::output(&mut command).map_err(|err| format!("{program}: {err}"))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     } else {

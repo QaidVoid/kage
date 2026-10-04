@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kage_core::{Risk, ToolOutput, ToolUpdate, sync::lock};
+use kage_core::{Risk, ToolOutput, ToolUpdate, reaper, sync::lock};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -286,7 +286,7 @@ pub fn run(
     let start = Instant::now();
     let mut last_progress = start;
     let status = loop {
-        if let Some(s) = child.try_wait()? {
+        if let Some(s) = reaper::try_wait(&mut child)? {
             break s;
         }
         if start.elapsed() > timeout {

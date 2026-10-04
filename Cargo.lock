@@ -1803,6 +1803,8 @@ dependencies = [
  "dirs",
  "figment",
  "globset",
+ "libc",
+ "nix 0.31.3",
  "serde",
  "serde_json",
  "tempfile",

@@ -18,6 +18,7 @@ pub mod model_id;
 pub mod options;
 pub mod permissions;
 pub mod protocol;
+pub mod reaper;
 pub mod resource_block;
 pub mod risk;
 pub mod skills;

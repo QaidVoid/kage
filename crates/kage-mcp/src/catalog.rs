@@ -221,7 +221,10 @@ impl McpConnection {
     }
 
     /// Collect the `key` array of `method` across pages, stopping at
-    /// `cap` entries or after [`MAX_PAGES`] pages.
+    /// `cap` entries or after [`MAX_PAGES`] pages. A first-page result
+    /// with no `key` array and no `nextCursor` yields an empty listing
+    /// instead of an error: a server holding zero entries may answer
+    /// a bare `{}`.
     fn paginate(&self, method: &str, key: &str, cap: usize) -> Result<Vec<Value>, McpError> {
         let mut out = Vec::new();
         let mut cursor: Option<String> = None;
@@ -231,7 +234,21 @@ impl McpConnection {
                 |c| serde_json::json!({ "cursor": c }),
             );
             let result = self.request(method, params)?;
-            out.extend(self.array(method, &result, key)?.iter().cloned());
+            match result.get(key).and_then(Value::as_array) {
+                Some(items) => out.extend(items.iter().cloned()),
+                None => {
+                    let has_cursor = result
+                        .get("nextCursor")
+                        .and_then(Value::as_str)
+                        .is_some_and(|next| !next.is_empty());
+                    if out.is_empty() && !has_cursor {
+                        return Ok(out);
+                    }
+                    return Err(
+                        self.protocol(format!("{method} result missing `{key}` array"))
+                    );
+                }
+            }
             if out.len() >= cap {
                 out.truncate(cap);
                 return Ok(out);
@@ -395,6 +412,38 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_first_page_is_an_empty_listing() {
+        let caps = json!({ "resources": {}, "prompts": {} });
+        let (conn, _srv, _seen) = scripted("empty", caps, |method, _params| {
+            Ok(match method {
+                "resources/list" | "resources/templates/list" | "prompts/list" => json!({}),
+                other => return Err(RpcError::method_not_found(other)),
+            })
+        });
+        assert!(conn.list_resources().unwrap().is_empty());
+        assert!(conn.list_resource_templates().unwrap().is_empty());
+        assert!(conn.list_prompts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_missing_array_after_items_or_with_a_cursor_still_errors() {
+        let caps = json!({ "resources": {}, "prompts": {} });
+        let (conn, _srv, _seen) = scripted("degenerate", caps, |method, params| {
+            Ok(match method {
+                "resources/list" if params.get("cursor").is_none() => json!({
+                    "resources": [{ "uri": "test://r/0", "name": "R0" }],
+                    "nextCursor": "2",
+                }),
+                "resources/list" => json!({}),
+                "prompts/list" => json!({ "nextCursor": "2" }),
+                other => return Err(RpcError::method_not_found(other)),
+            })
+        });
+        assert!(conn.list_resources().is_err());
+        assert!(conn.list_prompts().is_err());
+    }
+
+    #[test]
     fn caps_stop_a_server_that_lists_more() {
         let caps = json!({ "resources": {}, "prompts": {} });
         let (conn, _srv, seen) = scripted("big", caps, |method, params| {
@@ -431,13 +480,16 @@ mod tests {
         let (conn, _srv, _seen) = scripted("bad", json!({ "resources": {} }), |method, _| {
             Ok(match method {
                 "resources/list" => json!({ "resources": [{ "name": "no uri" }] }),
+                "resources/templates/list" => {
+                    json!({ "resourceTemplates": [{ "name": "no template" }] })
+                }
                 _ => json!({}),
             })
         });
         let err = conn.list_resources().unwrap_err();
         assert!(err.to_string().contains("`uri`"), "{err}");
         let err = conn.list_resource_templates().unwrap_err();
-        assert!(err.to_string().contains("resourceTemplates"), "{err}");
+        assert!(err.to_string().contains("uriTemplate"), "{err}");
     }
 
     #[test]

@@ -521,6 +521,27 @@ mod tests {
 
     const REVIEWER: &str = "---\ndescription: Reviews a diff.\ntools: read\n---\nReview.\n";
 
+    #[cfg(unix)]
+    #[test]
+    fn agent_unreadable_at_trust_time_becomes_untrusted_once_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, "")?;
+            std::fs::remove_file(Config::project_path(&project)).map_err(io)?;
+            write_agent(&project, "ghost", REVIEWER)?;
+            let path = crate::agents::project_dirs(&project)[0].join("ghost.md");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).map_err(io)?;
+            // A file the fingerprint cannot read records nothing to trust.
+            assert!(trust_project(&project).map_err(io)?.is_none());
+            assert!(project_extensions_trusted(&project));
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).map_err(io)?;
+            let summary = untrusted_project(&project).expect("readable ghost agent asks for trust");
+            assert!(summary.agents.contains(&"ghost".to_owned()));
+            Ok(())
+        });
+    }
+
     #[test]
     fn dot_agents_agents_join_trust_and_win_same_names() {
         let _globals = process_globals();

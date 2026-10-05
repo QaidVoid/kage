@@ -91,6 +91,24 @@ fn tps_example_emits_summary_on_agent_end() {
 }
 
 #[test]
+#[test]
+fn transform_demo_round_trips_an_empty_history() {
+    // Settler for plans/verify/27 F8: an empty history enters Lua as an
+    // empty table and the codec has no array marker to bring it back as
+    // a sequence, so the host receives `{}`. The cli transform wrapper
+    // accepts that shape as an empty history; this test pins the codec
+    // half so a future codec change cannot silently break the guard.
+    let rt = PluginRuntime::builder().build().unwrap();
+    let source = std::fs::read_to_string(examples_dir().join("transform_demo.lua"))
+        .expect("read transform_demo.lua");
+    rt.eval(&source).expect("transform_demo.lua loads");
+
+    let out = rt
+        .dispatch_transform("transform_context", json!([]))
+        .expect("empty history dispatches");
+    assert_eq!(out, json!({}));
+}
+
 fn transform_demo_redacts_secrets_in_user_text() {
     let (rec, sink) = forwarding_sink();
     let rt = PluginRuntime::builder().sink(sink).build().unwrap();

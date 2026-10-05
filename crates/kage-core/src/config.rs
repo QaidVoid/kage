@@ -1305,6 +1305,15 @@ default = "ask"   # keep asking
     }
 
     #[test]
+    fn create_dir_all_of_an_empty_parent_is_a_noop() {
+        // `save_keys` on a bare filename gets `Path::parent() == Some("")`;
+        // std special-cases the empty path on every platform, so the save
+        // proceeds into the current directory. Pins the contract the
+        // `parent()` call relies on (plans/verify/38 F9 settler).
+        std::fs::create_dir_all(Path::new("")).unwrap();
+    }
+
+    #[test]
     fn save_keys_creates_a_missing_file_with_only_those_keys() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("config.toml");

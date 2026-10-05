@@ -6,6 +6,7 @@ use kage_core::{Risk, ToolCallId};
 use kage_tools::Tool;
 
 use super::*;
+use crate::AgentContext;
 use crate::NoopHooks;
 use crate::test_support::{Meet, MeetTool};
 
@@ -1391,4 +1392,92 @@ fn parallel_panic_yields_an_error_for_its_own_call() {
         _ => None,
     });
     assert!(panic_end.is_some_and(|output| output.is_error));
+}
+
+/// Tool that resolves `../x` through its context, standing in for the
+/// built-in file tools.
+#[derive(Debug)]
+struct EscapeProbe;
+
+impl Tool for EscapeProbe {
+    fn name(&self) -> &'static str {
+        "escape_probe"
+    }
+    fn description(&self) -> &'static str {
+        "resolves a workdir-escaping path"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        cx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        let resolved = cx.resolve_path(Path::new("../x"))?;
+        Ok(ToolOutput {
+            is_error: false,
+            text: resolved.display().to_string(),
+            structured: None,
+            terminate: false,
+        })
+    }
+}
+
+/// A default `AgentContext` confines dispatch, so a model-supplied `../x`
+/// path surfaces as a `ToolError::Path` rejection instead of a resolved
+/// escape.
+#[test]
+fn confined_dispatch_rejects_workdir_escape() {
+    let root = std::env::temp_dir().join("kage-loop-dispatch-confine");
+    let work = root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let tools = ToolRegistry::new().with(Arc::new(EscapeProbe));
+    let cx = AgentContext::new("m", "").with_workdir(&work);
+    assert!(cx.confine_paths, "a default AgentContext confines paths");
+
+    let sequential = dispatch_tool_calls(
+        vec![pending("escape_probe", serde_json::json!({}))],
+        &tools,
+        cx.workdir.as_path(),
+        &CancelFlag::new(),
+        cx.confine_paths,
+        MessageId::new(),
+        &mut NoopHooks,
+        &mut |_| {},
+    );
+    assert!(sequential.error.is_none());
+    match &sequential.results[0].content[0] {
+        Content::ToolResultBlock {
+            output, is_error, ..
+        } => {
+            assert!(*is_error);
+            assert!(output.contains("escapes workdir"), "{output}");
+        }
+        other => panic!("unexpected content: {other:?}"),
+    }
+
+    let parallel = dispatch_tool_calls_parallel(
+        vec![pending("escape_probe", serde_json::json!({}))],
+        &tools,
+        cx.workdir.as_path(),
+        &CancelFlag::new(),
+        cx.confine_paths,
+        MessageId::new(),
+        &mut NoopHooks,
+        &mut |_| {},
+    );
+    assert!(parallel.error.is_none());
+    match &parallel.results[0].content[0] {
+        Content::ToolResultBlock {
+            output, is_error, ..
+        } => {
+            assert!(*is_error);
+            assert!(output.contains("escapes workdir"), "{output}");
+        }
+        other => panic!("unexpected content: {other:?}"),
+    }
 }

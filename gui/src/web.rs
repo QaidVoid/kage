@@ -148,9 +148,11 @@ fn endpoint() -> String {
 /// values win, the endpoint falls back to the page's `?ws=` override,
 /// else `/acp` on the page's own origin with the scheme mapped to ws
 /// or wss. Without the form there is no token, and the endpoint
-/// refuses the dial until one is entered.
+/// refuses the dial until one is entered. The `window.__kageConnect`
+/// holder is deleted once read, so the token never lingers on the
+/// window for same-origin scripts to recover.
 fn connection() -> (String, String) {
-    KAGE_CONNECT.with(|value| {
+    let values = KAGE_CONNECT.with(|value| {
         let handed = value.is_object().then(|| value.unchecked_ref::<Handoff>());
         let server = handed
             .and_then(|handoff| handoff.server())
@@ -160,7 +162,11 @@ fn connection() -> (String, String) {
             .and_then(|handoff| handoff.token())
             .unwrap_or_default();
         (server, token)
-    })
+    });
+    if let Some(window) = web_sys::window() {
+        let _ = js_sys::Reflect::delete_property_str(window.as_ref(), &"__kageConnect".into());
+    }
+    values
 }
 
 /// The query part of the page address, empty without a window.

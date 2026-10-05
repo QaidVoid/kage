@@ -54,6 +54,11 @@ pub(crate) fn run_serve(tools: &[String]) -> ExitCode {
         eprintln!("kage: mcp serve: {e}");
         return ExitCode::from(1);
     }
+    if !permissions.confine_paths {
+        eprintln!(
+            "kage: path confinement is OFF for this session (permissions.confine_paths = false)"
+        );
+    }
     let registry = match serve_registry(tools, &shell, &config.tools.rename) {
         Ok(r) => r,
         Err(e) => {

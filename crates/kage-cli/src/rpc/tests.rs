@@ -3035,6 +3035,61 @@ fn config_get_names_headers_and_env_without_their_values() {
     assert_eq!(config.plugins.config["notify"], super::REDACTED);
 }
 
+/// Writes a config.toml holding the JSON `entry` under `keys`.
+fn save_entry(path: &Path, keys: &[&str], entry: &serde_json::Value) {
+    let text = kage_core::config_edit::edited(path, keys, Some(entry)).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+#[test]
+fn config_test_refuses_an_unsaved_agent_instead_of_running_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    // No `[acp.agents.pwned]` on file: the request names one and the
+    // saved-spec contract refuses before anything can spawn.
+    let err = super::test_saved_acp(&path, "pwned").unwrap_err();
+    assert_eq!(err.code, -32602);
+    assert!(err.message.contains("save the agent"), "{}", err.message);
+
+    let err = super::test_saved_mcp(&path, "pwned").unwrap_err();
+    assert_eq!(err.code, -32602);
+    assert!(err.message.contains("save the server"), "{}", err.message);
+    assert!(!path.exists());
+}
+
+#[test]
+fn config_test_probes_the_saved_agent_spec() {
+    let answer = r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"fake","version":"1.0"}}}"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    save_entry(
+        &path,
+        &["acp", "agents", "echo"],
+        &serde_json::json!({
+            "command": "sh",
+            "args": ["-c", format!("read line; printf '%s\\n' '{answer}'; sleep 5")],
+            "env": {},
+        }),
+    );
+    let result = super::test_saved_acp(&path, "echo").unwrap();
+    assert!(result.ok, "{}", result.message);
+    assert_eq!(result.agent.as_deref(), Some("fake 1.0"));
+}
+
+#[test]
+fn config_test_probes_the_saved_server_spec() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    save_entry(
+        &path,
+        &["mcp", "servers", "gone"],
+        &serde_json::json!({ "command": "/nonexistent/config-test-server" }),
+    );
+    let result = super::test_saved_mcp(&path, "gone").unwrap();
+    assert!(!result.ok);
+    assert!(!result.message.is_empty(), "{}", result.message);
+}
+
 #[test]
 fn mcp_status_arrives_per_server_and_only_carries_changes() {
     let dir = tempfile::tempdir().unwrap();

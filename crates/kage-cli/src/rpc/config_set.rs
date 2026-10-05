@@ -96,6 +96,7 @@ fn validate(config: &Config) -> Result<(), String> {
         .permissions
         .validate()
         .map_err(|e| format!("permissions: {e}"))?;
+    config.shell.validate().map_err(|e| format!("shell: {e}"))?;
     for (name, server) in &config.mcp.servers {
         match (&server.command, &server.url) {
             (Some(_), Some(_)) => {
@@ -223,5 +224,27 @@ mod tests {
         set(&path, &keys("permissions.tools.shell"), None).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("shell") && text.contains("write"), "{text}");
+    }
+
+    #[test]
+    fn an_uncompilable_pattern_is_never_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[shell]\nscrub_env = [\"[\"]\n").unwrap();
+        let err = set(&path, &keys("ui.theme_dark"), Some(&json!("kimi-dark"))).unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("scrub_env"), "{}", err.message);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("scrub_env") && !text.contains("theme_dark"),
+            "{text}"
+        );
+
+        let fresh = dir.path().join("fresh.toml");
+        let deny = json!({ "deny": ["["] });
+        let err = set(&fresh, &keys("permissions.tools.shell"), Some(&deny)).unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("does not compile"), "{}", err.message);
+        assert!(!fresh.exists());
     }
 }

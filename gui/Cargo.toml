@@ -36,6 +36,11 @@ chrono = "0.4"
 # The config.toml preview the settings forms show.
 toml = "1"
 
+[build-dependencies]
+# The Windows executable icon embed, gated by `build.rs` to the
+# windows target.
+winresource = "0.1"
+
 [dev-dependencies]
 # The same pinned toolkit with headless windows and input dispatch, for
 # the transcript's instrumented render tests. Test-only: the shipped
@@ -45,6 +50,9 @@ gpui-kit = { version = "=0.7.0", features = ["test-support"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Plain WebSocket client, no TLS: kage serves loopback ws:// only.
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+# Decodes the embedded brand art for the window icon; gpui's
+# `WindowOptions.icon` takes an `image::RgbaImage`.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Exactly the versions the toolkit's web stack resolved, so the lockfile

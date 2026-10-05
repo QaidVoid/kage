@@ -338,6 +338,9 @@ impl CliAcpAgent {
 
     /// The layered config for the request's session workdir, or for the
     /// server's directory when the request names no known session.
+    /// Read without validation: this serves diagnostics and the
+    /// settings pages, so a broken config stays readable and fixable
+    /// through the RPC surface.
     fn load_config(&self, req: &ConfigGetRequest) -> Result<Config, RpcError> {
         let workdir = req
             .session_id
@@ -347,7 +350,7 @@ impl CliAcpAgent {
         let dir = workdir.unwrap_or_else(|| {
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
         });
-        Config::load_layered(&dir).map_err(|e| RpcError::internal(e.to_string()))
+        Config::load_layered_raw(&dir).map_err(|e| RpcError::internal(e.to_string()))
     }
 
     fn engine_id(&self, client_id: &str) -> Result<SessionId, RpcError> {
@@ -595,9 +598,12 @@ impl Agent for CliAcpAgent {
     }
 
     /// Lists the provider's models with the user config and saved keys
-    /// filling what the probe leaves out.
+    /// filling what the probe leaves out, or connects to the saved MCP
+    /// server or ACP agent the request names. Only specs already saved
+    /// in the user config are probed: a request's own command line and
+    /// environment never run, so a leaked token cannot spawn processes.
     fn config_test(&self, req: ConfigTestRequest) -> Result<ConfigTestResult, RpcError> {
-        let config = Config::load_default().map_err(|e| RpcError::internal(e.to_string()))?;
+        let config = Config::load_default_raw().map_err(|e| RpcError::internal(e.to_string()))?;
         if let Some(provider) = &req.provider {
             let store =
                 crate::auth::AuthStore::load().unwrap_or_else(|_| crate::auth::AuthStore::empty());
@@ -605,26 +611,11 @@ impl Agent for CliAcpAgent {
         }
         let path =
             Config::default_path().ok_or_else(|| RpcError::internal("no user config directory"))?;
-        let saved = |keys: &[&str]| {
-            kage_core::config_edit::current(&path, keys)
-                .map_err(|e| RpcError::internal(e.to_string()))
-        };
-        let invalid = |e: serde_json::Error| RpcError::new(-32602, e.to_string());
         if let Some(mcp) = &req.mcp {
-            let old = saved(&["mcp", "servers", &mcp.name])?;
-            let server = config_set::unredacted(&mcp.server, old.as_ref(), &mcp.name)?;
-            let spec = serde_json::from_value(server).map_err(invalid)?;
-            return Ok(probe::probe_mcp(&mcp.name, &spec));
+            return test_saved_mcp(&path, &mcp.name);
         }
         if let Some(acp) = &req.acp {
-            let old = saved(&["acp", "agents", &acp.name, "env"])?;
-            let env = config_set::unredacted(&serde_json::json!(acp.env), old.as_ref(), "env")?;
-            let agent = kage_core::config::AcpAgent {
-                command: acp.command.clone(),
-                args: acp.args.clone(),
-                env: serde_json::from_value(env).map_err(invalid)?,
-            };
-            return Ok(probe::probe_acp(&agent));
+            return test_saved_acp(&path, &acp.name);
         }
         Err(RpcError::new(
             -32602,
@@ -831,6 +822,36 @@ impl Agent for CliAcpAgent {
     fn detached(&self) {
         self.detach();
     }
+}
+
+/// Probes the `[mcp.servers.<name>]` entry saved in the user config at
+/// `path`: the request names the server and nothing else, so only what
+/// is on file is ever spawned. A name with no saved entry is invalid
+/// params.
+fn test_saved_mcp(path: &Path, name: &str) -> Result<ConfigTestResult, RpcError> {
+    let invalid = |message: String| RpcError::new(-32602, message);
+    let saved = saved_entry(path, &["mcp", "servers", name])?
+        .ok_or_else(|| invalid(format!("save the server `{name}`, then test it")))?;
+    let spec = serde_json::from_value::<McpSpec>(saved).map_err(|e| invalid(e.to_string()))?;
+    Ok(probe::probe_mcp(name, &spec))
+}
+
+/// Probes the `[acp.agents.<name>]` entry saved in the user config at
+/// `path`, command and environment included, the same way: an unsaved
+/// name is refused instead of running a request-supplied command line.
+fn test_saved_acp(path: &Path, name: &str) -> Result<ConfigTestResult, RpcError> {
+    let invalid = |message: String| RpcError::new(-32602, message);
+    let saved = saved_entry(path, &["acp", "agents", name])?
+        .ok_or_else(|| invalid(format!("save the agent `{name}`, then test it")))?;
+    let agent = serde_json::from_value::<kage_core::config::AcpAgent>(saved)
+        .map_err(|e| invalid(e.to_string()))?;
+    Ok(probe::probe_acp(&agent))
+}
+
+/// The JSON value the user config at `path` holds at `keys`, or `None`
+/// when the file or the entry is not there.
+fn saved_entry(path: &Path, keys: &[&str]) -> Result<Option<serde_json::Value>, RpcError> {
+    kage_core::config_edit::current(path, keys).map_err(|e| RpcError::internal(e.to_string()))
 }
 
 /// A completed turn that hit the output-token cap surfaces as `MaxTokens`

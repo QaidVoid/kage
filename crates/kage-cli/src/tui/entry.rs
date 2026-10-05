@@ -179,6 +179,11 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
     let mut cx = AgentContext::new(bare_model, system).with_workdir(&workdir);
     if app_config.permissions.confine_paths {
         cx = cx.with_confine_paths();
+    } else {
+        cx = cx.without_confine_paths();
+        eprintln!(
+            "kage: path confinement is OFF for this session (permissions.confine_paths = false)"
+        );
     }
     if let Some(window) = crate::runtime_env::context_window_for(&registry, &qualified_model) {
         cx = cx.with_context_window(window);

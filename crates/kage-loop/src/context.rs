@@ -95,11 +95,12 @@ pub struct AgentContext {
     /// the model catalog. [`kage_core::Reasoning::Unknown`] sends a
     /// chosen level unchanged and no automatic level.
     pub reasoning: kage_core::Reasoning,
-    /// Opt-in path confinement for the built-in file tools: when
-    /// `true`, every [`kage_tools::ToolContext`] the dispatcher builds
-    /// resolves paths through escape-checked resolution, so reads and
-    /// writes stay under `workdir`. Defaults to `false` (the
-    /// historical behavior).
+    /// Path confinement for the built-in file tools: when `true`, every
+    /// [`kage_tools::ToolContext`] the dispatcher builds resolves paths
+    /// through escape-checked resolution, so reads and writes stay under
+    /// `workdir`. Defaults to `true`; [`Self::without_confine_paths`]
+    /// restores the historical unconfined resolution when the config
+    /// disables confinement.
     pub confine_paths: bool,
     /// Running token totals.
     pub budget: TokenBudget,
@@ -119,7 +120,7 @@ impl AgentContext {
             max_output_tokens: None,
             thinking_level: None,
             reasoning: kage_core::Reasoning::Unknown,
-            confine_paths: false,
+            confine_paths: true,
             budget: TokenBudget::default(),
         }
     }
@@ -158,6 +159,15 @@ impl AgentContext {
     #[must_use]
     pub fn with_confine_paths(mut self) -> Self {
         self.confine_paths = true;
+        self
+    }
+
+    /// Restore the historical unconfined path resolution so built-in
+    /// file tools accept absolute paths and `..` traversals that escape
+    /// `workdir`. Hosts call this when the config disables confinement.
+    #[must_use]
+    pub fn without_confine_paths(mut self) -> Self {
+        self.confine_paths = false;
         self
     }
 }
@@ -210,5 +220,47 @@ mod tests {
         assert_eq!(cx.system_prompt, "you are helpful");
         assert!(cx.history.is_empty());
         assert_eq!(cx.budget, TokenBudget::default());
+    }
+
+    #[test]
+    fn agent_context_confines_paths_by_default() {
+        let cx = AgentContext::new("m", "");
+        assert!(cx.confine_paths);
+        assert!(!cx.clone().without_confine_paths().confine_paths);
+        assert!(
+            cx.without_confine_paths()
+                .with_confine_paths()
+                .confine_paths
+        );
+    }
+
+    /// Pins the subagent semantics the engine builds on: a child copies
+    /// the parent's flag instead of the constructor default, and a fresh
+    /// worktree forces confinement on top of the copy.
+    #[test]
+    fn subagent_inherits_parent_confinement_and_worktree_forces_it() {
+        let parent = AgentContext::new("m", "");
+        assert!(parent.confine_paths, "the default parent is confined");
+
+        let mut child = AgentContext::new("m", "");
+        child.confine_paths = parent.confine_paths;
+        assert!(
+            child.confine_paths,
+            "non-worktree child inherits the parent"
+        );
+
+        let opted_out = parent.without_confine_paths();
+        let mut child = AgentContext::new("m", "");
+        child.confine_paths = opted_out.confine_paths;
+        assert!(
+            !child.confine_paths,
+            "opted-out parent keeps its child unconfined"
+        );
+
+        child.confine_paths |= true;
+        assert!(
+            child.confine_paths,
+            "a worktree child is confined regardless"
+        );
     }
 }

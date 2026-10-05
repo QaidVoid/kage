@@ -181,8 +181,20 @@ mod tests {
     fn the_transcript_parses_whole() {
         let frames = transcript();
         assert_eq!(frames.len(), 23);
-        assert!(matches!(frames[0], Frame::Success { id: RequestId::Number(1), .. }));
-        assert!(matches!(frames[22], Frame::Success { id: RequestId::Number(3), .. }));
+        assert!(matches!(
+            frames[0],
+            Frame::Success {
+                id: RequestId::Number(1),
+                ..
+            }
+        ));
+        assert!(matches!(
+            frames[22],
+            Frame::Success {
+                id: RequestId::Number(3),
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -414,6 +414,11 @@ fn session_spec(
     let mut cx = AgentContext::new(model.clone(), &system_prompt).with_workdir(&workdir);
     if config.permissions.confine_paths {
         cx = cx.with_confine_paths();
+    } else {
+        cx = cx.without_confine_paths();
+        eprintln!(
+            "kage: path confinement is OFF for this session (permissions.confine_paths = false)"
+        );
     }
     if let Some(window) = crate::runtime_env::context_window_for(registry, &model) {
         cx = cx.with_context_window(window);

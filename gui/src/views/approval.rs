@@ -1050,7 +1050,12 @@ mod tests {
             "a digit typed into the feedback field types, it never answers"
         );
         let text = visual.update(|_, cx| {
-            let input = view.read(cx).feedback.get(&RequestId::Number(101)).unwrap().clone();
+            let input = view
+                .read(cx)
+                .feedback
+                .get(&RequestId::Number(101))
+                .unwrap()
+                .clone();
             input.read(cx).value().to_string()
         });
         assert_eq!(text, "1", "the digit went into the field instead");
@@ -1065,7 +1070,12 @@ mod tests {
         visual.update(|window, cx| window.render_frame(cx));
 
         visual.update(|window, cx| {
-            let input = view.read(cx).feedback.get(&RequestId::Number(101)).unwrap().clone();
+            let input = view
+                .read(cx)
+                .feedback
+                .get(&RequestId::Number(101))
+                .unwrap()
+                .clone();
             input.update(cx, |state, cx| state.focus(window, cx));
         });
         visual.update(|window, cx| window.input("use rustfmt first", cx));

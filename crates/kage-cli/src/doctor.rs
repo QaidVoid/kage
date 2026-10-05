@@ -126,9 +126,11 @@ const MCP_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// errors during discovery, or does not answer within
 /// [`MCP_PROBE_TIMEOUT`] makes the check FAIL with the offender
 /// named. Plugin-declared servers are not probed here: `doctor` has
-/// no plugin runtime loaded and only validates static config.
+/// no plugin runtime loaded and only validates static config. The
+/// config is read without validation, so the probe still runs when
+/// the permission or shell tables are the broken part.
 fn check_mcp(workdir: &Path) -> Check {
-    match Config::load_layered(workdir) {
+    match Config::load_layered_raw(workdir) {
         Ok(c) => check_mcp_servers(c.mcp.servers),
         Err(err) => Check {
             name: "mcp",
@@ -228,6 +230,10 @@ fn probe_mcp_server(name: &str, spec: &kage_core::config::McpServer) -> Result<u
     }
 }
 
+/// The `config` row: whether the layered config passes the checks
+/// kage runs when it starts. Unlike the other checks this one keeps
+/// the validating loader, because the validity it reports is the
+/// point: a parse or validation error must FAIL here with the fix.
 fn check_config(workdir: &Path) -> Check {
     let user = Config::default_path();
     let user_exists = user.as_deref().is_some_and(Path::exists);
@@ -323,7 +329,9 @@ fn check_auth() -> Check {
 }
 
 fn check_providers() -> Check {
-    let config = Config::load_default().unwrap_or_default();
+    // Raw on purpose: the credentials row must render even when the
+    // permission or shell tables are what is broken.
+    let config = Config::load_default_raw().unwrap_or_default();
     let store = AuthStore::load().unwrap_or_else(|_| AuthStore::empty());
     providers_check(&config, &store)
 }
@@ -380,7 +388,7 @@ fn check_plugins(workdir: &Path) -> Check {
     // Use a no-op sink so plugin errors don't pollute stderr while we
     // diagnose - we surface them in our own line instead.
     let sink: kage_plugin::SharedHostLog = Arc::new(Mutex::new(Box::new(SilentSink)));
-    let enabled = match Config::load_layered(workdir) {
+    let enabled = match Config::load_layered_raw(workdir) {
         Ok(c) => c.plugins.enabled,
         Err(err) => {
             return Check {
@@ -550,6 +558,21 @@ mod tests {
         assert_eq!(check.status, Status::Fail, "{}", check.body);
         assert!(check.body.contains("broken"), "{}", check.body);
         assert!(check.hint.is_some());
+    }
+
+    #[test]
+    fn mcp_check_still_probes_when_the_shell_policy_fails_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".kage")).unwrap();
+        // `[shell]` is not a trust-gated table, so this untrusted
+        // project config loads raw but refuses the validating loader.
+        fs::write(
+            dir.path().join(".kage/config.toml"),
+            "[shell]\nscrub_env = [\"[\"]\n",
+        )
+        .unwrap();
+        let check = check_mcp(dir.path());
+        assert!(!check.body.contains("config unreadable"), "{}", check.body);
     }
 
     #[test]

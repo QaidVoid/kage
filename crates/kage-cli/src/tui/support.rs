@@ -356,9 +356,11 @@ pub(crate) fn resolve_switch_target(target: &str) -> Result<PathBuf, String> {
 }
 
 /// Refresh the `session_write` entries snapshot from the active
-/// session file: a trimmed `{ id, kind, ts, role? }` per entry in
-/// file order. Run once per worker request (a between-turn cadence,
-/// never per stream tick) so a granted plugin's
+/// session file: a metadata-only `{ id, kind, ts, role? }` per entry
+/// in file order, never any message text (the snapshot is a
+/// navigation index, not a transcript reader; see
+/// `docs/plugins/capabilities.md`). Run once per worker request (a
+/// between-turn cadence, never per stream tick) so a granted plugin's
 /// `kage.session.entries()` reflects the latest committed turn. A
 /// missing file (no turn yet) clears the snapshot.
 pub(crate) fn refresh_session_entries(
@@ -386,17 +388,6 @@ pub(crate) fn refresh_session_entries(
             && let Ok(role) = serde_json::to_value(m.message.role)
         {
             obj["role"] = role;
-            // First text block, if any. Lets plugin labels show what
-            // the message actually said instead of only ts + id (the
-            // rewind picker is the main consumer).
-            for block in &m.message.content {
-                if let kage_core::Content::Text { text } = block
-                    && !text.is_empty()
-                {
-                    obj["text"] = serde_json::Value::String(text.clone());
-                    break;
-                }
-            }
         }
         out.push(obj);
     }
@@ -866,5 +857,55 @@ mod tests {
         assert!(notice.contains("anthropic/claude-sonnet-4-6"), "{notice}");
         assert!(notice.contains("Using mock/m."), "{notice}");
         assert!(notice.contains("Run /login anthropic"), "{notice}");
+    }
+
+    #[test]
+    fn session_entries_snapshot_carries_metadata_only() {
+        use kage_core::{Content, Message, Role};
+        use kage_session::{
+            EntryId, FORMAT_VERSION, Header, MessageEntry, SessionEntry, SessionWriter,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let header = Header {
+            version: FORMAT_VERSION,
+            session: id,
+            id: EntryId::new(),
+            ts: Utc::now(),
+            cwd: dir.path().to_path_buf(),
+            model: "mock/m".into(),
+            system_prompt: String::new(),
+            parent_session: None,
+            parent_entry: None,
+        };
+        let path = dir.path().join(format!("{id}.jsonl"));
+        let mut writer = SessionWriter::create(&path, header).unwrap();
+        let message = Message::new(
+            Role::User,
+            vec![Content::Text {
+                text: "secret transcript".into(),
+            }],
+            None,
+        );
+        writer
+            .append(&SessionEntry::Message(MessageEntry {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                message: Arc::new(message),
+                usage: None,
+            }))
+            .unwrap();
+        drop(writer);
+
+        let rt = Arc::new(PluginRuntime::builder().build().unwrap());
+        refresh_session_entries(Some(&rt), Some(path.as_path()));
+        let entries = lock(rt.shared_session_entries().as_ref()).clone();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1]["kind"], "message");
+        assert_eq!(entries[1]["role"], "user");
+        assert!(entries.iter().all(|e| e.get("text").is_none()));
+        let dumped = serde_json::to_string(&entries).unwrap();
+        assert!(!dumped.contains("secret transcript"), "{dumped}");
     }
 }

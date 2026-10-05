@@ -157,6 +157,9 @@ pub fn run() {
                     ..Default::default()
                 }),
                 window_min_size: Some(size(px(960.), px(640.))),
+                // The runtime icon applies on X11 only; the other
+                // platforms take the icon from the packaged resources.
+                icon: crate::icon::window_icon(),
                 ..Default::default()
             };
             let args = ShellArgs {

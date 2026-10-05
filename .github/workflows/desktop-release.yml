@@ -112,11 +112,21 @@ jobs:
         run: |
           bundle=../web-bundle/web
           mkdir -p "$bundle/assets/icons"
-          cp web/index.html web/boot.js web/kage_desktop.js web/kage_desktop_bg.wasm "$bundle/"
+          cp web/index.html web/favicon.svg web/boot.js web/kage_desktop.js \
+            web/kage_desktop_bg.wasm "$bundle/"
           manifest="$(cargo metadata --format-version 1 --locked \
             | jq -r '.packages[] | select(.name == "gpui-kit-assets") | .manifest_path')"
           cp "$(dirname "$manifest")"/assets/icons/*.svg "$bundle/assets/icons/"
           tar -C ../web-bundle -cJf ../kage-web.tar.xz web
+
+      - name: Verify bundle
+        run: |
+          listing="$(tar -tJf ../kage-web.tar.xz)"
+          echo "$listing"
+          echo "$listing" | grep -qx 'web/favicon.svg' || {
+            echo 'the web bundle is missing web/favicon.svg' >&2
+            exit 1
+          }
 
       - uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # 2.11.5
         with:
@@ -184,11 +194,40 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then bin="$bin.exe"; fi
           mkdir -p "$artifact" ../dist
           cp "$bin" ../LICENSE ../README.md "$artifact/"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            mkdir -p "$artifact/share/applications" "$artifact/share/icons"
+            printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=kage' \
+              'Comment=Desktop client for the kage coding agent' \
+              'Exec=kage-desktop' 'Icon=kage' 'Terminal=false' \
+              'Categories=Development;' > "$artifact/share/applications/kage.desktop"
+            cp -R assets/icons/hicolor "$artifact/share/icons/hicolor"
+          fi
           if [ "$RUNNER_OS" = "Windows" ]; then
             7z a "../dist/$artifact.zip" "$artifact"
           else
             tar -cJf "../dist/$artifact.tar.xz" "$artifact"
           fi
+
+      # Lists the archive and fails when the freedesktop sidecars are
+      # missing. The Windows zip carries the embedded icon resource
+      # instead, so it has no leg here.
+      - name: Verify archives
+        if: runner.os == 'Linux'
+        run: |
+          artifact="kage-desktop-${{ matrix.name }}.tar.xz"
+          listing="$(tar -tJf "../dist/$artifact")"
+          echo "$listing"
+          for wanted in \
+            share/applications/kage.desktop \
+            share/icons/hicolor/16/apps/kage.png \
+            share/icons/hicolor/32/apps/kage.png \
+            share/icons/hicolor/48/apps/kage.png \
+            share/icons/hicolor/256/apps/kage.png; do
+            echo "$listing" | grep -qx "$artifact/$wanted" || {
+              echo "$artifact is missing $wanted" >&2
+              exit 1
+            }
+          done
 
       - name: Subjects
         id: subjects

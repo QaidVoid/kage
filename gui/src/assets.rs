@@ -39,7 +39,8 @@ static GLYPH: &[u8] = include_bytes!("../assets/brand/kage-glyph.svg");
 
 /// The dark-palette gradient face bytes, rendered by `resvg` from the
 /// same outline and the palette's orb stops.
-static GLYPH_FACE_SHADOW_PNG: &[u8] = include_bytes!("../assets/brand/kage-glyph-shadow.png");
+pub(crate) static GLYPH_FACE_SHADOW_PNG: &[u8] =
+    include_bytes!("../assets/brand/kage-glyph-shadow.png");
 
 /// The dawn-palette gradient face bytes.
 static GLYPH_FACE_DAWN_PNG: &[u8] = include_bytes!("../assets/brand/kage-glyph-dawn.png");

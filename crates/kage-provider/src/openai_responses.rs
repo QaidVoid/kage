@@ -237,7 +237,7 @@ fn convert_user_parts(blocks: &[Content]) -> Vec<Value> {
         .iter()
         .filter_map(|c| match c {
             Content::Text { text } => Some(serde_json::json!({"type":"input_text","text":text})),
-            Content::Image { source, .. } => Some(image_part(source)),
+            Content::Image { source, mime } => Some(image_part(source, mime)),
             _ => None,
         })
         .collect()
@@ -320,16 +320,19 @@ fn convert_tool_result_items(blocks: &[Content]) -> Vec<Value> {
         .collect()
 }
 
-fn image_part(source: &kage_core::ImageSource) -> Value {
+fn image_part(source: &kage_core::ImageSource, mime: &str) -> Value {
     match source {
         kage_core::ImageSource::Url { url } => serde_json::json!({
             "type": "input_image",
             "image_url": url,
         }),
-        kage_core::ImageSource::Base64 { data } => serde_json::json!({
-            "type": "input_image",
-            "image_url": format!("data:image/png;base64,{data}"),
-        }),
+        kage_core::ImageSource::Base64 { data } => {
+            let mime = if mime.is_empty() { "image/png" } else { mime };
+            serde_json::json!({
+                "type": "input_image",
+                "image_url": format!("data:{mime};base64,{data}"),
+            })
+        }
     }
 }
 
@@ -346,6 +349,10 @@ pub struct ResponsesStream {
     /// event); subsequent argument deltas append to `args` and emit
     /// `ToolCallArgsDelta` against the same id.
     tool_calls: BTreeMap<usize, ToolCallBuilder>,
+    /// Argument deltas that arrived before their `output_item.added`,
+    /// buffered per `output_index` and drained into the builder when
+    /// the item finally starts.
+    pre_add: BTreeMap<usize, String>,
     finish_reason: StopReason,
     usage: kage_core::TokenUsage,
 }
@@ -366,6 +373,7 @@ impl ResponsesStream {
             done: false,
             started: false,
             tool_calls: BTreeMap::new(),
+            pre_add: BTreeMap::new(),
             finish_reason: StopReason::Other,
             usage: kage_core::TokenUsage::default(),
         }
@@ -373,7 +381,12 @@ impl ResponsesStream {
 
     fn process_chunk(&mut self, data: &str) {
         if data.trim() == "[DONE]" {
-            self.emit_message_end();
+            // A DONE-only stream invents no turn, matching the Chat
+            // Completions provider.
+            if self.started {
+                self.emit_message_end();
+            }
+            self.done = true;
             return;
         }
         let value: Value = match serde_json::from_str(data) {
@@ -469,8 +482,20 @@ impl ResponsesStream {
                 args: String::new(),
             },
         );
-        self.pending
-            .push_back(Ok(ProviderEvent::ToolCallStart { id, name }));
+        self.pending.push_back(Ok(ProviderEvent::ToolCallStart {
+            id: id.clone(),
+            name,
+        }));
+        if let Some(buffered) = self.pre_add.remove(&index)
+            && !buffered.is_empty()
+        {
+            let entry = self.tool_calls.get_mut(&index).expect("just inserted");
+            entry.args.push_str(&buffered);
+            self.pending.push_back(Ok(ProviderEvent::ToolCallArgsDelta {
+                id,
+                partial: buffered,
+            }));
+        }
     }
 
     fn on_text_delta(&mut self, value: &Value) {
@@ -509,6 +534,7 @@ impl ResponsesStream {
             return;
         }
         let Some(entry) = self.tool_calls.get_mut(&index) else {
+            self.pre_add.entry(index).or_default().push_str(delta);
             return;
         };
         entry.args.push_str(delta);
@@ -1092,6 +1118,72 @@ mod tests {
         let mut s = ResponsesStream::new(Box::new(std::io::Cursor::new(bytes)), cancel);
         assert!(matches!(s.next(), Some(Err(ProviderError::Cancelled))));
         assert!(s.next().is_none());
+    }
+
+    /// A stream whose first frame is `[DONE]` invents no turn, matching
+    /// the Chat Completions provider.
+    #[test]
+    fn done_before_any_output_invents_nothing() {
+        let mut events = stream_from_bytes(b"data: [DONE]\n\n");
+        assert!(events.next().is_none());
+    }
+
+    fn data_url(blocks: &[Content]) -> String {
+        let block = convert_user_parts(blocks).remove(0);
+        block["image_url"].as_str().expect("image url").to_owned()
+    }
+
+    #[test]
+    fn base64_images_forward_their_mime() {
+        let image = |mime: &str| Content::Image {
+            source: kage_core::ImageSource::Base64 {
+                data: "QUJD".into(),
+            },
+            mime: mime.to_owned(),
+        };
+        assert_eq!(
+            data_url(&[image("image/jpeg")]),
+            "data:image/jpeg;base64,QUJD"
+        );
+        assert_eq!(
+            data_url(&[image("image/webp")]),
+            "data:image/webp;base64,QUJD"
+        );
+        assert_eq!(data_url(&[image("")]), "data:image/png;base64,QUJD");
+    }
+
+    /// Argument deltas that arrive before their `output_item.added`
+    /// are buffered and fold into the same call once it starts.
+    #[test]
+    fn args_deltas_before_output_item_added_are_buffered() {
+        let bytes: &[u8] = b"data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"path\\\":\"}\n\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\"}}\n\ndata: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"\\\"/tmp\\\"}\"}\n\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\"}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":3}}}\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+        let start = events
+            .iter()
+            .position(|e| matches!(e, ProviderEvent::ToolCallStart { .. }))
+            .expect("ToolCallStart present");
+        let deltas: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::ToolCallArgsDelta { partial, .. } => Some(partial.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, ["{\"path\":", "\"/tmp\"}"]);
+        assert!(
+            events[..start]
+                .iter()
+                .all(|e| !matches!(e, ProviderEvent::ToolCallArgsDelta { .. })),
+            "no args delta precedes the start"
+        );
+        let end = events
+            .iter()
+            .find(|e| matches!(e, ProviderEvent::ToolCallEnd { .. }))
+            .expect("ToolCallEnd present");
+        if let ProviderEvent::ToolCallEnd { id, input } = end {
+            assert_eq!(id.0, "call_1");
+            assert_eq!(input["path"], "/tmp");
+        }
     }
 
     #[test]

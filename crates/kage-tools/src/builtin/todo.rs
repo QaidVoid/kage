@@ -70,8 +70,11 @@ pub struct TodoItem {
 }
 
 impl TodoItem {
-    /// The task as stored, with its title trimmed and bounded. An
-    /// empty title is an error rather than a blank line in the list.
+    /// The task as stored, with its title trimmed and bounded and its
+    /// `id` and `owner` bounded the same way. A `blockedBy` longer than
+    /// [`MAX_ITEMS`] is refused rather than cut, since its entries are
+    /// references; each entry string is still bounded. An empty title
+    /// is an error rather than a blank line in the list.
     fn checked(&self) -> Result<TodoItem, ToolError> {
         let title = self.title.trim();
         if title.is_empty() {
@@ -79,19 +82,30 @@ impl TodoItem {
                 "every todo needs a non-empty title".to_owned(),
             ));
         }
+        let blocked_by = match &self.blocked_by {
+            Some(ids) if ids.len() > MAX_ITEMS => {
+                return Err(ToolError::InvalidInput(format!(
+                    "blockedBy has {} entries, at most {MAX_ITEMS} are kept",
+                    ids.len()
+                )));
+            }
+            other => other
+                .clone()
+                .map(|ids| ids.iter().map(|id| truncate(id)).collect()),
+        };
         Ok(TodoItem {
             title: truncate(title),
             status: self.status,
-            id: self.id.clone(),
-            owner: self.owner.clone(),
-            blocked_by: self.blocked_by.clone(),
+            id: self.id.as_deref().map(truncate),
+            owner: self.owner.as_deref().map(truncate),
+            blocked_by,
         })
     }
 }
 
 /// Cut `text` to `MAX_TITLE` characters, never mid-character. A longer
-/// title is cut rather than refused: it is a display line, and the
-/// model's intent survives the tail.
+/// string is cut rather than refused: these are display lines and
+/// references, and the model's intent survives the tail.
 fn truncate(text: &str) -> String {
     if text.chars().count() <= MAX_TITLE {
         return text.to_owned();
@@ -515,6 +529,70 @@ mod tests {
             .collect();
         let err = run(TodoList::new(), serde_json::json!({ "todos": todos })).unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput(_)), "{err:?}");
+    }
+
+    /// An oversized `id` or `owner` is stored truncated, so the stored
+    /// list and its structured output stay bounded.
+    #[test]
+    fn an_over_long_id_and_owner_are_truncated() {
+        let todos = TodoList::new();
+        let big = "x".repeat(1024 * 1024);
+        let out = run(
+            todos,
+            serde_json::json!({"todos": [
+                {"title": "a", "status": "pending", "id": big, "owner": big}
+            ]}),
+        )
+        .unwrap();
+        let stored = out.structured.unwrap();
+        assert_eq!(stored[0]["id"].as_str().unwrap().chars().count(), MAX_TITLE);
+        assert_eq!(
+            stored[0]["owner"].as_str().unwrap().chars().count(),
+            MAX_TITLE
+        );
+    }
+
+    #[test]
+    fn blocked_by_entries_are_truncated_to_the_title_limit() {
+        let todos = TodoList::new();
+        let long = "y".repeat(MAX_TITLE + 10);
+        let out = run(
+            todos,
+            serde_json::json!({"todos": [
+                {"title": "a", "status": "pending", "blockedBy": [long]}
+            ]}),
+        )
+        .unwrap();
+        let stored = out.structured.unwrap();
+        assert_eq!(
+            stored[0]["blockedBy"][0].as_str().unwrap().chars().count(),
+            MAX_TITLE
+        );
+    }
+
+    /// A `blockedBy` over the item cap is refused, and the previous
+    /// list survives the rejected write.
+    #[test]
+    fn a_blocked_by_over_the_cap_is_refused_and_keeps_the_old_list() {
+        let todos = TodoList::new();
+        run(
+            todos.clone(),
+            serde_json::json!({"todos": [item("keep", "done")]}),
+        )
+        .unwrap();
+        let ids: Vec<String> = (0..=MAX_ITEMS).map(|i| format!("i{i}")).collect();
+        let err = run(
+            todos.clone(),
+            serde_json::json!({"todos": [
+                {"title": "a", "status": "pending", "blockedBy": ids}
+            ]}),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput(_)), "{err:?}");
+        assert_eq!(
+            run(todos, serde_json::json!({})).unwrap().text,
+            "Current todo list:\n  [x] keep"
+        );
     }
 
     #[test]

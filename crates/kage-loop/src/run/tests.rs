@@ -2036,3 +2036,317 @@ fn sleep_cancelable_returns_true_after_an_uncancelled_wait() {
         Duration::from_millis(20)
     ));
 }
+
+/// A context whose workdir is relative (the historical `.` fallback for
+/// a failing `current_dir`) must fail the run instead of silently making
+/// whatever the process CWD later is the session root.
+#[test]
+fn run_rejects_a_relative_workdir_instead_of_silently_using_it() {
+    let mock = MockProvider::replaying(vec![]);
+    let mut cx = AgentContext::new("mock:m", "");
+    cx.workdir = std::path::PathBuf::from(".");
+    cx.history.push(Arc::new(user_msg("hi")));
+    let cancel = CancelFlag::new();
+
+    let mut errors = Vec::new();
+    let res = run(
+        &mock,
+        &ToolRegistry::new(),
+        &mut cx,
+        LoopConfig::default(),
+        &mut NoopHooks,
+        &cancel,
+        |ev| {
+            if let LoopEvent::Error { kind } = ev {
+                errors.push(kind);
+            }
+        },
+    );
+    match res {
+        Err(LoopError::Other { message }) => {
+            assert!(message.contains("not absolute"), "{message}");
+        }
+        other => panic!("expected a workdir error, got {other:?}"),
+    }
+    assert_eq!(errors.len(), 1);
+    assert_eq!(mock.call_count(), 0, "provider never called");
+}
+
+#[test]
+fn an_absolute_workdir_runs_normally() {
+    let mock = MockProvider::replaying(vec![Ok(ProviderEvent::MessageEnd {
+        stop_reason: StopReason::EndTurn,
+        usage: TokenUsage::default(),
+    })]);
+    let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
+    cx.history.push(Arc::new(user_msg("hi")));
+
+    let res = run(
+        &mock,
+        &ToolRegistry::new(),
+        &mut cx,
+        LoopConfig::default(),
+        &mut NoopHooks,
+        &CancelFlag::new(),
+        |_| {},
+    );
+    assert!(res.is_ok());
+    assert_eq!(mock.call_count(), 1);
+}
+
+/// The opt-in `max_turns` failsafe stops the run with an error after the
+/// cap, answering any pending tool calls so history carries no dangling
+/// tool_use.
+#[test]
+fn max_turns_stops_the_run_after_the_cap() {
+    let call_id = kage_core::ToolCallId::new("call_1");
+    let mock = MockProvider::sequence(vec![
+        good_turn(),
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::ToolCallStart {
+                id: call_id.clone(),
+                name: "static".into(),
+            }),
+            Ok(ProviderEvent::ToolCallEnd {
+                id: call_id.clone(),
+                input: serde_json::json!({}),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::ToolUse,
+                usage: TokenUsage::default(),
+            }),
+        ],
+        vec![Ok(ProviderEvent::MessageEnd {
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        })],
+    ]);
+    let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
+    cx.history.push(Arc::new(user_msg("go")));
+    let cfg = LoopConfig {
+        max_turns: Some(2),
+        ..LoopConfig::default()
+    };
+    let registry = ToolRegistry::new().with(std::sync::Arc::new(StaticTool));
+    let mut hooks = AlwaysFollowup;
+
+    let res = run(
+        &mock,
+        &registry,
+        &mut cx,
+        cfg,
+        &mut hooks,
+        &CancelFlag::new(),
+        |_| {},
+    );
+    match res {
+        Err(LoopError::Other { message }) => {
+            assert!(message.contains("turn limit"), "{message}");
+        }
+        other => panic!("expected a turn-limit error, got {other:?}"),
+    }
+    assert_eq!(mock.call_count(), 2, "the third turn never ran");
+    // The pending call of the capped turn is answered synthetically.
+    let answered = cx
+        .history
+        .iter()
+        .flat_map(|m| &m.content)
+        .any(|c| matches!(c, Content::ToolResultBlock { is_error: true, .. }));
+    assert!(answered, "the pending tool call must be answered");
+}
+
+#[test]
+fn max_turns_none_keeps_the_run_going() {
+    let mock = MockProvider::sequence(vec![good_turn(), good_turn()]);
+    let mut cx = AgentContext::new("mock:m", "");
+    cx.history.push(Arc::new(user_msg("hi")));
+    let cfg = LoopConfig::default();
+    let mut hooks = OneFollowup(true);
+
+    let res = run(
+        &mock,
+        &ToolRegistry::new(),
+        &mut cx,
+        cfg,
+        &mut hooks,
+        &CancelFlag::new(),
+        |_| {},
+    );
+    assert!(res.is_ok(), "default config has no iteration cap");
+    assert_eq!(mock.call_count(), 2);
+}
+
+/// An always-producing hook must not hang the drain: the All-mode cap
+/// stops it, appends a truncation note, and drops the overflow.
+#[test]
+fn drain_messages_stops_at_the_cap_and_appends_a_note() {
+    let cancel = CancelFlag::new();
+    let mut polls = 0u32;
+    let text = drain_messages(SteeringMode::All, &cancel, || {
+        polls += 1;
+        Some(format!("m{}", polls - 1))
+    })
+    .unwrap()
+    .expect("an always-producing hook yields text");
+    assert_eq!(polls, 65, "the cap stops the poll loop");
+    assert!(text.starts_with("m0"));
+    assert!(text.contains("\nm63"), "64 messages made it in: {text}");
+    assert!(!text.contains("\nm64"), "the overflow is dropped");
+    assert!(text.contains("stopped draining after 64"));
+}
+
+#[test]
+fn drain_messages_polls_cancel_between_messages() {
+    let cancel = CancelFlag::new();
+    let mut polls = 0u32;
+    let res = drain_messages(SteeringMode::All, &cancel, || {
+        polls += 1;
+        if polls == 3 {
+            cancel.cancel();
+        }
+        Some(format!("m{polls}"))
+    });
+    assert!(matches!(res, Err(LoopError::Cancelled)));
+    assert_eq!(polls, 3, "cancel trips out of a never-ending drain");
+}
+
+/// End to end: a 100-message steering queue in All mode drains 64 on the
+/// first turn (with the truncation note) and the rest on the next.
+#[test]
+fn steering_all_mode_caps_the_drain_per_turn() {
+    struct BigQueue(std::collections::VecDeque<String>);
+    impl Hooks for BigQueue {
+        fn get_steering(&mut self) -> Option<String> {
+            self.0.pop_front()
+        }
+    }
+    /// Splits steering and followup across two hook values, since a
+    /// single `Hooks` impl cannot borrow two mutable states here.
+    struct SplitHooks<'a> {
+        steering: &'a mut BigQueue,
+        followup: &'a mut OneShotFollowup,
+    }
+    impl Hooks for SplitHooks<'_> {
+        fn get_steering(&mut self) -> Option<String> {
+            self.steering.get_steering()
+        }
+        fn get_followup(&mut self) -> Option<String> {
+            self.followup.get_followup()
+        }
+    }
+    let mock = MockProvider::sequence(vec![good_turn(), good_turn()]);
+    let mut cx = AgentContext::new("mock:m", "");
+    cx.history.push(Arc::new(user_msg("go")));
+    let cfg = LoopConfig {
+        steering_mode: SteeringMode::All,
+        ..LoopConfig::default()
+    };
+    let queue: std::collections::VecDeque<String> = (0..100).map(|i| format!("note {i}")).collect();
+    let mut steering = BigQueue(queue);
+    let mut followup = OneShotFollowup {
+        text: Some("ignored".into()),
+    };
+    let mut hooks = SplitHooks {
+        steering: &mut steering,
+        followup: &mut followup,
+    };
+
+    run(
+        &mock,
+        &ToolRegistry::new(),
+        &mut cx,
+        cfg,
+        &mut hooks,
+        &CancelFlag::new(),
+        |_| {},
+    )
+    .unwrap();
+
+    let requests = mock.requests().into_iter().collect::<Vec<_>>();
+    assert_eq!(requests.len(), 2);
+    // The last note-prefixed message: earlier drains stay in the
+    // history, so every request after the first also carries them.
+    let steering_text = |req: &kage_provider::StreamRequest| {
+        req.messages
+            .iter()
+            .filter_map(|m| match m.content.first() {
+                Some(Content::Text { text }) if text.starts_with("note ") => Some(text.clone()),
+                _ => None,
+            })
+            .last()
+            .expect("a drained steering message")
+    };
+    let first = steering_text(&requests[0]);
+    assert!(first.contains("note 0"));
+    assert!(first.contains("note 63"));
+    assert!(first.contains("stopped draining after 64"));
+    let second = steering_text(&requests[1]);
+    assert!(second.contains("note 99"));
+    assert!(!second.contains("stopped draining"), "{second}");
+}
+
+/// Pins the retry contract: the retried turn opens a new message id and
+/// streams from scratch, so receivers must discard everything since the
+/// failed attempt's `MessageStart`.
+#[test]
+fn provider_retry_uses_a_fresh_message_id_and_replays_no_deltas() {
+    let mock = MockProvider::sequence(vec![
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::TextDelta {
+                delta: "partial ".into(),
+            }),
+            Err(kage_provider::ProviderError::RateLimited {
+                retry_after: Some(Duration::from_millis(1)),
+            }),
+        ],
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::TextDelta {
+                delta: "complete".into(),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        ],
+    ]);
+    let mut cx = AgentContext::new("mock:m", "");
+    cx.history.push(Arc::new(user_msg("hello")));
+
+    let mut events = Vec::new();
+    run(
+        &mock,
+        &ToolRegistry::new(),
+        &mut cx,
+        LoopConfig::default(),
+        &mut NoopHooks,
+        &CancelFlag::new(),
+        |ev| events.push(ev),
+    )
+    .unwrap();
+
+    let starts: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            LoopEvent::MessageStart { id } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts.len(), 2, "one start per attempt");
+    assert_ne!(starts[0], starts[1], "the retry must reuse no message id");
+    let second_attempt_deltas: Vec<&str> = events
+        .iter()
+        .skip_while(|e| !matches!(e, LoopEvent::ProviderRetry { .. }))
+        .filter_map(|e| match e {
+            LoopEvent::TextDelta { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        second_attempt_deltas,
+        ["complete"],
+        "the retry streams the full turn, no dropped-attempt deltas replay"
+    );
+}

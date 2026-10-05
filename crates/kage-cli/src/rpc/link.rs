@@ -24,9 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 
-use kage_core::protocol::{
-    Command, CommandKind, Envelope, HostEvent, NoticeLevel, PermissionDecision,
-};
+use kage_core::protocol::{Command, CommandKind, Envelope, HostEvent, NoticeLevel};
 use kage_core::sync::lock;
 use kage_core::{MessageId, SessionId};
 use serde::{Deserialize, Serialize};
@@ -282,7 +280,7 @@ fn unavailable(kind: &CommandKind) -> Option<&'static str> {
 }
 
 /// The link is gone: stop forwarding, forget its prompts, release the
-/// session, and deny the asks no other client is left to answer.
+/// session, and decline the asks no other client is left to answer.
 fn detach(host: &Host, root: SessionId, connection: u64, subscription: SubscriptionId) {
     host.engine.unsubscribe(subscription);
     host.release_prompts_of(connection);
@@ -290,16 +288,7 @@ fn detach(host: &Host, root: SessionId, connection: u64, subscription: Subscript
     if host.held(root) {
         return;
     }
-    let asks = lock(&host.live).asks_under(root);
-    for (session, request_id) in asks {
-        host.engine.send(Command::to(
-            session,
-            CommandKind::ResolvePermission {
-                request_id,
-                decision: PermissionDecision::Deny,
-            },
-        ));
-    }
+    host.decline_asks_under(root);
 }
 
 fn notice(session: SessionId, text: String) -> Envelope {

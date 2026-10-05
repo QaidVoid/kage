@@ -12,6 +12,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::atomic::atomic_write;
+use crate::path_lock::with_path_lock;
 use crate::{Tool, ToolContext, ToolError, schema_for};
 
 /// Input shape for the `write` tool.
@@ -57,7 +58,15 @@ impl Tool for WriteTool {
     ) -> Result<ToolOutput, ToolError> {
         let input: WriteInput = serde_json::from_value(input)?;
         let target = cx.resolve_path(Path::new(&input.path))?;
+        // The exists check and the rename are one sequence: without the
+        // lock, two concurrent non-overwriting writes could both pass
+        // the check and both land, silently losing one.
+        with_path_lock(&target, || self.write_locked(&input, &target))
+    }
+}
 
+impl WriteTool {
+    fn write_locked(&self, input: &WriteInput, target: &Path) -> Result<ToolOutput, ToolError> {
         if target.exists() && !input.overwrite {
             return Ok(ToolOutput {
                 is_error: true,
@@ -71,7 +80,7 @@ impl Tool for WriteTool {
         }
 
         let parent = target.parent().ok_or_else(|| ToolError::Path {
-            path: target.clone(),
+            path: target.to_path_buf(),
             reason: "target has no parent directory".into(),
         })?;
         if !parent.exists() {
@@ -263,5 +272,43 @@ mod tests {
             fs::read_to_string(dir.path().join("out2.txt")).unwrap(),
             "hi"
         );
+    }
+
+    /// Two non-overwriting writes racing onto one fresh path: the
+    /// per-path lock must let exactly one through and keep the other
+    /// from silently replacing the winner.
+    #[test]
+    fn concurrent_writes_without_overwrite_admit_exactly_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path();
+        let results: Vec<ToolOutput> = std::thread::scope(|scope| {
+            ["aaa", "bbbbb"]
+                .map(|content| {
+                    scope.spawn(move || {
+                        let cancel = CancelFlag::new();
+                        let cx = ToolContext::new(workdir, &cancel);
+                        WriteTool
+                            .execute(
+                                serde_json::json!({"path":"race.txt","content":content}),
+                                &cx,
+                            )
+                            .unwrap()
+                    })
+                })
+                .map(|handle| handle.join().unwrap())
+                .into()
+        });
+        assert_eq!(
+            results.iter().filter(|out| !out.is_error).count(),
+            1,
+            "exactly one write must land: {results:?}"
+        );
+        let winner = results.iter().find(|out| !out.is_error).unwrap();
+        let bytes = winner.structured.clone().unwrap()["bytes"]
+            .as_u64()
+            .unwrap();
+        let content = fs::read_to_string(dir.path().join("race.txt")).unwrap();
+        assert_eq!(content.len() as u64, bytes);
+        assert!(content == "aaa" || content == "bbbbb", "{content:?}");
     }
 }

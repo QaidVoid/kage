@@ -11,7 +11,7 @@ use kage_acp::acp::SessionConfigSelectOption;
 use kage_acp::agent::serve_agent;
 use kage_core::config::{Config, McpServer as McpSpec};
 use kage_core::permissions::PermissionAction;
-use kage_core::protocol::{Command, CommandKind, Event, HostEvent, SessionId};
+use kage_core::protocol::{Command, CommandKind, Event, HostEvent, PermissionDecision, SessionId};
 use kage_core::sync::lock;
 use kage_jsonrpc::RpcError;
 use kage_loop::{AgentContext, LoopConfig};
@@ -276,6 +276,27 @@ impl Host {
     /// agent tree hangs under.
     pub(super) fn held(&self, session: SessionId) -> bool {
         lock(&self.live).held(session)
+    }
+
+    /// Declines every open ask under `root`: a permission ask is
+    /// denied, a question ask is answered with no answers. Sent once no
+    /// connection is left to answer, so runs parked on an ask go on
+    /// instead of waiting for a client that is gone.
+    pub(super) fn decline_asks_under(&self, root: SessionId) {
+        for ask in lock(&self.live).asks_under(root) {
+            let kind = if ask.question {
+                CommandKind::AnswerQuestion {
+                    request_id: ask.request_id,
+                    answers: None,
+                }
+            } else {
+                CommandKind::ResolvePermission {
+                    request_id: ask.request_id,
+                    decision: PermissionDecision::Deny,
+                }
+            };
+            self.engine.send(Command::to(ask.session, kind));
+        }
     }
 
     /// The next connection's id on this host.

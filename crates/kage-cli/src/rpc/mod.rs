@@ -68,7 +68,7 @@ use kage_acp::acp::{
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, Supported,
     SwarmResumeRequest, SwarmResumeResponse, ThemesRequest, ThemesResult,
 };
-use kage_acp::agent::{Agent, PromptContext, send_update};
+use kage_acp::agent::{Agent, PromptContext};
 use kage_core::config::{Config, McpServer as McpSpec};
 use kage_core::permissions::PermissionAction;
 use kage_core::protocol::{AgentTree, Command, CommandKind, Delivery, RunOutcome};
@@ -76,7 +76,7 @@ use kage_core::sync::lock;
 use kage_core::{LoopError, SessionId, StopReason as CoreStopReason};
 use kage_jsonrpc::{Peer, RpcError};
 
-use bridge::{Ask, AskSet, Bridge};
+use bridge::{Ask, AskSet, Bridge, HeldUpdates};
 use content::prompt_content;
 use host::Host;
 use live::Seed;
@@ -199,10 +199,10 @@ type Waiters = Arc<Mutex<HashMap<SessionId, Vec<mpsc::Sender<PromptEnd>>>>>;
 type ShownBySession = Arc<Mutex<HashMap<SessionId, Shown>>>;
 
 /// Updates for client sessions whose opening response is not written
-/// yet. Sending them earlier would reach the client before it knows the
-/// session. Capped per session at [`bridge::HELD_CAP`]; later updates
-/// are dropped.
-type Held = Arc<Mutex<HashMap<SessionId, Vec<SessionUpdate>>>>;
+/// yet, capped per session at [`bridge::HELD_CAP`]; later updates are
+/// dropped and counted. Sending them earlier would reach the client
+/// before it knows the session.
+type Held = bridge::HeldMap;
 
 /// The ACP agent one connection on the host is served through. Holds the
 /// per-connection maps; the engine and the session setup live in the
@@ -328,9 +328,11 @@ impl CliAcpAgent {
         let shown = Shown {
             settings: settings.clone(),
             catching_up: false,
+            changed: Default::default(),
+            swallowed: 0,
         };
         lock(&self.shown).insert(spec.id, shown);
-        lock(&self.held).insert(spec.id, Vec::new());
+        lock(&self.held).insert(spec.id, HeldUpdates::default());
         lock(&self.ids).insert(client_id, spec.id);
         self.host.launch(spec, settings);
         options
@@ -375,24 +377,33 @@ impl CliAcpAgent {
             .drain()
             .flat_map(|(session, asks)| asks.into_iter().map(move |ask| (session, ask)))
             .collect();
-        let withdrawn: Vec<(SessionId, kage_core::protocol::RequestId)> = asks
+        let withdrawn: Vec<(SessionId, kage_core::protocol::RequestId, bool)> = asks
             .into_iter()
-            .map(|(session, ask)| (session, ask.stop()))
+            .map(|(session, ask)| {
+                let question = ask.is_question();
+                (session, ask.stop(), question)
+            })
             .collect();
         let sessions: Vec<SessionId> = lock(&self.ids).by_engine.keys().copied().collect();
         for id in sessions {
             self.host.release(id);
         }
-        for (session, request_id) in withdrawn {
-            if !self.host.held(session) {
-                self.host.engine.send(Command::to(
-                    session,
-                    CommandKind::ResolvePermission {
-                        request_id,
-                        decision: kage_core::protocol::PermissionDecision::Deny,
-                    },
-                ));
+        for (session, request_id, question) in withdrawn {
+            if self.host.held(session) {
+                continue;
             }
+            let kind = if question {
+                CommandKind::AnswerQuestion {
+                    request_id,
+                    answers: None,
+                }
+            } else {
+                CommandKind::ResolvePermission {
+                    request_id,
+                    decision: kage_core::protocol::PermissionDecision::Deny,
+                }
+            };
+            self.host.engine.send(Command::to(session, kind));
         }
     }
 }
@@ -528,6 +539,12 @@ impl Agent for CliAcpAgent {
         lock(&self.shown).remove(&id);
         lock(&self.held).remove(&id);
         self.host.release(id);
+        if !self.host.held(id) {
+            // No connection is left to answer the asks parked under the
+            // session, so they are declined and the session closes once
+            // idle.
+            self.host.decline_asks_under(id);
+        }
         Ok(CloseSessionResponse {})
     }
 
@@ -545,6 +562,8 @@ impl Agent for CliAcpAgent {
                 .settings
                 .apply(&self.host.models(), &req.config_id, &req.value)?;
             shown.catching_up = true;
+            shown.changed.absorb(&commands);
+            shown.swallowed = 0;
             (
                 commands,
                 config_options(&self.host.models(), &shown.settings),
@@ -813,10 +832,8 @@ impl Agent for CliAcpAgent {
         let Some(id) = lock(&self.ids).by_client.get(session_id).copied() else {
             return;
         };
-        let mut held = lock(&self.held);
-        for update in held.remove(&id).unwrap_or_default() {
-            send_update(&self.peer, session_id, update);
-        }
+        let held = lock(&self.held).remove(&id).unwrap_or_default();
+        bridge::flush_held(&self.peer, session_id, held);
     }
 
     fn detached(&self) {

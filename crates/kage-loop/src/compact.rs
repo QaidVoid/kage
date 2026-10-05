@@ -81,6 +81,15 @@ fn run_compaction<F: FnMut(LoopEvent)>(
     while split > 0 && cx.history[split].role == Role::ToolResult {
         split -= 1;
     }
+    if split == 0 && cx.history[0].role == Role::Assistant {
+        // Degenerate shape: the keep window's parent is the very first
+        // turn, so nothing summarizable sits before it. Summarize the
+        // parent tool-call turn together with all of its results, which
+        // never tears a ToolResult from its parent.
+        split = (1..cx.history.len())
+            .find(|&index| cx.history[index].role != Role::ToolResult)
+            .unwrap_or(cx.history.len());
+    }
     if split == 0 {
         return Ok(false);
     }
@@ -115,6 +124,16 @@ fn run_compaction<F: FnMut(LoopEvent)>(
             cancel,
         )?,
     };
+    // An empty summary (a provider stream that ended without text, or an
+    // override of blanks) must not splice an empty frame over the
+    // summarized turns, which would silently drop the conversation.
+    // Surface it as a transient provider failure and return before the
+    // splice so history stays intact.
+    if summary_text.trim().is_empty() {
+        return Err(LoopError::Provider {
+            message: "compaction summary was empty; history left intact".to_owned(),
+        });
+    }
     // Frame the returned text in place rather than formatting a copy.
     let mut summary_body = summary_text;
     summary_body.insert_str(0, COMPACTION_SUMMARY_PREFIX);
@@ -131,7 +150,14 @@ fn run_compaction<F: FnMut(LoopEvent)>(
     };
     cx.history
         .splice(..split, std::iter::once(Arc::new(summary_msg)));
-    cx.budget = TokenBudget::default();
+    // Zero only the live context snapshot: the cumulative `used_*`
+    // counters are session-wide cost/audit totals that must survive a
+    // compaction. The next turn's `TokenBudget::add` re-snapshots
+    // `current_context` from real usage.
+    cx.budget = TokenBudget {
+        current_context: 0,
+        ..cx.budget
+    };
 
     emit(LoopEvent::Compaction {
         kept,
@@ -399,7 +425,44 @@ mod tests {
             |e| matches!(e, LoopEvent::Compaction { kept, summarized, .. }
                 if *kept == KEEP_RECENT && *summarized == 10 - KEEP_RECENT)
         ));
-        assert_eq!(cx.budget, TokenBudget::default());
+        assert_eq!(
+            cx.budget.used_input, 150_000,
+            "compaction must keep the cumulative cost totals"
+        );
+        assert_eq!(cx.budget.current_context, 0);
+    }
+
+    /// Compaction zeroes only the live context snapshot; the cumulative
+    /// `used_*` counters survive so modeline cost totals do not reset.
+    #[test]
+    fn compaction_preserves_cumulative_totals_and_zeroes_current_context() {
+        let provider = MockProvider::replaying(vec![
+            Ok(ProviderEvent::TextDelta {
+                delta: "summary".into(),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        ]);
+        let cancel = CancelFlag::new();
+        let mut hooks = NoopHooks;
+        let cfg = LoopConfig {
+            compaction_threshold: 0.5,
+            ..LoopConfig::default()
+        };
+        let mut cx = loaded_context(1_000, 10);
+        cx.budget.used_output = 500;
+        cx.budget.used_cache_read = 40;
+        cx.budget.current_context = 150_000;
+        cx.context_window = 200_000;
+
+        let ran = maybe_compact(&mut cx, cfg, &provider, &cancel, &mut hooks, &mut |_| {}).unwrap();
+        assert!(ran);
+        assert_eq!(cx.budget.used_input, 1_000);
+        assert_eq!(cx.budget.used_output, 500);
+        assert_eq!(cx.budget.used_cache_read, 40);
+        assert_eq!(cx.budget.current_context, 0);
     }
 
     #[test]
@@ -459,9 +522,21 @@ mod tests {
         )));
     }
 
+    /// A history that is nothing but one tool-call group longer than the
+    /// keep window used to refuse compaction forever. The fallback split
+    /// summarizes the parent turn together with all of its results in one
+    /// pass, so the group is never torn.
     #[test]
     fn nothing_summarizable_before_keep_window_compacts_nothing() {
-        let provider = MockProvider::replaying(vec![]);
+        let provider = MockProvider::replaying(vec![
+            Ok(ProviderEvent::TextDelta {
+                delta: "summary".into(),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        ]);
         let cancel = CancelFlag::new();
         let mut hooks = NoopHooks;
         let cfg = LoopConfig {
@@ -476,13 +551,112 @@ mod tests {
         };
         cx.context_window = 200_000;
         cx.history.push(Arc::new(assistant_tool_call("call_1")));
-        for _ in 0..4 {
+        for _ in 0..8 {
+            cx.history.push(Arc::new(tool_result("call_1")));
+        }
+
+        let mut events = Vec::new();
+        let ran = maybe_compact(&mut cx, cfg, &provider, &cancel, &mut hooks, &mut |ev| {
+            events.push(ev);
+        })
+        .unwrap();
+        assert!(ran, "the stuck shape must compact via the fallback split");
+        assert_eq!(cx.history.len(), 1, "the whole group is summarized");
+        assert!(
+            matches!(&cx.history[0].content[0], Content::Text { text } if text.contains("summary"))
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            LoopEvent::Compaction {
+                kept: 0,
+                summarized: 9,
+                ..
+            }
+        )));
+    }
+
+    /// Orphaned tool results with no assistant parent in history still
+    /// refuse to compact: there is no group boundary to fall back to.
+    #[test]
+    fn orphaned_results_without_an_assistant_still_refuse_compaction() {
+        let provider = MockProvider::replaying(vec![]);
+        let cancel = CancelFlag::new();
+        let mut hooks = NoopHooks;
+        let cfg = LoopConfig {
+            compaction_threshold: 0.5,
+            ..LoopConfig::default()
+        };
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.budget = TokenBudget {
+            used_input: 150_000,
+            current_context: 150_000,
+            ..Default::default()
+        };
+        cx.context_window = 200_000;
+        for _ in 0..8 {
             cx.history.push(Arc::new(tool_result("call_1")));
         }
 
         let ran = maybe_compact(&mut cx, cfg, &provider, &cancel, &mut hooks, &mut |_| {}).unwrap();
         assert!(!ran);
-        assert_eq!(cx.history.len(), 5, "history must be untouched");
+        assert_eq!(cx.history.len(), 8, "history must be untouched");
+    }
+
+    /// A summarizer stream that ends with zero text must abort before the
+    /// splice so the summarized conversation is never replaced by an
+    /// empty frame.
+    #[test]
+    fn empty_summary_from_provider_aborts_before_the_splice() {
+        let provider = MockProvider::replaying(vec![Ok(ProviderEvent::MessageEnd {
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        })]);
+        let cancel = CancelFlag::new();
+        let mut hooks = NoopHooks;
+        let cfg = LoopConfig {
+            compaction_threshold: 0.5,
+            ..LoopConfig::default()
+        };
+        let mut cx = loaded_context(150_000, 10);
+        cx.context_window = 200_000;
+
+        let mut events = Vec::new();
+        let res = maybe_compact(&mut cx, cfg, &provider, &cancel, &mut hooks, &mut |ev| {
+            events.push(ev);
+        });
+        assert!(matches!(res, Err(LoopError::Provider { .. })));
+        assert_eq!(cx.history.len(), 10, "history must stay intact");
+        assert!(
+            matches!(&cx.history[0].content[0], Content::Text { text } if text == "turn 0"),
+            "no turn may be replaced by the empty summary"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, LoopEvent::Compaction { .. }))
+        );
+    }
+
+    /// A whitespace-only `summary_override` hits the same guard as an
+    /// empty provider summary.
+    #[test]
+    fn empty_summary_override_aborts_before_the_splice() {
+        struct BlankOverride;
+        impl Hooks for BlankOverride {
+            fn prepare_compaction(&mut self, prep: &mut CompactionPrep) -> Result<(), String> {
+                prep.summary_override = Some("   \n\t".to_owned());
+                Ok(())
+            }
+        }
+        let provider = MockProvider::replaying(vec![]);
+        let cancel = CancelFlag::new();
+        let mut hooks = BlankOverride;
+        let mut cx = loaded_context(150_000, 10);
+        cx.context_window = 200_000;
+
+        let res = force_compact(&mut cx, &provider, &cancel, &mut hooks, &mut |_| {});
+        assert!(matches!(res, Err(LoopError::Provider { .. })));
+        assert_eq!(cx.history.len(), 10, "history must stay intact");
     }
 
     #[test]

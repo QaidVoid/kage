@@ -244,3 +244,151 @@ fn a_link_is_refused_what_it_may_not_touch() {
     link.until(|envelope| notice_with(envelope, "not part of the attached session"));
     assert!(hosts(&h.host, h.id));
 }
+
+#[test]
+fn a_link_detaching_denies_an_open_permission_ask() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let h = serve_paused(
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::TextDelta {
+                delta: "Hel".into(),
+            }),
+            Ok(ProviderEvent::ToolCallStart {
+                id: ToolCallId::new("call_1"),
+                name: "ls".into(),
+            }),
+        ],
+        vec![
+            Ok(ProviderEvent::ToolCallEnd {
+                id: ToolCallId::new("call_1"),
+                input: serde_json::json!({ "path": cwd }),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: CoreStopReason::ToolUse,
+                usage: TokenUsage::default(),
+            }),
+        ],
+        vec![text_turn("done"), text_turn("titled")],
+        dir.path(),
+        dir.path(),
+    );
+    let (done, prompt_end) = mpsc::channel();
+    let prompter = h.client.clone();
+    let params = serde_json::json!({
+        "sessionId": h.session,
+        "prompt": [{"type": "text", "text": "go"}],
+    });
+    std::thread::spawn(move || {
+        let _ =
+            done.send(prompter.request_timeout("session/prompt", params, Duration::from_secs(2)));
+    });
+    until(|| h.paused.is_parked());
+    h.release.send(()).unwrap();
+    let (_ask, _) = until_ask(&h.inbox, &mut Vec::new());
+
+    // The link is the only client left, so its detach declines the
+    // ask with the right command kind: a deny.
+    let mut link = LinkClient::attach(&h.host, h.id).unwrap();
+    link.until(|envelope| {
+        matches!(
+            host_event(envelope),
+            Some(HostEvent::PermissionRequested { .. })
+        )
+    });
+    let PausedHarness {
+        client,
+        inbox,
+        paused,
+        ..
+    } = h;
+    drop(client);
+    drop(inbox);
+    // The link still holds the session, so the connection detach
+    // leaves the ask alone.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        lock(&paused.requests).len(),
+        1,
+        "the ask stays open while the link holds the session"
+    );
+    drop(link);
+    until(|| lock(&paused.requests).len() >= 2);
+    let request = lock(&paused.requests)[1].clone();
+    let denied = request
+        .messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .find_map(|c| match c {
+            Content::ToolResultBlock {
+                call_id, is_error, ..
+            } if *call_id == ToolCallId::new("call_1") => Some(*is_error),
+            _ => None,
+        });
+    assert_eq!(denied, Some(true), "the ask was answered with a deny");
+    let response = prompt_end.recv_timeout(WAIT).unwrap();
+    assert!(response.is_err(), "the dropped client got an answer");
+}
+
+#[test]
+fn a_link_detaching_answers_an_open_question_with_no_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve_agents(
+        vec![
+            tool_turn("call_q", "ask_user_question", questions_input()),
+            text_turn("noted"),
+            text_turn("titled"),
+        ],
+        dir.path(),
+        dir.path(),
+        default_agents(),
+    );
+    let (done, prompt_end) = mpsc::channel();
+    let prompter = h.client.clone();
+    let params = serde_json::json!({
+        "sessionId": h.session,
+        "prompt": [{"type": "text", "text": "set it up"}],
+    });
+    std::thread::spawn(move || {
+        let _ =
+            done.send(prompter.request_timeout("session/prompt", params, Duration::from_secs(2)));
+    });
+    let (_ask, _) = until_ask(&h.inbox, &mut Vec::new());
+
+    let mut link = LinkClient::attach(&h.host, h.id).unwrap();
+    link.until(|envelope| {
+        matches!(
+            host_event(envelope),
+            Some(HostEvent::QuestionAsked { .. })
+        )
+    });
+    let Harness {
+        client,
+        inbox,
+        mock,
+        ..
+    } = h;
+    drop(client);
+    drop(inbox);
+    // The link still holds the session, so the connection detach
+    // leaves the question open.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        mock.requests().len(),
+        1,
+        "the question stays open while the link holds the session"
+    );
+    drop(link);
+    // The question ask was answered with no answers, so the tool
+    // reports the decline and the run goes on.
+    until(|| mock.requests().len() >= 2);
+    let sent = mock.requests()[1].messages.clone();
+    let declined = sent.iter().flat_map(|m| &m.content).any(|block| {
+        matches!(block, Content::ToolResultBlock { output, .. }
+            if output.starts_with("The user declined"))
+    });
+    assert!(declined, "{sent:#?}");
+    let response = prompt_end.recv_timeout(WAIT).unwrap();
+    assert!(response.is_err(), "the dropped client got an answer");
+}

@@ -42,6 +42,12 @@ pub enum ProviderError {
     /// The requested model id is not supported by this provider.
     #[error("model not supported: {0}")]
     UnknownModel(String),
+
+    /// kage's own machinery failed, such as a provider worker thread
+    /// panicking. Neither the provider's fault nor a cancel, and never
+    /// retried as a pipe problem.
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 impl ProviderError {
@@ -52,9 +58,9 @@ impl ProviderError {
     /// mid-body), rate limiting, and server-side 5xx / 408 / 429. A
     /// stalled stream surfaces here as [`Self::Transport`], so this is
     /// the gate the loop's auto-retry consults. Auth, decode,
-    /// unknown-model, an explicit cancel, and other 4xx are the
-    /// request's fault and never retried - resending only repeats the
-    /// failure.
+    /// unknown-model, an internal failure, an explicit cancel, and
+    /// other 4xx are the request's fault and never retried - resending
+    /// only repeats the failure.
     #[must_use]
     pub fn is_transient(&self) -> bool {
         match self {
@@ -62,7 +68,11 @@ impl ProviderError {
             Self::Http { status, .. } => {
                 *status == 408 || *status == 429 || (500..=599).contains(status)
             }
-            Self::Auth(_) | Self::Decode(_) | Self::Cancelled | Self::UnknownModel(_) => false,
+            Self::Auth(_)
+            | Self::Decode(_)
+            | Self::Cancelled
+            | Self::UnknownModel(_)
+            | Self::Internal(_) => false,
         }
     }
 
@@ -154,6 +164,7 @@ mod tests {
         assert!(!ProviderError::Decode("bad json".into()).is_transient());
         assert!(!ProviderError::Cancelled.is_transient());
         assert!(!ProviderError::UnknownModel("m".into()).is_transient());
+        assert!(!ProviderError::Internal("worker panicked".into()).is_transient());
     }
 
     #[test]

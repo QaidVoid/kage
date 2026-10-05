@@ -1481,3 +1481,379 @@ fn confined_dispatch_rejects_workdir_escape() {
         other => panic!("unexpected content: {other:?}"),
     }
 }
+
+/// Sleeps for a fixed duration and deliberately never polls the cancel
+/// flag, standing in for a plugin or MCP tool stuck in a tight loop.
+#[derive(Debug)]
+struct SleepsIgnoringCancel {
+    millis: u64,
+}
+
+impl Tool for SleepsIgnoringCancel {
+    fn name(&self) -> &'static str {
+        "ignores_cancel"
+    }
+    fn description(&self) -> &'static str {
+        "sleeps without ever polling cancel"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        _cx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(self.millis);
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Ok(ToolOutput {
+            is_error: false,
+            text: "finished".into(),
+            structured: None,
+            terminate: false,
+        })
+    }
+}
+
+/// A non-cooperative tool must not park the dispatch: cancel trips out of
+/// the wait and every unfinished call gets a synthesized Cancelled result.
+#[test]
+fn cancelable_wait_aborts_a_parallel_batch_that_ignores_cancel() {
+    let tools = ToolRegistry::new().with(Arc::new(SleepsIgnoringCancel { millis: 5_000 }));
+    let cancel = CancelFlag::new();
+    let canceller = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        canceller.cancel();
+    });
+    let mut hooks = NoopHooks;
+    let start = std::time::Instant::now();
+    let outcome = dispatch_tool_calls_parallel(
+        vec![
+            pending("ignores_cancel", serde_json::json!({"i": 0})),
+            pending("ignores_cancel", serde_json::json!({"i": 1})),
+        ],
+        &tools,
+        std::path::Path::new("/tmp"),
+        &cancel,
+        false,
+        MessageId::new(),
+        &mut hooks,
+        &mut |_| {},
+    );
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "dispatch parked on a tool that ignores cancel: {elapsed:?}"
+    );
+    assert_eq!(outcome.error, Some(LoopError::Cancelled));
+    assert_eq!(outcome.results.len(), 2);
+    for result in &outcome.results {
+        match &result.content[0] {
+            Content::ToolResultBlock {
+                output, is_error, ..
+            } => {
+                assert!(*is_error);
+                assert!(output.contains("cancelled"), "{output}");
+            }
+            other => panic!("unexpected content: {other:?}"),
+        }
+    }
+}
+
+/// Same guarantee for the sequential path: the running call is abandoned
+/// and the not-yet-started call is answered without running.
+#[test]
+fn cancelable_wait_aborts_a_sequential_batch_that_ignores_cancel() {
+    let tools = ToolRegistry::new().with(Arc::new(SleepsIgnoringCancel { millis: 5_000 }));
+    let cancel = CancelFlag::new();
+    let canceller = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        canceller.cancel();
+    });
+    let mut hooks = NoopHooks;
+    let start = std::time::Instant::now();
+    let outcome = dispatch_tool_calls(
+        vec![
+            pending("ignores_cancel", serde_json::json!({"i": 0})),
+            pending("ignores_cancel", serde_json::json!({"i": 1})),
+        ],
+        &tools,
+        std::path::Path::new("/tmp"),
+        &cancel,
+        false,
+        MessageId::new(),
+        &mut hooks,
+        &mut |_| {},
+    );
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "dispatch parked on a tool that ignores cancel: {elapsed:?}"
+    );
+    assert_eq!(outcome.error, Some(LoopError::Cancelled));
+    assert_eq!(outcome.results.len(), 2);
+    assert!(outcome.results.iter().all(|m| matches!(
+        &m.content[0],
+        Content::ToolResultBlock { is_error: true, .. }
+    )));
+}
+
+/// Counts concurrent executions and the peak, standing in for a host
+/// auditing thread usage.
+#[derive(Debug)]
+struct ConcurrencyProbe {
+    active: Arc<std::sync::atomic::AtomicUsize>,
+    peak: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Tool for ConcurrencyProbe {
+    fn name(&self) -> &'static str {
+        "probe"
+    }
+    fn description(&self) -> &'static str {
+        "tracks its concurrency peak"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        _cx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        use std::sync::atomic::Ordering;
+        let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(ToolOutput {
+            is_error: false,
+            text: "done".into(),
+            structured: None,
+            terminate: false,
+        })
+    }
+}
+
+/// An oversized batch runs in waves on the bounded pool: the concurrency
+/// peak never exceeds the worker count and every result keeps input order.
+#[test]
+fn worker_pool_bounds_concurrent_tool_threads() {
+    use std::sync::atomic::Ordering;
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let tools = ToolRegistry::new().with(Arc::new(ConcurrencyProbe {
+        active: Arc::clone(&active),
+        peak: Arc::clone(&peak),
+    }));
+    let calls: Vec<PendingToolCall> = (0..32)
+        .map(|i| PendingToolCall {
+            id: ToolCallId::new(format!("call_{i}")),
+            name: "probe".to_owned(),
+            input: serde_json::json!({"i": i}),
+        })
+        .collect();
+
+    let outcome = dispatch_tool_calls_parallel(
+        calls,
+        &tools,
+        std::path::Path::new("/tmp"),
+        &CancelFlag::new(),
+        false,
+        MessageId::new(),
+        &mut NoopHooks,
+        &mut |_| {},
+    );
+    assert!(outcome.error.is_none());
+    assert_eq!(outcome.results.len(), 32);
+    assert!(
+        peak.load(Ordering::SeqCst) <= MAX_TOOL_WORKERS,
+        "peak concurrency {} exceeded the pool",
+        peak.load(Ordering::SeqCst)
+    );
+    for (i, result) in outcome.results.iter().enumerate() {
+        match &result.content[0] {
+            Content::ToolResultBlock {
+                call_id,
+                output,
+                is_error,
+            } => {
+                assert_eq!(call_id.to_string(), format!("call_{i}"), "input order");
+                assert!(!*is_error && output == "done");
+            }
+            other => panic!("unexpected content: {other:?}"),
+        }
+    }
+}
+
+/// Emits far more updates than the progress channel holds, standing in
+/// for a chatty build tool against a slow host sink.
+#[derive(Debug)]
+struct ChattyTool;
+
+impl Tool for ChattyTool {
+    fn name(&self) -> &'static str {
+        "chatty"
+    }
+    fn description(&self) -> &'static str {
+        "emits one thousand updates"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        cx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        for i in 0..1_000 {
+            cx.update(ToolUpdate {
+                content: format!("step {i}"),
+                structured: None,
+            });
+        }
+        Ok(ToolOutput {
+            is_error: false,
+            text: "done".into(),
+            structured: None,
+            terminate: false,
+        })
+    }
+}
+
+/// The bounded progress channel applies backpressure instead of growing
+/// the queue: a slow host still receives every update, in order.
+#[test]
+fn bounded_progress_channel_delivers_every_update_under_a_slow_host() {
+    let tools = ToolRegistry::new().with(Arc::new(ChattyTool));
+    let mut updates = Vec::new();
+    let outcome = dispatch_tool_calls(
+        vec![pending("chatty", serde_json::json!({}))],
+        &tools,
+        std::path::Path::new("/tmp"),
+        &CancelFlag::new(),
+        false,
+        MessageId::new(),
+        &mut NoopHooks,
+        &mut |ev| {
+            if let LoopEvent::ToolUpdate { update, .. } = ev {
+                updates.push(update.content);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        },
+    );
+    assert!(outcome.error.is_none());
+    assert_eq!(updates.len(), 1_000, "every update is delivered");
+    assert_eq!(updates[0], "step 0");
+    assert_eq!(updates[999], "step 999");
+}
+
+/// Returns structured output sized by the `bytes` input, standing in for
+/// a tool returning bulky JSON alongside its text.
+#[derive(Debug)]
+struct StructuredTool;
+
+impl Tool for StructuredTool {
+    fn name(&self) -> &'static str {
+        "structured"
+    }
+    fn description(&self) -> &'static str {
+        "returns structured output of a requested size"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    fn execute(
+        &self,
+        input: serde_json::Value,
+        _cx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        let size = input["bytes"].as_u64().unwrap_or(0) as usize;
+        Ok(ToolOutput {
+            is_error: false,
+            text: "text".into(),
+            structured: Some(serde_json::json!({ "blob": "x".repeat(size) })),
+            terminate: false,
+        })
+    }
+}
+
+/// Structured output over the tool-result cap is dropped from the
+/// `ToolCallEnd` event; the persisted result message carries only the
+/// capped text either way.
+#[test]
+fn oversized_structured_output_is_dropped_from_the_end_event() {
+    let tools = ToolRegistry::new().with(Arc::new(StructuredTool));
+    let big = serde_json::json!({"bytes": kage_core::MAX_TOOL_RESULT_BYTES * 2});
+    let small = serde_json::json!({"bytes": 8});
+
+    let mut big_events = Vec::new();
+    let big_outcome = dispatch_tool_calls(
+        vec![pending("structured", big)],
+        &tools,
+        std::path::Path::new("/tmp"),
+        &CancelFlag::new(),
+        false,
+        MessageId::new(),
+        &mut NoopHooks,
+        &mut |ev| big_events.push(ev),
+    );
+    let mut small_events = Vec::new();
+    let small_outcome = dispatch_tool_calls_parallel(
+        vec![pending("structured", small)],
+        &tools,
+        std::path::Path::new("/tmp"),
+        &CancelFlag::new(),
+        false,
+        MessageId::new(),
+        &mut NoopHooks,
+        &mut |ev| small_events.push(ev),
+    );
+
+    let big_end = big_events.iter().find_map(|e| match e {
+        LoopEvent::ToolCallEnd { output, .. } => Some(output.clone()),
+        _ => None,
+    });
+    let big_structured = big_end.as_ref().and_then(|o| o.structured.clone());
+    assert_eq!(big_structured, None, "over-cap structured must be dropped");
+    assert_eq!(big_end.expect("a ToolCallEnd").text, "text");
+
+    let small_end = small_events.iter().find_map(|e| match e {
+        LoopEvent::ToolCallEnd { output, .. } => Some(output.clone()),
+        _ => None,
+    });
+    assert!(
+        small_end.and_then(|o| o.structured).is_some(),
+        "under-cap structured survives"
+    );
+
+    // History carries only the text, for both sizes and both paths.
+    for outcome in [big_outcome, small_outcome] {
+        assert_eq!(outcome.results.len(), 1);
+        match &outcome.results[0].content[0] {
+            Content::ToolResultBlock {
+                output, is_error, ..
+            } => {
+                assert_eq!(output, "text");
+                assert!(!*is_error);
+            }
+            other => panic!("unexpected content: {other:?}"),
+        }
+    }
+}

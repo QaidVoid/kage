@@ -6,6 +6,7 @@ pub mod atomic;
 pub mod builtin;
 pub mod error;
 pub mod path;
+pub mod path_lock;
 pub mod registry;
 pub mod schema;
 pub mod ssrf;

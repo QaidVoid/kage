@@ -36,19 +36,35 @@ pub struct McpToolDef {
 /// instead of being followed forever.
 const MAX_TOOL_PAGES: usize = 100;
 
+/// Tools kept in one discovery pass. A server offering more than this
+/// is unusable in practice and is reported as a protocol error.
+const MAX_TOOLS: usize = 1_000;
+
+/// Bytes kept for one tool's description or schema.
+const MAX_FIELD_BYTES: usize = 256 * 1024;
+
+/// Bytes kept across every accumulated tool name, description and
+/// schema in one discovery pass.
+const MAX_LIST_BYTES: usize = 16 * 1024 * 1024;
+
 impl McpConnection {
     /// List the server's tools, following `nextCursor` pagination up
     /// to `MAX_TOOL_PAGES` pages so a well-behaved server's full
-    /// set is returned in one call.
+    /// set is returned in one call. At most `MAX_TOOLS` tools are
+    /// kept, no single description or schema may exceed
+    /// `MAX_FIELD_BYTES` bytes, and the accumulated size of every
+    /// entry is capped at `MAX_LIST_BYTES` bytes.
     ///
     /// # Errors
     ///
     /// Returns [`McpError::Rpc`] on a JSON-RPC error or dropped
     /// connection, and [`McpError::Protocol`] when the result is not
-    /// the expected `{ tools: [...] }` shape or when pagination
-    /// exceeds `MAX_TOOL_PAGES` pages.
+    /// the expected `{ tools: [...] }` shape, when pagination
+    /// exceeds `MAX_TOOL_PAGES` pages, or when a cap above is
+    /// exceeded.
     pub fn list_tools(&self) -> Result<Vec<McpToolDef>, McpError> {
         let mut out = Vec::new();
+        let mut total_bytes = 0usize;
         let mut cursor: Option<String> = None;
         for _ in 0..MAX_TOOL_PAGES {
             let params = cursor.take().map_or_else(
@@ -70,17 +86,43 @@ impl McpConnection {
                         detail: "a tool entry had no `name`".to_owned(),
                     });
                 };
+                let description = tool
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                let input_schema = tool
+                    .get("inputSchema")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({ "type": "object" }));
+                let schema_bytes = input_schema.to_string().len();
+                if description.len() > MAX_FIELD_BYTES || schema_bytes > MAX_FIELD_BYTES {
+                    return Err(McpError::Protocol {
+                        server: self.name().to_owned(),
+                        detail: format!(
+                            "tool `{name}` advertises {} bytes of description or schema, \
+                             at most {MAX_FIELD_BYTES} are kept",
+                            description.len().max(schema_bytes)
+                        ),
+                    });
+                }
+                if out.len() >= MAX_TOOLS {
+                    return Err(McpError::Protocol {
+                        server: self.name().to_owned(),
+                        detail: format!("tools/list returned more than {MAX_TOOLS} tools"),
+                    });
+                }
+                total_bytes += name.len() + description.len() + schema_bytes;
+                if total_bytes > MAX_LIST_BYTES {
+                    return Err(McpError::Protocol {
+                        server: self.name().to_owned(),
+                        detail: format!("tools/list accumulated more than {MAX_LIST_BYTES} bytes"),
+                    });
+                }
                 out.push(McpToolDef {
                     name: name.to_owned(),
-                    description: tool
-                        .get("description")
-                        .and_then(|d| d.as_str())
-                        .unwrap_or_default()
-                        .to_owned(),
-                    input_schema: tool
-                        .get("inputSchema")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!({ "type": "object" })),
+                    description,
+                    input_schema,
                 });
             }
             match result.get("nextCursor").and_then(|c| c.as_str()) {
@@ -504,5 +546,64 @@ mod tests {
         let err = conn.list_tools().unwrap_err();
         assert!(matches!(err, McpError::Protocol { .. }), "got {err:?}");
         assert!(err.to_string().contains("pagination"), "got {err}");
+    }
+
+    /// A server whose single `tools/list` page carries one more tool
+    /// than the discovery cap.
+    fn too_many_tools() -> Arc<McpConnection> {
+        let caps = serde_json::json!({ "tools": {} });
+        let (conn, _srv, _seen) = scripted("many", caps, move |method, _| match method {
+            "tools/list" => {
+                let tools: Vec<serde_json::Value> = (0..=MAX_TOOLS)
+                    .map(|i| serde_json::json!({ "name": format!("t{i}"), "inputSchema": {} }))
+                    .collect();
+                Ok(serde_json::json!({ "tools": tools }))
+            }
+            other => Err(kage_jsonrpc::RpcError::method_not_found(other)),
+        });
+        conn
+    }
+
+    #[test]
+    fn list_tools_refuses_more_than_the_tool_cap() {
+        let conn = too_many_tools();
+        let err = conn.list_tools().unwrap_err();
+        assert!(matches!(err, McpError::Protocol { .. }), "got {err:?}");
+        assert!(err.to_string().contains("more than"), "got {err}");
+    }
+
+    #[test]
+    fn list_tools_refuses_an_oversized_description() {
+        let caps = serde_json::json!({ "tools": {} });
+        let (conn, _srv, _seen) = scripted("big", caps, |method, _| match method {
+            "tools/list" => Ok(serde_json::json!({
+                "tools": [{
+                    "name": "t",
+                    "description": "d".repeat(MAX_FIELD_BYTES + 1),
+                    "inputSchema": {},
+                }],
+            })),
+            other => Err(kage_jsonrpc::RpcError::method_not_found(other)),
+        });
+        let err = conn.list_tools().unwrap_err();
+        assert!(matches!(err, McpError::Protocol { .. }), "got {err:?}");
+        assert!(err.to_string().contains("description"), "got {err}");
+    }
+
+    #[test]
+    fn list_tools_refuses_an_oversized_schema() {
+        let caps = serde_json::json!({ "tools": {} });
+        let (conn, _srv, _seen) = scripted("bigschema", caps, |method, _| match method {
+            "tools/list" => Ok(serde_json::json!({
+                "tools": [{
+                    "name": "t",
+                    "inputSchema": { "x": "s".repeat(MAX_FIELD_BYTES + 1) },
+                }],
+            })),
+            other => Err(kage_jsonrpc::RpcError::method_not_found(other)),
+        });
+        let err = conn.list_tools().unwrap_err();
+        assert!(matches!(err, McpError::Protocol { .. }), "got {err:?}");
+        assert!(err.to_string().contains("schema"), "got {err}");
     }
 }

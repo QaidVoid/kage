@@ -1829,6 +1829,7 @@ name = "kage-loop"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "crossbeam-channel",
  "kage-core",
  "kage-provider",
  "kage-tools",
@@ -1890,6 +1891,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "ureq",
+ "url",
 ]
 
 [[package]]

@@ -205,6 +205,13 @@ pub fn expand(
                     .iter()
                     .map(|message| prompt_content(message, server, &mut budget)),
             );
+            if !rest.is_empty() {
+                // A prompt with no arguments bound none of the typed
+                // words; keep them after the prompt messages.
+                out.push(Content::Text {
+                    text: rest.to_owned(),
+                });
+            }
             continue;
         }
         for (server, uri) in find_mentions(&text) {
@@ -567,7 +574,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             out,
-            [text(r#"{"a":"0.7","b":"terse","c":"and short"}"#), image]
+            [
+                text(r#"{"a":"0.7","b":"terse","c":"and short"}"#),
+                text("0.7 terse and short"),
+                image
+            ]
         );
         assert_eq!(
             requests(&seen),
@@ -584,6 +595,23 @@ mod tests {
         let err = expand(vec![text("/srv:p")], &clients, &catalog).unwrap_err();
         assert_eq!(err.to_string(), "mcp srv:p: missing argument a");
         assert!(requests(&seen).is_empty());
+    }
+
+    #[test]
+    fn a_zero_argument_prompt_keeps_the_typed_text() {
+        let (clients, mut catalog, seen) = server();
+        catalog[0].prompts.push(prompt("z", Vec::new()));
+        let out = expand(vec![text("/srv:z hello world")], &clients, &catalog).unwrap();
+        assert_eq!(out, [text("{}"), text("hello world")]);
+        assert_eq!(
+            requests(&seen),
+            [(
+                "prompts/get".to_owned(),
+                json!({ "name": "z", "arguments": {} })
+            )]
+        );
+        let out = expand(vec![text("/srv:z")], &clients, &catalog).unwrap();
+        assert_eq!(out, [text("{}")]);
     }
 
     #[test]

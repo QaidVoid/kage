@@ -24,6 +24,9 @@ use kage_core::{Inputs, Reasoning, ReasoningField};
 
 use source::{SourceModel, SourceProvider};
 
+/// Hard cap on a downloaded catalog body.
+const DOWNLOAD_LIMIT: usize = 32 * 1024 * 1024;
+
 /// Description of one provider in the catalog.
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderInfo {
@@ -84,19 +87,28 @@ pub fn providers() -> &'static [ProviderInfo] {
 }
 
 /// Lay the model cache at `path` over the bundled snapshot for the rest
-/// of the process. A missing or unreadable cache is ignored, as is any
-/// entry that does not parse; only the first call has an effect.
+/// of the process. Only the first call has an effect; results of a
+/// later `kage models refresh` are picked up on the next process start.
 ///
 /// The cache may add models to a bundled provider or update their
 /// metadata. It never adds a provider or changes a provider's id,
 /// name or endpoint.
-pub fn use_cache(path: &Path) {
-    let Ok(json) = std::fs::read_to_string(path) else {
-        return;
-    };
-    if let Some(merged) = merge_json(generated::PROVIDERS, &json) {
-        let _ = CATALOG.set(merged);
+///
+/// # Errors
+///
+/// The reason the cache was ignored: unreadable file, or a body that
+/// does not parse. Callers should surface the reason; a silently
+/// stale catalog is exactly the drift the cache exists to prevent.
+pub fn use_cache(path: &Path) -> Result<usize, String> {
+    let json =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let merged = merge_json(generated::PROVIDERS, &json)
+        .ok_or_else(|| "catalog cache does not parse".to_owned())?;
+    let count = merged.iter().map(|p| p.models.len()).sum();
+    if CATALOG.set(merged).is_err() {
+        return Err("catalog already loaded this process".to_owned());
     }
+    Ok(count)
 }
 
 /// Download the models.dev catalog from `url`, cut it down to kage's
@@ -105,10 +117,9 @@ pub fn use_cache(path: &Path) {
 ///
 /// # Errors
 ///
-/// The download fails, the body is not a catalog, or `dest` cannot be
-/// written.
+/// The download fails, the body exceeds [`DOWNLOAD_LIMIT`], the body is
+/// not a catalog, or `dest` cannot be written.
 pub fn refresh(url: &str, dest: &Path) -> Result<usize, String> {
-    use std::io::Read as _;
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(60)))
         .build()
@@ -118,13 +129,7 @@ pub fn refresh(url: &str, dest: &Path) -> Result<usize, String> {
         .header("user-agent", concat!("kage/", env!("CARGO_PKG_VERSION")))
         .call()
         .map_err(|e| format!("get {url}: {e}"))?;
-    let mut body = String::new();
-    response
-        .into_body()
-        .into_reader()
-        .take(32 * 1024 * 1024)
-        .read_to_string(&mut body)
-        .map_err(|e| format!("read {url}: {e}"))?;
+    let body = read_limited(response.into_body().into_reader(), DOWNLOAD_LIMIT)?;
     let pruned = source::prune(&body)?;
     let count = source::parse(&pruned)?.iter().map(|p| p.models.len()).sum();
     if let Some(dir) = dest.parent() {
@@ -133,6 +138,23 @@ pub fn refresh(url: &str, dest: &Path) -> Result<usize, String> {
     kage_core::fsutil::atomic_write(dest, pruned.as_bytes())
         .map_err(|e| format!("write {}: {e}", dest.display()))?;
     Ok(count)
+}
+
+/// `reader` decoded as UTF-8, failing once it exceeds `limit` bytes
+/// instead of silently truncating mid-frame.
+fn read_limited(reader: impl std::io::Read, limit: usize) -> Result<String, String> {
+    use std::io::Read as _;
+    let mut reader = reader;
+    let mut bytes = Vec::new();
+    reader
+        .by_ref()
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("read body: {e}"))?;
+    if bytes.len() > limit {
+        return Err(format!("catalog exceeds {} MiB", limit / (1024 * 1024)));
+    }
+    String::from_utf8(bytes).map_err(|e| format!("catalog is not utf-8: {e}"))
 }
 
 /// `bundled` with the models of the catalog `json` laid over it:
@@ -205,12 +227,28 @@ pub fn model(provider_id: &str, model_id: &str) -> Option<&'static ModelInfo> {
 #[must_use]
 pub fn preferred_model(provider_id: &str) -> Option<&'static ModelInfo> {
     let p = provider(provider_id)?;
-    let by_release = p
-        .models
+    latest_model(p.models).or_else(|| p.models.first())
+}
+
+/// The most-recently-released model: release dates compared as parsed
+/// dates, an unparseable date the oldest, and ties broken by model id
+/// so the choice is stable regardless of list order.
+fn latest_model(models: &[ModelInfo]) -> Option<&ModelInfo> {
+    models
         .iter()
         .filter(|m| m.release_date.is_some())
-        .max_by_key(|m| m.release_date.unwrap_or(""));
-    by_release.or_else(|| p.models.first())
+        .max_by_key(|m| (parse_date(m.release_date.unwrap_or_default()), m.id))
+}
+
+/// A `YYYY-MM-DD` date as comparable `(year, month, day)`; a date that
+/// does not parse sorts as the oldest.
+fn parse_date(date: &str) -> (u32, u32, u32) {
+    let mut parts = date.split('-').map(|p| p.parse::<u32>().unwrap_or(0));
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
 }
 
 #[cfg(test)]
@@ -232,6 +270,25 @@ mod tests {
         for p in providers() {
             assert!(!p.models.is_empty(), "{} has no models", p.id);
         }
+    }
+
+    /// Every compat provider id must have a snapshot row, or the picker
+    /// silently lists no models for it.
+    #[test]
+    fn compat_provider_ids_have_catalog_rows() {
+        for entry in crate::compat::COMPAT_PROVIDERS {
+            let info =
+                provider(entry.id).unwrap_or_else(|| panic!("{} has no catalog entry", entry.id));
+            assert!(!info.models.is_empty(), "{} has no models", entry.id);
+        }
+    }
+
+    /// `kimi-for-coding` once shipped with no catalog entry at all.
+    #[test]
+    fn kimi_for_coding_has_models_with_cost_data() {
+        let p = provider("kimi-for-coding").expect("kimi-for-coding in the snapshot");
+        assert!(!p.models.is_empty());
+        assert!(p.models.iter().all(|m| m.cost.is_some()));
     }
 
     #[test]
@@ -281,7 +338,64 @@ mod tests {
     #[test]
     fn unparseable_cache_falls_back() {
         assert!(merge_json(generated::PROVIDERS, "not json").is_none());
-        use_cache(Path::new("/nonexistent/kage/models.json"));
+        let err = use_cache(Path::new("/nonexistent/kage/models.json"))
+            .expect_err("missing cache is ignored with a reason");
+        assert!(err.contains("read"), "{err}");
         assert!(provider("anthropic").is_some());
+    }
+
+    /// An unreadable or unparseable cache must be reported, never
+    /// silently skipped: the caller warns that the snapshot may be
+    /// stale.
+    #[test]
+    fn use_cache_reports_the_reason_it_ignored_a_cache() {
+        let path =
+            std::env::temp_dir().join(format!("kage-catalog-test-{}.json", std::process::id()));
+        std::fs::write(&path, "not json").expect("write cache fixture");
+        let err = use_cache(&path).expect_err("bad cache is ignored with a reason");
+        assert!(err.contains("does not parse"), "{err}");
+        std::fs::remove_file(&path).ok();
+        assert!(provider("anthropic").is_some());
+    }
+
+    #[test]
+    fn read_limited_rejects_oversized_bodies_instead_of_truncating() {
+        let body = vec![b'a'; 16];
+        let err = read_limited(std::io::Cursor::new(&body), 8).unwrap_err();
+        assert!(err.contains("exceeds"), "{err}");
+        let ok = read_limited(std::io::Cursor::new(&body), 16).unwrap();
+        assert_eq!(ok.len(), 16);
+        assert!(read_limited(std::io::Cursor::new(&body), 15).is_err());
+    }
+
+    fn model(id: &'static str, release_date: Option<&'static str>) -> ModelInfo {
+        ModelInfo {
+            id,
+            name: id,
+            context: None,
+            input_limit: None,
+            output: None,
+            reasoning: Reasoning::None,
+            input: Inputs::of(&[]),
+            interleaved: None,
+            release_date,
+            cost: None,
+        }
+    }
+
+    #[test]
+    fn preferred_model_breaks_date_ties_by_id_and_dates_bad_dates_oldest() {
+        let models = vec![
+            model("b", Some("2026-01-15")),
+            model("a", Some("2026-01-15")),
+            model("c", Some("not-a-date")),
+            model("d", None),
+        ];
+        assert_eq!(latest_model(&models).unwrap().id, "b");
+        let later = vec![
+            model("old", Some("2025-12-31")),
+            model("new", Some("2026-02-01")),
+        ];
+        assert_eq!(latest_model(&later).unwrap().id, "new");
     }
 }

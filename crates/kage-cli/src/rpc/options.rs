@@ -11,27 +11,96 @@ use kage_provider::ProviderRegistry;
 
 use crate::engine::{AUTO_THINKING, SessionSpec};
 
+/// How many reported states a catch-up may swallow before the filter
+/// gives up and forwards, so a change the engine can never reproduce
+/// cannot wedge it.
+pub(super) const CATCH_UP_CAP: u32 = 8;
+
 /// What a client session's config options last showed.
 pub(super) struct Shown {
     pub(super) settings: Settings,
     /// Set while the engine has yet to apply a change the client made, so
     /// the older states it still reports are not sent back to the client.
     pub(super) catching_up: bool,
+    /// The fields the pending change touches, so a state differing in an
+    /// unchanged field is forwarded while the rest is swallowed.
+    pub(super) changed: Changed,
+    /// Reported states swallowed while catching up.
+    pub(super) swallowed: u32,
 }
 
 impl Shown {
+    /// A `Shown` that has nothing pending.
+    pub(super) fn fresh(settings: Settings) -> Self {
+        Self {
+            settings,
+            catching_up: false,
+            changed: Changed::default(),
+            swallowed: 0,
+        }
+    }
+
     /// Takes in a state the engine reported, and says whether the client
     /// has to hear of it.
     pub(super) fn observe(&mut self, settings: &Settings) -> bool {
         if self.catching_up {
-            self.catching_up = *settings != self.settings;
-            return false;
+            self.swallowed += 1;
+            let unrelated = !self.changed.agree(settings, &self.settings);
+            let settled = *settings == self.settings;
+            let overdue = self.swallowed > CATCH_UP_CAP;
+            if unrelated || settled || overdue {
+                self.catching_up = false;
+            }
+            if !unrelated && !settled && !overdue {
+                return false;
+            }
         }
         if *settings == self.settings {
             return false;
         }
         self.settings = settings.clone();
         true
+    }
+}
+
+/// The settings fields a client change touches, so the catch-up filter
+/// can tell the requested fields from the rest.
+#[derive(Default)]
+pub(super) struct Changed {
+    model: bool,
+    thinking: bool,
+    /// The permission mode and plan mode, which are set together.
+    mode: bool,
+    swarm: bool,
+    goal: bool,
+}
+
+impl Changed {
+    /// Records the fields `commands` change.
+    pub(super) fn absorb(&mut self, commands: &[CommandKind]) {
+        for command in commands {
+            match command {
+                CommandKind::SetModel { .. } => self.model = true,
+                CommandKind::SetThinking { .. } => self.thinking = true,
+                CommandKind::SetPermissionMode { .. } | CommandKind::PlanMode { .. } => {
+                    self.mode = true;
+                }
+                CommandKind::SwarmMode { .. } => self.swarm = true,
+                CommandKind::SetGoal { .. } => self.goal = true,
+                _ => {}
+            }
+        }
+    }
+
+    /// Whether `settings` and `requested` agree everywhere the pending
+    /// change did not touch, so only the changed fields can still move.
+    fn agree(&self, settings: &Settings, requested: &Settings) -> bool {
+        (self.model || settings.model == requested.model)
+            && (self.thinking || settings.thinking == requested.thinking)
+            && (self.mode
+                || (settings.mode == requested.mode && settings.plan == requested.plan))
+            && (self.swarm || settings.swarm == requested.swarm)
+            && (self.goal || settings.goal == requested.goal)
     }
 }
 
@@ -135,7 +204,9 @@ impl Settings {
                 Ok(vec![CommandKind::SwarmMode { on }])
             }
             "goal" => {
-                let goal = if value.is_empty() {
+                // The engine filters a whitespace-only goal the same
+                // way, so the requested settings stay reachable.
+                let goal = if value.trim().is_empty() {
                     None
                 } else {
                     Some(value.to_owned())

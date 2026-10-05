@@ -6,19 +6,20 @@
 //! registry, runs the result through [`Hooks::after_tool_call`],
 //! emits a [`LoopEvent::ToolCallEnd`], and produces one tool-result message
 //! per call to append to history. Calls run one at a time or, for a
-//! parallel batch, concurrently. A parallel call is finished as soon as it
-//! completes, so its `ToolCallEnd` follows completion order, while the
-//! result messages always keep input order.
+//! parallel batch, on a bounded worker pool. A parallel call is finished
+//! as soon as it completes, so its `ToolCallEnd` follows completion
+//! order, while the result messages always keep input order.
 //!
-//! Dispatch is infallible: a call that never produced an output (cancel, or
-//! a tool failure the loop cannot recover from) gets a synthesized
+//! Dispatch is infallible: a call that never produced an output (cancel,
+//! or a tool failure the loop cannot recover from) gets a synthesized
 //! `is_error` result. The assistant message's `tool_use` blocks are
 //! therefore always answered, in memory and in the persisted session, so a
 //! resumed run never sends a provider a dangling `tool_use`.
 
 use std::path::Path;
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 
+use crossbeam_channel::Sender;
 use kage_core::event::TOOL_CANCELLED_TEXT;
 use kage_core::{
     CancelFlag, Content, LoopError, LoopEvent, Message, MessageId, Role, ToolCallId, ToolOutput,
@@ -28,6 +29,27 @@ use kage_tools::{ProgressSink, ToolContext, ToolError, ToolRegistry};
 
 use crate::Hooks;
 use crate::stream::PendingToolCall;
+
+/// Maximum worker threads per dispatch batch. Oversized batches run in
+/// waves; result placement is index-keyed, so waves never reorder
+/// messages.
+const MAX_TOOL_WORKERS: usize = 8;
+/// Capacity of the progress channel from tool threads to the loop
+/// thread. A chattier tool blocks on its own emit (backpressure)
+/// instead of growing the queue without bound while a slow host sink
+/// consumes the events.
+const PROGRESS_CAPACITY: usize = 256;
+
+/// How long a cancelled batch waits for in-flight tools to report their
+/// real results before the unreported calls are answered with
+/// `Cancelled`. Tools that honor the cancel flag finish well inside
+/// this window; a tool that ignores it only delays the batch by this
+/// much, never blocks it.
+const CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// One recv slice inside the grace window, so the overall deadline is
+/// checked often.
+const GRACE_SLICE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Message from a tool thread to the dispatching loop thread.
 enum Progress {
@@ -40,7 +62,7 @@ enum Progress {
 /// still running.
 struct ChannelSink {
     id: ToolCallId,
-    tx: mpsc::Sender<Progress>,
+    tx: Sender<Progress>,
 }
 
 impl ProgressSink for ChannelSink {
@@ -53,7 +75,7 @@ impl ProgressSink for ChannelSink {
 /// report, as on panic, it reports an error for that call instead.
 struct DoneOnDrop {
     index: usize,
-    tx: mpsc::Sender<Progress>,
+    tx: Sender<Progress>,
     reported: bool,
 }
 
@@ -77,13 +99,28 @@ impl Drop for DoneOnDrop {
     }
 }
 
-/// Execute `calls` on scoped threads and emit their progress live.
+/// One queued tool call handed to a pool worker.
+struct Job {
+    index: usize,
+    call: PendingToolCall,
+}
+
+/// Execute `calls` on a bounded worker pool and emit their progress live.
 ///
-/// Emits a [`LoopEvent::ToolExecutionStart`] per call first. The calling
-/// thread forwards every update as a [`LoopEvent::ToolUpdate`] and hands
-/// each result to `done` with the call's index in `calls` as soon as that
-/// call completes, so `emit` and `done` stay on the loop thread. A
-/// panicking tool yields an error for its own call.
+/// Emits a [`LoopEvent::ToolExecutionStart`] per call first. The calls are
+/// queued in input order to at most [`MAX_TOOL_WORKERS`] worker threads;
+/// the calling thread forwards every update as a
+/// [`LoopEvent::ToolUpdate`] and hands each result to `done` with the
+/// call's index in `calls` as soon as that call completes, so `emit` and
+/// `done` stay on the loop thread. A panicking tool yields an error for
+/// its own call.
+///
+/// The wait selects on both the progress channel and `cancel`'s watch, so
+/// a tool that ignores cancellation cannot park the loop: on cancel the
+/// batch returns at once, every unfinished index gets a synthesized
+/// [`LoopError::Cancelled`] through `done`, and the workers are left to
+/// finish in the background (their late results land in a dropped
+/// receiver and are ignored).
 fn execute_live<F, D>(
     calls: &[&PendingToolCall],
     tools: &ToolRegistry,
@@ -96,57 +133,130 @@ fn execute_live<F, D>(
     F: FnMut(LoopEvent),
     D: FnMut(&mut F, usize, Result<ToolOutput, LoopError>),
 {
+    if calls.is_empty() {
+        return;
+    }
     for call in calls {
         emit(LoopEvent::ToolExecutionStart {
             id: call.id.clone(),
         });
     }
-    let (tx, rx) = mpsc::channel();
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = calls
-            .iter()
-            .enumerate()
-            .map(|(index, &call)| {
+    let (tx, rx) = crossbeam_channel::bounded(PROGRESS_CAPACITY);
+    let (job_tx, job_rx) = crossbeam_channel::unbounded::<Job>();
+    for (index, call) in calls.iter().enumerate() {
+        let _ = job_tx.send(Job {
+            index,
+            call: (*call).clone(),
+        });
+    }
+    drop(job_tx);
+
+    // Workers own their state so a cancelled batch can return while a
+    // straggler tool finishes in the background.
+    let owned_tools = tools.clone();
+    let owned_workdir = workdir.to_path_buf();
+    let owned_cancel = cancel.clone();
+    let worker_count = calls.len().min(MAX_TOOL_WORKERS);
+    for _ in 0..worker_count {
+        let job_rx = job_rx.clone();
+        let tx = tx.clone();
+        let tools = owned_tools.clone();
+        let workdir = owned_workdir.clone();
+        let cancel = owned_cancel.clone();
+        std::thread::spawn(move || {
+            for job in job_rx {
+                // Work queued behind a cancel never starts: the batch
+                // has already been answered with synthesized results.
+                if cancel.is_cancelled() {
+                    break;
+                }
                 let sink = Arc::new(ChannelSink {
-                    id: call.id.clone(),
+                    id: job.call.id.clone(),
                     tx: tx.clone(),
                 });
                 let reporter = DoneOnDrop {
-                    index,
+                    index: job.index,
                     tx: tx.clone(),
                     reported: false,
                 };
-                scope.spawn(move || {
-                    reporter.report(execute(
-                        tools,
-                        call,
-                        workdir,
-                        cancel,
+                // A panicking tool must not kill the worker and strand
+                // the jobs queued behind it.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    execute(
+                        &tools,
+                        &job.call,
+                        &workdir,
+                        &cancel,
                         confine_paths,
                         Some(sink),
-                    ));
-                })
-            })
-            .collect();
+                    )
+                }));
+                reporter.report(result.unwrap_or_else(|_| {
+                    Err(LoopError::Other {
+                        message: "tool thread panicked".into(),
+                    })
+                }));
+            }
+        });
+    }
+    drop(tx);
 
-        let mut running = handles.len();
-        while running > 0 {
-            match rx.recv() {
+    let cancel_watch = cancel.watch();
+    let mut finished = vec![false; calls.len()];
+    let mut remaining = calls.len();
+    let cancelled = loop {
+        if cancel.is_cancelled() {
+            break true;
+        }
+        crossbeam_channel::select! {
+            recv(cancel_watch.receiver()) -> _ => break true,
+            recv(rx) -> message => match message {
                 Ok(Progress::Update(id, update)) => {
                     emit(LoopEvent::ToolUpdate { id, update });
                 }
                 Ok(Progress::Done(index, result)) => {
-                    running -= 1;
+                    finished[index] = true;
+                    remaining -= 1;
                     done(emit, index, result);
+                    if remaining == 0 {
+                        break false;
+                    }
+                }
+                Err(_) => break true,
+            },
+        }
+    };
+    if cancelled {
+        // In-flight tools get a short grace window to land their real
+        // results, then everything unreported is answered with
+        // `Cancelled`. The return happens without joining: stragglers
+        // finish in the background.
+        let deadline = std::time::Instant::now() + CANCEL_GRACE;
+        while remaining > 0 {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match rx.recv_timeout(left.min(GRACE_SLICE)) {
+                Ok(Progress::Update(id, update)) => {
+                    emit(LoopEvent::ToolUpdate { id, update });
+                }
+                Ok(Progress::Done(index, result)) => {
+                    if !finished[index] {
+                        finished[index] = true;
+                        remaining -= 1;
+                        done(emit, index, result);
+                    }
                 }
                 Err(_) => break,
             }
         }
-
-        for handle in handles {
-            let _ = handle.join();
+        for (index, reported) in finished.iter().enumerate() {
+            if !reported {
+                done(emit, index, Err(LoopError::Cancelled));
+            }
         }
-    });
+    }
 }
 
 /// Outcome of [`Hooks::before_tool_call`] for one entry: either a
@@ -183,6 +293,23 @@ fn synthesized_output(error: &LoopError) -> ToolOutput {
         text,
         structured: None,
         terminate: false,
+    }
+}
+
+/// Cap a finished output for events and history. Text goes through
+/// [`kage_core::cap_tool_result`]; a structured payload whose serialized
+/// form exceeds [`kage_core::MAX_TOOL_RESULT_BYTES`] is dropped, so a
+/// multi-megabyte value can neither bloat memory nor travel in the
+/// `ToolCallEnd` event. History itself only ever carries the capped text.
+fn cap_output(output: ToolOutput) -> ToolOutput {
+    let structured = output.structured.filter(|value| {
+        serde_json::to_string(value)
+            .is_ok_and(|json| json.len() <= kage_core::MAX_TOOL_RESULT_BYTES)
+    });
+    ToolOutput {
+        text: kage_core::cap_tool_result(output.text),
+        structured,
+        ..output
     }
 }
 
@@ -324,10 +451,7 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
                 synthesized_output(error.as_ref().unwrap_or(&LoopError::Cancelled)),
             ),
         };
-        let output = ToolOutput {
-            text: kage_core::cap_tool_result(output.text),
-            ..output
-        };
+        let output = cap_output(output);
         all_terminate &= output.terminate;
 
         emit(LoopEvent::ToolCallEnd {
@@ -352,7 +476,7 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
     }
 }
 
-/// Dispatch tool calls in parallel via [`std::thread::scope`].
+/// Dispatch tool calls in parallel on the bounded worker pool.
 ///
 /// Hooks (`before_tool_call`, `after_tool_call`) stay on the calling thread;
 /// only the tool's `execute` runs concurrently. Each call is finished on
@@ -364,14 +488,16 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
 ///
 /// Calls that get short-circuited by `before_tool_call` skip thread
 /// dispatch entirely and are finished before the others start. The
-/// remaining calls all run on dedicated threads inside one
-/// [`std::thread::scope`] block; the function blocks until the last one
+/// remaining calls queue onto at most [`MAX_TOOL_WORKERS`] worker
+/// threads and run in waves; the function blocks until the last one
 /// completes.
 ///
 /// A call whose thread reports cancel or panic gets a synthesized
 /// `is_error` result; every call that did produce an output keeps it. The
 /// batch-level failure (cancel preferred over panic, first otherwise) is
-/// carried in [`DispatchOutcome::error`].
+/// carried in [`DispatchOutcome::error`]. On cancel the batch returns as
+/// soon as the cancel is observed, with synthesized results for every
+/// unfinished call, while straggler tools finish in the background.
 #[expect(
     clippy::too_many_arguments,
     clippy::needless_pass_by_value,
@@ -418,10 +544,7 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
                 hooks.after_tool_call(&call.name, synthesized_output(&kind))
             }
         };
-        let output = ToolOutput {
-            text: kage_core::cap_tool_result(output.text),
-            ..output
-        };
+        let output = cap_output(output);
         all_terminate &= output.terminate;
         emit(LoopEvent::ToolCallEnd {
             id: call.id.clone(),

@@ -20,6 +20,8 @@ use kage_jsonrpc::RpcError;
 use kage_loop::TokenBudget;
 use kage_session::{EntryId, SessionEntry, SessionReader, SessionWriter};
 
+use super::live::Live;
+
 use super::bridge::to_update;
 use super::bridge::user_chunk;
 use super::content::image_block;
@@ -158,14 +160,17 @@ impl super::CliAcpAgent {
 
     /// Announces the finished agents the recorded session `root`
     /// started, at every depth: `root`'s own through `ctx`, deeper ones
-    /// on the session of the agent that started them.
+    /// on the session of the agent that started them. Agents the live
+    /// tree still tracks are left to the live attach, which knows their
+    /// true state.
     pub(super) fn announce_restored(
         &self,
         root: SessionId,
         history: &[Message],
         ctx: &PromptContext,
     ) {
-        for (parent, update) in restored_subagents(&self.host.sessions, root, history) {
+        let live = lock(&self.host.live);
+        for (parent, update) in restored_subagents(&self.host.sessions, root, history, &live) {
             let update = SessionUpdate::SubagentUpdate(update);
             if parent == root {
                 ctx.update(update);
@@ -259,6 +264,7 @@ pub(super) fn restored_subagents(
     dir: &Path,
     root: SessionId,
     history: &[Message],
+    live: &Live,
 ) -> Vec<(SessionId, SubagentUpdate)> {
     let mut tree = AgentTree::default();
     tree.restore(root, history);
@@ -284,6 +290,7 @@ pub(super) fn restored_subagents(
     }
     tree.under(root)
         .into_iter()
+        .filter(|(_, node)| !live.tracks(node.session))
         .map(|(_, node)| (node.parent, restored_update(node)))
         .collect()
 }

@@ -21,6 +21,7 @@
 //! [`KillRegistry`](crate::interrupt::KillRegistry), so a worker
 //! blocked in a read wakes with a connection error and exits instead of
 //! draining toward the idle deadline.
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, select_biased};
@@ -32,6 +33,18 @@ use crate::{EventStream, ProviderError, ProviderEvent};
 /// Bounded backlog between worker thread and consumer. Bounded so a
 /// fast-streaming provider cannot run away if the consumer is slow.
 const CHANNEL_BUFFER: usize = 32;
+
+/// The panic payload as a message, for the error a worker panic
+/// surfaces.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_owned()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_owned()
+    }
+}
 
 /// Run a blocking, uncancellable closure on a worker thread and wait
 /// for either its result or `cancel`, so the caller can return
@@ -50,8 +63,9 @@ const CHANNEL_BUFFER: usize = 32;
 /// # Errors
 ///
 /// - Whatever `f` returns when it completes first.
-/// - [`ProviderError::Cancelled`] when the flag is set first or the
-///   worker thread panics.
+/// - [`ProviderError::Cancelled`] when the flag is set first.
+/// - [`ProviderError::Internal`] when `f` panics, so a bug is not
+///   misread as a user cancel.
 pub fn cancellable_call<F, T>(
     cancel: &CancelFlag,
     kill: &KillRegistry,
@@ -63,7 +77,13 @@ where
 {
     let (tx, rx) = crossbeam_channel::bounded(1);
     std::thread::spawn(move || {
-        let _ = tx.send(f());
+        let result = catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|payload| {
+            Err(ProviderError::Internal(format!(
+                "request worker panicked: {}",
+                panic_message(payload.as_ref())
+            )))
+        });
+        let _ = tx.send(result);
     });
     if cancel.is_cancelled() {
         kill.shutdown_all();
@@ -97,9 +117,22 @@ pub fn make_cancelable(
 ) -> EventStream {
     let (tx, rx) = crossbeam_channel::bounded(CHANNEL_BUFFER);
     std::thread::spawn(move || {
-        for item in inner {
-            if tx.send(item).is_err() {
-                break;
+        let mut inner = inner;
+        loop {
+            match catch_unwind(AssertUnwindSafe(|| inner.next())) {
+                Ok(Some(item)) => {
+                    if tx.send(item).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(payload) => {
+                    let _ = tx.send(Err(ProviderError::Internal(format!(
+                        "stream worker panicked: {}",
+                        panic_message(payload.as_ref())
+                    ))));
+                    break;
+                }
             }
         }
     });
@@ -269,6 +302,48 @@ mod tests {
         let mut s = make_cancelable(inner, cancel, no_kill());
         assert!(matches!(s.next(), Some(Ok(ProviderEvent::MessageStart))));
         assert!(matches!(s.next(), Some(Err(ProviderError::Cancelled))));
+        assert!(s.next().is_none());
+    }
+
+    #[test]
+    fn cancellable_call_reports_a_panicking_closure_as_internal() {
+        let result = cancellable_call(
+            &CancelFlag::new(),
+            &no_kill(),
+            || -> Result<(), ProviderError> {
+                panic!("boom");
+            },
+        );
+        match result {
+            Err(ProviderError::Internal(msg)) => {
+                assert!(msg.contains("boom"), "panic message kept: {msg}");
+                assert!(msg.contains("panicked"), "{msg}");
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inner_panic_surfaces_as_internal_error_and_fuses() {
+        let events = boxed(vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::TextDelta { delta: "ok".into() }),
+        ]);
+        let panicking = events.chain(std::iter::from_fn(|| {
+            panic!("mid-stream");
+        }));
+        let mut s = make_cancelable(Box::new(panicking), CancelFlag::new(), no_kill());
+        assert!(matches!(s.next(), Some(Ok(ProviderEvent::MessageStart))));
+        assert!(matches!(
+            s.next(),
+            Some(Ok(ProviderEvent::TextDelta { .. }))
+        ));
+        match s.next() {
+            Some(Err(ProviderError::Internal(msg))) => {
+                assert!(msg.contains("mid-stream"), "{msg}");
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
         assert!(s.next().is_none());
     }
 }

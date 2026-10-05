@@ -66,14 +66,17 @@ impl Tool for FindTool {
             .map_err(|e| ToolError::InvalidInput(format!("invalid glob: {e}")))?
             .compile_matcher();
 
-        let want_files = input
-            .kind
-            .as_deref()
-            .map(|k| matches!(k, "f" | "file" | "files"));
-        let want_dirs = input
-            .kind
-            .as_deref()
-            .map(|k| matches!(k, "d" | "dir" | "directory" | "directories"));
+        let want_files = match input.kind.as_deref() {
+            None => None,
+            Some("f" | "file" | "files") => Some(true),
+            Some("d" | "dir" | "directory" | "directories") => Some(false),
+            Some(other) => {
+                return Err(ToolError::InvalidInput(format!(
+                    "invalid type `{other}`; expected `f` (files) or `d` (directories)"
+                )));
+            }
+        };
+        let want_dirs = want_files.map(|files| !files);
 
         let walker = WalkBuilder::new(&root)
             .add_custom_ignore_filename(".kageignore")
@@ -177,6 +180,28 @@ mod tests {
         populate(dir.path());
         let out = run(dir.path(), serde_json::json!({"pattern":"*","type":"d"})).unwrap();
         assert_eq!(out.text, "src");
+    }
+
+    #[test]
+    fn type_file_filters_to_files() {
+        let dir = tempfile::tempdir().unwrap();
+        populate(dir.path());
+        let out = run(dir.path(), serde_json::json!({"pattern":"*","type":"f"})).unwrap();
+        assert!(out.text.contains("Cargo.toml"), "{}", out.text);
+        assert!(!out.text.lines().any(|line| line == "src"), "{}", out.text);
+    }
+
+    #[test]
+    fn an_unknown_type_value_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        populate(dir.path());
+        let err = run(dir.path(), serde_json::json!({"pattern":"*","type":"x"})).unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput(_)), "{err:?}");
+        assert!(err.to_string().contains("`x`"), "{err}");
+        assert!(
+            err.to_string().contains("`f`") && err.to_string().contains("`d`"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -483,16 +483,19 @@ impl McpManager {
             if conn.take_tools_changed()
                 && let Err(e) = Self::reload(managed, reg)
             {
+                conn.set_tools_changed(true);
                 failures.push(e);
             }
             if conn.take_resources_changed()
                 && let Err(e) = managed.load_resources()
             {
+                conn.set_resources_changed(true);
                 failures.push(e);
             }
             if conn.take_prompts_changed()
                 && let Err(e) = managed.load_prompts()
             {
+                conn.set_prompts_changed(true);
                 failures.push(e);
             }
             let failures = managed.settle(reg, failures);
@@ -503,21 +506,22 @@ impl McpManager {
     }
 
     /// Restart one server by name: spawn a fresh process from its
-    /// original spec, and only on success swap it in (killing the old
-    /// child, if any), re-register its tools and reload its catalog.
-    /// The name is looked up across every entry, including servers
-    /// that failed to spawn or were evicted as dead, so `restart` can
-    /// bring them up from the retained spec. A failed respawn leaves a
-    /// live server untouched, so `restart` never causes downtime on its
-    /// own failure, and records the new error for a server that is not
-    /// live. The exception is a refused token: the live server is taken
-    /// down too, because its requests would be refused as well.
+    /// original spec, discover its tools against the fresh connection,
+    /// and only on success swap it in (killing the old child, if any),
+    /// register the tools and reload the catalog. A failed discovery
+    /// kills the fresh child and leaves the previous server live with
+    /// its tools registered, so `restart` never causes downtime on its
+    /// own failure. The name is looked up across every entry, including
+    /// servers that failed to spawn or were evicted as dead, so
+    /// `restart` can bring them up from the retained spec. The exception
+    /// is a refused token: the live server is taken down too, because
+    /// its requests would be refused as well.
     ///
     /// # Errors
     ///
     /// [`McpError::Unknown`] if no server has that name, the spawn
-    /// error, or the first discovery error from bringing the
-    /// replacement up (the server stays live).
+    /// error, or the discovery error from bringing the replacement up
+    /// (the previous server stays live).
     pub fn restart(&mut self, name: &str, reg: &mut ToolRegistry) -> Result<(), McpError> {
         let roots = self.roots.clone();
         let handler = self.handler.clone();
@@ -543,6 +547,18 @@ impl McpManager {
                 return Err(e);
             }
         };
+        let fresh_conn = Arc::clone(fresh.connection());
+        let tools = match tools_from_connection(&fresh_conn) {
+            Ok(tools) => tools,
+            Err(e) => {
+                drop(fresh);
+                if matches!(e, McpError::Unauthorized { .. }) {
+                    managed.evict(reg, &e);
+                    self.sync_resource_tool(reg);
+                }
+                return Err(e);
+            }
+        };
         for stale in managed.registered.drain(..) {
             reg.unregister(&stale);
         }
@@ -551,7 +567,12 @@ impl McpManager {
         managed.error = None;
         managed.needs_auth = false;
         managed.clear_catalog();
-        let failures = managed.load_all(reg);
+        let disabled = managed.spec.disabled_tools.clone();
+        register_tools(&tools, &fresh_conn, &disabled, &mut managed.registered, reg);
+        let failures: Vec<McpError> = [managed.load_resources(), managed.load_prompts()]
+            .into_iter()
+            .filter_map(Result::err)
+            .collect();
         let failures = managed.settle(reg, failures);
         self.sync_resource_tool(reg);
         failures.into_iter().next().map_or(Ok(()), Err)
@@ -614,6 +635,19 @@ fn reload_connection(
     for stale in registered.drain(..) {
         reg.unregister(&stale);
     }
+    register_tools(&tools, conn, disabled, registered, reg);
+    Ok(())
+}
+
+/// Register discovered tools, skipping the `disabled` ones, and track
+/// the registered names.
+fn register_tools(
+    tools: &[Arc<dyn kage_tools::Tool>],
+    conn: &Arc<McpConnection>,
+    disabled: &[String],
+    registered: &mut Vec<String>,
+    reg: &mut ToolRegistry,
+) {
     for tool in tools {
         if disabled
             .iter()
@@ -622,9 +656,8 @@ fn reload_connection(
             continue;
         }
         registered.push(tool.name().to_owned());
-        reg.register(tool);
+        reg.register(Arc::clone(tool));
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -766,6 +799,134 @@ mod tests {
             matches!(&err, crate::server::McpError::Unknown(n) if n == "ghost"),
             "{err}"
         );
+    }
+
+    /// An HTTP server that answers `initialize` and, unless it is the
+    /// refused method, nothing else. `tools_status` picks the reply to
+    /// `tools/list`: `None` for a JSON-RPC error, `Some(status)` for a
+    /// raw HTTP status.
+    fn discovery_server(tools_status: Option<u16>) -> FakeServer {
+        serve(move |request, _| {
+            if request.method == "GET" {
+                return Reply::status(405);
+            }
+            let body: serde_json::Value = serde_json::from_str(&request.body).unwrap_or_default();
+            match body["method"].as_str() {
+                Some("initialize") => Reply::json(
+                    200,
+                    &serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": body["id"],
+                        "result": { "protocolVersion": PROTOCOL_VERSION, "capabilities": {} },
+                    }),
+                ),
+                Some("tools/list") => match tools_status {
+                    Some(status) => Reply::status(status),
+                    None => Reply::json(
+                        200,
+                        &serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": body["id"],
+                            "error": { "code": -32000, "message": "boom" },
+                        }),
+                    ),
+                },
+                _ => Reply::status(202),
+            }
+        })
+    }
+
+    fn live_server_manager() -> (McpManager, ToolRegistry, Arc<McpConnection>) {
+        let (conn, _srv, _seen) = scripted(
+            "srv",
+            serde_json::json!({ "tools": {} }),
+            |method, _| match method {
+                "tools/list" => {
+                    Ok(serde_json::json!({ "tools": [{ "name": "t", "inputSchema": {} }] }))
+                }
+                other => Err(kage_jsonrpc::RpcError::method_not_found(other)),
+            },
+        );
+        let mut mgr = McpManager::default();
+        mgr.adopt("srv", Arc::clone(&conn));
+        let mut reg = ToolRegistry::new();
+        assert!(mgr.register_into(&mut reg).is_empty());
+        assert!(reg.get("srv__t").is_some());
+        (mgr, reg, conn)
+    }
+
+    #[test]
+    fn a_failed_restart_discovery_leaves_the_old_server_live() {
+        let (mut mgr, mut reg, conn) = live_server_manager();
+        let broken = discovery_server(None);
+        mgr.servers[0].1.spec.url = Some(format!("{}/mcp", broken.base));
+
+        let err = mgr.restart("srv", &mut reg).unwrap_err();
+        assert!(err.to_string().contains("boom"), "{err}");
+        assert!(reg.get("srv__t").is_some(), "old tools stay registered");
+        assert!(!conn.is_dead(), "the old connection stays live");
+        assert_eq!(mgr.len(), 1);
+        assert_eq!(mgr.catalog()[0].status, McpServerStatus::Connected);
+        assert_eq!(mgr.catalog()[0].tools, 1);
+        assert!(mgr.error("srv").is_none());
+    }
+
+    #[test]
+    fn a_restart_discovery_refusal_takes_the_server_down() {
+        let (mut mgr, mut reg, _conn) = live_server_manager();
+        let refused = discovery_server(Some(401));
+        mgr.servers[0].1.spec.url = Some(format!("{}/mcp", refused.base));
+
+        let err = mgr.restart("srv", &mut reg).unwrap_err();
+        assert!(matches!(err, McpError::Unauthorized { .. }), "{err:?}");
+        assert!(reg.get("srv__t").is_none(), "evicted as refused");
+        assert_eq!(mgr.catalog()[0].status, McpServerStatus::NeedsAuth);
+        assert!(mgr.is_empty());
+    }
+
+    #[test]
+    fn a_failed_reload_keeps_the_change_notice_pending() {
+        let fail = Arc::new(AtomicBool::new(false));
+        let fail_in_script = Arc::clone(&fail);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (conn, srv, _seen) = scripted(
+            "x",
+            serde_json::json!({ "tools": {} }),
+            move |method, _| match method {
+                "tools/list" if fail_in_script.load(Ordering::SeqCst) => {
+                    Err(kage_jsonrpc::RpcError::internal("boom"))
+                }
+                "tools/list" => {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(serde_json::json!({
+                        "tools": [{
+                            "name": if n == 0 { "old" } else { "new" },
+                            "inputSchema": {},
+                        }]
+                    }))
+                }
+                other => Err(kage_jsonrpc::RpcError::method_not_found(other)),
+            },
+        );
+        let mut mgr = McpManager::default();
+        mgr.adopt("x", conn);
+        let mut reg = ToolRegistry::new();
+        assert!(mgr.register_into(&mut reg).is_empty());
+        assert!(reg.get("x__old").is_some());
+
+        fail.store(true, Ordering::SeqCst);
+        srv.notify("notifications/tools/list_changed", serde_json::json!({}))
+            .unwrap();
+        srv.request("ping", serde_json::json!({}))
+            .expect("the drain thread handled the notice before the ping");
+        let errors = mgr.refresh_into(&mut reg);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(reg.get("x__old").is_some(), "reload failed, old tools stay");
+
+        fail.store(false, Ordering::SeqCst);
+        assert!(mgr.refresh_into(&mut reg).is_empty());
+        assert!(reg.get("x__new").is_some(), "the notice was retried");
+        assert!(reg.get("x__old").is_none());
     }
 
     #[test]

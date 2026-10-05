@@ -58,6 +58,13 @@ pub const SUPPORTED_PROVIDERS: &[ProviderMap] = &[
     ProviderMap::same("openrouter"),
     ProviderMap::same("fireworks-ai"),
     ProviderMap::same("moonshotai"),
+    // models.dev renamed the `kimi-for-coding` key to regional
+    // `kimi-code-plan-*` providers; the cn flavor serves the endpoint
+    // kage's compat entry declares.
+    ProviderMap {
+        api_id: "kimi-code-plan-cn",
+        kage_id: "kimi-for-coding",
+    },
     ProviderMap::same("xiaomi"),
     ProviderMap::same("xiaomi-token-plan-ams"),
     ProviderMap::same("xiaomi-token-plan-cn"),

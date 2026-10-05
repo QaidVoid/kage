@@ -20,6 +20,7 @@ use serde::Deserialize;
 use similar::TextDiff;
 
 use crate::atomic::atomic_write;
+use crate::path_lock::with_path_lock;
 use crate::{Tool, ToolContext, ToolError, schema_for};
 
 /// Files larger than this are refused; loading one for a single edit
@@ -116,10 +117,19 @@ impl Tool for EditTool {
     ) -> Result<ToolOutput, ToolError> {
         let input: EditInput = serde_json::from_value(input)?;
         let path = cx.resolve_path(Path::new(&input.path))?;
-        let file = std::fs::File::open(&path).map_err(ToolError::io_at("read", &path))?;
+        // Read, splice and rename are one sequence: without the lock, a
+        // concurrent edit could rewrite the file between the read and
+        // the write and lose its change set.
+        with_path_lock(&path, || self.edit_locked(&input, &path))
+    }
+}
+
+impl EditTool {
+    fn edit_locked(&self, input: &EditInput, path: &Path) -> Result<ToolOutput, ToolError> {
+        let file = std::fs::File::open(path).map_err(ToolError::io_at("read", path))?;
         let total_bytes = file
             .metadata()
-            .map_err(ToolError::io_at("read", &path))?
+            .map_err(ToolError::io_at("read", path))?
             .len();
         if total_bytes > MAX_EDIT_BYTES {
             return Ok(error(
@@ -134,9 +144,9 @@ impl Tool for EditTool {
         let mut bytes = Vec::new();
         file.take(MAX_EDIT_BYTES)
             .read_to_end(&mut bytes)
-            .map_err(ToolError::io_at("read", &path))?;
+            .map_err(ToolError::io_at("read", path))?;
         let original = String::from_utf8(bytes).map_err(|_| {
-            ToolError::io_at("read", &path)(std::io::Error::new(
+            ToolError::io_at("read", path)(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "stream did not contain valid UTF-8",
             ))
@@ -177,7 +187,7 @@ impl Tool for EditTool {
         }
 
         let new_content = eol.restore(&apply_splices(&normalized, &splices));
-        atomic_write(&path, new_content.as_bytes()).map_err(ToolError::io_at("write", &path))?;
+        atomic_write(path, new_content.as_bytes()).map_err(ToolError::io_at("write", path))?;
 
         let diff = unified_diff(&original, &new_content, &input.path);
         let count = splices.len();
@@ -820,5 +830,38 @@ mod tests {
             fs::read_to_string(dir.path().join("a.txt")).unwrap(),
             "newer"
         );
+    }
+
+    /// Two edits racing onto one file must both land: the per-path lock
+    /// serializes the read-modify-write, so the second reads what the
+    /// first wrote.
+    #[test]
+    fn concurrent_edits_both_land() {
+        let dir = tempfile::tempdir().unwrap();
+        for round in 0..3 {
+            let path = dir.path().join("race.txt");
+            fs::write(&path, format!("alpha beta {round}\n")).unwrap();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    run(
+                        dir.path(),
+                        serde_json::json!({"path":"race.txt","old_str":"alpha","new_str":"ALPHA"}),
+                    )
+                    .unwrap()
+                });
+                scope.spawn(|| {
+                    run(
+                        dir.path(),
+                        serde_json::json!({"path":"race.txt","old_str":"beta","new_str":"BETA"}),
+                    )
+                    .unwrap()
+                });
+            });
+            let content = fs::read_to_string(&path).unwrap();
+            assert!(
+                content.contains("ALPHA") && content.contains("BETA"),
+                "round {round} lost an edit: {content:?}"
+            );
+        }
     }
 }

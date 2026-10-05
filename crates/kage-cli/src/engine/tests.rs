@@ -3143,9 +3143,11 @@ fn a_prompt_command_runs_the_mcp_prompt() {
     let events = until_runs_end(&h.events, 1);
 
     assert_eq!(outcomes(&events), [RunOutcome::Completed]);
+    // The expansion keeps the typed text after the prompt messages, so
+    // the model sees both the greeting and the original words.
     assert_eq!(
         mock.last_request().unwrap().messages[0].content,
-        [text("Hello, Ada Lovelace")]
+        [text("Hello, Ada Lovelace"), text("Ada Lovelace")]
     );
 }
 
@@ -3881,15 +3883,23 @@ fn a_run_ending_mid_ask_resolves_the_pending_ask() {
     .unwrap()
     .session;
     h.engine.send(Command::to(parent, CommandKind::Cancel));
-    let events = until_runs_end(&h.events, 2);
-    let resolved = events
-        .iter()
-        .filter(|e| {
-            e.session == child
-                && matches!(e.event, Event::Host(HostEvent::PermissionResolved { .. }))
-        })
-        .count();
-    assert_eq!(resolved, 1, "the ask is denied once, unprompted");
+    let mut events = until_runs_end(&h.events, 2);
+    // The denial is published after the child's RunEnded, sometimes
+    // after the parent's too, so drain until it shows up.
+    let count = |events: &[Envelope]| {
+        events
+            .iter()
+            .filter(|e| {
+                e.session == child
+                    && matches!(e.event, Event::Host(HostEvent::PermissionResolved { .. }))
+            })
+            .count()
+    };
+    while count(&events) == 0 {
+        let envelope = h.events.recv_timeout(WAIT).expect("engine stalled");
+        events.push(envelope);
+    }
+    assert_eq!(count(&events), 1, "the ask is denied once, unprompted");
     h.engine.shutdown();
 }
 

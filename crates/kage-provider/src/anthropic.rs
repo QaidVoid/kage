@@ -441,15 +441,45 @@ pub struct AnthropicStream {
     done: bool,
 }
 
+/// Synthetic block slots count up from here for frames that omit the
+/// `index` field, far above any index a real stream carries.
+const SYNTHETIC_INDEX_BASE: usize = 1 << 62;
+
 #[derive(Default)]
 struct StreamState {
     blocks: HashMap<usize, BlockBuilder>,
+    /// Synthetic slots handed out so far to frames without an index.
+    synthetic: usize,
+    /// The synthetic slot of the index-less block in flight, so its
+    /// delta and stop frames reuse the slot their start allocated.
+    open_synthetic: Option<usize>,
     usage: TokenUsage,
     stop_reason: StopReason,
     /// Set once `message_start` arrived, so an EOF before it is a dead
     /// stream (nothing synthesized) and an EOF after it is a stream
     /// whose `message_stop` never made it (turn completed at EOF).
     started: bool,
+}
+
+impl StreamState {
+    /// The frame's `index`, or a fresh synthetic slot when the frame
+    /// omits it, so index-less blocks cannot share a slot with an
+    /// indexed one. Index-less delta and stop frames continue the
+    /// index-less block in flight.
+    fn block_index(&mut self, value: &Value) -> usize {
+        if let Some(v) = value.get("index").and_then(Value::as_u64) {
+            return usize::try_from(v).unwrap_or(0);
+        }
+        if let Some(slot) = self.open_synthetic
+            && self.blocks.contains_key(&slot)
+        {
+            return slot;
+        }
+        let slot = SYNTHETIC_INDEX_BASE.wrapping_add(self.synthetic);
+        self.synthetic += 1;
+        self.open_synthetic = Some(slot);
+        slot
+    }
 }
 
 enum BlockBuilder {
@@ -542,7 +572,7 @@ impl AnthropicStream {
     }
 
     fn on_block_start(&mut self, value: &Value) {
-        let index = block_index(value);
+        let index = self.state.block_index(value);
         let Some(block) = value.get("content_block") else {
             return;
         };
@@ -590,7 +620,7 @@ impl AnthropicStream {
     }
 
     fn on_block_delta(&mut self, value: &Value) {
-        let index = block_index(value);
+        let index = self.state.block_index(value);
         let Some(delta) = value.get("delta") else {
             return;
         };
@@ -644,7 +674,7 @@ impl AnthropicStream {
     }
 
     fn on_block_stop(&mut self, value: &Value) {
-        let index = block_index(value);
+        let index = self.state.block_index(value);
         if let Some(BlockBuilder::ToolUse { id, partial_input }) = self.state.blocks.remove(&index)
         {
             let input = if partial_input.is_empty() {
@@ -705,13 +735,6 @@ impl Iterator for AnthropicStream {
     fn next(&mut self) -> Option<Self::Item> {
         crate::sse::sse_next(self)
     }
-}
-
-fn block_index(value: &Value) -> usize {
-    value
-        .get("index")
-        .and_then(Value::as_u64)
-        .map_or(0, |v| usize::try_from(v).unwrap_or(0))
 }
 
 fn parse_stop_reason(value: &str) -> StopReason {

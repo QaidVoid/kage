@@ -67,6 +67,10 @@ pub fn compose(role: &str, env: &EnvContext<'_>) -> String {
 /// `disable_model_invocation: true` are still surfaced in the block (the
 /// flag only hides them from completion).
 ///
+/// Descriptions and bodies are entity-escaped, so a body containing
+/// `</skill>` or `</skills>` cannot close the block early; the model
+/// reads the escaped text without loss.
+///
 /// Returns `system` unchanged when `skills` is empty.
 #[must_use]
 pub fn with_skills(system: String, skills: &[Skill]) -> String {
@@ -90,17 +94,26 @@ pub fn with_skills(system: String, skills: &[Skill]) -> String {
         out.push_str(&escaped);
         out.push_str("\">\n");
         if !skill.description.is_empty() {
-            out.push_str(skill.description.trim());
+            out.push_str(&escape_skill_text(skill.description.trim()));
             out.push('\n');
         }
         if !skill.body.is_empty() {
-            out.push_str(skill.body.trim());
+            out.push_str(&escape_skill_text(skill.body.trim()));
             out.push('\n');
         }
         out.push_str("</skill>\n");
     }
     out.push_str("</skills>\n");
     out
+}
+
+/// Escape text that lands inside the `<skills>` block so a closing tag in
+/// a skill body or description cannot end the block early. `&` first, so
+/// the entities it produces are not escaped twice.
+fn escape_skill_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 #[cfg(test)]
@@ -162,8 +175,47 @@ mod tests {
         assert!(
             out.contains("<skill name=\"x&quot; onload=&quot;alert(1)&quot; data-&quot;&lt;a\">")
         );
-        // Bodies stay verbatim.
-        assert!(out.contains("Body & <more> text"));
+        // Bodies are escaped, so raw markup cannot forge structure.
+        assert!(out.contains("Body &amp; &lt;more&gt; text"));
+    }
+
+    /// A body containing the block's own closing tag must not end the
+    /// `<skills>` block early: the output carries exactly one `</skills>`
+    /// and it is the last line.
+    #[test]
+    fn skill_body_cannot_close_the_skills_block_early() {
+        let base = "role".to_owned();
+        let skill = Skill {
+            name: "naughty".into(),
+            description: "d".into(),
+            body: "use </skills> carefully".into(),
+            disable_model_invocation: false,
+            path: Path::new("/x").to_path_buf(),
+        };
+        let out = with_skills(base, std::slice::from_ref(&skill));
+        assert_eq!(out.matches("</skills>").count(), 1);
+        assert!(out.ends_with("</skills>\n"));
+        assert!(out.contains("use &lt;/skills&gt; carefully"));
+    }
+
+    /// Every `</skill>` in the output is a real per-skill closer, none
+    /// forged by a body.
+    #[test]
+    fn skill_closer_count_matches_the_skill_count() {
+        let base = "role".to_owned();
+        let skills: Vec<Skill> = ["a", "b", "c"]
+            .into_iter()
+            .map(|name| Skill {
+                name: name.into(),
+                description: "d".into(),
+                body: format!("{name} says </skill> and </skills> a lot"),
+                disable_model_invocation: false,
+                path: Path::new("/x").to_path_buf(),
+            })
+            .collect();
+        let out = with_skills(base, &skills);
+        assert_eq!(out.matches("</skill>").count(), 3);
+        assert_eq!(out.matches("</skills>").count(), 1);
     }
 
     #[test]

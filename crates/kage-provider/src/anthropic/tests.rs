@@ -674,6 +674,67 @@ fn stream_emits_decode_error_when_tool_input_partial_json_is_malformed() {
 }
 
 #[test]
+fn index_less_content_blocks_get_distinct_synthetic_slots() {
+    let bytes: &[u8] = b"event: message_start\n\
+         data: {\"type\":\"message_start\"}\n\n\
+         event: content_block_start\n\
+         data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"read\"}}\n\n\
+         event: content_block_delta\n\
+         data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"/a\\\"}\"}}\n\n\
+         event: content_block_stop\n\
+         data: {\"type\":\"content_block_stop\"}\n\n\
+         event: content_block_start\n\
+         data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_2\",\"name\":\"write\"}}\n\n\
+         event: content_block_delta\n\
+         data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"text\\\":\\\"x\\\"}\"}}\n\n\
+         event: content_block_stop\n\
+         data: {\"type\":\"content_block_stop\"}\n\n\
+         event: message_delta\n\
+         data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n\
+         event: message_stop\n\
+         data: {\"type\":\"message_stop\"}\n\n";
+    let events = collect_ok(stream_from_bytes(bytes));
+    let starts: Vec<(&str, &str)> = events
+        .iter()
+        .filter_map(|e| match e {
+            ProviderEvent::ToolCallStart { id, name } => Some((id.0.as_str(), name.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts, [("call_1", "read"), ("call_2", "write")]);
+    let deltas: Vec<(&str, &str)> = events
+        .iter()
+        .filter_map(|e| match e {
+            ProviderEvent::ToolCallArgsDelta { id, partial } => {
+                Some((id.0.as_str(), partial.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deltas,
+        [
+            ("call_1", "{\"path\":\"/a\"}"),
+            ("call_2", "{\"text\":\"x\"}")
+        ]
+    );
+    let ends: Vec<(&str, Value)> = events
+        .iter()
+        .filter_map(|e| match e {
+            ProviderEvent::ToolCallEnd { id, input } => Some((id.0.as_str(), input.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ends,
+        [
+            ("call_1", serde_json::json!({"path": "/a"})),
+            ("call_2", serde_json::json!({"text": "x"})),
+        ]
+    );
+}
+
+#[test]
 fn stream_yields_cancelled_when_flag_set() {
     let bytes: &[u8] = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
     let cancel = CancelFlag::new();

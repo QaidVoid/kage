@@ -109,6 +109,12 @@ pub struct AgentContext {
 impl AgentContext {
     /// Construct a fresh context with empty history, zero budget, and the
     /// process current working directory as `workdir`.
+    ///
+    /// When `current_dir` fails (deleted or unreadable CWD) this falls
+    /// back to the relative `.`, which [`run`](crate::run()) refuses, so
+    /// hosts should prefer [`Self::try_new`], which surfaces the failure
+    /// instead. Kept for tests and hosts that set an explicit
+    /// [`Self::with_workdir`] afterwards.
     #[must_use]
     pub fn new(model: impl Into<String>, system_prompt: impl Into<String>) -> Self {
         Self {
@@ -123,6 +129,26 @@ impl AgentContext {
             confine_paths: true,
             budget: TokenBudget::default(),
         }
+    }
+
+    /// Like [`Self::new`], but propagates a failing `current_dir` as an
+    /// I/O error instead of falling back to the relative `.`. Hosts
+    /// building the main-session context should use this so a broken
+    /// working directory fails at startup with a clear cause.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`std::env::current_dir`] returns when the process
+    /// working directory cannot be read.
+    pub fn try_new(
+        model: impl Into<String>,
+        system_prompt: impl Into<String>,
+    ) -> std::io::Result<Self> {
+        let workdir = std::env::current_dir()?;
+        Ok(Self {
+            workdir,
+            ..Self::new(model, system_prompt)
+        })
     }
 
     /// Override the working directory.
@@ -220,6 +246,18 @@ mod tests {
         assert_eq!(cx.system_prompt, "you are helpful");
         assert!(cx.history.is_empty());
         assert_eq!(cx.budget, TokenBudget::default());
+    }
+
+    /// `try_new` yields the same shape as `new` but with a verified
+    /// absolute workdir. (A deleted-CWD failure cannot be exercised
+    /// portably here: `set_current_dir` is process-wide and tests run in
+    /// parallel.)
+    #[test]
+    fn try_new_succeeds_with_an_absolute_workdir() {
+        let cx = AgentContext::try_new("m", "").expect("current_dir is readable");
+        assert!(cx.workdir.is_absolute());
+        assert_eq!(cx.model, "m");
+        assert!(cx.history.is_empty());
     }
 
     #[test]

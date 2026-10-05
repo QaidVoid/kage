@@ -19,10 +19,11 @@ struct ReadInput {
     /// Path to read, relative to the workdir.
     #[serde(alias = "filePath")]
     path: String,
-    /// Optional 1-indexed start line (inclusive).
+    /// Optional 1-indexed start line (inclusive). Line numbers are
+    /// 1-based and 0 is rejected; sliced lines fold `\r\n` to `\n`.
     #[serde(default)]
     start_line: Option<u64>,
-    /// Optional 1-indexed end line (inclusive).
+    /// Optional 1-indexed end line (inclusive). 0 is rejected.
     #[serde(default)]
     end_line: Option<u64>,
 }
@@ -56,6 +57,11 @@ impl Tool for ReadTool {
     ) -> Result<ToolOutput, ToolError> {
         let input: ReadInput = serde_json::from_value(input)?;
         let path = cx.resolve_path(Path::new(&input.path))?;
+        if input.start_line == Some(0) || input.end_line == Some(0) {
+            return Err(ToolError::InvalidInput(
+                "line numbers are 1-based; line numbers must be at least 1".into(),
+            ));
+        }
 
         // Cap the read itself, not just the output: a multi-gigabyte file
         // must not be slurped into memory before truncation.
@@ -69,7 +75,12 @@ impl Tool for ReadTool {
             .read_to_end(&mut head)
             .map_err(ToolError::io_at("read", &path))?;
         let truncated = total_bytes > MAX_BYTES as u64;
-        let text = String::from_utf8_lossy(&head).into_owned();
+        let text = String::from_utf8(head).map_err(|_| {
+            ToolError::InvalidInput(format!(
+                "{} is not valid UTF-8 and is likely a binary file",
+                input.path
+            ))
+        })?;
 
         let sliced = slice_lines(&text, input.start_line, input.end_line);
 
@@ -105,7 +116,11 @@ fn slice_lines(text: &str, start: Option<u64>, end: Option<u64>) -> std::borrow:
         .map_or(total, |n| usize::try_from(n).unwrap_or(usize::MAX))
         .min(total);
     let end_idx = end_idx.max(start_idx);
-    std::borrow::Cow::Owned(lines[start_idx..end_idx].join("\n"))
+    let mut out = lines[start_idx..end_idx].join("\n");
+    if end_idx == total && text.ends_with('\n') {
+        out.push('\n');
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 #[cfg(test)]
@@ -196,6 +211,66 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.text, "a\nb");
+    }
+
+    #[test]
+    fn zero_line_numbers_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("f.txt"), "a\nb\n").unwrap();
+        for input in [
+            serde_json::json!({"path":"f.txt","start_line":0}),
+            serde_json::json!({"path":"f.txt","end_line":0}),
+            serde_json::json!({"path":"f.txt","start_line":1,"end_line":0}),
+        ] {
+            let err = run(&ReadTool, dir.path(), input).unwrap_err();
+            assert!(matches!(err, ToolError::InvalidInput(_)), "{err:?}");
+            assert!(err.to_string().contains("1-based"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_slice_reaching_eof_keeps_the_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("f.txt"), "a\nb\nc\n").unwrap();
+        let out = run(
+            &ReadTool,
+            dir.path(),
+            serde_json::json!({"path":"f.txt","start_line":2}),
+        )
+        .unwrap();
+        assert_eq!(out.text, "b\nc\n");
+        let out = run(&ReadTool, dir.path(), serde_json::json!({"path":"f.txt"})).unwrap();
+        assert_eq!(out.text, "a\nb\nc\n");
+        let out = run(
+            &ReadTool,
+            dir.path(),
+            serde_json::json!({"path":"f.txt","end_line":2}),
+        )
+        .unwrap();
+        assert_eq!(out.text, "a\nb");
+    }
+
+    #[test]
+    fn sliced_crlf_lines_are_folded_to_lf() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("f.txt"), "a\r\nb\r\n").unwrap();
+        let out = run(
+            &ReadTool,
+            dir.path(),
+            serde_json::json!({"path":"f.txt","start_line":1,"end_line":1}),
+        )
+        .unwrap();
+        assert_eq!(out.text, "a");
+    }
+
+    #[test]
+    fn a_binary_file_is_rejected_not_mojibake() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("bin.dat"), [0xffu8, 0xfe, 0x00]).unwrap();
+        let err = run(&ReadTool, dir.path(), serde_json::json!({"path":"bin.dat"})).unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput(_)), "{err:?}");
+        assert!(err.to_string().contains("bin.dat"), "{err}");
+        assert!(err.to_string().contains("UTF-8"), "{err}");
     }
 
     #[test]

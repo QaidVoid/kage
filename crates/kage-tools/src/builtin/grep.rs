@@ -73,7 +73,7 @@ impl Tool for GrepTool {
             None => cx.workdir().to_path_buf(),
         };
         std::fs::metadata(&root).map_err(ToolError::io_at("search", &root))?;
-        let max = input.max_matches.unwrap_or(DEFAULT_MAX_MATCHES);
+        let max = input.max_matches.unwrap_or(DEFAULT_MAX_MATCHES).max(1);
 
         let matcher = RegexMatcherBuilder::new()
             .case_insensitive(input.ignore_case)
@@ -323,6 +323,25 @@ mod tests {
         .unwrap();
         assert!(out.text.contains("truncated"));
         assert_eq!(out.structured.unwrap()["truncated"], true);
+    }
+
+    /// A zero cap is clamped to one, so the text and the structured
+    /// output agree that a match was found and truncated.
+    #[test]
+    fn zero_max_matches_clamps_to_one() {
+        let dir = tempfile::tempdir().unwrap();
+        populate(dir.path());
+        let out = run(
+            dir.path(),
+            serde_json::json!({"pattern":"alpha","max_matches":0}),
+        )
+        .unwrap();
+        let lines: Vec<&str> = out.text.lines().collect();
+        assert_eq!(lines.len(), 2, "one hit plus the truncation marker");
+        assert!(lines[1].contains("truncated at 1 matches"), "{}", out.text);
+        let structured = out.structured.unwrap();
+        assert_eq!(structured["matches"], 1);
+        assert_eq!(structured["truncated"], true);
     }
 
     #[test]

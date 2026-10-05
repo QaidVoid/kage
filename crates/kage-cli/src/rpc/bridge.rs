@@ -108,6 +108,9 @@ pub(super) struct Bridge {
 pub(super) struct Ask {
     /// The engine request the ask came from.
     request_id: RequestId,
+    /// Whether answering means declining questions rather than denying
+    /// a permission.
+    question: bool,
     withdraw: CancelFlag,
     thread: std::thread::JoinHandle<()>,
 }
@@ -119,6 +122,11 @@ impl Ask {
         self.withdraw.cancel();
         let _ = self.thread.join();
         self.request_id
+    }
+
+    /// Whether answering this ask means declining questions.
+    pub(super) fn is_question(&self) -> bool {
+        self.question
     }
 }
 
@@ -148,7 +156,10 @@ pub(super) enum AskKind {
 }
 
 /// What `ask` of `tool` with `input`, shown as `tool_call`, asks the
-/// client: a plan review, questions, or a permission.
+/// client: a plan review, questions, or a permission. Questions are
+/// only asked when the input carries a well-formed, non-empty array,
+/// so their answer reaches the right engine request; anything else
+/// shows as an ordinary permission with the raw input.
 pub(super) fn ask_kind(
     tool: &str,
     input: &serde_json::Value,
@@ -159,34 +170,43 @@ pub(super) fn ask_kind(
             tool_call,
             plan: input["plan"].as_str().unwrap_or_default().to_owned(),
         },
-        ASK_USER_QUESTION_TOOL => AskKind::Questions {
-            tool_call,
-            questions: question_prompts(input),
+        ASK_USER_QUESTION_TOOL => match question_prompts(input) {
+            Some(questions) => AskKind::Questions {
+                tool_call,
+                questions,
+            },
+            None => AskKind::Permission(tool_call),
         },
         _ => AskKind::Permission(tool_call),
     }
 }
 
-/// The wire form of the questions an `ask_user_question` input holds.
-pub(super) fn question_prompts(input: &serde_json::Value) -> Vec<QuestionPrompt> {
-    let questions: Vec<Question> =
-        serde_json::from_value(input["questions"].clone()).unwrap_or_default();
-    questions
-        .into_iter()
-        .map(|q| QuestionPrompt {
-            header: q.header,
-            question: q.question,
-            options: q
-                .options
-                .into_iter()
-                .map(|o| QuestionChoice {
-                    label: o.label,
-                    description: o.description,
-                })
-                .collect(),
-            multi_select: q.multi_select,
-        })
-        .collect()
+/// The wire form of the questions an `ask_user_question` input holds,
+/// or `None` when the input carries no well-formed, non-empty questions
+/// array, so such an ask shows as an ordinary permission instead.
+pub(super) fn question_prompts(input: &serde_json::Value) -> Option<Vec<QuestionPrompt>> {
+    let questions: Vec<Question> = serde_json::from_value(input["questions"].clone()).ok()?;
+    if questions.is_empty() {
+        return None;
+    }
+    Some(
+        questions
+            .into_iter()
+            .map(|q| QuestionPrompt {
+                header: q.header,
+                question: q.question,
+                options: q
+                    .options
+                    .into_iter()
+                    .map(|o| QuestionChoice {
+                        label: o.label,
+                        description: o.description,
+                    })
+                    .collect(),
+                multi_select: q.multi_select,
+            })
+            .collect(),
+    )
 }
 
 /// The input an `ask_user_question` request is tracked and replayed
@@ -208,6 +228,7 @@ pub(super) fn spawn_ask(
     request_id: RequestId,
     kind: AskKind,
 ) {
+    let question = matches!(kind, AskKind::Questions { .. });
     let withdraw = CancelFlag::new();
     let flag = withdraw.clone();
     let peer = peer.clone();
@@ -275,6 +296,7 @@ pub(super) fn spawn_ask(
     });
     lock(asks).entry(session).or_default().push(Ask {
         request_id,
+        question,
         withdraw,
         thread,
     });
@@ -299,8 +321,30 @@ impl Bridge {
                 self.handle_subagent(session, &envelope.event);
             }
             None if is_agent => self.handle_agent(session, &envelope.event),
-            None => {}
+            None => {
+                if let Event::Host(HostEvent::RunEnded { outcome }) = &envelope.event {
+                    self.run_ended(session, outcome);
+                }
+            }
         }
+    }
+
+    /// The tail of an ended run: withdraw its asks, drop the per-run
+    /// state, and settle the prompt end. Shared by the client path and
+    /// by sessions whose id mapping is already gone, so a prompt that
+    /// outlives its `session/close` still gets its answer.
+    fn run_ended(&mut self, session: SessionId, outcome: &RunOutcome) {
+        self.end_asks(session);
+        self.seen.remove(&session);
+        self.names.remove(&session);
+        self.compacting.remove(&session);
+        let stop = self.stops.remove(&session);
+        let end = PromptEnd {
+            outcome: outcome.clone(),
+            stop,
+        };
+        self.ended.insert(session, end);
+        self.settle(session);
     }
 
     fn handle_client(&mut self, session: SessionId, client_id: String, event: &Event) {
@@ -386,17 +430,7 @@ impl Bridge {
                 self.mcp_servers(session, &client_id, servers);
             }
             Event::Host(HostEvent::RunEnded { outcome }) => {
-                self.end_asks(session);
-                self.seen.remove(&session);
-                self.names.remove(&session);
-                self.compacting.remove(&session);
-                let stop = self.stops.remove(&session);
-                let end = PromptEnd {
-                    outcome: outcome.clone(),
-                    stop,
-                };
-                self.ended.insert(session, end);
-                self.settle(session);
+                self.run_ended(session, outcome);
             }
             Event::Host(_) => {}
         }
@@ -931,15 +965,47 @@ pub(super) fn user_chunk(content: kage_acp::acp::ContentBlock) -> SessionUpdate 
     })
 }
 
-/// Buffers `update` for an unannounced session, keeping the first/// [`HELD_CAP`] and dropping later ones. The early updates are the
+/// Updates buffered for one unannounced client session, capped at
+/// [`HELD_CAP`]. A client that opens a session but never announces it
+/// would otherwise pin every update it generates, full tool outputs
+/// included, for as long as the connection lives. `dropped` counts
+/// the updates the cap dropped, so the announce can say so.
+#[derive(Default)]
+pub(super) struct HeldUpdates {
+    pub(super) updates: Vec<SessionUpdate>,
+    pub(super) dropped: u64,
+}
+
+/// The held buffers of every unannounced client session.
+pub(super) type HeldMap = Arc<Mutex<HashMap<SessionId, HeldUpdates>>>;
+
+/// Buffers `update` for an unannounced session, keeping the first
+/// [`HELD_CAP`] and counting later ones. The early updates are the
 /// ones a client replays first; nothing here is worth an unbounded
 /// buffer on a session that never announces.
-pub(super) fn hold(updates: &mut Vec<SessionUpdate>, update: SessionUpdate) -> bool {
-    if updates.len() >= HELD_CAP {
-        return false;
+pub(super) fn hold(held: &mut HeldUpdates, update: SessionUpdate) {
+    if held.updates.len() >= HELD_CAP {
+        held.dropped += 1;
+        return;
     }
-    updates.push(update);
-    true
+    held.updates.push(update);
+}
+
+/// Sends the updates held for `client_id`, and when the cap dropped
+/// any, a marker saying how many, so a client that announces late
+/// knows the replay it missed.
+pub(super) fn flush_held(peer: &Peer, client_id: &str, held: HeldUpdates) {
+    for update in held.updates {
+        send_update(peer, client_id, update);
+    }
+    if held.dropped > 0 {
+        let dropped = held.dropped;
+        let note = format!(
+            "{dropped} updates were dropped while the session was opening, so the replay \
+             above is incomplete"
+        );
+        send_update(peer, client_id, user_chunk(ContentBlock::text(note)));
+    }
 }
 
 /// The tool call a permission request for `tool` shows.

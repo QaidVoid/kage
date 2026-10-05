@@ -163,4 +163,19 @@ mod tests {
             assert!(seen.insert(entry.id), "duplicate compat id {}", entry.id);
         }
     }
+
+    /// Every compat provider needs a models.dev catalog key, or the
+    /// picker lists no models and costs are missing for it.
+    #[test]
+    fn every_compat_id_has_a_catalog_entry() {
+        for entry in COMPAT_PROVIDERS {
+            assert!(
+                crate::catalog::source::SUPPORTED_PROVIDERS
+                    .iter()
+                    .any(|map| map.kage_id == entry.id),
+                "{} is missing from SUPPORTED_PROVIDERS",
+                entry.id
+            );
+        }
+    }
 }

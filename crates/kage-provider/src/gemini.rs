@@ -179,7 +179,7 @@ pub(crate) fn build_request_body(req: &StreamRequest) -> Value {
         .enumerate()
         .filter_map(|(i, msg)| {
             let placeholder = enforced && i >= turn_start;
-            internal_message_to_gemini(msg, &names_by_id, &req.model, placeholder)
+            internal_message_to_gemini(msg, &names_by_id, &req.tools, &req.model, placeholder)
         })
         .collect();
 
@@ -237,16 +237,22 @@ fn thinking_config(req: &StreamRequest) -> Option<Value> {
 
 /// Whether `model` rejects a current-turn function call without a
 /// thought signature, which Gemini 3 and later do.
+///
+/// Name-based: the last path segment must carry a `gemini` marker
+/// (anywhere in it, case-insensitive, so gateway ids like
+/// `my-gemini-3` count), and the version is the digit run that follows
+/// the marker once separators are skipped. A segment whose next
+/// character is a letter names no version (`gemini-exp-1206`) and
+/// enforces nothing.
 fn enforces_signatures(model: &str) -> bool {
     let name = model.rsplit('/').next().unwrap_or(model);
-    name.strip_prefix("gemini-")
-        .map(|rest| {
-            rest.split(|c: char| !c.is_ascii_digit())
-                .next()
-                .unwrap_or("")
-        })
-        .and_then(|major| major.parse::<u32>().ok())
-        .is_some_and(|major| major >= 3)
+    let name = name.to_ascii_lowercase();
+    let Some((_, rest)) = name.split_once("gemini") else {
+        return false;
+    };
+    let rest = rest.trim_start_matches(|c: char| !c.is_ascii_alphanumeric());
+    let version: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    version.parse::<u32>().is_ok_and(|major| major >= 3)
 }
 
 fn tool_spec_to_gemini(spec: &ToolSpec) -> Value {
@@ -334,6 +340,7 @@ fn convert_schema(value: &Value, defs: &Value, depth: usize) -> Value {
 fn internal_message_to_gemini(
     msg: &Message,
     names_by_id: &HashMap<String, String>,
+    declared: &[ToolSpec],
     model: &str,
     placeholder: bool,
 ) -> Option<Value> {
@@ -343,7 +350,10 @@ fn internal_message_to_gemini(
             "model",
             convert_assistant_parts(&msg.content, model, placeholder),
         ),
-        Role::ToolResult => ("user", convert_tool_result_parts(&msg.content, names_by_id)),
+        Role::ToolResult => (
+            "user",
+            convert_tool_result_parts(&msg.content, names_by_id, declared),
+        ),
         Role::System => return None,
     };
     if parts.is_empty() {
@@ -411,6 +421,7 @@ fn convert_assistant_parts(blocks: &[Content], model: &str, placeholder: bool) -
 fn convert_tool_result_parts(
     blocks: &[Content],
     names_by_id: &HashMap<String, String>,
+    declared: &[ToolSpec],
 ) -> Vec<Value> {
     blocks
         .iter()
@@ -420,7 +431,7 @@ fn convert_tool_result_parts(
             } => {
                 let name = names_by_id
                     .get(&call_id.0)
-                    .map_or_else(|| tool_name_from_call_id(call_id), String::as_str);
+                    .map_or_else(|| tool_name_from_call_id(call_id, declared), String::as_str);
                 Some(serde_json::json!({
                     "functionResponse": {
                         "name": name,
@@ -435,10 +446,16 @@ fn convert_tool_result_parts(
 
 /// Recover the function name from a synthesized `gemini_{name}_{n}`
 /// correlation id when no matching assistant tool call is in history
-/// (resumed sessions written by older kage versions). Ids without the
-/// trailing counter decode as the whole `gemini_` suffix.
-fn tool_name_from_call_id(id: &ToolCallId) -> &str {
+/// (resumed sessions written by older kage versions). The remainder is
+/// first matched against the request's declared tool names, because a
+/// legacy counter-less id for a tool literally named `tool_2` would
+/// otherwise decode as `tool`; ids without the trailing counter decode
+/// as the whole `gemini_` suffix.
+fn tool_name_from_call_id<'a>(id: &'a ToolCallId, declared: &'a [ToolSpec]) -> &'a str {
     let rest = id.0.strip_prefix("gemini_").unwrap_or(&id.0);
+    if let Some(tool) = declared.iter().find(|t| t.name == rest) {
+        return tool.name.as_str();
+    }
     match rest.rsplit_once('_') {
         Some((name, counter))
             if !counter.is_empty() && counter.bytes().all(|b| b.is_ascii_digit()) =>
@@ -480,6 +497,12 @@ pub struct GeminiStream {
     tool_call_count: usize,
     finish_reason: StopReason,
     usage: kage_core::TokenUsage,
+    /// Cumulative `candidatesTokenCount`, overwrite-only per chunk.
+    output_candidates: u64,
+    /// Cumulative `thoughtsTokenCount`, overwrite-only per chunk. Kept
+    /// apart from the candidates count so a chunk that omits either
+    /// field cannot double-count the other when the fold happens.
+    output_thoughts: u64,
 }
 
 impl GeminiStream {
@@ -495,6 +518,8 @@ impl GeminiStream {
             tool_call_count: 0,
             finish_reason: StopReason::Other,
             usage: kage_core::TokenUsage::default(),
+            output_candidates: 0,
+            output_thoughts: 0,
         }
     }
 
@@ -587,22 +612,29 @@ impl GeminiStream {
         if let Some(v) = usage.get("promptTokenCount").and_then(Value::as_u64) {
             self.usage.input = v;
         }
+        // Chunks are cumulative but may omit either count, so each is
+        // kept as an overwrite-only value; the output fold happens at
+        // emit.
         if let Some(v) = usage.get("candidatesTokenCount").and_then(Value::as_u64) {
-            self.usage.output = v;
+            self.output_candidates = v;
         }
         // Gemini 2.5+ reports thinking tokens separately and excludes
         // them from `candidatesTokenCount`; every other provider counts
         // them in the output total, so fold them in for consistent
         // cost and context accounting.
         if let Some(v) = usage.get("thoughtsTokenCount").and_then(Value::as_u64) {
-            self.usage.output = self.usage.output.saturating_add(v);
+            self.output_thoughts = v;
         }
     }
 
     fn emit_message_end(&mut self) {
+        let usage = kage_core::TokenUsage {
+            output: self.output_candidates.saturating_add(self.output_thoughts),
+            ..self.usage
+        };
         self.pending.push_back(Ok(ProviderEvent::MessageEnd {
             stop_reason: self.finish_reason,
-            usage: self.usage,
+            usage,
         }));
         self.done = true;
     }
@@ -916,15 +948,26 @@ mod tests {
     #[test]
     fn signature_enforcement_starts_at_gemini_3() {
         for model in [
+            "gemini-3-pro",
             "gemini-3-flash-preview",
             "gemini-3.1-pro-preview",
             "models/gemini-3-pro",
+            "google/gemini-3-pro",
             "google/gemini-3.5-flash",
+            "my-gemini-3",
+            "gemini_3_flash",
             "gemini-10-pro",
         ] {
             assert!(enforces_signatures(model), "{model}");
         }
-        for model in ["gemini-2.5-pro", "gemini-exp-1206", "gemini-", "m"] {
+        for model in [
+            "gemini-2.5-pro",
+            "gemini-exp-1206",
+            "gemini-",
+            "gemini_2_flash",
+            "claude-x",
+            "m",
+        ] {
             assert!(!enforces_signatures(model), "{model}");
         }
     }
@@ -1094,26 +1137,79 @@ mod tests {
 
     #[test]
     fn tool_name_from_call_id_parses_new_and_legacy_formats() {
+        let none: Vec<ToolSpec> = Vec::new();
         assert_eq!(
-            tool_name_from_call_id(&ToolCallId::new("gemini_read_1")),
+            tool_name_from_call_id(&ToolCallId::new("gemini_read_1"), &none),
             "read"
         );
         assert_eq!(
-            tool_name_from_call_id(&ToolCallId::new("gemini_my_tool_12")),
+            tool_name_from_call_id(&ToolCallId::new("gemini_my_tool_12"), &none),
             "my_tool"
         );
         assert_eq!(
-            tool_name_from_call_id(&ToolCallId::new("gemini_read")),
+            tool_name_from_call_id(&ToolCallId::new("gemini_read"), &none),
             "read"
         );
         assert_eq!(
-            tool_name_from_call_id(&ToolCallId::new("gemini_my_tool")),
+            tool_name_from_call_id(&ToolCallId::new("gemini_my_tool"), &none),
             "my_tool"
         );
         assert_eq!(
-            tool_name_from_call_id(&ToolCallId::new("call_abc")),
+            tool_name_from_call_id(&ToolCallId::new("call_abc"), &none),
             "call_abc"
         );
+    }
+
+    /// A legacy counter-less id for a tool whose name itself ends in
+    /// `_<digits>` must match the declared name before the counter
+    /// stripping would cut it short.
+    #[test]
+    fn legacy_ids_try_declared_names_before_counter_stripping() {
+        let declared = |name: &str| {
+            vec![ToolSpec {
+                name: name.into(),
+                description: String::new(),
+                schema: serde_json::json!({}),
+            }]
+        };
+        let id = ToolCallId::new("gemini_tool_2");
+        assert_eq!(tool_name_from_call_id(&id, &declared("tool_2")), "tool_2");
+        assert_eq!(tool_name_from_call_id(&id, &declared("tool")), "tool");
+        assert_eq!(tool_name_from_call_id(&id, &[]), "tool");
+        let id = ToolCallId::new("gemini_tool2_1");
+        assert_eq!(tool_name_from_call_id(&id, &declared("tool2")), "tool2");
+    }
+
+    /// Gemini's SSE may interleave empty-data keepalive lines with
+    /// content chunks; they must not surface as decode failures.
+    #[test]
+    fn empty_data_keepalives_do_not_break_the_stream() {
+        let bytes: &[u8] = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}],\"role\":\"model\"}}]}\n\ndata:\n\ndata: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::TextDelta { delta } if delta == "hi"))
+        );
+        assert!(matches!(
+            events.last(),
+            Some(ProviderEvent::MessageEnd { .. })
+        ));
+    }
+
+    /// A later chunk may omit either usage count; the output fold must
+    /// use the last value of each, not double-count what a chunk left
+    /// out.
+    #[test]
+    fn incomplete_usage_chunks_fold_last_candidates_plus_last_thoughts() {
+        let bytes: &[u8] = b"data: {\"candidates\":[],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":4,\"thoughtsTokenCount\":3}}\n\ndata: {\"candidates\":[],\"usageMetadata\":{\"promptTokenCount\":5,\"thoughtsTokenCount\":2}}\n\ndata: {\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":7}}\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+        if let Some(ProviderEvent::MessageEnd { usage, .. }) = events.last() {
+            assert_eq!(usage.input, 5);
+            assert_eq!(usage.output, 9);
+        } else {
+            panic!("expected MessageEnd");
+        }
     }
 
     #[test]

@@ -190,14 +190,17 @@ struct ListsChanged {
 }
 
 /// Callback that emits the `notifications/progress` params of one token.
-type ProgressEmit = Box<dyn Fn(serde_json::Value) + Send>;
+/// Shared, so routing can clone it out of the routes lock and emit
+/// without holding it.
+type ProgressEmit = Arc<dyn Fn(serde_json::Value) + Send + Sync>;
 
 /// Open progress tokens, each with the callback of the call that owns it.
 type ProgressRoutes = Arc<Mutex<HashMap<String, ProgressEmit>>>;
 
-/// One registered progress token. Its callback runs on the drain thread,
-/// under the routes lock, until the ticket is dropped. Dropping takes the
-/// same lock, so no update is emitted once the drop returns.
+/// One registered progress token. The callback runs on the drain thread
+/// with the routes lock released; dropping the ticket takes the same
+/// lock to remove the callback, so no update is emitted once the drop
+/// returns.
 pub(crate) struct ProgressTicket {
     pub(crate) token: String,
     routes: ProgressRoutes,
@@ -401,11 +404,11 @@ impl McpConnection {
     pub(crate) fn track_progress(
         &self,
         label: &str,
-        emit: impl Fn(serde_json::Value) + Send + 'static,
+        emit: impl Fn(serde_json::Value) + Send + Sync + 'static,
     ) -> ProgressTicket {
         let n = self.next_progress.fetch_add(1, Ordering::Relaxed);
         let token = format!("{label}#{n}");
-        kage_core::sync::lock(&self.progress).insert(token.clone(), Box::new(emit));
+        kage_core::sync::lock(&self.progress).insert(token.clone(), Arc::new(emit));
         ProgressTicket {
             token,
             routes: Arc::clone(&self.progress),
@@ -481,6 +484,12 @@ impl McpConnection {
         self.changed.tools.swap(false, Ordering::SeqCst)
     }
 
+    /// Restore the "tools list changed" flag after a failed reload, so
+    /// the next refresh retries instead of dropping the notice.
+    pub(crate) fn set_tools_changed(&self, value: bool) {
+        self.changed.tools.store(value, Ordering::SeqCst);
+    }
+
     /// Take the "server announced its resource list changed" flag,
     /// resetting it to `false`. Resource templates reload with it.
     #[must_use]
@@ -488,11 +497,21 @@ impl McpConnection {
         self.changed.resources.swap(false, Ordering::SeqCst)
     }
 
+    /// Restore the "resources list changed" flag after a failed reload.
+    pub(crate) fn set_resources_changed(&self, value: bool) {
+        self.changed.resources.store(value, Ordering::SeqCst);
+    }
+
     /// Take the "server announced its prompt list changed" flag,
     /// resetting it to `false`.
     #[must_use]
     pub fn take_prompts_changed(&self) -> bool {
         self.changed.prompts.swap(false, Ordering::SeqCst)
+    }
+
+    /// Restore the "prompts list changed" flag after a failed reload.
+    pub(crate) fn set_prompts_changed(&self, value: bool) {
+        self.changed.prompts.store(value, Ordering::SeqCst);
     }
 
     /// Issue a request to the server, tagging failures with the
@@ -535,12 +554,15 @@ impl McpConnection {
 }
 
 /// Emit `notifications/progress` params through the callback of the call
-/// that owns their token. Unknown and finished tokens are dropped.
+/// that owns their token. Unknown and finished tokens are dropped. The
+/// callback is cloned out and the lock released before it runs, so a
+/// slow consumer cannot stall the drain thread's other work.
 fn route_progress(routes: &ProgressRoutes, params: serde_json::Value) {
     let Some(token) = params.get("progressToken").and_then(|t| t.as_str()) else {
         return;
     };
-    if let Some(emit) = kage_core::sync::lock(routes).get(token) {
+    let emit = kage_core::sync::lock(routes).get(token).cloned();
+    if let Some(emit) = emit {
         emit(params);
     }
 }
@@ -1184,6 +1206,51 @@ mod tests {
             matches!(&seen[0], Inbound::Request { method, .. } if method == "initialize"),
             "{seen:?}"
         );
+    }
+
+    /// A slow progress consumer must not hold the routes lock: while one
+    /// emitter blocks, registering another token still completes.
+    #[test]
+    fn a_blocked_progress_emitter_does_not_stall_the_routes_lock() {
+        let ((cli_peer, cli_in), (srv_peer, srv_in)) = pair();
+        answer_requests(
+            srv_peer.clone(),
+            srv_in,
+            serde_json::json!({}),
+            |method, _| Err(RpcError::method_not_found(method)),
+        );
+        let conn =
+            Arc::new(McpConnection::initialize("stub", cli_peer, cli_in, &[], None).unwrap());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release = std::sync::Mutex::new(release_rx);
+        let blocked = conn.track_progress("blocked", move |_| {
+            let _ = started_tx.send(());
+            let _ = release.lock().unwrap().recv();
+        });
+        srv_peer
+            .notify(
+                "notifications/progress",
+                serde_json::json!({ "progressToken": blocked.token, "progress": 1 }),
+            )
+            .unwrap();
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the emitter started");
+
+        let second = thread::spawn({
+            let conn = Arc::clone(&conn);
+            move || {
+                let ticket = conn.track_progress("second", |_| {});
+                ticket.token.clone()
+            }
+        });
+        assert!(
+            wait_until(|| second.is_finished()),
+            "track_progress must not wait on a blocked emitter"
+        );
+        release_tx.send(()).unwrap();
+        let _ = second.join().unwrap();
     }
 
     #[test]

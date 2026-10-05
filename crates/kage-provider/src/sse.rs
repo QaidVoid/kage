@@ -33,7 +33,8 @@ pub(crate) struct SseEvent {
 /// Blank lines terminate a frame, `:` lines are comments, `event:`
 /// sets the name, and successive `data:` lines join with `\n`. A
 /// frame with content still buffered at EOF is flushed before the
-/// terminating `Ok(None)`.
+/// terminating `Ok(None)`. A frame whose name and data are both empty
+/// (a bare `data:` keepalive line) is skipped rather than surfaced.
 pub(crate) fn read_sse_event<R: BufRead>(
     reader: &mut R,
 ) -> Result<Option<SseEvent>, ProviderError> {
@@ -47,16 +48,22 @@ pub(crate) fn read_sse_event<R: BufRead>(
             .read_line(&mut line)
             .map_err(|e| ProviderError::Transport(e.to_string()))?;
         if n == 0 {
-            if have_content {
+            if have_content && !(name.is_empty() && data.is_empty()) {
                 return Ok(Some(SseEvent { name, data }));
             }
             return Ok(None);
         }
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
-            if have_content {
+            if have_content && !(name.is_empty() && data.is_empty()) {
                 return Ok(Some(SseEvent { name, data }));
             }
+            // An empty-data frame is a keepalive, not an event: reset
+            // and keep reading instead of surfacing a payload the state
+            // machines would fail to parse.
+            name.clear();
+            data.clear();
+            have_content = false;
             continue;
         }
         if trimmed.starts_with(':') {
@@ -131,5 +138,40 @@ pub(crate) fn sse_next<S: SseStreamCore>(
                 return Some(Err(e));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frames(bytes: &'static [u8]) -> Vec<SseEvent> {
+        let mut reader = BufReader::new(std::io::Cursor::new(bytes));
+        let mut out = Vec::new();
+        while let Some(frame) = read_sse_event(&mut reader).unwrap() {
+            out.push(frame);
+        }
+        out
+    }
+
+    #[test]
+    fn empty_data_keepalives_yield_no_frames() {
+        let fs = frames(b"data:\n\ndata: {\"a\":1}\n\n");
+        assert_eq!(fs.len(), 1);
+        assert_eq!(fs[0].data, "{\"a\":1}");
+    }
+
+    #[test]
+    fn empty_data_keepalive_at_eof_yields_no_frames() {
+        assert!(frames(b"data:\n\n").is_empty());
+        assert!(frames(b"data:").is_empty());
+    }
+
+    #[test]
+    fn named_frame_with_empty_data_is_kept() {
+        let fs = frames(b"event: ping\ndata:\n\n");
+        assert_eq!(fs.len(), 1);
+        assert_eq!(fs[0].name, "ping");
+        assert!(fs[0].data.is_empty());
     }
 }

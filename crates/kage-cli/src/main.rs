@@ -620,7 +620,10 @@ fn main() -> ExitCode {
         return code;
     }
     if let Ok(path) = models_cache_path() {
-        kage_provider::catalog::use_cache(&path);
+        match kage_provider::catalog::use_cache(&path) {
+            Ok(count) => eprintln!("kage: model cache loaded ({count} models)"),
+            Err(reason) => eprintln!("kage: ignoring model cache {}: {reason}", path.display()),
+        }
     }
 
     if let Some(command) = cli.command {

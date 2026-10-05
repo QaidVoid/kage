@@ -2386,6 +2386,7 @@ fn a_change_the_client_did_not_make_sends_config_option_update() {
 
 #[test]
 fn states_older_than_a_client_change_are_not_sent_back() {
+    use super::options::Changed;
     let settings = |model: &str, thinking| Settings {
         model: model.into(),
         thinking: Some(thinking),
@@ -2395,9 +2396,20 @@ fn states_older_than_a_client_change_are_not_sent_back() {
         swarm: false,
         goal: None,
     };
+    let mut changed = Changed::default();
+    changed.absorb(&[
+        CommandKind::SetModel {
+            model: "mock/other".into(),
+        },
+        CommandKind::SetThinking {
+            level: Some(ThinkingLevel::High),
+        },
+    ]);
     let mut shown = Shown {
         settings: settings("mock/other", ThinkingLevel::High),
         catching_up: true,
+        changed,
+        swallowed: 0,
     };
     assert!(!shown.observe(&settings("mock/other", ThinkingLevel::Off)));
     assert!(!shown.observe(&settings("mock/m", ThinkingLevel::Off)));
@@ -2405,6 +2417,90 @@ fn states_older_than_a_client_change_are_not_sent_back() {
     assert!(!shown.observe(&settings("mock/other", ThinkingLevel::High)));
     assert!(shown.observe(&settings("mock/m", ThinkingLevel::High)));
     assert_eq!(shown.settings.model, "mock/m");
+}
+
+/// A `Shown` catching up on a model change, with every other field
+/// requested and settled.
+fn catching_up_on_model() -> (Shown, Settings) {
+    use super::options::Changed;
+    let requested = Settings {
+        model: "mock/other".into(),
+        thinking: Some(ThinkingLevel::High),
+        levels: Vec::new(),
+        mode: None,
+        plan: false,
+        swarm: false,
+        goal: Some("ship it".into()),
+    };
+    let mut changed = Changed::default();
+    changed.absorb(&[CommandKind::SetModel {
+        model: "mock/other".into(),
+    }]);
+    let shown = Shown {
+        settings: Settings {
+            model: "mock/m".into(),
+            ..requested.clone()
+        },
+        catching_up: true,
+        changed,
+        swallowed: 0,
+    };
+    (shown, requested)
+}
+
+#[test]
+fn an_unrelated_change_while_catching_up_is_forwarded_at_once() {
+    let (mut shown, requested) = catching_up_on_model();
+
+    // The engine reports a swarm flip it did not owe to the change the
+    // client made: it goes out at once and the catch-up ends.
+    let unrelated = Settings {
+        swarm: true,
+        ..requested.clone()
+    };
+    assert!(shown.observe(&unrelated));
+    assert!(!shown.catching_up);
+    assert_eq!(shown.settings.swarm, true);
+
+    // A later state the client already saw is no longer suppressed.
+    assert!(!shown.observe(&unrelated));
+}
+
+#[test]
+fn a_catch_up_that_never_settles_is_forwarded_after_a_bound() {
+    use super::options::CATCH_UP_CAP;
+    let (mut shown, requested) = catching_up_on_model();
+
+    // States that differ only in the changed field are swallowed
+    // while the catch-up is young.
+    let mut forwarded = 0;
+    for _ in 0..CATCH_UP_CAP {
+        forwarded += shown.observe(&requested).then_some(1).unwrap_or(0);
+    }
+    assert_eq!(forwarded, 0, "young catch-ups swallow what may settle");
+
+    // Past the bound the filter gives up, so a change the engine can
+    // never reproduce cannot wedge it.
+    assert!(shown.observe(&requested));
+    assert!(!shown.catching_up);
+}
+
+#[test]
+fn a_whitespace_goal_converges_instead_of_wedging() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(vec![text_turn("ok")], dir.path(), dir.path());
+
+    let set = set_option(&h, "goal", "   ").unwrap();
+    assert_eq!(set["configOptions"][4]["currentValue"], "");
+
+    // The engine filtered the goal the same way, so a change it
+    // reports later still reaches the client.
+    h.command(CommandKind::SetModel {
+        model: "mock/other".into(),
+    });
+    let updates = updates_until(&h.inbox, &h.session, "config_option_update");
+    let update = updates.last().unwrap()["update"].clone();
+    assert_eq!(current_values(&update), ["mock/other", "default", "default", "off", ""]);
 }
 
 #[test]
@@ -2923,7 +3019,10 @@ fn mcp_prompts_are_commands_that_expand_when_sent_back() {
         prompt(&h.client, &h.session, "/srv:p x")["stopReason"],
         "end_turn"
     );
-    assert_eq!(h.mock.requests()[0].messages[0].content, [text("p a=x")]);
+    assert_eq!(
+        h.mock.requests()[0].messages[0].content,
+        [text("p a=x"), text("x")]
+    );
 
     let params = serde_json::json!({
         "sessionId": h.session,
@@ -3523,29 +3622,131 @@ fn kind(update: &SessionUpdate) -> &'static str {
 /// bound.
 #[test]
 fn held_updates_stop_at_a_hard_cap() {
-    use super::bridge::{HELD_CAP, hold};
+    use super::bridge::{HELD_CAP, HeldUpdates, hold};
     use kage_acp::acp::{ContentBlock, MessageChunk};
 
     let held = Held::default();
     let session = SessionId::new();
-    lock(&held).insert(session, Vec::new());
+    lock(&held).insert(session, HeldUpdates::default());
     let chunk = |n: u64| {
         SessionUpdate::AgentMessageChunk(MessageChunk {
             content: ContentBlock::text(n.to_string()),
             meta: None,
         })
     };
-    let kept = (0..HELD_CAP as u64 + 100)
-        .filter(|n| {
-            let mut held = lock(&held);
-            hold(held.get_mut(&session).unwrap(), chunk(*n))
-        })
-        .count();
-    assert_eq!(kept, HELD_CAP);
+    for n in 0..HELD_CAP as u64 + 100 {
+        let mut held = lock(&held);
+        hold(held.get_mut(&session).unwrap(), chunk(n));
+    }
     let updates = lock(&held).remove(&session).unwrap();
-    assert_eq!(updates.len(), HELD_CAP);
-    assert_eq!(updates[0], chunk(0));
-    assert_eq!(updates.last().unwrap(), &chunk(HELD_CAP as u64 - 1));
+    assert_eq!(updates.updates.len(), HELD_CAP);
+    assert_eq!(updates.updates[0], chunk(0));
+    assert_eq!(updates.updates.last().unwrap(), &chunk(HELD_CAP as u64 - 1));
+    assert_eq!(updates.dropped, 100);
+}
+
+/// The agent side of a pipe pair, and the inbox its notifications
+/// land in.
+fn peer_inbox() -> (Peer, mpsc::Receiver<Inbound>) {
+    let (cli_r, srv_w) = std::io::pipe().unwrap();
+    let (srv_r, cli_w) = std::io::pipe().unwrap();
+    let (agent, _agent_in, _reader) = kage_jsonrpc::connect(BufReader::new(srv_r), srv_w);
+    let (_client, inbox, _client_reader) = kage_jsonrpc::connect(BufReader::new(cli_r), cli_w);
+    (agent, inbox)
+}
+
+#[test]
+fn a_flushed_held_buffer_reports_what_the_cap_dropped() {
+    use super::bridge::{HELD_CAP, HeldUpdates, flush_held, hold};
+    use kage_acp::acp::{ContentBlock, MessageChunk};
+
+    let (peer, inbox) = peer_inbox();
+    let chunk = |n: usize| {
+        SessionUpdate::AgentMessageChunk(MessageChunk {
+            content: ContentBlock::text(n.to_string()),
+            meta: None,
+        })
+    };
+    let mut held = HeldUpdates::default();
+    for n in 0..HELD_CAP + 3 {
+        hold(&mut held, chunk(n));
+    }
+    // The pipe plus the inbound channel hold far less than HELD_CAP
+    // updates, so the flush must run while this thread drains.
+    let flush_peer = peer.clone();
+    let flusher = std::thread::spawn(move || flush_held(&flush_peer, "c1", held));
+
+    let mut seen = 0;
+    let marker = loop {
+        let Inbound::Notification { params, .. } = inbox.recv_timeout(WAIT).expect("no update")
+        else {
+            continue;
+        };
+        let text = params["update"]["content"]["text"].as_str().unwrap_or("");
+        if text.contains("were dropped") {
+            break text.to_owned();
+        }
+        seen += 1;
+    };
+    flusher.join().unwrap();
+    assert_eq!(seen, HELD_CAP, "every kept update is replayed first");
+    assert!(marker.contains("3 updates were dropped"), "{marker}");
+}
+
+#[test]
+fn an_under_cap_flush_sends_no_marker() {
+    use super::bridge::{HeldUpdates, flush_held, hold};
+    use kage_acp::acp::{ContentBlock, MessageChunk};
+
+    let (peer, inbox) = peer_inbox();
+    let mut held = HeldUpdates::default();
+    hold(
+        &mut held,
+        SessionUpdate::AgentMessageChunk(MessageChunk {
+            content: ContentBlock::text("only"),
+            meta: None,
+        }),
+    );
+    let flush_peer = peer.clone();
+    let flusher = std::thread::spawn(move || flush_held(&flush_peer, "c1", held));
+    flusher.join().unwrap();
+
+    let mut texts = Vec::new();
+    while let Ok(Inbound::Notification { params, .. }) = inbox.recv_timeout(Duration::from_millis(300))
+    {
+        texts.push(
+            params["update"]["content"]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        );
+    }
+    assert_eq!(texts, ["only"]);
+}
+
+#[test]
+fn a_malformed_question_ask_shows_as_an_ordinary_permission() {
+    use super::bridge::{AskKind, ask_kind, permission_call, question_prompts};
+
+    let malformed = serde_json::json!({"questions": "nope"});
+    let tool_call = permission_call(
+        Some(&ToolCallId::new("call_q")),
+        "ask_user_question",
+        &malformed,
+    );
+    let kind = ask_kind("ask_user_question", &malformed, tool_call);
+    let AskKind::Permission(update) = kind else {
+        panic!("a malformed questions array must not spawn questions");
+    };
+    assert_eq!(update.raw_input.unwrap(), malformed);
+
+    assert_eq!(question_prompts(&malformed), None);
+    assert_eq!(question_prompts(&serde_json::json!({"questions": []})), None);
+    let valid = serde_json::json!({"questions": [
+        {"header": "Store", "question": "Where?",
+         "options": [{"label": "Disk", "description": "Kept"}]}
+    ]});
+    assert_eq!(question_prompts(&valid).unwrap().len(), 1);
 }
 
 fn status(update: &SessionUpdate) -> Option<ToolCallStatus> {
@@ -4581,6 +4782,151 @@ fn an_ask_whose_last_client_drops_is_denied_and_the_run_goes_on() {
 }
 
 #[test]
+fn an_ask_whose_last_client_drops_answers_questions_with_no_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(
+        vec![
+            tool_turn("call_q", "ask_user_question", questions_input()),
+            text_turn("noted"),
+            text_turn("titled"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    // The prompt gives up on its answer, so dropping the harness's
+    // own client closes the connection.
+    let (done, prompt_end) = mpsc::channel();
+    let prompter = h.client.clone();
+    let params = serde_json::json!({
+        "sessionId": h.session,
+        "prompt": [{"type": "text", "text": "set it up"}],
+    });
+    std::thread::spawn(move || {
+        let _ =
+            done.send(prompter.request_timeout("session/prompt", params, Duration::from_secs(2)));
+    });
+    until_ask(&h.inbox, &mut Vec::new());
+
+    let Harness {
+        client,
+        inbox,
+        mock,
+        ..
+    } = h;
+    drop(client);
+    drop(inbox);
+    // The question ask is answered with no answers, so the tool
+    // reports a decline and the run goes on instead of waiting.
+    until(|| mock.requests().len() >= 2);
+    let sent = mock.requests()[1].messages.clone();
+    let declined = sent.iter().flat_map(|m| &m.content).any(|block| {
+        matches!(block, Content::ToolResultBlock { output, .. }
+            if output.starts_with("The user declined"))
+    });
+    assert!(declined, "{sent:#?}");
+    let response = prompt_end.recv_timeout(WAIT).unwrap();
+    assert!(response.is_err(), "the dropped client got an answer");
+}
+
+#[test]
+fn closing_a_session_with_an_open_ask_denies_it_and_closes_once_idle() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let h = serve_paused(
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::ToolCallStart {
+                id: ToolCallId::new("call_1"),
+                name: "ls".into(),
+            }),
+        ],
+        vec![
+            Ok(ProviderEvent::ToolCallEnd {
+                id: ToolCallId::new("call_1"),
+                input: serde_json::json!({ "path": cwd }),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: CoreStopReason::ToolUse,
+                usage: TokenUsage::default(),
+            }),
+        ],
+        vec![text_turn("done"), text_turn("titled")],
+        dir.path(),
+        dir.path(),
+    );
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+    until(|| h.paused.is_parked());
+    h.release.send(()).unwrap();
+    let (ask, _) = until_ask(&h.inbox, &mut Vec::new());
+
+    h.client
+        .request("session/close", serde_json::json!({"sessionId": h.session}))
+        .unwrap();
+    // The deny reaches the engine and the run finishes before the
+    // session closes.
+    until(|| lock(&h.paused.requests).len() >= 2);
+    let request = lock(&h.paused.requests)[1].clone();
+    let denied = request
+        .messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .find_map(|c| match c {
+            Content::ToolResultBlock {
+                call_id, is_error, ..
+            } if *call_id == ToolCallId::new("call_1") => Some(*is_error),
+            _ => None,
+        });
+    assert_eq!(denied, Some(true), "the ask was answered with a deny");
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    wait_cancel(&h.inbox, &ask);
+    until(|| {
+        !h.host
+            .engine
+            .hosted_sessions()
+            .iter()
+            .any(|(id, _)| *id == h.id)
+    });
+}
+
+#[test]
+fn closing_a_session_with_an_open_question_answers_with_no_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(
+        vec![
+            tool_turn("call_q", "ask_user_question", questions_input()),
+            text_turn("noted"),
+            text_turn("titled"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    let prompt_end = prompt_async(&h.client, &h.session, "set it up");
+    let (ask, _) = until_ask(&h.inbox, &mut Vec::new());
+
+    h.client
+        .request("session/close", serde_json::json!({"sessionId": h.session}))
+        .unwrap();
+    wait_cancel(&h.inbox, &ask);
+    until(|| h.mock.requests().len() >= 2);
+    let sent = h.mock.requests()[1].messages.clone();
+    let declined = sent.iter().flat_map(|m| &m.content).any(|block| {
+        matches!(block, Content::ToolResultBlock { output, .. }
+            if output.starts_with("The user declined"))
+    });
+    assert!(declined, "{sent:#?}");
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    until(|| {
+        !h.host
+            .engine
+            .hosted_sessions()
+            .iter()
+            .any(|(id, _)| *id == h.id)
+    });
+}
+
+#[test]
 fn a_late_subagent_client_hears_of_a_running_agent_and_its_ask() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().display().to_string();
@@ -5027,7 +5373,7 @@ mod link;
 #[derive(Debug)]
 struct Routed {
     main: Listed,
-    agents: MockProvider,
+    agents: Arc<dyn kage_provider::Provider>,
 }
 
 impl kage_provider::Provider for Routed {
@@ -5071,7 +5417,7 @@ fn a_prompt_returns_while_its_background_agent_still_runs() {
     ]);
     let routed = Routed {
         main: Listed::of(main.clone()),
-        agents,
+        agents: Arc::new(agents),
     };
     let h = serve_on(
         Arc::new(routed),
@@ -5109,6 +5455,136 @@ fn a_prompt_returns_while_its_background_agent_still_runs() {
 }
 
 #[test]
+fn a_background_agent_and_its_ask_survive_the_parent_run_ending() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().display().to_string();
+    let task =
+        serde_json::json!({"description": "list files", "prompt": "list", "background": true});
+    let main = MockProvider::sequence(vec![
+        tool_turn("call_agent", "agent", task),
+        text_turn("the agent is on it"),
+    ]);
+    let agents = MockProvider::sequence(vec![
+        tool_turn("call_child", "ls", serde_json::json!({ "path": path })),
+        text_turn("child done"),
+        text_turn("titled twice"),
+    ]);
+    let routed = Routed {
+        main: Listed::of(main.clone()),
+        agents: Arc::new(agents),
+    };
+    let h = serve_on(
+        Arc::new(routed),
+        main.clone(),
+        dir.path(),
+        dir.path(),
+        false,
+        default_agents(),
+        true,
+    );
+    initialize(&h.client);
+    let resume = serde_json::json!({"sessionId": h.session, "cwd": path, "mcpServers": []});
+    let response = prompt_async(&h.client, &h.session, "go")
+        .recv_timeout(WAIT)
+        .unwrap()
+        .unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+
+    // The child asks while its parent's run has already ended.
+    let (ask, params) = until_ask(&h.inbox, &mut Vec::new());
+    let child = params["sessionId"].clone();
+    assert_ne!(child, h.session);
+    assert_eq!(params["toolCall"]["toolCallId"], "call_child");
+
+    // A late attach still hears of the running agent. The replay
+    // re-asks the parent's own agent call; the child's open ask stays
+    // with the original client, so it is answered there.
+    let c2 = connect(&h.host);
+    initialize(&c2.client);
+    c2.client.request("session/load", resume.clone()).unwrap();
+    let updates = updates_until(&c2.inbox, &h.session, "subagent_update");
+    let announced = updates.last().unwrap();
+    assert_eq!(announced["update"]["subagentSessionId"], child);
+    assert_eq!(announced["update"]["state"], "running");
+
+    allow(&h.client, &ask);
+    let notes = until_terminal(&c2.inbox);
+    let (_, terminal) = notes.last().unwrap();
+    assert_eq!(terminal["update"]["subagentSessionId"], child);
+    assert_eq!(terminal["update"]["state"], "completed");
+}
+
+#[test]
+fn a_session_with_a_live_background_agent_stays_open_after_close() {
+    let dir = tempfile::tempdir().unwrap();
+    let task =
+        serde_json::json!({"description": "ponder", "prompt": "ponder", "background": true});
+    let main = MockProvider::sequence(vec![
+        tool_turn("call_agent", "agent", task),
+        text_turn("the agent is on it"),
+    ]);
+    let (release, gate) = mpsc::channel();
+    let agents = Paused::new(
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::TextDelta {
+                delta: "wor".into(),
+            }),
+        ],
+        vec![
+            Ok(ProviderEvent::TextDelta {
+                delta: "king".into(),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: CoreStopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        ],
+        Vec::new(),
+        gate,
+    );
+    let routed = Routed {
+        main: Listed::of(main.clone()),
+        agents: Arc::new(agents),
+    };
+    let h = serve_on(
+        Arc::new(routed),
+        main.clone(),
+        dir.path(),
+        dir.path(),
+        false,
+        default_agents(),
+        false,
+    );
+    initialize(&h.client);
+    let response = prompt_async(&h.client, &h.session, "go")
+        .recv_timeout(WAIT)
+        .unwrap()
+        .unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    let hosted = || {
+        h.host
+            .engine
+            .hosted_sessions()
+            .iter()
+            .any(|(id, _)| *id == h.id)
+    };
+    assert!(hosted());
+
+    // The last client closes the session while the background agent
+    // still works: no Close goes out, so the run is not cancelled.
+    h.client
+        .request("session/close", serde_json::json!({"sessionId": h.session}))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(hosted(), "the live background agent keeps the session open");
+
+    // Once the agent ends, the close goes out after all.
+    release.send(()).unwrap();
+    until(|| !hosted());
+}
+
+#[test]
 fn a_kage_client_session_wakes_for_a_background_result() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().display().to_string();
@@ -5122,7 +5598,7 @@ fn a_kage_client_session_wakes_for_a_background_result() {
     let agents = MockProvider::sequence(vec![text_turn("child done")]);
     let routed = Routed {
         main: Listed::of(main.clone()),
-        agents,
+        agents: Arc::new(agents),
     };
     let host = test_host_agents(
         Arc::new(routed),

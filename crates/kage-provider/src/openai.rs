@@ -47,12 +47,28 @@ enum Dialect {
 impl Dialect {
     /// The dialect of provider `id` at `base_url`: Z.AI for the `zai`,
     /// `zai-coding-plan` and `zhipuai-coding-plan` ids and for any
-    /// `api.z.ai` or `open.bigmodel.cn` endpoint.
+    /// endpoint on `api.z.ai` (or a subdomain of it) or
+    /// `open.bigmodel.cn`.
     fn detect(id: &str, base_url: &str) -> Self {
         let zai = matches!(id, "zai" | "zai-coding-plan" | "zhipuai-coding-plan")
-            || base_url.contains("api.z.ai")
-            || base_url.contains("open.bigmodel.cn");
+            || is_zai_host(base_url);
         if zai { Self::Zai } else { Self::OpenAi }
+    }
+}
+
+/// Whether `base_url` points at a Z.AI or Zhipu host: its normalized
+/// host equals or is a subdomain of `api.z.ai`, or equals
+/// `open.bigmodel.cn`. A URL that fails to parse keeps the old
+/// substring check, so odd configs keep working.
+fn is_zai_host(base_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(base_url) else {
+        return base_url.contains("api.z.ai") || base_url.contains("open.bigmodel.cn");
+    };
+    match url.host_str() {
+        Some(host) => {
+            host == "api.z.ai" || host.ends_with(".api.z.ai") || host == "open.bigmodel.cn"
+        }
+        None => false,
     }
 }
 
@@ -369,7 +385,7 @@ fn convert_user_blocks(blocks: &[Content]) -> Vec<Value> {
         .iter()
         .filter_map(|c| match c {
             Content::Text { text } => Some(serde_json::json!({"type":"text","text":text})),
-            Content::Image { source, .. } => Some(image_to_openai(source)),
+            Content::Image { source, mime } => Some(image_to_openai(source, mime)),
             _ => None,
         })
         .collect()
@@ -455,16 +471,19 @@ fn convert_tool_result_messages(blocks: &[Content]) -> Vec<Value> {
         .collect()
 }
 
-fn image_to_openai(source: &kage_core::ImageSource) -> Value {
+fn image_to_openai(source: &kage_core::ImageSource, mime: &str) -> Value {
     match source {
         kage_core::ImageSource::Url { url } => serde_json::json!({
             "type": "image_url",
             "image_url": {"url": url},
         }),
-        kage_core::ImageSource::Base64 { data } => serde_json::json!({
-            "type": "image_url",
-            "image_url": {"url": format!("data:image/png;base64,{data}")},
-        }),
+        kage_core::ImageSource::Base64 { data } => {
+            let mime = if mime.is_empty() { "image/png" } else { mime };
+            serde_json::json!({
+                "type": "image_url",
+                "image_url": {"url": format!("data:{mime};base64,{data}")},
+            })
+        }
     }
 }
 
@@ -520,12 +539,16 @@ impl OpenAiStream {
 
     fn process_chunk(&mut self, data: &str) {
         if data == "[DONE]" {
-            self.flush_details();
-            self.flush_pending_tool_calls();
-            self.pending.push_back(Ok(ProviderEvent::MessageEnd {
-                stop_reason: self.finish_reason,
-                usage: crate::event::without_cached_input(self.usage),
-            }));
+            // A DONE-only stream invents no turn, matching on_eof; the
+            // loop treats the empty stream as transient and retries.
+            if self.started {
+                self.flush_details();
+                self.flush_pending_tool_calls();
+                self.pending.push_back(Ok(ProviderEvent::MessageEnd {
+                    stop_reason: self.finish_reason,
+                    usage: crate::event::without_cached_input(self.usage),
+                }));
+            }
             self.done = true;
             return;
         }
@@ -647,7 +670,9 @@ impl OpenAiStream {
         }
         if let Some(partial) = args {
             entry.args.push_str(partial);
-            if !partial.is_empty() {
+            // Before the call has an id and a name the delta is only
+            // buffered: an emission here would carry a ghost empty id.
+            if entry.started && !partial.is_empty() {
                 self.pending.push_back(Ok(ProviderEvent::ToolCallArgsDelta {
                     id: entry.id.clone(),
                     partial: partial.to_owned(),
@@ -669,8 +694,11 @@ impl OpenAiStream {
 
     fn flush_pending_tool_calls(&mut self) {
         let calls = std::mem::take(&mut self.tool_calls);
-        for (_, builder) in calls {
+        for (index, builder) in calls {
             if !builder.started {
+                self.pending.push_back(Err(ProviderError::Decode(format!(
+                    "tool call at index {index} never received an id and name"
+                ))));
                 continue;
             }
             let input = if builder.args.is_empty() {
@@ -953,6 +981,31 @@ mod tests {
     fn eof_before_any_output_invents_nothing() {
         let mut events = stream_from_bytes(b"");
         assert!(events.next().is_none());
+    }
+
+    /// A stream whose first frame is `[DONE]` invents no turn, matching
+    /// the EOF path.
+    #[test]
+    fn done_before_any_output_invents_nothing() {
+        let mut events = stream_from_bytes(b"data: [DONE]\n\n");
+        assert!(events.next().is_none());
+    }
+
+    /// Empty-data keepalive lines are framing noise; they must not
+    /// become decode failures that kill the turn.
+    #[test]
+    fn empty_data_keepalives_do_not_break_the_stream() {
+        let bytes: &[u8] = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata:\n\ndata:\n\ndata: [DONE]\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::TextDelta { delta } if delta == "hi"))
+        );
+        assert!(matches!(
+            events.last(),
+            Some(ProviderEvent::MessageEnd { .. })
+        ));
     }
 
     /// Same field the Responses provider maps; cached turns must not
@@ -1355,6 +1408,27 @@ mod tests {
         assert_eq!(OpenAiProvider::new("k").dialect, Dialect::OpenAi);
     }
 
+    /// Dialect detection keys on the parsed host, so a lookalike path
+    /// or query parameter on another gateway must not flip to Z.AI.
+    #[test]
+    fn zai_host_detection_uses_the_url_host_not_substrings() {
+        let detect = |url: &str| Dialect::detect("mine", url);
+        assert_eq!(detect("https://api.z.ai/api/paas/v4"), Dialect::Zai);
+        assert_eq!(detect("https://sub.api.z.ai/v1"), Dialect::Zai);
+        assert_eq!(detect("https://open.bigmodel.cn/api/paas/v4"), Dialect::Zai);
+        assert_eq!(
+            detect("https://gateway.example.com/api.z.ai-mirror/v1"),
+            Dialect::OpenAi
+        );
+        assert_eq!(
+            detect("https://gw.example.com/v1?mirror=api.z.ai"),
+            Dialect::OpenAi
+        );
+        assert_eq!(detect("https://notapi.z.ai/v1"), Dialect::OpenAi);
+        assert_eq!(detect("not a url but mentions api.z.ai"), Dialect::Zai);
+        assert_eq!(detect("::: not a url"), Dialect::OpenAi);
+    }
+
     #[test]
     fn zai_body_uses_max_tokens_and_a_system_role() {
         let mut req = StreamRequest::new("glm-5.3", vec![Arc::new(user_msg("hi"))]);
@@ -1462,6 +1536,88 @@ data: [DONE]\n\n";
         let provider = OpenAiProvider::new("k").with_models(models.clone());
         assert_eq!(provider.models(), models);
         assert!(OpenAiProvider::new("k").models().is_empty());
+    }
+
+    fn image_content(mime: &str) -> Content {
+        Content::Image {
+            source: kage_core::ImageSource::Base64 {
+                data: "QUJD".into(),
+            },
+            mime: mime.to_owned(),
+        }
+    }
+
+    fn data_url(blocks: &[Content]) -> String {
+        let block = convert_user_blocks(blocks).remove(0);
+        block["image_url"]["url"]
+            .as_str()
+            .expect("image url")
+            .to_owned()
+    }
+
+    #[test]
+    fn base64_images_forward_their_mime() {
+        assert_eq!(
+            data_url(&[image_content("image/jpeg")]),
+            "data:image/jpeg;base64,QUJD"
+        );
+        assert_eq!(
+            data_url(&[image_content("image/webp")]),
+            "data:image/webp;base64,QUJD"
+        );
+    }
+
+    #[test]
+    fn base64_images_without_a_mime_fall_back_to_png() {
+        assert_eq!(data_url(&[image_content("")]), "data:image/png;base64,QUJD");
+    }
+
+    #[test]
+    fn args_only_deltas_before_the_call_starts_stay_buffered() {
+        let bytes: &[u8] = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"/tmp\\\"}\"}}]}}]}\n\ndata: [DONE]\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+        let deltas: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::ToolCallArgsDelta { id, partial } => {
+                    assert!(!id.0.is_empty(), "no ghost empty id");
+                    Some(partial.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, ["\"/tmp\"}"]);
+        let end = events
+            .iter()
+            .find(|e| matches!(e, ProviderEvent::ToolCallEnd { .. }))
+            .expect("ToolCallEnd present");
+        if let ProviderEvent::ToolCallEnd { id, input } = end {
+            assert_eq!(id.0, "call_1");
+            assert_eq!(input["path"], "/tmp");
+        }
+    }
+
+    #[test]
+    fn tool_call_that_never_gets_a_name_decodes_as_an_error() {
+        let bytes: &[u8] = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"{}\"}}]}}]}\n\ndata: [DONE]\n\n";
+        let s = stream_from_bytes(bytes);
+        let events: Vec<_> = s.collect();
+        let after_start: Vec<_> = events
+            .iter()
+            .filter(|r| !matches!(r, Ok(ProviderEvent::MessageStart)))
+            .collect();
+        assert!(
+            after_start
+                .iter()
+                .any(|r| matches!(r, Err(ProviderError::Decode(msg)) if msg.contains("index 1"))),
+            "a Decode error naming the index: {after_start:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|r| matches!(r, Ok(ProviderEvent::ToolCallEnd { .. }))),
+            "no ToolCallEnd for a call with no id and name"
+        );
     }
 }
 

@@ -19,8 +19,9 @@ use kage_acp::acp::{
 };
 use kage_acp::agent::{PromptContext, send_update};
 use kage_core::protocol::{
-    ASK_USER_QUESTION_TOOL, AgentState, AgentTree, Command, CommandKind, Envelope, Event,
-    HostEvent, McpServerInfo, NoticeLevel, RequestId, RunOutcome, SessionState, SwarmMember, Usage,
+    ASK_USER_QUESTION_TOOL, AgentNode, AgentState, AgentTree, Command, CommandKind, Envelope,
+    Event, HostEvent, McpServerInfo, NoticeLevel, RequestId, RunOutcome, SessionState, SwarmMember,
+    Usage,
 };
 use kage_core::sync::lock;
 use kage_core::{LoopError, LoopEvent, MessageId, SessionId, ToolCallId};
@@ -28,8 +29,8 @@ use kage_jsonrpc::RpcError;
 
 use super::CliAcpAgent;
 use super::bridge::{
-    ask_kind, permission_call, question_input, spawn_ask, to_update, tool_kind, tool_title,
-    top_agent,
+    HeldUpdates, ask_kind, permission_call, question_input, spawn_ask, to_update, tool_kind,
+    tool_title, top_agent,
 };
 use super::options::{Settings, Shown, config_options};
 use crate::engine::Commander;
@@ -92,6 +93,16 @@ pub(super) struct AskSeed {
     /// The root `agent` call the ask reports under, when it came from
     /// an agent instead of the attached session itself.
     pub(super) top: Option<(ToolCallId, String)>,
+}
+
+/// An open ask a client that left is to decline: the session that
+/// raised it, the engine request, and whether declining means
+/// answering questions with no answers rather than denying a
+/// permission.
+pub(super) struct AskRef {
+    pub(super) session: SessionId,
+    pub(super) request_id: RequestId,
+    pub(super) question: bool,
 }
 
 /// A permission request still open in the engine.
@@ -397,17 +408,19 @@ impl Live {
                 self.owners.remove(&session);
                 self.running.remove(&session);
                 if !is_agent {
-                    let roots: Vec<SessionId> = self
-                        .tree
-                        .under(session)
-                        .into_iter()
-                        .filter_map(|(depth, node)| (depth == 1).then_some(node.session))
-                        .collect();
-                    for root in roots {
-                        self.tree.remove_subtree(root);
-                    }
-                    self.spawns.remove(&session);
+                    self.prune_ended_agents(session);
                     self.maybe_close(session);
+                } else if !requeued {
+                    // A background agent the parent run left behind has
+                    // ended: drop its node so a later attach reads its
+                    // report from the file, then close the parent when
+                    // nothing else keeps it open.
+                    let root = self.tree.root_of(session);
+                    self.tree.remove_subtree(session);
+                    self.retain_spawns(root);
+                    if root != session {
+                        self.maybe_close(root);
+                    }
                 }
             }
             HostEvent::AgentSpawned { .. } => {
@@ -453,8 +466,10 @@ impl Live {
     }
 
     /// Sends `Close` for an idle session no connection holds, so its
-    /// MCP servers and plugin runtimes go away. The engine keeps a
-    /// session it cannot close yet and says so.
+    /// MCP servers and plugin runtimes go away. An agent still at work
+    /// under the session keeps it open; the agent's own end retries
+    /// the close. The engine keeps a session it cannot close yet and
+    /// says so.
     fn maybe_close(&mut self, session: SessionId) {
         if self.attached.get(&session).is_some_and(|count| *count > 0) {
             return;
@@ -469,9 +484,59 @@ impl Live {
         {
             return;
         }
+        if self.agents_live_under(session) {
+            return;
+        }
         self.closing.insert(session);
         self.commander
             .send(Command::to(session, CommandKind::Close));
+    }
+
+    /// Whether an agent under `root` still runs or will again, so the
+    /// session stays open until its work is done.
+    fn agents_live_under(&self, root: SessionId) -> bool {
+        self.tree.under(root).iter().any(|(_, node)| {
+            matches!(node.state, AgentState::Queued | AgentState::Running)
+                || self.running.contains(&node.session)
+                || self.paused.contains_key(&node.session)
+        })
+    }
+
+    /// Whether the end of a parent run leaves `node` in the tree: a
+    /// background agent still queued or running, or waiting out a rate
+    /// limit.
+    fn agent_kept(&self, node: &AgentNode) -> bool {
+        node.background
+            && (matches!(node.state, AgentState::Queued | AgentState::Running)
+                || self.running.contains(&node.session)
+                || self.paused.contains_key(&node.session))
+    }
+
+    /// Drops the tree nodes of the depth-1 children of `session` whose
+    /// run ended, keeping the background agents still at work, and
+    /// drops the spawn records of every agent no longer in the tree.
+    fn prune_ended_agents(&mut self, session: SessionId) {
+        let roots: Vec<SessionId> = self
+            .tree
+            .under(session)
+            .into_iter()
+            .filter(|(depth, node)| *depth == 1 && !self.agent_kept(node))
+            .map(|(_, node)| node.session)
+            .collect();
+        for root in roots {
+            self.tree.remove_subtree(root);
+        }
+        self.retain_spawns(session);
+    }
+
+    /// Drops the spawn records of agents no longer in the tree.
+    fn retain_spawns(&mut self, root: SessionId) {
+        if let Some(spawns) = self.spawns.get_mut(&root) {
+            spawns.retain(|spawn| self.tree.get(spawn.session).is_some());
+            if spawns.is_empty() {
+                self.spawns.remove(&root);
+            }
+        }
     }
 
     /// The message `session` is streaming, with the loop events that
@@ -642,6 +707,15 @@ impl Live {
     pub(super) fn is_closing(&self, id: SessionId) -> bool {
         self.closing.contains(&id)
     }
+
+    /// Whether the live state tracks `session` itself, so a recorded
+    /// file's stale state must not be announced over it.
+    pub(super) fn tracks(&self, session: SessionId) -> bool {
+        self.tree.get(session).is_some()
+            || self.running.contains(&session)
+            || self.paused.contains_key(&session)
+            || self.spawns.contains_key(&session)
+    }
 }
 
 /// What link clients ([`super::link`]) read.
@@ -741,12 +815,17 @@ impl Live {
         self.asks.get(&request_id).map(|ask| ask.session)
     }
 
-    /// The open asks under `root`, with the session that raised each.
-    pub(super) fn asks_under(&self, root: SessionId) -> Vec<(SessionId, RequestId)> {
+    /// The open asks under `root`, with the session that raised each
+    /// and how to decline it.
+    pub(super) fn asks_under(&self, root: SessionId) -> Vec<AskRef> {
         self.asks
             .values()
             .filter(|ask| self.tree.root_of(ask.session) == root)
-            .map(|ask| (ask.session, ask.request_id))
+            .map(|ask| AskRef {
+                session: ask.session,
+                request_id: ask.request_id,
+                question: ask.tool == ASK_USER_QUESTION_TOOL,
+            })
             .collect()
     }
 }
@@ -803,14 +882,9 @@ impl CliAcpAgent {
                 }
             }
         }
-        lock(&self.shown).insert(
-            id,
-            Shown {
-                settings: settings.clone(),
-                catching_up: false,
-            },
-        );
-        lock(&self.held).insert(id, Vec::new());
+        lock(&self.shown)
+            .insert(id, Shown::fresh(settings.clone()));
+        lock(&self.held).insert(id, HeldUpdates::default());
         lock(&self.ids).insert(client.to_owned(), id);
         if let Some(ctx) = ctx {
             let file_title = replay_file.then(|| replay.title.clone()).flatten();

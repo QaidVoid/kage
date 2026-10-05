@@ -29,6 +29,19 @@ use crate::doom::DoomTracker;
 use crate::stream::{TurnFailure, TurnResult, collect_turn};
 use crate::{AgentContext, Hooks, LoopConfig, SteeringMode};
 
+/// Maximum messages drained from a steering or follow-up hook per call.
+/// A hook that never runs dry would otherwise hang the loop on an
+/// ever-growing join; correct hosts are unaffected because their queues
+/// are far smaller.
+const MAX_DRAINED_MESSAGES: usize = 64;
+
+/// Appended to a drained message when the [`MAX_DRAINED_MESSAGES`] cap
+/// truncated the queue. There is no dedicated notice event, so the note
+/// travels inside the joined text, where history and the provider
+/// request both see it.
+const DRAIN_TRUNCATED_NOTE: &str =
+    "[kage: stopped draining after 64 queued messages; the rest were dropped]";
+
 /// Drive one agent run to completion.
 ///
 /// `cx` carries the conversation forward: the caller is expected to push the
@@ -68,6 +81,21 @@ where
     let mut doom = DoomTracker::default();
     let mut turn_index: u32 = 0;
 
+    // A relative workdir (the historical `.` fallback when `current_dir`
+    // fails) would let confinement resolve against whatever the process
+    // CWD becomes later. Refuse it instead of silently running there.
+    if !cx.workdir.is_absolute() {
+        let kind = LoopError::Other {
+            message: format!(
+                "agent workdir '{}' is not absolute; build the context with \
+                 AgentContext::try_new or set an absolute workdir",
+                cx.workdir.display()
+            ),
+        };
+        emit(LoopEvent::Error { kind: kind.clone() });
+        return Err(kind);
+    }
+
     loop {
         if cancel.is_cancelled() {
             return finish_cancelled(&mut emit);
@@ -78,8 +106,11 @@ where
                 return finish_cancelled(&mut emit);
             }
 
-            if let Some(text) = drain_messages(config.steering_mode, || hooks.get_steering()) {
-                push_user_text(cx, &mut emit, text);
+            match drain_messages(config.steering_mode, &cancel, || hooks.get_steering()) {
+                Ok(Some(text)) => push_user_text(cx, &mut emit, text),
+                Ok(None) => {}
+                Err(LoopError::Cancelled) => return finish_cancelled(&mut emit),
+                Err(_) => unreachable!("drain_messages only fails with Cancelled"),
             }
 
             if let Err(kind) = maybe_compact(cx, config, provider, cancel, hooks, &mut emit) {
@@ -112,12 +143,17 @@ where
             // context is unchanged across attempts - no assistant
             // message is appended on failure - so re-issuing the
             // identical request is a clean re-request, not a resume
-            // (SSE has no resume token). The Notice emitted between
-            // attempts breaks the live-assistant block, so the
-            // retry's text starts a fresh block in the UI instead of
-            // concatenating onto the dropped partial; the recording
-            // hook likewise resets on the retry's MessageStart, so
-            // only the successful turn is persisted.
+            // (SSE has no resume token).
+            //
+            // Event contract for `LoopEvent::ProviderRetry`: every
+            // delta streamed since the last `MessageEnd` belonged to a
+            // dropped attempt and must be discarded by the receiver.
+            // The UIs shipped in this repo rely on the Notice breaking
+            // the live block (TUI) or persisting only `MessageAppended`
+            // (recorder), and the retrying turn reuses no message or
+            // tool-call ids, so id-keyed clients cannot concatenate the
+            // attempts either. The retry streams the full turn from
+            // scratch; no deltas are replayed.
             let turn = {
                 let mut attempt: u32 = 0;
                 loop {
@@ -199,6 +235,21 @@ where
                 append_all(cx, &mut emit, unrun);
                 return Ok(());
             }
+            // Opt-in failsafe (LoopConfig::max_turns). Answering pending
+            // calls keeps the every-tool_use-answered invariant; the
+            // error, not Ok(()), tells the host the cap and not the
+            // model ended the run.
+            if config.max_turns.is_some_and(|max| turn_index >= max) {
+                let unrun = unrun_results(pending, assistant_id, &mut emit);
+                append_all(cx, &mut emit, unrun);
+                let kind = LoopError::Other {
+                    message: format!(
+                        "turn limit reached: stopped after {turn_index} turns (max_turns)"
+                    ),
+                };
+                emit(LoopEvent::Error { kind: kind.clone() });
+                return Err(kind);
+            }
 
             if !had_tool_calls {
                 break;
@@ -267,7 +318,13 @@ where
             }
         }
 
-        let Some(text) = drain_messages(config.followup_mode, || hooks.get_followup()) else {
+        let followup = match drain_messages(config.followup_mode, &cancel, || hooks.get_followup())
+        {
+            Ok(text) => text,
+            Err(LoopError::Cancelled) => return finish_cancelled(&mut emit),
+            Err(_) => unreachable!("drain_messages only fails with Cancelled"),
+        };
+        let Some(text) = followup else {
             return Ok(());
         };
         push_user_text(cx, &mut emit, text);
@@ -277,20 +334,46 @@ where
 /// Drain queued messages from a hook poll according to `mode`. In
 /// `OneAtATime`, polls once and returns whatever the hook gave us. In
 /// `All`, polls repeatedly until the hook returns `None`, then joins the
-/// collected messages with blank-line separators.
+/// collected messages with blank-line separators into a single user
+/// message.
+///
+/// The drain is bounded: at most [`MAX_DRAINED_MESSAGES`] messages are
+/// consumed per call. A hook that keeps producing past the cap has its
+/// overflow dropped for this turn, with a note appended to the joined
+/// text so the truncation is visible in history and in the provider
+/// request. Cancel is polled between polls; tripping it aborts the
+/// drain with [`LoopError::Cancelled`].
 ///
 /// Returns `None` when the hook had nothing to give on the first poll.
-fn drain_messages<F: FnMut() -> Option<String>>(mode: SteeringMode, mut poll: F) -> Option<String> {
-    let first = poll()?;
+fn drain_messages<F: FnMut() -> Option<String>>(
+    mode: SteeringMode,
+    cancel: &CancelFlag,
+    mut poll: F,
+) -> Result<Option<String>, LoopError> {
+    if cancel.is_cancelled() {
+        return Err(LoopError::Cancelled);
+    }
+    let Some(first) = poll() else {
+        return Ok(None);
+    };
     if mode == SteeringMode::OneAtATime {
-        return Some(first);
+        return Ok(Some(first));
     }
     let mut out = first;
+    let mut drained = 1usize;
     while let Some(next) = poll() {
+        if cancel.is_cancelled() {
+            return Err(LoopError::Cancelled);
+        }
+        if drained >= MAX_DRAINED_MESSAGES {
+            out.push_str(&format!("\n\n{DRAIN_TRUNCATED_NOTE}"));
+            break;
+        }
         out.push_str("\n\n");
         out.push_str(&next);
+        drained += 1;
     }
-    Some(out)
+    Ok(Some(out))
 }
 
 /// Append `message` to history and announce it with

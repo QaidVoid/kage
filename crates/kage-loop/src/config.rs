@@ -22,9 +22,10 @@ pub enum SteeringMode {
 ///
 /// Defaults are tuned for interactive use: parallel tools are off because
 /// they magnify blast radius, and compaction kicks in at 80% of the
-/// model's context window. The agent loop has no iteration cap: a runaway
-/// agent is bounded by user cancellation, compaction, and provider quota,
-/// not by a magic number here.
+/// model's context window. The agent loop has no iteration cap by
+/// default: a runaway agent is bounded by user cancellation, compaction,
+/// and provider quota. Hosts that need a hard bound (autonomous or
+/// unattended runs) can set [`LoopConfig::max_turns`].
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LoopConfig {
     /// When true, tool calls within a single assistant turn run on
@@ -48,6 +49,14 @@ pub struct LoopConfig {
     /// partial turn is discarded so the re-request is clean.
     #[serde(default = "default_max_provider_retries")]
     pub max_provider_retries: u32,
+    /// Opt-in failsafe: stop the run with a turn-limit error once this
+    /// many turns have completed. `None`, the default, preserves the
+    /// documented no-iteration-cap design. Checked after every finished
+    /// turn, next to `Hooks::should_stop_after_turn`; pending tool calls
+    /// of the last turn are answered with synthesized errors so history
+    /// never carries a dangling tool call.
+    #[serde(default)]
+    pub max_turns: Option<u32>,
 }
 
 /// Serde default for [`LoopConfig::max_provider_retries`]: an old
@@ -64,6 +73,7 @@ impl Default for LoopConfig {
             steering_mode: SteeringMode::OneAtATime,
             followup_mode: SteeringMode::OneAtATime,
             max_provider_retries: default_max_provider_retries(),
+            max_turns: None,
         }
     }
 }
@@ -87,6 +97,7 @@ mod tests {
             steering_mode: SteeringMode::All,
             followup_mode: SteeringMode::OneAtATime,
             max_provider_retries: 2,
+            max_turns: Some(10),
         };
         let s = serde_json::to_string(&cfg).unwrap();
         let back: LoopConfig = serde_json::from_str(&s).unwrap();
@@ -94,6 +105,7 @@ mod tests {
         let legacy: LoopConfig =
             serde_json::from_str(r#"{"parallel_tools":false,"compaction_threshold":0.8}"#).unwrap();
         assert_eq!(legacy.max_provider_retries, 4);
+        assert_eq!(legacy.max_turns, None, "the failsafe stays opt-in");
     }
 
     #[test]

@@ -173,10 +173,24 @@ pub trait Hooks {
     /// [`kage_core::LoopError::HookFailed`]; the loop emits the terminal
     /// error event and returns. The default implementation is a no-op.
     ///
-    /// Use cases: strip secrets from history before sending, trim old tool
-    /// outputs that have rotted, inject a per-turn system reminder. Avoid
-    /// expensive work here: this runs on every turn including compaction
-    /// follow-ups.
+    /// # Contract
+    ///
+    /// Mutations made here are permanent and unannounced: the loop hands
+    /// this hook the persistent `cx.history` itself, so an appended,
+    /// dropped, or rewritten message stays that way for the rest of the
+    /// session and is written to the session file on resume, but no
+    /// [`kage_core::LoopEvent::MessageAppended`] is emitted for it. UIs
+    /// and recorders never see the mutation until the session is
+    /// reloaded, so a host that injects per-turn text here silently
+    /// diverges the in-memory view from the persisted transcript. For
+    /// per-turn injections that must stay ephemeral, use
+    /// [`Self::transform_provider_request`] instead: it mutates only the
+    /// request copy and leaves history untouched.
+    ///
+    /// Use cases that fit this hook: stripping secrets from history
+    /// before sending, trimming old tool outputs that have rotted,
+    /// permanently pruning stale turns. Avoid expensive work here: this
+    /// runs on every turn including compaction follow-ups.
     fn transform_context(&mut self, messages: &mut Vec<Arc<Message>>) -> Result<(), String> {
         let _ = messages;
         Ok(())

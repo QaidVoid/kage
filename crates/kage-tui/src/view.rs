@@ -326,7 +326,27 @@ pub fn render(
     } else {
         slot::render_footer(frame, regions.footer, &sources);
     }
+    if regions.buffer.height == 0 && frame.area().height > 0 {
+        render_too_small_notice(frame);
+    }
     capture_and_overlay(frame, regions, buffer, screen_selection, captured_rows);
+}
+
+/// One centered line painted when the fixed chrome leaves the
+/// conversation region no rows: without it a terminal shorter than
+/// the chrome would show a silent frame with nothing to read.
+fn render_too_small_notice(frame: &mut Frame) {
+    let area = frame.area();
+    let row = Rect {
+        y: area.y + area.height / 2,
+        height: 1,
+        ..area
+    };
+    let line = Line::styled(
+        "terminal too small",
+        Style::default().fg(crate::theme::current().warning_fg),
+    );
+    frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), row);
 }
 
 /// The footer region's top row, where the open `:` or `/` line paints.

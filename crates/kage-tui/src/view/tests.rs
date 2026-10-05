@@ -1047,6 +1047,13 @@ fn the_colon_and_search_lines_paint_on_the_footer_row() {
     assert!(footer.ends_with("match 2/5"), "{rows:#?}");
 }
 
+#[test]
+fn a_cursor_forced_mid_char_renders_without_panicking() {
+    let cl = CommandLine::for_test_with_cursor("a\u{e9}b", 2);
+    let rows = snapshot_with_cmdline(&cl, Rect::new(0, 0, 40, 8));
+    assert_eq!(rows.last().unwrap(), ":a\u{e9}b", "{rows:#?}");
+}
+
 /// Paint a frame with `cmdline` open over a conversation, so no start
 /// card competes with the popup.
 fn snapshot_with_cmdline(cmdline: &CommandLine, area: Rect) -> Vec<String> {
@@ -2596,4 +2603,56 @@ fn an_exit_plan_row_shows_the_plan_under_its_title() {
     assert!(body.contains("Steps"), "{lines:#?}");
     assert!(body.contains("Wire the host"), "{lines:#?}");
     assert!(!body.contains("# Remote rollout"), "the title shows once");
+}
+
+#[test]
+fn a_terminal_too_small_for_the_buffer_says_so() {
+    let mut buffer = Buffer::new();
+    let input = InputState::new();
+    let status = StatusCtx::default();
+    let area = Rect::new(0, 0, 40, 5);
+    let regions = crate::layout::split(
+        area,
+        crate::layout::Heights {
+            header: 1,
+            activity: 0,
+            input: crate::layout::INPUT_MIN_LINES,
+            footer: 1,
+        },
+    );
+    assert_eq!(regions.buffer.height, 0);
+    let backend = TestBackend::new(area.width, area.height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut captured: std::collections::BTreeMap<usize, Vec<CapturedCell>> =
+        std::collections::BTreeMap::new();
+    terminal
+        .draw(|frame| {
+            render(
+                frame,
+                regions,
+                &mut buffer,
+                &input,
+                None,
+                &status,
+                None,
+                &mut captured,
+                None,
+                &[],
+            );
+        })
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    let rows: Vec<String> = (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        })
+        .collect();
+    assert!(
+        rows.iter().any(|r| r.contains("terminal too small")),
+        "{rows:#?}"
+    );
 }

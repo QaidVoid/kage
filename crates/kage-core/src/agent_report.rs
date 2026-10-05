@@ -171,7 +171,9 @@ impl AgentReport {
         let _ = write!(
             text,
             ">\n{}\n</agent>",
-            self.body.replace("</agent", "<\\/agent")
+            self.body
+                .replace('\\', "\\\\")
+                .replace("</agent", "<\\/agent")
         );
         text
     }
@@ -184,7 +186,9 @@ impl AgentReport {
         let mut report = Self::header(header)?;
         let body = rest.strip_suffix("</agent>")?;
         let body = body.strip_suffix('\n').unwrap_or(body);
-        report.body = body.replace("<\\/agent", "</agent");
+        report.body = body
+            .replace("<\\/agent", "</agent")
+            .replace("\\\\", "\\");
         Some(report)
     }
 
@@ -276,7 +280,9 @@ impl AgentMail {
             "<message from=\"{}\" session=\"{}\">\n{}\n</message>",
             self.from,
             self.session,
-            self.body.replace("</message", "<\\/message")
+            self.body
+                .replace('\\', "\\\\")
+                .replace("</message", "<\\/message")
         )
     }
 
@@ -292,7 +298,9 @@ impl AgentMail {
         Some(Self {
             from: attr_value(attrs, "from")?.to_owned(),
             session: SessionId(session),
-            body: body.replace("<\\/message", "</message"),
+            body: body
+                .replace("<\\/message", "</message")
+                .replace("\\\\", "\\"),
         })
     }
 }

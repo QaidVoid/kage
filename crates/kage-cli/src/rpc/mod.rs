@@ -64,7 +64,7 @@ use kage_acp::acp::{
     OptionsResponse, PROTOCOL_VERSION, PluginInstallRequest, PluginRemoveRequest,
     PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse, ResumeSessionRequest,
     ResumeSessionResponse, SessionCapabilities, SessionConfigOption, SessionExportResponse,
-    SessionForkRequest, SessionForkResponse, SessionRenameRequest, SessionRequest, SessionUpdate,
+    SessionForkRequest, SessionForkResponse, SessionRenameRequest, SessionRequest,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, Supported,
     SwarmResumeRequest, SwarmResumeResponse, ThemesRequest, ThemesResult,
 };

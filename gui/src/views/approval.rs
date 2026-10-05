@@ -197,6 +197,38 @@ fn reject_option_id(ask: &PermissionAsk) -> Option<&str> {
         .map(|option| option.option_id.as_str())
 }
 
+/// What a digit key does to the oldest open ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DigitAction {
+    /// Toggle the choice at this zero-based index; the question
+    /// allows several picks.
+    Toggle(usize),
+    /// Answer with the option at this zero-based index.
+    Answer(usize),
+}
+
+/// Decides what the 1-based `digit` does to `ask`. On a multi-select
+/// question every offered choice toggles, the last included, bounded
+/// by the question's own choices; anything else answers with the
+/// named option, bounded by the ask's options. A digit past what is
+/// offered does nothing.
+fn digit_action(digit: usize, ask: &PermissionAsk) -> Option<DigitAction> {
+    let multi = ask.question.as_ref().is_some_and(|q| q.multi_select);
+    let len = match ask.question.as_ref() {
+        Some(question) if multi => question.options.len(),
+        _ => ask.options.len(),
+    };
+    if digit == 0 || digit > len {
+        return None;
+    }
+    let index = digit - 1;
+    if multi {
+        Some(DigitAction::Toggle(index))
+    } else {
+        Some(DigitAction::Answer(index))
+    }
+}
+
 /// What the card tells the shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalEvent {
@@ -364,25 +396,25 @@ impl ApprovalCard {
         let Some((session_id, ask)) = self.first_ask(cx) else {
             return;
         };
-        let Some(option) = digit
-            .checked_sub(1)
-            .and_then(|index| ask.options.get(index))
-            .cloned()
-        else {
-            return;
-        };
-        if ask.question.as_ref().is_some_and(|q| q.multi_select) && digit < ask.options.len() {
-            self.toggle_pick(ask.request_id.clone(), digit - 1);
-            cx.notify();
-            return;
+        match digit_action(digit, &ask) {
+            Some(DigitAction::Toggle(index)) => {
+                self.toggle_pick(ask.request_id.clone(), index);
+                cx.notify();
+            }
+            Some(DigitAction::Answer(index)) => {
+                let Some(option) = ask.options.get(index) else {
+                    return;
+                };
+                let decision = PermissionDecision::Option(option.option_id.clone());
+                self.store.update(cx, |store, cx| {
+                    store.reply_permission(&session_id, ask.request_id.clone(), &decision);
+                    cx.notify();
+                });
+                self.feedback.remove(&ask.request_id);
+                cx.notify();
+            }
+            None => {}
         }
-        let decision = PermissionDecision::Option(option.option_id);
-        self.store.update(cx, |store, cx| {
-            store.reply_permission(&session_id, ask.request_id.clone(), &decision);
-            cx.notify();
-        });
-        self.feedback.remove(&ask.request_id);
-        cx.notify();
     }
 
     /// One ask, rendered as the design draws the approval card: the
@@ -802,7 +834,7 @@ mod tests {
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AppContext as _, Entity, TestAppContext, Window};
 
-    use super::{ApprovalCard, reason_of, subject_of};
+    use super::{ApprovalCard, DigitAction, digit_action, reason_of, subject_of};
     use crate::store::{Command, Store};
     use crate::transport::State;
     use kage_client::wire::{PermissionOption, ToolCallUpdate};
@@ -1149,6 +1181,161 @@ mod tests {
                 .update(cx, |store, _| store.take_outgoing())
                 .is_empty()),
             "a closed card answers nothing"
+        );
+    }
+
+    /// A multi-select question ask with `n` choices, offered as the
+    /// `choice-<n>` options the question's labels answer through.
+    fn multi_ask(n: usize) -> PermissionAsk {
+        PermissionAsk {
+            request_id: RequestId::Number(1),
+            tool_call: ToolCallUpdate::default(),
+            options: (0..n)
+                .map(|index| PermissionOption {
+                    option_id: format!("choice-{index}"),
+                    name: format!("Choice {index}"),
+                    kind: kage_client::wire::PermissionOptionKind::AllowOnce,
+                })
+                .collect(),
+            plan: None,
+            question: Some(kage_client::wire::QuestionPrompt {
+                header: "Where to".into(),
+                question: "Pick a direction".into(),
+                options: (0..n)
+                    .map(|index| kage_client::wire::QuestionChoice {
+                        label: format!("Choice {index}"),
+                        description: String::new(),
+                    })
+                    .collect(),
+                multi_select: true,
+            }),
+        }
+    }
+
+    /// A `session/request_permission` ask carrying a multi-select
+    /// question with `choices` choices.
+    fn question_frame(session: &str, request_id: u64, choices: usize) -> Frame {
+        Frame::Request {
+            id: RequestId::Number(request_id),
+            method: "session/request_permission".into(),
+            params: serde_json::json!({
+                "sessionId": session,
+                "toolCall": {"toolCallId": "call-q", "title": "question", "kind": "think",
+                    "status": "pending"},
+                "options": (0..choices).map(|index| serde_json::json!({
+                    "optionId": format!("choice-{index}"),
+                    "name": format!("Choice {index}"),
+                    "kind": "allow_once",
+                })).collect::<Vec<_>>(),
+                "_meta": {"kage": {"question": {"prompt": {
+                    "header": "Where to",
+                    "question": "Pick a direction",
+                    "options": (0..choices).map(|index| serde_json::json!({
+                        "label": format!("Choice {index}"),
+                    })).collect::<Vec<_>>(),
+                    "multiSelect": true,
+                }}}},
+            }),
+        }
+    }
+
+    #[test]
+    fn digits_toggle_every_multi_choice_including_the_last() {
+        let ask = multi_ask(3);
+        assert_eq!(digit_action(1, &ask), Some(DigitAction::Toggle(0)));
+        assert_eq!(digit_action(2, &ask), Some(DigitAction::Toggle(1)));
+        assert_eq!(
+            digit_action(3, &ask),
+            Some(DigitAction::Toggle(2)),
+            "the last choice toggles, it never answers"
+        );
+        assert_eq!(digit_action(4, &ask), None);
+        assert_eq!(digit_action(0, &ask), None);
+    }
+
+    #[test]
+    fn a_single_option_multi_select_still_toggles() {
+        let ask = multi_ask(1);
+        assert_eq!(digit_action(1, &ask), Some(DigitAction::Toggle(0)));
+        assert_eq!(digit_action(2, &ask), None);
+    }
+
+    #[test]
+    fn digits_answer_plain_permission_asks() {
+        let mut store = asked_store();
+        store.absorb(ask_frame("s1", 102));
+        let ask = store
+            .state()
+            .session("s1")
+            .unwrap()
+            .permissions
+            .iter()
+            .find(|ask| ask.request_id == RequestId::Number(102))
+            .unwrap()
+            .clone();
+        assert_eq!(digit_action(3, &ask), Some(DigitAction::Answer(2)));
+    }
+
+    #[gpui_kit::test]
+    fn digits_toggle_multi_choices_and_answer_none(cx: &mut TestAppContext) {
+        let store = cx.new(|_| {
+            let mut store = booted_store();
+            store.absorb(question_frame("s1", 201, 3));
+            store
+        });
+        let (_view, visual) = window_on(cx, store.clone());
+        visual.update(|window, cx| window.render_frame(cx));
+        for digit in ["1", "2", "3"] {
+            visual.update(|window, cx| window.press(digit, cx));
+            assert!(
+                visual.update(|_, cx| store
+                    .update(cx, |store, _| store.take_outgoing())
+                    .is_empty()),
+                "digit {digit} toggles, it never answers"
+            );
+        }
+        let picked = visual.update(|_, cx| {
+            let view = _view.read(cx);
+            view.picks
+                .get(&RequestId::Number(201))
+                .cloned()
+                .unwrap_or_default()
+        });
+        assert_eq!(
+            picked,
+            [0, 1, 2]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<usize>>()
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_single_choice_multi_select_toggles_on_one(cx: &mut TestAppContext) {
+        let store = cx.new(|_| {
+            let mut store = booted_store();
+            store.absorb(question_frame("s1", 202, 1));
+            store
+        });
+        let (_view, visual) = window_on(cx, store.clone());
+        visual.update(|window, cx| window.render_frame(cx));
+        visual.update(|window, cx| window.press("1", cx));
+        assert!(
+            visual.update(|_, cx| store
+                .update(cx, |store, _| store.take_outgoing())
+                .is_empty()),
+            "the only choice toggles, it never answers"
+        );
+        let picked = visual.update(|_, cx| {
+            let view = _view.read(cx);
+            view.picks
+                .get(&RequestId::Number(202))
+                .cloned()
+                .unwrap_or_default()
+        });
+        assert_eq!(
+            picked,
+            [0].into_iter()
+                .collect::<std::collections::BTreeSet<usize>>()
         );
     }
 }

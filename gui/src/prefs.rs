@@ -4,9 +4,11 @@
 //! None of this is engine state, so none of it rides the wire. It is
 //! stored as one JSON document: `desktop.json` in the kage config
 //! directory natively, and one `localStorage` entry in the browser. A
-//! document that is missing or does not parse reads as the defaults,
-//! and a field it lacks takes its default, so older documents keep
-//! loading.
+//! document that is missing reads as the defaults, and a field it
+//! lacks takes its default, so older documents keep loading. A
+//! document that does not parse also reads as the defaults, but not
+//! quietly: the unreadable file is copied to `desktop.json.corrupt`
+//! before the next save can overwrite it, and the reset is reported.
 
 use std::collections::BTreeSet;
 
@@ -74,10 +76,17 @@ impl Default for Prefs {
 }
 
 impl Prefs {
+    /// The stored preferences, or `None` when the document does not
+    /// parse; the caller warns and backs the file up.
+    #[must_use]
+    pub fn try_parse(text: &str) -> Option<Self> {
+        serde_json::from_str(text).ok()
+    }
+
     /// Reads a stored document; anything unreadable is the defaults.
     #[must_use]
     pub fn parse(text: &str) -> Self {
-        serde_json::from_str(text).unwrap_or_default()
+        Self::try_parse(text).unwrap_or_default()
     }
 
     /// The document to store.
@@ -87,23 +96,39 @@ impl Prefs {
     }
 }
 
-/// The stored preferences, or the defaults when none are stored.
+/// The stored preferences, or the defaults when none are stored. A
+/// document that is present but unreadable warns and is copied aside
+/// as `desktop.json.corrupt`, so nothing silently eats it.
 #[must_use]
 pub fn load() -> Prefs {
-    storage::read().map_or_else(Prefs::default, |text| Prefs::parse(&text))
+    let Some(text) = storage::read() else {
+        return Prefs::default();
+    };
+    match Prefs::try_parse(&text) {
+        Some(prefs) => prefs,
+        None => {
+            storage::backup(&text);
+            crate::warn(
+                "the saved preferences did not parse; the defaults are in use and the file is kept as desktop.json.corrupt",
+            );
+            Prefs::default()
+        }
+    }
 }
 
-/// Stores `prefs`. A failed write is reported on stderr and otherwise
+/// Stores `prefs`. The write lands through a sibling temporary file
+/// and a rename, so a crash mid-write leaves the old document, never
+/// a torn one. A failed write is reported on stderr and otherwise
 /// ignored: the running app keeps its state either way.
 pub fn save(prefs: &Prefs) {
     if let Err(error) = storage::write(&prefs.to_json()) {
-        eprintln!("kage-desktop: saving preferences failed: {error}");
+        crate::warn(&format!("saving preferences failed: {error}"));
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 mod storage {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use kage_client::unquote_and_trim;
 
@@ -151,6 +176,20 @@ mod storage {
         Some(base.join("kage").join("desktop.json"))
     }
 
+    /// The unreadable document's sibling, kept for diagnosis.
+    fn corrupt_path(path: &Path) -> PathBuf {
+        path.with_extension("json.corrupt")
+    }
+
+    /// Writes `text` to a sibling temporary file and renames it over
+    /// `path`, so `path` holds either the old document or the new one,
+    /// never a torn half.
+    fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
     pub(super) fn read() -> Option<String> {
         std::fs::read_to_string(path()?).ok()
     }
@@ -160,12 +199,22 @@ mod storage {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
-        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))
+        write_atomic(&path, text)
     }
 
+    /// Copies `text` to the document's `.corrupt` sibling, so a save
+    /// cannot be what erases it. Best effort: the reset is already
+    /// reported.
+    pub(super) fn backup(text: &str) {
+        let Some(path) = path() else {
+            return;
+        };
+        let _ = std::fs::write(corrupt_path(&path), text);
+    }
     #[cfg(test)]
     mod tests {
-        use super::{PathBuf, config_base};
+        use super::{config_base, corrupt_path, write_atomic};
+        use std::path::PathBuf;
 
         #[test]
         fn quoted_and_spaced_values_clean_to_the_real_path() {
@@ -182,6 +231,38 @@ mod storage {
                 Some(PathBuf::from("/home/u/.config"))
             );
             assert_eq!(config_base(None, None, None, None), None);
+        }
+
+        #[test]
+        fn the_backup_sits_beside_the_document() {
+            assert_eq!(
+                corrupt_path(&PathBuf::from("/cfg/kage/desktop.json")),
+                PathBuf::from("/cfg/kage/desktop.json.corrupt")
+            );
+        }
+
+        #[test]
+        fn an_atomic_write_leaves_no_temporary_file_and_lands_whole() {
+            let dir = std::env::temp_dir().join(format!(
+                "kage-desktop-prefs-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|since| since.subsec_nanos())
+                    .unwrap_or(0)
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("desktop.json");
+            write_atomic(&path, "first").unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+            write_atomic(&path, "second").unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+            assert_eq!(
+                std::fs::read_dir(&dir).unwrap().count(),
+                1,
+                "no temporary file survives a save"
+            );
+            let _ = std::fs::remove_dir_all(dir);
         }
 
         #[cfg(not(windows))]
@@ -232,8 +313,10 @@ mod storage {
 
 #[cfg(target_arch = "wasm32")]
 mod storage {
-    /// The `localStorage` key the document lives under.
+    /// The `localStorage` key the document lives under, and the key
+    /// the unreadable document is copied to.
     const KEY: &str = "kage.desktop";
+    const CORRUPT: &str = "kage.desktop.corrupt";
 
     fn local() -> Option<web_sys::Storage> {
         web_sys::window()?.local_storage().ok().flatten()
@@ -248,6 +331,14 @@ mod storage {
             .ok_or("no local storage")?
             .set_item(KEY, text)
             .map_err(|_| "local storage refused the write".to_owned())
+    }
+
+    /// Copies the unreadable document aside under its own key, so the
+    /// next save cannot be what erases it. Best effort.
+    pub(super) fn backup(text: &str) {
+        if let Some(storage) = local() {
+            let _ = storage.set_item(CORRUPT, text);
+        }
     }
 }
 
@@ -277,5 +368,17 @@ mod tests {
             "absent fields default"
         );
         assert_eq!(Prefs::parse("not json"), Prefs::default());
+    }
+
+    #[test]
+    fn a_corrupt_document_reports_and_a_partial_one_does_not() {
+        assert!(
+            Prefs::try_parse("{not json").is_none(),
+            "the caller learns the document is unreadable"
+        );
+        assert!(
+            Prefs::try_parse(r#"{"theme": "kage-shadow"}"#).is_some(),
+            "a valid document with absent fields still parses"
+        );
     }
 }

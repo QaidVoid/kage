@@ -105,14 +105,7 @@ impl SessionTreeOverlay {
     /// Inherent render wrapper, matching the other overlays, so the
     /// App's draw closure can pass a `Frame` directly.
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let modal = OverlayWidget::measure(self, area);
-        frame.render_widget(crate::opaque::OpaqueClear, modal);
-        let theme = crate::theme::current();
-        let ctx = OverlayCtx {
-            theme: &theme,
-            viewport: area,
-        };
-        OverlayWidget::render(self, modal, frame.buffer_mut(), &ctx);
+        super::widget::paint_modal(frame, self, area);
     }
 }
 
@@ -393,5 +386,22 @@ mod tests {
         let mut t = SessionTreeOverlay::new(Vec::new());
         assert!(t.is_empty());
         assert_eq!(t.handle_key(key(KeyCode::Enter)), OverlayAction::Stay);
+    }
+
+    #[test]
+    fn measure_and_render_survive_degenerate_frames() {
+        let mut tree = SessionTreeOverlay::new(vec![node("root", None, true)]);
+        let theme = crate::theme::Theme::default();
+        for (w, h) in [(0u16, 0u16), (1, 1), (2, 3)] {
+            let area = Rect::new(0, 0, w, h);
+            let modal = tree.measure(area).intersection(area);
+            assert!(modal.right() <= area.right() && modal.bottom() <= area.bottom());
+            let mut buf = Buffer::empty(area);
+            let ctx = OverlayCtx {
+                theme: &theme,
+                viewport: area,
+            };
+            OverlayWidget::render(&mut tree, modal, &mut buf, &ctx);
+        }
     }
 }

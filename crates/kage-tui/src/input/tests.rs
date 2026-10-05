@@ -29,12 +29,21 @@ fn img(label: &str) -> crate::image::AttachedImage {
     }
 }
 
+/// A sentinel-branded chip body, as `attach_image` embeds it.
+fn chip(id: u32, label: &str) -> String {
+    format!("[{IMAGE_MARK_SENTINEL}image #{id} {label}]")
+}
+
 #[test]
 fn marker_scan_and_strip_round_trip() {
-    let s = "see [image #1 a.png image/png 3 B] and [image #2 b.png ...] done";
-    let ids = image_marker_ids(s);
+    let s = format!(
+        "see {} and {} done",
+        chip(1, "a.png image/png 3 B"),
+        chip(2, "b.png ...")
+    );
+    let ids = image_marker_ids(&s);
     assert!(ids.contains(&1) && ids.contains(&2) && ids.len() == 2);
-    assert_eq!(strip_image_markers(s), "see and done");
+    assert_eq!(strip_image_markers(&s), "see and done");
     // A non-marker bracket is left alone.
     assert_eq!(strip_image_markers("keep [this] text"), "keep [this] text");
     assert!(image_marker_ids("no markers here").is_empty());
@@ -45,8 +54,8 @@ fn attach_inserts_marker_and_submit_strips_it_keeping_image() {
     let mut s = InputState::new();
     s.attach_image(img("shot.png"));
     assert!(
-        s.text().contains("[image #1 shot.png"),
-        "marker inserted: {:?}",
+        s.text().contains("[\u{200b}image #1 shot.png"),
+        "sentinel-branded marker inserted: {:?}",
         s.text()
     );
     for c in "look at this".chars() {
@@ -70,7 +79,7 @@ fn empty_submit_with_orphaned_attach_warns_and_drops() {
     s.attach_image(img("a.png"));
     // Simulate an edit that removed the marker text without dropping
     // the attachment (undo across the attach does this).
-    s.text.clear();
+    s.content.text.clear();
     let acts = s.handle_key(key(KeyCode::Enter));
     assert_eq!(acts, vec![InputAction::DroppedStaleAttach]);
     assert!(s.attached().is_empty(), "the stale image is dropped");
@@ -87,9 +96,9 @@ fn empty_submit_without_attachments_stays_silent() {
 fn one_backspace_deletes_the_whole_marker_and_drops_the_image() {
     let mut s = InputState::new();
     s.attach_image(img("a.png"));
-    // Cursor sits just past `[image #1 ...] `; a single
-    // Backspace removes the entire chip, not one char.
-    assert!(s.text().contains("[image #1"));
+    // Cursor sits just past the chip; a single Backspace removes the
+    // entire chip, not one char.
+    assert!(s.text().contains(IMAGE_MARK_OPEN));
     s.handle_key(key(KeyCode::Backspace));
     assert_eq!(s.text(), "", "whole marker (and its space) removed");
     assert!(
@@ -238,6 +247,30 @@ fn gg_jumps_input_cursor_to_start_when_input_focused() {
     let acts = state.handle_key(key(KeyCode::Char('g')));
     assert!(acts.is_empty());
     assert_eq!(state.cursor(), 0);
+}
+
+#[test]
+fn g_then_d_keeps_the_second_key_as_an_operator() {
+    let mut state = InputState::new();
+    state.paste("hello");
+    state.handle_key(key(KeyCode::Esc));
+    state.handle_key(key(KeyCode::Char('g')));
+    state.handle_key(key(KeyCode::Char('d')));
+    assert!(
+        state.pending_op.is_some(),
+        "d after g enters operator pending"
+    );
+}
+
+#[test]
+fn g_then_esc_clears_the_selection() {
+    let mut state = InputState::new();
+    state.force_normal();
+    state.handle_key(key(KeyCode::Char('g')));
+    assert_eq!(
+        state.handle_key(key(KeyCode::Esc)),
+        vec![InputAction::ClearSelection]
+    );
 }
 
 #[test]
@@ -706,7 +739,7 @@ fn dw_deletes_word_in_input_pane() {
     state.handle_key(key(KeyCode::Char('w')));
     assert_eq!(state.text(), "bar baz");
     assert_eq!(state.cursor(), 0);
-    assert_eq!(state.register, "foo ");
+    assert_eq!(state.content.register, "foo ");
 }
 
 #[test]
@@ -720,8 +753,8 @@ fn dd_deletes_current_line() {
     state.handle_key(key(KeyCode::Char('d')));
     assert_eq!(state.text(), "second\nthird");
     assert_eq!(state.cursor(), 0);
-    assert_eq!(state.register, "first\n");
-    assert!(state.register_linewise);
+    assert_eq!(state.content.register, "first\n");
+    assert!(state.content.register_linewise);
 }
 
 #[test]
@@ -746,8 +779,8 @@ fn yw_yanks_word_into_register() {
     state.handle_key(key(KeyCode::Char('w')));
     assert_eq!(state.text(), "hello world");
     assert_eq!(state.cursor(), 0);
-    assert_eq!(state.register, "hello ");
-    assert!(!state.register_linewise);
+    assert_eq!(state.content.register, "hello ");
+    assert!(!state.content.register_linewise);
 }
 
 #[test]
@@ -786,7 +819,7 @@ fn absurd_count_digit_run_caps_the_count() {
 #[test]
 fn paste_beyond_max_payload_is_refused() {
     let mut state = InputState::new();
-    state.register = "x".repeat(MAX_PASTE_BYTES);
+    state.content.register = "x".repeat(MAX_PASTE_BYTES);
     state.handle_key(key(KeyCode::Esc));
     state.handle_key(key(KeyCode::Char('3')));
     state.handle_key(key(KeyCode::Char('p')));
@@ -796,7 +829,7 @@ fn paste_beyond_max_payload_is_refused() {
 #[test]
 fn paste_within_max_payload_still_pastes() {
     let mut state = InputState::new();
-    state.register = "ab".to_owned();
+    state.content.register = "ab".to_owned();
     state.handle_key(key(KeyCode::Esc));
     state.handle_key(key(KeyCode::Char('3')));
     state.handle_key(key(KeyCode::Char('p')));
@@ -921,7 +954,7 @@ fn input_visual_y_yanks_selection() {
     }
     state.handle_key(key(KeyCode::Char('y')));
     assert_eq!(state.text(), "foo bar");
-    assert_eq!(state.register, "foo");
+    assert_eq!(state.content.register, "foo");
     assert_eq!(state.mode(), Mode::Normal);
 }
 
@@ -944,8 +977,8 @@ fn capital_p_pastes_linewise_register_above() {
     state.handle_key(key(KeyCode::Esc));
     state.handle_key(key(KeyCode::Char('y')));
     state.handle_key(key(KeyCode::Char('y')));
-    assert_eq!(state.register, "second");
-    assert!(state.register_linewise);
+    assert_eq!(state.content.register, "second");
+    assert!(state.content.register_linewise);
     state.handle_key(key(KeyCode::Char('P')));
     assert_eq!(state.text(), "first\nsecondsecond");
 }
@@ -1259,7 +1292,10 @@ fn modeless_plain_arrows_still_move_cursor() {
 #[test]
 fn ctrl_o_toggles_fold_when_no_collapsed_paste() {
     let mut state = InputState::new();
-    assert!(state.pastes.is_empty(), "no collapsed pastes by default");
+    assert!(
+        state.content.pastes.is_empty(),
+        "no collapsed pastes by default"
+    );
     let acts = state.handle_key(ctrl('o'));
     assert_eq!(acts, vec![InputAction::ToggleFold]);
     assert_eq!(state.text(), "", "ctrl+o must not insert text");
@@ -1397,4 +1433,244 @@ fn modeless_question_mark_opens_help_only_on_an_empty_prompt() {
     state.handle_key(key(KeyCode::Char('a')));
     assert!(state.handle_key(key(KeyCode::Char('?'))).is_empty());
     assert_eq!(state.text(), "a?");
+}
+
+#[test]
+fn operator_pending_counts_multiply_not_concatenate() {
+    let mut state = InputState::new();
+    state.paste("one two three four five six seven");
+    state.handle_key(key(KeyCode::Esc));
+    state.handle_key(key(KeyCode::Char('0')));
+    state.handle_key(key(KeyCode::Char('3')));
+    state.handle_key(key(KeyCode::Char('d')));
+    state.handle_key(key(KeyCode::Char('2')));
+    state.handle_key(key(KeyCode::Char('w')));
+    assert_eq!(state.text(), "seven", "3d2w deletes six words, not 32");
+}
+
+#[test]
+fn post_operator_count_alone_stays_single() {
+    let mut state = InputState::new();
+    state.paste("one two three four");
+    state.handle_key(key(KeyCode::Esc));
+    state.handle_key(key(KeyCode::Char('0')));
+    state.handle_key(key(KeyCode::Char('d')));
+    state.handle_key(key(KeyCode::Char('2')));
+    state.handle_key(key(KeyCode::Char('w')));
+    assert_eq!(state.text(), "three four");
+}
+
+#[test]
+fn pre_operator_count_alone_stays_single() {
+    let mut state = InputState::new();
+    state.paste("one two three four");
+    state.handle_key(key(KeyCode::Esc));
+    state.handle_key(key(KeyCode::Char('0')));
+    state.handle_key(key(KeyCode::Char('3')));
+    state.handle_key(key(KeyCode::Char('d')));
+    state.handle_key(key(KeyCode::Char('w')));
+    assert_eq!(state.text(), "four");
+}
+
+#[test]
+fn d0_after_a_count_still_deletes_to_line_start() {
+    let mut state = InputState::new();
+    state.paste("keep drop");
+    state.handle_key(key(KeyCode::Esc));
+    state.handle_key(key(KeyCode::Char('0')));
+    for c in "3l".chars() {
+        state.handle_key(key(KeyCode::Char(c)));
+    }
+    state.handle_key(key(KeyCode::Char('d')));
+    state.handle_key(key(KeyCode::Char('0')));
+    assert_eq!(
+        state.text(),
+        "p drop",
+        "d0 deletes to line start, not count 0"
+    );
+}
+
+#[test]
+fn r_replays_its_count_but_stops_at_end_of_line() {
+    let mut state = InputState::new();
+    state.paste("abc");
+    state.handle_key(key(KeyCode::Esc));
+    state.handle_key(key(KeyCode::Char('0')));
+    state.handle_key(key(KeyCode::Char('3')));
+    state.handle_key(key(KeyCode::Char('r')));
+    state.handle_key(key(KeyCode::Char('X')));
+    assert_eq!(state.text(), "XXX", "3rX replaces three chars");
+}
+
+#[test]
+fn r_count_clamps_at_the_line_end() {
+    let mut state = InputState::new();
+    state.paste("ab");
+    state.handle_key(key(KeyCode::Esc));
+    state.handle_key(key(KeyCode::Char('0')));
+    state.handle_key(key(KeyCode::Char('3')));
+    state.handle_key(key(KeyCode::Char('r')));
+    state.handle_key(key(KeyCode::Char('X')));
+    assert_eq!(
+        state.text(),
+        "XX",
+        "r never extends the line, so the third char is dropped"
+    );
+}
+
+#[test]
+fn esc_after_counted_r_cancels_without_touching_text() {
+    let mut state = InputState::new();
+    state.paste("abc");
+    state.handle_key(key(KeyCode::Esc));
+    state.handle_key(key(KeyCode::Char('0')));
+    state.handle_key(key(KeyCode::Char('3')));
+    state.handle_key(key(KeyCode::Char('r')));
+    state.handle_key(key(KeyCode::Esc));
+    assert_eq!(state.text(), "abc");
+    assert!(!state.is_pending());
+}
+
+#[test]
+fn typed_marker_lookalike_stays_literal_and_cannot_revive_an_image() {
+    let mut s = InputState::new();
+    s.attach_image(img("a.png"));
+    s.handle_key(key(KeyCode::Backspace));
+    assert!(s.attached().is_empty(), "the chip delete dropped the image");
+    for c in "see [image #1 z] now".chars() {
+        s.handle_key(key(KeyCode::Char(c)));
+    }
+    let acts = s.handle_key(key(KeyCode::Enter));
+    match acts.as_slice() {
+        [InputAction::Submit(t)] => {
+            assert_eq!(t, "see [image #1 z] now", "typed text is verbatim");
+        }
+        other => panic!("expected Submit, got {other:?}"),
+    }
+    assert!(s.take_attached().is_empty());
+}
+
+#[test]
+fn undone_attach_plus_typed_lookalike_drops_the_image() {
+    let mut s = InputState::new();
+    for c in "prose ".chars() {
+        s.handle_key(key(KeyCode::Char(c)));
+    }
+    s.attach_image(img("a.png"));
+    s.handle_key(ctrl('/'));
+    assert!(s.text().is_empty(), "undo removed the chip");
+    assert_eq!(s.attached().len(), 1, "undo does not touch the queue");
+    for c in "prose [image #1 fake] end".chars() {
+        s.handle_key(key(KeyCode::Char(c)));
+    }
+    let acts = s.handle_key(key(KeyCode::Enter));
+    match acts.as_slice() {
+        [InputAction::Submit(t)] => {
+            assert_eq!(t, "prose [image #1 fake] end");
+        }
+        other => panic!("expected Submit, got {other:?}"),
+    }
+    assert!(s.take_attached().is_empty(), "the undone image is dropped");
+}
+
+#[test]
+fn pasted_body_containing_another_placeholder_is_sent_verbatim() {
+    let tail = "\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11";
+    let mut s = InputState::new();
+    s.paste(&format!("INNER [paste #2: 11 lines] TAIL{tail}"));
+    s.paste(&format!("second body{tail}"));
+    let acts = s.handle_key(key(KeyCode::Enter));
+    match acts.as_slice() {
+        [InputAction::Submit(t)] => {
+            assert!(
+                t.contains("INNER [paste #2: 11 lines] TAIL"),
+                "the first body must be sent verbatim: {t:?}"
+            );
+            assert!(t.contains("second body"), "the second blob still expands");
+        }
+        other => panic!("expected Submit, got {other:?}"),
+    }
+}
+
+#[test]
+fn typing_has_an_undo_baseline_from_a_fresh_editor() {
+    let mut state = InputState::new();
+    for c in "abc".chars() {
+        state.handle_key(key(KeyCode::Char(c)));
+    }
+    assert_eq!(state.text(), "abc");
+    state.handle_key(key(KeyCode::Esc));
+    state.handle_key(key(KeyCode::Char('u')));
+    assert_eq!(state.text(), "", "one undo drops the whole typing run");
+    state.handle_key(ctrl('r'));
+    assert_eq!(state.text(), "abc", "redo restores it");
+}
+
+#[test]
+fn typing_after_submit_is_still_undoable() {
+    let mut state = InputState::new();
+    for c in "abc".chars() {
+        state.handle_key(key(KeyCode::Char(c)));
+    }
+    assert!(matches!(
+        state.handle_key(key(KeyCode::Enter)).as_slice(),
+        [InputAction::Submit(_)]
+    ));
+    for c in "xy".chars() {
+        state.handle_key(key(KeyCode::Char(c)));
+    }
+    state.handle_key(key(KeyCode::Esc));
+    state.handle_key(key(KeyCode::Char('u')));
+    assert_eq!(state.text(), "", "the post-submit run undoes to empty");
+    state.handle_key(key(KeyCode::Char('u')));
+    assert_eq!(state.text(), "abc", "then past the submit boundary");
+}
+
+#[test]
+fn swap_draft_moves_the_register_and_kill_ring_with_the_view() {
+    let mut a = InputState::new();
+    let mut b = InputState::new();
+    a.handle_key(key(KeyCode::Esc));
+    a.content.text = "yank me".into();
+    a.handle_key(key(KeyCode::Char('0')));
+    a.handle_key(key(KeyCode::Char('y')));
+    a.handle_key(key(KeyCode::Char('y')));
+    assert_eq!(a.content.register, "yank me");
+
+    let left = b.swap_draft(a.swap_draft(Draft::new()));
+    assert_eq!(
+        b.content.register, "yank me",
+        "the register follows its view"
+    );
+    assert!(
+        a.content.register.is_empty(),
+        "the old view's register left"
+    );
+    assert!(left.register.is_empty());
+    assert_eq!(b.text(), "yank me", "the text swapped with everything else");
+}
+
+#[test]
+fn a_kill_in_one_view_does_not_leak_into_a_swapped_in_view() {
+    let mut a = InputState::new();
+    let mut b = InputState::new();
+    for c in "hello target".chars() {
+        a.handle_key(key(KeyCode::Char(c)));
+    }
+    a.handle_key(ctrl('w'));
+    assert_eq!(
+        a.content.kill_ring.last().map(String::as_str),
+        Some("target")
+    );
+
+    let _ = b.swap_draft(a.swap_draft(Draft::new()));
+    assert_eq!(
+        b.content.kill_ring.last().map(String::as_str),
+        Some("target"),
+        "the kills follow their view"
+    );
+    assert!(
+        a.content.kill_ring.is_empty(),
+        "the fresh view starts with an empty ring"
+    );
 }

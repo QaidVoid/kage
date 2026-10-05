@@ -3,7 +3,8 @@
 //! Every path resolves under the session workdir through
 //! [`resolve_under`], so traversal, absolute escapes and symlink
 //! escapes are refused before anything is touched. Reads are capped
-//! and refuse files whose configured `read` deny globs match.
+//! and refuse files whose configured `read` deny globs match, and a
+//! list prunes the paths those globs deny.
 
 use std::fs;
 use std::io::Read as _;
@@ -42,7 +43,7 @@ pub(crate) fn handle(
     let target = resolve_under(&workdir, Path::new(relative))
         .map_err(|e| RpcError::new(-32602, e.to_string()))?;
     match req.op {
-        FsOp::List => Ok(FsResult::List(list(&workdir, &target))),
+        FsOp::List => Ok(FsResult::List(list(&workdir, &target, permissions))),
         FsOp::Read => read(permissions, &target).map(FsResult::Read),
     }
 }
@@ -50,14 +51,17 @@ pub(crate) fn handle(
 /// Lists `root` as a subtree of `workdir`, parents directly before
 /// their children, sorted by name, until the entry or depth cap cuts
 /// it short. Hidden entries are listed, but `.git` and paths the
-/// ignore files exclude are not.
-fn list(workdir: &Path, root: &Path) -> FsListResult {
+/// ignore files exclude are not, and paths whose configured `read`
+/// deny globs match are pruned with their subtree, matching the
+/// read gate. Only denies apply: an allow never makes a path visible.
+fn list(workdir: &Path, root: &Path, permissions: &PermissionsConfig) -> FsListResult {
     let mut result = FsListResult::default();
+    let permissions = permissions.clone();
     let walker = WalkBuilder::new(root)
         .hidden(false)
         .require_git(false)
         .add_custom_ignore_filename(".kageignore")
-        .filter_entry(|entry| entry.file_name() != ".git")
+        .filter_entry(move |entry| entry.file_name() != ".git" && !read_denied(entry, &permissions))
         .sort_by_file_name(std::ffi::OsStr::cmp)
         .max_depth(Some(MAX_DEPTH + 1))
         .build();
@@ -101,6 +105,18 @@ fn list(workdir: &Path, root: &Path) -> FsListResult {
         });
     }
     result
+}
+
+/// Whether the configured `read` denies hide `entry`, so a list
+/// prunes it with its subtree. Directories also match as `path/` so a
+/// `**/name/**` deny hides the directory itself.
+fn read_denied(entry: &ignore::DirEntry, permissions: &PermissionsConfig) -> bool {
+    let subject = entry.path().display().to_string();
+    if permissions.check("read", &subject) == PermissionAction::Deny {
+        return true;
+    }
+    entry.file_type().is_some_and(|t| t.is_dir())
+        && permissions.check("read", &format!("{subject}/")) == PermissionAction::Deny
 }
 
 /// Reads `file` as UTF-8 text capped at [`READ_CAP`] bytes. A file
@@ -355,6 +371,60 @@ mod tests {
         let err = out.unwrap_err();
         assert_eq!(err.code, -32602);
         assert!(err.message.contains("denied by permissions"));
+    }
+
+    #[test]
+    fn a_deny_glob_hides_the_subtree_from_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("secrets")).unwrap();
+        fs::write(dir.path().join("secrets/key.txt"), "k").unwrap();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/b.rs"), "b").unwrap();
+        fs::write(dir.path().join("a.md"), "a").unwrap();
+        let permissions = deny_read(&["**/secrets/**"]);
+
+        let out = handle(dir.path(), &permissions, &request(FsOp::List, "")).unwrap();
+        let FsResult::List(list) = out else {
+            panic!("expected a list result");
+        };
+        let paths: Vec<&str> = list.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["a.md", "src", "src/b.rs"]);
+
+        let out = handle(dir.path(), &permissions, &request(FsOp::List, "secrets")).unwrap();
+        let FsResult::List(list) = out else {
+            panic!("expected a list result");
+        };
+        assert!(list.entries.is_empty(), "{:?}", list.entries);
+    }
+
+    #[test]
+    fn a_deny_on_a_plain_file_hides_just_that_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("secret.md"), "s").unwrap();
+        fs::write(dir.path().join("open.md"), "o").unwrap();
+        let permissions = deny_read(&["**/secret.md"]);
+
+        let out = handle(dir.path(), &permissions, &request(FsOp::List, "")).unwrap();
+        let FsResult::List(list) = out else {
+            panic!("expected a list result");
+        };
+        let paths: Vec<&str> = list.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["open.md"]);
+    }
+
+    #[test]
+    fn an_allow_does_not_make_a_denied_path_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("secret.md"), "s").unwrap();
+        let mut permissions = deny_read(&["**/secret.md"]);
+        let rules = permissions.tools.get_mut("read").unwrap();
+        rules.allow.push("**/secret.md".into());
+
+        let out = handle(dir.path(), &permissions, &request(FsOp::List, "")).unwrap();
+        let FsResult::List(list) = out else {
+            panic!("expected a list result");
+        };
+        assert!(list.entries.is_empty());
     }
 
     #[test]

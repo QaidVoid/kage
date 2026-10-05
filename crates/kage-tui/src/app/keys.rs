@@ -495,7 +495,7 @@ impl App {
                         (Some(hint), None) => Some(hint.clone()),
                         (None, desc) => desc.clone(),
                     },
-                    value: c.value,
+                    value: crate::cmdparse::quote_token(&c.value),
                     range: Some((c.replace_range.start + 1, c.replace_range.end + 1)),
                 })
                 .collect::<Vec<_>>();

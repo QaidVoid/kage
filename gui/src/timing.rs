@@ -211,6 +211,13 @@ impl Timings {
             .observe(session, Instant::now(), crate::clock::unix_seconds());
     }
 
+    /// Forgets session `id`: the session was closed, so its measured
+    /// times go with it instead of leaking. A later observation of
+    /// the same id starts fresh.
+    pub fn forget(&mut self, id: &str) {
+        self.sessions.remove(id);
+    }
+
     /// The measured times of session `id`, when any were taken.
     #[must_use]
     pub fn session(&self, id: &str) -> Option<&SessionTimes> {
@@ -331,5 +338,25 @@ mod tests {
         let end = times.run_end(2).expect("recorded");
         assert_eq!(end.at, 90);
         assert_eq!(end.took, Duration::from_millis(6_000));
+    }
+
+    #[test]
+    fn a_forgotten_session_leaves_nothing_and_can_be_watched_again() {
+        let mut session = Session::new("s1");
+        session.items = vec![TranscriptItem::Thinking {
+            text: "hm".into(),
+            took_ms: Some(10),
+        }];
+        let mut timings = super::Timings::default();
+        timings.observe(&session);
+        assert!(timings.session("s1").is_some());
+        timings.forget("s1");
+        assert!(timings.session("s1").is_none(), "the close prunes");
+        timings.forget("never-seen");
+        timings.observe(&session);
+        assert!(
+            timings.session("s1").is_some(),
+            "a later observation starts fresh"
+        );
     }
 }

@@ -264,6 +264,36 @@ fn answering_moves_the_row_from_waiting_to_approved() {
 }
 
 #[test]
+fn an_unparseable_question_request_falls_back_and_toasts_a_warning() {
+    let (mut app, _rx, events) = app_with_events();
+    app.set_toasts(crate::toast::shared_toasts());
+    feed(
+        &mut app,
+        &events,
+        vec![
+            kage_core::protocol::HostEvent::PermissionRequested {
+                request_id: kage_core::protocol::RequestId(5),
+                tool_call_id: None,
+                tool: kage_core::protocol::ASK_USER_QUESTION_TOOL.into(),
+                subject: "questions".into(),
+                input: serde_json::json!({"questions": [{"header": 1}]}),
+            }
+            .into(),
+        ],
+    );
+    let panel = app.approval_panel.as_ref().expect("panel opens");
+    assert!(panel.parse_notice().is_some());
+    assert!(panel.hint().starts_with("y/s/a/n/t or 1-5"), "plain panel");
+    let toasts = app.live_toasts();
+    assert!(
+        toasts
+            .iter()
+            .any(|t| t.kind == ToastKind::Warning && t.text.contains("did not parse")),
+        "{toasts:?}"
+    );
+}
+
+#[test]
 fn a_question_opens_the_panel_and_its_answers_go_back() {
     use kage_core::protocol::{HostEvent, Question, QuestionOption, RequestId};
     let (mut app, rx, events) = app_with_events();

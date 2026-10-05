@@ -2,9 +2,12 @@
 //!
 //! The token is 256 random bits, hex encoded. It lives in a private
 //! file next to the other credentials, survives restarts, and is
-//! replaced whole by rotation. Comparison against a presented value is
-//! constant time, and the value is never rendered: [`Token::as_str`]
-//! is the only way out, reserved for the startup connect line.
+//! replaced whole by rotation. A stored value that is not 64 ASCII
+//! hex characters is refused on load, so a truncated or edited file
+//! fails loudly instead of answering 401 to every paired client.
+//! Comparison against a presented value is constant time, and the
+//! value is never rendered: [`Token::as_str`] is the only way out,
+//! reserved for the startup connect line.
 
 use std::fmt;
 use std::fs;
@@ -27,15 +30,30 @@ impl Token {
     ///
     /// # Errors
     ///
-    /// Fails when a fresh token cannot be generated or written.
+    /// Fails when the stored value is not 64 ASCII hex characters
+    /// after trimming, naming the path and suggesting
+    /// `--rotate-token`, and when a fresh token cannot be generated or
+    /// written.
     pub fn load_or_create(path: &Path) -> io::Result<Token> {
         if let Ok(stored) = fs::read_to_string(path) {
             let stored = stored.trim();
-            if !stored.is_empty() {
-                return Ok(Token {
-                    value: stored.to_owned(),
-                });
+            if stored.is_empty() {
+                return Self::rotate(path);
             }
+            if !is_token_shape(stored) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} holds {} characters that are not a 64-character hex token; \
+                         replace it with `kage serve --rotate-token`",
+                        path.display(),
+                        stored.chars().count()
+                    ),
+                ));
+            }
+            return Ok(Token {
+                value: stored.to_owned(),
+            });
         }
         Self::rotate(path)
     }
@@ -84,6 +102,12 @@ impl Token {
             value: hex::encode(raw),
         })
     }
+}
+
+/// Whether `value` is the shape [`Token::generate`] writes: exactly
+/// [`TOKEN_BYTES`] hex-encoded characters.
+fn is_token_shape(value: &str) -> bool {
+    value.len() == TOKEN_BYTES * 2 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 impl fmt::Debug for Token {
@@ -146,6 +170,39 @@ mod tests {
         fs::write(&path, b"  \n").unwrap();
         let token = Token::load_or_create(&path).unwrap();
         assert_eq!(token.as_str().len(), 64);
+    }
+
+    #[test]
+    fn a_valid_file_loads_unchanged_and_padding_is_trimmed() {
+        let (_dir, path) = token_file();
+        fs::write(&path, format!("{}\n", "ab".repeat(32))).unwrap();
+        let token = Token::load_or_create(&path).unwrap();
+        assert_eq!(token.as_str(), "ab".repeat(32));
+    }
+
+    #[test]
+    fn a_short_file_is_refused_and_names_the_path() {
+        let (dir, path) = token_file();
+        fs::write(&path, "abcd\n").unwrap();
+        let err = Token::load_or_create(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let text = err.to_string();
+        assert!(text.contains(&path.display().to_string()), "{text}");
+        assert!(text.contains("--rotate-token"), "{text}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("remote-token")).unwrap(),
+            "abcd\n",
+            "a refused file is left for rotation to replace"
+        );
+    }
+
+    #[test]
+    fn a_non_hex_file_is_refused() {
+        let (_dir, path) = token_file();
+        fs::write(&path, "z".repeat(64)).unwrap();
+        let err = Token::load_or_create(&path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("--rotate-token"));
     }
 
     #[test]

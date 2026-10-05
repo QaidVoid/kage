@@ -64,20 +64,9 @@ fn kbd_chip(label: &str, p: &crate::theme::Palette) -> Div {
 
 /// The small rounded meta chip of the design's badges.
 fn badge_chip(label: &str, p: &crate::theme::Palette) -> Div {
-    div()
-        .flex_none()
+    crate::views::kit::badge(label.to_owned(), p)
         .mt(px(2.))
-        .px(px(7.))
-        .py(px(1.))
-        .rounded_full()
-        .border_1()
-        .border_color(p.line)
-        .bg(p.fill)
-        .text_size(px(10.5))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(p.muted)
         .whitespace_nowrap()
-        .child(SharedString::from(label.to_owned()))
 }
 
 /// How long a toast stays before it expires on its own.

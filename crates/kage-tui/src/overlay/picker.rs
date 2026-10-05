@@ -88,14 +88,7 @@ impl OverlayPicker {
     /// the render closure can pass the active `Frame` directly without
     /// reaching for `frame.buffer_mut()`.
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let modal = OverlayWidget::measure(self, area);
-        frame.render_widget(crate::opaque::OpaqueClear, modal);
-        let theme = crate::theme::current();
-        let ctx = OverlayCtx {
-            theme: &theme,
-            viewport: area,
-        };
-        OverlayWidget::render(self, modal, frame.buffer_mut(), &ctx);
+        super::widget::paint_modal(frame, self, area);
     }
 }
 

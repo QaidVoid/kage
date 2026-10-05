@@ -40,11 +40,39 @@ enum Failure {
     Retry(Duration),
 }
 
+/// How many frames the backlog keeps while no link is live. Beyond
+/// this the oldest frame is dropped and reported.
+const BACKLOG_CAP: usize = 64;
+
+/// The outgoing side the connection thread and the handle share.
+#[derive(Default)]
+struct Outgoing {
+    /// Frames handed over while no link was live, oldest first. The
+    /// next link flushes them before serving.
+    backlog: Vec<Frame>,
+    /// The live link's outgoing queue, absent between links.
+    sender: Option<std::sync::mpsc::Sender<Frame>>,
+}
+
+impl Outgoing {
+    /// Queues `frame` for the next link, dropping the oldest frame at
+    /// the cap.
+    fn hold(&mut self, frame: Frame) {
+        if self.backlog.len() >= BACKLOG_CAP {
+            self.backlog.remove(0);
+            crate::warn(
+                "the engine is unreachable; the reconnect backlog overflowed and the oldest queued frame was dropped",
+            );
+        }
+        self.backlog.push(frame);
+    }
+}
+
 /// Everything the connection thread and the handle share.
 #[derive(Default)]
 struct Shared {
-    /// The live link's outgoing queue, absent between links.
-    outgoing: Mutex<Option<std::sync::mpsc::Sender<Frame>>>,
+    /// The outgoing queues and the between-links backlog.
+    outgoing: Mutex<Outgoing>,
     /// Set by [`Transport::close`] to end every retry.
     closed: AtomicBool,
     /// A duplicate of the live socket, shut down to unblock the
@@ -177,7 +205,13 @@ impl WsTransport {
             let _ = stream.set_read_timeout(Some(READ_POLL));
         }
         let (writer, outgoing) = std::sync::mpsc::channel::<Frame>();
-        *self.shared.outgoing.lock().unwrap() = Some(writer);
+        {
+            let mut shared = self.shared.outgoing.lock().unwrap();
+            for frame in std::mem::take(&mut shared.backlog) {
+                let _ = writer.send(frame);
+            }
+            shared.sender = Some(writer);
+        }
         let mut live = true;
         while live {
             while let Ok(frame) = outgoing.try_recv() {
@@ -208,7 +242,7 @@ impl WsTransport {
                 Err(_) => live = false,
             }
         }
-        *self.shared.outgoing.lock().unwrap() = None;
+        self.shared.outgoing.lock().unwrap().sender = None;
         *self.shared.socket.lock().unwrap() = None;
         self.closed()
     }
@@ -221,22 +255,34 @@ impl Transport for WsTransport {
 
     fn start(&mut self, events: EventSender) {
         let transport = self.clone();
-        thread::Builder::new()
-            .name("kage-ws".to_owned())
-            .spawn(move || transport.run(events))
-            .expect("connection thread spawns");
+        let spawned = thread::Builder::new().name("kage-ws".to_owned()).spawn({
+            let events = events.clone();
+            move || transport.run(events)
+        });
+        if let Err(error) = spawned {
+            let _ = events.send_blocking(Event::State(State::Refused(format!(
+                "cannot start the connection thread: {error}"
+            ))));
+        }
     }
 
     fn send(&self, frame: Frame) {
-        let outgoing = self.shared.outgoing.lock().unwrap().clone();
-        if let Some(outgoing) = outgoing {
-            let _ = outgoing.send(frame);
+        let mut outgoing = self.shared.outgoing.lock().unwrap();
+        match &outgoing.sender {
+            Some(sender) => {
+                let _ = sender.send(frame);
+            }
+            None => outgoing.hold(frame),
         }
     }
 
     fn close(&self) {
         self.shared.closed.store(true, Ordering::SeqCst);
-        *self.shared.outgoing.lock().unwrap() = None;
+        {
+            let mut outgoing = self.shared.outgoing.lock().unwrap();
+            outgoing.sender = None;
+            outgoing.backlog.clear();
+        }
         if let Some(socket) = self.shared.socket.lock().unwrap().take() {
             let _ = socket.shutdown(std::net::Shutdown::Both);
         }
@@ -534,6 +580,118 @@ mod tests {
                 delay: Duration::from_secs(2)
             }
         );
+        transport.close();
+        assert_eq!(next_state(&rx), State::Closed);
+    }
+
+    /// One probe notification naming `n`, sent from the client.
+    fn probe(n: usize) -> Frame {
+        Frame::Notification {
+            method: format!("probe/{n}"),
+            params: serde_json::json!({ "n": n }),
+        }
+    }
+
+    #[test]
+    fn frames_sent_in_the_reconnect_window_flush_on_the_next_link() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (events, rx) = async_channel::unbounded();
+        let mut transport = WsTransport::new(format!("ws://{addr}/acp"), TOKEN);
+        transport.start(events);
+        assert_eq!(next_state(&rx), State::Connecting);
+
+        let (stream, _) = listener.accept().unwrap();
+        let server = upgrade(stream, true);
+        assert_eq!(next_state(&rx), State::Connected);
+
+        drop(server);
+        assert_eq!(
+            next_state(&rx),
+            State::Reconnecting {
+                attempt: 1,
+                delay: Duration::from_secs(1)
+            }
+        );
+        transport.send(probe(1));
+
+        let (stream, _) = listener.accept().unwrap();
+        let mut server = upgrade(stream, true);
+        assert_eq!(next_state(&rx), State::Connecting);
+        assert_eq!(next_state(&rx), State::Connected);
+
+        let sent = server.read().expect("the held frame arrives");
+        assert!(
+            sent.to_text().unwrap().contains("probe/1"),
+            "the frame sent during the dip went out on the new link: {sent:?}"
+        );
+
+        transport.close();
+        assert_eq!(next_state(&rx), State::Closed);
+    }
+
+    #[test]
+    fn the_backlog_holds_a_cap_and_drops_the_oldest_beyond_it() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (events, rx) = async_channel::unbounded();
+        let mut transport = WsTransport::new(format!("ws://{addr}/acp"), TOKEN);
+        transport.start(events);
+        assert_eq!(next_state(&rx), State::Connecting);
+
+        let (stream, _) = listener.accept().unwrap();
+        let server = upgrade(stream, true);
+        assert_eq!(next_state(&rx), State::Connected);
+        drop(server);
+        assert_eq!(
+            next_state(&rx),
+            State::Reconnecting {
+                attempt: 1,
+                delay: Duration::from_secs(1)
+            }
+        );
+
+        for n in 0..super::BACKLOG_CAP as usize + 6 {
+            transport.send(probe(n));
+        }
+
+        let (stream, _) = listener.accept().unwrap();
+        let mut server = upgrade(stream, true);
+        assert_eq!(next_state(&rx), State::Connecting);
+        assert_eq!(next_state(&rx), State::Connected);
+
+        let mut sent = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while sent.len() < super::BACKLOG_CAP {
+            assert!(
+                Instant::now() < deadline,
+                "only {} of {} frames arrived",
+                sent.len(),
+                super::BACKLOG_CAP
+            );
+            match server.read() {
+                Ok(tungstenite::Message::Text(text)) => sent.push(text),
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(error))
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        || error.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(other) => panic!("the link broke: {other}"),
+            }
+        }
+        assert_eq!(sent.len(), super::BACKLOG_CAP, "the cap held");
+        assert!(
+            sent.first().unwrap().contains(&format!("probe/6")),
+            "the six oldest frames were dropped: {}",
+            sent.first().unwrap()
+        );
+        assert!(
+            sent.last()
+                .unwrap()
+                .contains(&format!("probe/{}", super::BACKLOG_CAP as usize + 5)),
+            "the newest frame survived: {}",
+            sent.last().unwrap()
+        );
+
         transport.close();
         assert_eq!(next_state(&rx), State::Closed);
     }

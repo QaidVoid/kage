@@ -115,16 +115,17 @@ local SCENARIOS = {
     { say = "Found the retry call sites." },
   },
   edit = {
-    { tools = { { "edit", { path = "src/retry.rs", old_str = "pub const MAX_ATTEMPTS: u32 = 3;", new_str = "pub const MAX_ATTEMPTS: u32 = 5;" } },
-                { "write", { path = "notes/retry.md", content = "# Retry\n\nThe budget is shared per client.\n" } } } },
+    { tools = { { "write", { path = "src/retry.rs", content = "pub const MAX_ATTEMPTS: u32 = 3;\n" } },
+                { "edit", { path = "src/retry.rs", old_str = "pub const MAX_ATTEMPTS: u32 = 3;", new_str = "pub const MAX_ATTEMPTS: u32 = 5;" } },
+                { "write", { path = "notes/retry.md", content = "# Retry\n\nThe budget is shared per client.\n", overwrite = true } } } },
     { say = "Raised the attempt cap and wrote a short note." },
   },
   shell = {
-    { tools = { { "shell", { command = "ls -la src && wc -l src/*.rs" } } } },
-    { say = "The crate has three source files." },
+    { tools = { { "shell", { command = "git log --oneline -3" } } } },
+    { say = "That was the newest commit history." },
   },
   fail = {
-    { tools = { { "shell", { command = "sh -c 'echo test retry::backoff ... FAILED; exit 101'" } } } },
+    { tools = { { "shell", { command = "echo test retry::backoff ... FAILED; exit 101" } } } },
     { say = "The retry test fails; the backoff assertion is off by one." },
   },
   todo = {

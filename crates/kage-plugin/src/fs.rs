@@ -16,6 +16,9 @@
 //! swapping a symlink into place between the final check and the write
 //! remains outside the threat model.
 //!
+//! Reads are size-capped: a file larger than `READ_MAX` is refused with
+//! an error naming the cap instead of being read into memory.
+//!
 //! Built-in tools use the looser [`kage_tools::resolve`] (no escape check)
 //! because the model already has shell access via the `shell` tool; plugins keep the
 //! tighter check because they are third-party code in a sandbox.
@@ -28,6 +31,11 @@ use mlua::{Lua, Table};
 
 use crate::capabilities::{Capability, CapabilityRegistry};
 use crate::error::PluginError;
+
+/// Cap on one `kage.fs.read` call, matching the http body default.
+/// `read_to_string` allocates the full file size outside the Lua memory
+/// limit, so an oversized read is refused before it allocates.
+const READ_MAX: u64 = 2_000_000;
 
 /// Install `kage.fs.read` on the running Lua state.
 ///
@@ -45,6 +53,15 @@ pub fn install_fs(lua: &Lua, workdir: &Path) -> Result<(), PluginError> {
         "read",
         lua.create_function(move |_, path: String| {
             let resolved = resolve(&read_root, &path)?;
+            if let Ok(meta) = std::fs::metadata(&resolved)
+                && meta.len() > READ_MAX
+            {
+                return Err(mlua::Error::external(format!(
+                    "read {path}: {} bytes exceeds the kage.fs.read cap of \
+                     {READ_MAX} bytes",
+                    meta.len()
+                )));
+            }
             std::fs::read_to_string(&resolved)
                 .map_err(|err| mlua::Error::external(format!("read {path}: {err}")))
         })?,
@@ -183,6 +200,33 @@ mod tests {
             .unwrap();
         let v: String = rt.eval("return kage.fs.read('hello.txt')").unwrap_lua();
         assert_eq!(v, "world");
+    }
+
+    #[test]
+    fn read_refuses_files_over_the_cap() {
+        let dir = tempdir().unwrap();
+        let blob = vec![b'x'; usize::try_from(super::READ_MAX + 1).unwrap()];
+        fs::write(dir.path().join("big.bin"), blob).unwrap();
+        let rt = PluginRuntime::builder()
+            .workdir(dir.path().to_path_buf())
+            .build()
+            .unwrap();
+        let err = rt.eval("return kage.fs.read('big.bin')").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("exceeds the kage.fs.read cap"), "{msg}");
+        assert!(msg.contains("2000000"), "{msg}");
+    }
+
+    #[test]
+    fn read_at_the_cap_still_works() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("edge.txt"), "x").unwrap();
+        let rt = PluginRuntime::builder()
+            .workdir(dir.path().to_path_buf())
+            .build()
+            .unwrap();
+        let v: String = rt.eval("return kage.fs.read('edge.txt')").unwrap_lua();
+        assert_eq!(v, "x");
     }
 
     #[test]

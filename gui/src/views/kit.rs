@@ -3,11 +3,12 @@
 use gpui_kit::component::h_flex;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::{
-    Div, Entity, FontWeight, InteractiveElement as _, ParentElement as _, SharedString, Stateful,
-    Styled as _, div, px,
+    Div, Entity, FontWeight, Hsla, InteractiveElement, ParentElement as _, SharedString, Stateful,
+    Styled, div, px,
 };
+use kage_client::wire::Cost;
 
-use crate::theme::{FS_XS, Palette, R_FULL, R_MD, SP_3};
+use crate::theme::{FS_2XS, FS_XS, Palette, R_FULL, R_MD, SP_3};
 
 /// The tones a small action button carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +64,112 @@ pub(crate) fn btn_sm(id: impl Into<SharedString>, tone: BtnTone, pal: &Palette) 
     }
 }
 
+/// The design's string hash, so an avatar hue and the constellation's
+/// jitter agree with the web client.
+pub(crate) fn design_hash(text: &str) -> u32 {
+    let mut x: i32 = 0;
+    for unit in text.encode_utf16() {
+        x = x.wrapping_mul(31).wrapping_add(i32::from(unit));
+    }
+    x.unsigned_abs()
+}
+
+/// What a session tree spent, as the label under the status line: one
+/// currency reads `USD 1.23`, a tree that mixed currencies reads every
+/// subtotal joined with `+` instead of one silently dropped total.
+/// Empty when nothing is priced.
+pub(crate) fn cost_label(costs: &[Cost], decimals: usize) -> Option<String> {
+    if costs.is_empty() {
+        return None;
+    }
+    Some(
+        costs
+            .iter()
+            .map(|cost| format!("{} {:.*}", cost.currency, decimals, cost.amount))
+            .collect::<Vec<_>>()
+            .join(" + "),
+    )
+}
+
+/// The neutral badge of the design: fully round, a hairline border
+/// over the soft fill, 10.5px medium muted text. One-off spacing a
+/// site needs chains onto the returned div.
+pub(crate) fn badge(label: impl Into<SharedString>, pal: &Palette) -> Div {
+    div()
+        .flex_none()
+        .px(px(7.))
+        .py(px(1.))
+        .rounded(px(R_FULL))
+        .border_1()
+        .border_color(pal.line)
+        .bg(pal.fill)
+        .font_weight(FontWeight::MEDIUM)
+        .text_size(px(10.5))
+        .text_color(pal.muted)
+        .child(label.into())
+}
+
+/// The badge on a custom tint: the neutral recipe with the caller's
+/// colors, for badges that carry a meaning.
+pub(crate) fn badge_in(label: impl Into<SharedString>, fg: Hsla, bg: Hsla, line: Hsla) -> Div {
+    div()
+        .flex_none()
+        .px(px(7.))
+        .py(px(1.))
+        .rounded(px(R_FULL))
+        .border_1()
+        .border_color(line)
+        .bg(bg)
+        .font_weight(FontWeight::MEDIUM)
+        .text_size(px(10.5))
+        .text_color(fg)
+        .child(label.into())
+}
+
+/// The colored chip of the design's chip anatomy: 20px tall, fully
+/// round, mono at the smallest size, on the caller's tint.
+pub(crate) fn chip(
+    text: impl Into<SharedString>,
+    fg: Hsla,
+    bg: Hsla,
+    mono: impl Into<SharedString>,
+) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .h(px(20.))
+        .px(px(7.))
+        .rounded(px(R_FULL))
+        .bg(bg)
+        .font_family(mono.into())
+        .text_size(px(FS_2XS))
+        .text_color(fg)
+        .whitespace_nowrap()
+        .child(text.into())
+}
+
+/// The dock pill shape: 28px tall, fully round, a hairline border over
+/// the surface, muted small text that lifts onto the raised fill with
+/// a stronger border while hovered or open.
+pub(crate) fn pill<E: InteractiveElement + Styled>(el: E, pal: &Palette) -> E {
+    let (raised, ink, line_strong) = (pal.raised, pal.ink, pal.line_strong);
+    el.flex()
+        .h(px(28.))
+        .px(px(10.))
+        .gap(px(SP_3))
+        .flex_none()
+        .max_w(px(320.))
+        .items_center()
+        .rounded(px(R_FULL))
+        .border_1()
+        .border_color(pal.line)
+        .bg(pal.surface)
+        .text_size(px(FS_XS))
+        .text_color(pal.muted)
+        .hover(move |style| style.bg(raised).border_color(line_strong).text_color(ink))
+}
+
 /// An on/off switch as the design draws it: a 36 by 20 pill with its
 /// knob on the right when on. The click is the caller's.
 pub(crate) fn switch(id: impl Into<SharedString>, on: bool, pal: &Palette) -> Stateful<Div> {
@@ -114,5 +221,42 @@ impl FocusReturn {
                 None => window.blur(cx),
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cost_label, design_hash};
+    use kage_client::wire::Cost;
+
+    fn cost(amount: f64, currency: &str) -> Cost {
+        Cost {
+            amount,
+            currency: currency.to_owned(),
+        }
+    }
+
+    #[test]
+    fn cost_label_renders_one_currency_as_one_total() {
+        assert_eq!(
+            cost_label(&[cost(1.234, "USD")], 2).as_deref(),
+            Some("USD 1.23")
+        );
+        assert_eq!(cost_label(&[], 2), None);
+    }
+
+    #[test]
+    fn cost_label_keeps_mixed_currencies_as_subtotals() {
+        let costs = [cost(1.0, "USD"), cost(2.5, "EUR")];
+        assert_eq!(
+            cost_label(&costs, 2).as_deref(),
+            Some("USD 1.00 + EUR 2.50")
+        );
+    }
+
+    #[test]
+    fn design_hash_matches_the_design_values() {
+        assert_eq!(design_hash("explore"), 1_309_148_525);
+        assert_eq!(design_hash(""), 0);
     }
 }

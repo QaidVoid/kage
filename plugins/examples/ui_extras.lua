@@ -52,6 +52,7 @@ kage.add_autocomplete_provider({
                 items[#items + 1] = { value = code, label = code, detail = detail }
             end
         end
+        table.sort(items, function(a, b) return a.value < b.value end)
         return items
     end,
 })

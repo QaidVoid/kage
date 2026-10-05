@@ -2,7 +2,8 @@
 -- over `kage.api.autocmd_create`. The handler receives the event
 -- payload and the call returns an idempotent `off`. An unknown event
 -- name warns once instead of raising, so a plugin with a typo keeps
--- loading.
+-- loading; a context-gated event without the grant is skipped the same
+-- way and its `off` is a no-op.
 
 local internal = ...
 local create, del = kage.api.autocmd_create, kage.api.autocmd_del
@@ -22,6 +23,10 @@ function kage.on(event, handler)
       return handler(ev.data)
     end,
   })
+  -- A grant-denied subscription skips the hook and returns a nil id.
+  if id == nil then
+    return function() end
+  end
   return function()
     del(id)
   end

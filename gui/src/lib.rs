@@ -25,6 +25,15 @@ pub mod timing;
 pub mod transport;
 pub mod views;
 
+/// Reports a problem where the platform can show it: stderr on the
+/// desktop, the browser console on the web.
+pub(crate) fn warn(message: &str) {
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::warn_1(&format!("kage-desktop: {message}").into());
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("kage-desktop: {message}");
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub mod launch;
 

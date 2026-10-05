@@ -141,6 +141,13 @@ fn push_user_message(buf: &mut Buffer, message: &Message) {
     if let Some(text) = user_text(message) {
         push_user_text(buf, text);
     }
+    push_user_image_rows(buf, message);
+}
+
+/// One `kage:image` row per attached image, skipping an image the
+/// bubble's resource block already named. Shared by the live prompt
+/// path and the resume replay so both show attached images.
+fn push_user_image_rows(buf: &mut Buffer, message: &Message) {
     let mut labelled = false;
     for block in &message.content {
         match block {
@@ -268,6 +275,7 @@ pub fn populate_from_history(
                         push_user_text(buf, text);
                     }
                 }
+                push_user_image_rows(buf, msg);
             }
             Role::Assistant => {
                 for block in &msg.content {
@@ -324,14 +332,14 @@ pub fn populate_from_history(
     buf.interrupt_running_tools();
 }
 
-/// True when `text` looks like the synthetic compaction-summary
-/// message the loop inserts in place of drained history. Detection
-/// matches the framing constants in [`kage_core::message`] so resumed
-/// sessions route the summary through the compaction widget instead
-/// of rendering it as a plain user / assistant bubble.
+/// True when `text` is exactly the synthetic compaction-summary
+/// message the loop inserts in place of drained history: framed by
+/// the constants in [`kage_core::message`] on both ends. Strict
+/// framing keeps a user prompt that merely contains `<summary>` tags
+/// in a user bubble instead of the compaction widget.
 fn is_compaction_summary(text: &str) -> bool {
     text.starts_with(kage_core::message::COMPACTION_SUMMARY_PREFIX)
-        || text.contains("<summary>") && text.contains("</summary>")
+        && text.ends_with(kage_core::message::COMPACTION_SUMMARY_SUFFIX)
 }
 
 /// Push the text of a user message: the person's own words as a
@@ -1254,6 +1262,47 @@ mod tests {
     }
 
     #[test]
+    fn summary_tags_in_a_user_prompt_stay_a_user_bubble() {
+        let counts = CompactionCounts {
+            summarized: 4,
+            kept: 2,
+        };
+        let framed = format!(
+            "{}the real summary{}",
+            kage_core::message::COMPACTION_SUMMARY_PREFIX,
+            kage_core::message::COMPACTION_SUMMARY_SUFFIX
+        );
+        let history = vec![
+            Arc::new(Message::new(
+                Role::User,
+                vec![Content::Text {
+                    text: "wrap it in <summary>x</summary> please".into(),
+                }],
+                None,
+            )),
+            Arc::new(Message::new(
+                Role::User,
+                vec![Content::Text { text: framed }],
+                None,
+            )),
+        ];
+        let mut buf = Buffer::new();
+        populate_from_history(&mut buf, &history, &HashMap::new(), Some(counts));
+        let blocks = buf.blocks();
+        assert!(matches!(blocks[0].as_ref(), Block::User { .. }));
+        match blocks[1].as_ref() {
+            Block::Custom { kind, text, .. } => {
+                assert_eq!(kind, "kage:compaction");
+                assert!(
+                    text.starts_with("Compacted history (4 messages summarized, 2 kept)"),
+                    "{text}"
+                );
+            }
+            other => panic!("expected the framed summary to keep the counts, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn populate_keeps_regular_user_message_as_user_block() {
         let mut buf = Buffer::new();
         let history = vec![Arc::new(Message::new(
@@ -1364,6 +1413,35 @@ mod tests {
         let buf = buf.lock().unwrap();
         assert_eq!(buf.blocks().len(), 2);
         assert!(matches!(buf.blocks()[0].as_ref(), Block::User { text } if text == "hello"));
+    }
+
+    #[test]
+    fn replayed_user_messages_paint_text_then_images() {
+        let history = vec![Arc::new(Message::new(
+            Role::User,
+            vec![
+                Content::Text {
+                    text: "hello".into(),
+                },
+                Content::Image {
+                    source: kage_core::ImageSource::Base64 { data: "AA".into() },
+                    mime: "image/png".into(),
+                },
+            ],
+            None,
+        ))];
+        let mut buf = Buffer::new();
+        populate_from_history(&mut buf, &history, &HashMap::new(), None);
+        let blocks = buf.blocks();
+        assert_eq!(blocks.len(), 2, "bubble then image row");
+        assert!(matches!(blocks[0].as_ref(), Block::User { text } if text == "hello"));
+        match blocks[1].as_ref() {
+            Block::Custom { kind, text, .. } => {
+                assert_eq!(kind, "kage:image");
+                assert_eq!(text, "[image: image/png]");
+            }
+            other => panic!("expected an image row, got {other:?}"),
+        }
     }
 
     #[test]

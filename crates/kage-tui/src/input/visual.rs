@@ -41,11 +41,11 @@ impl InputState {
                 return actions;
             }
             KeyCode::Char('h') | KeyCode::Left => {
-                self.cursor = self.cursor_after_char_move(-1);
+                self.content.cursor = self.cursor_after_char_move(-1);
                 return Vec::new();
             }
             KeyCode::Char('l') | KeyCode::Right => {
-                self.cursor = self.cursor_after_char_move(1);
+                self.content.cursor = self.cursor_after_char_move(1);
                 return Vec::new();
             }
             KeyCode::Char('j') | KeyCode::Down => {
@@ -57,28 +57,28 @@ impl InputState {
                 return Vec::new();
             }
             KeyCode::Char('0') | KeyCode::Home => {
-                self.cursor = current_line_start(&self.text, self.cursor);
+                self.content.cursor = current_line_start(&self.content.text, self.content.cursor);
                 return Vec::new();
             }
             KeyCode::Char('$') | KeyCode::End => {
-                self.cursor = current_line_end(&self.text, self.cursor);
+                self.content.cursor = current_line_end(&self.content.text, self.content.cursor);
                 return Vec::new();
             }
             KeyCode::Char('^') => {
-                let s = current_line_start(&self.text, self.cursor);
-                self.cursor = first_non_whitespace_at(&self.text, s);
+                let s = current_line_start(&self.content.text, self.content.cursor);
+                self.content.cursor = first_non_whitespace_at(&self.content.text, s);
                 return Vec::new();
             }
             KeyCode::Char('w') => {
-                self.cursor = vim_word_forward(&self.text, self.cursor);
+                self.content.cursor = vim_word_forward(&self.content.text, self.content.cursor);
                 return Vec::new();
             }
             KeyCode::Char('b') => {
-                self.cursor = backward_word_start(&self.text, self.cursor);
+                self.content.cursor = backward_word_start(&self.content.text, self.content.cursor);
                 return Vec::new();
             }
             KeyCode::Char('e') => {
-                self.cursor = vim_word_end(&self.text, self.cursor);
+                self.content.cursor = vim_word_end(&self.content.text, self.content.cursor);
                 return Vec::new();
             }
             KeyCode::Char(op_key) if matches!(op_key, 'd' | 'c' | 'y' | 'x' | 'X') => {
@@ -109,12 +109,12 @@ impl InputState {
         let Some(anchor) = self.visual_anchor else {
             return (0, 0);
         };
-        let (start, end) = if anchor <= self.cursor {
-            (anchor, self.cursor)
+        let (start, end) = if anchor <= self.content.cursor {
+            (anchor, self.content.cursor)
         } else {
-            (self.cursor, anchor)
+            (self.content.cursor, anchor)
         };
-        let end_inclusive = if let Some((_, w)) = char_at(&self.text, end) {
+        let end_inclusive = if let Some((_, w)) = char_at(&self.content.text, end) {
             end + w
         } else {
             end
@@ -153,9 +153,10 @@ impl InputState {
     }
 
     pub(crate) fn insert_char(&mut self, c: char) {
+        self.snapshot_for_typing();
         let mut buf = [0u8; 4];
         let s = c.encode_utf8(&mut buf);
-        self.text.insert_str(self.cursor, s);
-        self.cursor += s.len();
+        self.content.text.insert_str(self.content.cursor, s);
+        self.content.cursor += s.len();
     }
 }

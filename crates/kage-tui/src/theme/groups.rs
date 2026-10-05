@@ -345,7 +345,24 @@ pub(super) fn parse_theme_file(toml: &str) -> Result<(String, ThemeGroups), Stri
             .map_err(|e| format!("group `{name}`: {e}"))?;
         out.groups.insert(name, spec);
     }
+    check_links(&out.groups)?;
     Ok((base.name, out))
+}
+
+/// Check every group's `link` against the fully merged table, so a
+/// typo fails the theme load instead of resolving to an empty style
+/// at paint time. Runs once per file, so a group may link forward to
+/// one defined later in the same file.
+fn check_links(groups: &BTreeMap<String, HlSpec>) -> Result<(), String> {
+    for (name, spec) in groups {
+        let Some(target) = &spec.link else {
+            continue;
+        };
+        if !groups.contains_key(target) {
+            return Err(format!("group `{name}` links to unknown group `{target}`"));
+        }
+    }
+    Ok(())
 }
 
 /// Parse a `[colors]` value via ratatui's grammar: `#rrggbb` hex, a
@@ -615,5 +632,31 @@ mod tests {
         let err = parse_theme_file("[groups]\nKageMuted = { fg = \"reset\" }").unwrap_err();
         assert!(err.contains("group `KageMuted`"), "{err}");
         assert!(parse_theme_file("[groups]\nKageMuted = { colour = \"red\" }").is_err());
+    }
+
+    #[test]
+    fn a_link_to_a_missing_group_fails_naming_the_group() {
+        let err = parse_theme_file("[groups]\nKageApproval = { link = \"KageNope\" }").unwrap_err();
+        assert!(
+            err.contains("group `KageApproval`") && err.contains("`KageNope`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn valid_links_still_parse_including_forward_references() {
+        let (_, groups) = parse_theme_file(
+            "[groups]\n\
+             KageApproval = { link = \"KageWarning\" }\n\
+             Mine = { link = \"Later\" }\n\
+             Later = { fg = \"red\" }",
+        )
+        .expect("ok");
+        assert_eq!(
+            groups.groups["KageApproval"].link.as_deref(),
+            Some("KageWarning")
+        );
+        assert_eq!(groups.groups["Mine"].link.as_deref(), Some("Later"));
+        assert_eq!(groups.groups["Later"].fg.as_deref(), Some("red"));
     }
 }

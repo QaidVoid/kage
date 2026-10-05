@@ -99,18 +99,31 @@ pub fn pick(prompt: &str, items: &[PickItem]) -> Result<Option<String>, TuiError
     sorted.sort_by_cached_key(|item| item.label.to_lowercase());
     let mut stdout = io::stdout();
     terminal::enable_raw_mode()?;
-    let _restore = RawModeGuard;
+    let _restore = TtyRestore::new();
     execute!(stdout, cursor::Hide)?;
     let result = run(&mut stdout, prompt, &sorted);
     let _ = execute!(stdout, cursor::Show);
     result
 }
 
-struct RawModeGuard;
+/// Restores the tty when the picker ends: raw mode off and the cursor
+/// back on. Held across `run` so a panic inside it still leaves the
+/// user's terminal usable; drop errors are ignored, as on the happy
+/// path. Tty-bound: a unit test can only exercise construction.
+struct TtyRestore {
+    out: io::Stdout,
+}
 
-impl Drop for RawModeGuard {
+impl TtyRestore {
+    fn new() -> Self {
+        Self { out: io::stdout() }
+    }
+}
+
+impl Drop for TtyRestore {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
+        let _ = execute!(self.out, cursor::Show);
     }
 }
 
@@ -144,7 +157,7 @@ fn run(out: &mut io::Stdout, prompt: &str, items: &[PickItem]) -> Result<Option<
         let CtEvent::Key(key) = ct_event::read()? else {
             continue;
         };
-        if key.kind != KeyEventKind::Press {
+        if matches!(key.kind, KeyEventKind::Release) {
             continue;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
@@ -511,5 +524,12 @@ mod tests {
     fn compute_window_handles_empty_and_zero() {
         assert_eq!(compute_window(0, 0, 0, 5), (0, 0));
         assert_eq!(compute_window(0, 0, 5, 0), (0, 0));
+    }
+
+    #[test]
+    fn the_restore_guard_drops_without_panicking() {
+        // Cursor and raw-mode restore are tty-bound; the guard only
+        // has to stay safe to construct and drop off-tty.
+        drop(TtyRestore::new());
     }
 }

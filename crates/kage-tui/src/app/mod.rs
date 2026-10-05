@@ -28,7 +28,7 @@ pub(crate) use crate::command::{
 };
 pub(crate) use crate::error::TuiError;
 pub(crate) use crate::events::SharedBuffer;
-pub(crate) use crate::input::{InputAction, InputState, Mode, Pane};
+pub(crate) use crate::input::{Draft, InputAction, InputState, Mode, Pane};
 pub(crate) use crate::keymap::{
     self, EditState, Sequencer, Step, event_from_key, help_groups, key_from_event,
 };

@@ -146,11 +146,24 @@ impl Highlights {
         self.overrides.get(name).or_else(|| self.base.get(name))
     }
 
+    /// Check every group's link target, base and overrides included,
+    /// naming the offending group. Run once after a batch insert (a
+    /// theme file load) so forward references inside the batch stay
+    /// allowed.
+    pub fn check_links(&self) -> Result<(), HighlightError> {
+        for (name, spec) in self.base.iter().chain(self.overrides.iter()) {
+            let Some(target) = &spec.link else { continue };
+            if self.get(target).is_none() {
+                return Err(HighlightError::UnknownLink(name.clone(), target.clone()));
+            }
+        }
+        Ok(())
+    }
+
     /// The spec for `name` with links followed. A missing group, a
     /// cycle, or a chain deeper than 16 links gives an empty style.
     #[must_use]
-    pub fn resolve(&self, name: &str) -> HlSpec {
-        let mut name = name;
+    pub fn resolve(&self, name: &str) -> HlSpec {        let mut name = name;
         for _ in 0..=MAX_LINK_DEPTH {
             let Some(spec) = self.get(name) else {
                 break;
@@ -191,6 +204,9 @@ pub enum HighlightError {
     /// The group name is empty.
     #[error("highlight group name must not be empty")]
     EmptyName,
+    /// A link names a group the table does not have.
+    #[error("highlight group `{0}` links to unknown group `{1}`")]
+    UnknownLink(String, String),
 }
 
 #[cfg(test)]
@@ -265,6 +281,20 @@ mod tests {
         assert_eq!(hl.resolve("Missing"), HlSpec::default());
         hl.set("Dangling", link("Missing")).unwrap();
         assert_eq!(hl.resolve("Dangling"), HlSpec::default());
+    }
+
+    #[test]
+    fn check_links_names_a_dangling_target_and_allows_forward_references() {
+        let mut hl = Highlights::new();
+        hl.set("A", link("B")).unwrap();
+        hl.set("B", fg("red")).unwrap();
+        assert!(hl.check_links().is_ok());
+        hl.set("Bad", link("Nope")).unwrap();
+        let err = hl.check_links().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "highlight group `Bad` links to unknown group `Nope`"
+        );
     }
 
     #[test]

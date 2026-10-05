@@ -589,10 +589,12 @@ impl Buffer {
     }
 
     /// Enforce [`MAX_BLOCKS`] and [`MAX_BYTES`]. Returns the number of
-    /// blocks dropped (zero when under both caps). The count cap compacts
-    /// first; the byte cap then keeps compacting the oldest blocks while
-    /// the kept text still exceeds [`MAX_BYTES`], never below the newest
-    /// block, so one oversized block is retained rather than erased. UI-
+    /// blocks dropped (zero when under both caps). Both caps resolve
+    /// into one drop frontier in a single pass, then the blocks drain
+    /// once: the count cap starts the frontier at `len - MAX_BLOCKS`
+    /// and the byte cap walks it forward while the kept text still
+    /// exceeds [`MAX_BYTES`], never below the newest block, so one
+    /// oversized block is retained rather than erased. UI-
     /// thread only: it shifts every block index, so it must run before a
     /// draw snapshots the buffer; the version bump it performs makes
     /// index-bearing caches elsewhere (the search-match list) rebuild
@@ -602,14 +604,17 @@ impl Buffer {
     /// that compacts the *session history* against the token budget;
     /// this only trims *rendered scrollback*.
     pub(crate) fn trim_scrollback(&mut self) -> usize {
-        let mut dropped = 0;
-        if self.blocks.len() > MAX_BLOCKS {
-            dropped += self.compact_to(MAX_BLOCKS);
+        let len = self.blocks.len();
+        if len <= MAX_BLOCKS && self.total_text_bytes <= MAX_BYTES {
+            return 0;
         }
-        while self.total_text_bytes > MAX_BYTES && self.blocks.len() > 1 {
-            dropped += self.compact_to(self.blocks.len() - 1);
+        let mut k = len.saturating_sub(MAX_BLOCKS);
+        let mut kept_bytes: usize = self.blocks[k..].iter().map(|b| b.text_bytes()).sum();
+        while self.blocks.len() - k > 1 && kept_bytes > MAX_BYTES {
+            kept_bytes -= self.blocks[k].text_bytes();
+            k += 1;
         }
-        dropped
+        self.compact_frontier(k)
     }
 
     /// The kept text bytes of the newest open call `call_id`, captured
@@ -637,15 +642,30 @@ impl Buffer {
     /// shifts up by the virtual rows the dropped blocks occupied so
     /// the viewport keeps showing the same content; uncached heights
     /// count one row (never measured). Following state is untouched.
+    /// Production compaction goes through [`Self::trim_scrollback`];
+    /// this arbitrary-cap form is the test seam for the frontier.
+    #[cfg(test)]
     pub(crate) fn compact_to(&mut self, cap: usize) -> usize {
         let len = self.blocks.len();
         if len <= cap {
             return 0;
         }
-        let mut k = len - cap;
+        self.compact_frontier(len - cap)
+    }
+
+    /// Drop the oldest `k` blocks, extending the frontier past any
+    /// kept result whose call is being dropped (see
+    /// [`Self::compact_to`]), then apply the anchor, focus and cache
+    /// shifts a single time. Every skipped block is counted toward
+    /// the dropped bytes so [`Self::total_text_bytes`] stays equal
+    /// to the survivors' byte sum.
+    fn compact_frontier(&mut self, mut k: usize) -> usize {
+        if k == 0 {
+            return 0;
+        }
         let mut dropped_bytes: usize = self.blocks[..k].iter().map(|b| b.text_bytes()).sum();
         loop {
-            let dropped_calls: std::collections::HashSet<&str> = self.blocks[..k]
+            let dropped_calls: HashSet<&str> = self.blocks[..k]
                 .iter()
                 .filter_map(|b| match b.as_ref() {
                     Block::ToolCall { call_id, .. } => Some(call_id.as_str()),
@@ -658,8 +678,12 @@ impl Buffer {
             }) else {
                 break;
             };
+            let old_k = k;
             k += next + 1;
-            dropped_bytes += self.blocks[k - 1].text_bytes();
+            dropped_bytes += self.blocks[old_k..k]
+                .iter()
+                .map(|b| b.text_bytes())
+                .sum::<usize>();
         }
 
         // Shift a pinned viewport anchor up by the virtual rows the

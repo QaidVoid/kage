@@ -35,6 +35,7 @@ use crate::theme::{
     SP_5,
 };
 use crate::views::deferred::Deferred;
+use crate::views::kit::pill;
 use gpui_kit::base::ElementExt as _;
 
 /// The config option id the goal pill reads and edits.
@@ -99,28 +100,6 @@ impl IntoElement for Pill {
     fn into_element(self) -> Self::Element {
         self.element
     }
-}
-
-/// The pill shape the dock pills share: 28px tall, fully round, a
-/// hairline border over the surface, muted 12px text that lifts onto
-/// the raised fill, inks and takes the stronger border while hovered
-/// or open.
-fn pill<E: InteractiveElement + Styled>(el: E, pal: &Palette) -> E {
-    let (raised, ink, line_strong) = (pal.raised, pal.ink, pal.line_strong);
-    el.flex()
-        .h(px(28.))
-        .px(px(10.))
-        .gap(px(SP_3))
-        .flex_none()
-        .max_w(px(320.))
-        .items_center()
-        .rounded(px(R_FULL))
-        .border_1()
-        .border_color(pal.line)
-        .bg(pal.surface)
-        .text_size(px(FS_XS))
-        .text_color(pal.muted)
-        .hover(move |style| style.bg(raised).border_color(line_strong).text_color(ink))
 }
 
 /// The mono count a pill carries after its label.
@@ -219,6 +198,7 @@ fn member_word(state: Option<SubagentState>) -> &'static str {
         Some(SubagentState::Completed) => "done",
         Some(SubagentState::Failed) => "failed",
         Some(SubagentState::Cancelled) => "cancelled",
+        Some(SubagentState::Unknown) => "unknown",
     }
 }
 
@@ -482,7 +462,7 @@ impl DockRow {
     /// from the queue.
     fn edit_row(&mut self, row: &QueueRow, cx: &mut Context<Self>) {
         let text = row.full.clone();
-        self.store.update(cx, |store, _| {
+        self.store.act(cx, |store| {
             let session = store.active_id().map(str::to_owned);
             store.set_draft(session.as_deref(), &text);
             store.withdraw_queued(row.index);
@@ -1066,7 +1046,7 @@ impl Render for DockRow {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext, Window};
@@ -1077,7 +1057,9 @@ mod tests {
         background_state, goal_state, prompt_text, queue_rows, swarm_state, todos_state,
         truncate_text,
     };
-    use crate::store::{Command, PlanChoice, PlanReviewState, Store, plan_review};
+    use crate::store::{
+        Command, PlanChoice, PlanReviewState, Store, StoreHandle as _, plan_review,
+    };
     use crate::transport::State;
     use kage_client::wire::{
         ContentBlock, NoticeTone, SessionConfigKind, SessionConfigOption, SubagentState,
@@ -1731,6 +1713,48 @@ mod tests {
                 "withdrawing sends no frame"
             );
             assert!(store.read(cx).active_session().unwrap().queue.is_empty());
+        });
+    }
+
+    /// Editing a queue row notifies the store's observers, so the
+    /// shell and the other views hear the draft change at once
+    /// instead of after an unrelated redraw.
+    #[gpui_kit::test]
+    fn editing_a_queue_row_notifies_the_store_observer(cx: &mut TestAppContext) {
+        let store = cx.new(|_| booted_store());
+        let (dock, visual) = window_on(cx, store.clone());
+        let ran = Rc::new(Cell::new(0usize));
+        let sink = ran.clone();
+        visual.update(|_, cx| {
+            cx.observe(&store, move |_, _| sink.set(sink.get() + 1))
+                .detach();
+        });
+        visual.update(|_, cx| {
+            store.act(cx, |store| {
+                assert!(store.submit("first").is_some(), "the run starts");
+                let _ = store.submit("second");
+            });
+            let _ = store.update(cx, |store, _| store.take_outgoing());
+        });
+        let before = ran.get();
+
+        visual.update(|_, cx| {
+            dock.update(cx, |dock, cx| {
+                let row = queue_rows(store.read(cx).active_session().unwrap()).remove(0);
+                dock.edit_row(&row, cx);
+            });
+        });
+        assert!(ran.get() > before, "edit_row notifies the store observers");
+        visual.update(|_, cx| {
+            assert!(
+                store.read(cx).active_session().unwrap().queue.is_empty(),
+                "the edited row left the queue"
+            );
+            assert_eq!(
+                store.read(cx).draft("s1"),
+                Some("second"),
+                "edit fills the draft the composer loads"
+            );
         });
     }
 

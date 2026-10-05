@@ -599,16 +599,17 @@ fn a_lone_g_times_out_into_the_grammar() {
 }
 
 #[test]
-fn z_then_x_does_nothing() {
+fn an_unmatched_z_pair_replays_x_into_the_grammar() {
     let mut app = defaults_app();
     app.input.paste("hello");
     normal(&mut app, Pane::Input);
     routes(&mut app, key('0'));
     assert!(routes(&mut app, key('z')).is_empty());
-    assert!(routes(&mut app, key('x')).is_empty());
     assert_eq!(app.input().text(), "hello");
     assert!(routes(&mut app, key('x')).is_empty());
-    assert_eq!(app.input().text(), "ello", "a later x is a delete again");
+    assert_eq!(app.input().text(), "ello", "the unmatched pair replays x");
+    assert!(routes(&mut app, key('x')).is_empty());
+    assert_eq!(app.input().text(), "llo", "a later x is a delete too");
 }
 
 #[test]

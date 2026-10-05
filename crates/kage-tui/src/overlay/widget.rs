@@ -10,11 +10,29 @@
 //! hold a plugin dialog as a `Box<dyn OverlayWidget>`. The dispatch
 //! layers in the App route keys to whichever modal is on top.
 
+use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
 
 use crate::theme::Theme;
+
+/// Measure `overlay` inside `area`, cut the modal to `area`, and paint
+/// it: the opaque clear first, then the overlay. The clamp keeps a
+/// modal that measures larger than the frame, as on a tiny or
+/// zero-sized terminal, from indexing past the buffer. Shared by the
+/// per-overlay `render(frame, area)` wrappers and the App's draw
+/// closure so every overlay inherits the rule.
+pub fn paint_modal(frame: &mut Frame, overlay: &mut dyn OverlayWidget, area: Rect) {
+    let modal = overlay.measure(area).intersection(area);
+    frame.render_widget(crate::opaque::OpaqueClear, modal);
+    let theme = crate::theme::current();
+    let ctx = OverlayCtx {
+        theme: &theme,
+        viewport: area,
+    };
+    overlay.render(modal, frame.buffer_mut(), &ctx);
+}
 
 /// Read-only context handed to every [`OverlayWidget::render`] call.
 ///

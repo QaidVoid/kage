@@ -536,24 +536,10 @@ impl App {
                     agents.render(frame, above_input);
                 }
                 if let Some(todos) = todo_list_overlay {
-                    let modal = crate::overlay::OverlayWidget::measure(todos, above_input);
-                    frame.render_widget(crate::opaque::OpaqueClear, modal);
-                    let theme = crate::theme::current();
-                    let ctx = crate::overlay::OverlayCtx {
-                        theme: &theme,
-                        viewport: above_input,
-                    };
-                    crate::overlay::OverlayWidget::render(todos, modal, frame.buffer_mut(), &ctx);
+                    crate::overlay::widget::paint_modal(frame, todos, above_input);
                 }
                 if let Some(help) = help_overlay {
-                    let modal = crate::overlay::OverlayWidget::measure(help, above_input);
-                    frame.render_widget(crate::opaque::OpaqueClear, modal);
-                    let theme = crate::theme::current();
-                    let ctx = crate::overlay::OverlayCtx {
-                        theme: &theme,
-                        viewport: above_input,
-                    };
-                    crate::overlay::OverlayWidget::render(help, modal, frame.buffer_mut(), &ctx);
+                    crate::overlay::widget::paint_modal(frame, help, above_input);
                 }
                 if let Some(completion) = input_completion {
                     completion.render(frame, box_regions);
@@ -562,14 +548,7 @@ impl App {
                     menu.render(frame, regions.buffer);
                 }
                 if let Some(overlay) = plugin_overlay {
-                    let modal = overlay.measure(area);
-                    frame.render_widget(crate::opaque::OpaqueClear, modal);
-                    let theme = crate::theme::current();
-                    let ctx = crate::overlay::OverlayCtx {
-                        theme: &theme,
-                        viewport: area,
-                    };
-                    overlay.render(modal, frame.buffer_mut(), &ctx);
+                    crate::overlay::widget::paint_modal(frame, overlay.as_mut(), area);
                 }
                 color_depth.apply(frame.buffer_mut());
                 view::strip_decoration(frame.buffer_mut());

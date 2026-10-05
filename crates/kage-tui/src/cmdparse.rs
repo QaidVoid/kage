@@ -289,8 +289,8 @@ pub fn parse_input(spec: &CommandSpec, args: &str) -> Result<ParsedArgs, ParseEr
 }
 
 /// One completion candidate. Callers replace `replace_range` in the
-/// raw input with `value` (and may want to re-quote `value` if it
-/// contains whitespace).
+/// raw input with `value`, quoted with [`quote_token`] when it is
+/// inserted into an editable line.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Completion {
     /// Replacement text inserted when this completion is accepted.
@@ -338,6 +338,28 @@ impl Completions {
     pub fn empty() -> Self {
         Self::default()
     }
+}
+
+/// Quote `value` for insertion into a command line: wrapped in double
+/// quotes with embedded quotes and backslashes escaped when it
+/// contains any whitespace, so the tokenizer re-parses it as one
+/// token. A value without whitespace is returned unchanged, keeping
+/// the line (and popup labels) as clean as before.
+#[must_use]
+pub fn quote_token(value: &str) -> String {
+    if !value.chars().any(char::is_whitespace) {
+        return value.to_owned();
+    }
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        if c == '"' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
 }
 
 /// Caller-supplied resolver for completion sources whose values are

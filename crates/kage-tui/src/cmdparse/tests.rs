@@ -746,3 +746,14 @@ fn suggest_command_exact_match_returns_it() {
     let suggestion = suggest_command(&registry(), "mouse");
     assert_eq!(suggestion, Some("mouse"));
 }
+
+#[test]
+fn quote_token_quotes_only_whitespace_values_and_round_trips() {
+    assert_eq!(quote_token("plain"), "plain");
+    assert_eq!(quote_token("my file.md"), "\"my file.md\"");
+    assert_eq!(quote_token("say \"hi\" now"), "\"say \\\"hi\\\" now\"");
+    assert_eq!(quote_token("back\\slash x"), "\"back\\\\slash x\"");
+    let tokens = tokenize(&quote_token("my file.md")).unwrap();
+    assert_eq!(tokens.len(), 1, "one token after quoting");
+    assert_eq!(tokens[0].value, "my file.md");
+}

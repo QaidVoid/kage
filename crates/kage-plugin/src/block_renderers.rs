@@ -23,9 +23,7 @@
 //! a pure function of its payload, so retained lines are never
 //! refreshed on a timer.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -90,9 +88,9 @@ impl LuaBlockRenderer {
     /// failure visible.
     #[must_use]
     pub fn render(&self, payload: &serde_json::Value) -> Option<Vec<ChromeLine>> {
-        let key = payload_key(payload);
+        let key = payload.to_string();
         let mut cache = lock(&self.cache);
-        if let Some(lines) = cache.get(key) {
+        if let Some(lines) = cache.get(&key) {
             return Some(lines);
         }
         if cache.pending.contains(&key) {
@@ -102,7 +100,7 @@ impl LuaBlockRenderer {
             self.host.note_missed_render();
             return None;
         }
-        cache.pending.insert(key);
+        cache.pending.insert(key.clone());
         drop(cache);
 
         let target = Arc::clone(&self.cache);
@@ -112,11 +110,12 @@ impl LuaBlockRenderer {
         let sink = Arc::clone(&self.sink);
         let handler = Arc::clone(&self.handler_key);
         let payload = payload.clone();
+        let job_key = key.clone();
         let queued = self.host.queue(move |lua| {
             let lines = render_block(lua, &kind, &sink, &handler, &payload);
             let mut cache = lock(&target);
-            cache.pending.remove(&key);
-            cache.insert(key, lines);
+            cache.pending.remove(&job_key);
+            cache.insert(job_key, lines);
             blocks.store(true, Ordering::SeqCst);
             redraw.store(true, Ordering::SeqCst);
         });
@@ -125,7 +124,7 @@ impl LuaBlockRenderer {
             return None;
         };
         let _ = done.recv_timeout(COLD_WAIT);
-        lock(&self.cache).get(key)
+        lock(&self.cache).get(&key)
     }
 }
 
@@ -158,32 +157,27 @@ fn render_block(
     }
 }
 
-fn payload_key(payload: &serde_json::Value) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    payload.to_string().hash(&mut hasher);
-    hasher.finish()
-}
-
-/// Retained lines by payload hash, bounded by dropping the older of two
-/// generations when the current one fills up.
+/// Retained lines by serialized payload, bounded by dropping the older
+/// of two generations when the current one fills up. The full payload
+/// string is the key, so distinct payloads can never collide.
 #[derive(Default)]
 struct BlockCache {
-    current: HashMap<u64, Vec<ChromeLine>>,
-    previous: HashMap<u64, Vec<ChromeLine>>,
-    pending: HashSet<u64>,
+    current: HashMap<String, Vec<ChromeLine>>,
+    previous: HashMap<String, Vec<ChromeLine>>,
+    pending: HashSet<String>,
 }
 
 impl BlockCache {
-    fn get(&mut self, key: u64) -> Option<Vec<ChromeLine>> {
-        if let Some(lines) = self.current.get(&key) {
+    fn get(&mut self, key: &str) -> Option<Vec<ChromeLine>> {
+        if let Some(lines) = self.current.get(key) {
             return Some(lines.clone());
         }
-        let lines = self.previous.remove(&key)?;
-        self.insert(key, lines.clone());
+        let lines = self.previous.remove(key)?;
+        self.insert(key.to_owned(), lines.clone());
         Some(lines)
     }
 
-    fn insert(&mut self, key: u64, lines: Vec<ChromeLine>) {
+    fn insert(&mut self, key: String, lines: Vec<ChromeLine>) {
         if self.current.len() >= GENERATION {
             self.previous = std::mem::take(&mut self.current);
         }
@@ -327,6 +321,36 @@ mod tests {
             map[0]
                 .render(&serde_json::json!({ "kind": "b", "text": "t" }))
                 .is_some_and(|lines| lines.is_empty())
+        );
+    }
+
+    #[test]
+    fn distinct_payloads_render_distinct_lines_and_cache_hit_skips_rerun() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval(
+            r#"
+            renders = 0
+            kage.register_block_renderer("k", function(b)
+                renders = renders + 1
+                return "line:" .. b.text
+            end)
+            "#,
+        )
+        .unwrap();
+        let map = rt.registered_block_renderers();
+        let a = serde_json::json!({ "kind": "k", "text": "a" });
+        let b = serde_json::json!({ "kind": "k", "text": "b" });
+        let la = map[0].render(&a).unwrap();
+        let lb = map[0].render(&b).unwrap();
+        assert_eq!(la[0].spans[0].text, "line:a");
+        assert_eq!(lb[0].spans[0].text, "line:b");
+        let again = map[0].render(&a).unwrap();
+        assert_eq!(again[0].spans[0].text, "line:a");
+        let renders = rt.eval("return renders").unwrap();
+        assert_eq!(
+            renders.as_integer(),
+            Some(2),
+            "re-render must hit the cache"
         );
     }
 }

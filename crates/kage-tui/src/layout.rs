@@ -186,6 +186,14 @@ mod tests {
     }
 
     #[test]
+    fn a_terminal_shorter_than_the_chrome_leaves_no_buffer_rows() {
+        let area = Rect::new(0, 0, 80, 5);
+        let r = split(area, heights(1, 0, INPUT_MIN_LINES));
+        assert_eq!(r.buffer.height, 0);
+        assert_eq!(r.buffer.y + r.buffer.height, r.activity.y);
+    }
+
+    #[test]
     fn input_height_for_clamps_both_directions() {
         assert_eq!(input_height_for(0), INPUT_MIN_LINES);
         assert_eq!(input_height_for(1), INPUT_MIN_LINES);

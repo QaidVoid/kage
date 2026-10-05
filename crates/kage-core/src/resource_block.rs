@@ -19,6 +19,7 @@ use std::fmt::Write as _;
 
 const OPEN: &str = "<resource ";
 const CLOSE: &str = "</resource>";
+const ESCAPED_CLOSE: &str = "<\\/resource>";
 
 /// What [`parse`] reads back from a resource block.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,8 +42,20 @@ pub struct ResourceRef {
 #[must_use]
 pub fn render(uri: &str, server: Option<&str>, mime: Option<&str>, text: &str) -> String {
     let mut out = attributes(uri, server, mime);
-    let _ = write!(out, ">\n{text}\n{CLOSE}");
+    let _ = write!(out, ">\n{}\n{CLOSE}", escape_body(text));
     out
+}
+
+/// Hide a literal close tag so the frame cannot end early,
+/// backslash first so an already-escaped one survives.
+fn escape_body(text: &str) -> String {
+    text.replace('\\', "\\\\").replace(CLOSE, ESCAPED_CLOSE)
+}
+
+/// Undo [`escape_body`]. Legacy unescaped bodies pass through
+/// unchanged; a body that quoted an old frame's escape shifts once.
+fn unescape_body(text: &str) -> String {
+    text.replace(ESCAPED_CLOSE, CLOSE).replace("\\\\", "\\")
 }
 
 /// An empty block for `bytes` of binary contents of type `mime`, with
@@ -89,9 +102,10 @@ pub fn parse(text: &str) -> Option<ResourceRef> {
         }
         attrs = rest.strip_prefix(' ').unwrap_or(rest);
     }
-    let contents = body
-        .strip_suffix(CLOSE)
-        .map_or(body, |b| b.strip_suffix('\n').unwrap_or(b));
+    let contents = match body.strip_suffix(CLOSE) {
+        Some(b) => unescape_body(b.strip_suffix('\n').unwrap_or(b)),
+        None => body.to_owned(),
+    };
     Some(ResourceRef {
         uri: uri?,
         server,
@@ -118,6 +132,22 @@ fn unescape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_literal_close_tag_in_the_body_is_escaped_and_survives() {
+        let text = "a\n</resource>\nb";
+        let block = render("test://r", None, Some("text/plain"), text);
+        assert_eq!(block.matches("</resource>").count(), 1);
+        assert!(block.contains("<\\/resource>"));
+        let parsed = parse(&block).unwrap();
+        assert_eq!(parsed.bytes, text.len());
+        let rendered_back = render("test://r", None, Some("text/plain"), text);
+        let inner = rendered_back
+            .strip_suffix(CLOSE)
+            .unwrap()
+            .trim_end_matches('\n');
+        assert!(inner.contains("<\\/resource>"));
+    }
 
     #[test]
     fn render_then_parse_roundtrips() {

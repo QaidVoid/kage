@@ -30,7 +30,11 @@ use crate::views::composer::{PLAN_MODE, active_mode};
 /// [`StoreHandle::act`], which notifies the store's observers: the
 /// shell flushes the outgoing frames on that notify, and the views
 /// redraw. A bare `update` that skips the notify leaves the frames in
-/// the client until something unrelated notifies.
+/// the client until something unrelated notifies. The one sanctioned
+/// bare update is a drain on a take-style accessor
+/// ([`Store::take_commands`], [`Store::take_outgoing`],
+/// [`Store::take_notes`]): draining must not notify, or the shell
+/// loop re-enters.
 pub trait StoreHandle {
     /// Runs `f` on the store, then notifies its observers.
     fn act<R>(&self, cx: &mut App, f: impl FnOnce(&mut Store) -> R) -> R;
@@ -236,10 +240,16 @@ pub struct Store {
     /// ran against for the picker that asked. A later answer replaces
     /// it.
     fs_listing: Option<(String, FsListResult)>,
-    /// The path the last `_kage/fs` read asked for, until it answers.
-    fs_reading: Option<String>,
+    /// The `_kage/fs` read in flight: its request id with the session
+    /// and path it asked, until it answers or fails. One at a time, so
+    /// an answer cannot land under another read's path.
+    fs_reading: Option<(u64, String, String)>,
     /// The last file read: the session, the path and the answer.
     fs_preview: Option<(String, String, FsReadResult)>,
+    /// The `session/load` requests this store issued, by request id,
+    /// with the session they loaded and whether a retry was spent. A
+    /// failed load is retried once, then reported.
+    loads: HashMap<u64, (String, bool)>,
     /// The last `_kage/config/get` answer, raw as the wire carried it.
     config: Option<serde_json::Value>,
     /// The last `_kage/options` answer: the engine options in effect.
@@ -300,6 +310,7 @@ impl Store {
             fs_listing: None,
             fs_reading: None,
             fs_preview: None,
+            loads: HashMap::new(),
             config: None,
             engine_options: None,
             writes: HashMap::new(),
@@ -345,10 +356,10 @@ impl Store {
 
     /// What session `id` and every agent under it have spent, as far
     /// as this client heard: each agent's reported usage, or its
-    /// session's own usage updates, adds to the session's. `None` while
-    /// nothing is priced.
+    /// session's own usage updates, adds to the session's. One entry
+    /// per currency heard; a tree that mixes currencies has several.
     #[must_use]
-    pub fn tree_cost(&self, id: &str) -> Option<kage_client::wire::Cost> {
+    pub fn tree_costs(&self, id: &str) -> Vec<kage_client::wire::Cost> {
         let state = self.state();
         let under = |session: &str| {
             let mut parent = state.session(session).and_then(|s| s.parent.as_deref());
@@ -360,7 +371,7 @@ impl Store {
             }
             false
         };
-        let mut total: Option<kage_client::wire::Cost> = None;
+        let mut totals: Vec<kage_client::wire::Cost> = Vec::new();
         for (session_id, session) in &state.sessions {
             if session_id != id && !under(session_id) {
                 continue;
@@ -383,13 +394,24 @@ impl Store {
             let Some(cost) = reported.as_ref().or(session.usage.cost.as_ref()) else {
                 continue;
             };
-            match &mut total {
-                Some(sum) if sum.currency == cost.currency => sum.amount += cost.amount,
-                Some(_) => {}
-                None => total = Some(cost.clone()),
+            match totals.iter_mut().find(|sum| sum.currency == cost.currency) {
+                Some(sum) => sum.amount += cost.amount,
+                None => totals.push(cost.clone()),
             }
         }
-        total
+        totals
+    }
+
+    /// What session `id` and every agent under it have spent, when it
+    /// is all one currency. `None` while nothing is priced or the
+    /// tree mixes currencies; [`Store::tree_costs`] has the
+    /// per-currency truth.
+    #[must_use]
+    pub fn tree_cost(&self, id: &str) -> Option<kage_client::wire::Cost> {
+        match self.tree_costs(id).as_slice() {
+            [one] => Some(one.clone()),
+            _ => None,
+        }
     }
 
     /// Picks the directory the next new session opens in; `None` goes
@@ -531,7 +553,8 @@ impl Store {
                 .find(|info| info.session_id == id)
                 .map(|info| info.cwd.clone())
                 .unwrap_or_else(|| self.cwd.clone());
-            self.client.load_session(&id, &cwd, &[]);
+            let request = self.client.load_session(&id, &cwd, &[]);
+            self.loads.insert(request, (id.clone(), false));
         }
         self.unread.remove(&id);
         self.active = Some(id);
@@ -573,7 +596,11 @@ impl Store {
             Frame::Success { id, .. } | Frame::Failure { id, .. } => id.as_number(),
             _ => None,
         };
+        let succeeded = matches!(frame, Frame::Success { .. });
         let changes = self.client.handle(frame);
+        if let Some(id) = answered {
+            self.settle_load(id, succeeded);
+        }
         if answered.is_some() && answered == self.opening {
             self.opening = None;
             self.settle_opening(&changes);
@@ -613,10 +640,19 @@ impl Store {
             }
         }
         for id in touched {
-            if let Some(session) = self.client.state().session(id) {
-                self.timings.observe(session);
-                if let Some(mode) = active_mode(session).filter(|mode| mode != PLAN_MODE) {
-                    self.permissions.insert(id.to_owned(), mode);
+            match self.client.state().session(id) {
+                Some(session) => {
+                    self.timings.observe(session);
+                    if let Some(mode) = active_mode(session).filter(|mode| mode != PLAN_MODE) {
+                        self.permissions.insert(id.to_owned(), mode);
+                    }
+                }
+                None => {
+                    // The session closed, on the menu's ask or the
+                    // engine's: its measured times and unread mark go
+                    // with it instead of leaking.
+                    self.timings.forget(id);
+                    self.unread.remove(id);
                 }
             }
         }
@@ -651,6 +687,13 @@ impl Store {
                     if let Some(read) = self.folders.get_mut(request) {
                         *read = Some(Err(error.message.clone()));
                     }
+                    if self
+                        .fs_reading
+                        .as_ref()
+                        .is_some_and(|(id, ..)| id == request)
+                    {
+                        self.fs_reading = None;
+                    }
                 }
                 Change::Folders { request, result } => {
                     self.folders.insert(*request, Some(Ok(result.clone())));
@@ -678,17 +721,47 @@ impl Store {
                     result: kage_client::wire::FsResult::List(listing),
                 } => self.merge_listing(session_id, listing),
                 Change::Fs {
-                    session_id,
                     result: kage_client::wire::FsResult::Read(read),
+                    ..
                 } => {
-                    if let Some(path) = self.fs_reading.take() {
-                        self.fs_preview = Some((session_id.clone(), path, read.clone()));
+                    if let Some((_, session, path)) = self.fs_reading.take() {
+                        self.fs_preview = Some((session, path, read.clone()));
                     }
                 }
                 _ => {}
             }
         }
         changes
+    }
+
+    /// Settles the store's watch on a `session/load` it issued: a
+    /// success stops watching, a first failure re-issues the load
+    /// once, and a second failure says the transcript could not be
+    /// restored instead of leaving an empty transcript silently.
+    fn settle_load(&mut self, id: u64, succeeded: bool) {
+        let Some((session, retried)) = self.loads.remove(&id) else {
+            return;
+        };
+        if succeeded {
+            return;
+        }
+        if retried {
+            let title = self.display_title(&session);
+            self.notes.push(Note::new(
+                NoticeTone::Warn,
+                format!("Loading \"{title}\" failed; the transcript could not be restored."),
+            ));
+            return;
+        }
+        let cwd = self
+            .state()
+            .directory
+            .iter()
+            .find(|info| info.session_id == session)
+            .map(|info| info.cwd.clone())
+            .unwrap_or_else(|| self.cwd.clone());
+        let request = self.client.load_session(&session, &cwd, &[]);
+        self.loads.insert(request, (session, true));
     }
 
     /// Lands the answer to the user's `session/new`: the session it
@@ -741,12 +814,31 @@ impl Store {
     }
 
     /// Records a connect-state move and returns what the shell must
-    /// carry out for it.
+    /// carry out for it. A link that lands somewhere final while a
+    /// run was in flight notes the loss: the answer that would have
+    /// ended the run died with the link.
     pub fn set_connect(&mut self, state: State) {
         if state.is_connected() && !self.connect.is_connected() {
             let replay_sessions = self.had_link;
             self.had_link = true;
             self.commands.push(Command::Handshake { replay_sessions });
+        }
+        let dropping = matches!(
+            self.connect,
+            State::Connected | State::Connecting | State::Reconnecting { .. }
+        );
+        if dropping
+            && matches!(state, State::Closed | State::Refused(_))
+            && self
+                .state()
+                .sessions
+                .values()
+                .any(|session| session.running)
+        {
+            self.notes.push(Note::new(
+                NoticeTone::Warn,
+                "The link closed; the run in flight was lost with it.".to_owned(),
+            ));
         }
         self.connect = state;
     }
@@ -781,8 +873,10 @@ impl Store {
                 .map(|session| (session.id.clone(), session.cwd.clone()))
                 .collect();
             for (id, cwd) in open {
-                self.client
-                    .load_session(&id, cwd.as_deref().unwrap_or(&self.cwd), &[]);
+                let request =
+                    self.client
+                        .load_session(&id, cwd.as_deref().unwrap_or(&self.cwd), &[]);
+                self.loads.insert(request, (id, false));
             }
         }
     }
@@ -861,7 +955,8 @@ impl Store {
             .active_session()
             .and_then(|session| session.cwd.clone())
             .unwrap_or_else(|| self.cwd.clone());
-        self.client.load_session(id, &cwd, &[]);
+        let request = self.client.load_session(id, &cwd, &[]);
+        self.loads.insert(request, (id.to_owned(), false));
     }
 
     /// Stops session `id`: a subagent's stop button.
@@ -888,18 +983,32 @@ impl Store {
 
     /// Copies the active session into a new one and opens it. With
     /// `through`, the copy keeps the transcript up to the end of that
-    /// item's turn; without, all of it. Reports whether a request went
-    /// out.
+    /// item's turn; without, all of it. A `through` past the
+    /// transcript's end is refused with a note: the row the click
+    /// named is gone. Reports whether a request went out.
     pub fn fork(&mut self, through: Option<usize>) -> bool {
         let Some(session) = self.active_session() else {
             return false;
         };
-        let before = through.and_then(|index| {
-            let next = session.items[index + 1..]
-                .iter()
-                .position(|item| matches!(item, TranscriptItem::User { .. }))?;
-            session.prompt_ref(index + 1 + next)
-        });
+        let before = match through {
+            None => None,
+            Some(index) => {
+                let Some(window) = index
+                    .checked_add(1)
+                    .and_then(|next| session.items.get(next..))
+                else {
+                    self.notes.push(Note::new(
+                        NoticeTone::Warn,
+                        "That fork point is gone; the transcript moved on.".to_owned(),
+                    ));
+                    return false;
+                };
+                window
+                    .iter()
+                    .position(|item| matches!(item, TranscriptItem::User { .. }))
+                    .and_then(|next| session.prompt_ref(index + 1 + next))
+            }
+        };
         let id = session.id.clone();
         self.forking.insert(id.clone(), ForkPlan::Fork);
         self.client.fork_session(&id, before);
@@ -943,7 +1052,8 @@ impl Store {
             .session(from)
             .and_then(|session| session.cwd.clone())
             .unwrap_or_else(|| self.cwd.clone());
-        self.client.load_session(to, &cwd, &[]);
+        let request = self.client.load_session(to, &cwd, &[]);
+        self.loads.insert(request, (to.to_owned(), false));
         self.unread.remove(to);
         self.active = Some(to.to_owned());
     }
@@ -1294,6 +1404,11 @@ impl Store {
         std::mem::take(&mut self.notes)
     }
 
+    /// Queues a message for the user, as a toast the shell raises.
+    pub fn note(&mut self, tone: NoticeTone, text: impl Into<String>) {
+        self.notes.push(Note::new(tone, text.into()));
+    }
+
     /// The title session `id` shows under, from its state or the
     /// directory.
     #[must_use]
@@ -1601,13 +1716,19 @@ impl Store {
     }
 
     /// Reads `path` under the active session's workdir through
-    /// `_kage/fs`; the answer lands in [`Store::fs_preview`].
+    /// `_kage/fs`; the answer lands in [`Store::fs_preview`] under the
+    /// session and path that asked. One read at a time: a second read
+    /// while one waits is refused, so an answer can never land under
+    /// another read's path. Reports whether the read was asked.
     pub fn fs_read(&mut self, path: &str) -> bool {
+        if self.fs_reading.is_some() {
+            return false;
+        }
         let Some(session) = self.active.clone() else {
             return false;
         };
-        self.fs_reading = Some(path.to_owned());
-        self.client.fs(&session, FsOp::Read, path);
+        let request = self.client.fs(&session, FsOp::Read, path);
+        self.fs_reading = Some((request, session, path.to_owned()));
         true
     }
 
@@ -2120,6 +2241,136 @@ mod tests {
         assert!(matches!(&flushed[0], Frame::Request { method, .. } if method == "session/new"));
     }
 
+    /// Every store method that queues a frame flushes exactly its
+    /// frames on the notify [`StoreHandle::act`] sends: one mutation,
+    /// one flush, with no unrelated redraw needed.
+    #[gpui_kit::test]
+    fn every_frame_queuing_method_flushes_through_act(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{App, AppContext as _};
+        let store = cx.new(|_| Store::new("/w", false));
+        let flushed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            let flushed = flushed.clone();
+            cx.observe(&store, move |store, cx| {
+                let frames = store.update(cx, |store, _| store.take_outgoing());
+                flushed.borrow_mut().extend(frames);
+            })
+            .detach();
+        });
+
+        // A live store with one open session, the way the shell answers
+        // the boot frames.
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.set_connect(State::Connected);
+                store.handshake(false);
+                cx.notify();
+            });
+        });
+        let init_id = flushed
+            .borrow()
+            .iter()
+            .find_map(|frame| match frame {
+                Frame::Request { id, method, .. } if method == "initialize" => id.as_number(),
+                _ => None,
+            })
+            .expect("the handshake went out");
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.absorb(init_answer_on(init_id, Some("0.1.0"), true, true));
+                store.new_session();
+                cx.notify();
+            });
+        });
+        let new_id = flushed
+            .borrow()
+            .iter()
+            .rev()
+            .find_map(|frame| match frame {
+                Frame::Request { id, method, .. } if method == "session/new" => Some(id.clone()),
+                _ => None,
+            })
+            .expect("the session/new went out");
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.absorb(Frame::Success {
+                    id: new_id,
+                    result: serde_json::json!({ "sessionId": "s1" }),
+                });
+                cx.notify();
+            });
+            assert_eq!(store.read(cx).active_id(), Some("s1"));
+        });
+
+        let cases: Vec<(&str, Vec<&str>, Box<dyn Fn(&mut App)>)> = vec![
+            (
+                "handshake",
+                vec!["initialize"],
+                Box::new(|cx| {
+                    store.act(cx, |store| store.handshake(false));
+                }),
+            ),
+            (
+                "new_session",
+                vec!["session/new"],
+                Box::new(|cx| {
+                    store.act(cx, |store| store.new_session());
+                }),
+            ),
+            (
+                "prompt",
+                vec!["session/prompt"],
+                Box::new(|cx| {
+                    store.act(cx, |store| assert!(store.prompt("a plain prompt")));
+                }),
+            ),
+            (
+                "steer",
+                vec!["session/prompt"],
+                Box::new(|cx| {
+                    store.act(cx, |store| assert!(store.steer("join me here").is_ok()));
+                }),
+            ),
+            (
+                "config_set",
+                vec!["_kage/config/set"],
+                Box::new(|cx| {
+                    store.act(cx, |store| {
+                        store.config_set(&["theme"], Some(serde_json::json!("dark")))
+                    });
+                }),
+            ),
+            (
+                "close_active",
+                vec!["session/close", "session/list"],
+                Box::new(|cx| {
+                    store.act(cx, Store::close_active);
+                }),
+            ),
+        ];
+        for (name, expected, run) in cases {
+            flushed.borrow_mut().clear();
+            cx.update(|cx| run(cx));
+            cx.run_until_parked();
+            let frames = flushed.borrow();
+            let methods: Vec<&str> = frames
+                .iter()
+                .filter_map(|frame| match frame {
+                    Frame::Request { method, .. } => Some(method.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(methods, expected, "{name} flushes exactly its frames");
+            if name == "steer" {
+                let Frame::Request { params, .. } = &frames[0] else {
+                    panic!("expected the steer request, got {:?}", frames[0]);
+                };
+                assert_eq!(params["delivery"], "steer");
+                assert_eq!(params["prompt"][0]["text"], "join me here");
+            }
+        }
+    }
+
     #[test]
     fn a_prompt_without_a_session_sends_nothing() {
         let mut store = Store::new("/w", false);
@@ -2374,6 +2625,253 @@ mod tests {
         assert_eq!(asked, ["c1", "s1"], "a child's ask shows on its parent");
         store.show_welcome();
         assert!(store.active_asks().is_empty(), "the welcome shows no card");
+    }
+
+    #[test]
+    fn a_fork_past_the_end_of_the_transcript_is_refused_not_a_panic() {
+        let mut store = three_prompts();
+        let count = store.active_session().unwrap().items.len();
+        assert!(count < 5, "the fixture is short");
+
+        assert!(!store.fork(Some(count + 2)), "a stale index refuses");
+        assert!(!store.fork(Some(usize::MAX)), "no overflow, no panic");
+        assert!(
+            store.take_outgoing().is_empty(),
+            "a refused fork sends nothing"
+        );
+        let notes = store.take_notes();
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].tone, NoticeTone::Warn);
+
+        assert!(
+            store.fork(Some(count - 1)),
+            "the last item still forks whole"
+        );
+        assert!(!store.take_outgoing().is_empty());
+    }
+
+    #[test]
+    fn a_second_fs_read_waits_and_answers_land_under_their_own_path() {
+        let mut store = welcome_store();
+        open_session(&mut store, 3, "s1");
+        open_session(&mut store, 4, "s2");
+        store.set_active("s1");
+
+        assert!(store.fs_read("a.rs"));
+        assert!(
+            !store.fs_read("b.rs"),
+            "one read at a time, so answers cannot swap paths"
+        );
+        let sent = requests(store.take_outgoing());
+        assert_eq!(sent.len(), 1, "only the first read went out");
+        let (id, method, params) = &sent[0];
+        assert_eq!(method, "_kage/fs");
+        assert_eq!(params["op"], "read");
+        assert_eq!(params["path"], "a.rs");
+
+        store.absorb(Frame::Failure {
+            id: id.clone(),
+            error: kage_client::RpcError {
+                code: -32603,
+                message: "gone".into(),
+                data: None,
+            },
+        });
+        assert!(store.fs_read("b.rs"), "a failed read frees the slot");
+        let sent = requests(store.take_outgoing());
+        let (id, ..) = sent.first().expect("the second read went out").clone();
+        store.absorb(Frame::Success {
+            id,
+            result: serde_json::json!({"op": "read", "content": "b", "truncated": false, "binary": false}),
+        });
+        let (path, read) = store.fs_preview("s1").expect("the answer landed");
+        assert_eq!(path, "b.rs");
+        assert_eq!(read.content, "b");
+        assert!(
+            store.fs_preview("s2").is_none(),
+            "the answer carries the session that asked"
+        );
+    }
+
+    #[test]
+    fn a_failed_load_retries_once_and_then_says_so() {
+        let mut store = welcome_store();
+        store.set_active("rec-1");
+        let (id, method, params) = requests(store.take_outgoing()).remove(0);
+        assert_eq!(method, "session/load");
+        assert_eq!(params["sessionId"], "rec-1");
+
+        store.absorb(Frame::Failure {
+            id,
+            error: kage_client::RpcError {
+                code: -32603,
+                message: "engine hiccup".into(),
+                data: None,
+            },
+        });
+        let sent = requests(store.take_outgoing());
+        assert_eq!(sent.len(), 1, "the load is retried once");
+        let (retry, method, params) = &sent[0];
+        assert_eq!(method, "session/load");
+        assert_eq!(params["sessionId"], "rec-1");
+        store.absorb(Frame::Success {
+            id: retry.clone(),
+            result: serde_json::json!({}),
+        });
+        assert!(store.take_notes().is_empty(), "the retry landed quietly");
+
+        store.set_active("rec-2");
+        let (first, ..) = requests(store.take_outgoing()).remove(0);
+        store.absorb(Frame::Failure {
+            id: first,
+            error: kage_client::RpcError {
+                code: -32603,
+                message: "down".into(),
+                data: None,
+            },
+        });
+        let (retry, ..) = requests(store.take_outgoing()).remove(0);
+        store.absorb(Frame::Failure {
+            id: retry,
+            error: kage_client::RpcError {
+                code: -32603,
+                message: "still down".into(),
+                data: None,
+            },
+        });
+        assert!(requests(store.take_outgoing()).is_empty(), "no third try");
+        let notes = store.take_notes();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].tone, NoticeTone::Warn);
+        assert!(
+            notes[0].text.contains("could not be restored"),
+            "{}",
+            notes[0].text
+        );
+    }
+
+    #[test]
+    fn a_final_link_loss_notes_the_run_it_lost() {
+        let mut store = welcome_store();
+        open_session(&mut store, 3, "s1");
+        store.prompt("busy");
+        let _ = store.take_outgoing();
+
+        store.set_connect(State::Reconnecting {
+            attempt: 1,
+            delay: std::time::Duration::from_secs(1),
+        });
+        assert!(
+            store.take_notes().is_empty(),
+            "a reconnect may resume the run"
+        );
+        store.set_connect(State::Closed);
+        let notes = store.take_notes();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].tone, NoticeTone::Warn);
+
+        store.set_connect(State::Closed);
+        assert!(store.take_notes().is_empty(), "the loss is reported once");
+    }
+
+    #[test]
+    fn a_closed_session_leaves_no_timings_behind() {
+        let mut store = three_prompts();
+        assert!(store.timings("s1").is_some(), "the run left measured times");
+
+        store.close_active();
+        let sent = requests(store.take_outgoing());
+        let (close, ..) = sent
+            .iter()
+            .find(|(_, method, _)| method == "session/close")
+            .expect("the close went out");
+        store.absorb(Frame::Success {
+            id: close.clone(),
+            result: serde_json::json!({}),
+        });
+        assert!(
+            store.timings("s1").is_none(),
+            "the closed session's times go with it"
+        );
+    }
+
+    #[test]
+    fn the_cost_reports_per_currency_never_one_mixed_total() {
+        let mut store = welcome_store();
+        open_session(&mut store, 3, "s1");
+        let update = |session: &str, update: serde_json::Value| Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({ "sessionId": session, "update": update }),
+        };
+        store.absorb(update(
+            "s1",
+            serde_json::json!({"sessionUpdate": "subagent_update", "subagentSessionId": "c1"}),
+        ));
+        store.absorb(update("s1", usage_cost(1.0, "USD")));
+        store.absorb(update("c1", usage_cost(2.0, "EUR")));
+
+        let costs = store.tree_costs("s1");
+        assert_eq!(costs.len(), 2, "two currencies, two subtotals");
+        assert!(
+            costs
+                .iter()
+                .any(|cost| cost.currency == "USD" && (cost.amount - 1.0).abs() < 1e-9)
+        );
+        assert!(
+            costs
+                .iter()
+                .any(|cost| cost.currency == "EUR" && (cost.amount - 2.0).abs() < 1e-9)
+        );
+        assert!(
+            store.tree_cost("s1").is_none(),
+            "a mixed tree is not silently one total"
+        );
+    }
+
+    /// A usage update carrying a cost in `currency`.
+    fn usage_cost(amount: f64, currency: &str) -> serde_json::Value {
+        serde_json::json!({
+            "sessionUpdate": "usage_update",
+            "used": 10,
+            "size": 100,
+            "cost": { "amount": amount, "currency": currency },
+        })
+    }
+
+    #[test]
+    fn a_prompt_sent_during_a_dip_survives_the_handshake() {
+        let mut store = welcome_store();
+        open_session(&mut store, 3, "s1");
+        store.set_connect(State::Reconnecting {
+            attempt: 1,
+            delay: std::time::Duration::from_secs(1),
+        });
+
+        assert!(store.prompt("mid-dip"));
+        let outgoing = store.take_outgoing();
+        assert!(
+            matches!(&outgoing[0], Frame::Request { method, .. } if method == "session/prompt"),
+            "the prompt frame is produced for the shell to buffer"
+        );
+
+        store.set_connect(State::Connected);
+        assert_eq!(
+            store.take_commands(),
+            vec![Command::Handshake {
+                replay_sessions: true
+            }]
+        );
+        store.handshake(true);
+        let mut methods: Vec<String> = requests(store.take_outgoing())
+            .into_iter()
+            .map(|(_, method, _)| method)
+            .collect();
+        methods.sort();
+        assert_eq!(
+            methods,
+            ["initialize", "session/load"],
+            "the session replays"
+        );
     }
 
     /// The requests in `frames` as (id, method, params).

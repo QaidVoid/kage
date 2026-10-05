@@ -48,6 +48,9 @@ impl Phase {
             None | Some(SubagentState::Running) => Self::Running,
             Some(SubagentState::Paused) => Self::Paused,
             Some(SubagentState::Completed) => Self::Done,
+            // A state this build cannot name is final; reading it as a
+            // failure keeps the member visible instead of silently done.
+            Some(SubagentState::Unknown) => Self::Failed,
             Some(SubagentState::Failed) => Self::Failed,
             Some(SubagentState::Cancelled) => Self::Cancelled,
         }
@@ -370,19 +373,10 @@ pub(crate) fn tokens(n: u64) -> String {
     }
 }
 
-/// The design's string hash, so an agent keeps its avatar color.
-fn hash(text: &str) -> u32 {
-    let mut x: i32 = 0;
-    for unit in text.encode_utf16() {
-        x = x.wrapping_mul(31).wrapping_add(i32::from(unit));
-    }
-    x.unsigned_abs()
-}
-
 /// The avatar: the name's first letter on the fill, in the name's hue.
 pub(crate) fn avatar(name: &str, pal: &Palette) -> Div {
     let hues = &pal.avatars;
-    let hue = match hash(name) % 8 {
+    let hue = match crate::views::kit::design_hash(name) % 8 {
         0 => hues.amber,
         1 => hues.rose,
         2 => hues.orange,
@@ -1020,7 +1014,8 @@ mod tests {
     };
     use kage_client::{Session, ToolCallItem, TranscriptItem};
 
-    use super::{hash, recorded_reply, tokens};
+    use super::{recorded_reply, tokens};
+    use crate::views::kit::design_hash;
 
     #[test]
     fn a_card_reads_the_reply_its_call_recorded() {
@@ -1066,7 +1061,7 @@ mod tests {
     #[test]
     fn the_hash_matches_the_design_so_hues_agree() {
         // JavaScript: [...'explore'].reduce((x, c) => (x * 31 + c.charCodeAt(0)) | 0, 0)
-        assert_eq!(hash("explore"), 1_309_148_525);
-        assert_eq!(hash(""), 0);
+        assert_eq!(design_hash("explore"), 1_309_148_525);
+        assert_eq!(design_hash(""), 0);
     }
 }

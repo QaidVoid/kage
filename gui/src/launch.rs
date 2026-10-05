@@ -56,6 +56,18 @@ struct Launch {
 }
 
 impl Launch {
+    /// Records one problem, keeping the earlier ones, so the exit
+    /// message can list every flag that did not fit.
+    fn refuse(&mut self, problem: String) {
+        match &mut self.error {
+            Some(error) => {
+                error.push_str("; ");
+                error.push_str(&problem);
+            }
+            None => self.error = Some(problem),
+        }
+    }
+
     fn parse(args: impl Iterator<Item = String>) -> Self {
         let mut launch = Self::default();
         let mut args = args.peekable();
@@ -83,7 +95,16 @@ impl Launch {
                     Some(program) => launch.rpc_bin = Some(program.to_owned()),
                     None => launch.error = Some("--rpc-bin needs a path".to_owned()),
                 },
-                _ => {}
+                other => {
+                    let known = other.split_once('=').is_some_and(|(name, _)| {
+                        matches!(name, "--ws" | "--token" | "--rpc-bin" | "--smoke")
+                    });
+                    launch.refuse(if known {
+                        format!("{other} is not a flag form here; pass the value after a space")
+                    } else {
+                        format!("unknown flag: {other}")
+                    });
+                }
             }
         }
         launch.finalize()
@@ -299,5 +320,33 @@ mod tests {
             Some("/opt/kage")
         );
         assert_eq!(parse(&["--rpc-bin", "/opt/kage"]).wire, Wire::Stdio);
+    }
+
+    #[test]
+    fn unknown_flags_are_refused_and_listed() {
+        let launch = parse(&["--typo"]);
+        let error = launch.error.expect("the typo is refused");
+        assert!(error.contains("--typo"), "{error}");
+
+        let launch = parse(&["--first-typo", "--second-typo"]);
+        let error = launch.error.expect("both typos are listed");
+        assert!(
+            error.contains("--first-typo") && error.contains("--second-typo"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_equals_form_value_flag_is_refused_with_the_space_form() {
+        for arg in ["--ws=ws://127.0.0.1:7433/acp", "--token=t"] {
+            let launch = parse(&[arg]);
+            let error = launch.error.unwrap_or_else(|| panic!("{arg} is refused"));
+            assert!(error.contains("space"), "{error}");
+        }
+
+        let launch = parse(&["--ws=", "--token=t"]);
+        assert!(launch.error.is_some(), "an empty equals value is refused");
+        assert!(launch.ws_url.is_none(), "nothing became a URL");
+        assert_eq!(launch.wire, Wire::Stdio, "the launch never misroutes");
     }
 }

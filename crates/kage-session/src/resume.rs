@@ -179,7 +179,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
             SessionEntry::ThinkingLevelChange(t) => thinking_level = Some(t.level),
             SessionEntry::Title(t) => title = Some(t.title),
             SessionEntry::Custom(c) => {
-                agent |= c.kind == crate::list::AGENT_ENTRY_KIND;
+                agent |= crate::list::is_agent_marker(&c);
                 read_mode(&c, &mut swarm_mode, &mut plan_mode);
             }
             SessionEntry::Label(_) => {}
@@ -339,27 +339,20 @@ fn session_files(dir: &Path) -> Result<Vec<(String, PathBuf)>, SessionError> {
 }
 
 /// Whether `path` starts with a header recorded in `cwd` and is not an
-/// agent session, reading only its first two lines.
+/// agent session, through the one session-identity scan the summary
+/// and `is_agent_session` share.
 fn opens_as_user_session(path: &Path, cwd: &Path) -> bool {
     use std::io::BufRead as _;
     let Ok(file) = std::fs::File::open(path) else {
         return false;
     };
-    let mut lines = std::io::BufReader::new(file).lines();
-    let header = lines
+    let header = std::io::BufReader::new(file)
+        .lines()
         .next()
         .and_then(Result::ok)
         .and_then(|line| serde_json::from_str::<SessionEntry>(&line).ok());
-    if !matches!(header, Some(SessionEntry::Header(header)) if header.cwd == cwd) {
-        return false;
-    }
-    match lines.next().and_then(Result::ok) {
-        Some(line) => !matches!(
-            serde_json::from_str::<SessionEntry>(&line),
-            Ok(SessionEntry::Custom(custom)) if custom.kind == crate::list::AGENT_ENTRY_KIND
-        ),
-        None => true,
-    }
+    matches!(header, Some(SessionEntry::Header(header)) if header.cwd == cwd)
+        && !crate::list::is_agent_session(path)
 }
 
 #[cfg(test)]
@@ -809,6 +802,39 @@ mod tests {
         assert_eq!(
             find_last(dir.path(), Path::new("/work")).unwrap().unwrap(),
             main
+        );
+    }
+
+    #[test]
+    fn find_last_skips_a_fork_shaped_late_marker() {
+        let dir = tempdir().unwrap();
+        let main = dir.path().join("a.jsonl");
+        write(&main, fresh_header(), &[]);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let marker = SessionEntry::Custom(crate::entry::Custom {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            kind: crate::list::AGENT_ENTRY_KIND.into(),
+            data: serde_json::json!({ "agent": "explore" }),
+        });
+        // The shape a forked child is written in: the copied history
+        // first, then the marker appended after.
+        let forked = dir.path().join("b.jsonl");
+        write(
+            &forked,
+            fresh_header(),
+            &[
+                message_entry(Role::User, "copied ask"),
+                message_entry(Role::Assistant, "copied reply"),
+                marker,
+            ],
+        );
+
+        assert!(crate::list::is_agent_session(&forked));
+        assert_eq!(
+            find_last(dir.path(), Path::new("/work")).unwrap().unwrap(),
+            main,
+            "the forked child is not the last user session"
         );
     }
 }

@@ -494,6 +494,20 @@ impl App {
         if focus == self.focus {
             return;
         }
+        self.reset_session_ui();
+        let draft = self.drafts.remove(&focus).unwrap_or_default();
+        let left = self.input.swap_draft(draft);
+        self.drafts.insert(self.focus, left);
+        self.focus = focus;
+        self.buffer = target.map_or_else(|| Arc::clone(&self.root_buffer), |(_, b)| b);
+        self.draw_snapshot = None;
+        lock(&self.buffer).invalidate_all_heights();
+    }
+
+    /// Drop the per-view UI state a switch or a resume must not
+    /// carry over: the search, the mouse selection and drag anchor,
+    /// the context menu and the completion popup.
+    fn reset_session_ui(&mut self) {
         self.search_line = None;
         self.search_origin = None;
         self.search_pattern = None;
@@ -502,13 +516,6 @@ impl App {
         self.mouse_drag_anchor = None;
         self.context_menu = None;
         self.input_completion = None;
-        let draft = self.drafts.remove(&focus).unwrap_or_default();
-        let left = self.input.swap_draft(draft);
-        self.drafts.insert(self.focus, left);
-        self.focus = focus;
-        self.buffer = target.map_or_else(|| Arc::clone(&self.root_buffer), |(_, b)| b);
-        self.draw_snapshot = None;
-        lock(&self.buffer).invalidate_all_heights();
     }
 
     /// Whether agent `session` shares its call row with sibling
@@ -709,6 +716,9 @@ impl App {
             Instant::now(),
         )
         .with_diff(self.edit_preview(&approval.tool, &approval.input));
+        if let Some(notice) = panel.parse_notice() {
+            self.toast(NoticeLevel::Warning, format!("{}: {notice}", approval.tool));
+        }
         self.approval_panel = Some(panel);
         self.pending_permission = Some(approval);
         true
@@ -787,8 +797,17 @@ impl App {
         messages: &[std::sync::Arc<kage_core::Message>],
         compaction: Option<kage_core::protocol::CompactionCounts>,
     ) {
-        self.set_focus(None);
+        // The common resume keeps the main view focused, so
+        // `set_focus`'s same-view early return would skip these
+        // resets; run them explicitly. The live draft belongs to the
+        // old session and goes too, along with any agent view.
+        self.reset_session_ui();
+        let _ = self.input.swap_draft(Draft::default());
         self.drafts.clear();
+        self.focus = None;
+        self.buffer = Arc::clone(&self.root_buffer);
+        self.draw_snapshot = None;
+        lock(&self.buffer).invalidate_all_heights();
         self.pending.clear();
         self.agents.clear();
         self.agent_buffers.clear();

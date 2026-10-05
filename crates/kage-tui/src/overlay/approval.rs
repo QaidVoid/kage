@@ -14,7 +14,8 @@
 //!
 //! An `ask_user_question` call asks its questions here one at a time
 //! (see [`super::question`]); the feedback field takes an answer in
-//! the user's own words.
+//! the user's own words. Questions that fail to parse fall back to
+//! the plain panel and leave a notice the host can toast.
 //!
 //! Keys typed in the first [`TYPE_AHEAD_GUARD`] after the panel opens
 //! are dropped, so type-ahead meant for the prompt cannot answer it.
@@ -31,7 +32,7 @@ use ratatui::widgets::Paragraph;
 use serde_json::Value;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::question::{QuestionFlow, Step};
+use super::question::{QuestionFlow, Questions, Step};
 use crate::cmdline::{CommandLine, CommandLineEvent};
 use crate::cmdparse::EmptyResolver;
 use crate::theme::Theme;
@@ -94,14 +95,33 @@ pub struct ApprovalPanel {
     diff: Option<EditDiff>,
     /// The questions of an `ask_user_question` call.
     flow: Option<QuestionFlow>,
+    /// Why the questions fell back to the plain panel, when they did.
+    parse_notice: Option<String>,
 }
 
 impl ApprovalPanel {
     /// Build the panel for a call to `tool` with `input`, asked by the
     /// agent `agent` (its name and task) or, with `None`, by the main
-    /// session. "Yes" starts selected.
+    /// session. "Yes" starts selected. Questions that fail to parse
+    /// fall back to the plain panel and leave [`Self::parse_notice`].
     #[must_use]
     pub fn new(tool: &str, input: &Value, agent: Option<(&str, &str)>, opened_at: Instant) -> Self {
+        let mut parse_notice = None;
+        let flow = if tool == ASK_USER_QUESTION_TOOL {
+            match QuestionFlow::from_input(input) {
+                Questions::Flow(flow) => Some(flow),
+                Questions::Absent => None,
+                Questions::Invalid => {
+                    parse_notice = Some(
+                        "the question payload did not parse; the panel fell back to a plain yes or no"
+                            .to_owned(),
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         Self {
             tool: tool.to_owned(),
             input: input.clone(),
@@ -112,10 +132,17 @@ impl ApprovalPanel {
             parked: None,
             opened_at,
             diff: None,
-            flow: (tool == ASK_USER_QUESTION_TOOL)
-                .then(|| QuestionFlow::from_input(input))
-                .flatten(),
+            flow,
+            parse_notice,
         }
+    }
+
+    /// Why the questions of an `ask_user_question` call fell back to
+    /// the plain panel, when they did. The host toasts it as a
+    /// warning.
+    #[must_use]
+    pub fn parse_notice(&self) -> Option<&str> {
+        self.parse_notice.as_deref()
     }
 
     /// Show `diff` as an edit's change instead of the one its input
@@ -974,5 +1001,33 @@ mod tests {
         assert_eq!(panel.hint(), "y/s/a/n/t or 1-5 \u{B7} enter \u{B7} esc no");
         panel.handle_key_at(key(KeyCode::Char('t')), now);
         assert!(panel.hint().contains("esc to go back"));
+    }
+
+    #[test]
+    fn an_unparseable_question_payload_falls_back_with_a_notice() {
+        let at = Instant::now();
+        let panel = ApprovalPanel::new(
+            ASK_USER_QUESTION_TOOL,
+            &json!({"questions": [{"header": 1}]}),
+            None,
+            at,
+        );
+        assert!(panel.parse_notice().is_some());
+        assert!(panel.flow.is_none());
+        let rows = rows(&panel, 80, 0);
+        assert!(rows.iter().any(|r| r == " > 1. Yes"), "{rows:#?}");
+        assert!(panel.hint().starts_with("y/s/a/n/t or 1-5"), "plain panel");
+    }
+
+    #[test]
+    fn an_input_without_questions_keeps_the_plain_panel_without_a_notice() {
+        let at = Instant::now();
+        let mut panel = ApprovalPanel::new(ASK_USER_QUESTION_TOOL, &json!({}), None, at);
+        assert!(panel.parse_notice().is_none());
+        assert!(panel.flow.is_none());
+        assert_eq!(
+            panel.handle_key_at(key(KeyCode::Enter), at + Duration::from_millis(500)),
+            ApprovalOutcome::Decide(PermissionDecision::AllowOnce)
+        );
     }
 }

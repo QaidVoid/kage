@@ -80,10 +80,17 @@ impl Transport for ReplayTransport {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let transport = self.clone();
-            thread::Builder::new()
+            let spawned = thread::Builder::new()
                 .name("kage-replay".to_owned())
-                .spawn(move || play_blocking(transport, events))
-                .expect("replay thread spawns");
+                .spawn({
+                    let events = events.clone();
+                    move || play_blocking(transport, events)
+                });
+            if let Err(error) = spawned {
+                let _ = events.send_blocking(Event::State(State::Refused(format!(
+                    "cannot start the replay thread: {error}"
+                ))));
+            }
         }
         #[cfg(target_arch = "wasm32")]
         {

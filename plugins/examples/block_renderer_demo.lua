@@ -7,8 +7,12 @@
 -- line). The host keeps the conversation's focus rule and spacing;
 -- the plugin owns everything inside.
 --
--- `/card <title>` writes a `demo:card` entry whose body the renderer
--- below paints as a boxed, colored card. `/card` with no argument
+-- `/card <title>` appends a `demo:card` entry to the session. The
+-- renderer below agrees on the payload: it paints `block.text` (the
+-- field the host's custom-block payload carries) and falls back to the
+-- stored entry's `title`. Storage-only today: appended custom entries
+-- are persisted to the session JSONL, but the host does not yet paint
+-- them live or on resume. `/card` with no argument
 -- opens the built-in picker (kage.ui.select) to choose a title -
 -- there is no separate "open_picker" API because ui.select already
 -- is the picker.
@@ -18,7 +22,7 @@
 kage.request_capabilities({ 'session_write' })
 
 kage.register_block_renderer('demo:card', function(block)
-    local title = block.text
+    local title = block.text or block.title
     local w = math.max(20, math.min(block.width - 2, 60))
     local bar = string.rep('-', w)
     return {

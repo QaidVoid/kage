@@ -242,14 +242,7 @@ impl AgentsOverlay {
     /// Inherent render wrapper, matching the other overlays, so the
     /// App's draw closure can pass a `Frame` directly.
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let modal = OverlayWidget::measure(self, area);
-        frame.render_widget(crate::opaque::OpaqueClear, modal);
-        let theme = crate::theme::current();
-        let ctx = OverlayCtx {
-            theme: &theme,
-            viewport: area,
-        };
-        OverlayWidget::render(self, modal, frame.buffer_mut(), &ctx);
+        super::widget::paint_modal(frame, self, area);
     }
 
     /// The top border's summary: agents per state, then the tokens and

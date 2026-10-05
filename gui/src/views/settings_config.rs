@@ -16,7 +16,7 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Div, Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
+    AnyElement, App, Div, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use kage_client::wire::{McpServerStatus, SessionConfigOption};
@@ -24,7 +24,7 @@ use serde::Deserialize;
 
 use crate::store::{Store, StoreHandle as _};
 use crate::theme::{FONT_MONO, FS_SM, FS_XS, Palette, R_FULL, R_LG};
-use crate::views::kit::{BtnTone, btn_sm, switch};
+use crate::views::kit::{BtnTone, badge, badge_in, btn_sm, switch};
 use crate::views::provider_form::Target;
 
 /// The parts of the snapshot the pages read. Every field defaults, so a
@@ -311,22 +311,8 @@ pub(crate) fn provider_rows(
     rows
 }
 
-fn badge(text: impl Into<SharedString>, fg: Hsla, bg: Hsla, line: Hsla) -> Div {
-    div()
-        .flex_none()
-        .px(px(7.))
-        .py(px(1.))
-        .rounded(px(R_FULL))
-        .border_1()
-        .border_color(line)
-        .bg(bg)
-        .text_size(px(10.5))
-        .text_color(fg)
-        .child(text.into())
-}
-
 fn plain_badge(text: impl Into<SharedString>, pal: &Palette) -> Div {
-    badge(text, pal.muted, pal.fill, pal.line)
+    badge(text, pal)
 }
 
 fn group(text: impl Into<SharedString>, pal: &Palette) -> Div {
@@ -583,22 +569,22 @@ fn provider_row(
     }
     let key = match snapshot.key_state(&row.id) {
         Some(state) => match state.source.as_str() {
-            "env" => badge(
+            "env" => badge_in(
                 format!("key from {}", state.env),
                 pal.ok,
                 pal.ok_soft,
                 pal.ok_bd,
             ),
-            "auth" => badge("key in auth.json", pal.ok, pal.ok_soft, pal.ok_bd),
+            "auth" => badge_in("key in auth.json", pal.ok, pal.ok_soft, pal.ok_bd),
             "unneeded" => plain_badge("no key needed", pal),
-            _ => badge(
+            _ => badge_in(
                 format!("{} not set", state.env),
                 pal.warn,
                 pal.warn_soft,
                 pal.warn_bd,
             ),
         },
-        None => badge("key source unknown", pal.faint, pal.fill, pal.subtle),
+        None => badge_in("key source unknown", pal.faint, pal.fill, pal.subtle),
     };
     let target = if row.custom {
         Target::Custom(Some(row.id.clone()))
@@ -822,7 +808,7 @@ pub(crate) fn mcp_page(
             .items_center()
             .child(mono(name.clone(), pal))
             .child(plain_badge(transport, pal))
-            .child(badge(word, fg, bg, line));
+            .child(badge_in(word, fg, bg, line));
         let edit = on_edit.clone();
         let edited = name.clone();
         let hover = pal.fill_hover;
@@ -1262,7 +1248,7 @@ fn action_chip(id: String, action: &'static str, on: bool, pal: &Palette) -> Sta
 /// One glob of a rule, removed when clicked.
 fn glob_chip(id: String, glob: &str, deny: bool, pal: &Palette) -> Stateful<Div> {
     let chip = if deny {
-        badge(glob.to_owned(), pal.danger, pal.danger_soft, pal.danger_bd)
+        badge_in(glob.to_owned(), pal.danger, pal.danger_soft, pal.danger_bd)
     } else {
         plain_badge(glob.to_owned(), pal)
     };

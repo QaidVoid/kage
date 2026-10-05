@@ -486,22 +486,6 @@ fn section_head(text: &str, p: &crate::theme::Palette) -> Div {
         .child(SharedString::from(text.to_owned()))
 }
 
-/// A diff count chip on its tint.
-fn chip(text: String, fg: gpui_kit::Hsla, bg: gpui_kit::Hsla) -> Div {
-    div()
-        .flex_none()
-        .h(px(20.))
-        .px(px(7.))
-        .flex()
-        .items_center()
-        .rounded(px(R_FULL))
-        .bg(bg)
-        .font_family(FONT_MONO)
-        .text_size(px(FS_2XS))
-        .text_color(fg)
-        .child(SharedString::from(text))
-}
-
 /// A byte count as the design writes it: `812 B`, `4.2 KB`, `1.2 MB`.
 fn bytes(n: usize) -> String {
     #[allow(clippy::cast_precision_loss)]
@@ -882,9 +866,19 @@ impl WorkbenchView {
         )
         .gap(px(6.))
         .child(div().flex_1())
-        .child(chip(format!("+{add}"), p.diff_add, p.diff_add_bg));
+        .child(kit::chip(
+            format!("+{add}"),
+            p.diff_add,
+            p.diff_add_bg,
+            FONT_MONO,
+        ));
         if del > 0 {
-            head = head.child(chip(format!("-{del}"), p.diff_del, p.diff_del_bg));
+            head = head.child(kit::chip(
+                format!("-{del}"),
+                p.diff_del,
+                p.diff_del_bg,
+                FONT_MONO,
+            ));
         }
         let selected = self
             .selected
@@ -946,9 +940,19 @@ impl WorkbenchView {
                         .child(SharedString::from(by.clone())),
                 );
             }
-            row = row.child(chip(format!("+{}", entry.add), p.diff_add, p.diff_add_bg));
+            row = row.child(kit::chip(
+                format!("+{}", entry.add),
+                p.diff_add,
+                p.diff_add_bg,
+                FONT_MONO,
+            ));
             if entry.del > 0 {
-                row = row.child(chip(format!("-{}", entry.del), p.diff_del, p.diff_del_bg));
+                row = row.child(kit::chip(
+                    format!("-{}", entry.del),
+                    p.diff_del,
+                    p.diff_del_bg,
+                    FONT_MONO,
+                ));
             }
             out.push(row.into_any_element());
         }
@@ -1553,7 +1557,12 @@ impl WorkbenchView {
             );
         }
         if let Some(code) = run.exit.filter(|code| *code != 0) {
-            head = head.child(chip(format!("exit {code}"), p.danger, p.danger_soft));
+            head = head.child(kit::chip(
+                format!("exit {code}"),
+                p.danger,
+                p.danger_soft,
+                FONT_MONO,
+            ));
         }
         // A clipped card has no content floor, so in the scrolling column
         // it would shrink to fit instead of overflowing.

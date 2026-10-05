@@ -14,7 +14,7 @@ use gpui_kit::{
 use kage_client::wire::{AcpProbe, ConfigTestRequest, ConfigTestResult};
 use serde_json::{Map, Value, json};
 
-use crate::store::Store;
+use crate::store::{Store, StoreHandle as _};
 use crate::theme::{FONT_MONO, FS_XS, Palette, R_FULL};
 use crate::views::config_forms::{
     Pairs, Saving, field, form_head, preview_block, text_field, toml_preview,
@@ -161,8 +161,7 @@ impl AcpForm {
     fn save(&mut self, cx: &mut Context<Self>) {
         match self.entry(cx) {
             Ok((name, value)) => {
-                let id = self.store.update(cx, |store, cx| {
-                    cx.notify();
+                let id = self.store.act(cx, |store| {
                     store.config_set(&["acp", "agents", &name], Some(value))
                 });
                 self.saving = Saving::Sent(vec![id]);
@@ -176,8 +175,7 @@ impl AcpForm {
         let Some(name) = self.editing.clone() else {
             return;
         };
-        let id = self.store.update(cx, |store, cx| {
-            cx.notify();
+        let id = self.store.act(cx, |store| {
             store.config_set(&["acp", "agents", &name], None)
         });
         self.saving = Saving::Sent(vec![id]);
@@ -199,10 +197,7 @@ impl AcpForm {
             }),
             ..ConfigTestRequest::default()
         };
-        let id = self.store.update(cx, |store, cx| {
-            cx.notify();
-            store.config_probe(&request)
-        });
+        let id = self.store.act(cx, |store| store.config_probe(&request));
         self.testing = Some(id);
         self.tested = None;
         cx.notify();

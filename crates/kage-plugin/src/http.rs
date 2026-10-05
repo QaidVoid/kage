@@ -140,7 +140,7 @@ fn simple_function(lua: &Lua, method: &'static str, name: &'static str) -> mlua:
 }
 
 /// Caller-supplied request details parsed out of the Lua `opts` table.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct RequestSpec {
     headers: Vec<(String, String)>,
     body: Option<Vec<u8>>,
@@ -178,18 +178,34 @@ fn build_request(opts: Option<&Table>) -> Result<RequestSpec, String> {
         spec.content_type = Some("application/json".to_owned());
     }
 
-    if let Ok(cap) = opts.get::<u64>("max_bytes") {
-        spec.max_bytes = Some(cap);
-    }
+    spec.max_bytes = opt_u64(opts, "max_bytes")?;
 
-    if let Ok(secs) = opts.get::<u64>("timeout_secs") {
-        if secs == 0 {
-            return Err("opts.timeout_secs must be at least 1".to_owned());
-        }
-        spec.timeout = Some(Duration::from_secs(secs));
+    match opt_u64(opts, "timeout_secs")? {
+        None => {}
+        Some(0) => return Err("opts.timeout_secs must be at least 1".to_owned()),
+        Some(secs) => spec.timeout = Some(Duration::from_secs(secs)),
     }
 
     Ok(spec)
+}
+
+/// Read an unsigned integer option from the `opts` table.
+///
+/// A present but non-integer value is a misconfiguration and errors
+/// instead of falling back to the default. Numeric strings do not
+/// coerce: a quoted number is a type error.
+fn opt_u64(opts: &Table, name: &str) -> Result<Option<u64>, String> {
+    let value: Value = opts.get(name).map_err(|e| format!("opts.{name}: {e}"))?;
+    match value {
+        Value::Nil => Ok(None),
+        Value::Integer(i) => u64::try_from(i)
+            .map(Some)
+            .map_err(|_| format!("opts.{name} must be a positive integer")),
+        Value::Number(n) if n.fract() == 0.0 && (0.0..=u64::MAX as f64).contains(&n) => {
+            Ok(Some(n as u64))
+        }
+        _ => Err(format!("opts.{name} must be a positive integer")),
+    }
 }
 
 struct SimpleResult {
@@ -727,6 +743,40 @@ mod tests {
 
         let opts: Table = lua.load("{ timeout_secs = 0 }").eval().unwrap();
         assert!(super::build_request(Some(&opts)).is_err());
+    }
+
+    #[test]
+    fn build_request_rejects_non_numeric_max_bytes() {
+        let lua = Lua::new();
+        let opts: Table = lua.load(r#"{ max_bytes = "huge" }"#).eval().unwrap();
+        let err = super::build_request(Some(&opts)).unwrap_err();
+        assert!(err.contains("max_bytes"), "{err}");
+    }
+
+    #[test]
+    fn build_request_rejects_fractional_and_negative_max_bytes() {
+        let lua = Lua::new();
+        for bad in ["{ max_bytes = 10.5 }", "{ max_bytes = -1 }"] {
+            let opts: Table = lua.load(bad).eval().unwrap();
+            let err = super::build_request(Some(&opts)).unwrap_err();
+            assert!(err.contains("max_bytes"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn build_request_keeps_integer_max_bytes() {
+        let lua = Lua::new();
+        let opts: Table = lua.load("{ max_bytes = 10 }").eval().unwrap();
+        let spec = super::build_request(Some(&opts)).unwrap();
+        assert_eq!(spec.max_bytes, Some(10));
+    }
+
+    #[test]
+    fn build_request_rejects_non_numeric_timeout_secs() {
+        let lua = Lua::new();
+        let opts: Table = lua.load(r#"{ timeout_secs = "soon" }"#).eval().unwrap();
+        let err = super::build_request(Some(&opts)).unwrap_err();
+        assert!(err.contains("timeout_secs"), "{err}");
     }
 
     /// A proxied dial cannot vet addresses, only literal forms: an IP

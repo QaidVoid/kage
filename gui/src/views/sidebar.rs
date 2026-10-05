@@ -15,6 +15,8 @@ use gpui_kit::{
     linear_color_stop, linear_gradient, px, relative,
 };
 
+use std::collections::HashMap;
+
 use crate::app::{OpenPalette, OpenSettings, ToggleSidebar};
 use crate::clock::unix_seconds;
 use crate::store::{Store, StoreHandle as _};
@@ -162,11 +164,17 @@ fn forest(parents: &[Option<&str>], ids: &[&str]) -> Vec<Place> {
             walk(kid, depth + 1, n + 1 == kids.len(), rails, kids_of, out);
         }
     }
-    let position = |id: &str| ids.iter().position(|known| *known == id);
+    let mut at_of: HashMap<&str, usize> = HashMap::with_capacity(ids.len());
+    for (ix, id) in ids.iter().copied().enumerate() {
+        at_of.entry(id).or_insert(ix);
+    }
     let mut kids_of = vec![Vec::new(); ids.len()];
     let mut roots = Vec::new();
     for (ix, parent) in parents.iter().enumerate() {
-        match parent.and_then(position).filter(|&at| at != ix) {
+        match parent
+            .and_then(|id| at_of.get(id).copied())
+            .filter(|&at| at != ix)
+        {
             Some(at) => kids_of[at].push(ix),
             None => roots.push(ix),
         }
@@ -960,5 +968,39 @@ mod tests {
             Some(&true),
             "b's later sibling keeps a rail running past d"
         );
+    }
+
+    #[test]
+    fn duplicate_ids_nest_under_the_first_occurrence() {
+        let ids = ["a", "b", "a"];
+        let parents = [None, Some("a"), None];
+        let placed = forest(&parents, &ids);
+        let order: Vec<&str> = placed.iter().map(|place| ids[place.ix]).collect();
+        assert_eq!(order, ["a", "b", "a"], "every row lands exactly once");
+        assert_eq!(
+            (placed[1].depth, placed[1].last, placed[1].kids),
+            (1, true, 0),
+            "the first row carrying the id is the parent"
+        );
+    }
+
+    #[test]
+    fn a_parent_outside_the_list_is_a_root() {
+        let ids = ["a", "b"];
+        let parents = [Some("ghost"), None];
+        let placed = forest(&parents, &ids);
+        let order: Vec<(&str, usize)> = placed
+            .iter()
+            .map(|place| (ids[place.ix], place.depth))
+            .collect();
+        assert_eq!(order, [("a", 0), ("b", 0)], "both rows show as roots");
+    }
+
+    #[test]
+    fn a_two_cycle_emits_neither_row() {
+        let ids = ["a", "b"];
+        let parents = [Some("b"), Some("a")];
+        let placed = forest(&parents, &ids);
+        assert!(placed.is_empty(), "a cycle legitimately emits neither row");
     }
 }

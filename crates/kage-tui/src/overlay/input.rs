@@ -58,8 +58,8 @@ impl InputOverlay {
 
 impl OverlayWidget for InputOverlay {
     fn measure(&self, available: Rect) -> Rect {
-        let width = available.width.clamp(30, 60);
-        let height: u16 = 5;
+        let width = available.width.clamp(30, 60).min(available.width);
+        let height = 5.min(available.height);
         let x = available.x + available.width.saturating_sub(width) / 2;
         let y = available.y + available.height.saturating_sub(height) / 2;
         Rect::new(x, y, width, height)
@@ -238,5 +238,22 @@ mod tests {
         let mut i = InputOverlay::new("Name");
         let lines = snapshot(&mut i, Rect::new(0, 0, 32, 10));
         assert!(lines.iter().any(|l| l.contains("Name")));
+    }
+
+    #[test]
+    fn measure_stays_inside_a_tiny_viewport() {
+        let i = InputOverlay::new("Name");
+        let available = Rect::new(0, 0, 12, 4);
+        let modal = i.measure(available);
+        assert!(modal.right() <= available.right(), "{modal:?}");
+        assert!(modal.bottom() <= available.bottom(), "{modal:?}");
+        let mut buf = Buffer::empty(available);
+        let theme = crate::theme::Theme::default();
+        let ctx = OverlayCtx {
+            theme: &theme,
+            viewport: available,
+        };
+        let mut i = i;
+        i.render(modal, &mut buf, &ctx);
     }
 }

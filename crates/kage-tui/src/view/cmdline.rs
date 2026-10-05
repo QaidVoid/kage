@@ -358,7 +358,9 @@ pub(super) fn place_cmdline_cursor(frame: &mut Frame, regions: Regions, cmdline:
         return;
     }
     let prefix_width = 1u16;
-    let col = u16::try_from(cmdline.text()[..cmdline.cursor()].width()).unwrap_or(u16::MAX);
+    let text = cmdline.text();
+    let col =
+        u16::try_from(text.get(..cmdline.cursor()).unwrap_or(text).width()).unwrap_or(u16::MAX);
     let cx = row
         .x
         .saturating_add(prefix_width)

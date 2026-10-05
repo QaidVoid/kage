@@ -29,6 +29,7 @@ use crate::theme::{
 use crate::transport::State;
 use crate::views::acp_form::AcpForm;
 use crate::views::directory_picker::{DirectoryPicker, Picked};
+use crate::views::kit::badge;
 use crate::views::mcp_form::{FormDone, McpForm};
 use crate::views::provider_form::{ProviderForm, Target as ProviderTarget};
 use crate::views::settings_config as config;
@@ -1731,19 +1732,6 @@ fn row_el(
                 .items_center()
                 .child(control),
         )
-}
-
-fn badge(text: impl Into<SharedString>, pal: &Palette) -> Div {
-    div()
-        .px(px(7.))
-        .py(px(1.))
-        .rounded(px(R_FULL))
-        .border_1()
-        .border_color(pal.line)
-        .bg(pal.fill)
-        .text_size(px(10.5))
-        .text_color(pal.muted)
-        .child(text.into())
 }
 
 fn key_cap(text: String, pal: &Palette) -> Div {

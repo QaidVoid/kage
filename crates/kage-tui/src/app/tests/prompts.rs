@@ -174,6 +174,49 @@ fn session_changed_rebuilds_the_transcript() {
 }
 
 #[test]
+fn session_changed_resets_view_state_even_when_already_on_the_main_view() {
+    let (mut app, _rx, events) = app_with_events();
+    for c in "half-written prompt".chars() {
+        app.handle_key(key(c));
+    }
+    app.mouse_drag_anchor = Some((3, 0, false));
+    app.input_completion =
+        crate::overlay::completion::InputCompletion::new(vec![kage_plugin::AutocompleteItem {
+            label: "run".into(),
+            detail: None,
+            value: "run".into(),
+            range: None,
+        }]);
+    assert!(app.input_completion.is_some());
+
+    let message = kage_core::Message::new(
+        kage_core::Role::User,
+        vec![kage_core::Content::Text {
+            text: "restored".into(),
+        }],
+        None,
+    );
+    events
+        .send(envelope(
+            kage_core::SessionId::new(),
+            1,
+            kage_core::protocol::HostEvent::SessionChanged {
+                path: "/tmp/s.jsonl".into(),
+                title: None,
+                messages: vec![std::sync::Arc::new(message)],
+                compaction: None,
+            },
+        ))
+        .unwrap();
+    app.drain_engine_events();
+
+    assert!(app.mouse_drag_anchor.is_none(), "drag anchor dropped");
+    assert!(app.input_completion.is_none(), "completion popup dropped");
+    assert!(app.input().text().is_empty(), "the old draft does not leak");
+    assert_eq!(app.focus, None, "the main view is focused");
+}
+
+#[test]
 fn state_changes_update_the_modeline() {
     let (mut app, _rx, events) = app_with_events();
     events
@@ -291,7 +334,7 @@ fn recall_pulls_the_newest_pending_prompt_back_into_the_editor() {
     );
     assert_eq!(
         app.input().text(),
-        "queued one\n\n[image #1 recall image/png 3 B] "
+        "queued one\n\n[\u{200b}image #1 recall image/png 3 B] "
     );
     assert_eq!(app.input().attached().len(), 1);
     assert_eq!(pending_rows(&mut app).len(), 1, "the steer row stays");
@@ -320,7 +363,7 @@ fn recall_pulls_the_newest_pending_prompt_back_into_the_editor() {
     assert!(pending_rows(&mut app).is_empty());
     assert_eq!(
         app.input().text(),
-        "first steer\n\nqueued one\n\n[image #1 recall image/png 3 B] "
+        "first steer\n\nqueued one\n\n[\u{200b}image #1 recall image/png 3 B] "
     );
 }
 
@@ -380,7 +423,7 @@ fn pasting_an_image_path_attaches_instead_of_inserting_text() {
     app.handle_paste(&png.to_string_lossy());
     assert_eq!(app.input.attached().len(), 1, "image path attached");
     assert!(
-        app.input.text().contains("[image #1 shot.png"),
+        app.input.text().contains("[\u{200b}image #1 shot.png"),
         "an editable marker is inserted, not the raw path: {:?}",
         app.input.text()
     );

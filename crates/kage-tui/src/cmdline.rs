@@ -20,7 +20,7 @@
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::cmdparse::{Completions, Resolver, complete};
+use crate::cmdparse::{Completions, Resolver, complete, quote_token};
 use crate::command::CommandSpec;
 
 /// Outcome of [`CommandLine::handle_key`].
@@ -118,14 +118,14 @@ impl CommandLine {
 
     /// Drive the widget by one key press. `registry` and `resolver`
     /// are consulted on every edit to refresh completions and on Tab
-    /// to apply them.
+    /// to apply them. Press and Repeat keys edit; Release is ignored.
     pub fn handle_key(
         &mut self,
         key: KeyEvent,
         registry: &[&CommandSpec],
         resolver: &dyn Resolver,
     ) -> CommandLineEvent {
-        if key.kind != KeyEventKind::Press {
+        if matches!(key.kind, KeyEventKind::Release) {
             return CommandLineEvent::Pending;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -169,12 +169,8 @@ impl CommandLine {
             KeyCode::Backspace => {
                 self.error = None;
                 self.backspace();
-                if self.text.is_empty() {
-                    CommandLineEvent::Cancelled
-                } else {
-                    self.refresh(registry, resolver);
-                    CommandLineEvent::Pending
-                }
+                self.refresh(registry, resolver);
+                CommandLineEvent::Pending
             }
             KeyCode::Left => {
                 self.error = None;
@@ -244,7 +240,7 @@ impl CommandLine {
         let current_prefix = self.text.get(anchor..self.cursor).unwrap_or("");
         let extends = lcp.len() > current_prefix.len() && lcp.starts_with(current_prefix);
         if extends {
-            self.replace_at_anchor(&lcp);
+            self.replace_at_anchor(&quote_token(&lcp));
         }
         self.popup_open = true;
         self.selected = None;
@@ -252,16 +248,21 @@ impl CommandLine {
     }
 
     /// Put a chosen candidate in place of the token being completed.
+    /// A value with whitespace is quoted so the line re-parses as one
+    /// token.
     fn insert_candidate(&mut self, value: &str) {
-        self.replace_at_anchor(value);
+        self.replace_at_anchor(&quote_token(value));
     }
 
     /// Insert bracketed-paste text at the cursor and refresh the
     /// completion set, as if one `Char` keystroke had been sent per
-    /// character. Control characters (tab, newline, CR) are skipped:
-    /// this is a single-line field.
+    /// character. Newlines and CR are dropped: this is a single-line
+    /// field. Tabs are kept so pasted values keep their separators.
     pub fn paste_str(&mut self, text: &str, registry: &[&CommandSpec], resolver: &dyn Resolver) {
-        let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+        let clean: String = text
+            .chars()
+            .filter(|c| !c.is_control() || *c == '\t')
+            .collect();
         if clean.is_empty() {
             return;
         }
@@ -280,7 +281,7 @@ impl CommandLine {
             .and_then(|i| self.completions.items.get(i))
             .map(|c| c.value.clone())
         {
-            self.replace_at_anchor(&value);
+            self.replace_at_anchor(&quote_token(&value));
         }
         let trimmed = self.text.trim().to_owned();
         if trimmed.is_empty() {
@@ -419,6 +420,20 @@ impl CommandLine {
             popup_open: false,
             selected: None,
             error: Some(error.to_owned()),
+        }
+    }
+
+    /// Build a `CommandLine` with the cursor forced to `cursor`, even
+    /// mid-char. Used by view tests to exercise the render fallback
+    /// for a broken cursor invariant.
+    pub(crate) fn for_test_with_cursor(text: &str, cursor: usize) -> Self {
+        Self {
+            text: text.to_owned(),
+            cursor,
+            completions: Completions::default(),
+            popup_open: false,
+            selected: None,
+            error: None,
         }
     }
 }
@@ -890,9 +905,61 @@ mod tests {
     fn paste_str_of_only_control_chars_is_a_noop() {
         let mut cl = CommandLine::new();
         send(&mut cl, key(KeyCode::Char('a')));
-        cl.paste_str("\n\r\t", &empty_registry(), &EmptyResolver);
+        cl.paste_str("\n\r", &empty_registry(), &EmptyResolver);
         assert_eq!(cl.text(), "a");
         assert_eq!(cl.cursor, 1);
+    }
+
+    #[test]
+    fn paste_keeps_tabs_and_drops_newlines() {
+        let mut cl = CommandLine::new();
+        cl.paste_str("a\tb\nc", &empty_registry(), &EmptyResolver);
+        assert_eq!(cl.text(), "a\tbc");
+    }
+
+    #[test]
+    fn backspace_to_empty_keeps_the_line_open() {
+        let mut cl = typed("q");
+        assert_eq!(
+            send(&mut cl, key(KeyCode::Backspace)),
+            CommandLineEvent::Pending
+        );
+        assert_eq!(cl.text(), "");
+        assert_eq!(
+            send(&mut cl, key(KeyCode::Backspace)),
+            CommandLineEvent::Pending,
+            "an emptied line stays open"
+        );
+        assert_eq!(
+            send(&mut cl, key(KeyCode::Enter)),
+            CommandLineEvent::Cancelled,
+            "enter on empty still cancels"
+        );
+    }
+
+    #[test]
+    fn repeat_events_edit_like_presses() {
+        let mut cl = typed("abc");
+        let repeat =
+            KeyEvent::new_with_kind(KeyCode::Backspace, KeyModifiers::NONE, KeyEventKind::Repeat);
+        assert_eq!(send(&mut cl, repeat), CommandLineEvent::Pending);
+        assert_eq!(cl.text(), "ab");
+    }
+
+    #[test]
+    fn a_candidate_with_spaces_is_quoted_and_submits_whole() {
+        let mut cl = CommandLine::new();
+        let reg = registry();
+        let res = ModelResolver(vec!["my file.md".into()]);
+        for c in "model ".chars() {
+            send_with(&mut cl, key(KeyCode::Char(c)), &reg, &res);
+        }
+        send_with(&mut cl, key(KeyCode::Tab), &reg, &res);
+        assert_eq!(cl.text(), "model \"my file.md\"");
+        assert_eq!(
+            send_with(&mut cl, key(KeyCode::Enter), &reg, &res),
+            CommandLineEvent::Submit("model \"my file.md\"".into())
+        );
     }
 
     fn typed(text: &str) -> CommandLine {

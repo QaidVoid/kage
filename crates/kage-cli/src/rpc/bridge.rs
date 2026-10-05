@@ -947,13 +947,30 @@ impl Bridge {
 }
 
 /// The agent reports and messages `text` carries after the words a
-/// user typed, if any.
-fn agent_part(text: &str) -> Option<&str> {
-    let (words, _) = kage_core::agent_report::split_agent_text(text)?;
-    if words.is_empty() {
-        return Some(text.trim());
+/// user typed, if any. A burst the strict splitter refuses, prose
+/// interleaved between elements included, still yields everything
+/// from its first element on, so the reports and the words between
+/// them reach the clients that did not send the message.
+pub(super) fn agent_part(text: &str) -> Option<&str> {
+    if let Some((words, _)) = kage_core::agent_report::split_agent_text(text) {
+        return if words.is_empty() {
+            Some(text.trim())
+        } else {
+            text.split_once(words).map(|(_, rest)| rest.trim())
+        };
     }
-    text.split_once(words).map(|(_, rest)| rest.trim())
+    first_agent_element(text).map(|start| text[start..].trim())
+}
+
+/// Where the first agent element of `text` starts: at the front or on
+/// its own line, the position the strict splitter accepts elements
+/// at. `None` when the text holds none.
+fn first_agent_element(text: &str) -> Option<usize> {
+    let at_line_start = |at: usize| at == 0 || text[..at].ends_with('\n');
+    ["<agent ", "<message "]
+        .iter()
+        .filter_map(|open| text.find(open))
+        .find(|at| at_line_start(*at))
 }
 
 /// The `user_message_chunk` showing `content` to a client that did not
@@ -1408,4 +1425,42 @@ pub(super) fn agent_usage(node: &AgentNode) -> Option<SubagentUsage> {
 /// The model a subagent update reports of `node`, once known.
 pub(super) fn agent_model(node: &AgentNode) -> Option<String> {
     (!node.model.is_empty()).then(|| node.model.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kage_core::agent_report::AgentReport;
+
+    /// One `<agent>` report element with a parseable header.
+    fn report(name: &str, session: &str, body: &str) -> String {
+        format!(
+            "<agent name=\"{name}\" session=\"{session}\" state=\"completed\">\n{body}\n</agent>"
+        )
+    }
+
+    #[test]
+    fn agent_part_survives_prose_between_agent_elements() {
+        let first = report("alpha", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "first body");
+        let second = report("beta", "01ARZ3NDEKTSV4RRFFQ69G5FAW", "second body");
+
+        let burst = format!("{first}\nwords between\n{second}");
+        let part = agent_part(&burst).expect("no part");
+        assert!(part.starts_with("<agent "), "{part}");
+        assert!(part.contains("words between"), "{part}");
+        assert_eq!(AgentReport::all_in(part).len(), 2);
+
+        let clean = format!("{first}\n\n{second}");
+        let part = agent_part(&clean).expect("no part");
+        assert_eq!(part, clean);
+        assert_eq!(AgentReport::all_in(part).len(), 2);
+
+        let steered = format!("make it so\n{clean}");
+        let part = agent_part(&steered).expect("no part");
+        assert!(part.starts_with("<agent "), "{part}");
+        assert!(!part.contains("make it so"), "{part}");
+        assert_eq!(AgentReport::all_in(part).len(), 2);
+
+        assert!(agent_part("plain words with no agent elements").is_none());
+    }
 }

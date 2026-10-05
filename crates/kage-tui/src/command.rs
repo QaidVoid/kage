@@ -66,6 +66,11 @@ pub enum ArgSpec {
         optional: bool,
     },
     /// File path under the working directory (autocomplete via fs walk).
+    /// Inert today: the default [`crate::cmdparse::Resolver::paths`]
+    /// returns empty and no in-tree resolver overrides it, so a `Path`
+    /// argument never offers candidates. Implement `paths` in the
+    /// host's resolver (or stop advertising `Path`) before relying on
+    /// it.
     Path {
         /// Parameter name shown in completion hints.
         name: &'static str,

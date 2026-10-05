@@ -498,18 +498,11 @@ impl Shell {
     fn on_transport(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::Frame(frame) => {
-                let changes = self.store.update(cx, |store, cx| {
-                    let changes = store.absorb(frame);
-                    cx.notify();
-                    changes
-                });
+                let changes = self.store.act(cx, |store| store.absorb(frame));
                 self.raise_toasts(&changes, cx);
             }
             Event::State(state) => {
-                self.store.update(cx, |store, cx| {
-                    store.set_connect(state);
-                    cx.notify();
-                });
+                self.store.act(cx, |store| store.set_connect(state));
             }
         }
         self.track_turn(cx);
@@ -619,10 +612,7 @@ impl Shell {
     /// next prompt opens the session it rides on. This is what the
     /// web client's New session does.
     pub fn show_welcome(&mut self, cx: &mut Context<Self>) {
-        self.store.update(cx, |store, cx| {
-            store.show_welcome();
-            cx.notify();
-        });
+        self.store.act(cx, Store::show_welcome);
     }
 
     /// Opens find over the transcript; the palette steps aside.
@@ -692,10 +682,7 @@ impl Shell {
                 },
             }),
         };
-        self.store.update(cx, |store, cx| {
-            store.absorb(frame);
-            cx.notify();
-        });
+        self.store.act(cx, |store| store.absorb(frame));
     }
 
     /// The line automated runs print before quitting.
@@ -874,9 +861,8 @@ impl Shell {
         });
         transport.start(self.events.clone());
         self.transport = Box::new(transport);
-        self.store.update(cx, |store, cx| {
-            store.set_connect(crate::transport::State::Connecting);
-            cx.notify();
+        self.store.act(cx, |store| {
+            store.set_connect(crate::transport::State::Connecting)
         });
     }
 
@@ -1104,8 +1090,7 @@ impl Shell {
             }),
             cost: store
                 .active_id()
-                .and_then(|id| store.tree_cost(id))
-                .map(|cost| format!("{} {:.2}", cost.currency, cost.amount)),
+                .and_then(|id| crate::views::kit::cost_label(&store.tree_costs(id), 2)),
             link: if store.connect().is_connected() {
                 store.link().name.to_string()
             } else {

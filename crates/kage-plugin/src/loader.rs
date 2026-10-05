@@ -13,7 +13,9 @@
 //! `[keybindings]` entry or a broken `init.lua` logs an error through
 //! the runtime's host log and the load proceeds. The function returns a
 //! summary the host can surface to the user. File stems starting with
-//! `@` are reserved for kage's own environments and are rejected.
+//! `@` are reserved for kage's own environments and are rejected, and
+//! so are stems that are not valid UTF-8: plugins are addressed by
+//! stem in config, so two files could not share the fallback name.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -134,10 +136,15 @@ fn load_plugins(lua: &Lua, dir: &Path, eval: &EvalState) -> Result<LoadReport, P
     let sink = eval.sink();
     let mut report = LoadReport::default();
     for path in paths {
-        let name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("plugin");
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            let err = "plugin file name is not valid UTF-8";
+            lock(sink).log(
+                LogLevel::Error,
+                &format!("plugin '{}': {err}", path.display()),
+            );
+            report.failed.push((path, err.to_owned()));
+            continue;
+        };
         if name.starts_with('@') {
             let err = "names starting with '@' are reserved";
             lock(sink).log(
@@ -331,5 +338,30 @@ mod tests {
         let report = load_dir(dir.path(), &rt).unwrap();
         assert!(report.loaded.is_empty());
         assert!(report.failed.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_stems_fail_instead_of_colliding() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempdir().unwrap();
+        for stem in [&b"bad\xff1"[..], &b"bad\xff2"[..]] {
+            let mut path = dir.path().join(OsStr::from_bytes(stem));
+            path.set_extension("lua");
+            fs::write(path, "kage.register_command({})").unwrap();
+        }
+        let rt = PluginRuntime::new().unwrap();
+        let report = load_dir(dir.path(), &rt).unwrap();
+        assert_eq!(report.loaded.len(), 0);
+        assert_eq!(report.failed.len(), 2);
+        assert!(rt.registered_commands().is_empty());
+        for (path, err) in &report.failed {
+            assert!(
+                err.contains("not valid UTF-8"),
+                "{path:?}: expected a UTF-8 error, got {err}"
+            );
+        }
     }
 }

@@ -225,6 +225,21 @@ fn slash_argument_positions_complete_against_the_spec() {
 }
 
 #[test]
+fn slash_completion_quotes_argument_values_with_whitespace() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    app.set_model_choices(vec![PickItem::simple("my model")]);
+    for c in "/model ".chars() {
+        app.handle_key(key(c));
+    }
+    let sp = app.input_completion.as_ref().expect("model arg completion");
+    let item = sp.items().first().expect("candidate offered");
+    assert_eq!(item.label, "my model", "the popup label stays unquoted");
+    assert_eq!(item.value, "\"my model\"", "the inserted value is quoted");
+}
+
+#[test]
 fn enter_accepts_a_slash_completion_then_the_next_enter_sends() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();

@@ -41,7 +41,7 @@ use crate::store::{EXIT_PLAN_TOOL, PlanChoice, Store, StoreHandle as _, plan_rev
 use crate::theme::{FS_2XS, FS_SM, FS_XS, R_FULL, R_LG, R_MD, R_SM, SP_1, SP_2, SP_3, SP_4, SP_5};
 use crate::timing::RunEnd;
 use crate::views::agents::{self, AgentFacts, SwarmCounts, SwarmView, agent_facts, children_of};
-use crate::views::kit::{self, BtnTone};
+use crate::views::kit::{self, BtnTone, chip};
 use crate::views::reveal::{self, Reveal};
 use crate::views::workbench::{ChangeEntry, change_entries};
 use kage_client::agent_text::{self, AgentText};
@@ -559,24 +559,6 @@ fn chevron(open: bool, color: Hsla) -> Icon {
         } else {
             0.0
         }))
-}
-
-/// A pill chip in one tone of the design's chip anatomy: 20px tall,
-/// mono at the smallest size, on a soft tint.
-fn chip(text: String, fg: Hsla, bg: Hsla, mono: SharedString) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .flex_none()
-        .h(px(20.0))
-        .px(px(7.0))
-        .rounded(px(R_FULL))
-        .font_family(mono)
-        .text_size(px(FS_2XS))
-        .text_color(fg)
-        .bg(bg)
-        .whitespace_nowrap()
-        .child(SharedString::from(text))
 }
 
 /// The collapse family of a tool title. Only these titles group.

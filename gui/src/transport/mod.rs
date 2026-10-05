@@ -12,6 +12,12 @@
 //! same through a browser `WebSocket` on wasm targets, and
 //! [`replay`](self::replay) plays a recorded golden transcript so the
 //! shell is fully usable with no engine on the machine.
+//!
+//! Panic policy for the implementations: lock unwraps and serialize
+//! expects stay, because a poisoned lock or a failing serialize means
+//! a bug elsewhere and aborting with it is accepted; thread and child
+//! spawn failures report [`State::Refused`] instead, so a constrained
+//! host shows why nothing came up rather than a dead window.
 
 pub mod replay;
 #[cfg(not(target_arch = "wasm32"))]
@@ -114,9 +120,12 @@ pub trait Transport: 'static {
     /// once, before any [`Transport::send`].
     fn start(&mut self, events: EventSender);
 
-    /// Hands one outgoing frame to the engine. Frames handed before a
-    /// link exists are dropped; the client that produced them still
-    /// holds its pending entry.
+    /// Hands one outgoing frame to the engine. A frame that arrives
+    /// while no link is live waits in a bounded backlog and goes out
+    /// on the next link; a backlog that overflows drops its oldest
+    /// frame and says so. [`stdio`](self::stdio) never relinks, so it
+    /// reports a dead link as [`State::Closed`] instead of holding
+    /// the frame.
     fn send(&self, frame: Frame);
 
     /// Closes the link for good: no more retries, no more events

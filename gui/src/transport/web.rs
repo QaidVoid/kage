@@ -34,6 +34,9 @@ struct Inner {
     events: Option<EventSender>,
     /// The live link, absent between links.
     socket: Option<WebSocket>,
+    /// Frames handed over while no link was live, oldest first,
+    /// flushed when the next link opens.
+    backlog: Vec<Frame>,
     /// Set by [`Transport::close`]; ends every retry.
     closed: bool,
     /// The backoff ladder, shared across retries of one transport.
@@ -43,6 +46,10 @@ struct Inner {
     /// The browser callbacks of the live link, dropped with it.
     keepalive: Vec<Closure<dyn FnMut(JsValue)>>,
 }
+
+/// How many frames the backlog keeps while no link is live. Beyond
+/// this the oldest frame is dropped and reported.
+const BACKLOG_CAP: usize = 64;
 
 /// The browser transport to one `kage serve` endpoint. Dropping it
 /// closes the link.
@@ -62,6 +69,7 @@ impl WebTransport {
                 inner: Rc::new(RefCell::new(Inner {
                     events: None,
                     socket: None,
+                    backlog: Vec::new(),
                     closed: false,
                     backoff: Backoff::new(),
                     attempt: 0,
@@ -135,6 +143,12 @@ impl Dialer {
             let mut inner = transport.inner.borrow_mut();
             inner.backoff.reset();
             inner.attempt = 0;
+            for frame in std::mem::take(&mut inner.backlog) {
+                if let Some(socket) = &inner.socket {
+                    let line = serde_json::to_string(&frame.to_value()).expect("frame serializes");
+                    let _ = socket.send_with_str(&line);
+                }
+            }
             Self::report(&inner, State::Connected);
         });
         let on_message = self.bind(|transport, event| {
@@ -172,7 +186,7 @@ impl Dialer {
                 );
                 delay
             };
-            transport.schedule(delay);
+            transport.schedule(delay, |transport| transport.dial());
         });
         let on_error = self.bind(|_, _| {
             // The status of a failed handshake is invisible here; the
@@ -202,10 +216,10 @@ impl Dialer {
         Closure::new(move |event: JsValue| run(&transport, event))
     }
 
-    /// Schedules one dial after `delay`.
-    fn schedule(&self, delay: Duration) {
+    /// Schedules `run` on the browser timer after `delay`.
+    fn schedule(&self, delay: Duration, run: impl FnOnce(&Dialer) + 'static) {
         let transport = self.clone();
-        let fire = Closure::once(move || transport.dial());
+        let fire = Closure::once(move || run(&transport));
         if let Some(window) = web_sys::window() {
             let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
                 fire.as_ref().unchecked_ref(),
@@ -216,17 +230,18 @@ impl Dialer {
     }
 
     /// Shuts the link down and reports [`State::Closed`]. Safe to call
-    /// from inside a callback: a contended borrow defers the shutdown
-    /// to the next tick instead of panicking.
+    /// from inside a callback: a contended borrow re-arms the
+    /// shutdown on the next tick instead of dialing or panicking.
     fn shutdown(&self) {
         let Ok(mut inner) = self.inner.try_borrow_mut() else {
-            self.schedule(Duration::ZERO);
+            self.schedule(Duration::ZERO, |transport| transport.shutdown());
             return;
         };
         if inner.closed {
             return;
         }
         inner.closed = true;
+        inner.backlog.clear();
         if let Some(socket) = inner.socket.take() {
             socket.set_onopen(None);
             socket.set_onmessage(None);
@@ -252,8 +267,15 @@ impl Transport for WebTransport {
     }
 
     fn send(&self, frame: Frame) {
-        let inner = self.dialer.inner.borrow();
+        let mut inner = self.dialer.inner.borrow_mut();
         let Some(socket) = &inner.socket else {
+            if inner.backlog.len() >= BACKLOG_CAP {
+                inner.backlog.remove(0);
+                crate::warn(
+                    "the engine is unreachable; the reconnect backlog overflowed and the oldest queued frame was dropped",
+                );
+            }
+            inner.backlog.push(frame);
             return;
         };
         let line = serde_json::to_string(&frame.to_value()).expect("frame serializes");

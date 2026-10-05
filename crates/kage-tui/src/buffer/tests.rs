@@ -443,6 +443,37 @@ fn push_tool_pairs(buf: &mut Buffer, start: usize, n: usize) {
 }
 
 #[test]
+fn a_duplicated_call_id_leaves_the_second_result_selectable() {
+    let mut buf = Buffer::new();
+    buf.push_tool_call("A", "shell", json!({"command": "ls"}));
+    buf.push_tool_result("A", "first out", false);
+    buf.push_tool_result("A", "needle second out", false);
+    buf.tool_topology();
+
+    assert!(
+        !buf.is_selectable(1),
+        "the paired result still hides behind its call"
+    );
+    assert!(
+        buf.is_selectable(2),
+        "a standalone second result of a reused id stays selectable"
+    );
+    assert_eq!(buf.match_indices("needle"), vec![2]);
+}
+
+#[test]
+fn standalone_result_selectable_even_before_the_topology_cache_exists() {
+    let mut buf = Buffer::new();
+    buf.push_tool_call("A", "shell", json!({"command": "ls"}));
+    buf.push_tool_result("A", "first", false);
+    buf.push_tool_result("A", "second needle", false);
+
+    assert_eq!(buf.next_match(0, "needle"), Some(2));
+    assert_eq!(buf.prev_match(3, "needle"), Some(2));
+    assert!(!buf.is_selectable(1));
+}
+
+#[test]
 fn tool_topology_tracks_new_pairs_at_the_block_cap() {
     let mut buf = Buffer::new();
     push_tool_pairs(&mut buf, 0, MAX_BLOCKS / 2);
@@ -725,6 +756,115 @@ fn compact_shifts_a_pinned_scroll_anchor() {
     }
     assert_eq!(buf.compact_to(2), 2);
     assert!(buf.is_following());
+}
+
+#[test]
+fn compact_counts_every_block_the_frontier_skips() {
+    let mut buf = Buffer::new();
+    buf.push_user("start");
+    buf.push_tool_call("A", "shell", json!({"command": "ls"}));
+    buf.push_tool_call("B", "shell", json!({"command": "x".repeat(4096)}));
+    buf.push_tool_result("A", "out".repeat(512), false);
+    buf.push_user("keep0");
+    buf.push_user("keep1");
+    let survivors: usize = buf.blocks()[4..].iter().map(|b| b.text_bytes()).sum();
+
+    assert_eq!(buf.compact_to(4), 4);
+    assert_eq!(buf.blocks().len(), 2);
+    assert_eq!(
+        buf.total_text_bytes, survivors,
+        "the skipped middle block must be counted as dropped"
+    );
+}
+
+#[test]
+fn compact_counts_skipped_blocks_across_two_jumps_in_one_pass() {
+    let mut buf = Buffer::new();
+    buf.push_tool_call("A", "shell", json!({"command": "ls"}));
+    buf.push_tool_call("B", "shell", json!({"command": "ls"}));
+    buf.push_custom("kage:notify", "junk1", false);
+    buf.push_tool_result("A", "outA", false);
+    buf.push_custom("kage:notify", "junk2", false);
+    buf.push_tool_result("B", "outB", false);
+    buf.push_user("keep0");
+    buf.push_user("keep1");
+    buf.push_user("keep2");
+    let survivors: usize = buf.blocks()[6..].iter().map(|b| b.text_bytes()).sum();
+
+    assert_eq!(buf.compact_to(3), 6);
+    assert_eq!(buf.blocks().len(), 3);
+    assert_eq!(
+        buf.total_text_bytes, survivors,
+        "both dangling results and the block between the jumps drop"
+    );
+    assert_eq!(buf.trim_scrollback(), 0, "accounting is exact afterwards");
+}
+
+#[test]
+fn trim_scrollback_keeps_call_result_pairs_intact_under_the_byte_cap() {
+    let mut buf = Buffer::new();
+    let blob = "x".repeat(2 * 1024 * 1024);
+    for i in 0..40 {
+        let id = format!("c{i}");
+        buf.push_tool_call(&id, "shell", json!({"command": "ls"}));
+        buf.push_tool_result(&id, "out", false);
+        buf.push_custom("kage:notify", blob.clone(), false);
+    }
+    assert!(buf.total_text_bytes > MAX_BYTES, "the cap must bind");
+
+    let dropped = buf.trim_scrollback();
+    assert_eq!(dropped + buf.blocks().len(), 120);
+    assert!(buf.total_text_bytes <= MAX_BYTES);
+    assert_eq!(
+        buf.blocks().len() % 3,
+        0,
+        "whole triples drop, never a bare half"
+    );
+    let topo = buf.tool_topology();
+    let blocks = buf.blocks();
+    let mut pairs = topo
+        .result_of_call
+        .iter()
+        .map(|(call, result)| (*call, *result))
+        .collect::<Vec<_>>();
+    pairs.sort_unstable();
+    assert_eq!(pairs.len(), blocks.len() / 3, "every call keeps its result");
+    for (n, (call, result)) in pairs.iter().enumerate() {
+        assert_eq!(call % 3, 0, "pair {n} kept its blob slot aligned");
+        assert_eq!(*result, call + 1, "pair {n} stayed adjacent");
+        assert!(topo.consumed_results.contains(result));
+    }
+    assert!(
+        matches!(blocks[0].as_ref(), Block::ToolCall { call_id, .. } if *call_id == format!("c{}", 40 - blocks.len() / 3)),
+        "the oldest pairs dropped whole"
+    );
+}
+
+#[test]
+fn trim_scrollback_extends_the_frontier_past_a_dangling_result_once() {
+    let mut buf = Buffer::new();
+    buf.push_tool_call("A", "shell", json!({"command": "ls"}));
+    buf.begin_assistant();
+    let chunk = "x".repeat(2 * 1024 * 1024);
+    for _ in 0..30 {
+        buf.append_assistant_delta(&chunk);
+    }
+    buf.push_tool_result("A", "out", false);
+    let blob = "y".repeat(1024 * 1024);
+    for _ in 0..20 {
+        buf.push_custom("kage:notify", blob.clone(), false);
+    }
+
+    let dropped = buf.trim_scrollback();
+    assert!(dropped >= 3, "the dangling result drops with its call");
+    let expected: usize = buf.blocks().iter().map(|b| b.text_bytes()).sum();
+    assert_eq!(buf.total_text_bytes, expected);
+    assert!(
+        buf.blocks()
+            .iter()
+            .all(|b| !matches!(b.as_ref(), Block::ToolResult { call_id, .. } if call_id == "A")),
+        "no orphaned result survives without its call"
+    );
 }
 
 #[test]

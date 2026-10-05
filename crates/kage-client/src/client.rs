@@ -1095,7 +1095,8 @@ impl Client {
     }
 
     /// Merges a `session/list` page into the directory and asks for
-    /// the next one.
+    /// the next one. An empty cursor is the end of the list, not a
+    /// page to fetch.
     fn apply_list_page(&mut self, id: u64, cwd: Option<&str>, result: Value) -> Vec<Change> {
         let page = match answer::<kage_acp_wire::ListSessionsResponse>(
             id,
@@ -1117,7 +1118,7 @@ impl Client {
                 self.state.directory.push(info);
             }
         }
-        if let Some(cursor) = page.next_cursor {
+        if let Some(cursor) = page.next_cursor.filter(|cursor| !cursor.is_empty()) {
             self.list_sessions(cwd, Some(&cursor));
         }
         vec![Change::Directory]
@@ -1593,6 +1594,55 @@ mod tests {
             } if id == "abc"
         )));
         assert!(client.state().session("s1").unwrap().permissions.is_empty());
+    }
+
+    #[test]
+    fn an_empty_cursor_ends_the_paging() {
+        let mut client = Client::new();
+        client.list_sessions(None, None);
+        let _ = client.take_outgoing();
+
+        let changes = client.handle(Frame::Success {
+            id: RequestId::Number(1),
+            result: json!({"sessions": [], "nextCursor": ""}),
+        });
+        assert_eq!(changes, vec![Change::Directory]);
+        assert!(
+            client.take_outgoing().is_empty(),
+            "an empty cursor is the end of the list"
+        );
+    }
+
+    #[test]
+    fn a_non_empty_cursor_still_pages() {
+        let mut client = Client::new();
+        client.list_sessions(None, None);
+        let _ = client.take_outgoing();
+
+        client.handle(Frame::Success {
+            id: RequestId::Number(1),
+            result: json!({"sessions": [], "nextCursor": "50"}),
+        });
+        let outgoing = client.take_outgoing();
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(
+            outgoing[0].to_value()["params"]["cursor"],
+            json!("50"),
+            "the named page is fetched"
+        );
+    }
+
+    #[test]
+    fn a_missing_cursor_ends_the_paging() {
+        let mut client = Client::new();
+        client.list_sessions(None, None);
+        let _ = client.take_outgoing();
+
+        client.handle(Frame::Success {
+            id: RequestId::Number(1),
+            result: json!({"sessions": []}),
+        });
+        assert!(client.take_outgoing().is_empty());
     }
 
     #[test]

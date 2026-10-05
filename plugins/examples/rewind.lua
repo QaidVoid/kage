@@ -14,19 +14,24 @@
 --
 -- Commands:
 --   /undo          drop the last exchange: fork back to just before
---                  your most recent prompt and restore tracked files
---                  there. Repeat to walk further back, one exchange
---                  per call.
---   /redo          re-apply the file changes the last /undo or
---                  /rewind undid (alias: /rewind-redo)
+--                  your most recent prompt and restore tracked file
+--                  changes there. Repeat to walk further back, one
+--                  exchange per call.
+--   /redo          re-apply the tracked changes the last /undo or
+--                  /rewind moved away from. Redo entries survive later
+--                  prompts and are consumed one at a time.
+--                  (alias: /rewind-redo)
 --   /rewind        pick any earlier point and fork the conversation
---                  there, restoring tracked files to that turn
+--                  there, restoring tracked changes to that turn
 --   /rewind-status how many checkpoints / redo entries are held
 --                  (alias: /undo-status)
 --
 -- Scope/limits: file snapshots use `git stash create`, so they
 -- cover tracked changes only (not untracked files) and require a git
--- work tree. The conversation fork is one-way: /redo restores files,
+-- work tree; success notices say "tracked modifications + conversation"
+-- for that reason. Redo entries reference unreferenced git stash
+-- commits, so very old ones may be pruned by git's garbage collection.
+-- The conversation fork is one-way: /redo restores files,
 -- not the un-forked conversation (that would need a host primitive
 -- kage does not expose to Lua yet). The very first exchange cannot be
 -- undone into an empty session via a fork; start a new session.
@@ -42,12 +47,22 @@ local files = caps.exec
 
 -- Per-turn checkpoints in chronological order: each is
 -- { id = <entry id at turn end>, sha = <git stash sha or false> }.
--- `redo` holds stash shas of states a /undo or /rewind moved away from.
+-- `redo` holds stash shas of states a /undo or /rewind moved away
+-- from; it survives later turns so a prompt between /undo and /redo
+-- does not wipe it.
 local checkpoints = {}
 local redo = {}
 
+local warned_no_git = false
 local function git(args)
-    local r = kage.exec({ cmd = 'git', args = args })
+    local ok, r = pcall(kage.exec, { cmd = 'git', args = args })
+    if not ok then
+        if not warned_no_git then
+            warned_no_git = true
+            kage.notify('rewind: git unavailable; file checkpoints disabled')
+        end
+        return nil, nil
+    end
     if r.code ~= 0 then
         return nil, (r.stderr ~= '' and r.stderr or r.stdout)
     end
@@ -112,7 +127,6 @@ local function undo_target()
 end
 
 kage.on('turn_end', function()
-    redo = {}
     if not files or not in_git_repo() then return end
     local id = last_entry_id()
     if not id then return end
@@ -134,7 +148,7 @@ kage.register_command({
             if pre then redo[#redo + 1] = pre end
             local cp = checkpoint_for(at)
             if cp and restore(cp.sha) then
-                restored = 'files + conversation'
+                restored = 'tracked modifications + conversation'
             end
         end
         kage.session.fork_to(at)
@@ -176,7 +190,7 @@ kage.register_command({
             if pre then redo[#redo + 1] = pre end
             local cp = checkpoint_for(at)
             if cp and restore(cp.sha) then
-                restored = 'files + conversation'
+                restored = 'tracked modifications + conversation'
             end
         end
 
@@ -189,7 +203,7 @@ kage.register_command({
 kage.register_command({
     name = 'redo',
     aliases = { 'rewind-redo' },
-    description = 'Re-apply the file changes the last /undo or /rewind undid',
+    description = 'Re-apply the tracked changes the last /undo or /rewind moved away from (survives later prompts)',
     handler = function()
         if not files then return 'redo unavailable (exec not granted)' end
         local sha = table.remove(redo)
@@ -198,7 +212,7 @@ kage.register_command({
             return 'nothing to redo'
         end
         if restore(sha) then
-            kage.notify('redo: re-applied file changes')
+            kage.notify('redo: re-applied tracked changes')
             return 're-applied'
         end
         return 'redo failed'

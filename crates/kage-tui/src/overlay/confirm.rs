@@ -72,8 +72,8 @@ impl ConfirmOverlay {
 
 impl OverlayWidget for ConfirmOverlay {
     fn measure(&self, available: Rect) -> Rect {
-        let width = available.width.clamp(30, 60);
-        let height: u16 = 7;
+        let width = available.width.clamp(30, 60).min(available.width);
+        let height = 7.min(available.height);
         let x = available.x + available.width.saturating_sub(width) / 2;
         let y = available.y + available.height.saturating_sub(height) / 2;
         Rect::new(x, y, width, height)
@@ -258,6 +258,23 @@ mod tests {
         let mut c = ConfirmOverlay::new("Save?", "unsaved changes");
         let lines = snapshot(&mut c, Rect::new(0, 0, 32, 12));
         assert!(lines.iter().any(|l| l.contains("Save?")));
+    }
+
+    #[test]
+    fn measure_stays_inside_a_tiny_viewport() {
+        let c = ConfirmOverlay::new("Save?", "unsaved changes");
+        let available = Rect::new(0, 0, 12, 4);
+        let modal = c.measure(available);
+        assert!(modal.right() <= available.right(), "{modal:?}");
+        assert!(modal.bottom() <= available.bottom(), "{modal:?}");
+        let mut buf = Buffer::empty(available);
+        let theme = crate::theme::Theme::default();
+        let ctx = OverlayCtx {
+            theme: &theme,
+            viewport: available,
+        };
+        let mut c = c;
+        c.render(modal, &mut buf, &ctx);
     }
 
     #[test]

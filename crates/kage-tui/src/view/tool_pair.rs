@@ -14,8 +14,8 @@ use crate::buffer::Block;
 /// Renders one [`Block::ToolCall`] paired with its matching
 /// [`Block::ToolResult`] as a finished tool row: state bullet, verb,
 /// target, duration and a body chosen by the tool's kind. An
-/// interrupted call shows the last progress it streamed instead of the
-/// cancellation text.
+/// interrupted call shows the last progress it streamed, or the
+/// result's cancellation text when nothing streamed.
 ///
 /// Unpaired tool calls (still running) and unpaired tool results stay
 /// on the standalone widgets.
@@ -31,13 +31,13 @@ pub struct ToolPairBlockWidget {
 }
 
 impl ToolPairBlockWidget {
-    /// Construct a widget from a paired call and result.
-    ///
-    /// Returns `None` when either block is the wrong variant; callers
-    /// who already verified the pair from `Buffer` should `unwrap()`.
+    /// Construct a widget from a paired call and result. `from_pair`
+    /// verifies the pair itself: both blocks must be the right variant
+    /// and carry the same call id, else `None`.
     #[must_use]
     pub fn from_pair(call: &Block, result: &Block) -> Option<Self> {
         let Block::ToolCall {
+            call_id,
             name,
             input,
             phase,
@@ -50,6 +50,7 @@ impl ToolPairBlockWidget {
             return None;
         };
         let Block::ToolResult {
+            call_id: result_id,
             output,
             duration_ms,
             ..
@@ -57,12 +58,15 @@ impl ToolPairBlockWidget {
         else {
             return None;
         };
+        if call_id != result_id {
+            return None;
+        }
         Some(Self {
             name: name.clone(),
             input: Arc::clone(input),
             phase: *phase,
             folded: *folded,
-            output: if *phase == ToolPhase::Interrupted {
+            output: if *phase == ToolPhase::Interrupted && !progress.is_empty() {
                 progress.clone()
             } else {
                 output.clone()
@@ -147,6 +151,33 @@ mod tests {
     fn from_pair_rejects_non_tool_blocks() {
         let user = Block::User { text: "hi".into() };
         assert!(ToolPairBlockWidget::from_pair(&user, &user).is_none());
+    }
+
+    #[test]
+    fn from_pair_verifies_the_call_ids() {
+        let mut buf = Buffer::new();
+        buf.push_tool_call("c1", "read", json!({"path": "a"}));
+        buf.push_tool_call("c2", "read", json!({"path": "b"}));
+        buf.push_tool_result("c2", "b", false);
+        let blocks = buf.blocks();
+        assert!(ToolPairBlockWidget::from_pair(&blocks[0], &blocks[2]).is_none());
+        let paired = ToolPairBlockWidget::from_pair(&blocks[1], &blocks[2]).unwrap();
+        let rows = rows_of(&paired.lines(80, &ctx(&Theme::default())));
+        assert!(rows[0].contains("Read b"), "{rows:?}");
+    }
+
+    #[test]
+    fn an_interrupted_pair_shows_the_cancellation_text_without_progress() {
+        let mut buf = Buffer::new();
+        buf.push_tool_call("c1", "shell", json!({"command": "seq 8"}));
+        buf.push_tool_result("c1", kage_core::event::TOOL_CANCELLED_TEXT, true);
+        let paired = ToolPairBlockWidget::from_pair(&buf.blocks()[0], &buf.blocks()[1]).unwrap();
+        let rows = rows_of(&paired.lines(80, &ctx(&Theme::default())));
+        assert!(
+            rows.iter()
+                .any(|r| r.ends_with(kage_core::event::TOOL_CANCELLED_TEXT)),
+            "{rows:?}"
+        );
     }
 
     #[test]

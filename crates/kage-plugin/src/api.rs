@@ -20,6 +20,9 @@
 //!   `kage.host_version()` the host crate version string;
 //!   `kage.requires{ api = N }` raises at load time when the host is
 //!   older than the generation the plugin needs.
+//! * `kage.json.decode(text)` / `kage.json.encode(value)` convert
+//!   between JSON text and Lua tables. Both directions cap table
+//!   nesting at 128 levels and raise past it.
 //! * `kage.api` holds the low-level primitives (autocmds today) that the
 //!   embedded Lua stdlib builds its friendlier aliases on.
 
@@ -283,8 +286,25 @@ async fn sleep_ms(lua: Lua, ms: i64) -> mlua::Result<()> {
 ///
 /// JSON arrays become 1-indexed Lua tables. Object keys are stringified.
 /// Numeric values that fit in `i64` are returned as integers; anything
-/// else falls through to `f64`.
+/// else falls through to `f64`. Values nested deeper than
+/// [`DECODE_DEPTH_MAX`] raise instead of recursing, mirroring the
+/// encode-side cap.
 pub fn json_to_lua(lua: &Lua, value: &serde_json::Value) -> mlua::Result<Value> {
+    json_to_lua_at(lua, value, 0)
+}
+
+/// Cap on [`json_to_lua`] nesting, matching serde_json's own recursion
+/// limit. Current inputs all come from serde parsers; the cap is
+/// defense in depth for a future caller passing a programmatically
+/// built deep value.
+const DECODE_DEPTH_MAX: usize = 128;
+
+fn json_to_lua_at(lua: &Lua, value: &serde_json::Value, depth: usize) -> mlua::Result<Value> {
+    if depth >= DECODE_DEPTH_MAX {
+        return Err(mlua::Error::external(format!(
+            "kage.json.decode: nesting exceeds cap of {DECODE_DEPTH_MAX}"
+        )));
+    }
     Ok(match value {
         serde_json::Value::Null => Value::Nil,
         serde_json::Value::Bool(b) => Value::Boolean(*b),
@@ -299,14 +319,14 @@ pub fn json_to_lua(lua: &Lua, value: &serde_json::Value) -> mlua::Result<Value> 
         serde_json::Value::Array(items) => {
             let table = lua.create_table()?;
             for (idx, item) in items.iter().enumerate() {
-                table.set(idx + 1, json_to_lua(lua, item)?)?;
+                table.set(idx + 1, json_to_lua_at(lua, item, depth + 1)?)?;
             }
             Value::Table(table)
         }
         serde_json::Value::Object(map) => {
             let table = lua.create_table()?;
             for (k, v) in map {
-                table.set(k.as_str(), json_to_lua(lua, v)?)?;
+                table.set(k.as_str(), json_to_lua_at(lua, v, depth + 1)?)?;
             }
             Value::Table(table)
         }
@@ -643,5 +663,27 @@ mod tests {
             .unwrap();
         let err = lua_to_json(mlua::Value::Table(table)).unwrap_err();
         assert!(err.to_string().contains("nesting"), "{err}");
+    }
+
+    #[test]
+    fn deeply_nested_json_errors_instead_of_overflowing() {
+        let lua = Lua::new();
+        let mut deep = serde_json::json!(1);
+        for _ in 0..200 {
+            deep = serde_json::json!({ "n": deep });
+        }
+        let err = json_to_lua(&lua, &deep).unwrap_err();
+        assert!(err.to_string().contains("nesting"), "{err}");
+    }
+
+    #[test]
+    fn json_nesting_under_the_cap_still_decodes() {
+        let lua = Lua::new();
+        let mut nested = serde_json::json!(1);
+        for _ in 0..100 {
+            nested = serde_json::json!({ "n": nested });
+        }
+        let value = json_to_lua(&lua, &nested).unwrap();
+        assert!(matches!(value, mlua::Value::Table(_)));
     }
 }

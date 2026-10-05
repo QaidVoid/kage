@@ -27,8 +27,19 @@ pub enum Step {
     Decline,
 }
 
+/// What an `ask_user_question` input carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Questions {
+    /// A parsed flow of questions to ask.
+    Flow(QuestionFlow),
+    /// The input carries no questions.
+    Absent,
+    /// The input carries questions that fail to parse.
+    Invalid,
+}
+
 /// The questions of one call and the answers given so far.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuestionFlow {
     questions: Vec<Question>,
     /// The question on screen.
@@ -41,18 +52,26 @@ pub struct QuestionFlow {
 }
 
 impl QuestionFlow {
-    /// The questions an `ask_user_question` call's `input` carries, or
-    /// `None` when it carries none.
+    /// The questions an `ask_user_question` call's `input` carries: a
+    /// flow when they parse, [`Questions::Absent`] when the input
+    /// carries none, [`Questions::Invalid`] when they fail to parse.
     #[must_use]
-    pub fn from_input(input: &Value) -> Option<Self> {
-        let questions: Vec<Question> =
-            serde_json::from_value(input.get("questions")?.clone()).ok()?;
-        let first = questions.first()?.options.len();
-        Some(Self {
+    pub fn from_input(input: &Value) -> Questions {
+        let Some(raw) = input.get("questions") else {
+            return Questions::Absent;
+        };
+        let Ok(questions) = serde_json::from_value::<Vec<Question>>(raw.clone()) else {
+            return Questions::Invalid;
+        };
+        let Some(first) = questions.first() else {
+            return Questions::Absent;
+        };
+        let picked = vec![false; first.options.len()];
+        Questions::Flow(Self {
             questions,
             at: 0,
             selected: 0,
-            picked: vec![false; first],
+            picked,
             answers: Vec::new(),
         })
     }
@@ -126,14 +145,14 @@ impl QuestionFlow {
 
     /// Act on the highlighted row: pick a choice (toggle one, for a
     /// question that allows several), open the own-words field, or
-    /// finish picking.
+    /// finish picking. Done with nothing picked stays.
     fn choose(&mut self) -> Step {
         let own = self.own_row();
         if self.selected == own {
             return Step::OwnWords;
         }
         if self.selected > own {
-            let picked = self
+            let picked: Vec<String> = self
                 .question()
                 .options
                 .iter()
@@ -141,6 +160,9 @@ impl QuestionFlow {
                 .filter(|(_, on)| **on)
                 .map(|(option, _)| option.label.clone())
                 .collect();
+            if picked.is_empty() {
+                return Step::Stay;
+            }
             return self.answer(picked);
         }
         if self.question().multi_select {
@@ -247,13 +269,25 @@ mod tests {
     use super::*;
 
     fn flow(multi: bool) -> QuestionFlow {
-        QuestionFlow::from_input(&serde_json::json!({"questions": [
+        match QuestionFlow::from_input(&serde_json::json!({"questions": [
             {"header": "Auth", "question": "Which auth?", "multi_select": multi,
              "options": [{"label": "OAuth", "description": "a"}, {"label": "Keys", "description": "b"}]},
             {"header": "Store", "question": "Where?",
              "options": [{"label": "Disk"}, {"label": "Memory"}]},
-        ]}))
-        .unwrap()
+        ]})) {
+            Questions::Flow(flow) => flow,
+            other => panic!("a flow, got {other:?}"),
+        }
+    }
+
+    fn single_multi_flow() -> QuestionFlow {
+        match QuestionFlow::from_input(&serde_json::json!({"questions": [
+            {"header": "Format", "question": "Which formats?", "multi_select": true,
+             "options": [{"label": "JSON"}, {"label": "TOML"}]},
+        ]})) {
+            Questions::Flow(flow) => flow,
+            other => panic!("a flow, got {other:?}"),
+        }
     }
 
     #[test]
@@ -291,5 +325,41 @@ mod tests {
         assert_eq!(flow.handle_key(KeyCode::Char('3')), Step::OwnWords);
         assert_eq!(flow.own_words("  "), Step::Stay, "an empty answer waits");
         assert_eq!(flow.handle_key(KeyCode::Esc), Step::Decline);
+    }
+
+    #[test]
+    fn done_with_zero_picks_stays_until_one_is_picked() {
+        let mut flow = single_multi_flow();
+        flow.handle_key(KeyCode::Char('4'));
+        assert_eq!(
+            flow.handle_key(KeyCode::Enter),
+            Step::Stay,
+            "done with zero picks stays"
+        );
+        for _ in 0..3 {
+            flow.handle_key(KeyCode::Up);
+        }
+        assert_eq!(flow.handle_key(KeyCode::Char(' ')), Step::Stay);
+        flow.handle_key(KeyCode::Char('4'));
+        assert_eq!(
+            flow.handle_key(KeyCode::Enter),
+            Step::Done(vec![vec!["JSON".into()]])
+        );
+    }
+
+    #[test]
+    fn from_input_tells_absent_from_invalid() {
+        assert_eq!(
+            QuestionFlow::from_input(&serde_json::json!({})),
+            Questions::Absent
+        );
+        assert_eq!(
+            QuestionFlow::from_input(&serde_json::json!({"questions": []})),
+            Questions::Absent
+        );
+        assert_eq!(
+            QuestionFlow::from_input(&serde_json::json!({"questions": [{"header": 1}]})),
+            Questions::Invalid
+        );
     }
 }

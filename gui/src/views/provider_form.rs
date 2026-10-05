@@ -22,7 +22,7 @@ use gpui_kit::{
 use kage_client::wire::{ConfigTestResult, ProbeModel, ProviderProbe};
 use serde_json::{Map, Value, json};
 
-use crate::store::Store;
+use crate::store::{Store, StoreHandle as _};
 use crate::theme::{FONT_MONO, FS_XS, Palette, R_FULL};
 use crate::views::config_forms::{
     Pairs, Saving, field, form_head, icon_button, preview_block, segments, text_field, toml_preview,
@@ -269,10 +269,7 @@ impl ProviderForm {
     /// ones the table lacks.
     fn test(&mut self, fill: bool, cx: &mut Context<Self>) {
         let probe = self.probe(cx);
-        let id = self.store.update(cx, |store, cx| {
-            cx.notify();
-            store.config_test(probe)
-        });
+        let id = self.store.act(cx, |store| store.config_test(probe));
         self.probing = Some((id, fill));
         self.tested = None;
         cx.notify();
@@ -420,8 +417,7 @@ impl ProviderForm {
             .then(|| Self::read(&self.key, cx))
             .filter(|key| !key.is_empty());
         let provider = self.provider_id(cx);
-        let id = self.store.update(cx, |store, cx| {
-            cx.notify();
+        let id = self.store.act(cx, |store| {
             let path: Vec<&str> = path.iter().map(String::as_str).collect();
             let id = store.config_set(&path, value);
             if let Some(key) = key {
@@ -442,8 +438,7 @@ impl ProviderForm {
         } else {
             vec!["providers".into(), "custom".into(), id]
         };
-        let request = self.store.update(cx, |store, cx| {
-            cx.notify();
+        let request = self.store.act(cx, |store| {
             let path: Vec<&str> = path.iter().map(String::as_str).collect();
             store.config_set(&path, None)
         });
@@ -455,10 +450,7 @@ impl ProviderForm {
     /// store.
     fn forget_key(&mut self, cx: &mut Context<Self>) {
         let provider = self.provider_id(cx);
-        self.store.update(cx, |store, cx| {
-            store.save_key(&provider, None);
-            cx.notify();
-        });
+        self.store.act(cx, |store| store.save_key(&provider, None));
         "missing".clone_into(&mut self.key_now);
         cx.notify();
     }

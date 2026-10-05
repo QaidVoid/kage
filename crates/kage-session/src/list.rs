@@ -4,8 +4,9 @@
 //! plus the most recent user prompt, and returns the resulting summaries
 //! sorted by creation time (newest first).
 //!
-//! A summary needs only the header, the entry after it, and the latest
-//! entry, user message and title. So each file is scanned for line
+//! A summary needs only the header and the latest entry, user message
+//! and title; the agent marker is read through the same whole-file
+//! scan every reader shares. So each file is scanned for line
 //! boundaries and entry tags without decoding, and only those few lines
 //! are decoded, found by walking back from the end.
 //!
@@ -32,23 +33,47 @@ pub const AGENT_ENTRY_KIND: &str = "kage:agent";
 
 /// Whether the session file at `path` records an agent an `agent` or
 /// `swarm` call started: it carries an [`AGENT_ENTRY_KIND`] entry,
-/// right after the header, or after the history a forked child copied.
-/// Only custom entry lines are decoded. An unreadable file is not one.
+/// right after the header, or after the history a forked child
+/// copied. Only custom entry lines are decoded. An unreadable file is
+/// not one.
 #[must_use]
 pub fn is_agent_session(path: &Path) -> bool {
+    agent_session_name(path).is_some()
+}
+
+/// The one session-identity predicate. `Some` names the agent
+/// definition when a session file records an `agent` or `swarm` call
+/// start: its [`AGENT_ENTRY_KIND`] entry, wherever the entry sits,
+/// late in a forked child's copied history included. `None` when the
+/// file records a user session or cannot be read. The summary,
+/// [`is_agent_session`] and `find_last` all read identity through
+/// this one scan.
+pub(crate) fn agent_session_name(path: &Path) -> Option<String> {
     let Ok(file) = File::open(path) else {
-        return false;
+        return None;
     };
     BufReader::new(file)
         .split(b'\n')
         .map_while(Result::ok)
         .filter(|line| line.starts_with(br#"{"type":"custom""#))
-        .any(|line| {
-            matches!(
-                serde_json::from_slice::<SessionEntry>(&line),
-                Ok(SessionEntry::Custom(custom)) if custom.kind == AGENT_ENTRY_KIND
-            )
+        .find_map(|line| match serde_json::from_slice::<SessionEntry>(&line) {
+            Ok(SessionEntry::Custom(custom)) if is_agent_marker(&custom) => Some(
+                custom
+                    .data
+                    .get("agent")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            ),
+            _ => None,
         })
+}
+
+/// Whether one custom entry marks the session an `agent` or `swarm`
+/// call started: the entry-level form the file scan and replay share.
+#[must_use]
+pub(crate) fn is_agent_marker(custom: &crate::Custom) -> bool {
+    custom.kind == AGENT_ENTRY_KIND
 }
 
 /// Kind of the [`SessionEntry::Custom`] entry that records a swarm
@@ -87,7 +112,8 @@ pub struct SessionSummary {
     /// back to [`Self::last_user_prompt`] for a label.
     pub title: Option<String>,
     /// Agent definition name when an `agent` call started this session,
-    /// read from the [`AGENT_ENTRY_KIND`] entry right after the header.
+    /// read from the [`AGENT_ENTRY_KIND`] entry wherever it sits, so a
+    /// forked child whose marker follows its copied history counts too.
     pub agent: Option<String>,
 }
 
@@ -274,13 +300,11 @@ fn summarize_from(path: &Path, before: Option<(u64, Option<String>)>) -> Option<
     let mut buf = Vec::new();
     let mut consumed = 0u64;
 
-    // Head pass: the header, the agent marker and an early title.
+    // Head pass: the header and an early title.
     // Titles are appended when generated, so for a long session the
     // only one usually sits right after the first exchange.
     let mut header = None;
-    let mut agent = None;
     let mut head_title = None;
-    let mut agent_pending = true;
     while consumed < HEAD_PROBE {
         buf.clear();
         let Ok(n) = file.read_until(b'\n', &mut buf) else {
@@ -301,20 +325,6 @@ fn summarize_from(path: &Path, before: Option<(u64, Option<String>)>) -> Option<
             }
             continue;
         }
-        if agent_pending && let Ok(entry) = serde_json::from_slice::<SessionEntry>(line) {
-            agent_pending = false;
-            if let SessionEntry::Custom(c) = entry
-                && c.kind == AGENT_ENTRY_KIND
-            {
-                agent = Some(
-                    c.data
-                        .get("agent")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                );
-            }
-        }
         if leading_tag(line) == Some(b"title")
             && let Ok(SessionEntry::Title(t)) = serde_json::from_slice(line)
         {
@@ -322,6 +332,7 @@ fn summarize_from(path: &Path, before: Option<(u64, Option<String>)>) -> Option<
         }
     }
     let header = header?;
+    let agent = agent_session_name(path);
 
     // The latest title can sit anywhere: generated after a first
     // exchange whose tool output pushed it past the head probe, or set
@@ -790,8 +801,58 @@ mod tests {
                 .clone()
         };
         assert_eq!(agent_of("agent.jsonl").as_deref(), Some("explore"));
-        assert_eq!(agent_of("late.jsonl"), None);
+        assert_eq!(
+            agent_of("late.jsonl").as_deref(),
+            Some("explore"),
+            "the marker after other entries still names the agent"
+        );
         assert_eq!(agent_of("plain.jsonl"), None);
+    }
+
+    #[test]
+    fn a_fork_child_s_late_marker_names_its_agent_and_marks_the_session() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("forked.jsonl");
+        let header = Header {
+            version: FORMAT_VERSION,
+            session: SessionId::new(),
+            id: EntryId::new(),
+            ts: Utc::now(),
+            cwd: PathBuf::from("/work"),
+            model: "anthropic:claude".into(),
+            system_prompt: "explore".into(),
+            parent_session: Some(SessionId::new()),
+            parent_entry: None,
+        };
+        let marker = SessionEntry::Custom(Custom {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            kind: AGENT_ENTRY_KIND.into(),
+            data: serde_json::json!({ "agent": "explore", "description": "map exports" }),
+        });
+        let mut writer = SessionWriter::create(&path, header).unwrap();
+        // The shape a forked child is written in: the copied history
+        // first, then the fork notice, then the marker appended after.
+        writer
+            .append(&message(Role::User, text("copied ask")))
+            .unwrap();
+        writer
+            .append(&message(Role::Assistant, text("copied reply")))
+            .unwrap();
+        writer
+            .append(&SessionEntry::Label(Label {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                text: "forked from the parent".into(),
+                anchor: EntryId::new(),
+            }))
+            .unwrap();
+        writer.append(&marker).unwrap();
+        drop(writer);
+
+        let summary = summarize_one(&path).unwrap();
+        assert_eq!(summary.agent.as_deref(), Some("explore"));
+        assert!(is_agent_session(&path));
     }
 
     /// The summary a full decode of every entry gives, to check that
@@ -805,12 +866,10 @@ mod tests {
         };
         let mut updated_at = header.ts;
         let (mut last_user_prompt, mut title, mut agent) = (None, None, None);
-        let mut index = 1;
         for entry in entries {
-            index += 1;
             updated_at = entry.ts();
             match entry {
-                SessionEntry::Custom(c) if index == 2 && c.kind == AGENT_ENTRY_KIND => {
+                SessionEntry::Custom(c) if is_agent_marker(&c) => {
                     agent = Some(c.data["agent"].as_str().unwrap_or_default().to_owned());
                 }
                 SessionEntry::Message(m) if m.message.role == Role::User => {

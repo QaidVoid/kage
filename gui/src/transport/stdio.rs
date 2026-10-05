@@ -47,6 +47,9 @@ struct Shared {
     writer: Mutex<Option<std::sync::mpsc::Sender<Frame>>>,
     /// The child, so a drop can kill it.
     child: Mutex<Option<Child>>,
+    /// The event stream, so a send into a dead child can report it
+    /// instead of dropping the frame.
+    events: Mutex<Option<EventSender>>,
 }
 
 /// The stdio transport to a spawned `kage rpc`.
@@ -208,49 +211,76 @@ impl Transport for StdioTransport {
         let stdin = child.stdin.take().expect("spawned with piped stdin");
         let stdout = child.stdout.take().expect("spawned with piped stdout");
         *self.shared.child.lock().unwrap() = Some(child);
+        *self.shared.events.lock().unwrap() = Some(events.clone());
 
         let (writer, reader) = std::sync::mpsc::channel::<Frame>();
         *self.shared.writer.lock().unwrap() = Some(writer);
 
         let _ = events.send_blocking(Event::State(State::Connecting));
-        thread::Builder::new()
+        let shared = Arc::clone(&self.shared);
+        let spawned = thread::Builder::new()
             .name("kage-stdio-writer".to_owned())
             .spawn(move || {
                 let mut stdin = stdin;
                 for frame in reader {
                     let line = serde_json::to_string(&frame.to_value()).expect("frame serializes");
                     if writeln!(stdin, "{line}").is_err() || stdin.flush().is_err() {
+                        // The child is gone; senders learn at once.
+                        *shared.writer.lock().unwrap() = None;
                         break;
                     }
                 }
-            })
-            .expect("writer thread spawns");
+            });
+        if let Err(error) = spawned {
+            self.shutdown();
+            let _ = events.send_blocking(Event::State(State::Refused(format!(
+                "cannot start the io threads: {error}"
+            ))));
+            return;
+        }
 
-        thread::Builder::new()
+        let spawned = thread::Builder::new()
             .name("kage-stdio-reader".to_owned())
-            .spawn(move || {
-                let _ = events.send_blocking(Event::State(State::Connected));
-                let mut reader = BufReader::new(stdout);
-                while let Some(line) = next_line(&mut reader) {
-                    let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-                        continue;
-                    };
-                    let Some(frame) = Frame::parse(&value) else {
-                        continue;
-                    };
-                    if events.send_blocking(Event::Frame(frame)).is_err() {
-                        break;
+            .spawn({
+                let events = events.clone();
+                move || {
+                    let _ = events.send_blocking(Event::State(State::Connected));
+                    let mut reader = BufReader::new(stdout);
+                    while let Some(line) = next_line(&mut reader) {
+                        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                            continue;
+                        };
+                        let Some(frame) = Frame::parse(&value) else {
+                            continue;
+                        };
+                        if events.send_blocking(Event::Frame(frame)).is_err() {
+                            break;
+                        }
                     }
+                    let _ = events.send_blocking(Event::State(State::Closed));
                 }
-                let _ = events.send_blocking(Event::State(State::Closed));
-            })
-            .expect("reader thread spawns");
+            });
+        if let Err(error) = spawned {
+            self.shutdown();
+            let _ = events.send_blocking(Event::State(State::Refused(format!(
+                "cannot start the io threads: {error}"
+            ))));
+        }
     }
 
     fn send(&self, frame: Frame) {
         let writer = self.shared.writer.lock().unwrap().clone();
-        if let Some(writer) = writer {
-            let _ = writer.send(frame);
+        match writer {
+            Some(writer) => {
+                let _ = writer.send(frame);
+            }
+            None => {
+                // No child to take the frame: say so instead of
+                // dropping it on the floor.
+                if let Some(events) = self.shared.events.lock().unwrap().clone() {
+                    let _ = events.try_send(Event::State(State::Closed));
+                }
+            }
         }
     }
 
@@ -293,6 +323,17 @@ printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id"
 
     /// Writes the stub script and returns its path.
     fn stub_script() -> PathBuf {
+        script(STUB)
+    }
+
+    /// A stub engine that exits at once: the link dies before any
+    /// frame can flow.
+    fn exiting_script() -> PathBuf {
+        script("#!/bin/sh\nexit 0\n")
+    }
+
+    /// Writes `contents` as an executable script and returns its path.
+    fn script(contents: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|since| since.subsec_nanos())
@@ -303,7 +344,7 @@ printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id"
             std::process::id()
         ));
         let mut file = std::fs::File::create(&path).unwrap();
-        file.write_all(STUB.as_bytes()).unwrap();
+        file.write_all(contents.as_bytes()).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -429,6 +470,32 @@ printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id"
             next_state(&rx),
             State::Refused(reason) if reason.contains("cannot spawn")
         ));
+    }
+
+    #[test]
+    fn a_send_into_a_dead_child_is_reported_not_swallowed() {
+        let script = exiting_script();
+        let (events, rx) = async_channel::unbounded();
+        let mut transport = StdioTransport::new(Config {
+            program: script.display().to_string(),
+            args: vec![],
+        });
+        transport.start(events);
+        assert_eq!(next_state(&rx), State::Connecting);
+        assert_eq!(next_state(&rx), State::Connected);
+        assert_eq!(next_state(&rx), State::Closed, "the child exited at once");
+
+        transport.close();
+        transport.send(Frame::Notification {
+            method: "probe".into(),
+            params: serde_json::json!({}),
+        });
+        assert_eq!(
+            next_state(&rx),
+            State::Closed,
+            "the send into the dead child says so"
+        );
+        let _ = std::fs::remove_file(&script);
     }
 
     #[test]

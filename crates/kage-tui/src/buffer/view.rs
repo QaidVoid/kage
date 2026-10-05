@@ -761,20 +761,44 @@ impl Buffer {
     }
 
     /// Whether `idx` is something `[` / `]` should land on. Every
-    /// block kind is selectable except a `ToolResult` whose matching
-    /// `ToolCall` exists earlier in the buffer (the renderer merges
-    /// the pair into one composite, so landing on the result would
-    /// look like a no-op visual) and a call grouped under another
-    /// `Explored` head.
+    /// block kind is selectable except a `ToolResult` merged into its
+    /// call (the renderer paints the pair as one composite, so
+    /// landing on the result would look like a no-op visual) and a
+    /// call grouped under another `Explored` head. Both are decided
+    /// by the cached topology, so a call id reused across turns only
+    /// hides the one result that actually paired.
     pub(crate) fn is_selectable(&self, idx: usize) -> bool {
         match self.blocks.get(idx).map(Arc::as_ref) {
-            Some(Block::ToolResult { call_id, .. }) => !self.blocks[..idx].iter().any(
-                |b| matches!(b.as_ref(), Block::ToolCall { call_id: cid, .. } if cid == call_id),
-            ),
+            Some(Block::ToolResult { .. }) => !self.result_consumed(idx),
             Some(Block::ToolCall { .. }) => !self.is_grouped_member(idx),
             Some(_) => true,
             None => false,
         }
+    }
+
+    /// Whether the result at `idx` merged into its call, per the
+    /// cached topology. Mirrors [`ToolTopology::build`]'s one-shot
+    /// pairing when the cache has not been built for the current
+    /// block list yet: only the newest unpaired earlier call of the
+    /// id consumes this result.
+    fn result_consumed(&self, idx: usize) -> bool {
+        if let Some((key, topo)) = &self.tool_topology
+            && *key == self.topology_key()
+        {
+            return topo.consumed_results.contains(&idx);
+        }
+        let Some(Block::ToolResult { call_id, .. }) = self.blocks.get(idx).map(Arc::as_ref) else {
+            return false;
+        };
+        let mut open = false;
+        for block in &self.blocks[..idx] {
+            match block.as_ref() {
+                Block::ToolCall { call_id: cid, .. } if cid == call_id => open = true,
+                Block::ToolResult { call_id: cid, .. } if cid == call_id => open = false,
+                _ => {}
+            }
+        }
+        open
     }
 
     pub(crate) fn last_selectable_index(&self) -> Option<usize> {

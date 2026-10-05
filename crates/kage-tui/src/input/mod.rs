@@ -231,33 +231,62 @@ impl PasteBlob {
 }
 
 /// One view's unsent prompt: its text and cursor, undo history,
-/// collapsed pastes, attached images and shell mode. Each agent view
-/// keeps its own, swapped in with [`InputState::swap_draft`].
+/// collapsed pastes, attached images, shell mode, and the yank
+/// registers. Everything here is view-local, so a yank or a kill in
+/// one agent's view cannot leak into another's. Each agent view
+/// keeps its own, swapped in whole with [`InputState::swap_draft`].
 #[derive(Debug)]
 pub(crate) struct Draft {
     text: String,
     cursor: usize,
     shell: bool,
     undo_stack: Vec<EditSnapshot>,
+    /// True when the live text is no longer what the undo stack's
+    /// top snapshot captured, so the next typed char must baseline a
+    /// fresh undo unit.
+    undo_dirty: bool,
     redo_stack: Vec<EditSnapshot>,
     pastes: Vec<PasteBlob>,
     next_paste_id: u32,
     attached: Vec<(u32, crate::image::AttachedImage)>,
     next_image_id: u32,
+    /// Last yanked / cut text. Inserted by `p` / `P`.
+    register: String,
+    /// `true` when `register` was filled by a linewise op (`dd`, `yy`,
+    /// etc.), so `p` pastes on a new line below the cursor instead of
+    /// inserting inline.
+    register_linewise: bool,
+    /// Emacs kill ring. Ctrl+W / Ctrl+U / Ctrl+K and the Alt word
+    /// kills push here; Ctrl+Y yanks the most recent entry. Capped at
+    /// [`KILL_RING_MAX`]; empty kills are not recorded.
+    kill_ring: Vec<String>,
 }
 
 impl Default for Draft {
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Draft {
+    /// An empty draft. Id counters start at 1 so the first marker or
+    /// placeholder is `#1`; the empty text is not yet on the undo
+    /// stack, so the first typed char baselines a unit.
+    fn new() -> Self {
         Self {
             text: String::new(),
             cursor: 0,
             shell: false,
             undo_stack: Vec::new(),
+            undo_dirty: true,
             redo_stack: Vec::new(),
             pastes: Vec::new(),
             next_paste_id: 1,
             attached: Vec::new(),
             next_image_id: 1,
+            register: String::new(),
+            register_linewise: false,
+            kill_ring: Vec::new(),
         }
     }
 }
@@ -302,8 +331,9 @@ impl Operator {
 #[derive(Debug)]
 pub struct InputState {
     mode: Mode,
-    text: String,
-    cursor: usize,
+    /// Per-view editor content, swapped as a whole between views. See
+    /// [`Draft`].
+    content: Draft,
     pending: Option<char>,
     history: Vec<String>,
     history_cursor: Option<usize>,
@@ -312,10 +342,6 @@ pub struct InputState {
     /// top of the draft takes it back before it walks the history.
     recallable: bool,
     focused_pane: Pane,
-    /// Shell-escape mode: `!` on an empty prompt arms it; the next
-    /// submit runs the line as a shell command instead of a prompt.
-    /// Backspace on the empty prompt disarms it.
-    shell: bool,
     /// Vim operator awaiting a motion or doubled key. When set, the
     /// next keystroke either resolves the operator (motion / linewise
     /// `dd`-style / Esc cancel) or extends the count.
@@ -324,81 +350,43 @@ pub struct InputState {
     /// motion. `Some(3)` after pressing `3`, `Some(15)` after `15`.
     /// Multiplies whatever follows; reset after the action runs.
     pending_count: Option<usize>,
-    /// `true` after `r` was pressed; the next character literally
-    /// replaces the char at the cursor.
-    awaiting_replace: bool,
-    /// Last yanked / cut text. Inserted by `p` / `P`.
-    register: String,
-    /// `true` when `register` was filled by a linewise op (`dd`, `yy`,
-    /// etc.), so `p` pastes on a new line below the cursor instead of
-    /// inserting inline.
-    register_linewise: bool,
+    /// Digits typed after an operator (`d2` of `3d2w`). Multiplies
+    /// [`Self::pending_count`] when the operator resolves, so `3d2w`
+    /// acts on 6 words instead of 32.
+    pending_op_count: Option<usize>,
+    /// Count stored with the `r` prefix (`3rX`); the next character
+    /// replaces that many chars, stopping at the end of the line.
+    pending_replace: Option<usize>,
     /// Anchor byte offset of an active input-pane char-visual
     /// selection. `None` outside Visual mode and during buffer-cell
     /// visual; `Some(n)` while the user is dragging a vim-style range
     /// across the input text. It tells "v in input pane" (inline
     /// selection) from "v in buffer pane" (the cell-overlay selection).
     visual_anchor: Option<usize>,
-    /// Undo stack: snapshots taken before each mutating op. Vim
-    /// groups one Insert session as a single undo unit, so the
-    /// snapshot is taken once at insert-entry time, not per
-    /// keystroke.
-    undo_stack: Vec<EditSnapshot>,
-    /// Redo stack: filled by [`Self::undo`], cleared by any new
-    /// mutation. Vim's `<C-r>` pops from here.
-    redo_stack: Vec<EditSnapshot>,
     /// When true the editor is non-modal (`[ui] editor = "modeless"`):
     /// it never leaves an insert-like state, `Esc` clears the draft or
     /// interrupts the turn, and `PageUp` / `PageDown` scroll the buffer. Set by the host
     /// from config / the settings dialog.
     modeless: bool,
-    /// Emacs kill ring. Ctrl+W / Ctrl+U / Ctrl+K and the Alt word
-    /// kills push here; Ctrl+Y yanks the most recent entry. Capped at
-    /// [`KILL_RING_MAX`]; empty kills are not recorded.
-    kill_ring: Vec<String>,
-    /// Collapsed large pastes, keyed by the placeholder embedded in
-    /// the draft. Resolved back to full text on submit (or inline via
-    /// Ctrl+O). Empty in the common case.
-    pastes: Vec<PasteBlob>,
-    /// Monotonic id for the next collapsed paste, so placeholders stay
-    /// unique within a draft even after edits.
-    next_paste_id: u32,
-    /// Images queued for the next prompt (file/path/clipboard), each
-    /// paired with the id embedded in its `[image #N ...]` prompt
-    /// marker. Reconciled against the marker on submit so editing the
-    /// marker out removes the image; survivors become `Content::Image`.
-    attached: Vec<(u32, crate::image::AttachedImage)>,
-    /// Monotonic id for the next image marker, unique within a draft.
-    next_image_id: u32,
 }
 
 impl Default for InputState {
     fn default() -> Self {
         Self {
             mode: Mode::Insert,
-            text: String::new(),
-            cursor: 0,
+            content: Draft::new(),
             pending: None,
             history: Vec::new(),
             history_cursor: None,
             history_stash: None,
             recallable: false,
             focused_pane: Pane::default(),
-            shell: false,
             pending_op: None,
             pending_count: None,
-            awaiting_replace: false,
-            register: String::new(),
-            register_linewise: false,
+            pending_op_count: None,
+            pending_replace: None,
             visual_anchor: None,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
             modeless: false,
-            kill_ring: Vec::new(),
-            pastes: Vec::new(),
-            next_paste_id: 1,
-            attached: Vec::new(),
-            next_image_id: 1,
         }
     }
 }
@@ -599,14 +587,24 @@ pub(crate) fn vim_word_end(text: &str, cursor: usize) -> usize {
     last_word_pos
 }
 
-/// Scan `s` for `[image #<digits> ...]` markers and collect the ids.
-/// A marker runs from `[image #` to the next `]`; content between the
-/// digits and `]` is ignored (it is just the human label/size).
+/// Zero-width space that brands an inserted image chip. Only markers
+/// containing it are chips: a typed `[image #1]` lookalike never
+/// matches, so it stays literal prose and cannot resurrect a deleted
+/// attachment.
+pub(crate) const IMAGE_MARK_SENTINEL: char = '\u{200b}';
+
+/// Opening bytes of a real image chip: `[` + sentinel + `image #`.
+const IMAGE_MARK_OPEN: &str = "[\u{200b}image #";
+
+/// Scan `s` for `[{IMAGE_MARK_SENTINEL}image #<digits> ...]` chips and
+/// collect the ids. A chip runs from the sentinel-branded `[image #`
+/// to the next `]`; content between the digits and `]` is ignored (it
+/// is just the human label/size).
 fn image_marker_ids(s: &str) -> std::collections::HashSet<u32> {
     let mut ids = std::collections::HashSet::new();
     let mut rest = s;
-    while let Some(start) = rest.find("[image #") {
-        let after = &rest[start + "[image #".len()..];
+    while let Some(start) = rest.find(IMAGE_MARK_OPEN) {
+        let after = &rest[start + IMAGE_MARK_OPEN.len()..];
         let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
         if let Some(end) = after.find(']')
             && let Ok(id) = digits.parse::<u32>()
@@ -620,17 +618,18 @@ fn image_marker_ids(s: &str) -> std::collections::HashSet<u32> {
     ids
 }
 
-/// Absolute byte spans of every `[image #<digits> ...]` marker in
-/// `s` as `(start, end, id)`, where `end` is just past the closing
-/// `]` plus one trailing space if present - i.e. exactly the slice
-/// [`strip_image_markers`] would remove. Used to treat a chip as one
-/// atomic block for cursor-aware delete and highlight.
+/// Absolute byte spans of every `[{IMAGE_MARK_SENTINEL}image
+/// #<digits> ...]` chip in `s` as `(start, end, id)`, where `end` is
+/// just past the closing `]` plus one trailing space if present - i.e.
+/// exactly the slice [`strip_image_markers`] would remove. Used to
+/// treat a chip as one atomic block for cursor-aware delete and
+/// highlight.
 fn image_marker_spans(s: &str) -> Vec<(usize, usize, u32)> {
     let mut spans = Vec::new();
     let mut base = 0usize;
-    while let Some(rel) = s[base..].find("[image #") {
+    while let Some(rel) = s[base..].find(IMAGE_MARK_OPEN) {
         let open = base + rel;
-        let after_at = open + "[image #".len();
+        let after_at = open + IMAGE_MARK_OPEN.len();
         let after = &s[after_at..];
         let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
         match (after.find(']'), digits.parse::<u32>()) {
@@ -648,18 +647,18 @@ fn image_marker_spans(s: &str) -> Vec<(usize, usize, u32)> {
     spans
 }
 
-/// Remove every `[image #<digits> ...]` marker (and one trailing
-/// space if present) from `s`, leaving the user's prose for the
-/// model. Non-marker `[...]` text is left untouched.
+/// Remove every `[{IMAGE_MARK_SENTINEL}image #<digits> ...]` chip
+/// (and one trailing space if present) from `s`, leaving the user's
+/// prose for the model. Non-chip `[...]` text is left untouched.
 fn strip_image_markers(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     loop {
-        let Some(start) = rest.find("[image #") else {
+        let Some(start) = rest.find(IMAGE_MARK_OPEN) else {
             out.push_str(rest);
             break;
         };
-        let after = &rest[start + "[image #".len()..];
+        let after = &rest[start + IMAGE_MARK_OPEN.len()..];
         let has_digit = after.starts_with(|c: char| c.is_ascii_digit());
         match after.find(']') {
             Some(end) if has_digit => {
@@ -669,8 +668,8 @@ fn strip_image_markers(s: &str) -> String {
                 rest = tail;
             }
             _ => {
-                // Not a real marker; keep the literal `[image #`.
-                out.push_str(&rest[..start + "[image #".len()]);
+                // Not a real chip; keep the literal branded opening.
+                out.push_str(&rest[..start + IMAGE_MARK_OPEN.len()]);
                 rest = after;
             }
         }

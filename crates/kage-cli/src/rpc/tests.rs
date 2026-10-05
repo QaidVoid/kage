@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use kage_acp::acp::{McpServer, ToolCallStatus, ToolKind};
+use kage_acp::acp::{McpServer, SessionUpdate, ToolCallStatus, ToolKind};
 use kage_core::agents::AgentDefs;
 use kage_core::config::McpServer as McpSpec;
 use kage_core::permissions::{PermissionAction, PermissionsConfig, ToolPermissionRules};
@@ -2500,7 +2500,10 @@ fn a_whitespace_goal_converges_instead_of_wedging() {
     });
     let updates = updates_until(&h.inbox, &h.session, "config_option_update");
     let update = updates.last().unwrap()["update"].clone();
-    assert_eq!(current_values(&update), ["mock/other", "default", "default", "off", ""]);
+    assert_eq!(
+        current_values(&update),
+        ["mock/other", "default", "default", "off", ""]
+    );
 }
 
 #[test]
@@ -3712,7 +3715,8 @@ fn an_under_cap_flush_sends_no_marker() {
     flusher.join().unwrap();
 
     let mut texts = Vec::new();
-    while let Ok(Inbound::Notification { params, .. }) = inbox.recv_timeout(Duration::from_millis(300))
+    while let Ok(Inbound::Notification { params, .. }) =
+        inbox.recv_timeout(Duration::from_millis(300))
     {
         texts.push(
             params["update"]["content"]["text"]
@@ -3741,7 +3745,10 @@ fn a_malformed_question_ask_shows_as_an_ordinary_permission() {
     assert_eq!(update.raw_input.unwrap(), malformed);
 
     assert_eq!(question_prompts(&malformed), None);
-    assert_eq!(question_prompts(&serde_json::json!({"questions": []})), None);
+    assert_eq!(
+        question_prompts(&serde_json::json!({"questions": []})),
+        None
+    );
     let valid = serde_json::json!({"questions": [
         {"header": "Store", "question": "Where?",
          "options": [{"label": "Disk", "description": "Kept"}]}
@@ -4243,6 +4250,46 @@ fn the_non_owner_sees_the_prompt_and_the_owner_does_not() {
     assert_eq!(echoed[0]["text"], "look");
     assert_eq!(echoed[1]["type"], "image");
     assert_eq!(echoed[1]["data"], "aGk=");
+}
+
+#[test]
+fn the_owner_sees_an_agent_burst_with_prose_between_reports() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let session = record(dir.path(), &cwd, "mock/m", 0, &[]);
+    let burst = format!(
+        "<agent name=\"alpha\" session=\"{}\" state=\"completed\">\nfirst body\n</agent>\
+         \n\nwords between\n\n<agent name=\"beta\" session=\"{}\" state=\"completed\">\nsecond \
+         body\n</agent>",
+        "01ARZ3NDEKTSV4RRFFQ69G5FAV", "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+    );
+    let h = serve(
+        vec![text_turn("reply"), text_turn("title")],
+        dir.path(),
+        dir.path(),
+    );
+    let params = serde_json::json!({"sessionId": session, "cwd": cwd, "mcpServers": []});
+    h.client.request("session/resume", params).unwrap();
+
+    let params = serde_json::json!({
+        "sessionId": session,
+        "prompt": [{"type": "text", "text": burst}],
+    });
+    let response = h.client.request("session/prompt", params).unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    until(|| h.mock.call_count() >= 2);
+
+    let echoed: Vec<String> = drain(&h.inbox)
+        .iter()
+        .filter(|p| p["update"]["sessionUpdate"] == "user_message_chunk")
+        .filter_map(|p| p["update"]["content"]["text"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(echoed.len(), 1, "{echoed:?}");
+    assert_eq!(echoed[0], burst);
+    assert_eq!(
+        kage_core::agent_report::AgentReport::all_in(&echoed[0]).len(),
+        2
+    );
 }
 
 #[test]
@@ -5517,8 +5564,7 @@ fn a_background_agent_and_its_ask_survive_the_parent_run_ending() {
 #[test]
 fn a_session_with_a_live_background_agent_stays_open_after_close() {
     let dir = tempfile::tempdir().unwrap();
-    let task =
-        serde_json::json!({"description": "ponder", "prompt": "ponder", "background": true});
+    let task = serde_json::json!({"description": "ponder", "prompt": "ponder", "background": true});
     let main = MockProvider::sequence(vec![
         tool_turn("call_agent", "agent", task),
         text_turn("the agent is on it"),

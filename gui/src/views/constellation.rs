@@ -55,15 +55,6 @@ fn rows(n: usize) -> usize {
     }
 }
 
-/// The design's string hash, for the per-item jitter.
-fn hash(text: &str) -> i64 {
-    let mut x: i32 = 0;
-    for unit in text.encode_utf16() {
-        x = x.wrapping_mul(31).wrapping_add(i32::from(unit));
-    }
-    i64::from(x).abs()
-}
-
 /// Where each star sits in a field `width` wide, in launch order, and
 /// where the lead sits.
 fn layout(stars: &[Star], width: f32) -> (Point<f32>, Vec<Point<f32>>) {
@@ -76,8 +67,10 @@ fn layout(stars: &[Star], width: f32) -> (Point<f32>, Vec<Point<f32>>) {
         .iter()
         .enumerate()
         .map(|(i, star)| {
-            let jx = (hash(&format!("{}x", star.item)) % 21 - 10) as f32;
-            let jy = (hash(&format!("{}y", star.item)) % 13 - 6) as f32;
+            let jx = (i64::from(crate::views::kit::design_hash(&format!("{}x", star.item)) % 21)
+                - 10) as f32;
+            let jy = (i64::from(crate::views::kit::design_hash(&format!("{}y", star.item)) % 13)
+                - 6) as f32;
             let col = i / rows;
             let row = i % rows;
             let x =

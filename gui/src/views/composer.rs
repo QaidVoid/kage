@@ -36,7 +36,8 @@ use gpui_kit::{
 };
 use kage_client::Session;
 use kage_client::wire::{
-    FsKind, FsListResult, SessionConfigKind, SessionConfigOption, SessionConfigSelectOption,
+    FsKind, FsListResult, NoticeTone, SessionConfigKind, SessionConfigOption,
+    SessionConfigSelectOption,
 };
 use serde_json::Value;
 
@@ -48,6 +49,7 @@ use crate::theme::{
 use crate::views::agents::tokens;
 use crate::views::deferred::{Deferred, LaidOut};
 use crate::views::dialog::{DialogKind, DialogView};
+use crate::views::kit::badge;
 use crate::views::pickers::{ModePicker, ModelPicker, PickerEvent, mode_icon, mode_tone};
 use gpui_kit::base::ElementExt as _;
 use gpui_kit::base::TestSupportExt as _;
@@ -345,24 +347,6 @@ fn kbd(label: &str, pal: &Palette) -> Div {
         .child(SharedString::from(label.to_owned()))
 }
 
-/// The small rounded badge some rows carry.
-fn badge(label: &str, pal: &Palette) -> Div {
-    div()
-        .h(px(18.))
-        .px(px(7.))
-        .flex()
-        .flex_none()
-        .items_center()
-        .rounded(px(R_FULL))
-        .border_1()
-        .border_color(pal.line)
-        .bg(pal.fill)
-        .font_weight(FontWeight::MEDIUM)
-        .text_size(px(10.5))
-        .text_color(pal.muted)
-        .child(SharedString::from(label.to_owned()))
-}
-
 /// The uppercase section label between popover row groups.
 fn pop_label(text: &'static str, pal: &Palette) -> Div {
     div()
@@ -599,6 +583,17 @@ const BUILTINS: [(&str, &str, &str); 4] = [
 pub(crate) struct Builtin<'a> {
     pub name: &'a str,
     pub args: &'a str,
+}
+
+/// What became of a built-in command the composer recognized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuiltinRun {
+    /// It ran.
+    Ran,
+    /// It needs a session and none is active; the text stays.
+    NeedsSession,
+    /// The composer does not run it; the agent gets the text.
+    NotMine,
 }
 
 /// The built-in command `text` runs, if it names one.
@@ -1021,18 +1016,32 @@ impl ComposerView {
     /// Sends the typed text: on the welcome pane it opens the session
     /// the text rides on; plain when idle, or queued while a run is
     /// in flight, or steered into the run when `steer` says so and the
-    /// wire allows it. A steer with no run in flight sends plainly. Accepted text leaves the textarea and the draft.
+    /// wire allows it. A steer with no run in flight sends plainly. A
+    /// built-in that needs a session keeps its text in the composer.
+    /// Accepted text leaves the textarea and the draft.
     pub fn submit(&mut self, steer: bool, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input_value(cx);
         let text = text.trim();
         if text.is_empty() {
             return;
         }
-        if let Some(command) = builtin(text)
-            && self.run_builtin(&command, window, cx)
-        {
-            self.clear_input(window, cx);
-            return;
+        if let Some(command) = builtin(text) {
+            match self.run_builtin(&command, window, cx) {
+                BuiltinRun::Ran => {
+                    self.clear_input(window, cx);
+                    return;
+                }
+                BuiltinRun::NeedsSession => {
+                    self.store.act(cx, |store| {
+                        store.note(
+                            NoticeTone::Info,
+                            format!("/{} needs a session; open one first", command.name),
+                        );
+                    });
+                    return;
+                }
+                BuiltinRun::NotMine => {}
+            }
         }
         let accepted = if self.loaded.is_none() && !self.store.read(cx).pending_prompt() {
             self.store.act(cx, |store| store.open_with_prompt(text));
@@ -1060,29 +1069,30 @@ impl ComposerView {
         cx.notify();
     }
 
-    /// Runs a built-in command. Reports whether it ran; one that needs a
-    /// session waits for one, and its text stays in the composer.
+    /// Runs a built-in command. One that needs a session reports
+    /// [`BuiltinRun::NeedsSession`], and its text stays in the
+    /// composer.
     fn run_builtin(
         &mut self,
         command: &Builtin<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> BuiltinRun {
         let has_session = self.store.read(cx).active_session().is_some();
         let dialog = self.dialog.clone();
         match (command.name, command.args) {
             ("new", _) => {
                 self.store.act(cx, Store::show_welcome);
-                true
+                BuiltinRun::Ran
             }
-            (_, _) if !has_session => false,
+            (_, _) if !has_session => BuiltinRun::NeedsSession,
             ("plan", "on") => {
                 self.store.act(cx, Store::enter_plan);
-                true
+                BuiltinRun::Ran
             }
             ("plan", "off") => {
                 self.store.act(cx, Store::exit_plan);
-                true
+                BuiltinRun::Ran
             }
             ("plan", _) => {
                 self.store.act(cx, |store| {
@@ -1092,28 +1102,42 @@ impl ComposerView {
                         store.enter_plan()
                     }
                 });
-                true
+                BuiltinRun::Ran
             }
             ("goal", "") => {
                 dialog.update(cx, |dialog, cx| dialog.open(DialogKind::Goal, window, cx));
-                true
+                BuiltinRun::Ran
             }
-            ("goal", "clear") => self.store.act(cx, |store| store.set_option("goal", "")),
-            ("goal", text) => self.store.act(cx, |store| store.set_option("goal", text)),
-            ("swarm", "off") => self.store.act(cx, |store| store.set_option("swarm", "off")),
+            ("goal", "clear") => {
+                self.store.act(cx, |store| store.set_option("goal", ""));
+                BuiltinRun::Ran
+            }
+            ("goal", text) => {
+                self.store.act(cx, |store| store.set_option("goal", text));
+                BuiltinRun::Ran
+            }
+            ("swarm", "off") => {
+                self.store.act(cx, |store| store.set_option("swarm", "off"));
+                BuiltinRun::Ran
+            }
             ("swarm", "on" | "") => {
                 dialog.update(cx, |dialog, cx| {
                     dialog.open(DialogKind::ConfirmSwarm, window, cx)
                 });
-                true
+                BuiltinRun::Ran
             }
             ("swarm", task) => {
                 let task = task.to_owned();
-                self.store.act(cx, |store| {
+                let sent = self.store.act(cx, |store| {
                     store.set_option("swarm", "on") && store.submit(&task).is_some()
-                })
+                });
+                if sent {
+                    BuiltinRun::Ran
+                } else {
+                    BuiltinRun::NotMine
+                }
             }
-            _ => false,
+            _ => BuiltinRun::NotMine,
         }
     }
 
@@ -1332,7 +1356,7 @@ impl ComposerView {
                             })),
                     );
                     if let Some(tag) = item.badge {
-                        row = row.child(badge(tag, pal));
+                        row = row.child(badge(tag, pal).h(px(18.)).flex().items_center());
                     }
                     panel = panel.child(row);
                 }
@@ -1381,7 +1405,12 @@ impl ComposerView {
                                     .truncate()
                                     .child(SharedString::from(item.path.clone())),
                             )
-                            .child(badge(if item.directory { "dir" } else { "file" }, pal)),
+                            .child(
+                                badge(if item.directory { "dir" } else { "file" }, pal)
+                                    .h(px(18.))
+                                    .flex()
+                                    .items_center(),
+                            ),
                         );
                     }
                 }
@@ -2371,11 +2400,72 @@ mod tests {
         assert!(sent, "the prompt went out");
     }
 
+    /// A built-in that needs a session keeps its text and sends
+    /// nothing; `/new` still runs on the welcome pane.
+    #[gpui_kit::test]
+    fn a_builtin_that_needs_a_session_keeps_its_text(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let store = cx.new(|_| Store::new("/tmp", false));
+        let (handle, composer) = cx.update(|app| {
+            gpui_kit::open_window(Default::default(), app, |window, cx| {
+                cx.new(|cx| {
+                    ComposerView::new(
+                        store.clone(),
+                        cx.new(|cx| {
+                            crate::views::dialog::DialogView::new(store.clone(), window, cx)
+                        }),
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .expect("the window opens")
+        });
+        let type_and_submit = |text: &'static str, cx: &mut TestAppContext| {
+            let _ = handle.update(cx, |_, window, app| {
+                composer.update(app, |composer, cx| {
+                    composer
+                        .input()
+                        .update(cx, |state, cx| state.set_value(text, window, cx));
+                    composer.submit(false, window, cx);
+                });
+            });
+        };
+
+        type_and_submit("/swarm on", cx);
+        let value = cx.update(|app| composer.read(app).input().read(app).value().to_owned());
+        assert_eq!(
+            value, "/swarm on",
+            "a builtin that needs a session keeps its text"
+        );
+        let sent = cx.update(|app| store.update(app, |store, _| store.take_outgoing()));
+        assert!(
+            sent.is_empty(),
+            "a builtin that needs a session sends nothing"
+        );
+        let notes = cx.update(|app| store.update(app, |store, _| store.take_notes()));
+        assert!(
+            matches!(notes.as_slice(), [note] if note.tone == NoticeTone::Info),
+            "the composer explains why nothing was sent"
+        );
+
+        type_and_submit("/new", cx);
+        let value = cx.update(|app| composer.read(app).input().read(app).value().to_owned());
+        assert_eq!(
+            value, "",
+            "/new runs without a session and clears the input"
+        );
+        let welcome = cx.update(|app| store.read(app).active_id().is_none());
+        assert!(welcome, "/new lands on the welcome pane");
+        let sent = cx.update(|app| store.update(app, |store, _| store.take_outgoing()));
+        assert!(sent.is_empty(), "/new sends no frame on an empty store");
+    }
+
     use std::time::{Duration, Instant};
 
     use kage_client::Session;
     use kage_client::wire::{
-        FsEntry, FsKind, FsListResult, SessionConfigKind, SessionConfigOption,
+        FsEntry, FsKind, FsListResult, NoticeTone, SessionConfigKind, SessionConfigOption,
         SessionConfigSelectOption,
     };
 

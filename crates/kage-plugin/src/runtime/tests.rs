@@ -511,3 +511,33 @@ fn kage_api_and_stdlib_tables_are_read_only_in_the_base() {
         .unwrap();
     assert_eq!(v.as_boolean(), Some(true));
 }
+
+#[test]
+fn on_without_context_grant_returns_a_noop_off() {
+    let rt = PluginRuntime::new().unwrap();
+    let v = rt
+        .eval_plugin(
+            "u",
+            "local off = kage.on('transform_context', function() end); \
+             off(); return type(off) == 'function'",
+        )
+        .unwrap();
+    assert_eq!(v.as_boolean(), Some(true));
+    assert_eq!(rt.handler_count("transform_context"), 0);
+}
+
+#[test]
+fn on_with_context_grant_off_still_deletes() {
+    let mut caps = std::collections::BTreeMap::new();
+    caps.insert("u".to_owned(), vec!["context".to_owned()]);
+    let rt = PluginRuntime::builder().capabilities(caps).build().unwrap();
+    rt.eval_plugin(
+        "u",
+        "kage.request_capabilities({'context'}); \
+         off = kage.on('transform_context', function() end)",
+    )
+    .unwrap();
+    assert_eq!(rt.handler_count("transform_context"), 1);
+    rt.eval_plugin("u", "off()").unwrap();
+    assert_eq!(rt.handler_count("transform_context"), 0);
+}

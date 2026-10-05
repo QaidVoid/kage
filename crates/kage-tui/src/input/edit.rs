@@ -7,24 +7,26 @@ impl InputState {
     /// leaves the cursor past the end of its line, snap it to the
     /// last char on that line (vim convention).
     pub(crate) fn delete_char_at_cursor(&mut self) {
-        let Some((c, w)) = char_at(&self.text, self.cursor) else {
+        let Some((c, w)) = char_at(&self.content.text, self.content.cursor) else {
             return;
         };
         if c == '\n' {
             // Vim's `x` does not eat newlines; ignore.
             return;
         }
-        self.text.drain(self.cursor..self.cursor + w);
-        let line_end = current_line_end(&self.text, self.cursor);
-        let line_start = current_line_start(&self.text, self.cursor);
-        if self.cursor > line_end {
-            self.cursor = line_end;
+        self.content
+            .text
+            .drain(self.content.cursor..self.content.cursor + w);
+        let line_end = current_line_end(&self.content.text, self.content.cursor);
+        let line_start = current_line_start(&self.content.text, self.content.cursor);
+        if self.content.cursor > line_end {
+            self.content.cursor = line_end;
         }
-        if self.cursor == line_end
+        if self.content.cursor == line_end
             && line_end > line_start
-            && let Some((_, pw)) = prev_char(&self.text, self.cursor)
+            && let Some((_, pw)) = prev_char(&self.content.text, self.content.cursor)
         {
-            self.cursor -= pw;
+            self.content.cursor -= pw;
         }
     }
 
@@ -47,28 +49,29 @@ impl InputState {
             match key.code {
                 KeyCode::Char('w') => {
                     self.reset_history_navigation();
-                    let to = unix_word_rubout_start(&self.text, self.cursor);
-                    self.kill_range(to, self.cursor);
+                    let to = unix_word_rubout_start(&self.content.text, self.content.cursor);
+                    self.kill_range(to, self.content.cursor);
                     return Vec::new();
                 }
                 KeyCode::Char('a') => {
-                    self.cursor = current_line_start(&self.text, self.cursor);
+                    self.content.cursor =
+                        current_line_start(&self.content.text, self.content.cursor);
                     return Vec::new();
                 }
                 KeyCode::Char('e') => {
-                    self.cursor = current_line_end(&self.text, self.cursor);
+                    self.content.cursor = current_line_end(&self.content.text, self.content.cursor);
                     return Vec::new();
                 }
                 KeyCode::Char('u') => {
                     self.reset_history_navigation();
-                    let start = current_line_start(&self.text, self.cursor);
-                    self.kill_range(start, self.cursor);
+                    let start = current_line_start(&self.content.text, self.content.cursor);
+                    self.kill_range(start, self.content.cursor);
                     return Vec::new();
                 }
                 KeyCode::Char('k') => {
                     self.reset_history_navigation();
-                    let end = current_line_end(&self.text, self.cursor);
-                    self.kill_range(self.cursor, end);
+                    let end = current_line_end(&self.content.text, self.content.cursor);
+                    self.kill_range(self.content.cursor, end);
                     return Vec::new();
                 }
                 KeyCode::Char('y') => {
@@ -82,7 +85,7 @@ impl InputState {
                     return Vec::new();
                 }
                 KeyCode::Char('o') => {
-                    if self.pastes.is_empty() {
+                    if self.content.pastes.is_empty() {
                         return vec![InputAction::ToggleFold];
                     }
                     self.expand_pastes();
@@ -95,22 +98,23 @@ impl InputState {
             match key.code {
                 KeyCode::Backspace => {
                     self.reset_history_navigation();
-                    let to = backward_word_start(&self.text, self.cursor);
-                    self.kill_range(to, self.cursor);
+                    let to = backward_word_start(&self.content.text, self.content.cursor);
+                    self.kill_range(to, self.content.cursor);
                     return Vec::new();
                 }
                 KeyCode::Delete | KeyCode::Char('d') => {
                     self.reset_history_navigation();
-                    let to = forward_word_end(&self.text, self.cursor);
-                    self.kill_range(self.cursor, to);
+                    let to = forward_word_end(&self.content.text, self.content.cursor);
+                    self.kill_range(self.content.cursor, to);
                     return Vec::new();
                 }
                 KeyCode::Char('b') | KeyCode::Left => {
-                    self.cursor = backward_word_start(&self.text, self.cursor);
+                    self.content.cursor =
+                        backward_word_start(&self.content.text, self.content.cursor);
                     return Vec::new();
                 }
                 KeyCode::Char('f') | KeyCode::Right => {
-                    self.cursor = forward_word_end(&self.text, self.cursor);
+                    self.content.cursor = forward_word_end(&self.content.text, self.content.cursor);
                     return Vec::new();
                 }
                 _ => {}
@@ -129,21 +133,21 @@ impl InputState {
                 {
                     self.insert_char('\n');
                     Vec::new()
-                } else if self.text.is_empty() {
+                } else if self.content.text.is_empty() {
                     // Nothing to send; an image attached without a
                     // surviving marker is stale - drop it, but say so
                     // rather than vanishing silently.
-                    let stale = !self.attached.is_empty();
-                    self.attached.clear();
+                    let stale = !self.content.attached.is_empty();
+                    self.content.attached.clear();
                     if stale {
                         vec![InputAction::DroppedStaleAttach]
                     } else {
                         Vec::new()
                     }
-                } else if self.shell {
+                } else if self.content.shell {
                     // Shell commands stay out of the prompt history;
                     // they are not prompts.
-                    self.shell = false;
+                    self.content.shell = false;
                     let text = self.take_draft();
                     self.reset_history_navigation();
                     vec![InputAction::RunShell(text)]
@@ -162,7 +166,7 @@ impl InputState {
                 if self.move_cursor_up() {
                     return Vec::new();
                 }
-                if self.recallable && self.history_cursor.is_none() && !self.shell {
+                if self.recallable && self.history_cursor.is_none() && !self.content.shell {
                     return vec![InputAction::RecallPrompt];
                 }
                 self.history_prev();
@@ -176,8 +180,8 @@ impl InputState {
             }
             KeyCode::Backspace => {
                 self.reset_history_navigation();
-                if self.shell && self.text.is_empty() {
-                    self.shell = false;
+                if self.content.shell && self.content.text.is_empty() {
+                    self.content.shell = false;
                     return Vec::new();
                 }
                 self.backspace();
@@ -192,11 +196,11 @@ impl InputState {
                 Vec::new()
             }
             KeyCode::Home => {
-                self.cursor = 0;
+                self.content.cursor = 0;
                 Vec::new()
             }
             KeyCode::End => {
-                self.cursor = self.text.len();
+                self.content.cursor = self.content.text.len();
                 Vec::new()
             }
             KeyCode::Delete => {
@@ -204,8 +208,8 @@ impl InputState {
                 self.forward_delete();
                 Vec::new()
             }
-            KeyCode::Char('!') if self.text.is_empty() && self.cursor == 0 => {
-                self.shell = true;
+            KeyCode::Char('!') if self.content.text.is_empty() && self.content.cursor == 0 => {
+                self.content.shell = true;
                 Vec::new()
             }
             // An unmapped Ctrl chord does not type its letter. Ctrl
@@ -222,16 +226,18 @@ impl InputState {
     }
 
     /// Take the draft as the text to send and empty it: collapsed
-    /// pastes resolve to their full text, images whose `[image #N ...]`
-    /// marker is gone are dropped, and the markers are stripped (the
-    /// images ride as `Content::Image` blocks instead).
+    /// pastes resolve to their full text, images whose chip is gone
+    /// are dropped, and the chips are stripped (the images ride as
+    /// `Content::Image` blocks instead). Snapshots before emptying so
+    /// a submit boundary still allows undoing the pre-submit text.
     fn take_draft(&mut self) -> String {
-        let raw = std::mem::take(&mut self.text);
+        self.snapshot_for_undo();
+        let raw = std::mem::take(&mut self.content.text);
         let expanded = self.resolve_pastes(&raw);
-        self.pastes.clear();
+        self.content.pastes.clear();
         let live = image_marker_ids(&expanded);
-        self.attached.retain(|(id, _)| live.contains(id));
-        self.cursor = 0;
+        self.content.attached.retain(|(id, _)| live.contains(id));
+        self.content.cursor = 0;
         strip_image_markers(&expanded)
     }
 
@@ -239,7 +245,7 @@ impl InputState {
     /// in the history. `None` when the draft is empty or shell mode is
     /// armed.
     pub(crate) fn take_prompt(&mut self) -> Option<String> {
-        if self.text.is_empty() || self.shell {
+        if self.content.text.is_empty() || self.content.shell {
             return None;
         }
         let text = self.take_draft();
@@ -251,14 +257,14 @@ impl InputState {
     /// Remove `text[start..end]` and clamp the cursor to the deletion
     /// point. Used by the Emacs-style edits in [`Self::handle_insert`].
     pub(crate) fn delete_range(&mut self, start: usize, end: usize) {
-        if start >= end || end > self.text.len() {
+        if start >= end || end > self.content.text.len() {
             return;
         }
-        self.text.drain(start..end);
-        if self.cursor >= end {
-            self.cursor -= end - start;
-        } else if self.cursor > start {
-            self.cursor = start;
+        self.content.text.drain(start..end);
+        if self.content.cursor >= end {
+            self.content.cursor -= end - start;
+        } else if self.content.cursor > start {
+            self.content.cursor = start;
         }
     }
 
@@ -268,14 +274,14 @@ impl InputState {
     /// (Ctrl+W / Ctrl+U / Ctrl+K, Alt+Backspace, Alt+d). Empty or
     /// invalid ranges are a no-op and do not touch the ring.
     pub(crate) fn kill_range(&mut self, start: usize, end: usize) {
-        if start >= end || end > self.text.len() {
+        if start >= end || end > self.content.text.len() {
             return;
         }
         self.snapshot_for_undo();
-        let killed = self.text[start..end].to_owned();
-        self.kill_ring.push(killed);
-        if self.kill_ring.len() > KILL_RING_MAX {
-            self.kill_ring.remove(0);
+        let killed = self.content.text[start..end].to_owned();
+        self.content.kill_ring.push(killed);
+        if self.content.kill_ring.len() > KILL_RING_MAX {
+            self.content.kill_ring.remove(0);
         }
         self.delete_range(start, end);
     }
@@ -284,21 +290,21 @@ impl InputState {
     /// Ctrl+Y). A no-op when the ring is empty. Snapshots for undo and
     /// leaves the cursor just past the inserted text.
     pub(crate) fn yank_kill(&mut self) {
-        let Some(text) = self.kill_ring.last().cloned() else {
+        let Some(text) = self.content.kill_ring.last().cloned() else {
             return;
         };
         if text.is_empty() {
             return;
         }
         self.snapshot_for_undo();
-        self.text.insert_str(self.cursor, &text);
-        self.cursor += text.len();
+        self.content.text.insert_str(self.content.cursor, &text);
+        self.content.cursor += text.len();
     }
 
     /// Read-only view of the kill ring, oldest first. Test/inspection
     /// aid; the most recent entry is what Ctrl+Y yanks.
     #[cfg(test)]
     pub(crate) fn kill_ring(&self) -> &[String] {
-        &self.kill_ring
+        &self.content.kill_ring
     }
 }

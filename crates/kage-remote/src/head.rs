@@ -11,7 +11,7 @@
 use std::fmt;
 use std::io::{self, Read as _, Write as _};
 use std::net::TcpStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::token::Token;
 use crate::{HEAD_CAP, HEAD_TIMEOUT};
@@ -106,7 +106,10 @@ pub fn read_head(stream: &mut TcpStream) -> Result<Head, HeadError> {
     read_head_with_timeout(stream, HEAD_TIMEOUT)
 }
 
-/// [`read_head`] with a caller-chosen deadline.
+/// [`read_head`] with a caller-chosen deadline. `timeout` bounds each
+/// read and the whole head: a peer that keeps a read alive by
+/// dripping bytes still misses the head's deadline once the first
+/// read started it.
 ///
 /// # Errors
 ///
@@ -118,6 +121,7 @@ pub fn read_head_with_timeout(
     stream.set_read_timeout(Some(timeout))?;
     let mut buf: Vec<u8> = Vec::with_capacity(1024);
     let mut chunk = [0u8; 1024];
+    let start = Instant::now();
     loop {
         let n = stream.read(&mut chunk)?;
         if n == 0 {
@@ -138,6 +142,13 @@ pub fn read_head_with_timeout(
         }
         if buf.len() > HEAD_CAP {
             return Err(HeadError::TooLarge);
+        }
+        if start.elapsed() >= timeout {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the request head missed its deadline",
+            )
+            .into());
         }
     }
 }
@@ -354,6 +365,35 @@ mod tests {
                 e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut,
                 "{error}"
             ),
+            other @ HeadError::TooLarge => panic!("expected a timeout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_dripping_peer_misses_the_whole_head_deadline() {
+        let (client, mut server) = pair();
+        let budget = Duration::from_millis(900);
+        let gap = Duration::from_millis(500);
+        // One byte per read window keeps the per-read timeout quiet
+        // while the whole head passes its budget.
+        let writer = std::thread::spawn(move || {
+            let mut client = client;
+            client.write_all(b"G").unwrap();
+            std::thread::sleep(gap);
+            client.write_all(b"E").unwrap();
+            std::thread::sleep(gap);
+            client.write_all(b"T").unwrap();
+        });
+        let error = read_head_with_timeout(&mut server, budget).unwrap_err();
+        writer.join().unwrap();
+        match error {
+            HeadError::Io(ref e) => {
+                assert_eq!(e.kind(), io::ErrorKind::TimedOut, "{error}");
+                assert!(
+                    e.to_string().contains("deadline"),
+                    "the whole-head deadline fired: {error}"
+                );
+            }
             other @ HeadError::TooLarge => panic!("expected a timeout, got {other:?}"),
         }
     }

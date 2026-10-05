@@ -31,8 +31,8 @@ impl InputState {
                 vec![InputAction::Escape]
             }
             KeyCode::Char('?')
-                if self.text.is_empty()
-                    && !self.shell
+                if self.content.text.is_empty()
+                    && !self.content.shell
                     && !key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 vec![InputAction::OpenHelp]
@@ -43,14 +43,14 @@ impl InputState {
 
     pub(crate) fn handle_normal(&mut self, key: KeyEvent) -> Vec<InputAction> {
         // Awaiting `r{ch}` replacement: the next char literally
-        // replaces the char at the cursor. Esc cancels.
-        if self.awaiting_replace {
-            self.awaiting_replace = false;
+        // replaces `count` chars, stopping at the end of the line.
+        // Esc cancels.
+        if let Some(count) = self.pending_replace.take() {
             if matches!(key.code, KeyCode::Esc) {
                 return vec![InputAction::ClearSelection];
             }
             if let KeyCode::Char(c) = key.code {
-                self.replace_char_at_cursor(c);
+                self.replace_chars_at_cursor(c, count);
             }
             return Vec::new();
         }
@@ -75,6 +75,7 @@ impl InputState {
         match key.code {
             KeyCode::Esc => {
                 self.pending_count = None;
+                self.pending_op_count = None;
                 return vec![InputAction::ClearSelection];
             }
             KeyCode::Char('c') if ctrl => return vec![InputAction::Cancel],
@@ -107,27 +108,30 @@ impl InputState {
             KeyCode::Esc => {
                 self.pending_op = None;
                 self.pending_count = None;
+                self.pending_op_count = None;
                 return vec![InputAction::ClearSelection];
             }
-            // Counts after the operator: `d3w` etc. Multiply the
-            // existing pre-operator count by the post-operator one.
+            // Counts after the operator: `d3w` etc. The post-operator
+            // digits accumulate on their own and multiply the
+            // pre-operator count when the operator resolves, so
+            // `3d2w` acts on 6 words, not 32.
             KeyCode::Char(c @ '0'..='9') => {
-                if c == '0' && self.pending_count.is_none() {
+                if c == '0' && self.pending_op_count.is_none() {
                     // `d0` is "delete to line start", not "count 0".
                 } else {
-                    self.accumulate_count(c);
+                    self.accumulate_op_count(c);
                     return Vec::new();
                 }
             }
             KeyCode::Char(c) if c == op.double_key() => {
-                let count = self.pending_count.take().unwrap_or(1);
+                let count = self.take_combined_count();
                 self.pending_op = None;
                 return self.apply_op_linewise(op, count);
             }
             _ => {}
         }
         // Try resolving as a motion key.
-        let count = self.pending_count.take().unwrap_or(1);
+        let count = self.take_combined_count();
         if let KeyCode::Char(motion_key) = key.code
             && let Some(range) = self.motion_operator_range(motion_key, count)
         {
@@ -136,7 +140,16 @@ impl InputState {
         }
         // Unrecognised key cancels the operator (vim convention).
         self.pending_op = None;
+        self.pending_op_count = None;
         Vec::new()
+    }
+
+    /// The effective count an operator resolves with: the pre-operator
+    /// count times the post-operator digits, clamped to [`MAX_COUNT`].
+    fn take_combined_count(&mut self) -> usize {
+        let pre = self.pending_count.take().unwrap_or(1);
+        let post = self.pending_op_count.take().unwrap_or(1);
+        pre.saturating_mul(post).min(MAX_COUNT)
     }
 
     /// Normal-mode keys the grammar handles in the conversation pane:
@@ -194,11 +207,10 @@ impl InputState {
             return Vec::new();
         }
 
-        // `r{ch}` replace: stash a flag; the next keystroke is the
-        // literal replacement char.
+        // `r{ch}` replace: stash the count; the next keystroke is the
+        // literal replacement char, applied `count` times.
         if matches!(key.code, KeyCode::Char('r')) {
-            self.awaiting_replace = true;
-            self.pending_count = None;
+            self.pending_replace = Some(self.pending_count.take().unwrap_or(1));
             return Vec::new();
         }
 
@@ -214,34 +226,34 @@ impl InputState {
             }
             KeyCode::Char('a') => {
                 self.snapshot_for_undo();
-                if let Some((_, w)) = char_at(&self.text, self.cursor) {
-                    self.cursor += w;
+                if let Some((_, w)) = char_at(&self.content.text, self.content.cursor) {
+                    self.content.cursor += w;
                 }
                 self.enter_mode(Mode::Insert)
             }
             KeyCode::Char('I') => {
                 self.snapshot_for_undo();
-                let start = current_line_start(&self.text, self.cursor);
-                self.cursor = first_non_whitespace_at(&self.text, start);
+                let start = current_line_start(&self.content.text, self.content.cursor);
+                self.content.cursor = first_non_whitespace_at(&self.content.text, start);
                 self.enter_mode(Mode::Insert)
             }
             KeyCode::Char('A') => {
                 self.snapshot_for_undo();
-                self.cursor = current_line_end(&self.text, self.cursor);
+                self.content.cursor = current_line_end(&self.content.text, self.content.cursor);
                 self.enter_mode(Mode::Insert)
             }
             KeyCode::Char('o') => {
                 self.snapshot_for_undo();
-                let end = current_line_end(&self.text, self.cursor);
-                self.text.insert(end, '\n');
-                self.cursor = end + 1;
+                let end = current_line_end(&self.content.text, self.content.cursor);
+                self.content.text.insert(end, '\n');
+                self.content.cursor = end + 1;
                 self.enter_mode(Mode::Insert)
             }
             KeyCode::Char('O') => {
                 self.snapshot_for_undo();
-                let start = current_line_start(&self.text, self.cursor);
-                self.text.insert(start, '\n');
-                self.cursor = start;
+                let start = current_line_start(&self.content.text, self.content.cursor);
+                self.content.text.insert(start, '\n');
+                self.content.cursor = start;
                 self.enter_mode(Mode::Insert)
             }
             // Single-char edits. Snapshot once per `x`/`X` press so a
@@ -275,21 +287,28 @@ impl InputState {
             // Vim's line-shorthand operators.
             KeyCode::Char('D') => self.apply_op_charwise(
                 Operator::Delete,
-                (self.cursor, current_line_end(&self.text, self.cursor)),
+                (
+                    self.content.cursor,
+                    current_line_end(&self.content.text, self.content.cursor),
+                ),
             ),
             KeyCode::Char('C') => self.apply_op_charwise(
                 Operator::Change,
-                (self.cursor, current_line_end(&self.text, self.cursor)),
+                (
+                    self.content.cursor,
+                    current_line_end(&self.content.text, self.content.cursor),
+                ),
             ),
             KeyCode::Char('Y') => self.apply_op_linewise(Operator::Yank, count),
             // Charwise motions (cursor movement only).
             KeyCode::Char('h') | KeyCode::Left => {
-                self.cursor =
+                self.content.cursor =
                     self.cursor_after_char_move(-i32::try_from(count).unwrap_or(i32::MAX));
                 Vec::new()
             }
             KeyCode::Char('l') | KeyCode::Right => {
-                self.cursor = self.cursor_after_char_move(i32::try_from(count).unwrap_or(i32::MAX));
+                self.content.cursor =
+                    self.cursor_after_char_move(i32::try_from(count).unwrap_or(i32::MAX));
                 Vec::new()
             }
             KeyCode::Char('j') | KeyCode::Down => {
@@ -309,38 +328,39 @@ impl InputState {
                 Vec::new()
             }
             KeyCode::Char('0') | KeyCode::Home => {
-                self.cursor = current_line_start(&self.text, self.cursor);
+                self.content.cursor = current_line_start(&self.content.text, self.content.cursor);
                 Vec::new()
             }
             KeyCode::Char('$') | KeyCode::End => {
-                self.cursor = current_line_end(&self.text, self.cursor);
+                self.content.cursor = current_line_end(&self.content.text, self.content.cursor);
                 Vec::new()
             }
             KeyCode::Char('^') => {
-                let start = current_line_start(&self.text, self.cursor);
-                self.cursor = first_non_whitespace_at(&self.text, start);
+                let start = current_line_start(&self.content.text, self.content.cursor);
+                self.content.cursor = first_non_whitespace_at(&self.content.text, start);
                 Vec::new()
             }
             KeyCode::Char('w') => {
                 for _ in 0..count {
-                    self.cursor = vim_word_forward(&self.text, self.cursor);
+                    self.content.cursor = vim_word_forward(&self.content.text, self.content.cursor);
                 }
                 Vec::new()
             }
             KeyCode::Char('b') => {
                 for _ in 0..count {
-                    self.cursor = backward_word_start(&self.text, self.cursor);
+                    self.content.cursor =
+                        backward_word_start(&self.content.text, self.content.cursor);
                 }
                 Vec::new()
             }
             KeyCode::Char('e') => {
                 for _ in 0..count {
-                    self.cursor = vim_word_end(&self.text, self.cursor);
+                    self.content.cursor = vim_word_end(&self.content.text, self.content.cursor);
                 }
                 Vec::new()
             }
             KeyCode::Char('G') => {
-                self.cursor = self.text.len();
+                self.content.cursor = self.content.text.len();
                 Vec::new()
             }
             KeyCode::Char('v') => {
@@ -348,7 +368,7 @@ impl InputState {
                 // and switch to Visual mode. The host detects this
                 // via `input_visual_range()` and renders an inline
                 // highlight; buffer-cell selection is suppressed.
-                self.visual_anchor = Some(self.cursor);
+                self.visual_anchor = Some(self.content.cursor);
                 self.enter_mode(Mode::Visual)
             }
             _ => Vec::new(),

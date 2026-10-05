@@ -1381,7 +1381,8 @@ pub enum ToolKind {
     Think,
     /// Fetches remote data.
     Fetch,
-    /// Anything else.
+    /// Anything else, including a kind this build does not know.
+    #[serde(other)]
     #[default]
     Other,
 }
@@ -1398,6 +1399,10 @@ pub enum ToolCallStatus {
     Completed,
     /// Failed.
     Failed,
+    /// A status this build does not know, kept so one new status does
+    /// not drop the whole tool call.
+    #[serde(other)]
+    Unknown,
 }
 
 /// A `tool_call` update.
@@ -1640,6 +1645,10 @@ pub enum SubagentState {
     /// provider rate limit. `SubagentUpdate::reason` says why, and a
     /// later state follows.
     Paused,
+    /// A state this build does not know, kept so one new state does
+    /// not drop the update that carried it.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Swarm batch membership of a subagent: which batch it belongs to and
@@ -1747,6 +1756,10 @@ pub enum PermissionOptionKind {
     RejectOnce,
     /// Reject and remember.
     RejectAlways,
+    /// A kind this build does not know, kept so one new kind does not
+    /// drop the whole permission request.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One choice offered in a permission prompt.
@@ -2055,6 +2068,80 @@ mod tests {
         let known: ContentBlock =
             serde_json::from_value(serde_json::json!({"type": "text", "text": "hi"})).unwrap();
         assert_eq!(known, ContentBlock::text("hi"));
+    }
+
+    /// An unknown tool kind or status decodes to a fallback instead of
+    /// failing the whole `tool_call`, and encodes back to a legal
+    /// value.
+    #[test]
+    fn unknown_tool_kind_and_status_fall_back() {
+        let call: ToolCall = serde_json::from_value(serde_json::json!({
+            "toolCallId": "c1",
+            "title": "shiny",
+            "kind": "brand_new",
+            "status": "brand_new"
+        }))
+        .unwrap();
+        assert_eq!(call.kind, ToolKind::Other);
+        assert_eq!(call.status, ToolCallStatus::Unknown);
+        let encoded = serde_json::to_value(&call).unwrap();
+        assert_eq!(encoded["kind"], serde_json::json!("other"));
+        assert_eq!(encoded["status"], serde_json::json!("unknown"));
+        let again: ToolCall = serde_json::from_value(encoded).unwrap();
+        assert_eq!(again, call);
+        let known: ToolCall = serde_json::from_value(serde_json::json!({
+            "toolCallId": "c1",
+            "title": "shiny",
+            "kind": "execute",
+            "status": "in_progress"
+        }))
+        .unwrap();
+        assert_eq!(known.kind, ToolKind::Execute);
+        assert_eq!(known.status, ToolCallStatus::InProgress);
+    }
+
+    /// An unknown subagent state decodes instead of dropping the
+    /// `subagent_update` that carried it.
+    #[test]
+    fn unknown_subagent_state_decodes() {
+        let update: SessionNotification = serde_json::from_value(serde_json::json!({
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "subagent_update",
+                "subagentSessionId": "child-1",
+                "state": "dreaming"
+            }
+        }))
+        .unwrap();
+        let SessionUpdate::SubagentUpdate(sub) = update.update else {
+            panic!("expected a subagent update");
+        };
+        assert_eq!(sub.state, Some(SubagentState::Unknown));
+        assert_eq!(
+            serde_json::to_value(&sub).unwrap()["state"],
+            serde_json::json!("unknown")
+        );
+    }
+
+    /// An unknown permission option kind decodes so the request keeps
+    /// its other options and the ask still reaches the user.
+    #[test]
+    fn unknown_permission_option_kind_falls_back() {
+        let request: RequestPermissionRequest = serde_json::from_value(serde_json::json!({
+            "sessionId": "s1",
+            "toolCall": {"toolCallId": "c1", "title": "t", "status": "pending"},
+            "options": [
+                {"optionId": "o1", "name": "New", "kind": "brand_new"},
+                {"optionId": "o2", "name": "Allow", "kind": "allow_once"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(request.options[0].kind, PermissionOptionKind::Unknown);
+        assert_eq!(request.options[1].kind, PermissionOptionKind::AllowOnce);
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["options"][0]["kind"],
+            serde_json::json!("unknown")
+        );
     }
 
     #[test]

@@ -127,14 +127,18 @@ pub enum Content {
 
 impl Content {
     /// Thinking `text` framed as `<thinking>` text, the form kage sends
-    /// to a provider that cannot take a thinking block natively. `None`
-    /// for blank thinking.
+    /// to a provider that cannot take a thinking block natively. A
+    /// literal close tag in the text is escaped so the frame cannot end
+    /// early. `None` for blank thinking.
     #[must_use]
     pub fn flattened_thinking(text: &str) -> Option<String> {
         if text.trim().is_empty() {
             return None;
         }
-        Some(format!("<thinking>\n{text}\n</thinking>"))
+        Some(format!(
+            "<thinking>\n{}\n</thinking>",
+            text.replace("</thinking", "<\\/thinking")
+        ))
     }
 }
 

@@ -17,6 +17,8 @@ use kage_acp_wire::{
     ToolCallStatus, ToolCallUpdate, ToolKind, TurnReason,
 };
 
+use crate::frame::RequestId;
+
 /// What the client knows after the frames it handled.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct State {
@@ -251,8 +253,9 @@ impl Usage {
 /// request waiting for the user's verdict.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PermissionAsk {
-    /// The id the reply answers.
-    pub request_id: u64,
+    /// The id the reply answers. A number when this client assigned
+    /// it, a string when the agent did.
+    pub request_id: RequestId,
     /// The tool call awaiting the verdict.
     pub tool_call: ToolCallUpdate,
     /// The choices offered.
@@ -621,7 +624,7 @@ mod tests {
     #[test]
     fn permission_asks_find_options_by_kind() {
         let ask = PermissionAsk {
-            request_id: 1,
+            request_id: RequestId::Number(1),
             tool_call: ToolCallUpdate::default(),
             options: vec![
                 kage_acp_wire::PermissionOption {

@@ -25,11 +25,11 @@ pub enum SessionError {
         #[source]
         source: serde_json::Error,
     },
-    /// JSON decoding failed for a non-trailing line.
+    /// JSON decoding failed for a line.
     ///
-    /// Callers reading a session may choose to surface this as a hard error
-    /// or to log and continue; the reader does both depending on whether the
-    /// failed line was the final line of the file (treated as a torn write).
+    /// An unterminated trailing line is instead treated as a torn
+    /// write and forgiven, so this error names a line the file really
+    /// holds complete.
     #[error("session decode failed at {path} line {line}: {source}")]
     Decode {
         /// Path of the file being read.
@@ -70,6 +70,15 @@ pub enum SessionError {
     /// can neither be replayed nor forked from.
     #[error("session {path}: first entry is not a header")]
     MissingHeader {
+        /// Path of the offending file.
+        path: PathBuf,
+    },
+    /// The file holds a single line that never received its `\n`, so
+    /// the session header never landed completely. There is no
+    /// complete line to keep and appending would glue the next entry
+    /// onto the fragment, so `open` refuses instead of repairing.
+    #[error("session {path}: header line never completed, nothing to repair into")]
+    TornHeader {
         /// Path of the offending file.
         path: PathBuf,
     },

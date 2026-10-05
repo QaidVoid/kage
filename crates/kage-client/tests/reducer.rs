@@ -2,8 +2,13 @@
 //! itself, what extension facts it keeps, and what survives a reload.
 
 use kage_acp_wire::{ClientCapabilities, ContentBlock, SubagentState};
-use kage_client::{Client, Frame, PromptOutcome, TranscriptItem};
+use kage_client::{Client, Frame, PromptOutcome, RequestId, TranscriptItem};
 use serde_json::{Value, json};
+
+/// The numeric id fixtures answer under.
+fn n(id: u64) -> RequestId {
+    RequestId::Number(id)
+}
 
 /// A client that initialized against a steering kage agent running in
 /// `/srv/proj`, and opened session `s1` with an empty cwd.
@@ -11,7 +16,7 @@ fn opened() -> Client {
     let mut client = Client::new();
     client.initialize(ClientCapabilities::default(), None);
     client.handle(Frame::Success {
-        id: 1,
+        id: n(1),
         result: json!({
             "protocolVersion": 1,
             "agentCapabilities": {"steer": true},
@@ -21,7 +26,7 @@ fn opened() -> Client {
     });
     client.new_session("", &[]);
     client.handle(Frame::Success {
-        id: 2,
+        id: n(2),
         result: json!({"sessionId": "s1"}),
     });
     let _ = client.take_outgoing();
@@ -108,7 +113,7 @@ fn an_echoed_prompt_keeps_its_images_and_each_text_starts_a_prompt() {
 fn a_plan_review_keeps_its_document() {
     let mut client = opened();
     client.handle(Frame::Request {
-        id: 70,
+        id: n(70),
         method: "session/request_permission".into(),
         params: json!({
             "sessionId": "s1",
@@ -177,7 +182,7 @@ fn the_directory_follows_every_page() {
     let first = client.list_sessions(None, None);
     let _ = client.take_outgoing();
     client.handle(Frame::Success {
-        id: first,
+        id: n(first),
         result: json!({
             "sessions": [{"sessionId": "r1", "cwd": "/srv/proj"}],
             "nextCursor": "page2",
@@ -190,7 +195,7 @@ fn the_directory_follows_every_page() {
     assert_eq!(method, "session/list");
     assert_eq!(params["cursor"], "page2");
     client.handle(Frame::Success {
-        id: *id,
+        id: id.clone(),
         result: json!({"sessions": [{"sessionId": "r2", "cwd": "/srv/proj"}]}),
     });
     assert!(client.take_outgoing().is_empty(), "the last page ends it");
@@ -244,7 +249,7 @@ fn an_option_change_shows_at_once_and_a_refusal_restores_it() {
     let id = client.set_config_option("s1", "mode", "plan");
     assert_eq!(mode(&client), ("plan".into(), Some("plan".into())));
     client.handle(Frame::Failure {
-        id,
+        id: n(id),
         error: kage_client::RpcError {
             code: -32602,
             message: "no".into(),

@@ -6,7 +6,7 @@
 
 use serde_json::Value;
 
-use crate::frame::RpcError;
+use crate::frame::{RequestId, RpcError};
 use kage_acp_wire::{FsResult, ModelProvider, OptionEntry};
 
 /// The scopes and one-shot answers a handled frame produced.
@@ -41,7 +41,7 @@ pub enum Change {
         /// The session whose ask was withdrawn.
         id: String,
         /// The request id that was withdrawn.
-        request_id: u64,
+        request_id: RequestId,
     },
     /// A session's agent tree changed.
     Agents {

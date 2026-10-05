@@ -7,7 +7,8 @@ use chrono::Utc;
 use kage_core::{Content, Message, Role, ThinkingSignature, ToolCallId};
 use kage_session::{
     Compaction, EntryId, FORMAT_VERSION, Header, Label, MessageEntry, ModelChange, SessionEntry,
-    SessionId, SessionReader, SessionWriter, fork, replay, resolve_entry_prefix, search,
+    SessionError, SessionId, SessionReader, SessionWriter, fork, replay, resolve_entry_prefix,
+    search,
 };
 use tempfile::tempdir;
 
@@ -23,6 +24,15 @@ fn fresh_header() -> Header {
         parent_session: None,
         parent_entry: None,
     }
+}
+
+fn label_entry(text: &str) -> SessionEntry {
+    SessionEntry::Label(Label {
+        id: EntryId::new(),
+        ts: Utc::now(),
+        text: text.into(),
+        anchor: EntryId::new(),
+    })
 }
 
 #[test]
@@ -307,4 +317,72 @@ fn search_indexes_assistant_text_and_user_prompts() {
         .filter_map(kage_session::SearchHit::entry)
         .collect();
     assert_eq!(parsed.len(), 2);
+}
+
+/// The reader and writer sides of crash tolerance must agree: over
+/// hand-damaged files, `open` plus append plus `replay` either
+/// round-trips every durable terminated line or returns an error,
+/// never a history silently missing a parseable line.
+#[test]
+fn damaged_files_round_trip_or_error_but_never_lose_a_line() {
+    let dir = tempdir().unwrap();
+
+    // A torn (unterminated) tail is repaired: `open` truncates the
+    // fragment, appends land whole, and replay reads every line.
+    let torn = dir.path().join("torn.jsonl");
+    {
+        let mut w = SessionWriter::create(&torn, fresh_header()).unwrap();
+        w.append(&label_entry("kept")).unwrap();
+    }
+    let mut raw = std::fs::read(&torn).unwrap();
+    raw.extend_from_slice(b"{\"type\":\"label\",\"id\":\"01");
+    std::fs::write(&torn, raw).unwrap();
+    let mut w = SessionWriter::open(&torn).unwrap();
+    w.append(&label_entry("after")).unwrap();
+    drop(w);
+    let entries: Vec<_> = SessionReader::iter(&torn)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(entries.len(), 3, "every durable line round-trips");
+
+    // A terminated corrupt tail is a hard decode error on replay,
+    // never a silently shortened history.
+    let corrupt = dir.path().join("corrupt.jsonl");
+    {
+        let mut w = SessionWriter::create(&corrupt, fresh_header()).unwrap();
+        w.append(&label_entry("kept")).unwrap();
+    }
+    let mut raw = std::fs::read(&corrupt).unwrap();
+    raw.extend_from_slice(b"{\"corrupt\": true}\n");
+    std::fs::write(&corrupt, raw).unwrap();
+    SessionWriter::open(&corrupt).unwrap();
+    assert!(
+        matches!(replay(&corrupt), Err(SessionError::Decode { .. })),
+        "the corrupt line must surface, not vanish"
+    );
+
+    // A crash mid-header: `open` refuses, `replay` fails with the
+    // same cause, and the bytes on disk are untouched.
+    let partial = dir.path().join("partial.jsonl");
+    let partial_bytes = b"{\"type\":\"header\",\"vers";
+    std::fs::write(&partial, partial_bytes).unwrap();
+    assert!(matches!(
+        SessionWriter::open(&partial),
+        Err(SessionError::MissingHeader { .. })
+    ));
+    assert!(matches!(
+        replay(&partial),
+        Err(SessionError::MissingHeader { .. })
+    ));
+    assert_eq!(std::fs::read(&partial).unwrap(), partial_bytes);
+
+    // An empty file is refused on both paths.
+    let empty = dir.path().join("empty.jsonl");
+    std::fs::write(&empty, b"").unwrap();
+    assert!(matches!(
+        SessionWriter::open(&empty),
+        Err(SessionError::Empty { .. })
+    ));
+    assert!(matches!(replay(&empty), Err(SessionError::Empty { .. })));
 }

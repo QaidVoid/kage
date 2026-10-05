@@ -108,21 +108,7 @@ fn capped(mut message: Message) -> Message {
 /// Replay every entry of `path`, returning the final history.
 pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
     let mut reader = SessionReader::iter(path)?;
-    let first = reader
-        .next()
-        .ok_or_else(|| SessionError::Empty {
-            path: path.to_path_buf(),
-        })?
-        .map_err(|e| match e {
-            SessionError::Decode { .. } | SessionError::Io { .. } => e,
-            other => unreachable!("reader items are decode or io errors only: {other}"),
-        })?;
-    let SessionEntry::Header(header) = first else {
-        return Err(SessionError::MissingHeader {
-            path: path.to_path_buf(),
-        });
-    };
-    ensure_supported_version(path, header.version)?;
+    let header = first_header(path, &mut reader)?;
 
     let mut model = kage_core::canonical_model(&header.model);
     let mut thinking_level: Option<String> = None;
@@ -212,6 +198,33 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
         compaction,
         agent,
     })
+}
+
+/// The validated header of `path`, read from `reader`. A file with
+/// content whose only line is torn never completed its header; only a
+/// truly empty file is `Empty`.
+fn first_header(path: &Path, reader: &mut SessionReader) -> Result<Header, SessionError> {
+    let Some(first) = reader.next() else {
+        if reader.torn_trailing() {
+            return Err(SessionError::MissingHeader {
+                path: path.to_path_buf(),
+            });
+        }
+        return Err(SessionError::Empty {
+            path: path.to_path_buf(),
+        });
+    };
+    let first = first.map_err(|e| match e {
+        SessionError::Decode { .. } | SessionError::Io { .. } => e,
+        other => unreachable!("reader items are decode or io errors only: {other}"),
+    })?;
+    let SessionEntry::Header(header) = first else {
+        return Err(SessionError::MissingHeader {
+            path: path.to_path_buf(),
+        });
+    };
+    ensure_supported_version(path, header.version)?;
+    Ok(header)
 }
 
 /// Read a swarm or plan mode toggle from a custom entry into the
@@ -577,6 +590,22 @@ mod tests {
             ],
         );
         assert_eq!(replay(&path).unwrap().title.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn replay_reports_a_terminated_corrupt_tail() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("torn.jsonl");
+        write(&path, fresh_header(), &[message_entry(Role::User, "hello")]);
+        // A corrupt last line that ends in `\n` is not a torn write:
+        // replay must fail instead of returning a shortened history.
+        let mut raw = std::fs::read(&path).unwrap();
+        raw.extend_from_slice(b"{\"corrupt\": true}\n");
+        std::fs::write(&path, raw).unwrap();
+        match replay(&path) {
+            Err(SessionError::Decode { line: 3, .. }) => {}
+            other => panic!("expected a decode error at line 3, got {other:?}"),
+        }
     }
 
     #[test]

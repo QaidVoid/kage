@@ -49,14 +49,14 @@ impl RpcError {
 
 /// One JSON-RPC 2.0 message, in either direction.
 ///
-/// Ids are the numbers both kage sides assign; a message whose id is
-/// anything else does not parse.
+/// Ids are non-negative integers or strings; a message whose id
+/// member is anything else does not parse.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
     /// A request that wants an answer, sent with a fresh id.
     Request {
         /// The id the answer repeats.
-        id: u64,
+        id: RequestId,
         /// The method called.
         method: String,
         /// The call parameters, or `null` when the method takes none.
@@ -72,17 +72,67 @@ pub enum Frame {
     /// A successful answer to a request.
     Success {
         /// The id of the request answered.
-        id: u64,
+        id: RequestId,
         /// The result payload.
         result: Value,
     },
     /// A failed answer to a request.
     Failure {
         /// The id of the request answered.
-        id: u64,
+        id: RequestId,
         /// What went wrong.
         error: RpcError,
     },
+}
+
+/// A JSON-RPC request id: a non-negative integer or a string, the
+/// shape the ACP spec calls a `RequestId`. Null, booleans, negative
+/// numbers and fractions are not ids: they neither parse nor render.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RequestId {
+    /// A numeric id, the kind kage assigns.
+    Number(u64),
+    /// A string id, the kind other agents may assign.
+    String(String),
+}
+
+impl RequestId {
+    /// The id a JSON `id` member carries, or `None` when the member
+    /// holds anything that is not a lawful id.
+    #[must_use]
+    pub fn from_value(value: &Value) -> Option<Self> {
+        if let Some(number) = value.as_u64() {
+            return Some(Self::Number(number));
+        }
+        value.as_str().map(|id| Self::String(id.to_owned()))
+    }
+
+    /// The numeric id, when it is one.
+    #[must_use]
+    pub fn as_number(&self) -> Option<u64> {
+        match self {
+            Self::Number(id) => Some(*id),
+            Self::String(_) => None,
+        }
+    }
+}
+
+impl From<RequestId> for Value {
+    fn from(id: RequestId) -> Self {
+        match id {
+            RequestId::Number(id) => Value::from(id),
+            RequestId::String(id) => Value::String(id),
+        }
+    }
+}
+
+impl std::fmt::Display for RequestId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Number(id) => write!(f, "{id}"),
+            Self::String(id) => f.write_str(id),
+        }
+    }
 }
 
 impl Frame {
@@ -94,7 +144,7 @@ impl Frame {
         message.insert("jsonrpc".into(), Value::String("2.0".into()));
         match self {
             Self::Request { id, method, params } => {
-                message.insert("id".into(), Value::from(*id));
+                message.insert("id".into(), Value::from(id.clone()));
                 message.insert("method".into(), Value::String(method.clone()));
                 message.insert("params".into(), params.clone());
             }
@@ -103,11 +153,11 @@ impl Frame {
                 message.insert("params".into(), params.clone());
             }
             Self::Success { id, result } => {
-                message.insert("id".into(), Value::from(*id));
+                message.insert("id".into(), Value::from(id.clone()));
                 message.insert("result".into(), result.clone());
             }
             Self::Failure { id, error } => {
-                message.insert("id".into(), Value::from(*id));
+                message.insert("id".into(), Value::from(id.clone()));
                 message.insert(
                     "error".into(),
                     serde_json::to_value(error).unwrap_or(Value::Null),
@@ -122,7 +172,7 @@ impl Frame {
     #[must_use]
     pub fn parse(message: &Value) -> Option<Self> {
         let object = message.as_object()?;
-        let id = object.get("id").and_then(Value::as_u64);
+        let id = object.get("id").and_then(RequestId::from_value);
         if let Some(method) = object.get("method").and_then(Value::as_str) {
             let params = object.get("params").cloned().unwrap_or(Value::Null);
             return match id {
@@ -131,10 +181,13 @@ impl Frame {
                     method: method.to_owned(),
                     params,
                 }),
-                None => Some(Self::Notification {
+                // An absent id makes the message a notification; an id
+                // member holding no lawful id leaves it unparsed.
+                None if !object.contains_key("id") => Some(Self::Notification {
                     method: method.to_owned(),
                     params,
                 }),
+                None => None,
             };
         }
         let id = id?;
@@ -159,7 +212,7 @@ mod tests {
     #[test]
     fn requests_and_notifications_round_trip() {
         let request = Frame::Request {
-            id: 7,
+            id: RequestId::Number(7),
             method: "session/prompt".into(),
             params: serde_json::json!({"sessionId": "s1"}),
         };
@@ -177,12 +230,12 @@ mod tests {
     #[test]
     fn responses_round_trip_both_ways() {
         let success = Frame::Success {
-            id: 3,
+            id: RequestId::Number(3),
             result: serde_json::json!({"stopReason": "end_turn"}),
         };
         assert_eq!(Frame::parse(&success.to_value()).unwrap(), success);
         let failure = Frame::Failure {
-            id: 4,
+            id: RequestId::Number(4),
             error: RpcError::new(-32602, "unknown session s9"),
         };
         assert_eq!(Frame::parse(&failure.to_value()).unwrap(), failure);
@@ -196,8 +249,68 @@ mod tests {
             Frame::parse(&serde_json::json!({"id": 1, "error": {"code": -1}})),
             None
         );
-        let string_id = serde_json::json!({"id": "a", "result": null});
-        assert_eq!(Frame::parse(&string_id), None);
+    }
+
+    #[test]
+    fn string_id_requests_parse_as_requests() {
+        let ask = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "abc",
+            "method": "session/request_permission",
+            "params": {"sessionId": "s1"}
+        });
+        match Frame::parse(&ask) {
+            Some(Frame::Request { id, method, .. }) => {
+                assert_eq!(id, RequestId::String("abc".into()));
+                assert_eq!(method, "session/request_permission");
+            }
+            other => panic!("expected a request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn string_id_responses_parse_as_responses() {
+        let success = serde_json::json!({"id": "a", "result": null});
+        assert_eq!(
+            Frame::parse(&success),
+            Some(Frame::Success {
+                id: RequestId::String("a".into()),
+                result: Value::Null,
+            })
+        );
+        let round_trip = Frame::Success {
+            id: RequestId::String("a".into()),
+            result: serde_json::json!({"stopReason": "end_turn"}),
+        };
+        assert_eq!(Frame::parse(&round_trip.to_value()).unwrap(), round_trip);
+    }
+
+    #[test]
+    fn null_bool_and_fraction_ids_do_not_parse() {
+        assert_eq!(
+            Frame::parse(&serde_json::json!({"id": null, "method": "ping"})),
+            None
+        );
+        assert_eq!(
+            Frame::parse(&serde_json::json!({"id": true, "method": "ping"})),
+            None
+        );
+        assert_eq!(
+            Frame::parse(&serde_json::json!({"id": 1.5, "method": "ping"})),
+            None
+        );
+        assert_eq!(
+            Frame::parse(&serde_json::json!({"id": -3, "method": "ping"})),
+            None
+        );
+        assert_eq!(
+            Frame::parse(&serde_json::json!({"id": null, "result": 1})),
+            None
+        );
+        assert_eq!(
+            Frame::parse(&serde_json::json!({"id": 2.5, "result": 1})),
+            None
+        );
     }
 
     #[test]

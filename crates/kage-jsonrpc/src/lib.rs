@@ -491,9 +491,15 @@ fn route_line(
             "invalid request: method must be a string",
         )
         .is_ok(),
-        None => match obj.get("id").and_then(serde_json::Value::as_i64) {
+        None => match obj.get("id") {
+            // A response-shaped message: an id member and no method.
+            // The spec forbids replying to a response, so an id that
+            // matches nothing pending, a string id, or one beyond
+            // `i64` range stays silent.
             Some(id) => {
-                route_response(pending, id, obj);
+                if let Some(id) = id.as_i64() {
+                    route_response(pending, id, obj);
+                }
                 true
             }
             None => reply_error(
@@ -862,6 +868,73 @@ mod tests {
         // line was dropped, not answered with -32600.
         assert!(reply.contains("-32700"), "{reply}");
         assert!(reply.contains("parse error"), "{reply}");
+    }
+
+    /// A response with a string id has an id member, so it is a
+    /// response: dropped, never answered, loop alive.
+    #[test]
+    fn string_id_response_stays_silent() {
+        let (_peer, mut in_w, mut out, _h) = recorded(None);
+        in_w.write_all(b"{\"id\":\"abc\",\"result\":1}\n").unwrap();
+        in_w.write_all(b"boom\n").unwrap();
+        let mut reply = String::new();
+        out.read_line(&mut reply).unwrap();
+        assert!(reply.contains("-32700"), "{reply}");
+        assert!(reply.contains("parse error"), "{reply}");
+    }
+
+    /// An id beyond `i64` range cannot match the pending table, so it
+    /// is dropped like any other unknown id instead of drawing a
+    /// reply.
+    #[test]
+    fn id_beyond_i64_range_response_stays_silent() {
+        let (_peer, mut in_w, mut out, _h) = recorded(None);
+        in_w.write_all(b"{\"id\":18446744073709551615,\"result\":1}\n")
+            .unwrap();
+        in_w.write_all(b"boom\n").unwrap();
+        let mut reply = String::new();
+        out.read_line(&mut reply).unwrap();
+        assert!(reply.contains("-32700"), "{reply}");
+        assert!(reply.contains("parse error"), "{reply}");
+    }
+
+    /// A message with neither a method nor an id member is not a
+    /// response, so it keeps its -32600 reply.
+    #[test]
+    fn idless_response_gets_a_32600_reply() {
+        let (_peer, mut in_w, mut out, _h) = recorded(None);
+        in_w.write_all(b"{\"result\":1}\n").unwrap();
+        let mut reply = String::new();
+        out.read_line(&mut reply).unwrap();
+        assert!(reply.contains("-32600"), "{reply}");
+        assert!(reply.contains("missing method or response id"), "{reply}");
+    }
+
+    /// Peers that assign string request ids get their answers under
+    /// the same string: the inbound id is carried raw and echoed
+    /// verbatim.
+    #[test]
+    fn string_id_requests_reach_the_owner_and_echo_the_string_id() {
+        let (in_r, mut in_w) = std::io::pipe().unwrap();
+        let (out_r, out_w) = std::io::pipe().unwrap();
+        let (peer, inbound, _h) = connect(BufReader::new(in_r), out_w);
+        in_w.write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":\"agent-1\",\"method\":\"ping\",\"params\":{}}\n",
+        )
+        .unwrap();
+        match inbound.recv_timeout(Duration::from_secs(5)).unwrap() {
+            Inbound::Request { id, method, .. } => {
+                assert_eq!(method, "ping");
+                assert_eq!(id, serde_json::json!("agent-1"));
+                peer.respond(&id, Ok(serde_json::json!({"pong": true})))
+                    .unwrap();
+            }
+            Inbound::Notification { .. } => panic!("expected a request"),
+        }
+        let mut out = BufReader::new(out_r);
+        let reply = next_line(&mut out);
+        assert_eq!(reply["id"], serde_json::json!("agent-1"));
+        assert_eq!(reply["result"]["pong"], true);
     }
 
     /// The reader parks on the full inbound queue instead of queueing

@@ -12,7 +12,8 @@ use kage_client::wire::{
     PermissionOptionKind, SessionConfigOption,
 };
 use kage_client::{
-    Change, Client, Frame, PermissionAsk, PromptOutcome, Session, SteerError, TranscriptItem,
+    Change, Client, Frame, PermissionAsk, PromptOutcome, RequestId, Session, SteerError,
+    TranscriptItem,
 };
 
 use gpui_kit::{App, Entity};
@@ -113,7 +114,7 @@ pub(crate) const EXIT_PLAN_TOOL: &str = "exit_plan";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlanReviewState {
     /// The id the decision answers.
-    pub request_id: u64,
+    pub request_id: RequestId,
     /// The `exit_plan` call under review.
     pub call_id: String,
     /// The offered approve option, when the ask offers one.
@@ -149,7 +150,7 @@ pub(crate) fn plan_review(session: &Session) -> Option<PlanReviewState> {
         None => option_named(&ask.options, "approve"),
     };
     Some(PlanReviewState {
-        request_id: ask.request_id,
+        request_id: ask.request_id.clone(),
         call_id: ask.tool_call.tool_call_id.clone(),
         approve,
         revise: option_named(&ask.options, "revise"),
@@ -569,7 +570,7 @@ impl Store {
     /// to the changes it has been waiting for.
     pub fn absorb(&mut self, frame: Frame) -> Vec<Change> {
         let answered = match &frame {
-            Frame::Success { id, .. } | Frame::Failure { id, .. } => Some(*id),
+            Frame::Success { id, .. } | Frame::Failure { id, .. } => id.as_number(),
             _ => None,
         };
         let changes = self.client.handle(frame);
@@ -1378,7 +1379,7 @@ impl Store {
     pub fn reply_permission(
         &mut self,
         session: &str,
-        request_id: u64,
+        request_id: RequestId,
         decision: &kage_client::PermissionDecision,
     ) -> bool {
         self.client.reply_permission(session, request_id, decision)
@@ -1657,7 +1658,7 @@ mod tests {
     use super::{Command, Store, StoreHandle as _};
     use crate::transport::State;
     use kage_client::wire::NoticeTone;
-    use kage_client::{Frame, PromptOutcome, SteerError, TranscriptItem};
+    use kage_client::{Frame, PromptOutcome, RequestId, SteerError, TranscriptItem};
 
     /// An initialize answer with the given version and capabilities.
     fn init_answer(version: Option<&str>, steer: bool, close: bool) -> Frame {
@@ -1677,7 +1678,7 @@ mod tests {
             capabilities["sessionCapabilities"] = serde_json::json!({ "close": {} });
         }
         Frame::Success {
-            id,
+            id: RequestId::Number(id),
             result: serde_json::json!({
                 "protocolVersion": 1,
                 "agentCapabilities": capabilities,
@@ -1769,7 +1770,7 @@ mod tests {
             "a shell with a directory lists all: {params}"
         );
         store.absorb(Frame::Success {
-            id: *id,
+            id: id.clone(),
             result: serde_json::json!({ "sessions": [
                 { "sessionId": "a", "cwd": "/a", "updatedAt": "2026-10-01T10:00:00Z" },
                 { "sessionId": "b", "cwd": "/b", "updatedAt": "2026-10-01T11:00:00Z" },
@@ -1800,7 +1801,7 @@ mod tests {
         store.new_session();
         let _ = store.take_outgoing();
         store.absorb(Frame::Success {
-            id: reply_id,
+            id: RequestId::Number(reply_id),
             result: serde_json::json!({ "sessionId": id }),
         });
         let _ = store.take_outgoing();
@@ -1849,7 +1850,7 @@ mod tests {
         run(&mut store, commands);
         let _ = store.take_outgoing();
         store.absorb(Frame::Success {
-            id: 2,
+            id: RequestId::Number(2),
             result: serde_json::json!({"sessionId": "s1"}),
         });
         assert_eq!(store.take_commands(), vec![Command::ReplayPrompt]);
@@ -1894,7 +1895,7 @@ mod tests {
         let init_id = frames
             .iter()
             .find_map(|frame| match frame {
-                Frame::Request { id, method, .. } if method == "initialize" => Some(*id),
+                Frame::Request { id, method, .. } if method == "initialize" => id.as_number(),
                 _ => None,
             })
             .expect("a re-handshake sends initialize");
@@ -2078,7 +2079,7 @@ mod tests {
         assert!(store.fs_listing("s1").is_none(), "nothing asked yet");
         assert!(store.fs_list(""));
         store.absorb(Frame::Success {
-            id: 4,
+            id: RequestId::Number(4),
             result: serde_json::json!({
                 "op": "list",
                 "entries": [
@@ -2146,7 +2147,7 @@ mod tests {
         assert_eq!(method, "session/new");
 
         store.absorb(Frame::Success {
-            id: *id,
+            id: id.clone(),
             result: serde_json::json!({"sessionId": "s9"}),
         });
         assert_eq!(store.active_id(), Some("s9"));
@@ -2175,7 +2176,7 @@ mod tests {
             panic!("expected a request, got {:?}", outgoing[0]);
         };
         store.absorb(Frame::Success {
-            id: *id,
+            id: id.clone(),
             result: serde_json::json!({"sessionId": "s2"}),
         });
         assert_eq!(store.active_id(), Some("s2"));
@@ -2225,7 +2226,7 @@ mod tests {
         });
         let _ = store.take_outgoing();
         store.absorb(Frame::Success {
-            id,
+            id: RequestId::Number(id),
             result: serde_json::json!({"ok": false, "message": "refused", "millis": 1, "models": []}),
         });
         assert_eq!(
@@ -2264,7 +2265,7 @@ mod tests {
             .take_outgoing()
             .into_iter()
             .find_map(|frame| match frame {
-                Frame::Request { id, method, .. } if method == "session/load" => Some(id),
+                Frame::Request { id, method, .. } if method == "session/load" => Some(id.clone()),
                 _ => None,
             })
             .expect("the open session reloads");
@@ -2285,7 +2286,7 @@ mod tests {
             panic!("expected a request, got {:?}", outgoing[0]);
         };
         store.absorb(Frame::Failure {
-            id: *id,
+            id: id.clone(),
             error: kage_client::RpcError {
                 code: -32603,
                 message: "no provider".into(),
@@ -2357,7 +2358,7 @@ mod tests {
             }),
         });
         let ask = |id: u64, session: &str| Frame::Request {
-            id,
+            id: RequestId::Number(id),
             method: "session/request_permission".into(),
             params: serde_json::json!({
                 "sessionId": session,
@@ -2376,7 +2377,7 @@ mod tests {
     }
 
     /// The requests in `frames` as (id, method, params).
-    fn requests(frames: Vec<Frame>) -> Vec<(u64, String, serde_json::Value)> {
+    fn requests(frames: Vec<Frame>) -> Vec<(RequestId, String, serde_json::Value)> {
         frames
             .into_iter()
             .filter_map(|frame| match frame {
@@ -2416,7 +2417,7 @@ mod tests {
         store: &mut Store,
         frames: Vec<Frame>,
         to: &str,
-    ) -> Vec<(u64, String, serde_json::Value)> {
+    ) -> Vec<(RequestId, String, serde_json::Value)> {
         let (fork, ..) = requests(frames)
             .into_iter()
             .find(|(_, method, _)| method == "_kage/session/fork")
@@ -2429,7 +2430,7 @@ mod tests {
         let load = sent
             .iter()
             .find(|(_, method, _)| method == "session/load")
-            .map(|(id, ..)| *id)
+            .map(|(id, ..)| id.clone())
             .expect("the copy loads");
         store.absorb(Frame::Success {
             id: load,

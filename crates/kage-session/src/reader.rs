@@ -2,10 +2,12 @@
 //!
 //! [`SessionReader::iter`] opens a session file and yields one
 //! [`SessionEntry`] per non-empty line. A non-final line that fails to parse
-//! is yielded as `Err` and iteration continues; the trailing line is given
-//! the benefit of the doubt: if it fails to parse, it is treated as a torn
-//! write from a crashed appender, iteration ends silently, and
-//! [`SessionReader::torn_trailing`] returns true.
+//! is yielded as `Err` and iteration continues. The trailing line is
+//! forgiven only when it is unterminated: the tail of a torn write from
+//! a crashed appender ends iteration silently with
+//! [`SessionReader::torn_trailing`] true. A corrupt line that does end
+//! with `\n` is a real [`SessionError::Decode`] failure, not a silent
+//! loss.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Lines};
@@ -43,10 +45,13 @@ impl SessionReader {
         })
     }
 
-    /// True if iteration ended on a trailing line that failed to parse.
+    /// True if iteration ended on an unterminated trailing line that
+    /// failed to parse.
     ///
     /// Indicates a crashed appender: the last write made it to disk only
-    /// partially. The session up to that point is still valid.
+    /// partially. The session up to that point is still valid. A
+    /// trailing line that fails to parse while ending in `\n` is
+    /// reported as [`SessionError::Decode`] instead.
     #[must_use]
     pub fn torn_trailing(&self) -> bool {
         self.torn_trailing
@@ -90,7 +95,7 @@ impl Iterator for SessionReader {
             return match serde_json::from_str::<SessionEntry>(&line) {
                 Ok(entry) => Some(Ok(entry)),
                 Err(err) => {
-                    if is_trailing {
+                    if is_trailing && !ends_with_newline(&self.path) {
                         self.torn_trailing = true;
                         None
                     } else {
@@ -104,6 +109,28 @@ impl Iterator for SessionReader {
             };
         }
     }
+}
+
+/// Whether the file at `path` ends with a `\n` byte, i.e. whether its
+/// trailing line is complete. A file that cannot be reopened reads as
+/// unterminated, keeping the torn-tail tolerance for infrastructure
+/// failures.
+fn ends_with_newline(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let Ok(len) = file.metadata().map(|meta| meta.len()) else {
+        return false;
+    };
+    if len == 0 {
+        return false;
+    }
+    let Ok(_) = file.seek(SeekFrom::End(-1)) else {
+        return false;
+    };
+    let mut last = [0u8];
+    file.read_exact(&mut last).is_ok_and(|()| last[0] == b'\n')
 }
 
 #[cfg(test)]
@@ -197,6 +224,30 @@ mod tests {
         }
         assert_eq!(count, 2);
         assert!(reader.torn_trailing());
+    }
+
+    #[test]
+    fn terminated_corrupt_trailing_line_is_a_decode_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        let mut w = SessionWriter::create(&path, fresh_header()).unwrap();
+        w.append(&label("kept")).unwrap();
+        drop(w);
+        // A corrupt line that does end with `\n` is not a torn write.
+        let mut raw = std::fs::read(&path).unwrap();
+        raw.extend_from_slice(b"{\"corrupt\": true}\n");
+        std::fs::write(&path, raw).unwrap();
+
+        let mut reader = SessionReader::iter(&path).unwrap();
+        assert!(matches!(reader.next(), Some(Ok(SessionEntry::Header(_)))));
+        assert!(matches!(reader.next(), Some(Ok(SessionEntry::Label(_)))));
+        let err = reader.next().unwrap().unwrap_err();
+        assert!(
+            matches!(err, SessionError::Decode { line: 3, .. }),
+            "{err:?}"
+        );
+        assert!(reader.next().is_none());
+        assert!(!reader.torn_trailing());
     }
 
     #[test]

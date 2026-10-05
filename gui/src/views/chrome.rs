@@ -1862,12 +1862,12 @@ mod tests {
     use gpui_kit::base::ElementExt as _;
     use gpui_kit::component::input::Textarea;
     use kage_client::wire::NoticeTone;
-    use kage_client::{Change, Frame};
+    use kage_client::{Change, Frame, RequestId};
 
     /// An initialize answer with everything the gate accepts.
     fn init_answer() -> Frame {
         Frame::Success {
-            id: 1,
+            id: RequestId::Number(1),
             result: serde_json::json!({
                 "protocolVersion": 1,
                 "agentCapabilities": {
@@ -1903,7 +1903,7 @@ mod tests {
         store.new_session();
         let _ = store.take_outgoing();
         store.absorb(Frame::Success {
-            id: 3,
+            id: RequestId::Number(3),
             result: serde_json::json!({"sessionId": "s1"}),
         });
         let _ = store.take_outgoing();
@@ -2051,7 +2051,7 @@ mod tests {
     fn the_answered_elsewhere_change_raises_a_toast_that_follows_the_session() {
         let changes = vec![Change::AnsweredElsewhere {
             id: "s1".to_owned(),
-            request_id: 101,
+            request_id: RequestId::Number(101),
         }];
         let drafts = toasts_for_changes(&changes);
         assert_eq!(drafts.len(), 1);
@@ -2257,7 +2257,7 @@ mod tests {
         let mut store = booted_store();
         store.new_session();
         store.absorb(Frame::Success {
-            id: 4,
+            id: RequestId::Number(4),
             result: serde_json::json!({"sessionId": "s2"}),
         });
         store.set_active("s1");

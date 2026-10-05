@@ -59,7 +59,7 @@ use gpui_kit::{
     div, px,
 };
 use kage_client::wire::{PermissionOptionKind, QuestionPrompt};
-use kage_client::{PermissionAsk, PermissionDecision};
+use kage_client::{PermissionAsk, PermissionDecision, RequestId};
 use serde_json::Value;
 
 use crate::store::{Store, StoreHandle as _};
@@ -216,10 +216,10 @@ pub struct ApprovalCard {
     /// The feedback field of each ask that offers a reject, keyed by
     /// request id. The typed text survives every redraw with the
     /// entity.
-    feedback: HashMap<u64, Entity<InputState>>,
+    feedback: HashMap<RequestId, Entity<InputState>>,
     /// The choices toggled on a question that allows several, by
     /// request id.
-    picks: HashMap<u64, BTreeSet<usize>>,
+    picks: HashMap<RequestId, BTreeSet<usize>>,
 }
 
 impl gpui_kit::EventEmitter<ApprovalEvent> for ApprovalCard {}
@@ -257,7 +257,7 @@ impl ApprovalCard {
     /// closes while the card holds it, and keeps one feedback field
     /// per open ask that offers a reject.
     fn sync_open_asks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let asks: Vec<(String, u64, bool, bool)> = self
+        let asks: Vec<(String, RequestId, bool, bool)> = self
             .store
             .read(cx)
             .active_asks()
@@ -265,7 +265,7 @@ impl ApprovalCard {
             .map(|(session_id, ask)| {
                 (
                     session_id.to_owned(),
-                    ask.request_id,
+                    ask.request_id.clone(),
                     reject_option_id(ask).is_some(),
                     ask.question.is_some(),
                 )
@@ -294,6 +294,7 @@ impl ApprovalCard {
             };
             let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
             let store = self.store.clone();
+            let ask_id = request_id.clone();
             cx.subscribe_in(
                 &input,
                 window,
@@ -308,7 +309,7 @@ impl ApprovalCard {
                                 session
                                     .permissions
                                     .iter()
-                                    .find(|ask| ask.request_id == request_id)
+                                    .find(|ask| ask.request_id == ask_id)
                             });
                             let decision = match ask {
                                 Some(ask) if ask.question.is_some() => PermissionDecision::Answer {
@@ -324,11 +325,11 @@ impl ApprovalCard {
                                 },
                                 None => return false,
                             };
-                            store.reply_permission(&session_id, request_id, &decision)
+                            store.reply_permission(&session_id, ask_id.clone(), &decision)
                         });
                         if answered {
                             input.update(cx, |state, cx| state.set_value("", window, cx));
-                            this.feedback.remove(&request_id);
+                            this.feedback.remove(&ask_id);
                             cx.notify();
                         }
                     }
@@ -371,13 +372,13 @@ impl ApprovalCard {
             return;
         };
         if ask.question.as_ref().is_some_and(|q| q.multi_select) && digit < ask.options.len() {
-            self.toggle_pick(ask.request_id, digit - 1);
+            self.toggle_pick(ask.request_id.clone(), digit - 1);
             cx.notify();
             return;
         }
         let decision = PermissionDecision::Option(option.option_id);
         self.store.update(cx, |store, cx| {
-            store.reply_permission(&session_id, ask.request_id, &decision);
+            store.reply_permission(&session_id, ask.request_id.clone(), &decision);
             cx.notify();
         });
         self.feedback.remove(&ask.request_id);
@@ -509,7 +510,7 @@ impl ApprovalCard {
             };
             let store = self.store.clone();
             let session = session_id.to_owned();
-            let request_id = ask.request_id;
+            let request_id = ask.request_id.clone();
             let option_id = option.option_id.clone();
             actions = actions.child(
                 option_btn(
@@ -525,7 +526,7 @@ impl ApprovalCard {
                     store.update(cx, |store, cx| {
                         store.reply_permission(
                             &session,
-                            request_id,
+                            request_id.clone(),
                             &PermissionDecision::Option(option_id.clone()),
                         );
                         cx.notify();
@@ -551,7 +552,7 @@ impl ApprovalCard {
 
 impl ApprovalCard {
     /// Turn choice `index` of the question `request_id` on or off.
-    fn toggle_pick(&mut self, request_id: u64, index: usize) {
+    fn toggle_pick(&mut self, request_id: RequestId, index: usize) {
         let picks = self.picks.entry(request_id).or_default();
         if !picks.remove(&index) {
             picks.insert(index);
@@ -569,7 +570,7 @@ impl ApprovalCard {
         pal: &'static Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let request_id = ask.request_id;
+        let request_id = ask.request_id.clone();
         let picked = self.picks.get(&request_id).cloned().unwrap_or_default();
         let head = v_flex()
             .px(px(14.))
@@ -605,6 +606,7 @@ impl ApprovalCard {
             );
         let mut choices = v_flex().px(px(10.)).gap(px(2.));
         for (index, choice) in question.options.iter().enumerate() {
+            let request_id = request_id.clone();
             let on = picked.contains(&index);
             let store = self.store.clone();
             let session = session_id.to_owned();
@@ -660,7 +662,7 @@ impl ApprovalCard {
                     .on_click(move |_, _, cx| {
                         if multi {
                             this.update(cx, |card, cx| {
-                                card.toggle_pick(request_id, index);
+                                card.toggle_pick(request_id.clone(), index);
                                 cx.notify();
                             });
                             return;
@@ -668,7 +670,7 @@ impl ApprovalCard {
                         store.update(cx, |store, cx| {
                             store.reply_permission(
                                 &session,
-                                request_id,
+                                request_id.clone(),
                                 &PermissionDecision::Option(format!("choice-{index}")),
                             );
                             cx.notify();
@@ -692,6 +694,7 @@ impl ApprovalCard {
             );
         }
         if question.multi_select {
+            let request_id = request_id.clone();
             let store = self.store.clone();
             let session = session_id.to_owned();
             let labels: Vec<String> = picked
@@ -714,7 +717,7 @@ impl ApprovalCard {
                     store.update(cx, |store, cx| {
                         store.reply_permission(
                             &session,
-                            request_id,
+                            request_id.clone(),
                             &PermissionDecision::Answer {
                                 option_id: format!("choice-{first}"),
                                 answer: labels.clone(),
@@ -726,6 +729,7 @@ impl ApprovalCard {
             );
         }
         if let Some(skip) = reject_option_id(ask).map(str::to_owned) {
+            let request_id = request_id.clone();
             let store = self.store.clone();
             let session = session_id.to_owned();
             actions = actions.child(
@@ -739,7 +743,7 @@ impl ApprovalCard {
                     store.update(cx, |store, cx| {
                         store.reply_permission(
                             &session,
-                            request_id,
+                            request_id.clone(),
                             &PermissionDecision::Option(skip.clone()),
                         );
                         cx.notify();
@@ -802,12 +806,12 @@ mod tests {
     use crate::store::{Command, Store};
     use crate::transport::State;
     use kage_client::wire::{PermissionOption, ToolCallUpdate};
-    use kage_client::{Frame, PermissionAsk, TranscriptItem};
+    use kage_client::{Frame, PermissionAsk, RequestId, TranscriptItem};
 
     /// An initialize answer with everything the gate accepts.
     fn init_answer() -> Frame {
         Frame::Success {
-            id: 1,
+            id: RequestId::Number(1),
             result: serde_json::json!({
                 "protocolVersion": 1,
                 "agentCapabilities": {"steer": true},
@@ -840,7 +844,7 @@ mod tests {
         store.new_session();
         let _ = store.take_outgoing();
         store.absorb(Frame::Success {
-            id: 3,
+            id: RequestId::Number(3),
             result: serde_json::json!({"sessionId": "s1"}),
         });
         let _ = store.take_outgoing();
@@ -850,7 +854,7 @@ mod tests {
     /// A `session/request_permission` ask with three options.
     fn ask_frame(session: &str, request_id: u64) -> Frame {
         Frame::Request {
-            id: request_id,
+            id: RequestId::Number(request_id),
             method: "session/request_permission".into(),
             params: serde_json::json!({
                 "sessionId": session,
@@ -885,7 +889,7 @@ mod tests {
     #[test]
     fn subject_and_reason_come_from_the_delivered_input_only() {
         let ask = |raw_input: Option<serde_json::Value>| PermissionAsk {
-            request_id: 1,
+            request_id: RequestId::Number(1),
             tool_call: ToolCallUpdate {
                 tool_call_id: "call-sh".into(),
                 title: Some("shell".into()),
@@ -914,7 +918,7 @@ mod tests {
     #[test]
     fn the_feedback_field_targets_the_first_reject_option() {
         let ask = PermissionAsk {
-            request_id: 1,
+            request_id: RequestId::Number(1),
             tool_call: ToolCallUpdate::default(),
             options: vec![
                 PermissionOption {
@@ -938,7 +942,7 @@ mod tests {
         };
         assert_eq!(super::reject_option_id(&ask), Some("revise"));
         let allow_only = PermissionAsk {
-            request_id: 2,
+            request_id: RequestId::Number(2),
             tool_call: ToolCallUpdate::default(),
             options: vec![PermissionOption {
                 option_id: "ok".into(),
@@ -989,7 +993,7 @@ mod tests {
         assert_eq!(
             outgoing.last(),
             Some(&Frame::Success {
-                id: 101,
+                id: RequestId::Number(101),
                 result: serde_json::json!({
                     "outcome": {"outcome": "selected", "optionId": "reject"},
                 }),
@@ -1032,7 +1036,7 @@ mod tests {
             let input = view
                 .read(cx)
                 .feedback
-                .get(&101)
+                .get(&RequestId::Number(101))
                 .expect("the ask offers a reject, so the field rendered")
                 .clone();
             input.update(cx, |state, cx| state.focus(window, cx));
@@ -1046,7 +1050,7 @@ mod tests {
             "a digit typed into the feedback field types, it never answers"
         );
         let text = visual.update(|_, cx| {
-            let input = view.read(cx).feedback.get(&101).unwrap().clone();
+            let input = view.read(cx).feedback.get(&RequestId::Number(101)).unwrap().clone();
             input.read(cx).value().to_string()
         });
         assert_eq!(text, "1", "the digit went into the field instead");
@@ -1061,7 +1065,7 @@ mod tests {
         visual.update(|window, cx| window.render_frame(cx));
 
         visual.update(|window, cx| {
-            let input = view.read(cx).feedback.get(&101).unwrap().clone();
+            let input = view.read(cx).feedback.get(&RequestId::Number(101)).unwrap().clone();
             input.update(cx, |state, cx| state.focus(window, cx));
         });
         visual.update(|window, cx| window.input("use rustfmt first", cx));
@@ -1071,7 +1075,7 @@ mod tests {
         assert_eq!(
             outgoing.last(),
             Some(&Frame::Success {
-                id: 101,
+                id: RequestId::Number(101),
                 result: serde_json::json!({
                     "outcome": {"outcome": "selected", "optionId": "reject"},
                     "_meta": {"kage": {"planReview": {"revision": "use rustfmt first"}}},

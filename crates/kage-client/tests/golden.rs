@@ -15,11 +15,16 @@ use kage_acp_wire::{
     RequestPermissionRequest, SessionNotification, StopReason, ToolCallStatus,
 };
 use kage_client::{
-    Change, Client, Frame, PermissionDecision, PromptOutcome, SteerError, TranscriptItem,
+    Change, Client, Frame, PermissionDecision, PromptOutcome, RequestId, SteerError, TranscriptItem,
 };
 
 const PARENT: &str = "01KA5C0D1NG000000000000000";
 const CHILD: &str = "01KA5C0D1NG000000000000001";
+
+/// The numeric id fixtures answer and assert under.
+fn n(id: u64) -> RequestId {
+    RequestId::Number(id)
+}
 
 /// The fixtures directory of this crate.
 fn fixtures() -> PathBuf {
@@ -70,7 +75,7 @@ fn text(message: &str) -> Vec<ContentBlock> {
 /// without the steering capability.
 fn init_result(steer: bool) -> Frame {
     Frame::Success {
-        id: 1,
+        id: n(1),
         result: serde_json::json!({
             "protocolVersion": 1,
             "agentCapabilities": {"loadSession": true, "steer": steer},
@@ -80,14 +85,14 @@ fn init_result(steer: bool) -> Frame {
 
 fn new_result(id: u64, session: &str) -> Frame {
     Frame::Success {
-        id,
+        id: n(id),
         result: serde_json::json!({"sessionId": session}),
     }
 }
 
 fn stop(id: u64, reason: &str) -> Frame {
     Frame::Success {
-        id,
+        id: n(id),
         result: serde_json::json!({"stopReason": reason}),
     }
 }
@@ -282,19 +287,19 @@ fn the_approval_fixture_round_trips_a_permission_ask() {
     let session = client.state().session(PARENT).unwrap();
     assert_eq!(session.permissions.len(), 1);
     let ask = &session.permissions[0];
-    assert_eq!(ask.request_id, 101);
+    assert_eq!(ask.request_id, n(101));
     assert_eq!(ask.tool_call.title.as_deref(), Some("shell"));
     assert_eq!(
         ask.option_of(kage_acp_wire::PermissionOptionKind::AllowOnce),
         Some("allow")
     );
 
-    assert!(client.reply_permission(PARENT, 101, &PermissionDecision::Allow));
+    assert!(client.reply_permission(PARENT, n(101), &PermissionDecision::Allow));
     let outgoing = client.take_outgoing();
     assert_eq!(
         outgoing.last(),
         Some(&Frame::Success {
-            id: 101,
+            id: n(101),
             result: serde_json::json!({"outcome": {"outcome": "selected", "optionId": "allow"}}),
         })
     );
@@ -359,7 +364,7 @@ fn the_cancel_fixture_withdraws_the_ask_and_ends_cancelled() {
     assert!(
         changes.contains(&Change::AnsweredElsewhere {
             id: PARENT.into(),
-            request_id: 101,
+            request_id: n(101),
         }),
         "the withdraw names the ask that closed: {changes:?}"
     );
@@ -452,7 +457,7 @@ fn a_reraised_ask_replaces_its_echo_instead_of_duplicating() {
     // The same request id again, as a re-attach re-raises the ask,
     // this time with a narrower offer.
     let changes = client.handle(Frame::Request {
-        id: 101,
+        id: n(101),
         method: "session/request_permission".into(),
         params: serde_json::json!({
             "sessionId": PARENT,
@@ -464,7 +469,7 @@ fn a_reraised_ask_replaces_its_echo_instead_of_duplicating() {
     assert!(changes.contains(&Change::Permission { id: PARENT.into() }));
     let session = client.state().session(PARENT).unwrap();
     assert_eq!(session.permissions.len(), 1, "one ask per request id");
-    assert_eq!(session.permissions[0].request_id, 101);
+    assert_eq!(session.permissions[0].request_id, n(101));
     assert_eq!(
         session.permissions[0].options.len(),
         1,
@@ -493,7 +498,7 @@ fn feedback_rides_the_meta_channel_and_the_record_quotes_it() {
 
     assert!(client.reply_permission(
         PARENT,
-        101,
+        n(101),
         &PermissionDecision::Feedback {
             option_id: "reject".into(),
             feedback: "use rustfmt first".into(),
@@ -503,7 +508,7 @@ fn feedback_rides_the_meta_channel_and_the_record_quotes_it() {
     assert_eq!(
         outgoing.last(),
         Some(&Frame::Success {
-            id: 101,
+            id: n(101),
             result: serde_json::json!({
                 "outcome": {"outcome": "selected", "optionId": "reject"},
                 "_meta": {"kage": {"planReview": {"revision": "use rustfmt first"}}},
@@ -540,12 +545,12 @@ fn a_dismissal_answers_cancelled_and_records_no_choice() {
     let _ = client.take_outgoing();
     drive(&mut client, &frames[2..5]);
 
-    assert!(client.reply_permission(PARENT, 101, &PermissionDecision::Cancel));
+    assert!(client.reply_permission(PARENT, n(101), &PermissionDecision::Cancel));
     let outgoing = client.take_outgoing();
     assert_eq!(
         outgoing.last(),
         Some(&Frame::Success {
-            id: 101,
+            id: n(101),
             result: serde_json::json!({"outcome": {"outcome": "cancelled"}}),
         })
     );
@@ -593,7 +598,7 @@ fn the_subagent_fixture_builds_the_agent_tree_and_the_child_transcript() {
     let child = client.state().session(CHILD).unwrap();
     assert!(!child.opened, "the child is heard, not opened");
     assert_eq!(child.permissions.len(), 1, "the child's tool call asks");
-    assert_eq!(child.permissions[0].request_id, 101);
+    assert_eq!(child.permissions[0].request_id, n(101));
 
     let asks = client.state().open_asks();
     assert_eq!(asks.len(), 1, "{asks:?}");
@@ -605,12 +610,12 @@ fn the_subagent_fixture_builds_the_agent_tree_and_the_child_transcript() {
     );
     assert_eq!(client.state().asker_byline(PARENT), None);
 
-    assert!(client.reply_permission(CHILD, 101, &PermissionDecision::Allow));
+    assert!(client.reply_permission(CHILD, n(101), &PermissionDecision::Allow));
     assert!(
         client
             .take_outgoing()
             .last()
-            .is_some_and(|frame| { matches!(frame, Frame::Success { id: 101, .. }) })
+            .is_some_and(|frame| { matches!(frame, Frame::Success { id, .. } if *id == n(101)) })
     );
     changes.extend(drive(&mut client, &frames[8..]));
 
@@ -726,11 +731,7 @@ fn a_prompt_queues_without_the_steer_capability() {
     let outgoing = client.take_outgoing();
     assert_eq!(outgoing.len(), 1, "{outgoing:?}");
     match &outgoing[0] {
-        Frame::Request {
-            id: 4,
-            method,
-            params,
-        } => {
+        Frame::Request { id, method, params } if *id == n(4) => {
             assert_eq!(method, "session/prompt");
             assert!(params.get("delivery").is_none(), "queued prompts go plain");
             assert_eq!(params["prompt"][0]["text"], "later");
@@ -758,7 +759,7 @@ fn steer_joins_a_run_only_when_advertised_and_in_flight() {
     assert!(session.queue.is_empty(), "steered prompts never queue");
     let outgoing = client.take_outgoing();
     match &outgoing[0] {
-        Frame::Request { id: 4, params, .. } => {
+        Frame::Request { id, params, .. } if *id == n(4) => {
             assert_eq!(params["delivery"], "steer");
             assert_eq!(params["prompt"][0]["text"], "hurry");
         }
@@ -830,7 +831,7 @@ fn queued_prompts_withdraw_and_promote_to_steer() {
     assert_eq!(client.steer_queued("s1", 0), Ok(4));
     let outgoing = client.take_outgoing();
     match &outgoing[0] {
-        Frame::Request { id: 4, params, .. } => {
+        Frame::Request { id, params, .. } if *id == n(4) => {
             assert_eq!(params["delivery"], "steer");
             assert_eq!(params["prompt"][0]["text"], "second");
         }
@@ -866,7 +867,7 @@ fn a_config_write_answers_with_the_snapshot_or_fails() {
     assert_eq!(
         client.take_outgoing(),
         vec![Frame::Request {
-            id,
+            id: n(id),
             method: "_kage/config/set".into(),
             params: serde_json::json!({
                 "sessionId": "s1",
@@ -879,7 +880,7 @@ fn a_config_write_answers_with_the_snapshot_or_fails() {
     let changes = drive(
         &mut client,
         &[Frame::Success {
-            id,
+            id: n(id),
             result: snapshot.clone(),
         }],
     );
@@ -901,7 +902,7 @@ fn a_config_write_answers_with_the_snapshot_or_fails() {
     let changes = drive(
         &mut client,
         &[Frame::Failure {
-            id,
+            id: n(id),
             error: error.clone(),
         }],
     );
@@ -914,7 +915,7 @@ fn a_config_write_answers_with_the_snapshot_or_fails() {
     let changes = drive(
         &mut client,
         &[Frame::Success {
-            id,
+            id: n(id),
             result: serde_json::json!({
                 "ok": true, "status": 200, "message": "GET /models", "millis": 5,
                 "models": [{"id": "m1", "context": 8000}],
@@ -938,7 +939,7 @@ fn a_config_write_answers_with_the_snapshot_or_fails() {
     let changes = drive(
         &mut client,
         &[Frame::Success {
-            id,
+            id: n(id),
             result: serde_json::json!({}),
         }],
     );
@@ -965,7 +966,7 @@ fn directory_and_plugin_answers_arrive_under_their_ids() {
     let changes = drive(
         &mut client,
         &[Frame::Success {
-            id,
+            id: n(id),
             result: serde_json::json!({"providers": [
                 {"id": "lab", "name": "Lab", "env": [], "models": [{"id": "m", "name": "M"}]}
             ]}),
@@ -982,7 +983,7 @@ fn directory_and_plugin_answers_arrive_under_their_ids() {
     let changes = drive(
         &mut client,
         &[Frame::Success {
-            id,
+            id: n(id),
             result: serde_json::json!({"name": "clock"}),
         }],
     );
@@ -1001,7 +1002,7 @@ fn one_shot_answers_arrive_as_changes() {
     let changes = drive(
         &mut client,
         &[Frame::Success {
-            id: 3,
+            id: n(3),
             result: serde_json::json!({"providers": {}, "permissions": {}}),
         }],
     );
@@ -1017,7 +1018,7 @@ fn one_shot_answers_arrive_as_changes() {
     let changes = drive(
         &mut client,
         &[Frame::Success {
-            id: 4,
+            id: n(4),
             result: serde_json::to_value(FsResult::List(FsListResult {
                 entries: vec![FsEntry {
                     path: "src".into(),
@@ -1057,7 +1058,7 @@ fn list_pages_merge_and_config_and_close_land_on_the_session() {
     let changes = drive(
         &mut client,
         &[Frame::Success {
-            id: 3,
+            id: n(3),
             result: serde_json::json!({"sessions": [
                 {"sessionId": "rec-1", "cwd": "/w", "title": "Fix the build"}
             ]}),
@@ -1074,7 +1075,7 @@ fn list_pages_merge_and_config_and_close_land_on_the_session() {
     drive(
         &mut client,
         &[Frame::Success {
-            id: 4,
+            id: n(4),
             result: serde_json::json!({"sessions": [
                 {"sessionId": "rec-1", "cwd": "/w", "title": "Renamed"},
                 {"sessionId": "rec-2", "cwd": "/w"}
@@ -1091,7 +1092,7 @@ fn list_pages_merge_and_config_and_close_land_on_the_session() {
     let changes = drive(
         &mut client,
         &[Frame::Success {
-            id: 5,
+            id: n(5),
             result: serde_json::json!({"configOptions": [{
                 "id": "mode", "name": "Mode", "category": "mode",
                 "type": "select", "currentValue": "ask", "options": []
@@ -1108,7 +1109,7 @@ fn list_pages_merge_and_config_and_close_land_on_the_session() {
     let changes = drive(
         &mut client,
         &[Frame::Success {
-            id: 6,
+            id: n(6),
             result: serde_json::json!({}),
         }],
     );
@@ -1126,7 +1127,7 @@ fn unheard_of_answers_and_frames_change_nothing() {
         drive(
             &mut client,
             &[Frame::Success {
-                id: 99,
+                id: n(99),
                 result: serde_json::json!({})
             }]
         ),
@@ -1159,7 +1160,7 @@ fn unheard_of_answers_and_frames_change_nothing() {
 fn server_requests_outside_the_permission_ask_are_refused() {
     let mut client = Client::new();
     client.handle(Frame::Request {
-        id: 5,
+        id: n(5),
         method: "fs/read_text_file".into(),
         params: serde_json::json!({"sessionId": "s1", "path": "a"}),
     });
@@ -1167,13 +1168,13 @@ fn server_requests_outside_the_permission_ask_are_refused() {
     assert_eq!(
         outgoing,
         vec![Frame::Failure {
-            id: 5,
+            id: n(5),
             error: kage_client::RpcError::method_not_found("fs/read_text_file"),
         }]
     );
 
     client.handle(Frame::Request {
-        id: 6,
+        id: n(6),
         method: "session/request_permission".into(),
         params: serde_json::json!({"toolCall": {}}),
     });
@@ -1185,7 +1186,7 @@ fn server_requests_outside_the_permission_ask_are_refused() {
     );
     assert!(matches!(
         &outgoing[0],
-        Frame::Failure { id: 6, error } if error.code == -32602
+        Frame::Failure { id, error } if *id == n(6) && error.code == -32602
     ));
 }
 
@@ -1199,7 +1200,7 @@ fn a_failed_prompt_answer_releases_the_run_and_flushes_the_queue() {
     let _ = client.take_outgoing();
     assert_eq!(client.prompt("s1", text("later")), PromptOutcome::Queued);
     client.handle(Frame::Failure {
-        id: 3,
+        id: n(3),
         error: kage_client::RpcError::new(-32603, "session is busy"),
     });
     assert!(
@@ -1207,7 +1208,7 @@ fn a_failed_prompt_answer_releases_the_run_and_flushes_the_queue() {
         "the failed run released, so the queued prompt took over"
     );
     let outgoing = client.take_outgoing();
-    assert!(matches!(&outgoing[0], Frame::Request { id: 4, .. }));
+    assert!(matches!(&outgoing[0], Frame::Request { id, .. } if *id == n(4)));
 }
 
 #[test]
@@ -1239,7 +1240,7 @@ fn a_fork_names_its_prompt_by_text_and_occurrence() {
         &serde_json::json!({"sessionId": "s1", "before": {"text": "again", "occurrence": 1}})
     );
     let changes = client.handle(Frame::Success {
-        id,
+        id: n(id),
         result: serde_json::json!({"sessionId": "s2"}),
     });
     assert_eq!(
@@ -1252,7 +1253,7 @@ fn a_fork_names_its_prompt_by_text_and_occurrence() {
 
     let id = client.export_session("s1");
     let changes = client.handle(Frame::Success {
-        id,
+        id: n(id),
         result: serde_json::json!({"markdown": "# s1"}),
     });
     assert_eq!(
@@ -1283,7 +1284,10 @@ fn engine_options_list_and_set_answer_with_every_option() {
         params,
         &serde_json::json!({"name": "agent_max_depth", "value": 2})
     );
-    let changes = client.handle(Frame::Success { id, result: listed });
+    let changes = client.handle(Frame::Success {
+        id: n(id),
+        result: listed,
+    });
     let [Change::Options { options }] = changes.as_slice() else {
         panic!("one options change: {changes:?}");
     };

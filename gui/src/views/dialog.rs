@@ -813,7 +813,7 @@ impl Render for DialogView {
 #[cfg(test)]
 mod tests {
     use gpui_kit::{AppContext as _, TestAppContext, Window};
-    use kage_client::Frame;
+    use kage_client::{Frame, RequestId};
 
     use kage_client::wire::{ContentBlock, DiffContent, ToolCallContent, ToolCallStatus, ToolKind};
     use kage_client::{Session, Subagent, ToolCallItem, TranscriptItem};
@@ -833,7 +833,7 @@ mod tests {
         }
         let _ = store.take_outgoing();
         store.absorb(Frame::Success {
-            id: 1,
+            id: RequestId::Number(1),
             result: serde_json::json!({"protocolVersion": 1, "agentCapabilities": {}}),
         });
         let _ = store.take_outgoing();

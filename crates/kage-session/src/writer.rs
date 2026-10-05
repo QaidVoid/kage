@@ -13,7 +13,9 @@
 //!
 //! Crash safety is "newline-only": entries are always terminated by a single
 //! `\n`. A process killed mid-append leaves a partial trailing line which
-//! [`SessionWriter::open`] truncates away before its first append.
+//! [`SessionWriter::open`] truncates away before its first append. A file
+//! that never received a `\n` at all, such as a crash mid-header, is
+//! refused instead: there is nothing safe to repair into.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufWriter, Seek, Write};
@@ -96,8 +98,12 @@ impl SessionWriter {
     /// appending after it would glue the next entry onto the fragment and
     /// turn a skippable partial write into a permanent decode error. The
     /// advisory lock is taken before that repair so a second appender never
-    /// truncates a concurrent writer's in-flight entry. No validation of
-    /// the header is performed here; readers detect malformed files.
+    /// truncates a concurrent writer's in-flight entry.
+    ///
+    /// The file must be appendable as it stands: an empty file, a file
+    /// whose first line is not a parseable header, and a file holding
+    /// a single line that never received its `\n` are all refused
+    /// rather than repaired into a headerless file.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, SessionError> {
         let path = path.into();
         let mut file = OpenOptions::new()
@@ -117,10 +123,7 @@ impl SessionWriter {
             })?;
             acquire_lock(dup, &path)?
         };
-        repair_torn_tail(&mut file, &path).map_err(|err| SessionError::Io {
-            path: path.clone(),
-            source: err,
-        })?;
+        repair_torn_tail(&mut file, &path)?;
         Ok(Self {
             path,
             inner: BufWriter::new(file),
@@ -179,9 +182,12 @@ impl SessionWriter {
     }
 }
 
-/// Refuse to append to a file whose header declares a format version this
-/// build does not understand. A first line that is not a header is left for
-/// readers to report, matching the previous behavior.
+/// Refuse to append to a file that is not a session this build can
+/// extend. An empty file has no header to append behind; a first line
+/// that does not parse as a header can only be a torn or foreign
+/// line, and appending behind it would orphan everything this writer
+/// adds. A parseable header must also declare the supported format
+/// version.
 fn check_version(file: &File, path: &Path) -> Result<(), SessionError> {
     let mut reader = std::io::BufReader::new(file);
     let mut line = String::new();
@@ -192,31 +198,44 @@ fn check_version(file: &File, path: &Path) -> Result<(), SessionError> {
             source: err,
         })?;
     if read == 0 {
-        return Ok(());
-    }
-    if let Ok(SessionEntry::Header(header)) = serde_json::from_str::<SessionEntry>(&line)
-        && header.version != FORMAT_VERSION
-    {
-        return Err(SessionError::UnsupportedVersion {
+        return Err(SessionError::Empty {
             path: path.to_path_buf(),
-            found: header.version,
-            supported: FORMAT_VERSION,
         });
     }
-    Ok(())
+    match serde_json::from_str::<SessionEntry>(&line) {
+        Ok(SessionEntry::Header(header)) => {
+            if header.version != FORMAT_VERSION {
+                return Err(SessionError::UnsupportedVersion {
+                    path: path.to_path_buf(),
+                    found: header.version,
+                    supported: FORMAT_VERSION,
+                });
+            }
+            Ok(())
+        }
+        _ => Err(SessionError::MissingHeader {
+            path: path.to_path_buf(),
+        }),
+    }
 }
 
 /// Drop an unterminated trailing line from `file`.
 ///
 /// Scans for the final `\n`; if the file does not end with one, the bytes
 /// after it are a torn write from a crashed appender and are truncated
-/// away. The reader would have skipped those bytes anyway, so truncation
-/// changes nothing it could see; it only keeps the next append from being
-/// glued onto the fragment.
-fn repair_torn_tail(file: &mut File, path: &Path) -> std::io::Result<()> {
-    file.rewind()?;
-    let len = file.metadata()?.len();
-    if len == 0 {
+/// away. Those bytes are exactly the ones the reader skips as torn, so
+/// truncation removes nothing the reader would keep or report. A file
+/// with no `\n` at all is refused instead of truncated: its only line
+/// never completed, so there is nothing to repair into and truncating
+/// would erase even the header fragment.
+fn repair_torn_tail(file: &mut File, path: &Path) -> Result<(), SessionError> {
+    let io = |err: std::io::Error| SessionError::Io {
+        path: path.to_path_buf(),
+        source: err,
+    };
+    file.rewind().map_err(io)?;
+    let len = file.metadata().map_err(io)?;
+    if len.len() == 0 {
         return Ok(());
     }
     let mut last_newline: Option<u64> = None;
@@ -224,7 +243,7 @@ fn repair_torn_tail(file: &mut File, path: &Path) -> std::io::Result<()> {
     let mut reader = std::io::BufReader::new(&mut *file);
     loop {
         let mut chunk = Vec::new();
-        let n = reader.read_until(b'\n', &mut chunk)?;
+        let n = reader.read_until(b'\n', &mut chunk).map_err(io)?;
         if n == 0 {
             break;
         }
@@ -237,10 +256,15 @@ fn repair_torn_tail(file: &mut File, path: &Path) -> std::io::Result<()> {
     if ends_with_newline {
         return Ok(());
     }
+    let Some(last_newline) = last_newline else {
+        return Err(SessionError::TornHeader {
+            path: path.to_path_buf(),
+        });
+    };
     // Windows refuses to truncate through an append-only handle.
-    let writer = OpenOptions::new().write(true).open(path)?;
-    writer.set_len(last_newline.map_or(0, |pos| pos + 1))?;
-    writer.sync_all()
+    let writer = OpenOptions::new().write(true).open(path).map_err(io)?;
+    writer.set_len(last_newline + 1).map_err(io)?;
+    writer.sync_all().map_err(io)
 }
 
 /// Whether another writer holds the advisory lock on the session file
@@ -443,6 +467,39 @@ mod tests {
         drop(w);
         assert!(!is_locked(&path));
         let _w = SessionWriter::open(&path).unwrap();
+    }
+
+    #[test]
+    fn open_refuses_an_empty_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        std::fs::write(&path, b"").unwrap();
+        let err = SessionWriter::open(&path).unwrap_err();
+        assert!(matches!(err, SessionError::Empty { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn open_refuses_a_partial_header_and_keeps_the_bytes() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        let partial = b"{\"type\":\"header\",\"vers";
+        std::fs::write(&path, partial).unwrap();
+        let err = SessionWriter::open(&path).unwrap_err();
+        assert!(matches!(err, SessionError::MissingHeader { .. }), "{err:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), partial, "bytes stay put");
+    }
+
+    #[test]
+    fn open_refuses_a_header_that_never_ended() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        // A valid header line with no `\n`: nothing to repair into,
+        // and truncating would erase the header itself.
+        let header = serde_json::to_string(&SessionEntry::Header(fresh_header())).unwrap();
+        std::fs::write(&path, &header).unwrap();
+        let err = SessionWriter::open(&path).unwrap_err();
+        assert!(matches!(err, SessionError::TornHeader { .. }), "{err:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), header);
     }
 
     #[test]

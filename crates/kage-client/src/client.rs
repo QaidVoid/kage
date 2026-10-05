@@ -25,7 +25,7 @@ use kage_acp_wire::{
 };
 
 use crate::change::Change;
-use crate::frame::{Frame, RpcError};
+use crate::frame::{Frame, RequestId, RpcError};
 use crate::state::{
     PermissionAsk, QueuedPrompt, Session, State, ToolCallItem, TranscriptItem, Usage,
 };
@@ -167,7 +167,7 @@ enum Pending {
 pub struct Client {
     state: State,
     next_id: u64,
-    pending: BTreeMap<u64, Pending>,
+    pending: BTreeMap<RequestId, Pending>,
     outgoing: Vec<Frame>,
 }
 
@@ -206,8 +206,8 @@ impl Client {
                 self.handle_server_request(id, &method, params)
             }
             Frame::Notification { method, params } => self.handle_notification(&method, params),
-            Frame::Success { id, result } => self.handle_success(id, result),
-            Frame::Failure { id, error } => self.handle_failure(id, error),
+            Frame::Success { id, result } => self.handle_success(&id, result),
+            Frame::Failure { id, error } => self.handle_failure(&id, error),
         }
     }
 
@@ -414,7 +414,7 @@ impl Client {
     pub fn reply_permission(
         &mut self,
         session_id: &str,
-        request_id: u64,
+        request_id: RequestId,
         decision: &PermissionDecision,
     ) -> bool {
         let (outcome, meta) = {
@@ -785,9 +785,9 @@ impl Client {
 
     fn request(&mut self, method: &str, params: Value, pending: Pending) -> u64 {
         let id = self.take_id();
-        self.pending.insert(id, pending);
+        self.pending.insert(RequestId::Number(id), pending);
         self.outgoing.push(Frame::Request {
-            id,
+            id: RequestId::Number(id),
             method: method.to_owned(),
             params,
         });
@@ -858,7 +858,7 @@ impl Client {
     ) -> u64 {
         let id = self.take_id();
         self.pending.insert(
-            id,
+            RequestId::Number(id),
             Pending::Prompt {
                 session_id: session_id.to_owned(),
                 owns_run,
@@ -873,7 +873,7 @@ impl Client {
             steered: delivery == Some(PromptDelivery::Steer),
         });
         self.outgoing.push(Frame::Request {
-            id,
+            id: RequestId::Number(id),
             method: "session/prompt".into(),
             params: params(&PromptRequest {
                 session_id: session_id.to_owned(),
@@ -901,7 +901,7 @@ impl Client {
             .or_insert_with(|| Session::new(session_id))
     }
 
-    fn handle_server_request(&mut self, id: u64, method: &str, params: Value) -> Vec<Change> {
+    fn handle_server_request(&mut self, id: RequestId, method: &str, params: Value) -> Vec<Change> {
         if method != ASK_METHOD {
             self.outgoing.push(Frame::Failure {
                 id,
@@ -933,7 +933,7 @@ impl Client {
         match session
             .permissions
             .iter()
-            .position(|open| open.request_id == id)
+            .position(|open| open.request_id == ask.request_id)
         {
             Some(index) => session.permissions[index] = ask,
             None => session.permissions.push(ask),
@@ -948,10 +948,11 @@ impl Client {
                 Err(_) => Vec::new(),
             },
             "$/cancel_request" => {
-                let Some(request_id) = params.get("requestId").and_then(Value::as_u64) else {
+                let Some(request_id) = params.get("requestId").and_then(RequestId::from_value)
+                else {
                     return Vec::new();
                 };
-                self.withdraw_ask(request_id)
+                self.withdraw_ask(&request_id)
             }
             _ => Vec::new(),
         }
@@ -962,7 +963,7 @@ impl Client {
     /// leaves the queue with no reply of ours and no decision record;
     /// [`Change::AnsweredElsewhere`] is the host's cue to close the
     /// card.
-    fn withdraw_ask(&mut self, request_id: u64) -> Vec<Change> {
+    fn withdraw_ask(&mut self, request_id: &RequestId) -> Vec<Change> {
         let mut moved = Vec::new();
         let sessions = self.state.sessions.keys().cloned().collect::<Vec<_>>();
         for session_id in sessions {
@@ -972,7 +973,7 @@ impl Client {
             let Some(index) = session
                 .permissions
                 .iter()
-                .position(|ask| ask.request_id == request_id)
+                .position(|ask| &ask.request_id == request_id)
             else {
                 continue;
             };
@@ -982,14 +983,14 @@ impl Client {
             });
             moved.push(Change::AnsweredElsewhere {
                 id: session_id,
-                request_id,
+                request_id: request_id.clone(),
             });
         }
         moved
     }
 
-    fn handle_success(&mut self, id: u64, result: Value) -> Vec<Change> {
-        let Some(pending) = self.pending.remove(&id) else {
+    fn handle_success(&mut self, id: &RequestId, result: Value) -> Vec<Change> {
+        let Some((RequestId::Number(id), pending)) = self.pending.remove_entry(id) else {
             return Vec::new();
         };
         match pending {
@@ -1167,8 +1168,8 @@ impl Client {
         vec![Change::Session { id: session_id }]
     }
 
-    fn handle_failure(&mut self, id: u64, error: RpcError) -> Vec<Change> {
-        let Some(pending) = self.pending.remove(&id) else {
+    fn handle_failure(&mut self, id: &RequestId, error: RpcError) -> Vec<Change> {
+        let Some((RequestId::Number(id), pending)) = self.pending.remove_entry(id) else {
             return Vec::new();
         };
         match pending {
@@ -1515,5 +1516,102 @@ fn settings_answer(id: u64, pending: Pending, result: Value) -> Vec<Change> {
             }],
         },
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// A permission ask whose request id is a string, as agents that
+    /// assign string ids send.
+    fn string_id_ask() -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": "abc",
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "s1",
+                "toolCall": { "toolCallId": "c1" },
+                "options": [
+                    { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+                    { "optionId": "reject", "name": "Reject", "kind": "reject_once" }
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn string_id_asks_open_a_card_and_take_an_answer() {
+        let mut client = Client::new();
+        let frame = Frame::parse(&string_id_ask()).unwrap();
+        assert_eq!(
+            client.handle(frame),
+            vec![Change::Permission { id: "s1".into() }]
+        );
+        assert_eq!(
+            client.state().session("s1").unwrap().permissions.len(),
+            1,
+            "the ask is queued under its string id"
+        );
+        let answered = client.reply_permission(
+            "s1",
+            RequestId::String("abc".into()),
+            &PermissionDecision::Allow,
+        );
+        assert!(answered);
+        let outgoing = client.take_outgoing();
+        assert_eq!(outgoing.len(), 1);
+        match &outgoing[0] {
+            Frame::Success { id, result } => {
+                assert_eq!(*id, RequestId::String("abc".into()));
+                let result = result.to_string();
+                assert!(result.contains("allow"), "the allow option was picked");
+            }
+            other => panic!("expected a success answer, got {other:?}"),
+        }
+        assert_eq!(outgoing[0].to_value()["id"], json!("abc"));
+    }
+
+    #[test]
+    fn a_string_request_id_cancel_withdraws_the_ask() {
+        let mut client = Client::new();
+        client.handle(Frame::parse(&string_id_ask()).unwrap());
+        let cancel = json!({
+            "jsonrpc": "2.0",
+            "method": "$/cancel_request",
+            "params": { "requestId": "abc" }
+        });
+        let changes = client.handle(Frame::parse(&cancel).unwrap());
+        assert!(changes.iter().any(|change| matches!(
+            change,
+            Change::AnsweredElsewhere {
+                request_id: RequestId::String(id),
+                ..
+            } if id == "abc"
+        )));
+        assert!(client.state().session("s1").unwrap().permissions.is_empty());
+    }
+
+    #[test]
+    fn numeric_id_flows_are_unchanged() {
+        let mut client = Client::new();
+        let request_id = client.initialize(ClientCapabilities::default(), None);
+        let outgoing = client.take_outgoing();
+        let Frame::Request { id, .. } = &outgoing[0] else {
+            panic!("expected a request");
+        };
+        assert_eq!(*id, RequestId::Number(request_id));
+        client.handle(Frame::Success {
+            id: RequestId::Number(request_id),
+            result: json!({
+                "protocolVersion": 1,
+                "agentCapabilities": {},
+                "agentInfo": { "name": "agent" }
+            }),
+        });
+        assert_eq!(client.state().protocol_version, Some(1));
     }
 }

@@ -1083,13 +1083,13 @@ mod tests {
         ContentBlock, NoticeTone, SessionConfigKind, SessionConfigOption, SubagentState,
         ToolCallUpdate,
     };
-    use kage_client::{Frame, PermissionAsk, Session, Subagent, TranscriptItem};
+    use kage_client::{Frame, PermissionAsk, RequestId, Session, Subagent, TranscriptItem};
 
     /// An initialize answer with everything the gate accepts,
     /// steering advertised.
     fn init_answer() -> Frame {
         Frame::Success {
-            id: 1,
+            id: RequestId::Number(1),
             result: serde_json::json!({
                 "protocolVersion": 1,
                 "agentCapabilities": {
@@ -1125,7 +1125,7 @@ mod tests {
         store.new_session();
         let _ = store.take_outgoing();
         store.absorb(Frame::Success {
-            id: 3,
+            id: RequestId::Number(3),
             result: serde_json::json!({"sessionId": "s1"}),
         });
         let _ = store.take_outgoing();
@@ -1177,7 +1177,7 @@ mod tests {
     /// offers.
     fn review_ask(id: u64) -> Frame {
         Frame::Request {
-            id,
+            id: RequestId::Number(id),
             method: "session/request_permission".to_owned(),
             params: serde_json::json!({
                 "sessionId": "s1",
@@ -1194,7 +1194,7 @@ mod tests {
     /// A permission ask naming `title` with the offered options.
     fn ask_of(id: u64, title: &str, options: &[(&str, &str)]) -> PermissionAsk {
         PermissionAsk {
-            request_id: id,
+            request_id: RequestId::Number(id),
             tool_call: ToolCallUpdate {
                 tool_call_id: format!("call_{title}"),
                 title: Some(title.to_owned()),
@@ -1242,7 +1242,10 @@ mod tests {
     }
 
     /// The permission replies drained, anything else a test failure.
-    fn drain_replies(store: &Entity<Store>, visual: &mut VisualTestContext) -> Vec<(u64, Value)> {
+    fn drain_replies(
+        store: &Entity<Store>,
+        visual: &mut VisualTestContext,
+    ) -> Vec<(RequestId, Value)> {
         visual.update(|_, cx| {
             store.update(cx, |store, _| {
                 store
@@ -1461,7 +1464,7 @@ mod tests {
         assert_eq!(
             plan_review(&session),
             Some(PlanReviewState {
-                request_id: 7,
+                request_id: RequestId::Number(7),
                 call_id: "call_exit_plan".into(),
                 approve: Some("approve".into()),
                 revise: Some("revise".into()),
@@ -1547,7 +1550,7 @@ mod tests {
                 .active_session()
                 .and_then(plan_review)
                 .expect("the ask opens the review");
-            assert_eq!(review.request_id, 7);
+            assert_eq!(review.request_id, RequestId::Number(7));
             assert_eq!(review.approve.as_deref(), Some("approve"));
             assert_eq!(review.revise.as_deref(), Some("revise"));
             assert_eq!(review.reject.as_deref(), Some("reject"));
@@ -1560,7 +1563,7 @@ mod tests {
         assert_eq!(
             replies,
             vec![(
-                7,
+                RequestId::Number(7),
                 serde_json::json!({
                     "outcome": {"outcome": "selected", "optionId": "approve"},
                 })
@@ -1587,7 +1590,8 @@ mod tests {
         let replies = drain_replies(&store, visual);
         assert_eq!(replies.len(), 1);
         assert_eq!(
-            replies[0].0, 8,
+            replies[0].0,
+            RequestId::Number(8),
             "the decision answers the request id the ask carried"
         );
         assert_eq!(
@@ -1619,7 +1623,7 @@ mod tests {
         });
         let replies = drain_replies(&store, visual);
         assert_eq!(replies.len(), 1);
-        assert_eq!(replies[0].0, 7);
+        assert_eq!(replies[0].0, RequestId::Number(7));
         assert_eq!(
             replies[0].1["outcome"]["optionId"], "revise",
             "the revise decision picks the offered revise option"

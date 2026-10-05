@@ -4032,7 +4032,7 @@ mod tests {
         ContentBlock, DiffContent, MessageChunk, ToolCallContent, ToolCallStatus, ToolKind,
         TurnReason,
     };
-    use kage_client::{Frame, Session, ToolCallItem, TranscriptItem};
+    use kage_client::{Frame, RequestId, Session, ToolCallItem, TranscriptItem};
 
     /// A session holding exactly `items`.
     fn session_with(items: Vec<TranscriptItem>) -> Session {
@@ -4817,7 +4817,7 @@ mod tests {
     /// An initialize answer with everything the gate accepts.
     fn init_answer() -> Frame {
         Frame::Success {
-            id: 1,
+            id: RequestId::Number(1),
             result: serde_json::json!({
                 "protocolVersion": 1,
                 "agentCapabilities": {
@@ -4840,7 +4840,7 @@ mod tests {
         store.new_session();
         let _ = store.take_outgoing();
         store.absorb(Frame::Success {
-            id: 3,
+            id: RequestId::Number(3),
             result: serde_json::json!({"sessionId": "s1"}),
         });
         let _ = store.take_outgoing();
@@ -4878,7 +4878,7 @@ mod tests {
     /// A `session/request_permission` ask on "s1" with three options.
     fn ask_frame() -> Frame {
         Frame::Request {
-            id: 101,
+            id: RequestId::Number(101),
             method: "session/request_permission".into(),
             params: serde_json::json!({
                 "sessionId": "s1",
@@ -5029,7 +5029,7 @@ mod tests {
             store.update(cx, |store, _| {
                 store.reply_permission(
                     "s1",
-                    101,
+                    RequestId::Number(101),
                     &kage_client::PermissionDecision::Feedback {
                         option_id: "reject".into(),
                         feedback: "use rustfmt first".into(),

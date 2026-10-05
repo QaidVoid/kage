@@ -121,7 +121,7 @@ fn parse(version: &str) -> Option<(u64, u64, u64)> {
 mod tests {
     use super::{Capability, Report, check, is_below, parse};
     use kage_client::wire::{AgentCapabilities, Implementation};
-    use kage_client::{Client, Frame};
+    use kage_client::{Client, Frame, RequestId};
 
     fn state_with(version: Option<&str>, steer: bool, close: bool) -> kage_client::State {
         let mut client = Client::new();
@@ -139,7 +139,7 @@ mod tests {
         });
         client
             .handle(Frame::Success {
-                id: 1,
+                id: RequestId::Number(1),
                 result: serde_json::json!({
                     "protocolVersion": 1,
                     "agentCapabilities": capabilities,

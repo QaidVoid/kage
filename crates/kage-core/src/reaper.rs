@@ -56,9 +56,11 @@ mod imp {
         STARTED.get_or_init(|| {
             let spawned = std::thread::Builder::new()
                 .name("kage-reaper".to_owned())
-                .spawn(|| loop {
-                    drain();
-                    std::thread::sleep(PERIOD);
+                .spawn(|| {
+                    loop {
+                        drain();
+                        std::thread::sleep(PERIOD);
+                    }
                 });
             if spawned.is_err() {
                 // The daemon still works without the reaper; it only

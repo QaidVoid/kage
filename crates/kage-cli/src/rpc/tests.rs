@@ -1167,15 +1167,19 @@ fn the_goal_option_sets_and_clears_the_goal() {
 }
 
 #[test]
-fn a_set_goal_is_checked_each_turn_and_clearing_stops_the_checks() {
+fn a_set_goal_is_sent_to_the_agent_checked_each_turn_and_clearing_stops_the_checks() {
     let dir = tempfile::tempdir().unwrap();
     let h = serve(
         vec![
-            text_turn("hello"),
-            text_turn("T1"),
-            text_turn("did it"),
-            text_turn("YES"),
-            text_turn("after clear"),
+            text_turn("hello"),  // the "first" turn
+            text_turn("T1"),     // its title call
+            text_turn("on it"),  // the turn the goal set starts
+            text_turn("YES"),    // the check after it: met
+            text_turn("again"),  // the "go" turn
+            text_turn("NO"),     // the check after it: reopens the goal
+            text_turn("fixing"), // the turn the nudge starts
+            text_turn("YES"),    // the check after it: met again
+            text_turn("done"),   // the "last" turn
         ],
         dir.path(),
         dir.path(),
@@ -1191,18 +1195,60 @@ fn a_set_goal_is_checked_each_turn_and_clearing_stops_the_checks() {
     }
     assert_eq!(h.mock.call_count(), 2);
 
+    // Setting a goal sends it to the agent as a turn of its own, and
+    // meeting the goal reaches the client as a success notice.
     let created = set_option(&h, "goal", "ship it").unwrap();
     assert_eq!(created["configOptions"][4]["currentValue"], "ship it");
+    let deadline = Instant::now() + WAIT;
+    while h.mock.call_count() < 4 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(h.mock.call_count(), 4);
+    let requests = h.mock.requests();
+    let intro = requests[2].messages.last().unwrap();
+    let Content::Text { text } = &intro.content[0] else {
+        panic!("text intro");
+    };
+    assert!(text.contains("Work toward this goal: ship it"), "{text}");
+    let deadline = Instant::now() + WAIT;
+    let mut texts: Vec<String> = Vec::new();
+    loop {
+        texts.extend(notice_texts(&h.inbox));
+        if h.mock.call_count() >= 4 && texts.iter().any(|t| t == "goal met: ship it") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "count {}, {texts:?}",
+            h.mock.call_count()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(h.mock.call_count(), 4);
 
-    // The completed turn of a goal session is checked, and meeting the
-    // goal reaches the client as a success notice.
+    // A later turn is still checked; a not-met verdict reopens the
+    // goal and keeps the session working until the check says met.
     let response = prompt(&h.client, &h.session, "go");
     assert_eq!(response["stopReason"], "end_turn");
-    let updates = updates_until(&h.inbox, &h.session, "_kage/notice");
-    let notice = updates.last().unwrap();
-    assert_eq!(notice["update"]["tone"], "success");
-    assert_eq!(notice["update"]["text"], "goal met: ship it");
-    assert_eq!(h.mock.call_count(), 4);
+    let deadline = Instant::now() + WAIT;
+    let mut texts: Vec<String> = Vec::new();
+    loop {
+        texts.extend(notice_texts(&h.inbox));
+        let reopened = texts
+            .iter()
+            .any(|t| t == "goal not met yet; continuing (1/8)");
+        let met = texts.iter().any(|t| t == "goal met: ship it");
+        if h.mock.call_count() >= 8 && reopened && met {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "count {}, {texts:?}",
+            h.mock.call_count()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(h.mock.call_count(), 8);
 
     // Clearing the goal stops the checks.
     let cleared = set_option(&h, "goal", "").unwrap();
@@ -1210,7 +1256,7 @@ fn a_set_goal_is_checked_each_turn_and_clearing_stops_the_checks() {
     let response = prompt(&h.client, &h.session, "last");
     assert_eq!(response["stopReason"], "end_turn");
     std::thread::sleep(Duration::from_millis(200));
-    assert_eq!(h.mock.call_count(), 5);
+    assert_eq!(h.mock.call_count(), 9);
 }
 
 #[test]
@@ -1657,6 +1703,14 @@ fn drain(inbox: &mpsc::Receiver<Inbound>) -> Vec<serde_json::Value> {
         updates.push(params);
     }
     updates
+}
+
+/// The text of every notice pending in the inbox, drained.
+fn notice_texts(inbox: &mpsc::Receiver<Inbound>) -> Vec<String> {
+    drain(inbox)
+        .iter()
+        .filter_map(|params| params["update"]["text"].as_str().map(str::to_owned))
+        .collect()
 }
 
 fn update_kinds(updates: &[serde_json::Value]) -> Vec<&str> {

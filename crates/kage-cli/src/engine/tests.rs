@@ -1,5 +1,5 @@
 use std::sync::mpsc::{Receiver, channel};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kage_core::Content;
 use kage_core::agent_report::{AgentLimit, AgentMail, AgentReport, ReportState};
@@ -4522,7 +4522,7 @@ fn a_client_resume_keeps_the_member_on_its_card_and_reports_to_the_parent() {
 }
 
 #[test]
-fn an_unmet_goal_keeps_the_session_working_until_it_is_met() {
+fn a_set_goal_reaches_the_agent_and_keeps_the_session_working_until_met() {
     let mock = MockProvider::sequence(vec![
         text_turn("working"),
         text_turn("NO"),
@@ -4538,7 +4538,6 @@ fn an_unmet_goal_keeps_the_session_working_until_it_is_met() {
             goal: Some("ship it".into()),
         },
     ));
-    prompt(&h.engine, id, "go", Delivery::Steer);
     let events = until_runs_end(&h.events, 2);
     assert_eq!(
         outcomes(&events),
@@ -4550,6 +4549,12 @@ fn an_unmet_goal_keeps_the_session_working_until_it_is_met() {
             .any(|n| n.starts_with("goal met"))
     });
     h.engine.shutdown();
+    let requests = mock.requests();
+    let intro = requests[0].messages.last().unwrap();
+    let Content::Text { text } = &intro.content[0] else {
+        panic!("text intro");
+    };
+    assert!(text.contains("Work toward this goal: ship it"), "{text}");
     let mut seen = notices(&events);
     seen.extend(notices(&met));
     assert!(
@@ -4559,6 +4564,88 @@ fn an_unmet_goal_keeps_the_session_working_until_it_is_met() {
     );
     assert!(seen.iter().any(|n| n == "goal met: ship it"), "{seen:?}");
     assert_eq!(mock.call_count(), 4, "no turn after the goal is met");
+}
+
+#[test]
+fn a_goal_set_mid_turn_queues_its_message_for_the_next_turn() {
+    let mock = MockProvider::sequence(vec![
+        tool_turn("gate"),    // the running turn, held on the gate
+        text_turn("working"), // its continuation
+        text_turn("YES"),     // the check after it: met
+        text_turn("on it"),   // the queued goal turn
+        text_turn("YES"),     // the check after it
+    ]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let id = SessionId::new();
+    h.open(id, None);
+    prompt(&h.engine, id, "start", Delivery::Queue);
+    wait_for(&h.events, is_tool_start);
+    h.engine.send(Command::to(
+        id,
+        CommandKind::SetGoal {
+            goal: Some("ship it".into()),
+        },
+    ));
+    h.release.send(()).unwrap();
+    until_runs_end(&h.events, 2);
+    // The check after the queued turn runs on its own thread, so wait
+    // for it to land before the shutdown cuts it short.
+    let deadline = Instant::now() + WAIT;
+    while mock.call_count() < 5 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    h.engine.shutdown();
+    let requests = mock.requests();
+    let intro = requests[3].messages.last().unwrap();
+    let Content::Text { text } = &intro.content[0] else {
+        panic!("text intro");
+    };
+    assert!(text.contains("Work toward this goal: ship it"), "{text}");
+    assert_eq!(mock.call_count(), 5, "the queued turn ran, then the check");
+}
+
+#[test]
+fn a_met_goal_is_checked_again_and_reopens_when_a_later_turn_fails_it() {
+    let mock = MockProvider::sequence(vec![
+        text_turn("working"),
+        text_turn("YES"),
+        text_turn("broke it"),
+        text_turn("NO"),
+        text_turn("fixed"),
+        text_turn("YES"),
+    ]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let id = SessionId::new();
+    h.open(id, None);
+    h.engine.send(Command::to(
+        id,
+        CommandKind::SetGoal {
+            goal: Some("ship it".into()),
+        },
+    ));
+    until_runs_end(&h.events, 1);
+    let first = wait_for(&h.events, |e| {
+        notices(std::slice::from_ref(e))
+            .iter()
+            .any(|n| n == "goal met: ship it")
+    });
+    prompt(&h.engine, id, "now break it", Delivery::Queue);
+    let more = until_runs_end(&h.events, 2);
+    let reopened = wait_for(&h.events, |e| {
+        notices(std::slice::from_ref(e))
+            .iter()
+            .any(|n| n == "goal met: ship it")
+    });
+    h.engine.shutdown();
+    let mut seen = notices(&first);
+    seen.extend(notices(&more));
+    seen.extend(notices(&reopened));
+    assert!(
+        seen.iter()
+            .any(|n| n == "goal not met yet; continuing (1/8)"),
+        "{seen:?}"
+    );
+    assert_eq!(mock.call_count(), 6, "no turn after the goal is met again");
 }
 
 #[test]
@@ -4573,7 +4660,6 @@ fn a_goal_check_without_a_verdict_stops_instead_of_looping() {
             goal: Some("ship it".into()),
         },
     ));
-    prompt(&h.engine, id, "go", Delivery::Steer);
     let stopped = wait_for(&h.events, |e| {
         notices(std::slice::from_ref(e))
             .iter()
@@ -4601,7 +4687,6 @@ fn a_missing_part_is_named_in_the_notice() {
             goal: Some("tests pass".into()),
         },
     ));
-    prompt(&h.engine, id, "go", Delivery::Steer);
     let met = wait_for(&h.events, |e| {
         notices(std::slice::from_ref(e))
             .iter()
@@ -4642,7 +4727,6 @@ fn an_unmet_goal_stops_after_its_turn_cap() {
             goal: Some("impossible".into()),
         },
     ));
-    prompt(&h.engine, id, "go", Delivery::Steer);
     let stopped = wait_for(&h.events, |e| {
         notices(std::slice::from_ref(e))
             .iter()

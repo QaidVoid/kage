@@ -97,8 +97,8 @@ pub fn split(text: &str) -> Option<(&str, Vec<AgentText>)> {
 /// What a note the engine adds to the conversation as a user message
 /// says, in the line a client shows instead of a user bubble: plan or
 /// swarm mode switching, resumed swarm members reporting back, or a
-/// goal check sending the model back to work. `None` for anything
-/// else.
+/// goal message: the goal set for the session, or a goal check
+/// sending the model back to work. `None` for anything else.
 #[must_use]
 pub fn engine_note(text: &str) -> Option<String> {
     const MODES: [(&str, &str); 4] = [
@@ -115,6 +115,10 @@ pub fn engine_note(text: &str) -> Option<String> {
         return Some("Resumed swarm members reported back".to_owned());
     }
     let goal = text.strip_prefix("[goal]")?.trim_start();
+    if let Some(set) = goal.strip_prefix("Work toward this goal: ") {
+        let first = set.split_inclusive(". ").next().unwrap_or(set).trim();
+        return Some(format!("Goal: {first}"));
+    }
     let first = goal.split_inclusive(". ").next().unwrap_or(goal).trim();
     Some(format!("Goal check: {first}"))
 }

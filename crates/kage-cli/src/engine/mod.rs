@@ -470,8 +470,8 @@ struct Session {
     shell: Option<String>,
     title: bool,
     title_pending: bool,
-    /// Whether the judge found the goal met; no more checks run until
-    /// the goal changes.
+    /// Whether the latest check found the goal met; met is announced
+    /// once, and a later check that finds it unmet reopens the goal.
     goal_met: bool,
     /// Turns the engine started on its own toward the goal since the
     /// user last prompted or set it.
@@ -918,34 +918,48 @@ impl Dispatcher {
         );
     }
 
-    /// Set the goal the session works toward, or clear it. Publishing
-    /// the state is all a change needs: the check runs at the end of
-    /// every completed turn while a goal is set.
+    /// Set the goal the session works toward, or clear it. Setting
+    /// one delivers it to the session as a prompt, which starts a turn
+    /// now when idle or queues behind the current one, and every
+    /// completed turn is then judged against it.
     fn set_goal(&mut self, id: SessionId, goal: Option<String>) {
         let goal = goal.filter(|g| !g.trim().is_empty());
         self.update_state(id, |s| {
-            s.state.goal = goal;
+            s.state.goal.clone_from(&goal);
             s.goal_met = false;
             s.goal_turns = 0;
         });
+        let Some(goal) = goal else {
+            return;
+        };
+        let text = format!(
+            "{}{goal}. Keep working toward it until it is met, then stop.",
+            crate::goal::GOAL_INTRO_PREFIX
+        );
+        self.prompt(id, vec![Content::Text { text }], Delivery::Queue);
     }
 
     /// Act on the judge's verdict for `goal` on session `id`. A verdict
     /// for a goal that changed since is dropped. A met goal is
-    /// announced once; an unmet one keeps the session working: a turn
-    /// toward it starts while the session is idle with nothing queued,
-    /// up to [`MAX_GOAL_TURNS`] in a row. A check without a verdict
-    /// says so and stops there.
+    /// announced once and re-armed when a later check finds it unmet
+    /// again; an unmet one keeps the session working: a turn toward it
+    /// starts while the session is idle with nothing queued, up to
+    /// [`MAX_GOAL_TURNS`] in a row. A check without a verdict says so
+    /// and stops there.
     fn goal_checked(&mut self, id: SessionId, goal: &str, verdict: crate::goal::Verdict) {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
-        if session.state.goal.as_deref() != Some(goal) || session.goal_met {
+        if session.state.goal.as_deref() != Some(goal) {
             return;
         }
         let missing = match verdict {
             crate::goal::Verdict::Met => {
+                if session.goal_met {
+                    return;
+                }
                 session.goal_met = true;
+                session.goal_turns = 0;
                 notice(
                     &self.bus,
                     id,
@@ -963,7 +977,10 @@ impl Dispatcher {
                 );
                 return;
             }
-            crate::goal::Verdict::NotMet(missing) => missing,
+            crate::goal::Verdict::NotMet(missing) => {
+                session.goal_met = false;
+                missing
+            }
         };
         let busy =
             session.idle.is_none() || !session.queued.is_empty() || self.waiting.contains(&id);
@@ -1328,7 +1345,6 @@ impl Dispatcher {
             .then(|| {
                 self.sessions
                     .get(&id)
-                    .filter(|s| !s.goal_met)
                     .and_then(|s| s.state.goal.clone())
                     .filter(|g| !g.trim().is_empty())
             })

@@ -364,7 +364,8 @@ fn push_user_text(buf: &mut Buffer, text: String) {
 /// What a note the engine adds to the conversation as a user message
 /// says, as the quiet line shown in place of a user bubble: plan or
 /// swarm mode switching, resumed swarm members reporting back, or a
-/// goal check sending the model back to work. `None` for anything else.
+/// goal message: the goal set for the session, or a goal check
+/// sending the model back to work. `None` for anything else.
 fn engine_note(text: &str) -> Option<String> {
     const MODES: [(&str, &str); 4] = [
         ("[plan mode on]", "plan mode on"),
@@ -380,6 +381,10 @@ fn engine_note(text: &str) -> Option<String> {
         return Some("resumed swarm members reported back".to_owned());
     }
     let goal = text.strip_prefix("[goal]")?.trim_start();
+    if let Some(set) = goal.strip_prefix("Work toward this goal: ") {
+        let first = set.split_inclusive(". ").next().unwrap_or(set).trim();
+        return Some(format!("goal: {first}"));
+    }
     let first = goal.split_inclusive(". ").next().unwrap_or(goal).trim();
     Some(format!("goal check: {first}"))
 }

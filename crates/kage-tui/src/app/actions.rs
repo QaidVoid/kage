@@ -428,7 +428,8 @@ impl App {
                     goal: Some(goal.to_owned()),
                 });
                 self.push_info(format!(
-                    "goal set: {goal}. After each turn kage checks it and keeps going until it is met."
+                    "goal set: {goal}. Sent to the agent; kage checks it after each turn and \
+                     keeps going until it is met."
                 ));
             }
         }

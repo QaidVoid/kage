@@ -20,11 +20,18 @@ use kage_provider::{Provider, ProviderEvent, StreamRequest};
 
 /// System instruction for the goal check.
 const GOAL_SYSTEM: &str = "You judge whether an assistant's work met a stated goal. \
- Reply YES if the goal is fully met. Otherwise reply NO, then one short line saying what \
- is still missing. Reply with nothing else.";
+ Judge the recorded work: tool calls, their results and what the assistant did, not \
+ its claims of success. Reply YES only if that work shows the goal is fully met. \
+ Otherwise reply NO, then one short line saying what is still missing. Reply with \
+ nothing else.";
 
 /// The most characters of work the judge reads.
-const WORK_BUDGET: usize = 6000;
+const WORK_BUDGET: usize = 12_000;
+
+/// Prefix of the user message setting a goal delivers to the
+/// session, and the anchor the judge reads the work from: everything
+/// since the goal was set, not just since the last prompt.
+pub(crate) const GOAL_INTRO_PREFIX: &str = "[goal] Work toward this goal: ";
 
 /// What the judge said about a turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,17 +117,23 @@ fn verdict(reply: &str) -> Verdict {
     }
 }
 
-/// The work since the user's last own prompt, a goal nudge aside, as
-/// lines the judge reads, newest kept when it runs over the budget.
+/// The work since the goal was set when an intro message says where
+/// that was, else since the user's last own prompt, a goal nudge
+/// aside, as lines the judge reads, newest kept when it runs over the
+/// budget.
 fn work(history: &[Arc<Message>]) -> String {
+    let user_text = |m: &Arc<Message>, prefix: &str, keep: bool| {
+        m.role == Role::User
+            && m.content.iter().any(|block| match block {
+                Content::Text { text } => text.starts_with(prefix) == keep,
+                _ => false,
+            })
+    };
+    let prompt = |m: &Arc<Message>| user_text(m, "[goal]", false);
+    let intro = |m: &Arc<Message>| user_text(m, GOAL_INTRO_PREFIX, true);
     let start = history
         .iter()
-        .rposition(|m| {
-            m.role == Role::User
-                && m.content.iter().any(
-                    |block| matches!(block, Content::Text { text } if !text.starts_with("[goal]")),
-                )
-        })
+        .rposition(|m| prompt(m) || intro(m))
         .unwrap_or(0);
     let mut out = String::new();
     for message in &history[start..] {
@@ -261,10 +274,37 @@ mod tests {
     }
 
     #[test]
+    fn the_judge_reads_the_work_since_the_goal_was_set() {
+        let mock = MockProvider::replaying(verdict_script("YES"));
+        let intro = text(
+            Role::User,
+            "[goal] Work toward this goal: ship it. Keep working until it is met, then stop.",
+        );
+        let history = vec![
+            text(Role::User, "an older prompt"),
+            intro,
+            text(Role::Assistant, "part one is done"),
+            text(Role::User, "[goal] The goal is not met yet: ship it."),
+            text(Role::Assistant, "part two is done"),
+        ];
+        assert_eq!(
+            judge(&mock, "mock:m", "ship it", &history, &CancelFlag::new()),
+            Verdict::Met
+        );
+        let req = mock.last_request().expect("one call");
+        let Content::Text { text } = &req.messages[0].content[0] else {
+            panic!("text message");
+        };
+        assert!(text.contains("Assistant: part one is done"), "{text}");
+        assert!(text.contains("Assistant: part two is done"), "{text}");
+        assert!(!text.contains("an older prompt"), "{text}");
+    }
+
+    #[test]
     fn long_work_keeps_its_newest_part() {
         let long = "x".repeat(1500);
         let mut history = vec![text(Role::User, "go")];
-        for _ in 0..6 {
+        for _ in 0..9 {
             history.push(text(Role::Assistant, &long));
         }
         history.push(text(Role::Assistant, "the end"));

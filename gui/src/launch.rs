@@ -12,6 +12,8 @@ use std::time::Duration;
 use gpui_kit::assets::Assets;
 use gpui_kit::{App, AppContext, Entity, TitlebarOptions, WindowOptions, px, size};
 
+use kage_client::unquote_and_trim;
+
 use crate::app::{Shell, ShellArgs};
 use crate::theme;
 use crate::transport::Transport;
@@ -76,8 +78,9 @@ impl Launch {
                     Some(token) => launch.token = Some(token),
                     None => launch.error = Some("--token needs a value".to_owned()),
                 },
-                "--rpc-bin" => match args.next() {
-                    Some(program) => launch.rpc_bin = Some(program),
+                "--rpc-bin" => match args.next().as_deref().map(unquote_and_trim) {
+                    Some("") => {}
+                    Some(program) => launch.rpc_bin = Some(program.to_owned()),
                     None => launch.error = Some("--rpc-bin needs a path".to_owned()),
                 },
                 _ => {}
@@ -256,6 +259,37 @@ mod tests {
                 token: "t".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn rpc_bin_cleans_quotes_spaces_and_unicode() {
+        assert_eq!(
+            parse(&["--rpc-bin", " \"/opt/my dir/kage\" "])
+                .rpc_bin
+                .as_deref(),
+            Some("/opt/my dir/kage")
+        );
+        assert_eq!(
+            parse(&["--rpc-bin", "'/opt/kage'"]).rpc_bin.as_deref(),
+            Some("/opt/kage")
+        );
+        assert_eq!(
+            parse(&["--rpc-bin", " ~/kägé "]).rpc_bin.as_deref(),
+            Some("~/kägé")
+        );
+        assert_eq!(
+            parse(&["--rpc-bin", "\"/opt/kage"]).rpc_bin.as_deref(),
+            Some("\"/opt/kage"),
+            "an unmatched quote stays"
+        );
+    }
+
+    #[test]
+    fn an_rpc_bin_that_cleans_to_empty_is_absent() {
+        let launch = parse(&["--rpc-bin", "\"\""]);
+        assert!(launch.rpc_bin.is_none());
+        assert!(launch.error.is_none());
+        assert_eq!(launch.wire, Wire::Stdio);
     }
 
     #[test]

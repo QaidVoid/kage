@@ -1,6 +1,6 @@
 //! The XDG directories kage reads and writes.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Resolve `$XDG_DATA_HOME/kage` (default `~/.local/share/kage`).
 pub(crate) fn data_root() -> Result<PathBuf, String> {
@@ -52,7 +52,7 @@ pub(crate) fn config_dir() -> Result<PathBuf, String> {
 /// default `$XDG_CONFIG_HOME/kage/plugins` (default `~/.config/kage/plugins`).
 pub(crate) fn plugins_dir() -> Result<PathBuf, String> {
     if let Ok(cfg) = kage_core::config::Config::load_default()
-        && let Some(dir) = cfg.plugins.dir
+        && let Some(dir) = cfg.plugins.dir.as_deref()
     {
         return Ok(resolve_plugin_dir(dir));
     }
@@ -60,12 +60,18 @@ pub(crate) fn plugins_dir() -> Result<PathBuf, String> {
 }
 
 /// Apply `[plugins] dir` path semantics: absolute paths as-is, `~`
-/// expanded to the home directory, relative paths resolved against the
-/// kage config directory (`~/.config/kage`). Pure so tests need no
-/// environment isolation.
-fn resolve_plugin_dir(dir: PathBuf) -> PathBuf {
+/// expanded to the home directory, `~user` left unexpanded (it
+/// resolves as a relative path against the kage config directory),
+/// and relative paths resolved against the kage config directory
+/// (`~/.config/kage`). The value is cleaned with
+/// [`kage_core::fsutil::unquote_and_trim`] first, so a pasted or
+/// quoted entry carries neither quotes nor padding spaces. Pure so
+/// tests need no environment isolation.
+fn resolve_plugin_dir(dir: &Path) -> PathBuf {
+    let lossy = dir.to_string_lossy();
+    let dir = Path::new(kage_core::fsutil::unquote_and_trim(&lossy));
     if dir.is_absolute() {
-        return dir;
+        return dir.to_path_buf();
     }
     if let Ok(rest) = dir.strip_prefix("~")
         && let Some(home) = dirs::home_dir()
@@ -74,7 +80,7 @@ fn resolve_plugin_dir(dir: PathBuf) -> PathBuf {
     }
     match config_dir() {
         Ok(base) => base.join(dir),
-        Err(_) => dir,
+        Err(_) => dir.to_path_buf(),
     }
 }
 
@@ -84,39 +90,109 @@ pub(crate) fn themes_dir() -> Result<PathBuf, String> {
     Ok(config_dir()?.join("themes"))
 }
 
-/// Resolve an XDG base directory: prefers `$ENV_VAR` if set and non-empty,
-/// otherwise falls back to `$HOME/<fallback_subpath>`.
+/// Resolve an XDG base directory: prefers `$ENV_VAR` if set to
+/// something non-empty once quotes and padding are stripped
+/// ([`kage_core::fsutil::unquote_and_trim`], so a quoted or spaced
+/// value still names the real directory), otherwise falls back to
+/// `$HOME/<fallback_subpath>`.
 pub(crate) fn xdg_dir(env_var: &str, fallback_subpath: &str) -> Result<PathBuf, String> {
-    if let Ok(v) = std::env::var(env_var)
-        && !v.is_empty()
-    {
-        return Ok(PathBuf::from(v));
+    if let Ok(v) = std::env::var(env_var) {
+        let v = kage_core::fsutil::unquote_and_trim(&v);
+        if !v.is_empty() {
+            return Ok(PathBuf::from(v));
+        }
     }
     let home = dirs::home_dir().ok_or_else(|| "no home directory".to_owned())?;
     Ok(home.join(fallback_subpath))
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::result_large_err,
+    reason = "figment::Jail closures must return figment::Error"
+)]
 mod tests {
     use super::*;
 
     #[test]
     fn plugin_dir_override_absolute_asis() {
         let dir = std::env::temp_dir().join("kage-plugins");
-        assert_eq!(resolve_plugin_dir(dir.clone()), dir);
+        assert_eq!(resolve_plugin_dir(&dir), dir);
     }
 
     #[test]
     fn plugin_dir_override_tilde_expands_home() {
-        let p = resolve_plugin_dir(PathBuf::from("~/my-plugins"));
+        let p = resolve_plugin_dir(Path::new("~/my-plugins"));
         let home = dirs::home_dir().expect("test needs a home directory");
         assert_eq!(p, home.join("my-plugins"));
     }
 
     #[test]
     fn plugin_dir_override_relative_resolves_against_config_dir() {
-        let p = resolve_plugin_dir(PathBuf::from("extra-plugins"));
+        let p = resolve_plugin_dir(Path::new("extra-plugins"));
         let base = xdg_dir("XDG_CONFIG_HOME", ".config").expect("test needs a home directory");
         assert_eq!(p, base.join("kage").join("extra-plugins"));
+    }
+
+    #[test]
+    fn quoted_and_spaced_xdg_env_values_resolve_to_the_clean_path() {
+        figment::Jail::expect_with(|jail| {
+            let home = jail.directory().to_path_buf();
+            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            let quoted = format!("\"{}\"", home.join("config").display());
+            jail.set_env("XDG_CONFIG_HOME", quoted.as_str());
+            assert_eq!(config_dir().unwrap(), home.join("config").join("kage"));
+            let spaced = format!(" {} ", home.join("config").display());
+            jail.set_env("XDG_CONFIG_HOME", spaced.as_str());
+            assert_eq!(config_dir().unwrap(), home.join("config").join("kage"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn an_empty_xdg_env_value_falls_back_to_home() {
+        figment::Jail::expect_with(|jail| {
+            let home = jail.directory().to_path_buf();
+            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            jail.set_env("XDG_CONFIG_HOME", "");
+            assert_eq!(config_dir().unwrap(), home.join(".config").join("kage"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_quoted_and_spaced_tilde_plugin_dir_still_expands() {
+        figment::Jail::expect_with(|jail| {
+            let home = jail.directory().to_path_buf();
+            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            jail.set_env(
+                "XDG_CONFIG_HOME",
+                home.join(".config").to_string_lossy().as_ref(),
+            );
+            let p = resolve_plugin_dir(Path::new(" \"~/my-plugins\" "));
+            assert_eq!(p, home.join("my-plugins"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_tilde_user_plugin_dir_resolves_against_the_config_dir() {
+        figment::Jail::expect_with(|jail| {
+            let home = jail.directory().to_path_buf();
+            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            jail.set_env(
+                "XDG_CONFIG_HOME",
+                home.join(".config").to_string_lossy().as_ref(),
+            );
+            let p = resolve_plugin_dir(Path::new("~other/plugins"));
+            assert_eq!(
+                p,
+                home.join(".config")
+                    .join("kage")
+                    .join("~other")
+                    .join("plugins")
+            );
+            Ok(())
+        });
     }
 }

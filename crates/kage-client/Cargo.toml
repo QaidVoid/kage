@@ -18,8 +18,6 @@ workspace = true
 
 [dependencies]
 kage-acp-wire = { path = "../kage-acp-wire" }
+kage-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-
-[dev-dependencies]
-kage-core = { path = "../kage-core" }

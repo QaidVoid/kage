@@ -16,7 +16,7 @@ use gpui_kit::{
 };
 
 use gpui_kit::prelude::FluentBuilder as _;
-use kage_client::{Session, TranscriptItem};
+use kage_client::{Session, TranscriptItem, unquote_and_trim};
 
 use crate::store::{Store, StoreHandle as _};
 use crate::theme::{FONT_MONO, FS_SM, FS_XS, Palette, R_FULL, R_MD};
@@ -129,6 +129,15 @@ fn counted(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
+/// `base` and `name` as one path the engine reads back, in the
+/// separator style `base` uses. Trailing separators are trimmed, so
+/// the join never doubles them.
+fn join_folder(base: &str, name: &str) -> String {
+    let base = base.trim_end_matches(['/', '\\']);
+    let separator = if base.contains('\\') { '\\' } else { '/' };
+    format!("{base}{separator}{name}")
+}
+
 /// The dialog layer over the shell.
 pub struct DialogView {
     /// Where the focus goes when this closes.
@@ -174,7 +183,7 @@ impl DialogView {
             window,
             |this, folder, event: &InputEvent, _, cx| {
                 if let InputEvent::PressEnter { .. } = event {
-                    let typed = folder.read(cx).value().trim().to_owned();
+                    let typed = unquote_and_trim(&folder.read(cx).value()).to_owned();
                     this.browse(Some(&typed), cx);
                 }
             },
@@ -278,7 +287,7 @@ impl DialogView {
     }
 
     fn save_folder(&mut self, cx: &mut Context<Self>) {
-        let path = self.folder.read(cx).value().trim().to_owned();
+        let path = unquote_and_trim(&self.folder.read(cx).value()).to_owned();
         self.store.act(cx, |store| store.set_project(Some(path)));
         self.close(cx);
     }
@@ -614,10 +623,9 @@ impl DialogView {
         }
         let view = cx.entity();
         let hover = pal.hover;
-        let base = listing.path.trim_end_matches('/').to_owned();
         let mut list = list.children(listing.folders.iter().enumerate().map(|(n, name)| {
             let view = view.clone();
-            let to = format!("{base}/{name}");
+            let to = join_folder(&listing.path, name);
             h_flex()
                 .id(gpui_kit::ElementId::named_usize("folder", n))
                 .gap(px(8.))
@@ -919,6 +927,61 @@ mod tests {
             content: vec![ContentBlock::text(text)],
             steered: false,
         }
+    }
+
+    #[test]
+    fn folder_navigation_joins_in_the_base_s_separator_style() {
+        use super::join_folder;
+        assert_eq!(join_folder("C:\\work\\proj", "sub"), "C:\\work\\proj\\sub");
+        assert_eq!(join_folder("C:/work/proj/", "sub"), "C:/work/proj/sub");
+        assert_eq!(
+            join_folder("\\\\server\\share\\", "sub"),
+            "\\\\server\\share\\sub"
+        );
+        assert_eq!(join_folder("/home/u", "sub"), "/home/u/sub");
+        assert_eq!(join_folder("/home/u/", "sub"), "/home/u/sub");
+    }
+
+    #[gpui_kit::test]
+    fn a_quoted_and_spaced_folder_saves_unquoted(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let store = cx.new(|_| asking_store());
+        let (dialog, visual) = cx
+            .add_window_view(|window: &mut Window, cx| DialogView::new(store.clone(), window, cx));
+        visual.update(|window, cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.open(DialogKind::OpenFolder, window, cx);
+            });
+            let folder = dialog.read(cx).folder.clone();
+            folder.update(cx, |state, cx| {
+                state.set_value("  \"/opt/my dir\"  ", window, cx)
+            });
+            dialog.update(cx, |dialog, cx| dialog.save_folder(cx));
+        });
+        let dir = visual.update(|_, cx| store.read(cx).session_dir().map(str::to_owned));
+        assert_eq!(dir.as_deref(), Some("/opt/my dir"));
+    }
+
+    #[gpui_kit::test]
+    fn a_folder_that_cleans_to_empty_sets_nothing(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let store = cx.new(|_| asking_store());
+        let (dialog, visual) = cx
+            .add_window_view(|window: &mut Window, cx| DialogView::new(store.clone(), window, cx));
+        visual.update(|window, cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog.open(DialogKind::OpenFolder, window, cx);
+            });
+            let folder = dialog.read(cx).folder.clone();
+            folder.update(cx, |state, cx| state.set_value("\"\"", window, cx));
+            dialog.update(cx, |dialog, cx| dialog.save_folder(cx));
+        });
+        let dir = visual.update(|_, cx| store.read(cx).session_dir().map(str::to_owned));
+        assert_eq!(
+            dir.as_deref(),
+            Some("/w"),
+            "the cleaned-empty folder fell through"
+        );
     }
 
     #[test]

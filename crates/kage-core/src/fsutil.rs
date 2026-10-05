@@ -142,6 +142,25 @@ pub fn expand_tilde(candidate: &Path) -> PathBuf {
     }
 }
 
+/// `value` ready to use as a path: trimmed, then one layer of
+/// matching surrounding quotes stripped (a shell-quoted word or an
+/// Explorer "Copy as path" paste), then trimmed again. Unmatched
+/// quotes, interior quotes, and a lone quote character are kept,
+/// and a value that cleans to the empty string stays empty so
+/// callers keep their empty-input behavior.
+#[must_use]
+pub fn unquote_and_trim(value: &str) -> &str {
+    let trimmed = value.trim();
+    let first = trimmed.as_bytes().first().copied();
+    let quoted = trimmed.len() >= 2
+        && matches!(first, Some(b'"' | b'\''))
+        && first == trimmed.as_bytes().last().copied();
+    if !quoted {
+        return trimmed;
+    }
+    trimmed[1..trimmed.len() - 1].trim()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +286,52 @@ mod tests {
         assert_eq!(expand_tilde(Path::new("~/a/b")), home.join("a/b"));
         assert_eq!(expand_tilde(Path::new("~foo")), PathBuf::from("~foo"));
         assert_eq!(expand_tilde(Path::new("/tmp/x")), PathBuf::from("/tmp/x"));
+    }
+
+    #[test]
+    fn unquote_and_trim_cleans_plain_quoted_and_spaced_values() {
+        assert_eq!(unquote_and_trim("/opt/kage"), "/opt/kage");
+        assert_eq!(unquote_and_trim("  /opt/my dir  "), "/opt/my dir");
+        assert_eq!(unquote_and_trim("\"/opt/my dir\""), "/opt/my dir");
+        assert_eq!(unquote_and_trim("'/opt/my dir'"), "/opt/my dir");
+        assert_eq!(unquote_and_trim(" \"a b\" "), "a b");
+        assert_eq!(unquote_and_trim("'a b'"), "a b");
+    }
+
+    #[test]
+    fn unquote_and_trim_keeps_unmatched_mismatched_and_interior_quotes() {
+        assert_eq!(unquote_and_trim("\"a b"), "\"a b");
+        assert_eq!(unquote_and_trim("\"mismatched'"), "\"mismatched'");
+        assert_eq!(unquote_and_trim("'a b\""), "'a b\"");
+        assert_eq!(unquote_and_trim("\"quoted 'inside'\""), "quoted 'inside'");
+    }
+
+    #[test]
+    fn unquote_and_trim_handles_unicode_and_empty_inputs() {
+        assert_eq!(unquote_and_trim("  \"café.png\"  "), "café.png");
+        assert_eq!(unquote_and_trim(""), "");
+        assert_eq!(unquote_and_trim("   "), "");
+        assert_eq!(unquote_and_trim("\"\""), "");
+        assert_eq!(unquote_and_trim("''"), "");
+        assert_eq!(unquote_and_trim("'"), "'");
+        assert_eq!(unquote_and_trim("\""), "\"");
+    }
+
+    #[test]
+    fn unquote_and_trim_feeds_tilde_expansion() {
+        let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
+            return;
+        };
+        let home = PathBuf::from(home);
+        assert_eq!(unquote_and_trim(" ~/x "), "~/x");
+        assert_eq!(
+            expand_tilde(Path::new(unquote_and_trim(" \"~/x\" "))),
+            home.join("x")
+        );
+        assert_eq!(expand_tilde(Path::new(unquote_and_trim("~"))), home);
+        assert_eq!(
+            expand_tilde(Path::new(unquote_and_trim("~user/x"))),
+            PathBuf::from("~user/x")
+        );
     }
 }

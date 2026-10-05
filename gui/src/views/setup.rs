@@ -20,6 +20,8 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 
+use kage_client::unquote_and_trim;
+
 use crate::gate::MINIMUM_KAGE_VERSION;
 use crate::theme::{FONT_MONO, FS_SM, FS_XS, Palette, R_LG, WEIGHT_BOLD, WEIGHT_SEMIBOLD};
 use crate::views::deferred::Deferred;
@@ -45,6 +47,13 @@ pub enum SetupEvent {
     Use(String),
     /// Look for `kage` on the PATH again.
     Retry,
+}
+
+/// The typed path ready for the probe: trimmed, one layer of
+/// surrounding quotes stripped (a shell-quoted word or an Explorer
+/// "Copy as path" paste), then trimmed again.
+fn clean_path(value: &str) -> String {
+    unquote_and_trim(value).to_owned()
 }
 
 /// Probes `program` with `--version`: the version it reports, or why it
@@ -98,7 +107,7 @@ impl SetupView {
 
     /// Probes the typed path and hands it to the shell when it passes.
     fn use_path(&mut self, cx: &mut Context<Self>) {
-        let program = self.path.read(cx).value().trim().to_owned();
+        let program = clean_path(&self.path.read(cx).value());
         if program.is_empty() {
             self.error = Some("Enter the path to a kage binary.".to_owned());
             cx.notify();
@@ -325,7 +334,21 @@ impl Render for SetupView {
 
 #[cfg(test)]
 mod tests {
-    use super::probe;
+    use super::{clean_path, probe};
+
+    #[test]
+    fn a_pasted_path_is_cleaned_before_the_probe() {
+        assert_eq!(clean_path("  /opt/kage  "), "/opt/kage");
+        assert_eq!(clean_path("\"/opt/my dir/kage\""), "/opt/my dir/kage");
+        assert_eq!(clean_path("'/opt/my dir/kage'"), "/opt/my dir/kage");
+        assert_eq!(clean_path(" \"~/käge\" "), "~/käge");
+        assert_eq!(
+            clean_path("\"/opt/kage"),
+            "\"/opt/kage",
+            "an unmatched quote stays"
+        );
+        assert_eq!(clean_path("   "), "", "an empty field stays empty");
+    }
 
     #[test]
     fn a_path_that_does_not_run_is_refused_with_why() {

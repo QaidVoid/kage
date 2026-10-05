@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use kage_client::Frame;
+use kage_client::{Frame, unquote_and_trim};
 
 use super::{Event, EventSender, Link, State, Transport};
 
@@ -77,10 +77,16 @@ impl StdioTransport {
     }
 }
 
-/// Resolves `program` to an executable path. A program containing a
-/// path separator is used as is; a bare name is looked up on `PATH`
+/// Resolves `program` to an executable path: quotes and spaces from
+/// a pasted value go first, then a program containing a path
+/// separator is used as is, and a bare name is looked up on `PATH`
 /// with the executable bit required.
+#[cfg(unix)]
 fn resolve(program: &str) -> Option<PathBuf> {
+    let program = unquote_and_trim(program);
+    if program.is_empty() {
+        return None;
+    }
     if program.contains('/') {
         return Some(PathBuf::from(program));
     }
@@ -88,6 +94,42 @@ fn resolve(program: &str) -> Option<PathBuf> {
     std::env::split_paths(&paths)
         .map(|dir| dir.join(program))
         .find(|candidate| is_executable(candidate))
+}
+
+/// The Windows form of [`resolve`]: both separators mark a path, and
+/// a bare name probes the plain file, `.exe`, `.bat` and `.cmd`
+/// against every `PATH` directory, one directory at a time.
+#[cfg(windows)]
+fn resolve(program: &str) -> Option<PathBuf> {
+    let program = unquote_and_trim(program);
+    if program.is_empty() {
+        return None;
+    }
+    if program.contains('\\') || program.contains('/') {
+        return Some(PathBuf::from(program));
+    }
+    let paths = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&paths) {
+        for extension in ["", ".exe", ".bat", ".cmd"] {
+            let candidate = dir.join(format!("{program}{extension}"));
+            if is_executable(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// The refusal for a program [`resolve`] could not find: a path
+/// input names the missing path, a bare name the `PATH` search. Both
+/// point at `--rpc-bin`.
+fn refusal(program: &str) -> String {
+    let program = unquote_and_trim(program);
+    if program.contains('/') || program.contains('\\') {
+        format!("{program} does not exist; pass --rpc-bin to point at the engine")
+    } else {
+        format!("no {program} on PATH; pass --rpc-bin to point at the engine")
+    }
 }
 
 #[cfg(unix)]
@@ -131,10 +173,8 @@ impl Transport for StdioTransport {
 
     fn start(&mut self, events: EventSender) {
         let Some(program) = resolve(&self.config.program) else {
-            let _ = events.send_blocking(Event::State(State::Refused(format!(
-                "no {} on PATH; pass --rpc-bin to point at the engine",
-                self.config.program
-            ))));
+            let _ =
+                events.send_blocking(Event::State(State::Refused(refusal(&self.config.program))));
             return;
         };
         let mut child = Err(std::io::Error::other("not spawned"));
@@ -233,7 +273,7 @@ mod tests {
 
     use kage_client::{Client, Frame, PromptOutcome};
 
-    use super::{Config, StdioTransport};
+    use super::{Config, StdioTransport, refusal, resolve};
     use crate::transport::{Event, State, Transport};
 
     /// A stub engine: answers whatever request arrives first with an
@@ -389,5 +429,86 @@ printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id"
             next_state(&rx),
             State::Refused(reason) if reason.contains("cannot spawn")
         ));
+    }
+
+    #[test]
+    fn the_refusal_tells_a_missing_path_from_a_missing_bare_name() {
+        assert!(
+            refusal("\"C:\\tools\\kage.exe\"").contains("does not exist"),
+            "a quoted paste is a path, not a PATH search"
+        );
+        assert!(refusal("  /opt/kage  ").contains("does not exist"));
+        assert!(refusal("kage").contains("on PATH"));
+    }
+
+    /// A fresh directory under the temp dir.
+    fn unique_dir(tag: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.subsec_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "kage-desktop-resolve-{tag}-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_unquotes_a_pasted_path_before_the_lookup() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = unique_dir("unix");
+        let program = dir.join("käge");
+        std::fs::write(&program, b"").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let pasted = format!("\"{}\"", program.display());
+        assert_eq!(resolve(&pasted), Some(program.clone()));
+        assert_eq!(
+            resolve(&program.display().to_string()),
+            Some(program.clone())
+        );
+        assert_eq!(
+            resolve("\"/nonexistent/kage-desktop-nothing\""),
+            Some(PathBuf::from("/nonexistent/kage-desktop-nothing")),
+            "a quoted path routes to the spawn refusal, not the PATH one"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_accepts_quoted_backslash_and_forward_slash_paths() {
+        let dir = unique_dir("windows");
+        let program = dir.join("kage.exe");
+        std::fs::write(&program, b"MZ").unwrap();
+        let pasted = format!("\"{}\"", program.display());
+        assert_eq!(resolve(&pasted), Some(program.clone()));
+        assert_eq!(
+            resolve(&program.display().to_string()),
+            Some(program.clone())
+        );
+        let forward = format!("{}/kage.exe", dir.display().to_string().replace('\\', "/"));
+        assert_eq!(resolve(&forward), Some(program));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_probes_the_executable_extensions_for_a_bare_name() {
+        let dir = unique_dir("windows-path");
+        std::fs::write(dir.join("kage.exe"), b"MZ").unwrap();
+        let previous = std::env::var_os("PATH");
+        unsafe { std::env::set_var("PATH", &dir) };
+        let found = resolve("kage");
+        let missing = resolve("kage-desktop-nothing");
+        match previous {
+            Some(previous) => unsafe { std::env::set_var("PATH", previous) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        assert_eq!(found, Some(dir.join("kage.exe")));
+        assert_eq!(missing, None, "an absent bare name stays unresolved");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

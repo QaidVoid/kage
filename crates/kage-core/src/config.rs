@@ -118,17 +118,27 @@ pub enum SearchEngine {
     Brave,
 }
 
+/// The directory `$env_var` names, with quotes and padding stripped
+/// ([`crate::fsutil::unquote_and_trim`], so a quoted or spaced value
+/// still names the real directory). `None` when the variable is
+/// unset, empty, or cleans to empty.
+fn env_base_dir(env_var: &str) -> Option<PathBuf> {
+    let value = std::env::var(env_var).ok()?;
+    let cleaned = crate::fsutil::unquote_and_trim(&value);
+    (!cleaned.is_empty()).then(|| PathBuf::from(cleaned))
+}
+
 impl Config {
     /// Path to the user config file, XDG-resolved:
     /// `$XDG_CONFIG_HOME/kage/config.toml`, or `~/.config/kage/config.toml`
-    /// when `XDG_CONFIG_HOME` is unset. This mirrors how the rest of kage
-    /// resolves config-tier paths (plugins, skills); only the home
-    /// directory case returns `None`.
+    /// when `XDG_CONFIG_HOME` is unset, empty, or quoted-empty. This mirrors
+    /// how the rest of kage resolves config-tier paths (plugins, skills);
+    /// only the home directory case returns `None`.
     #[must_use]
     pub fn default_path() -> Option<PathBuf> {
-        let base = match std::env::var("XDG_CONFIG_HOME") {
-            Ok(v) if !v.is_empty() => PathBuf::from(v),
-            _ => dirs::home_dir()?.join(".config"),
+        let base = match env_base_dir("XDG_CONFIG_HOME") {
+            Some(base) => base,
+            None => dirs::home_dir()?.join(".config"),
         };
         Some(base.join("kage").join("config.toml"))
     }
@@ -199,13 +209,13 @@ impl Config {
 
     /// Directory for kage's mutable state, XDG-resolved:
     /// `$XDG_STATE_HOME/kage`, or `~/.local/state/kage` when
-    /// `XDG_STATE_HOME` is unset. `None` only when there is no home
-    /// directory.
+    /// `XDG_STATE_HOME` is unset, empty, or quoted-empty. `None` only
+    /// when there is no home directory.
     #[must_use]
     pub fn state_dir() -> Option<PathBuf> {
-        let base = match std::env::var("XDG_STATE_HOME") {
-            Ok(v) if !v.is_empty() => PathBuf::from(v),
-            _ => dirs::home_dir()?.join(".local").join("state"),
+        let base = match env_base_dir("XDG_STATE_HOME") {
+            Some(base) => base,
+            None => dirs::home_dir()?.join(".local").join("state"),
         };
         Some(base.join("kage"))
     }
@@ -965,6 +975,64 @@ mod tests {
         figment::Jail::expect_with(|jail| {
             let cfg = Config::load(jail.directory().join("nope.toml").as_path()).unwrap();
             assert_eq!(cfg, Config::default());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn quoted_and_spaced_config_env_yields_a_clean_default_path() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let home = jail.directory().to_path_buf();
+            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            let quoted = format!("\"{}\"", home.join("cfg").display());
+            jail.set_env("XDG_CONFIG_HOME", quoted.as_str());
+            assert_eq!(
+                Config::default_path(),
+                Some(home.join("cfg").join("kage").join("config.toml"))
+            );
+            let spaced = format!(" {} ", home.join("cfg").display());
+            jail.set_env("XDG_CONFIG_HOME", spaced.as_str());
+            assert_eq!(
+                Config::default_path(),
+                Some(home.join("cfg").join("kage").join("config.toml"))
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn an_empty_config_env_value_falls_back_to_home() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let home = jail.directory().to_path_buf();
+            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            jail.set_env("XDG_CONFIG_HOME", "");
+            assert_eq!(
+                Config::default_path(),
+                Some(home.join(".config").join("kage").join("config.toml"))
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn quoted_and_spaced_state_env_yields_a_clean_state_dir() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let home = jail.directory().to_path_buf();
+            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            let quoted = format!("\"{}\"", home.join("state").display());
+            jail.set_env("XDG_STATE_HOME", quoted.as_str());
+            assert_eq!(Config::state_dir(), Some(home.join("state").join("kage")));
+            let spaced = format!(" {} ", home.join("state").display());
+            jail.set_env("XDG_STATE_HOME", spaced.as_str());
+            assert_eq!(Config::state_dir(), Some(home.join("state").join("kage")));
+            jail.set_env("XDG_STATE_HOME", "");
+            assert_eq!(
+                Config::state_dir(),
+                Some(home.join(".local").join("state").join("kage"))
+            );
             Ok(())
         });
     }

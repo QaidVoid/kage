@@ -765,6 +765,10 @@ pub struct FoldersResult {
     /// Whether the list was cut at its cap.
     #[serde(default)]
     pub truncated: bool,
+    /// How many entries were left out: hidden ones, entries that
+    /// could not be read, and names that are not UTF-8.
+    #[serde(default)]
+    pub skipped: usize,
 }
 
 /// `_kage/themes` request params: none.

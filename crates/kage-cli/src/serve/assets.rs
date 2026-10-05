@@ -189,15 +189,19 @@ fn isolated(content_type: &str) -> bool {
     content_type.starts_with("text/html") || content_type == "application/wasm"
 }
 
-/// The Content-Type of a served file name. Unknown extensions get
-/// `application/octet-stream`, which `X-Content-Type-Options: nosniff`
-/// keeps the browser from reinterpreting.
+/// The Content-Type of a served file name. The extension matches
+/// case-insensitively, so an uppercase request for an existing file
+/// (`BOOT.JS` on a case-insensitive filesystem) still serves as its
+/// real type instead of `application/octet-stream`, which
+/// `X-Content-Type-Options: nosniff` keeps the browser from
+/// executing. Unknown extensions get `application/octet-stream`.
 fn content_type(name: &str) -> &'static str {
     let extension = Path::new(name)
         .extension()
         .and_then(|extension| extension.to_str())
-        .unwrap_or_default();
-    match extension {
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
         "html" => "text/html; charset=utf-8",
         "js" | "mjs" => "application/javascript",
         "wasm" => "application/wasm",
@@ -266,22 +270,110 @@ enum SegmentError {
 
 /// Splits a decoded request path into segments the web directory may
 /// hold. Empty and `.` segments are dropped, `..` is a traversal, and
-/// any other segment must be plain file-name characters.
+/// any other segment may name any file: only control characters and
+/// `\` are refused. Segments are already split on `/` and the
+/// canonicalize-then-`starts_with` check confines reads to the
+/// directory, so names with spaces, quotes, `+`, or non-ASCII bytes
+/// are safe to serve (custom `--web-dir` content uses them today).
 fn safe_segments(decoded: &str) -> Result<Vec<&str>, SegmentError> {
     let mut segments = Vec::new();
     for segment in decoded.split('/') {
         match segment {
             "" | "." => {}
             ".." => return Err(SegmentError::Traversal),
-            other
-                if other.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')
-                }) =>
-            {
-                segments.push(other);
-            }
+            other if is_safe_segment(other) => segments.push(other),
             _ => return Err(SegmentError::Unsafe),
         }
     }
     Ok(segments)
+}
+
+/// Whether a segment can name a file under the web directory:
+/// anything without control characters (C0 and C1, NUL included) or
+/// a backslash.
+fn is_safe_segment(segment: &str) -> bool {
+    segment.chars().all(|c| !c.is_control() && c != '\\')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_segments_accept_spaces_quotes_plus_and_unicode() {
+        for name in ["my file.svg", "we+ird.svg", "café.svg", "\"q\".svg"] {
+            assert_eq!(safe_segments(name).unwrap(), vec![name]);
+        }
+    }
+
+    #[test]
+    fn safe_segments_still_rejects_traversal_backslash_and_controls() {
+        assert_eq!(safe_segments("a/.."), Err(SegmentError::Traversal));
+        assert_eq!(safe_segments("a\\b"), Err(SegmentError::Unsafe));
+        assert_eq!(safe_segments("\u{7f}.svg"), Err(SegmentError::Unsafe));
+        assert_eq!(safe_segments("\u{9f}.svg"), Err(SegmentError::Unsafe));
+        assert_eq!(safe_segments("a/\u{0}b"), Err(SegmentError::Unsafe));
+    }
+
+    #[test]
+    fn a_percent_encoded_dot_dot_path_is_traversal_after_decoding() {
+        let decoded = percent_decode("/%2e%2e/secret").unwrap();
+        assert_eq!(decoded, "/../secret");
+        assert_eq!(safe_segments(&decoded), Err(SegmentError::Traversal));
+    }
+
+    #[test]
+    fn content_type_matches_extensions_case_insensitively() {
+        assert_eq!(content_type("BOOT.JS"), "application/javascript");
+        assert!(content_type("INDEX.HTML").starts_with("text/html"));
+        assert_eq!(content_type("BOOT.WASM"), "application/wasm");
+        assert_eq!(content_type("boot.js"), "application/javascript");
+        assert_eq!(content_type("index.html"), "text/html; charset=utf-8");
+        assert_eq!(content_type("unknown.bin"), "application/octet-stream");
+    }
+
+    /// One request round trip over a real loopback socket: the
+    /// accepted side is served, the connecting side reads the reply.
+    fn serve_get(web: &WebDir, raw_path: &str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        web.serve(raw_path, &mut stream);
+        let mut reply = String::new();
+        std::io::BufReader::new(client)
+            .read_to_string(&mut reply)
+            .unwrap();
+        reply
+    }
+
+    #[test]
+    fn serves_a_file_with_a_space_in_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), b"page").unwrap();
+        std::fs::write(dir.path().join("my file.svg"), b"<svg/>").unwrap();
+        let web = WebDir::open(dir.path());
+        assert!(web.available());
+        let reply = serve_get(&web, "/my%20file.svg");
+        assert!(reply.starts_with("HTTP/1.1 200 OK"), "{reply}");
+        assert!(reply.contains("image/svg+xml"), "{reply}");
+        assert!(reply.ends_with("<svg/>"), "{reply}");
+    }
+
+    #[test]
+    fn a_traversal_request_is_reported_not_served() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), b"page").unwrap();
+        let web = WebDir::open(dir.path());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        assert_eq!(web.serve("/..%2fsecret", &mut stream), Outcome::Traversal);
+        let mut reply = String::new();
+        std::io::BufReader::new(client)
+            .read_to_string(&mut reply)
+            .unwrap();
+        assert!(reply.starts_with("HTTP/1.1 404"), "{reply}");
+    }
 }

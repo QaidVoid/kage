@@ -126,30 +126,87 @@ pub fn load_path(path: &Path) -> Result<AttachedImage, String> {
 
 /// Whether `text` is a plausible single filesystem path to an
 /// existing image (used to treat a pasted/dragged path as an image
-/// rather than literal prompt text). Tolerates surrounding quotes
-/// and a leading `file://`, and backslash-escaped spaces from
-/// drag-drop.
+/// rather than literal prompt text). Tolerates surrounding quotes,
+/// a leading `file://` URL with percent-encoded names (the form a
+/// browser drag hands over, including the Windows `file:///C:/...`
+/// shape), and backslash-escaped spaces from drag-drop.
 #[must_use]
 pub fn path_if_image(text: &str) -> Option<std::path::PathBuf> {
-    let t = text.trim();
+    let t = kage_core::fsutil::unquote_and_trim(text);
     if t.is_empty() || t.contains('\n') {
         return None;
     }
-    let unquoted = t
-        .trim_matches(['"', '\''])
-        .strip_prefix("file://")
-        .unwrap_or_else(|| t.trim_matches(['"', '\'']));
-    let cleaned = unquoted.replace("\\ ", " ");
-    let path = kage_core::fsutil::expand_tilde(std::path::Path::new(&cleaned));
-    let is_image_ext = path
+    if let Some(rest) = t.strip_prefix("file://") {
+        let decoded = percent_decode(rest)?;
+        let path = std::path::PathBuf::from(without_slash_before_drive(&decoded));
+        return path_if_image_file(&path).then_some(path);
+    }
+    let direct = kage_core::fsutil::expand_tilde(std::path::Path::new(t));
+    if path_if_image_file(&direct) {
+        return Some(direct);
+    }
+    if t.contains("\\ ") {
+        let unescaped =
+            kage_core::fsutil::expand_tilde(std::path::Path::new(&t.replace("\\ ", " ")));
+        if path_if_image_file(&unescaped) {
+            return Some(unescaped);
+        }
+    }
+    None
+}
+
+/// Whether `path` names an existing file with an image extension.
+fn path_if_image_file(path: &Path) -> bool {
+    let image_ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
         .is_some_and(|e| matches!(e.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp"));
-    if is_image_ext && path.is_file() {
-        Some(path)
+    image_ext && path.is_file()
+}
+
+/// A `file:///C:/x.png` URL decodes to `/C:/x.png`; the slash before
+/// a drive prefix is not part of the Windows path.
+fn without_slash_before_drive(path: &str) -> String {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
+        path[1..].to_owned()
     } else {
-        None
+        path.to_owned()
+    }
+}
+
+/// Decodes the %-escapes of a `file://` URL path. `None` on a
+/// truncated or malformed escape, or a path that is not UTF-8 after
+/// decoding.
+fn percent_decode(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            out.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        if index + 3 > bytes.len() {
+            return None;
+        }
+        let high = hex_digit(bytes[index + 1])?;
+        let low = hex_digit(bytes[index + 2])?;
+        out.push(high.wrapping_shl(4) | low);
+        index += 3;
+    }
+    String::from_utf8(out).ok()
+}
+
+/// One hexadecimal digit of a %-escape.
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -291,5 +348,73 @@ mod tests {
         assert_eq!(path_if_image("just a sentence"), None);
         assert_eq!(path_if_image("/nope/missing.png"), None);
         assert_eq!(path_if_image("line one\nline two"), None);
+    }
+
+    #[test]
+    fn a_percent_encoded_file_url_attaches() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a b.png");
+        std::fs::write(&file, PNG).unwrap();
+        let url = format!("file://{}/a%20b.png", dir.path().display());
+        assert_eq!(path_if_image(&url), Some(file));
+    }
+
+    #[test]
+    fn a_quoted_file_url_attaches() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a b.png");
+        std::fs::write(&file, PNG).unwrap();
+        let url = format!("\"file://{}/a%20b.png\"", dir.path().display());
+        assert_eq!(path_if_image(&url), Some(file));
+    }
+
+    #[test]
+    fn a_quoted_and_spaced_unicode_name_attaches() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("café.png");
+        std::fs::write(&file, PNG).unwrap();
+        let input = format!(" \"{}\" ", file.display());
+        assert_eq!(path_if_image(&input), Some(file));
+    }
+
+    #[test]
+    fn a_backslash_escaped_space_path_attaches_when_the_unescaped_name_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a b.png");
+        std::fs::write(&file, PNG).unwrap();
+        let escaped = file.to_str().unwrap().replace(' ', "\\ ");
+        assert_eq!(path_if_image(&escaped), Some(file));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_literal_backslash_space_name_survives_unescaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a\\ b.png");
+        std::fs::write(&file, PNG).unwrap();
+        assert_eq!(path_if_image(file.to_str().unwrap()), Some(file));
+    }
+
+    #[test]
+    fn the_slash_before_a_windows_drive_prefix_is_dropped() {
+        assert_eq!(without_slash_before_drive("/C:/x.png"), "C:/x.png");
+        assert_eq!(without_slash_before_drive("/home/u/x.png"), "/home/u/x.png");
+        assert_eq!(without_slash_before_drive("/x.png"), "/x.png");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_drive_file_url_attaches() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("w.png");
+        std::fs::write(&file, PNG).unwrap();
+        let url = format!("file:///{}", file.display().to_string().replace('\\', "/"));
+        assert_eq!(path_if_image(&url), Some(file));
+    }
+
+    #[test]
+    fn a_malformed_file_url_is_not_a_path() {
+        assert_eq!(path_if_image("file:///tmp/%ZZ.png"), None);
+        assert_eq!(path_if_image("file:///tmp/%2"), None);
     }
 }

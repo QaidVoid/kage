@@ -441,7 +441,10 @@ impl McpConnection {
 
     /// Build the `roots/list` result advertised to the server: one
     /// entry per host root as a `file://` URI named by its last path
-    /// component.
+    /// component. The URI is built with [`url::Url::from_file_path`]
+    /// so spaces and non-ASCII names percent-encode and Windows
+    /// drives map to `file:///C:/...`; a relative root falls back to
+    /// the raw `file://` form.
     fn roots_list_result(roots: &[std::path::PathBuf]) -> serde_json::Value {
         let entries: Vec<serde_json::Value> = roots
             .iter()
@@ -451,8 +454,12 @@ impl McpConnection {
                     .and_then(|n| n.to_str())
                     .unwrap_or("root")
                     .to_owned();
+                let uri = url::Url::from_file_path(path).map_or_else(
+                    |()| format!("file://{}", path.display()),
+                    |url| url.to_string(),
+                );
                 serde_json::json!({
-                    "uri": format!("file://{}", path.display()),
+                    "uri": uri,
                     "name": name,
                 })
             })
@@ -988,6 +995,28 @@ mod tests {
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0]["uri"], "file:///work/project");
         assert_eq!(roots[0]["name"], "project");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn roots_list_uris_percent_encode_spaces_and_unicode() {
+        let (_conn, srv) = stub_server_with_roots(&[
+            std::path::PathBuf::from("/work/my project"),
+            std::path::PathBuf::from("/work/café"),
+        ]);
+        let result = srv
+            .request("roots/list", serde_json::json!({}))
+            .expect("roots/list is answered");
+        let roots = result["roots"].as_array().expect("roots array");
+        assert_eq!(roots.len(), 2);
+        for (root, expected) in roots.iter().zip([
+            std::path::PathBuf::from("/work/my project"),
+            std::path::PathBuf::from("/work/café"),
+        ]) {
+            let uri = root["uri"].as_str().expect("uri string");
+            let parsed = url::Url::parse(uri).expect("a valid URI");
+            assert_eq!(parsed.to_file_path().unwrap(), expected);
+        }
     }
 
     #[test]

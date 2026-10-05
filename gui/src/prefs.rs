@@ -105,14 +105,49 @@ pub fn save(prefs: &Prefs) {
 mod storage {
     use std::path::PathBuf;
 
+    use kage_client::unquote_and_trim;
+
+    /// The config base directory from the environment values, in the
+    /// platform's order: `XDG_CONFIG_HOME` first, then `%APPDATA%` on
+    /// Windows, then `HOME/.config`, with `%USERPROFILE%` standing in
+    /// for an unset `HOME` on Windows. Quoted and spaced values are
+    /// cleaned, and a value that cleans to empty falls through to the
+    /// next source.
+    fn config_base(
+        xdg: Option<&str>,
+        home: Option<&str>,
+        appdata: Option<&str>,
+        userprofile: Option<&str>,
+    ) -> Option<PathBuf> {
+        fn clean(value: Option<&str>) -> Option<&str> {
+            value
+                .map(unquote_and_trim)
+                .filter(|value| !value.is_empty())
+        }
+        let home_config =
+            |value: Option<&str>| clean(value).map(|home| PathBuf::from(home).join(".config"));
+        if cfg!(windows) {
+            clean(xdg)
+                .map(PathBuf::from)
+                .or_else(|| clean(appdata).map(PathBuf::from))
+                .or_else(|| home_config(home))
+                .or_else(|| clean(userprofile).map(|user| PathBuf::from(user).join(".config")))
+        } else {
+            clean(xdg).map(PathBuf::from).or_else(|| home_config(home))
+        }
+    }
+
     /// `desktop.json` in the kage config directory: `$XDG_CONFIG_HOME/kage`,
-    /// else `~/.config/kage`, else `%APPDATA%\kage`.
+    /// else the platform's own base, else `~/.config/kage`.
     fn path() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .filter(|dir| !dir.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-            .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))?;
+        let env =
+            |key: &str| std::env::var_os(key).map(|value| value.to_string_lossy().into_owned());
+        let base = config_base(
+            env("XDG_CONFIG_HOME").as_deref(),
+            env("HOME").as_deref(),
+            env("APPDATA").as_deref(),
+            env("USERPROFILE").as_deref(),
+        )?;
         Some(base.join("kage").join("desktop.json"))
     }
 
@@ -126,6 +161,72 @@ mod storage {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
         std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{PathBuf, config_base};
+
+        #[test]
+        fn quoted_and_spaced_values_clean_to_the_real_path() {
+            assert_eq!(
+                config_base(Some(" \"/cfg/kage\" "), None, None, None),
+                Some(PathBuf::from("/cfg/kage"))
+            );
+        }
+
+        #[test]
+        fn an_empty_value_falls_through_to_the_next_source() {
+            assert_eq!(
+                config_base(Some("   "), Some("/home/u"), None, None),
+                Some(PathBuf::from("/home/u/.config"))
+            );
+            assert_eq!(config_base(None, None, None, None), None);
+        }
+
+        #[cfg(not(windows))]
+        #[test]
+        fn the_unix_order_is_xdg_then_home_and_windows_bases_are_ignored() {
+            assert_eq!(
+                config_base(
+                    None,
+                    Some("/home/u"),
+                    Some("/appdata"),
+                    Some("C:\\Users\\u")
+                ),
+                Some(PathBuf::from("/home/u/.config"))
+            );
+            assert_eq!(
+                config_base(Some("/cfg"), Some("/home/u"), Some("/appdata"), None),
+                Some(PathBuf::from("/cfg"))
+            );
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn the_windows_order_is_xdg_appdata_home_userprofile() {
+            assert_eq!(
+                config_base(Some(""), None, Some("C:\\App\\Roaming"), None),
+                Some(PathBuf::from("C:\\App\\Roaming"))
+            );
+            assert_eq!(
+                config_base(Some(""), Some("C:\\Users\\u"), Some("C:\\App"), None),
+                Some(PathBuf::from("C:\\Users\\u\\.config"))
+            );
+            assert_eq!(
+                config_base(Some(""), None, None, Some("C:\\Users\\u")),
+                Some(PathBuf::from("C:\\Users\\u\\.config"))
+            );
+            assert_eq!(
+                config_base(
+                    Some("C:\\cfg"),
+                    Some("C:\\Users\\u"),
+                    Some("C:\\App"),
+                    Some("C:\\Users\\u")
+                ),
+                Some(PathBuf::from("C:\\cfg"))
+            );
+        }
     }
 }
 

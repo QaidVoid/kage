@@ -1002,7 +1002,7 @@ mod tests {
     fn roots_list_uris_percent_encode_spaces_and_unicode() {
         let (_conn, srv) = stub_server_with_roots(&[
             std::path::PathBuf::from("/work/my project"),
-            std::path::PathBuf::from("/work/café"),
+            std::path::PathBuf::from("/work/caf\u{e9}"),
         ]);
         let result = srv
             .request("roots/list", serde_json::json!({}))
@@ -1011,7 +1011,7 @@ mod tests {
         assert_eq!(roots.len(), 2);
         for (root, expected) in roots.iter().zip([
             std::path::PathBuf::from("/work/my project"),
-            std::path::PathBuf::from("/work/café"),
+            std::path::PathBuf::from("/work/caf\u{e9}"),
         ]) {
             let uri = root["uri"].as_str().expect("uri string");
             let parsed = url::Url::parse(uri).expect("a valid URI");

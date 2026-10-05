@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn unquote_and_trim_handles_unicode_and_empty_inputs() {
-        assert_eq!(unquote_and_trim("  \"café.png\"  "), "café.png");
+        assert_eq!(unquote_and_trim("  \"caf\u{e9}.png\"  "), "caf\u{e9}.png");
         assert_eq!(unquote_and_trim(""), "");
         assert_eq!(unquote_and_trim("   "), "");
         assert_eq!(unquote_and_trim("\"\""), "");

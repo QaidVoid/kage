@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn safe_segments_accept_spaces_quotes_plus_and_unicode() {
-        for name in ["my file.svg", "we+ird.svg", "café.svg", "\"q\".svg"] {
+        for name in ["my file.svg", "we+ird.svg", "caf\u{e9}.svg", "\"q\".svg"] {
             assert_eq!(safe_segments(name).unwrap(), vec![name]);
         }
     }

@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn a_quoted_and_spaced_unicode_name_attaches() {
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("café.png");
+        let file = dir.path().join("caf\u{e9}.png");
         std::fs::write(&file, PNG).unwrap();
         let input = format!(" \"{}\" ", file.display());
         assert_eq!(path_if_image(&input), Some(file));

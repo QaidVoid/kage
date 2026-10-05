@@ -77,6 +77,14 @@ impl Resolver for SsrfResolver {
 /// `url` must already have a parsed scheme; this function only looks at
 /// the host and port. It performs DNS resolution synchronously.
 pub fn check(url: &url::Url) -> Result<(), ToolError> {
+    check_allowing(url, |_| false)
+}
+
+/// [`check`] with an exception: an address `allow` accepts passes even
+/// when [`is_unsafe`] calls it non-routable. OAuth discovery allows
+/// loopback this way, so local dev servers keep working while every
+/// other non-routable address stays refused.
+pub fn check_allowing(url: &url::Url, allow: impl Fn(&IpAddr) -> bool) -> Result<(), ToolError> {
     let host = url
         .host_str()
         .ok_or_else(|| ToolError::InvalidInput("url has no host".into()))?;
@@ -97,7 +105,7 @@ pub fn check(url: &url::Url) -> Result<(), ToolError> {
         return Err(ToolError::Other(format!("no DNS records for {host}")));
     }
     for addr in addrs {
-        if is_unsafe(&addr.ip()) {
+        if is_unsafe(&addr.ip()) && !allow(&addr.ip()) {
             return Err(ToolError::InvalidInput(format!(
                 "refusing to fetch {host}: resolved to non-routable address {}",
                 addr.ip()
@@ -211,6 +219,14 @@ pub fn is_unsafe(ip: &IpAddr) -> bool {
             if segs[0] & 0xffc0 == 0xfe80 {
                 return true;
             }
+            // Documentation 2001:db8::/32.
+            if segs[0] == 0x2001 && segs[1] == 0x0db8 {
+                return true;
+            }
+            // Discard-only 100::/64.
+            if segs[0] == 0x0100 && segs[1..4] == [0, 0, 0] {
+                return true;
+            }
             // IPv4-mapped ::ffff:0:0/96, NAT64 64:ff9b::/96, and the
             // deprecated IPv4-compatible ::/96 all carry an IPv4
             // address in their last 32 bits; vet it by the IPv4 rules.
@@ -310,6 +326,47 @@ mod tests {
             assert_eq!(io.kind(), std::io::ErrorKind::PermissionDenied, "{uri}");
             assert!(io.to_string().contains("ssrf guard"), "{uri}: {io}");
         }
+    }
+
+    #[test]
+    fn documentation_and_discard_only_v6_are_unsafe() {
+        // Documentation 2001:db8::/32.
+        assert!(is_unsafe(&IpAddr::V6(Ipv6Addr::new(
+            0x2001, 0x0db8, 0, 0, 0, 0, 0, 1
+        ))));
+        assert!(
+            check(&url::Url::parse("https://[2001:db8::1]/x").unwrap()).is_err(),
+            "a documentation address must be refused"
+        );
+        // The neighbours outside the range stay safe.
+        assert!(!is_unsafe(&IpAddr::V6(Ipv6Addr::new(
+            0x2001, 0x0db7, 0, 0, 0, 0, 0, 1
+        ))));
+        assert!(!is_unsafe(&IpAddr::V6(Ipv6Addr::new(
+            0x2001, 0x0db9, 0, 0, 0, 0, 0, 1
+        ))));
+        // Discard-only 100::/64.
+        assert!(is_unsafe(&IpAddr::V6(Ipv6Addr::new(
+            0x0100, 0, 0, 0, 0, 0, 0, 1
+        ))));
+        // Just outside 100::/64 the address is a normal global one.
+        assert!(!is_unsafe(&IpAddr::V6(Ipv6Addr::new(
+            0x0100, 0, 0, 1, 0, 0, 0, 1
+        ))));
+    }
+
+    #[test]
+    fn check_allowing_spares_only_the_allowed_addresses() {
+        let loopback = url::Url::parse("http://127.0.0.1:18080/x").unwrap();
+        assert!(check(&loopback).is_err());
+        assert!(
+            check_allowing(&loopback, std::net::IpAddr::is_loopback).is_ok(),
+            "the loopback exception must let a dev server through"
+        );
+        let private = url::Url::parse("https://10.0.0.1/x").unwrap();
+        assert!(check_allowing(&private, std::net::IpAddr::is_loopback).is_err());
+        let public = url::Url::parse("https://1.1.1.1/x").unwrap();
+        assert!(check_allowing(&public, std::net::IpAddr::is_loopback).is_ok());
     }
 
     #[test]

@@ -48,6 +48,7 @@ pub mod error;
 pub mod events;
 pub(crate) mod exec;
 pub mod fs;
+pub(crate) mod guard;
 pub mod highlight;
 pub(crate) mod host;
 pub mod http;

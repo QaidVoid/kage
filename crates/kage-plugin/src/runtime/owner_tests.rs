@@ -1,6 +1,7 @@
 //! Tests for the Lua owner thread: render paths never block on it,
 //! input hooks are bounded, dispatch stays ordered, reload runs there.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
@@ -271,4 +272,37 @@ fn queued_repeats_of_one_event_coalesce_into_the_newest_payload() {
         other => panic!("expected a string, got {other:?}"),
     };
     assert_eq!(seen, "a2,b");
+}
+
+#[test]
+fn failed_plugin_eval_leaves_no_stale_current_plugin() {
+    let rt = PluginRuntime::builder()
+        .workdir(PathBuf::from("."))
+        .capabilities(BTreeMap::from([("p".to_owned(), vec!["exec".to_owned()])]))
+        .build()
+        .unwrap();
+    let eval = Arc::clone(&rt.eval);
+    rt.with_lua(move |lua| {
+        let env = eval.env(lua, "q").unwrap();
+        let boom = lua
+            .create_function(|_, ()| -> mlua::Result<()> { panic!("boom") })
+            .unwrap();
+        env.raw_set("boom", boom).unwrap();
+        // mlua re-raises a callback panic at the Rust call boundary, so
+        // eval_in unwinds instead of returning an error.
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            eval.eval_in(lua, "q", "=probe", env, "boom()")
+        }));
+        assert!(outcome.is_err());
+        assert!(lock(&eval.current_plugin).is_none());
+    })
+    .unwrap();
+    assert!(lock(&rt.eval.current_plugin).is_none());
+    let granted = rt
+        .eval_plugin(
+            "p",
+            "return kage.request_capabilities({'exec'}).exec == true",
+        )
+        .unwrap();
+    assert_eq!(granted.as_boolean(), Some(true));
 }

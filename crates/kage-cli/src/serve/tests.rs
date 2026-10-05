@@ -547,6 +547,41 @@ fn the_seventeenth_concurrent_connection_gets_503() {
 }
 
 #[test]
+fn the_connect_url_lands_beside_the_token_and_never_in_the_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let token_file = dir.path().join("remote-token");
+    let token = Token::load_or_create(&token_file).unwrap();
+    let addr: SocketAddr = "127.0.0.1:7433".parse().unwrap();
+    let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = Arc::clone(&lines);
+    let log: Log = Arc::new(move |line| sink.lock().unwrap().push(line.to_owned()));
+
+    log_connect(addr, &token, &token_file, &log);
+
+    let printed = lines.lock().unwrap().join("\n");
+    assert!(
+        !printed.contains(token.as_str()),
+        "the token must never be logged: {printed}"
+    );
+    assert!(printed.contains("connect.txt"), "{printed}");
+
+    let url = std::fs::read_to_string(dir.path().join("connect.txt")).unwrap();
+    assert!(url.starts_with(&format!("ws://{addr}/acp?token=")), "{url}");
+    let presented = url.split("token=").nth(1).unwrap_or_default();
+    assert!(token.matches(presented), "the file token must match: {url}");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.path().join("connect.txt"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "only the owner may read the connect URL");
+    }
+}
+
+#[test]
 fn non_loopback_hosts_are_warned_about_in_plain_text() {
     for (host, warned) in [
         ("127.0.0.1", false),

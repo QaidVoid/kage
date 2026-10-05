@@ -443,8 +443,7 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
         // Lua has one table type: an empty history round trips as `{}`,
         // not `[]`, so accept that shape as an empty history instead of
         // failing the turn (plans/verify/27 F8).
-        let next: Vec<Arc<Message>> = if result.as_object().is_some_and(serde_json::Map::is_empty)
-        {
+        let next: Vec<Arc<Message>> = if result.as_object().is_some_and(serde_json::Map::is_empty) {
             Vec::new()
         } else {
             serde_json::from_value(result)

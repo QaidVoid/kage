@@ -1,18 +1,32 @@
 //! Tests for the autocmd registry and its `kage.api` primitives.
 
+use std::collections::BTreeMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 
+use kage_core::sync::lock;
+use mlua::Value;
 use serde_json::json;
 
+use super::{MAX_EXEC_DEPTH, SharedAutocmds};
 use crate::PluginRuntime;
 use crate::api::LogLevel;
-use crate::testing::runtime_with_recording;
+use crate::testing::{recording_sink, runtime_with_recording};
 
 fn int(rt: &PluginRuntime, expr: &str) -> i64 {
     rt.eval(&format!("return {expr}"))
         .unwrap()
         .as_integer()
         .unwrap()
+}
+
+fn exec_depth_lua(lua: &mlua::Lua) -> usize {
+    let shared = lua.app_data_ref::<SharedAutocmds>().unwrap();
+    lock(&shared).exec_depth
+}
+
+fn exec_depth(rt: &PluginRuntime) -> usize {
+    rt.with_lua(exec_depth_lua).unwrap()
 }
 
 #[test]
@@ -275,4 +289,133 @@ fn reload_clears_autocmds_and_groups() {
     assert_eq!(rt.handler_count("user"), 2);
     rt.reload_dir(dir.path()).unwrap();
     assert_eq!(rt.handler_count("user"), 1);
+}
+
+#[test]
+fn tool_events_need_the_context_capability() {
+    let (rec, sink) = recording_sink();
+    let rt = PluginRuntime::builder()
+        .sink(sink)
+        .workdir(PathBuf::from("."))
+        .capabilities(BTreeMap::from([(
+            "a".to_owned(),
+            vec!["context".to_owned()],
+        )]))
+        .build()
+        .unwrap();
+    rt.eval_plugin(
+        "b",
+        r"
+        kage.api.autocmd_create('tool_call', { callback = function() end })
+        kage.api.autocmd_create('tool_result', { callback = function() end })
+        ",
+    )
+    .unwrap();
+    assert_eq!(rt.handler_count("tool_call"), 0);
+    assert_eq!(rt.handler_count("tool_result"), 0);
+    let warnings = rec
+        .snapshot()
+        .logs
+        .into_iter()
+        .filter(|(level, msg)| {
+            *level == LogLevel::Warn
+                && (msg.contains("'tool_call'") || msg.contains("'tool_result'"))
+                && msg.contains("context")
+        })
+        .count();
+    assert_eq!(warnings, 2);
+
+    rt.eval_plugin(
+        "a",
+        r"
+        calls, results = {}, {}
+        kage.api.autocmd_create('tool_call', {
+            callback = function(ev) calls[#calls + 1] = ev end,
+        })
+        kage.api.autocmd_create('tool_result', {
+            callback = function(ev) results[#results + 1] = ev end,
+        })
+        ",
+    )
+    .unwrap();
+    assert_eq!(rt.handler_count("tool_call"), 1);
+    assert_eq!(rt.handler_count("tool_result"), 1);
+    rt.dispatch_event(
+        "tool_call",
+        &json!({ "id": "t1", "name": "write", "input": { "path": "notes.md" } }),
+    )
+    .unwrap();
+    rt.dispatch_event(
+        "tool_result",
+        &json!({ "id": "t1", "name": "write", "is_error": false, "text": "wrote notes.md" }),
+    )
+    .unwrap();
+    rt.eval_plugin("a", "assert(calls[1].data.id == results[1].data.id)")
+        .unwrap();
+    let summary = rt
+        .eval_plugin(
+            "a",
+            "return calls[1].data.input.path .. ':' .. results[1].data.text",
+        )
+        .unwrap();
+    assert_eq!(
+        summary.as_string().unwrap().to_str().unwrap(),
+        "notes.md:wrote notes.md"
+    );
+}
+
+#[test]
+fn panicking_handler_keeps_the_exec_depth_stable() {
+    let rt = PluginRuntime::new().unwrap();
+    rt.with_lua(|lua| {
+        let boom = lua
+            .create_function(|_, ()| -> mlua::Result<()> { panic!("boom") })
+            .unwrap();
+        lua.globals().raw_set("boom", boom).unwrap();
+    })
+    .unwrap();
+    rt.eval("kage.api.autocmd_create('agent_end', { callback = function() boom() end })")
+        .unwrap();
+    rt.eval("kage.api.autocmd_create('turn_end', { callback = function() end })")
+        .unwrap();
+    let sink = rt.sink();
+    rt.with_lua(move |lua| {
+        // mlua re-raises a callback panic at the Rust call boundary, so
+        // exec unwinds instead of returning an error.
+        let payload = catch_unwind(AssertUnwindSafe(|| {
+            super::exec(lua, &sink, "agent_end", None, &Value::Nil)
+        }))
+        .unwrap_err();
+        let msg = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned());
+        assert_eq!(msg.as_deref(), Some("boom"));
+        assert_eq!(exec_depth_lua(lua), 0);
+    })
+    .unwrap();
+    for _ in 0..17 {
+        rt.eval("kage.api.autocmd_exec('turn_end')").unwrap();
+    }
+    assert_eq!(exec_depth(&rt), 0);
+}
+
+#[test]
+fn clear_resets_a_leaked_exec_depth() {
+    let rt = PluginRuntime::new().unwrap();
+    rt.with_lua(|lua| {
+        let shared = lua.app_data_ref::<SharedAutocmds>().unwrap();
+        lock(&shared).exec_depth = MAX_EXEC_DEPTH;
+    })
+    .unwrap();
+    let err = rt.eval("kage.api.autocmd_exec('agent_end')").unwrap_err();
+    assert!(err.to_string().contains("nested deeper"));
+    rt.with_lua(|lua| {
+        let shared = lua.app_data_ref::<SharedAutocmds>().unwrap();
+        lock(&shared).exec_depth = MAX_EXEC_DEPTH;
+        super::clear(lua).unwrap();
+        assert_eq!(lock(&shared).exec_depth, 0);
+    })
+    .unwrap();
+    rt.eval("kage.api.autocmd_exec('agent_end')").unwrap();
 }

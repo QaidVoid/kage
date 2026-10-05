@@ -52,7 +52,11 @@ pub(super) fn install(dir: &Path, req: &PluginInstallRequest) -> Result<String, 
             "a plugin named {name} is already installed"
         )));
     }
-    let text = if source.starts_with("https://") || source.starts_with("http://") {
+    let text = if source.starts_with("http://") {
+        return Err(invalid(format!(
+            "{source} uses plain http; a plugin source must be an https URL or a local path"
+        )));
+    } else if source.starts_with("https://") {
         fetch(source)?
     } else {
         let path = match source.strip_prefix("~/") {
@@ -61,8 +65,7 @@ pub(super) fn install(dir: &Path, req: &PluginInstallRequest) -> Result<String, 
                 .join(rest),
             None => source.into(),
         };
-        std::fs::read_to_string(&path)
-            .map_err(|e| invalid(format!("cannot read {}: {e}", path.display())))?
+        read_local(&path)?
     };
     kage_plugin::check_syntax(&text)
         .map_err(|e| invalid(format!("{source} is not a Lua plugin: {e}")))?;
@@ -85,13 +88,49 @@ pub(super) fn remove(dir: &Path, req: &PluginRemoveRequest) -> Result<(), RpcErr
     std::fs::remove_file(&target).map_err(|e| RpcError::internal(e.to_string()))
 }
 
+/// The plugin file at `path`, capped at [`MAX_BYTES`] like a fetched
+/// one, so a huge file is refused instead of loaded.
+fn read_local(path: &Path) -> Result<String, RpcError> {
+    use std::io::Read as _;
+
+    let mut reader = std::fs::File::open(path)
+        .map_err(|e| invalid(format!("cannot read {}: {e}", path.display())))?
+        .take(MAX_BYTES);
+    let mut text = String::new();
+    reader
+        .read_to_string(&mut text)
+        .map_err(|e| invalid(format!("cannot read {}: {e}", path.display())))?;
+    let mut extra = [0u8; 1];
+    if reader.get_ref().read(&mut extra).unwrap_or(0) != 0 {
+        return Err(invalid(format!(
+            "{} is larger than the {} byte plugin limit",
+            path.display(),
+            MAX_BYTES
+        )));
+    }
+    Ok(text)
+}
+
+/// GETs an https plugin source. The host is resolved and vetted before
+/// the dial, and the guarded agent re-vets every redirect hop, so a
+/// source URL cannot reach an internal address.
 fn fetch(url: &str) -> Result<String, RpcError> {
     use std::io::Read as _;
 
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(30)))
-        .build()
-        .into();
+    let uri: ureq::http::Uri = url
+        .parse()
+        .map_err(|e| invalid(format!("{url} is not a URL: {e}")))?;
+    let host = uri.host().unwrap_or_default();
+    if host.is_empty() {
+        return Err(invalid(format!("{url} has no host")));
+    }
+    super::directory::vet(host, uri.port_u16().unwrap_or(443))
+        .map_err(|e| invalid(format!("{url}: {e}")))?;
+    let agent = kage_tools::ssrf::guarded_agent(
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(30)))
+            .build(),
+    );
     let response = agent
         .get(url)
         .header("user-agent", concat!("kage/", env!("CARGO_PKG_VERSION")))
@@ -111,7 +150,7 @@ fn fetch(url: &str) -> Result<String, RpcError> {
 mod tests {
     use kage_acp::acp::{PluginInstallRequest, PluginRemoveRequest};
 
-    use super::{install, remove};
+    use super::{MAX_BYTES, install, remove};
 
     #[test]
     fn a_plugin_installs_from_a_path_and_is_removed() {
@@ -161,5 +200,52 @@ mod tests {
             ..req
         };
         assert!(install(&plugins, &reserved).is_err());
+    }
+
+    #[test]
+    fn a_plain_http_source_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let req = PluginInstallRequest {
+            source: "http://127.0.0.1/clock.lua".into(),
+            ..PluginInstallRequest::default()
+        };
+        let err = install(&dir.path().join("plugins"), &req).unwrap_err();
+        assert!(err.message.contains("https"), "{}", err.message);
+        assert!(
+            !dir.path().join("plugins").join("clock.lua").exists(),
+            "nothing is installed from a refused source"
+        );
+    }
+
+    #[test]
+    fn an_https_source_on_an_internal_address_is_refused_before_the_dial() {
+        let dir = tempfile::tempdir().unwrap();
+        for source in [
+            "https://127.0.0.1/clock.lua",
+            "https://10.0.0.1/clock.lua",
+            "https://[::1]/clock.lua",
+        ] {
+            let req = PluginInstallRequest {
+                source: source.into(),
+                ..PluginInstallRequest::default()
+            };
+            let err = install(&dir.path().join("plugins"), &req).unwrap_err();
+            assert!(err.message.contains("non-routable"), "{source}: {err}");
+        }
+    }
+
+    #[test]
+    fn an_oversized_local_plugin_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("big.lua");
+        let body = "kage.log('hi')\n".repeat((MAX_BYTES as usize) / 8 + 1);
+        assert!(body.len() > MAX_BYTES as usize);
+        std::fs::write(&big, body).unwrap();
+        let req = PluginInstallRequest {
+            source: big.display().to_string(),
+            ..PluginInstallRequest::default()
+        };
+        let err = install(&dir.path().join("plugins"), &req).unwrap_err();
+        assert!(err.message.contains("larger than"), "{}", err.message);
     }
 }

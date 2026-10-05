@@ -20,6 +20,7 @@
 use mlua::{HookTriggers, Lua, Thread, VmState};
 
 use crate::error::PluginError;
+use crate::guard::RestoreOnDrop;
 
 /// Registry slot holding the remaining hook ticks; [`DISARMED`] means
 /// no budget is in force.
@@ -81,8 +82,10 @@ fn check(lua: &Lua) -> Result<(), mlua::Error> {
 }
 
 /// Arm `budget` VM instructions for the duration of `f`, then restore
-/// the previous arming. An overrun inside `f` surfaces as
-/// [`PluginError::Lua`].
+/// the previous arming, including when `f` unwinds: the host contains
+/// job panics with `catch_unwind`, so a skipped restore would leak a
+/// small remaining credit into every later Lua execution. An overrun
+/// inside `f` surfaces as [`PluginError::Lua`].
 pub fn run<T, E>(lua: &Lua, budget: u64, f: impl FnOnce() -> Result<T, E>) -> Result<T, PluginError>
 where
     E: Into<PluginError>,
@@ -90,14 +93,19 @@ where
     let previous: i64 = lua.named_registry_value(CREDITS_KEY)?;
     let ticks = i64::try_from(budget / u64::from(HOOK_INTERVAL)).unwrap_or(i64::MAX);
     lua.set_named_registry_value(CREDITS_KEY, ticks.max(1))?;
+    let guard = RestoreOnDrop::arm(|| {
+        let _ = lua.set_named_registry_value(CREDITS_KEY, previous);
+    });
     let result = f();
     lua.set_named_registry_value(CREDITS_KEY, previous)?;
+    guard.defuse();
     result.map_err(Into::into)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::time::Instant;
 
     #[test]
@@ -142,6 +150,27 @@ mod tests {
         install(&lua).unwrap();
         let value: i64 = run(&lua, BUDGET, || {
             lua.load("return 21 * 2")
+                .eval::<i64>()
+                .map_err(PluginError::from)
+        })
+        .unwrap();
+        assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn panicking_region_restores_the_previous_credits() {
+        let lua = Lua::new();
+        install(&lua).unwrap();
+        let panicked = catch_unwind(AssertUnwindSafe(|| {
+            let _ = run(&lua, 1_000, || -> Result<(), PluginError> {
+                panic!("boom")
+            });
+        }));
+        assert!(panicked.is_err());
+        let credits: i64 = lua.named_registry_value(CREDITS_KEY).unwrap();
+        assert_eq!(credits, DISARMED);
+        let value: i64 = run(&lua, BUDGET, || {
+            lua.load("return 6 * 7")
                 .eval::<i64>()
                 .map_err(PluginError::from)
         })

@@ -30,6 +30,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use kage_tools::ssrf;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::{Host, Url};
@@ -245,6 +246,7 @@ pub fn register(discovery: &Discovery, redirect_uri: &str) -> Result<String, OAu
         return Err(OAuthError::NoRegistration(discovery.issuer.clone()));
     };
     let url = secure_url(endpoint)?;
+    vet(&url)?;
     let body = serde_json::json!({
         "client_name": "kage",
         "redirect_uris": [redirect_uri],
@@ -634,6 +636,7 @@ pub fn refresh(
 /// POST `form` to the token endpoint and parse the answer.
 fn token_request(endpoint: &str, form: &[(&str, &str)]) -> Result<Tokens, OAuthError> {
     let url = secure_url(endpoint)?;
+    vet(&url)?;
     let mut response = agent()
         .post(url.as_str())
         .header("accept", "application/json")
@@ -871,12 +874,24 @@ fn endpoint(metadata: &Value, key: &str) -> Result<String, OAuthError> {
         .get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| OAuthError::Discovery(format!("the server metadata has no `{key}`")))?;
-    Ok(secure_url(value)?.into())
+    let url = secure_url(value)?;
+    vet(&url)?;
+    Ok(url.into())
+}
+
+/// Resolve `url` and refuse a host that answers on a non-routable
+/// address: the metadata chain is served by the remote server, so a
+/// hostile one could otherwise point the fetches at internal services.
+/// Loopback stays allowed so local dev servers keep working.
+fn vet(url: &Url) -> Result<(), OAuthError> {
+    ssrf::check_allowing(url, std::net::IpAddr::is_loopback)
+        .map_err(|e| OAuthError::Discovery(e.to_string()))
 }
 
 /// GET a JSON object. `None` for a non-success status or a body that is
 /// not a JSON object, so discovery can try the next candidate.
 fn get_json(agent: &ureq::Agent, url: &Url) -> Result<Option<Value>, OAuthError> {
+    vet(url)?;
     let mut response = agent
         .get(url.as_str())
         .header("accept", "application/json")
@@ -1150,6 +1165,22 @@ mod tests {
             secure_url("http://127.0.0.1.example.com/x"),
             Err(OAuthError::Insecure(_))
         ));
+    }
+
+    #[test]
+    fn discovery_refuses_a_private_metadata_address_before_dialing() {
+        let server = serve(|request, _| {
+            match (request.method.as_str(), request.path.as_str()) {
+            ("POST", "/mcp") => Reply::status(401).header(
+                "www-authenticate",
+                r#"Bearer resource_metadata="https://10.255.255.1/.well-known/oauth-protected-resource""#,
+            ),
+            _ => Reply::status(404),
+        }
+        });
+        let err = discover(&format!("{}/mcp", server.base)).unwrap_err();
+        assert!(matches!(err, OAuthError::Discovery(_)), "{err}");
+        assert!(err.to_string().contains("10.255.255.1"), "{err}");
     }
 
     #[test]

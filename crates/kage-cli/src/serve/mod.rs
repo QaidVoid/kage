@@ -24,9 +24,11 @@
 //! sessions a moment to close their files, and exit with status 0; a
 //! second signal exits at once.
 //!
-//! Log lines go to stderr prefixed `kage serve:`. The connect URL in
-//! the startup output is the only place the token is ever rendered;
-//! refusals name the peer address, never a presented value.
+//! Log lines go to stderr prefixed `kage serve:`. The connect URL,
+//! token included, is written with private permissions to
+//! `connect.txt` beside the token file and the startup output names
+//! that file; the token is never rendered in the log. Refusals name
+//! the peer address, never a presented value.
 
 use std::io::{self, Read as _};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -148,10 +150,7 @@ pub(crate) fn run(
         }
     };
     log(&format!("token file {}", token_path.display()));
-    log(&format!(
-        "connect: ws://{addr}/acp?token={}",
-        token.as_str()
-    ));
+    log_connect(addr, &token, &token_path, &log);
     if web.available() {
         log(&format!("web UI: http://{addr}/"));
     }
@@ -211,6 +210,28 @@ fn load_token(rotate: bool) -> Result<(PathBuf, Arc<Token>), String> {
     }
     .map_err(|e| format!("token at {}: {e}", path.display()))?;
     Ok((path, Arc::new(token)))
+}
+
+/// The `ws://` URL a client dials to reach the endpoint on `addr`.
+fn connect_url(addr: SocketAddr, token: &Token) -> String {
+    format!("ws://{addr}/acp?token={}", token.as_str())
+}
+
+/// Writes the connect URL, token included, with private permissions to
+/// a file beside the token and logs where it went. The token itself
+/// never reaches the log: stderr lands in journals anyone on the
+/// machine can read, while the file is user-only.
+fn log_connect(addr: SocketAddr, token: &Token, token_file: &Path, log: &Log) {
+    let url = connect_url(addr, token);
+    let file = token_file.with_file_name("connect.txt");
+    match kage_core::fsutil::atomic_write_private(&file, url.as_bytes()) {
+        Ok(()) => log(&format!("connect URL in {}", file.display())),
+        Err(e) => log(&format!(
+            "connect: ws://{addr}/acp (cannot write {}: {e}; read the token from {})",
+            file.display(),
+            token_file.display()
+        )),
+    }
 }
 
 /// Registers SIGINT and SIGTERM handlers. The first signal sets `stop`

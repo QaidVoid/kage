@@ -41,6 +41,7 @@ use crate::api::{LogLevel, SharedHostLog};
 use crate::capabilities::CurrentPlugin;
 use crate::error::PluginError;
 use crate::events::KNOWN_EVENTS;
+use crate::guard::RestoreOnDrop;
 
 /// Lua-registry key of the `id -> callback` table.
 const CALLBACKS_KEY: &str = "kage._autocmds";
@@ -256,12 +257,14 @@ pub(crate) fn notify(
     }
 }
 
-/// Drop every autocmd and group. Used by reload.
+/// Drop every autocmd and group, and reset the exec nesting depth.
+/// Used by reload.
 pub(crate) fn clear(lua: &Lua) -> mlua::Result<()> {
     if let Some(shared) = lua.app_data_ref::<SharedAutocmds>() {
         let mut autocmds = lock(&shared);
         autocmds.by_event.clear();
         autocmds.groups.clear();
+        autocmds.exec_depth = 0;
     }
     lua.set_named_registry_value(CALLBACKS_KEY, lua.create_table()?)
 }
@@ -530,7 +533,8 @@ fn exec_fn(lua: &Lua, sink: SharedHostLog) -> mlua::Result<Function> {
 /// Fire `event` from inside Lua with `matched` as the match and `data`
 /// as the payload. Callback errors are logged. Nested calls, through
 /// `autocmd_exec` or an option set in a callback, are capped at
-/// [`MAX_EXEC_DEPTH`] levels.
+/// [`MAX_EXEC_DEPTH`] levels, and the depth is restored on every exit
+/// path so a contained panic cannot exhaust the budget permanently.
 pub(crate) fn exec(
     lua: &Lua,
     sink: &SharedHostLog,
@@ -550,10 +554,14 @@ pub(crate) fn exec(
         }
         autocmds.exec_depth += 1;
     }
+    let guard = RestoreOnDrop::arm(|| {
+        lock(&autocmds).exec_depth -= 1;
+    });
     let result = targets(lua, event, matched).map(|targets| {
         notify(lua, sink, event, matched, &targets, data);
     });
     lock(&autocmds).exec_depth -= 1;
+    guard.defuse();
     result
 }
 

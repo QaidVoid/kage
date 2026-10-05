@@ -47,14 +47,16 @@ pub struct ToolPermissionRules {
 }
 
 /// The `[permissions]` table.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PermissionsConfig {
-    /// Opt-in path confinement: route the built-in file tools
-    /// through escape-checked resolution so reads and writes stay
-    /// under the working directory. Defaults to `false` (the
-    /// historical behavior: paths resolve against the workdir but
-    /// may escape it).
+    /// Path confinement: route the built-in file tools through
+    /// escape-checked resolution so reads and writes stay under the
+    /// working directory. Defaults to `true`; set
+    /// `confine_paths = false` to restore the historical unconfined
+    /// resolution, which lets model-supplied paths escape the
+    /// workdir.
+    #[serde(default = "default_confine_paths")]
     pub confine_paths: bool,
     /// Per-tool rules, keyed by literal tool name (`shell`,
     /// `write`, `github__create_issue`, ...). No glob keys in
@@ -69,11 +71,26 @@ pub struct PermissionsConfig {
     pub mcp: BTreeMap<String, PermissionAction>,
 }
 
+impl Default for PermissionsConfig {
+    fn default() -> Self {
+        Self {
+            confine_paths: default_confine_paths(),
+            tools: BTreeMap::new(),
+            mcp: BTreeMap::new(),
+        }
+    }
+}
+
+fn default_confine_paths() -> bool {
+    true
+}
+
 impl PermissionsConfig {
-    /// Whether the table carries no configuration at all.
+    /// Whether the table carries no configuration at all: confinement
+    /// at its default (on) and no tool or MCP rules.
     #[must_use]
     pub fn is_default(&self) -> bool {
-        !self.confine_paths && self.tools.is_empty() && self.mcp.is_empty()
+        self.confine_paths && self.tools.is_empty() && self.mcp.is_empty()
     }
 
     /// The action for a tool of MCP server `server` that has no
@@ -219,6 +236,31 @@ mod tests {
         let cfg = rules(PermissionAction::Deny, &[], &[]);
         assert_eq!(cfg.check("shell", "echo hi"), PermissionAction::Deny);
         assert_eq!(cfg.check("write", "{}"), PermissionAction::Allow);
+    }
+
+    #[test]
+    fn confine_paths_defaults_on_and_explicit_false_is_honoured() {
+        let cfg: PermissionsConfig = toml::from_str("").unwrap();
+        assert!(cfg.confine_paths);
+        assert!(PermissionsConfig::default().confine_paths);
+        assert!(cfg.is_default());
+        let cfg: PermissionsConfig = toml::from_str("confine_paths = false").unwrap();
+        assert!(!cfg.confine_paths);
+        assert!(!cfg.is_default());
+    }
+
+    #[test]
+    fn subject_for_canonicalizes_key_order() {
+        // serde_json sorts map keys, so a deny pattern written to
+        // mirror the model's emission order still matches the
+        // canonical subject. Enabling serde_json's `preserve_order`
+        // feature anywhere in the dependency graph breaks this pin
+        // loudly instead of silently reshaping every deny rule.
+        let input = serde_json::json!({"path": "/tmp/a", "content": "data"});
+        assert_eq!(
+            PermissionsConfig::subject_for(&input),
+            r#"{"content":"data","path":"/tmp/a"}"#
+        );
     }
 
     #[test]

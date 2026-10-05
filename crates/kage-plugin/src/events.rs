@@ -201,9 +201,9 @@ pub const KNOWN_EVENTS: &[(&str, &str, &str)] = &[
 
 /// The capability an event requires when its payload carries
 /// conversation or prompt text: the transforms, the system-prompt
-/// notification, and every stream event a plugin could reassemble a
-/// transcript from. Everything else is base surface. `tool_call`/
-/// `tool_result` intentionally stay base (documented residual).
+/// notification, every stream event a plugin could reassemble a
+/// transcript from, and the tool events, whose payloads carry raw tool
+/// arguments and full tool outputs. Everything else is base surface.
 pub(crate) fn required_capability(event: &str) -> Option<Capability> {
     match event {
         "transform_context"
@@ -214,7 +214,9 @@ pub(crate) fn required_capability(event: &str) -> Option<Capability> {
         | "message_update"
         | "message_end"
         | "after_provider_response"
-        | "user" => Some(Capability::Context),
+        | "user"
+        | "tool_call"
+        | "tool_result" => Some(Capability::Context),
         _ => None,
     }
 }

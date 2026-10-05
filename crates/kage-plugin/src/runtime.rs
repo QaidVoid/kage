@@ -63,6 +63,7 @@ pub(crate) use crate::error::PluginError;
 pub(crate) use crate::events;
 pub(crate) use crate::exec;
 pub(crate) use crate::fs as plugin_fs;
+use crate::guard::RestoreOnDrop;
 pub(crate) use crate::highlight::{self, SharedHighlights, SharedThemeResolver};
 pub(crate) use crate::host::LuaHost;
 pub(crate) use crate::http;
@@ -244,7 +245,9 @@ impl EvalState {
     }
 
     /// Evaluate `source` in `env` under the watchdog, with `name` as the
-    /// current plugin and `chunk` as the chunk name.
+    /// current plugin and `chunk` as the chunk name. The slot is
+    /// restored on every exit path, so a contained panic cannot leave a
+    /// stale plugin name for the next `kage.request_capabilities`.
     pub(crate) fn eval_in(
         &self,
         lua: &Lua,
@@ -254,6 +257,9 @@ impl EvalState {
         source: &str,
     ) -> Result<mlua::Value, PluginError> {
         *lock(&self.current_plugin) = Some(name.to_owned());
+        let guard = RestoreOnDrop::arm(|| {
+            *lock(&self.current_plugin) = None;
+        });
         let result = watchdog::run(lua, self.script_budget, || {
             lua.load(source)
                 .set_name(chunk)
@@ -261,6 +267,7 @@ impl EvalState {
                 .eval::<mlua::Value>()
         });
         *lock(&self.current_plugin) = None;
+        guard.defuse();
         result
     }
 

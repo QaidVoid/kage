@@ -4,6 +4,7 @@
 //! Only models that can call tools are listed, since kage drives tools.
 
 use std::collections::HashMap;
+use std::net::ToSocketAddrs;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,7 @@ use kage_acp::acp::{
 };
 use kage_core::sync::lock;
 use kage_jsonrpc::RpcError;
+use kage_tools::ssrf;
 use serde_json::Value;
 
 /// The directory a request without a URL reads.
@@ -24,11 +26,75 @@ const FRESH_FOR: Duration = Duration::from_secs(600);
 /// The largest directory read.
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
 
-/// A fetched directory: when, and what it listed.
-type Fetched = (Instant, Vec<DirectoryProvider>);
+/// How many redirects one fetch may follow. Every hop is resolved
+/// through the SSRF guard, so a redirect cannot leave for an internal
+/// target either.
+const MAX_REDIRECTS: u32 = 4;
+
+/// How many distinct directories stay cached.
+const MAX_CACHED: usize = 8;
+
+/// The approximate body budget across the cache.
+const MAX_CACHED_BYTES: u64 = 64 * 1024 * 1024;
+
+/// One fetched directory: when it was fetched, its body size, and what
+/// it listed.
+struct Entry {
+    at: Instant,
+    bytes: u64,
+    providers: Vec<DirectoryProvider>,
+}
+
+/// The fetched directories, bounded in entries and bytes: a long-lived
+/// serve must not grow with every distinct URL a client names.
+#[derive(Default)]
+struct FetchCache {
+    entries: HashMap<String, Entry>,
+}
+
+impl FetchCache {
+    /// The providers of `url` when they were fetched inside
+    /// [`FRESH_FOR`] of `now`.
+    fn fresh(&self, url: &str, now: Instant) -> Option<&[DirectoryProvider]> {
+        let entry = self.entries.get(url)?;
+        (now.duration_since(entry.at) < FRESH_FOR).then(|| entry.providers.as_slice())
+    }
+
+    /// Stores one fetch, dropping expired entries first and then the
+    /// oldest until the entry and byte caps hold again.
+    fn insert(&mut self, url: &str, bytes: u64, providers: Vec<DirectoryProvider>, now: Instant) {
+        self.entries.insert(
+            url.to_owned(),
+            Entry {
+                at: now,
+                bytes,
+                providers,
+            },
+        );
+        self.entries
+            .retain(|_, entry| now.duration_since(entry.at) < FRESH_FOR);
+        while self.over_caps() {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.at)
+                .map(|(url, _)| url.clone());
+            let Some(oldest) = oldest else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+    }
+
+    /// Whether the cache is past either cap.
+    fn over_caps(&self) -> bool {
+        self.entries.len() > MAX_CACHED
+            || self.entries.values().map(|entry| entry.bytes).sum::<u64>() > MAX_CACHED_BYTES
+    }
+}
 
 /// Directories fetched lately, by URL.
-static FETCHED: Mutex<Option<HashMap<String, Fetched>>> = Mutex::new(None);
+static FETCHED: Mutex<Option<FetchCache>> = Mutex::new(None);
 
 /// The providers of the directory `req` names.
 pub(super) fn directory(req: &DirectoryRequest) -> Result<DirectoryResult, RpcError> {
@@ -37,34 +103,73 @@ pub(super) fn directory(req: &DirectoryRequest) -> Result<DirectoryResult, RpcEr
         .as_deref()
         .filter(|url| !url.trim().is_empty())
         .unwrap_or(MODELS_DEV);
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err(RpcError::new(
-            -32602,
-            format!("{url} is not an http(s) URL"),
-        ));
-    }
-    if let Some((at, providers)) = lock(&FETCHED).as_ref().and_then(|cache| cache.get(url))
-        && at.elapsed() < FRESH_FOR
-    {
-        return Ok(DirectoryResult {
-            providers: providers.clone(),
-        });
+    let (host, port) = fetch_url(url).map_err(|e| RpcError::new(-32602, e))?;
+    vet(&host, port).map_err(RpcError::internal)?;
+    let now = Instant::now();
+    let hit = lock(&FETCHED)
+        .as_ref()
+        .and_then(|cache| cache.fresh(url, now))
+        .map(<[DirectoryProvider]>::to_vec);
+    if let Some(providers) = hit {
+        return Ok(DirectoryResult { providers });
     }
     let body = fetch(url, req.api_key.as_deref()).map_err(RpcError::internal)?;
     let providers = parse(&body).map_err(RpcError::internal)?;
     lock(&FETCHED)
-        .get_or_insert_with(HashMap::new)
-        .insert(url.to_owned(), (Instant::now(), providers.clone()));
+        .get_or_insert_with(FetchCache::default)
+        .insert(url, body.len() as u64, providers.clone(), Instant::now());
     Ok(DirectoryResult { providers })
+}
+
+/// The URL shape one directory fetch accepts: https, with a host.
+/// Returns the host to resolve and its port. The fetch dials only
+/// addresses [`vet`] and the SSRF guard accept, so a client cannot
+/// point kage's own network access at internal services.
+fn fetch_url(url: &str) -> Result<(String, u16), String> {
+    let uri: ureq::http::Uri = url
+        .parse()
+        .map_err(|e| format!("{url} is not a URL: {e}"))?;
+    if uri.scheme_str().as_deref() != Some("https") {
+        return Err(format!("{url} must be an https URL"));
+    }
+    let host = uri.host().unwrap_or_default();
+    if host.is_empty() {
+        return Err(format!("{url} has no host"));
+    }
+    Ok((host.to_owned(), uri.port_u16().unwrap_or(443)))
+}
+
+/// Resolve `host` and refuse when any address it names is non-routable.
+/// Runs before the connection so the error names the refused address.
+pub(super) fn vet(host: &str, port: u16) -> Result<(), String> {
+    let dial_host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    let addrs: Vec<_> = (dial_host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("cannot resolve {host}: {e}"))?
+        .collect();
+    for addr in addrs {
+        if ssrf::is_unsafe(&addr.ip()) {
+            return Err(format!(
+                "refusing {host}: it resolves to the non-routable address {}",
+                addr.ip()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn fetch(url: &str, key: Option<&str>) -> Result<String, String> {
     use std::io::Read as _;
 
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(60)))
-        .build()
-        .into();
+    let agent = ssrf::guarded_agent(
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(60)))
+            .max_redirects(MAX_REDIRECTS)
+            .build(),
+    );
     let mut request = agent
         .get(url)
         .header("user-agent", concat!("kage/", env!("CARGO_PKG_VERSION")));
@@ -158,7 +263,9 @@ fn model_of(key: &str, model: &Value) -> DirectoryModel {
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use std::time::{Duration, Instant};
+
+    use super::{FRESH_FOR, FetchCache, MAX_CACHED, fetch_url, parse, vet};
 
     #[test]
     fn a_directory_lists_its_tool_calling_models() {
@@ -196,5 +303,77 @@ mod tests {
         assert_eq!(bravo.input, ["text", "image"]);
         assert_eq!(bravo.cost.as_ref().unwrap().cache_read, Some(0.1));
         assert!(parse("[]").is_err());
+    }
+
+    #[test]
+    fn only_https_urls_with_a_host_are_accepted() {
+        assert!(fetch_url("http://models.dev/api.json").is_err());
+        assert!(fetch_url("ftp://models.dev/api.json").is_err());
+        assert!(fetch_url("https:///api.json").is_err());
+        assert_eq!(
+            fetch_url("https://models.dev/api.json").unwrap(),
+            ("models.dev".to_owned(), 443)
+        );
+        assert_eq!(
+            fetch_url("https://models.dev:8443/api.json").unwrap(),
+            ("models.dev".to_owned(), 8443)
+        );
+    }
+
+    #[test]
+    fn the_vet_refuses_non_routable_hosts_without_dialing() {
+        for host in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "169.254.169.254",
+            "::1",
+            "[::1]",
+            "localhost",
+            "2001:db8::1",
+        ] {
+            let err = vet(host, 443).expect_err(host);
+            assert!(err.contains("non-routable"), "{host}: {err}");
+        }
+        assert!(vet("1.1.1.1", 443).is_ok());
+        let (host, port) = fetch_url("https://[2001:db8::1]/api.json").unwrap();
+        assert_eq!(host, "[2001:db8::1]");
+        assert!(vet(&host, port).is_err());
+    }
+
+    #[test]
+    fn the_cache_evicts_the_oldest_beyond_the_entry_cap() {
+        let mut cache = FetchCache::default();
+        let now = Instant::now();
+        for ix in 0..=MAX_CACHED {
+            cache.insert(
+                &format!("u{ix}"),
+                1,
+                Vec::new(),
+                now + Duration::from_secs(ix as u64),
+            );
+        }
+        assert!(cache.fresh("u0", now).is_none(), "oldest evicted");
+        assert!(
+            cache.fresh(&format!("u{MAX_CACHED}"), now).is_some(),
+            "newest kept"
+        );
+    }
+
+    #[test]
+    fn an_expired_entry_is_neither_served_nor_kept() {
+        let mut cache = FetchCache::default();
+        let now = Instant::now();
+        cache.insert("a", 1, Vec::new(), now);
+        assert!(cache.fresh("a", now).is_some());
+        assert!(
+            cache.fresh("a", now + FRESH_FOR).is_none(),
+            "stale not served"
+        );
+        cache.insert("b", 1, Vec::new(), now + FRESH_FOR + Duration::from_secs(1));
+        assert!(
+            !cache.entries.contains_key("a"),
+            "the expired entry is dropped on insert"
+        );
+        assert!(cache.entries.contains_key("b"));
     }
 }

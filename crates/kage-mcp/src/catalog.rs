@@ -244,9 +244,7 @@ impl McpConnection {
                     if out.is_empty() && !has_cursor {
                         return Ok(out);
                     }
-                    return Err(
-                        self.protocol(format!("{method} result missing `{key}` array"))
-                    );
+                    return Err(self.protocol(format!("{method} result missing `{key}` array")));
                 }
             }
             if out.len() >= cap {

@@ -46,7 +46,8 @@ pub struct Config {
     #[serde(skip_serializing_if = "ProvidersConfig::is_default")]
     pub providers: ProvidersConfig,
     /// Tool permission rules (`[permissions]`): allow / ask / deny
-    /// per tool, plus the opt-in path-confinement flag.
+    /// per tool, plus the path-confinement flag (on by default;
+    /// `confine_paths = false` opts out).
     #[serde(default, skip_serializing_if = "PermissionsConfig::is_default")]
     pub permissions: crate::permissions::PermissionsConfig,
     /// Shell tool policy (`[shell]`).
@@ -132,10 +133,37 @@ impl Config {
         Some(base.join("kage").join("config.toml"))
     }
 
+    /// Check the security-sensitive tables a load must refuse:
+    /// permission rules and shell policy. [`Self::load`],
+    /// [`Self::load_default`] and [`Self::load_layered`] run this
+    /// already, so broken rules stop the process at startup instead
+    /// of failing open at call time. Repair-capable callers load with
+    /// the `*_raw` loaders.
+    ///
+    /// # Errors
+    ///
+    /// A [`crate::error::Error`] describing the first broken rule.
+    pub fn validate(&self) -> Result<()> {
+        self.permissions.validate()?;
+        self.shell.validate()
+    }
+
     /// Load configuration from `path`, merging with defaults and env overrides.
     ///
     /// A missing file is not an error: defaults plus env are returned.
+    /// The permission and shell tables are validated (see
+    /// [`Self::validate`]); repair callers use [`Self::load_raw`].
     pub fn load(path: &Path) -> Result<Self> {
+        let cfg = Self::load_raw(path)?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Load configuration from `path` like [`Self::load`], but without
+    /// validating the permission and shell tables. Repair-capable
+    /// callers (doctor, config editing) use this so a broken config
+    /// stays loadable and fixable.
+    pub fn load_raw(path: &Path) -> Result<Self> {
         Ok(Figment::new()
             .merge(Serialized::defaults(Self::default()))
             .merge(Toml::file(path))
@@ -144,10 +172,17 @@ impl Config {
     }
 
     /// Load configuration from [`Self::default_path`], or pure defaults plus
-    /// env if no home directory is available.
+    /// env if no home directory is available. Validates like [`Self::load`].
     pub fn load_default() -> Result<Self> {
+        let cfg = Self::load_default_raw()?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// [`Self::load_default`] without validation, for repair callers.
+    pub fn load_default_raw() -> Result<Self> {
         match Self::default_path() {
-            Some(p) => Self::load(&p),
+            Some(p) => Self::load_raw(&p),
             None => Ok(Figment::new()
                 .merge(Serialized::defaults(Self::default()))
                 .merge(Env::prefixed("KAGE_").split("__"))
@@ -179,13 +214,22 @@ impl Config {
     ///
     /// The project file is `<workdir>/.kage/config.toml`. Either file may be
     /// absent; only the layers that exist contribute. Env overrides win
-    /// over both files just like in [`Self::load`].
+    /// over both files just like in [`Self::load`], and the result is
+    /// validated like [`Self::load`]; repair callers use
+    /// [`Self::load_layered_raw`].
     ///
     /// The project file's `mcp`, `permissions` and
     /// `plugins.capabilities` tables are dropped unless the project is
     /// trusted (see [`crate::trust`]). The project file's `providers` and
     /// `acp` tables never apply: those are only read from the user config.
     pub fn load_layered(workdir: &Path) -> Result<Self> {
+        let cfg = Self::load_layered_raw(workdir)?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// [`Self::load_layered`] without validation, for repair callers.
+    pub fn load_layered_raw(workdir: &Path) -> Result<Self> {
         let mut figment = Figment::new().merge(Serialized::defaults(Self::default()));
         if let Some(user) = Self::default_path() {
             figment = figment.merge(Toml::file(user));
@@ -1202,6 +1246,96 @@ mod tests {
         let cfg: Config = toml::from_str("[shell]\nscrub_env = [\"[\"]\n").unwrap();
         let err = cfg.shell.validate().unwrap_err().to_string();
         assert!(err.contains("[shell] scrub_env"), "{err}");
+    }
+
+    #[test]
+    fn load_rejects_bad_security_patterns_and_load_raw_keeps_them_loadable() {
+        let _globals = process_globals();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[permissions.tools.shell]\ndeny = [\"[\"]\n").unwrap();
+        let err = Config::load(&path).expect_err("bad deny pattern must fail the load");
+        assert!(err.to_string().contains("does not compile"), "{err}");
+        let cfg = Config::load_raw(&path).unwrap();
+        assert_eq!(cfg.permissions.tools["shell"].deny, ["[".to_owned()]);
+
+        std::fs::write(&path, "[shell]\nscrub_env = [\"[\"]\n").unwrap();
+        let err = Config::load(&path).expect_err("bad scrub pattern must fail the load");
+        assert!(err.to_string().contains("does not compile"), "{err}");
+        let cfg = Config::load_raw(&path).unwrap();
+        assert_eq!(cfg.shell.scrub_env, ["[".to_owned()]);
+    }
+
+    #[test]
+    fn load_default_rejects_bad_security_patterns_in_the_user_file() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let home = jail.directory().to_path_buf();
+            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            let xdg_config = home.join(".config");
+            jail.set_env("XDG_CONFIG_HOME", xdg_config.to_string_lossy().as_ref());
+            let user_cfg = xdg_config.join("kage");
+            std::fs::create_dir_all(&user_cfg).map_err(|e| figment::Error::from(e.to_string()))?;
+
+            std::fs::write(
+                user_cfg.join("config.toml"),
+                "[permissions.tools.shell]\ndeny = [\"[\"]\n",
+            )
+            .map_err(|e| figment::Error::from(e.to_string()))?;
+            let err = Config::load_default().expect_err("bad deny pattern must fail the load");
+            assert!(err.to_string().contains("does not compile"), "{err}");
+
+            std::fs::write(
+                user_cfg.join("config.toml"),
+                "[shell]\nscrub_env = [\"[\"]\n",
+            )
+            .map_err(|e| figment::Error::from(e.to_string()))?;
+            let err = Config::load_default().expect_err("bad scrub pattern must fail the load");
+            assert!(err.to_string().contains("does not compile"), "{err}");
+            assert!(
+                Config::load_default_raw().is_ok(),
+                "the raw loader must keep a broken config repairable"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn load_layered_rejects_bad_security_patterns_in_the_user_file() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let home = jail.directory().to_path_buf();
+            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            let xdg_config = home.join(".config");
+            jail.set_env("XDG_CONFIG_HOME", xdg_config.to_string_lossy().as_ref());
+            let user_cfg = xdg_config.join("kage");
+            std::fs::create_dir_all(&user_cfg).map_err(|e| figment::Error::from(e.to_string()))?;
+            let project = home.join("project");
+            std::fs::create_dir_all(&project).map_err(|e| figment::Error::from(e.to_string()))?;
+
+            std::fs::write(
+                user_cfg.join("config.toml"),
+                "[permissions.tools.shell]\ndeny = [\"[\"]\n",
+            )
+            .map_err(|e| figment::Error::from(e.to_string()))?;
+            let err =
+                Config::load_layered(&project).expect_err("bad deny pattern must fail the load");
+            assert!(err.to_string().contains("does not compile"), "{err}");
+
+            std::fs::write(
+                user_cfg.join("config.toml"),
+                "[shell]\nscrub_env = [\"[\"]\n",
+            )
+            .map_err(|e| figment::Error::from(e.to_string()))?;
+            let err =
+                Config::load_layered(&project).expect_err("bad scrub pattern must fail the load");
+            assert!(err.to_string().contains("does not compile"), "{err}");
+            assert!(
+                Config::load_layered_raw(&project).is_ok(),
+                "the raw loader must keep a broken config repairable"
+            );
+            Ok(())
+        });
     }
 
     #[test]

@@ -128,7 +128,10 @@ fn call_tool(
     let Some(tool) = registry.get(name) else {
         return error_result(format!("unknown tool: {name}"));
     };
-    if let Some(reason) = gate(name, &arguments) {
+    // The gate judges the tool's real name: permission rules are keyed
+    // by it, so a call that arrived as an alias must not slip past the
+    // rules for the registered tool.
+    if let Some(reason) = gate(registry.canonical_name(name), &arguments) {
         return error_result(reason);
     }
     let cancel = CancelFlag::new();
@@ -312,6 +315,79 @@ mod tests {
             .unwrap();
         assert_eq!(res["isError"], true);
         assert_eq!(res["content"][0]["text"], "refused by gate");
+    }
+
+    /// A tool the test gate allows, so the alias path is proven both
+    /// ways.
+    #[derive(Debug)]
+    struct Pass;
+
+    impl Tool for Pass {
+        fn name(&self) -> &'static str {
+            "free"
+        }
+        fn description(&self) -> &'static str {
+            "always runs"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+        fn risk(&self) -> Risk {
+            Risk::Read
+        }
+        fn execute(
+            &self,
+            _input: serde_json::Value,
+            _cx: &ToolContext<'_>,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput {
+                is_error: false,
+                text: "ran".to_owned(),
+                structured: None,
+                terminate: false,
+            })
+        }
+    }
+
+    #[test]
+    fn a_call_under_an_alias_is_judged_by_its_real_name() {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        thread::spawn(move || {
+            let reg = ToolRegistry::new()
+                .with(Arc::new(Echo))
+                .alias("bash", "echo")
+                .with(Arc::new(Pass))
+                .alias("freely", "free");
+            let wd = std::env::temp_dir();
+            let gate = |name: &str, _: &serde_json::Value| {
+                (name == "echo").then(|| "`echo` is denied by permissions".to_owned())
+            };
+            serve(&reg, &wd, false, &gate, BufReader::new(srv_r), srv_w).unwrap();
+        });
+        let (peer, _in, _h) = connect(BufReader::new(cli_r), cli_w);
+        let refused = peer
+            .request(
+                "tools/call",
+                serde_json::json!({ "name": "bash", "arguments": {} }),
+            )
+            .unwrap();
+        assert_eq!(refused["isError"], true);
+        assert!(
+            refused["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("`echo` is denied"),
+            "{refused}"
+        );
+        let allowed = peer
+            .request(
+                "tools/call",
+                serde_json::json!({ "name": "freely", "arguments": {} }),
+            )
+            .unwrap();
+        assert_eq!(allowed["isError"], false);
+        assert_eq!(allowed["content"][0]["text"], "ran");
     }
 
     #[test]

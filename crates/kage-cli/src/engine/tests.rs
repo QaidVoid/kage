@@ -4616,8 +4616,18 @@ fn a_goal_set_mid_turn_queues_its_message_for_the_next_turn() {
     }
     h.engine.shutdown();
     let requests = mock.requests();
-    let intro = requests[3].messages.last().unwrap();
-    let Content::Text { text } = &intro.content[0] else {
+    // The judge runs on its own thread, so it may interleave with the
+    // queued intro turn; find the intro request by its content instead
+    // of its position.
+    let intro = requests
+        .iter()
+        .find(|r| {
+            r.messages.last().is_some_and(|m| {
+                crate::cli_loop_run::first_user_text(m).contains("Work toward this goal: ship it")
+            })
+        })
+        .unwrap_or_else(|| panic!("no queued goal intro in {requests:?}"));
+    let Content::Text { text } = &intro.messages.last().unwrap().content[0] else {
         panic!("text intro");
     };
     assert!(text.contains("Work toward this goal: ship it"), "{text}");

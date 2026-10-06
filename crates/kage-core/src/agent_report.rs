@@ -317,24 +317,48 @@ pub enum AgentText {
     Mail(AgentMail),
 }
 
-/// A user message the engine built from agent text, split into the
-/// person's own words in front (empty when there are none) and the
-/// reports and messages after them. A run reads a burst of agent text
-/// as one message, after any steering the user typed. `None` when the
-/// text holds no agent element, or one that does not parse: it is
-/// plain user text then.
+/// A burst of agent text in a user message, split into the person's
+/// own words in front, the reports and messages, and the human words
+/// interleaved between and after the elements. A run reads a burst of
+/// agent text as one message, after any steering the user typed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentBurst<'a> {
+    /// The words before the first element, empty when the burst opens
+    /// with one.
+    pub words: &'a str,
+    /// The human words between and after the elements, each trimmed,
+    /// in order. Empty when the elements run back to back.
+    pub prose: Vec<&'a str>,
+    /// The reports and messages, in order.
+    pub parts: Vec<AgentText>,
+}
+
+/// Splits a user message into its agent elements and the words around
+/// them. Elements start at the front of the text or on their own
+/// line; human words between them come back in [`AgentBurst::prose`]
+/// instead of refusing the burst. `None` when the text holds no
+/// agent element, or one that does not parse: it is plain user text
+/// then.
 #[must_use]
-pub fn split_agent_text(text: &str) -> Option<(&str, Vec<AgentText>)> {
-    let starts = |at: usize| at == 0 || text[..at].ends_with('\n');
-    let first = ["<agent ", "<message "]
-        .iter()
-        .filter_map(|open| {
-            text.match_indices(open)
-                .map(|(at, _)| at)
-                .find(|at| starts(*at))
-        })
-        .min()?;
-    let mut parts = Vec::new();
+pub fn split_agent_text(text: &str) -> Option<AgentBurst<'_>> {
+    let at_line_start = |rest: &str, at: usize| at == 0 || rest[..at].ends_with('\n');
+    let opens = ["<agent ", "<message "];
+    let next_open = |rest: &str| {
+        opens
+            .iter()
+            .filter_map(|open| {
+                rest.match_indices(open)
+                    .map(|(at, _)| at)
+                    .find(|at| at_line_start(rest, *at))
+            })
+            .min()
+    };
+    let first = next_open(text)?;
+    let mut burst = AgentBurst {
+        words: text[..first].trim(),
+        prose: Vec::new(),
+        parts: Vec::new(),
+    };
     let mut rest = &text[first..];
     while !rest.is_empty() {
         let (close, report) = if rest.starts_with("<agent ") {
@@ -342,18 +366,34 @@ pub fn split_agent_text(text: &str) -> Option<(&str, Vec<AgentText>)> {
         } else if rest.starts_with("<message ") {
             ("\n</message>", false)
         } else {
-            return None;
+            match next_open(rest) {
+                Some(next) => {
+                    let words = rest[..next].trim();
+                    if !words.is_empty() {
+                        burst.prose.push(words);
+                    }
+                    rest = &rest[next..];
+                    continue;
+                }
+                None => {
+                    let words = rest.trim();
+                    if !words.is_empty() {
+                        burst.prose.push(words);
+                    }
+                    break;
+                }
+            }
         };
         let end = rest.find(close)? + close.len();
         let element = &rest[..end];
-        parts.push(if report {
+        burst.parts.push(if report {
             AgentText::Report(AgentReport::parse(element)?)
         } else {
             AgentText::Mail(AgentMail::parse(element)?)
         });
-        rest = rest[end..].trim_start();
+        rest = &rest[end..];
     }
-    Some((text[..first].trim(), parts))
+    Some(burst)
 }
 
 /// The value of `key="..."` in an attribute list, matched as a whole
@@ -517,19 +557,57 @@ mod tests {
         let burst = format!("{}\n\n{}", report.to_text(), mail.to_text());
         assert_eq!(
             split_agent_text(&burst),
-            Some((
-                "",
-                vec![AgentText::Report(report.clone()), AgentText::Mail(mail)]
-            ))
+            Some(AgentBurst {
+                words: "",
+                prose: Vec::new(),
+                parts: vec![AgentText::Report(report.clone()), AgentText::Mail(mail)]
+            })
         );
         let steered = format!("stop after this\n\n{}", report.to_text());
         assert_eq!(
             split_agent_text(&steered),
-            Some(("stop after this", vec![AgentText::Report(report.clone())]))
+            Some(AgentBurst {
+                words: "stop after this",
+                prose: Vec::new(),
+                parts: vec![AgentText::Report(report.clone())]
+            })
         );
         assert_eq!(split_agent_text("plain words"), None);
         let broken = format!("{} and more", report.to_text());
-        assert_eq!(split_agent_text(&broken), None);
+        assert_eq!(
+            split_agent_text(&broken),
+            Some(AgentBurst {
+                words: "",
+                prose: vec!["and more"],
+                parts: vec![AgentText::Report(report.clone())]
+            })
+        );
+        assert_eq!(
+            split_agent_text(
+                "<agent name=\"x\" session=\"bad\" state=\"completed\">\nhi\n</agent>"
+            ),
+            None,
+            "an element that does not parse is plain user text"
+        );
+    }
+
+    #[test]
+    fn prose_between_reports_is_kept_and_both_reports_parse() {
+        let one = finished(ReportState::Completed);
+        let mut two = finished(ReportState::Cancelled);
+        two.limit = Some(AgentLimit::Time);
+        let text = format!(
+            "{}\nnote between\n{}\nnote after",
+            one.to_text(),
+            two.to_text()
+        );
+        let burst = split_agent_text(&text).expect("prose does not refuse the burst");
+        assert_eq!(burst.words, "");
+        assert_eq!(burst.prose, ["note between", "note after"]);
+        assert_eq!(
+            burst.parts,
+            [AgentText::Report(one), AgentText::Report(two)]
+        );
     }
 
     #[test]

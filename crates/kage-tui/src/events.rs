@@ -350,20 +350,21 @@ fn is_compaction_summary(text: &str) -> bool {
 
 /// Push the text of a user message: the person's own words as a
 /// bubble, then each agent report as a folded report block and each
-/// message from another session as a one-line row.
+/// message from another session as a one-line row, then any human
+/// words the burst interleaved between them as bubbles.
 fn push_user_text(buf: &mut Buffer, text: String) {
     if let Some(note) = engine_note(&text) {
         buf.push_custom("kage:mode", note, false);
         return;
     }
-    let Some((words, parts)) = split_agent_text(&text) else {
+    let Some(burst) = split_agent_text(&text) else {
         buf.push_user(text);
         return;
     };
-    if !words.is_empty() {
-        buf.push_user(words.to_owned());
+    if !burst.words.is_empty() {
+        buf.push_user(burst.words.to_owned());
     }
-    for part in parts {
+    for part in burst.parts {
         match part {
             AgentText::Report(report) => buf.push_custom("kage:agent", report.to_text(), true),
             AgentText::Mail(mail) => buf.push_custom(
@@ -372,6 +373,9 @@ fn push_user_text(buf: &mut Buffer, text: String) {
                 true,
             ),
         }
+    }
+    for words in burst.prose {
+        buf.push_user(words.to_owned());
     }
 }
 
@@ -404,11 +408,13 @@ fn engine_note(text: &str) -> Option<String> {
 }
 
 /// Whether a user message carries words someone typed, rather than
-/// only agent reports and messages the engine delivered.
+/// only agent reports and messages the engine delivered. Words typed
+/// between the elements count too.
 pub(crate) fn typed_by_the_user(message: &Message) -> bool {
     user_text(message).is_none_or(|text| {
         engine_note(&text).is_none()
-            && split_agent_text(&text).is_none_or(|(words, _)| !words.is_empty())
+            && split_agent_text(&text)
+                .is_none_or(|burst| !burst.words.is_empty() || !burst.prose.is_empty())
     })
 }
 
@@ -498,6 +504,64 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    fn agent_report_text(name: &str, session: &str, body: &str) -> String {
+        format!(
+            "<agent name=\"{name}\" session=\"{session}\" state=\"completed\">\n{body}\n</agent>"
+        )
+    }
+
+    #[test]
+    fn a_burst_with_prose_around_reports_renders_blocks_and_keeps_the_prose() {
+        let mut buf = Buffer::new();
+        let first = agent_report_text("alpha", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "first reply");
+        let second = agent_report_text("beta", "01ARZ3NDEKTSV4RRFFQ69G5FAW", "second reply");
+        let burst = format!("running these\n{first}\nnotes between\n{second}\nthoughts after");
+        push_user_text(&mut buf, burst);
+        let blocks = buf.blocks();
+        assert_eq!(blocks.len(), 5, "{blocks:?}");
+        assert!(matches!(blocks[0].as_ref(), Block::User { text } if text == "running these"));
+        assert!(matches!(
+            blocks[1].as_ref(),
+            Block::Custom { kind, text, folded: true, .. }
+                if kind == "kage:agent" && text.contains("alpha")
+        ));
+        assert!(matches!(
+            blocks[2].as_ref(),
+            Block::Custom { kind, text, folded: true, .. }
+                if kind == "kage:agent" && text.contains("beta")
+        ));
+        assert!(matches!(blocks[3].as_ref(), Block::User { text } if text == "notes between"));
+        assert!(matches!(blocks[4].as_ref(), Block::User { text } if text == "thoughts after"));
+    }
+
+    #[test]
+    fn a_plain_prompt_without_markers_stays_a_user_bubble() {
+        let mut buf = Buffer::new();
+        push_user_text(&mut buf, "just a plain question".into());
+        let blocks = buf.blocks();
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(
+            blocks[0].as_ref(),
+            Block::User { text } if text == "just a plain question"
+        ));
+    }
+
+    #[test]
+    fn prose_between_reports_counts_as_typed_but_a_pure_burst_does_not() {
+        let first = agent_report_text("alpha", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "first reply");
+        let second = agent_report_text("beta", "01ARZ3NDEKTSV4RRFFQ69G5FAW", "second reply");
+        let typed = |text: String| {
+            typed_by_the_user(&Message::new(
+                Role::User,
+                vec![Content::Text { text }],
+                None,
+            ))
+        };
+        assert!(typed(format!("{first}\nnotes between\n{second}")));
+        assert!(!typed(format!("{first}\n\n{second}")));
+        assert!(typed("plain words".into()));
     }
 
     #[test]

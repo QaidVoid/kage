@@ -947,16 +947,17 @@ impl Bridge {
 }
 
 /// The agent reports and messages `text` carries after the words a
-/// user typed, if any. A burst the strict splitter refuses, prose
-/// interleaved between elements included, still yields everything
-/// from its first element on, so the reports and the words between
-/// them reach the clients that did not send the message.
+/// user typed, if any. Prose interleaved between the elements stays
+/// in what comes back, so the reports and the words between them
+/// reach the clients that did not send the message. A burst whose
+/// element does not parse falls back to the raw text from its first
+/// element.
 pub(super) fn agent_part(text: &str) -> Option<&str> {
-    if let Some((words, _)) = kage_core::agent_report::split_agent_text(text) {
-        return if words.is_empty() {
+    if let Some(burst) = kage_core::agent_report::split_agent_text(text) {
+        return if burst.words.is_empty() {
             Some(text.trim())
         } else {
-            text.split_once(words).map(|(_, rest)| rest.trim())
+            text.split_once(burst.words).map(|(_, rest)| rest.trim())
         };
     }
     first_agent_element(text).map(|start| text[start..].trim())

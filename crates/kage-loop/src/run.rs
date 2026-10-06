@@ -175,9 +175,10 @@ where
                             if exhausted || !e.is_transient() {
                                 let kind = match e {
                                     ProviderError::Auth(message) => LoopError::Auth { message },
-                                    ProviderError::RateLimited { retry_after } => {
+                                    ProviderError::RateLimited { retry_after, body } => {
                                         LoopError::RateLimited {
-                                            message: "too many requests".to_owned(),
+                                            message: body
+                                                .unwrap_or_else(|| "too many requests".to_owned()),
                                             retry_after_secs: retry_after.map(|d| d.as_secs()),
                                         }
                                     }
@@ -607,6 +608,7 @@ mod retry_display {
         let mock = MockProvider::sequence(vec![
             vec![Err(ProviderError::RateLimited {
                 retry_after: Some(Duration::from_millis(1)),
+                body: None,
             })],
             good_turn(),
         ]);

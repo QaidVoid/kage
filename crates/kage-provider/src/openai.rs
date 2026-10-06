@@ -1040,7 +1040,13 @@ mod tests {
         let mut events = stream_from_bytes(bytes);
         let first = events.next().unwrap();
         assert!(
-            matches!(first, Err(ProviderError::RateLimited { retry_after: None })),
+            matches!(
+                first,
+                Err(ProviderError::RateLimited {
+                    retry_after: None,
+                    ..
+                })
+            ),
             "got {first:?}"
         );
     }

@@ -1635,6 +1635,7 @@ impl EventLog {
 fn transient_turn() -> Vec<Result<ProviderEvent, kage_provider::ProviderError>> {
     vec![Err(kage_provider::ProviderError::RateLimited {
         retry_after: Some(Duration::from_millis(1)),
+        body: None,
     })]
 }
 
@@ -1765,6 +1766,43 @@ fn retries_are_bounded_then_surface_the_error() {
 }
 
 #[test]
+fn an_exhausted_rate_limit_carries_the_upstream_body() {
+    let json = "{\"error\":{\"message\":\"quota exceeded, retries today: 4\"}}";
+    let rate_limited = vec![Err(kage_provider::ProviderError::RateLimited {
+        retry_after: None,
+        body: Some(json.to_owned()),
+    })];
+    let mock = MockProvider::sequence(vec![rate_limited]);
+    let mut cx = AgentContext::new("mock:m", "");
+    cx.history.push(Arc::new(user_msg("hello")));
+    let cfg = LoopConfig {
+        max_provider_retries: 0,
+        ..LoopConfig::default()
+    };
+    let log = EventLog::default();
+    let cancel = CancelFlag::new();
+    let registry = ToolRegistry::new();
+
+    let res = run(
+        &mock,
+        &registry,
+        &mut cx,
+        cfg,
+        &mut NoopHooks,
+        &cancel,
+        |e| log.record(e),
+    );
+    assert_eq!(
+        res,
+        Err(LoopError::RateLimited {
+            message: json.to_owned(),
+            retry_after_secs: None,
+        }),
+        "the upstream body must reach the user verbatim"
+    );
+}
+
+#[test]
 fn steering_message_is_announced_then_lands_in_history() {
     #[derive(Default)]
     struct Steerer {
@@ -1829,6 +1867,7 @@ fn steering_message_is_announced_then_lands_in_history() {
 fn provider_retry_event_surfaces_server_retry_after() {
     let rate_limited = vec![Err(kage_provider::ProviderError::RateLimited {
         retry_after: Some(std::time::Duration::from_secs(300)),
+        body: None,
     })];
     let mock = MockProvider::sequence(vec![rate_limited, good_turn()]);
     let mut cx = AgentContext::new("mock:m", "");
@@ -2340,6 +2379,7 @@ fn provider_retry_uses_a_fresh_message_id_and_replays_no_deltas() {
             }),
             Err(kage_provider::ProviderError::RateLimited {
                 retry_after: Some(Duration::from_millis(1)),
+                body: None,
             }),
         ],
         vec![

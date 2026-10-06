@@ -13,6 +13,7 @@ use std::time::Duration;
 use kage_core::CancelFlag;
 
 use crate::ProviderError;
+use crate::error::nonempty;
 use crate::interrupt::{InterruptibleConnector, KillRegistry};
 
 /// The configuration behind every provider request.
@@ -101,15 +102,16 @@ where
 /// Read the body of a non-2xx response into a [`ProviderError`].
 ///
 /// A 429 becomes [`ProviderError::RateLimited`], carrying the
-/// provider's `Retry-After` hint (delta-seconds or HTTP-date) when one
-/// is present. A 401 means the credentials were rejected and becomes
-/// [`ProviderError::Auth`] with a short detail pulled from the body. A
-/// 403 means valid credentials that may not do this (a model the key
-/// is not allowed to use), so it stays [`ProviderError::Http`] with
-/// that same short detail instead of asking the user to log in again.
-/// Every other status stays [`ProviderError::Http`] with the body
-/// capped at 8 KiB so a misbehaving upstream cannot blow up our error
-/// strings.
+/// provider's `Retry-After` hint (delta-seconds or HTTP-date) and the
+/// response body verbatim, so quota details reach the user instead of
+/// a canned phrase. A 401 means the credentials were rejected and
+/// becomes [`ProviderError::Auth`] with a short detail pulled from the
+/// body. A 403 means valid credentials that may not do this (a model
+/// the key is not allowed to use), so it stays [`ProviderError::Http`]
+/// with that same short detail instead of asking the user to log in
+/// again. Every other status stays [`ProviderError::Http`] with the
+/// body capped at 8 KiB so a misbehaving upstream cannot blow up our
+/// error strings.
 pub(crate) fn read_error_body(
     status: u16,
     response: ureq::http::Response<ureq::Body>,
@@ -138,7 +140,10 @@ pub(crate) fn read_error_body(
 /// tests can pin it without a live response.
 fn classify_http_error(status: u16, retry_after: Option<Duration>, body: String) -> ProviderError {
     match status {
-        429 => ProviderError::RateLimited { retry_after },
+        429 => ProviderError::RateLimited {
+            retry_after,
+            body: nonempty(&body),
+        },
         401 => ProviderError::Auth(auth_detail(status, &body)),
         403 => ProviderError::Http {
             status,
@@ -280,15 +285,20 @@ mod tests {
 
     #[test]
     fn classify_maps_429_to_rate_limited_and_keeps_other_statuses_http() {
+        let json = "{\"error\":{\"message\":\"quota exceeded\"}}";
         assert!(matches!(
-            classify_http_error(429, Some(Duration::from_secs(9)), String::new()),
+            classify_http_error(429, Some(Duration::from_secs(9)), json.to_owned()),
             ProviderError::RateLimited {
-                retry_after: Some(d)
-            } if d == Duration::from_secs(9)
+                retry_after: Some(d),
+                body: Some(body),
+            } if d == Duration::from_secs(9) && body == json
         ));
         assert!(matches!(
-            classify_http_error(429, None, String::new()),
-            ProviderError::RateLimited { retry_after: None }
+            classify_http_error(429, None, "   \n".into()),
+            ProviderError::RateLimited {
+                retry_after: None,
+                body: None
+            }
         ));
         assert!(matches!(
             classify_http_error(500, None, "boom".into()),
@@ -343,8 +353,9 @@ mod tests {
             matches!(
                 &err,
                 ProviderError::RateLimited {
-                    retry_after: Some(d)
-                } if *d == Duration::from_secs(7)
+                    retry_after: Some(d),
+                    body: Some(body),
+                } if *d == Duration::from_secs(7) && body == "slow down"
             ),
             "got {err:?}"
         );

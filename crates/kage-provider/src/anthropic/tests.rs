@@ -766,7 +766,13 @@ fn stream_error_event_rate_limit_classifies_as_rate_limited() {
     let mut events = stream_from_bytes(bytes);
     let first = events.next().unwrap();
     assert!(
-        matches!(first, Err(ProviderError::RateLimited { retry_after: None })),
+        matches!(
+            first,
+            Err(ProviderError::RateLimited {
+                retry_after: None,
+                ..
+            })
+        ),
         "rate_limit_error should surface as RateLimited, got {first:?}"
     );
 }

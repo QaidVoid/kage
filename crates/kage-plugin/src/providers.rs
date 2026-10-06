@@ -115,10 +115,12 @@ struct TypedError {
 fn typed_error(kind: &str, message: String, status: Option<u16>) -> Option<ProviderError> {
     Some(match kind {
         "transport" => ProviderError::Transport(message),
-        // RateLimited carries no detail field, so the plugin message
-        // is dropped rather than smuggled somewhere misleading. The
-        // retry, which is the point of the kind, still happens.
-        "rate_limited" => ProviderError::RateLimited { retry_after: None },
+        // The plugin's detail rides along in the variant's body, so a
+        // raised rate limit still says why.
+        "rate_limited" => ProviderError::RateLimited {
+            retry_after: None,
+            body: (!message.trim().is_empty()).then_some(message),
+        },
         "http" => ProviderError::Http {
             status: status.unwrap_or(0),
             body: message,
@@ -956,15 +958,13 @@ mod tests {
                 .into_iter()
                 .find_map(std::result::Result::err)
                 .unwrap_or_else(|| panic!("{kind} produced no error"));
-            // RateLimited has no detail field to carry the message,
-            // so only the kinds whose variant has one are checked for it.
-            if kind != "rate_limited" {
-                let text = err.to_string();
-                assert!(
-                    text.contains("boom happened"),
-                    "{kind} lost the message: {text}"
-                );
-            }
+            // Every kind now carries the plugin's detail somewhere in
+            // its display, rate limits included.
+            let text = err.to_string();
+            assert!(
+                text.contains("boom happened"),
+                "{kind} lost the message: {text}"
+            );
             assert_eq!(
                 err.is_transient(),
                 expect_transient,

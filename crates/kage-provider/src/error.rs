@@ -2,6 +2,13 @@
 
 use std::time::Duration;
 
+/// The text as `Some`, or `None` when it is empty apart from
+/// whitespace, so an absent upstream body renders the fallback phrase
+/// instead of an empty tail.
+pub(crate) fn nonempty(text: &str) -> Option<String> {
+    (!text.trim().is_empty()).then(|| text.to_owned())
+}
+
 /// Failure modes shared by all providers.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ProviderError {
@@ -11,11 +18,16 @@ pub enum ProviderError {
     #[error("authentication failed: {0}")]
     Auth(String),
 
-    /// Provider rate limited the request.
-    #[error("rate limited")]
+    /// Provider rate limited the request. Carries the provider's
+    /// response text when one came back, so quota details and stream
+    /// error messages reach the user verbatim instead of a canned
+    /// phrase.
+    #[error("rate limited: {}", body.as_deref().unwrap_or("too many requests"))]
     RateLimited {
         /// Hint from the provider about when to retry.
         retry_after: Option<Duration>,
+        /// The provider's response text, when the upstream sent one.
+        body: Option<String>,
     },
 
     /// HTTP error returned by the provider.
@@ -82,7 +94,7 @@ impl ProviderError {
     #[must_use]
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after } => *retry_after,
+            Self::RateLimited { retry_after, .. } => *retry_after,
             _ => None,
         }
     }
@@ -94,7 +106,10 @@ impl ProviderError {
     pub(crate) fn from_stream_error(kind: &str, message: &str) -> Self {
         let kind = kind.trim().to_ascii_lowercase();
         if kind.contains("rate_limit") || kind.contains("resource_exhausted") || kind == "429" {
-            return Self::RateLimited { retry_after: None };
+            return Self::RateLimited {
+                retry_after: None,
+                body: nonempty(message),
+            };
         }
         if kind.contains("overloaded")
             || kind.contains("server_error")
@@ -139,7 +154,13 @@ mod tests {
     #[test]
     fn transient_classification_targets_the_pipe_not_the_request() {
         assert!(ProviderError::Transport("timeout: receive response".into()).is_transient());
-        assert!(ProviderError::RateLimited { retry_after: None }.is_transient());
+        assert!(
+            ProviderError::RateLimited {
+                retry_after: None,
+                body: None
+            }
+            .is_transient()
+        );
         for status in [408, 429, 500, 502, 503, 504] {
             assert!(
                 ProviderError::Http {
@@ -171,12 +192,47 @@ mod tests {
     fn retry_after_only_from_rate_limit() {
         assert_eq!(
             ProviderError::RateLimited {
-                retry_after: Some(Duration::from_secs(7))
+                retry_after: Some(Duration::from_secs(7)),
+                body: None,
             }
             .retry_after(),
             Some(Duration::from_secs(7))
         );
         assert_eq!(ProviderError::Transport("x".into()).retry_after(), None);
+    }
+
+    #[test]
+    fn rate_limit_display_shows_the_upstream_body_verbatim() {
+        let json = "{\"error\":{\"message\":\"quota exceeded, retries today: 4\"}}";
+        let err = ProviderError::RateLimited {
+            retry_after: None,
+            body: Some(json.to_owned()),
+        };
+        assert_eq!(err.to_string(), format!("rate limited: {json}"));
+        assert_eq!(
+            ProviderError::RateLimited {
+                retry_after: None,
+                body: None
+            }
+            .to_string(),
+            "rate limited: too many requests"
+        );
+    }
+
+    #[test]
+    fn stream_error_classifier_carries_the_rate_limit_message() {
+        let err = ProviderError::from_stream_error("rate_limit_error", "slow down");
+        assert!(
+            matches!(
+                &err,
+                ProviderError::RateLimited {
+                    retry_after: None,
+                    body: Some(body)
+                } if body == "slow down"
+            ),
+            "lost the message: {err:?}"
+        );
+        assert_eq!(err.to_string(), "rate limited: slow down");
     }
 
     #[test]
@@ -190,7 +246,10 @@ mod tests {
             assert!(
                 matches!(
                     ProviderError::from_stream_error(kind, "slow down"),
-                    ProviderError::RateLimited { retry_after: None }
+                    ProviderError::RateLimited {
+                        retry_after: None,
+                        ..
+                    }
                 ),
                 "{kind} should classify as RateLimited"
             );

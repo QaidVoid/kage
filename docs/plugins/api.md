@@ -1041,6 +1041,10 @@ failure it hit.
 | `unknown_model` | no |
 | `decode` | no |
 
+The message you pass reaches the user for every kind; for
+`rate_limited` it is shown after `rate limited:` instead of a canned
+phrase.
+
 An unknown kind raises rather than defaulting, naming the known ones,
 so a typo is visible instead of silently non-retried.
 

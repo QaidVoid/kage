@@ -2166,6 +2166,7 @@ fn a_queued_child_keeps_its_own_timeout_budget() {
 fn rate_limited() -> Vec<Result<ProviderEvent, ProviderError>> {
     vec![Err(ProviderError::RateLimited {
         retry_after: Some(Duration::from_millis(5)),
+        body: None,
     })]
 }
 

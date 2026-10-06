@@ -889,6 +889,7 @@ fn a_cancelled_prompt_answers_after_its_subagents_end() {
 fn rate_limited() -> Script {
     vec![Err(ProviderError::RateLimited {
         retry_after: Some(Duration::from_millis(5)),
+        body: None,
     })]
 }
 

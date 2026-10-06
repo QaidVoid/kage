@@ -198,9 +198,10 @@ pub enum Auth {
 #[must_use]
 pub fn authorize(head: &Head, token: &Token) -> Option<Auth> {
     for value in head.header_all("authorization") {
-        if let Some(presented) = value.strip_prefix("Bearer ")
-            && token.matches(presented.trim())
-        {
+        let Some((scheme, presented)) = value.split_once(' ') else {
+            continue;
+        };
+        if scheme.eq_ignore_ascii_case("bearer") && token.matches(presented.trim()) {
             return Some(Auth::Bearer);
         }
     }
@@ -434,6 +435,26 @@ mod tests {
             authorize(&head(&[], bearer.clone()), &token),
             Some(Auth::Bearer)
         );
+
+        for scheme in ["bearer", "BEARER", "BeArEr"] {
+            let lowered = vec![(
+                "authorization".to_owned(),
+                format!("{scheme} {}", token.as_str()),
+            )];
+            assert_eq!(
+                authorize(&head(&[], lowered), &token),
+                Some(Auth::Bearer),
+                "the auth scheme is case-insensitive per RFC 9110"
+            );
+        }
+
+        let scheme_only = vec![("authorization".to_owned(), "Bearer".to_owned())];
+        assert_eq!(authorize(&head(&[], scheme_only), &token), None);
+        let wrong_scheme = vec![(
+            "authorization".to_owned(),
+            format!("Basic {}", token.as_str()),
+        )];
+        assert_eq!(authorize(&head(&[], wrong_scheme), &token), None);
 
         let protocols = vec![("sec-websocket-protocol".to_owned(), entry.clone())];
         assert_eq!(

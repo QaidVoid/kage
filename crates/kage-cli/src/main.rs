@@ -1033,7 +1033,9 @@ mod tests {
             // Cloned project: skill instructions stay out of the prompt
             // until the first-run trust decision.
             assert!(load_skills(&project, None).is_empty());
-            kage_core::trust::trust_project(&project).unwrap();
+            let presented =
+                kage_core::trust::untrusted_project(&project).expect("shared skill asks for trust");
+            kage_core::trust::trust_project(&project, &presented).unwrap();
 
             let skills = load_skills(&project, None);
             let lint = skills

@@ -37,7 +37,7 @@ pub(crate) fn confirm_project_trust(workdir: &Path) {
         eprintln!("kage: continuing without them. Run `kage trust` later to allow them.");
         return;
     }
-    if let Err(e) = trust::trust_project(workdir) {
+    if let Err(e) = trust::trust_project(workdir, &summary) {
         eprintln!("kage: trust: {e}");
     }
 }
@@ -97,7 +97,14 @@ pub(crate) fn run(revoke: bool) -> ExitCode {
             }
         };
     }
-    match trust::trust_project(&workdir) {
+    let Some(presented) = trust::untrusted_project(&workdir) else {
+        eprintln!(
+            "kage: {} has no mcp, permissions or plugins.capabilities settings and no agents to trust",
+            workdir.join(".kage").display()
+        );
+        return ExitCode::SUCCESS;
+    };
+    match trust::trust_project(&workdir, &presented) {
         Ok(Some(summary)) => {
             eprintln!("kage: trusted {}:", summary.path.display());
             for item in &summary.items {
@@ -106,10 +113,7 @@ pub(crate) fn run(revoke: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(None) => {
-            eprintln!(
-                "kage: {} has no mcp, permissions or plugins.capabilities settings and no agents to trust",
-                workdir.join(".kage").display()
-            );
+            eprintln!("kage: nothing left to trust in {}", workdir.display());
             ExitCode::SUCCESS
         }
         Err(e) => {

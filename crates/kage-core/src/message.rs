@@ -276,11 +276,13 @@ pub const MAX_TOOL_RESULT_BYTES: usize = 100_000;
 /// Whether `output` is an `agent` call's `<agent>` element or a `swarm`
 /// call's aggregate of `<swarm>` elements. Their tools bound their size
 /// themselves, and resuming a session reads every child's header line
-/// back out of them, so they are never cut.
+/// back out of them, so they are never cut. Both shapes are matched at
+/// a line start after leading padding, so a padded or blank-prefixed
+/// result is still detected.
 #[must_use]
 pub fn is_agent_result(output: &str) -> bool {
-    output.starts_with("<agent ")
-        || (output.starts_with("completed: ") && output.contains("\n<swarm description=\""))
+    let trimmed = output.trim_start();
+    trimmed.starts_with("<agent ") || trimmed.contains("\n<swarm description=\"")
 }
 
 /// `text` cut to at most [`MAX_TOOL_RESULT_BYTES`]: the first two
@@ -347,8 +349,23 @@ mod tests {
         assert!(is_agent_result(
             "completed: 1, failed: 0, cancelled: 0\n<swarm description=\"d\" item=\"a\">"
         ));
+        assert!(!is_agent_result("exit code 0:\nsome ordinary text"));
+    }
+
+    #[test]
+    fn padded_agent_and_swarm_results_are_still_detected() {
+        assert!(is_agent_result(
+            "\n  <agent name=\"general\" session=\"s\" state=\"completed\">\nhi\n</agent>"
+        ));
+        assert!(is_agent_result(
+            "  completed: 1, failed: 0, cancelled: 0\n<swarm description=\"d\" item=\"a\">"
+        ));
+        // A marker that does not start a line is ordinary output.
         assert!(!is_agent_result(
-            "notes.md:\n<swarm description=\"d\" item=\"a\">"
+            "the log said <swarm description=\"d\" item=\"a\"> mid-sentence"
+        ));
+        assert!(!is_agent_result(
+            "the log said <agent name=\"x\"> mid-sentence"
         ));
     }
 

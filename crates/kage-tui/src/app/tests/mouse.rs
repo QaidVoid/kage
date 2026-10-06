@@ -215,6 +215,8 @@ fn a_drag_release_toasts_the_copied_characters() {
 
 #[test]
 fn modal_open_reflects_every_modal_field() {
+    // One toggled field per arm of `App::modal_open`; extend both
+    // together when a modal field joins the App.
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
     let mut app = app_with_defaults(buffer, tx);
@@ -250,6 +252,25 @@ fn modal_open_reflects_every_modal_field() {
     app.open_help();
     assert!(app.modal_open());
     app.help_overlay = None;
+
+    app.agents_overlay = Some(crate::overlay::AgentsOverlay::new(Vec::new(), None));
+    assert!(app.modal_open());
+    app.agents_overlay = None;
+
+    app.todo_list_overlay = Some(crate::overlay::TodoListOverlay::new(
+        &crate::view::todo::TodoStrip::default(),
+    ));
+    assert!(app.modal_open());
+    app.todo_list_overlay = None;
+
+    app.approval_panel = Some(crate::overlay::ApprovalPanel::new(
+        "shell",
+        &serde_json::json!({ "command": "ls" }),
+        None,
+        Instant::now(),
+    ));
+    assert!(app.modal_open());
+    app.approval_panel = None;
 
     assert!(!app.modal_open());
 }

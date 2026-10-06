@@ -136,13 +136,13 @@ fn tree_d_key_asks_before_deleting_and_n_declines() {
     assert!(app.session_tree.is_none());
     assert!(app.plugin_overlay.is_some());
     assert!(app.pending_tree_delete.is_some());
-    assert!(rx.try_recv().is_err());
+    assert!(rx_idle(&rx));
 
     // `n` declines: the dialog closes and still nothing is deleted.
     app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
     assert!(app.plugin_overlay.is_none());
     assert!(app.pending_tree_delete.is_none());
-    assert!(rx.try_recv().is_err());
+    assert!(rx_idle(&rx));
 }
 
 #[test]
@@ -165,7 +165,7 @@ fn tree_delete_confirm_esc_cancels_without_deleting() {
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(app.plugin_overlay.is_none());
     assert!(app.pending_tree_delete.is_none());
-    assert!(rx.try_recv().is_err());
+    assert!(rx_idle(&rx));
 }
 
 #[test]
@@ -218,7 +218,7 @@ fn settings_thinking_level_ignores_unknown_values() {
     );
     let cfg = kage_core::config::Config::load(&path).unwrap();
     assert_eq!(cfg.ui.thinking_level, None);
-    assert!(rx.try_recv().is_err());
+    assert!(rx_idle(&rx));
 }
 
 #[test]
@@ -442,7 +442,7 @@ fn idle_ctrl_c_closes_each_overlay_and_the_footer_names_its_keys() {
         assert!(!app.keyboard_modal_open(), "ctrl+c closes: {hint}");
     }
     assert!(app.escalation.is_none(), "closing never arms quit");
-    assert!(rx.try_recv().is_err(), "idle, nothing is cancelled");
+    assert!(rx_idle(&rx), "idle, nothing is cancelled");
 }
 
 #[test]

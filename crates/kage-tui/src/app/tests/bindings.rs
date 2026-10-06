@@ -76,7 +76,7 @@ fn init_lua_can_reclaim_ctrl_c_in_one_mode() {
         None,
         "the hatch never armed quit"
     );
-    assert!(rx.try_recv().is_err(), "insert mode ran the mapping");
+    assert!(rx_idle(&rx), "insert mode ran the mapping");
     assert_eq!(app.input.text(), "x", "the mapping kept the draft");
     lock(&usage).working = true;
     normal(&mut app, Pane::Input);
@@ -235,7 +235,7 @@ fn idle_esc_on_an_empty_draft_sends_nothing() {
     app.set_editor_modeless(true);
     assert_eq!(app.handle_key(code(KeyCode::Esc)), None);
     assert_eq!(app.handle_key(code(KeyCode::Esc)), None);
-    assert!(rx.try_recv().is_err());
+    assert!(rx_idle(&rx));
     assert_eq!(app.footer_hint(), "? for shortcuts \u{B7} / for commands");
 }
 
@@ -245,7 +245,7 @@ fn ctrl_c_twice_within_the_window_quits() {
     assert_eq!(app.handle_key(ctrl('c')), None, "one press only arms");
     assert_eq!(app.footer_hint(), "ctrl+c again to quit");
     assert_eq!(app.handle_key(ctrl('c')), Some(AppExit::Quit));
-    assert!(rx.try_recv().is_err());
+    assert!(rx_idle(&rx));
 }
 
 #[test]
@@ -264,7 +264,7 @@ fn tab_queues_only_while_working() {
     let (mut app, rx, usage) = app_with_usage();
     app.handle_key(key('a'));
     app.handle_key(code(KeyCode::Tab));
-    assert!(rx.try_recv().is_err(), "idle tab sends nothing");
+    assert!(rx_idle(&rx), "idle tab sends nothing");
     assert_eq!(app.input().text(), "a");
     lock(&usage).working = true;
     app.handle_key(code(KeyCode::Tab));
@@ -327,6 +327,8 @@ fn terminal_input_hook_cannot_swallow_approval_panel_keys() {
         vec![shell_start("c1"), permission_request("c1", 1)],
     );
     assert!(app.approval_panel.is_some());
+    // handle_key reads the clock itself, so the guard has to elapse
+    // in real time here.
     std::thread::sleep(crate::overlay::approval::TYPE_AHEAD_GUARD);
     app.handle_key(key('4'));
     assert!(app.approval_panel.is_none(), "4 reached the panel");
@@ -512,7 +514,7 @@ fn lua_mapping_dispatches_invoke_request() {
     };
     assert_ne!(first, second);
     app.handle_key(ctrl('h'));
-    assert!(rx.try_recv().is_err(), "an unmapped chord sends nothing");
+    assert!(rx_idle(&rx), "an unmapped chord sends nothing");
 }
 
 #[test]
@@ -523,7 +525,7 @@ fn open_overlay_suppresses_mappings() {
 
     app.handle_key(ctrl('t'));
 
-    assert!(rx.try_recv().is_err(), "picker should swallow the chord");
+    assert!(rx_idle(&rx), "picker should swallow the chord");
 }
 
 fn ctrl_code(code: KeyCode) -> KeyEvent {

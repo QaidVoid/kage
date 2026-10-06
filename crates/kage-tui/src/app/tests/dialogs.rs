@@ -93,7 +93,7 @@ fn plugin_dialog_not_drained_while_another_overlay_is_open() {
     app.set_plugin_dialog(drx);
     app.picker = Some(OverlayPicker::new("busy", vec![PickItem::simple("x")]));
     app.picker_kind = Some(PickerKind::Model);
-    let (reply_tx, _reply_rx) = mpsc::channel();
+    let (reply_tx, reply_rx) = mpsc::channel();
     dtx.send(PluginDialog::Select {
         title: "later".to_owned(),
         items: vec![select_item("a", serde_json::json!("a"))],
@@ -104,6 +104,20 @@ fn plugin_dialog_not_drained_while_another_overlay_is_open() {
     app.drain_plugin_dialog();
 
     assert_eq!(app.picker_kind, Some(PickerKind::Model));
+    assert!(app.plugin_overlay.is_none());
+    assert!(app.active_dialog.is_none());
+
+    // Once the screen is free the queued dialog opens and answers.
+    app.picker = None;
+    app.picker_kind = None;
+    assert!(
+        app.drain_plugin_dialog(),
+        "the queued dialog opens once free"
+    );
+    assert!(app.plugin_overlay.is_some());
+    assert!(app.active_dialog.is_some());
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(reply_rx.recv().unwrap(), Some(serde_json::json!("a")));
     assert!(app.plugin_overlay.is_none());
     assert!(app.active_dialog.is_none());
 }

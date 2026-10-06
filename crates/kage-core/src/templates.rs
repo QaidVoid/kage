@@ -16,8 +16,8 @@
 //! * `$@` and `$ARGUMENTS` - all args joined by single space
 //! * `${@:N:L}` - bash-style slice: starting at index `N`, up to `L` args
 //!
-//! Unknown placeholders pass through unchanged so a template can include
-//! literal `$VAR` strings without escaping.
+//! Unknown placeholders pass through unchanged so a template can
+//! include literal `$VAR` strings; write `$$` for a literal `$`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -147,21 +147,25 @@ pub fn load_template_file(path: &Path) -> Result<Template, TemplateError> {
 }
 
 /// Render a template body by substituting positional placeholders with
-/// the provided args. Unknown placeholders pass through unchanged.
+/// the provided args. Unknown placeholders pass through unchanged and
+/// `$$` renders a literal `$`, so `price $$5.00` renders
+/// `price $5.00` while a missing `$N` arg renders empty. Characters
+/// outside placeholders are copied verbatim, multibyte ones included.
 #[must_use]
 pub fn render_template(body: &str, args: &[&str]) -> String {
     let joined = args.join(" ");
     let mut out = String::with_capacity(body.len());
-    let bytes = body.as_bytes();
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != b'$' {
-            out.push(bytes[i] as char);
-            i += 1;
+    while i < body.len() {
+        let rest = &body[i..];
+        let c = rest.chars().next().expect("i sits on a char boundary");
+        if c != '$' {
+            out.push(c);
+            i += c.len_utf8();
             continue;
         }
         // Try to match a placeholder starting at i.
-        if let Some((replacement, consumed)) = try_match_placeholder(&body[i..], args, &joined) {
+        if let Some((replacement, consumed)) = try_match_placeholder(rest, args, &joined) {
             out.push_str(&replacement);
             i += consumed;
         } else {
@@ -177,6 +181,10 @@ pub fn render_template(body: &str, args: &[&str]) -> String {
 fn try_match_placeholder(s: &str, args: &[&str], joined: &str) -> Option<(String, usize)> {
     let bytes = s.as_bytes();
     debug_assert_eq!(bytes.first().copied(), Some(b'$'));
+    // $$ escapes a literal dollar.
+    if bytes.get(1).copied() == Some(b'$') {
+        return Some(("$".to_owned(), 2));
+    }
     // $@
     if bytes.get(1).copied() == Some(b'@') {
         return Some((joined.to_owned(), 2));
@@ -260,6 +268,23 @@ mod tests {
         assert_eq!(render_template("$FOO bar", &["x"]), "$FOO bar");
         assert_eq!(render_template("price $5.00", &[]), "price .00");
         // ^ $5 is empty because there's no 5th arg; remainder passes through.
+    }
+
+    #[test]
+    fn a_doubled_dollar_renders_one_literal_dollar() {
+        assert_eq!(render_template("price $$5.00", &[]), "price $5.00");
+        assert_eq!(render_template("$$1 and $$@", &["a", "b"]), "$1 and $@");
+        assert_eq!(render_template("$$$", &[]), "$$");
+    }
+
+    #[test]
+    fn multibyte_text_around_placeholders_survives() {
+        assert_eq!(render_template("caf\u{e9} $1", &["x"]), "caf\u{e9} x");
+        assert_eq!(
+            render_template("\u{4f60}\u{597d}$1\u{1f600}", &["ok"]),
+            "\u{4f60}\u{597d}ok\u{1f600}"
+        );
+        assert_eq!(render_template("\u{00fc}$3", &["a", "b"]), "\u{00fc}");
     }
 
     #[test]

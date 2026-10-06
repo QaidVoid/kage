@@ -5,17 +5,26 @@ use super::*;
 const SAMPLE_BEFORE: &str = "fn main() {\n    let x = 1;\n    let y = 2;\n}\n";
 const SAMPLE_AFTER: &str = "fn main() {\n    let x = 1;\n    let y = 3;\n    let z = 4;\n}\n";
 
-fn sample_edit(old: &str) -> serde_json::Value {
-    serde_json::json!({"path": "sample.rs", "old_str": old, "new_str": "let y = 3;\n    let z = 4;"})
+fn sample_edit_at(path: &str, old: &str) -> serde_json::Value {
+    serde_json::json!({"path": path, "old_str": old, "new_str": "let y = 3;\n    let z = 4;"})
 }
 
-fn edit_events(id: &str, old: &str, is_error: bool) -> Vec<kage_core::protocol::Event> {
+fn sample_edit(old: &str) -> serde_json::Value {
+    sample_edit_at("sample.rs", old)
+}
+
+fn edit_events_at(
+    id: &str,
+    path: &str,
+    old: &str,
+    is_error: bool,
+) -> Vec<kage_core::protocol::Event> {
     let id = kage_core::ToolCallId::new(id);
     vec![
         kage_core::LoopEvent::ToolCallStart {
             id: id.clone(),
             name: "edit".into(),
-            input_partial: sample_edit(old),
+            input_partial: sample_edit_at(path, old),
         }
         .into(),
         kage_core::LoopEvent::ToolExecutionStart { id: id.clone() }.into(),
@@ -24,17 +33,20 @@ fn edit_events(id: &str, old: &str, is_error: bool) -> Vec<kage_core::protocol::
             output: kage_core::ToolOutput {
                 is_error,
                 text: if is_error {
-                    "`old_str` not found in sample.rs"
+                    format!("`old_str` not found in {path}")
                 } else {
-                    "edited"
-                }
-                .into(),
+                    "edited".into()
+                },
                 structured: None,
                 terminate: false,
             },
         }
         .into(),
     ]
+}
+
+fn edit_events(id: &str, old: &str, is_error: bool) -> Vec<kage_core::protocol::Event> {
+    edit_events_at(id, "sample.rs", old, is_error)
 }
 
 fn edit_rows(app: &mut App) -> Vec<String> {
@@ -59,6 +71,23 @@ fn a_finished_edit_shows_whole_lines_of_its_file() {
     assert!(has("-     let y = 2;"), "{rows:#?}");
     assert!(has("+     let y = 3;"), "{rows:#?}");
     assert!(has("+     let z = 4;"), "{rows:#?}");
+
+    for name in ["my notes.rs", "caf\u{e9}.rs"] {
+        std::fs::write(dir.path().join(name), SAMPLE_AFTER).unwrap();
+        let (mut app, _rx, events) = app_with_events();
+        app.set_workdir(dir.path().to_path_buf());
+        feed(
+            &mut app,
+            &events,
+            edit_events_at("c1", name, "let y = 2;", false),
+        );
+        let rows = edit_rows(&mut app);
+        let title = format!("Edited {name} (+2 -1)");
+        assert!(
+            rows.iter().any(|r| r.contains(&title)),
+            "the card names {name}: {rows:#?}"
+        );
+    }
 }
 
 #[test]

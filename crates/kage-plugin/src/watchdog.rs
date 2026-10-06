@@ -16,6 +16,14 @@
 //! budget and cannot falsely abort a legitimate plugin. The flip
 //! side, accepted here: a plugin that hot-loops on *blocking* host
 //! calls stays bounded only by each call's own timeout.
+//!
+//! Entry points where the host already gives the plugin a wall
+//! deadline (autocomplete answers, terminal-input verdicts) arm a
+//! deadline-proportional budget ([`AUTOCOMPLETE_BUDGET`],
+//! [`TERMINAL_INPUT_BUDGET`]) instead of [`BUDGET`], so the host's
+//! deadline bounds the runner too: a job still executing after the
+//! waiter gave up is cut off near that deadline instead of seconds
+//! later.
 
 use mlua::{HookTriggers, Lua, Thread, VmState};
 
@@ -42,6 +50,19 @@ pub const BUDGET: u64 = 1_000_000_000;
 /// Renders are small and frequent, so a looping one is cut off well
 /// under a second instead of burning the full [`BUDGET`].
 pub const RENDER_BUDGET: u64 = 10_000_000;
+
+/// Budget for autocomplete answers: a few multiples of the wall
+/// deadline the host already grants the handler
+/// ([`crate::autocomplete::COMPLETE_DEADLINE`], 100 ms). A slow or
+/// looping completion is cut off close to the time the host gave up
+/// instead of keeping the owner thread busy for [`BUDGET`].
+pub const AUTOCOMPLETE_BUDGET: u64 = 20_000_000;
+
+/// Budget for terminal-input verdicts: a few multiples of the wall
+/// deadline the host grants the hook
+/// ([`crate::terminal_input::INPUT_DEADLINE`], 20 ms), with the same
+/// reasoning as [`AUTOCOMPLETE_BUDGET`].
+pub const TERMINAL_INPUT_BUDGET: u64 = 5_000_000;
 
 /// Install the watchdog hook on the main Lua state, disarmed. Per-entry
 /// budgets are armed through [`run`].

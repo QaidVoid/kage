@@ -375,12 +375,6 @@ impl AgentTree {
     }
 }
 
-/// The value of `key="..."` in a wrapper's attribute list.
-fn attr_value<'a>(attrs: &'a str, key: &str) -> Option<&'a str> {
-    let value = attrs.split_once(&format!("{key}=\""))?.1;
-    value.split_once('"').map(|(value, _)| value)
-}
-
 /// An attribute value as written before the swarm tool escaped it.
 fn unescape(value: &str) -> String {
     value
@@ -435,6 +429,7 @@ fn agent_header(line: &str) -> Option<RestoredAgent> {
 /// `swarm` call's aggregate. Bodies may be truncated or missing; the
 /// headers survive.
 fn wrapped_agents(output: &str) -> Vec<(RestoredAgent, String)> {
+    use crate::agent_report::attr_value;
     let mut found = Vec::new();
     let mut rest = output;
     while let Some(at) = rest.find("<swarm ") {
@@ -775,6 +770,24 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0.session, session);
         assert_eq!(found[0].1, "a>\nb \"c\" &d");
+    }
+
+    #[test]
+    fn a_swarm_item_attribute_matches_whole_names_only() {
+        let session = SessionId::new();
+        for attrs in [
+            format!("item=\"real\" xitem=\"decoy\""),
+            format!("xitem=\"decoy\" item=\"real\""),
+        ] {
+            let aggregate = format!(
+                "completed: 1, failed: 0, cancelled: 0\n<swarm description=\"d\" \
+                 {attrs}>\n<agent name=\"general\" session=\"{session}\" \
+                 state=\"completed\">\nok\n</agent>\n</swarm>"
+            );
+            let found = wrapped_agents(&aggregate);
+            assert_eq!(found.len(), 1, "{attrs}");
+            assert_eq!(found[0].1, "real", "{attrs}");
+        }
     }
 
     #[test]

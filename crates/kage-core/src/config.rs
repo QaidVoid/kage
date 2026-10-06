@@ -263,12 +263,13 @@ impl Config {
     ///
     /// The write is atomic: the TOML is rendered to a sibling temp
     /// file and renamed over `path`, so an interrupted save never
-    /// truncates an existing config.
+    /// truncates an existing config. An empty key path is an error.
     ///
     /// # Errors
     ///
-    /// The file cannot be read, parsed or written, or a table on a key
-    /// path is already set to a value that is not a table.
+    /// An edit carries an empty key path, the file cannot be read,
+    /// parsed or written, or a table on a key path is already set to
+    /// a value that is not a table.
     pub fn save_keys(path: &Path, edits: &[(Vec<&str>, OptionValue)]) -> Result<()> {
         use toml_edit::DocumentMut;
 
@@ -297,7 +298,9 @@ fn set_key(root: &mut toml_edit::Table, keys: &[&str], value: &OptionValue) -> R
     use toml_edit::{InlineTable, Item, Table, TableLike, Value};
 
     let Some((last, parents)) = keys.split_last() else {
-        return Ok(());
+        return Err(crate::error::Error::ConfigWrite(
+            "empty key path".to_owned(),
+        ));
     };
     let mut table: &mut dyn TableLike = root;
     let mut inline = false;
@@ -1586,6 +1589,16 @@ default = "ask"   # keep asking
             .expect_err("ui is not a table");
         assert!(err.to_string().contains("`ui` is not a table"), "{err}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "ui = 3\n");
+    }
+
+    #[test]
+    fn save_keys_refuses_an_empty_key_path_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let err =
+            Config::save_keys(&path, &[(vec![], str_value("ayu"))]).expect_err("empty key path");
+        assert!(err.to_string().contains("empty key path"), "{err}");
+        assert!(!path.exists(), "no file is created for a rejected edit");
     }
 
     fn sample_custom_provider() -> CustomProviderConfig {

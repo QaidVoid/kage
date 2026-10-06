@@ -254,6 +254,14 @@ fn to_value(value: &serde_json::Value) -> Result<Value> {
         serde_json::Value::Bool(b) => Value::from(*b),
         serde_json::Value::Number(n) => match n.as_i64() {
             Some(n) => Value::from(n),
+            // TOML integers are signed 64-bit: an integer above
+            // `i64::MAX` has no exact TOML form, so refuse it instead
+            // of demoting it to a float.
+            None if n.as_u64().is_some() => {
+                return Err(Error::ConfigWrite(
+                    "integer exceeds the TOML range".to_owned(),
+                ));
+            }
             None => Value::from(n.as_f64().unwrap_or_default()),
         },
         serde_json::Value::String(s) => Value::from(s.as_str()),
@@ -391,6 +399,41 @@ mod tests {
         );
         let untouched = edited(&path, &["mcp", "servers", "none"], None).unwrap();
         assert!(!untouched.contains("mcp"), "{untouched}");
+    }
+
+    #[test]
+    fn integers_stay_integers_through_an_edit() {
+        let (_dir, path) = file("[agents]\nmax_depth = 1\n");
+        let text = edited(
+            &path,
+            &["agents", "max_depth"],
+            Some(&json!(9_223_372_036_854_775_807i64)),
+        )
+        .unwrap();
+        assert!(text.contains("max_depth = 9223372036854775807"), "{text}");
+        let back: toml::Table = toml::from_str(&text).unwrap();
+        assert_eq!(back["agents"]["max_depth"].as_integer(), Some(i64::MAX));
+    }
+
+    #[test]
+    fn an_integer_past_the_toml_range_errors_instead_of_becoming_a_float() {
+        let (_dir, path) = file("[agents]\nmax_depth = 1\n");
+        let err = edited(
+            &path,
+            &["agents", "max_depth"],
+            Some(&json!(18_446_744_073_709_551_615u64)),
+        )
+        .expect_err("u64::MAX has no TOML integer form");
+        assert!(err.to_string().contains("exceeds the TOML range"), "{err}");
+    }
+
+    #[test]
+    fn a_float_stays_a_float_through_an_edit() {
+        let (_dir, path) = file("[loop]\ncompaction_threshold = 0.8\n");
+        let text = edited(&path, &["loop", "compaction_threshold"], Some(&json!(0.5))).unwrap();
+        assert!(text.contains("compaction_threshold = 0.5"), "{text}");
+        let back: toml::Table = toml::from_str(&text).unwrap();
+        assert_eq!(back["loop"]["compaction_threshold"].as_float(), Some(0.5));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Integration tests for the App event and render loop.
 
+use std::collections::HashMap;
 use std::sync::mpsc;
 
 use ratatui::Terminal;
@@ -140,10 +141,9 @@ fn feed(
     batch: Vec<kage_core::protocol::Event>,
 ) {
     let session = app.active_session.unwrap_or_default();
-    for (seq, event) in batch.into_iter().enumerate() {
-        events
-            .send(envelope(session, seq as u64 + 1, event))
-            .unwrap();
+    for event in batch {
+        let seq = next_seq(session);
+        events.send(envelope(session, seq, event)).unwrap();
     }
     app.drain_engine_events();
 }
@@ -184,15 +184,44 @@ fn past_guard() -> Instant {
     Instant::now() + crate::overlay::approval::TYPE_AHEAD_GUARD + Duration::from_millis(100)
 }
 
+/// Continues one envelope sequence per session across batches. The
+/// consumer ignores `seq` today; the helpers keep it ascending per
+/// session so a future consumer never sees a batch restart the count.
+#[derive(Default)]
+struct Sequencer {
+    next: HashMap<kage_core::SessionId, u64>,
+}
+
+impl Sequencer {
+    fn next(&mut self, session: kage_core::SessionId) -> u64 {
+        let next = self.next.entry(session).or_insert(0);
+        *next += 1;
+        *next
+    }
+}
+
+std::thread_local! {
+    static SEQUENCER: std::cell::RefCell<Sequencer> =
+        std::cell::RefCell::new(Sequencer::default());
+}
+
+/// The next sequence number of `session`, continuing earlier batches.
+fn next_seq(session: kage_core::SessionId) -> u64 {
+    SEQUENCER.with(|seq| seq.borrow_mut().next(session))
+}
+
+/// Every request the app sent, unfiltered, so a stray `Cancel` or
+/// `AnswerQuestion` fails the comparison instead of hiding behind a
+/// whitelist.
 fn resolutions(rx: &mpsc::Receiver<RunRequest>) -> Vec<RunRequest> {
-    rx.try_iter()
-        .filter(|r| {
-            matches!(
-                r,
-                RunRequest::ResolvePermission { .. } | RunRequest::Submit { .. }
-            )
-        })
-        .collect()
+    rx.try_iter().collect()
+}
+
+/// Whether the request channel is merely empty. `Disconnected` reads
+/// as broken, not idle, so a dropped sender can never pass as "the
+/// app sent nothing".
+fn rx_idle(rx: &mpsc::Receiver<RunRequest>) -> bool {
+    matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty))
 }
 
 fn user_message(text: &str) -> kage_core::protocol::Event {
@@ -258,10 +287,9 @@ fn send_to(
     session: kage_core::SessionId,
     batch: Vec<kage_core::protocol::Event>,
 ) {
-    for (seq, event) in batch.into_iter().enumerate() {
-        events
-            .send(envelope(session, seq as u64 + 1, event))
-            .unwrap();
+    for event in batch {
+        let seq = next_seq(session);
+        events.send(envelope(session, seq, event)).unwrap();
     }
     app.drain_engine_events();
 }
@@ -324,4 +352,46 @@ fn rendered(app: &mut App, width: u16, height: u16) -> Vec<String> {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     app.render_into(&mut terminal).unwrap();
     snapshot_rows(&terminal)
+}
+
+#[test]
+fn the_sequencer_continues_one_stream_per_session() {
+    let (a, b) = (kage_core::SessionId::new(), kage_core::SessionId::new());
+    let mut seq = Sequencer::default();
+    assert_eq!(seq.next(a), 1);
+    assert_eq!(seq.next(b), 1);
+    assert_eq!(seq.next(a), 2);
+    assert_eq!(seq.next(a), 3);
+    assert_eq!(seq.next(b), 2);
+}
+
+#[test]
+fn interleaved_session_batches_still_route_to_their_own_session() {
+    let (mut app, _rx, events) = app_with_events();
+    let (a, b) = (kage_core::SessionId::new(), kage_core::SessionId::new());
+    let notice = |text: &str| {
+        kage_core::protocol::HostEvent::Notice {
+            level: kage_core::protocol::NoticeLevel::Error,
+            text: text.into(),
+            transient: false,
+        }
+        .into()
+    };
+    for n in 0..3 {
+        send_to(&mut app, &events, a, vec![notice(&format!("a{n}"))]);
+        send_to(&mut app, &events, b, vec![notice(&format!("b{n}"))]);
+    }
+    assert_eq!(app.active_session, Some(a), "the first session is main");
+    let blocks: Vec<String> = app
+        .buffer
+        .lock()
+        .unwrap()
+        .blocks()
+        .iter()
+        .filter_map(|b| match b.as_ref() {
+            crate::buffer::Block::Custom { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(blocks, ["a0", "a1", "a2"], "b never leaks in");
 }

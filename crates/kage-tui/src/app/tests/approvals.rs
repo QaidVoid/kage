@@ -42,6 +42,7 @@ fn tool_timing_excludes_the_approval_wait() {
         vec![shell_start("c1"), permission_request("c1", 1)],
     );
     assert_eq!(tool_phase(&app, "c1"), ToolPhase::Waiting);
+    let t0 = Instant::now();
     std::thread::sleep(std::time::Duration::from_millis(60));
     app.answer_permission(PermissionDecision::AllowOnce);
     assert_eq!(tool_phase(&app, "c1"), ToolPhase::Approved);
@@ -71,7 +72,11 @@ fn tool_timing_excludes_the_approval_wait() {
         crate::buffer::Block::ToolResult { duration_ms, .. } => *duration_ms,
         _ => None,
     });
-    assert!(duration.is_some_and(|ms| ms < 60), "{duration:?}");
+    let duration = duration.expect("the result times the call");
+    assert!(
+        u128::from(duration) + 10 < t0.elapsed().as_millis(),
+        "the approval wait leaked into the duration: {duration:?}"
+    );
 }
 
 #[test]
@@ -159,6 +164,47 @@ fn keys_right_after_the_panel_opens_are_dropped() {
     app.dispatch_key(key('y'));
     assert!(app.approval_panel.is_some());
     assert!(resolutions(&rx).is_empty());
+}
+
+#[test]
+fn approval_keys_exactly_at_the_guard_boundary_flip() {
+    let (mut app, rx, events) = app_with_events();
+    let t0 = Instant::now();
+    feed(
+        &mut app,
+        &events,
+        vec![
+            permission_request("c1", 1),
+            permission_request("c2", 2),
+            permission_request("c3", 3),
+        ],
+    );
+    let inside = t0 + crate::overlay::approval::TYPE_AHEAD_GUARD - Duration::from_millis(1);
+    app.approval_key_at(key('1'), inside);
+    app.approval_key_at(code(KeyCode::Esc), inside);
+    assert!(app.approval_panel.is_some(), "guarded keys are dropped");
+    assert!(rx_idle(&rx), "guarded keys answer nothing");
+
+    let decide = |request: u64, decision| RunRequest::ResolvePermission {
+        request_id: kage_core::protocol::RequestId(request),
+        decision,
+    };
+    let past = Instant::now() + crate::overlay::approval::TYPE_AHEAD_GUARD;
+    app.approval_key_at(key('1'), past);
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        decide(1, PermissionDecision::AllowOnce)
+    );
+    let past = Instant::now() + crate::overlay::approval::TYPE_AHEAD_GUARD;
+    app.approval_key_at(code(KeyCode::Esc), past);
+    assert_eq!(rx.try_recv().unwrap(), decide(2, PermissionDecision::Deny));
+    let past = Instant::now() + crate::overlay::approval::TYPE_AHEAD_GUARD;
+    app.approval_key_at(key('y'), past);
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        decide(3, PermissionDecision::AllowOnce)
+    );
+    assert!(app.approval_panel.is_none());
 }
 
 #[test]

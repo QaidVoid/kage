@@ -359,18 +359,26 @@ fn the_activity_row_shows_while_working_with_elapsed_seconds() {
         serde_json::json!({ "command": "cargo test" }),
     );
     lock(&buffer).set_tool_phase("c1", crate::view::tool_view::ToolPhase::Running);
+    let expected = format!(
+        "  / Running cargo test ({}s, ctrl+c to interrupt)",
+        app.run_started.unwrap().elapsed().as_secs()
+    );
     let rows = snapshot_rows(&render_app(&mut app));
     assert!(
-        rows.iter().any(|r| {
-            r.replace(['\u{25cb}', '\u{25cf}'], "/")
-                == "  / Running cargo test (14s, ctrl+c to interrupt)"
-        }),
+        rows.iter()
+            .any(|r| r.replace(['\u{25cb}', '\u{25cf}'], "/") == expected),
         "{rows:?}"
     );
     run_event(2, ended());
     run_event(3, kage_core::protocol::HostEvent::RunStarted);
     app.drain_engine_events();
-    assert!(app.run_started.unwrap().elapsed() < Duration::from_secs(1));
+    let rows = snapshot_rows(&render_app(&mut app));
+    assert!(
+        rows.iter().any(|r| {
+            r.replace(['\u{25cb}', '\u{25cf}'], "/") == "  / Working (0s, ctrl+c to interrupt)"
+        }),
+        "the restarted run starts its clock over: {rows:?}"
+    );
     run_event(4, ended());
     app.drain_engine_events();
     let rows = snapshot_rows(&render_app(&mut app));
@@ -484,9 +492,13 @@ fn the_working_row_cuts_the_command_before_its_time_and_key() {
     let command = "for i in 1 2 3 4 5 6 7 8 9 10; do echo $i; sleep 1; done; echo all done";
     lock(&buffer).push_tool_call("c1", "shell", serde_json::json!({ "command": command }));
     lock(&buffer).set_tool_phase("c1", crate::view::tool_view::ToolPhase::Running);
+    let secs = app.run_started.unwrap().elapsed().as_secs();
     let label = app.activity_label(&lock(&buffer), 80).unwrap();
     assert!(label.starts_with("Running for i in"), "{label}");
-    assert!(label.ends_with("... (2s, esc to interrupt)"), "{label}");
+    assert!(
+        label.ends_with(&format!("... ({secs}s, esc to interrupt)")),
+        "{label}"
+    );
     assert_eq!(label.len(), 78, "{label}");
 }
 

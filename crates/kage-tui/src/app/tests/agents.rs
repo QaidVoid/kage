@@ -17,6 +17,20 @@ fn progress_of(buffer: &SharedBuffer, id: &str) -> String {
         .expect("tool call present")
 }
 
+/// The call ids of every tool-call block in `buffer`, oldest first.
+fn tool_call_ids(buffer: &SharedBuffer) -> Vec<String> {
+    buffer
+        .lock()
+        .unwrap()
+        .blocks()
+        .iter()
+        .filter_map(|b| match b.as_ref() {
+            crate::buffer::Block::ToolCall { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn agent_deltas_land_in_the_agent_buffer_only() {
     let (mut app, _rx, events) = app_with_events();
@@ -59,9 +73,18 @@ fn an_agent_buffer_is_trimmed_like_the_main_one() {
         .collect();
     send_to(&mut app, &events, child, batch);
     let buffer = Arc::clone(&app.agent_buffers[&child]);
+    let ids = tool_call_ids(&buffer);
+    assert_eq!(ids.len(), crate::buffer::MAX_BLOCKS, "{ids:#?}");
     assert_eq!(
-        buffer.lock().unwrap().blocks().len(),
-        crate::buffer::MAX_BLOCKS
+        ids.first().map(String::as_str),
+        Some("c8"),
+        "the oldest calls drop first"
+    );
+    let newest = format!("c{}", crate::buffer::MAX_BLOCKS + 7);
+    assert_eq!(
+        ids.last().map(String::as_str),
+        Some(newest.as_str()),
+        "the newest calls survive"
     );
 }
 
@@ -206,6 +229,7 @@ fn an_agent_ask_is_labeled_and_its_feedback_goes_to_the_agent() {
             },
         ]
     );
+    assert_eq!(app.pending.len(), 1, "the feedback row must stay tracked");
     assert!(
         app.pending
             .iter()
@@ -355,7 +379,13 @@ fn the_working_row_counts_live_agents() {
     spawn_agent(&mut app, &events, "a1", "explore");
     let second = spawn_agent(&mut app, &events, "a2", "explore");
     let label = |app: &App| app.activity_label(&lock(&app.buffer), 80).unwrap();
-    assert_eq!(label(&app), "Waiting for 2 agents (41s, esc to interrupt)");
+    let expected = |app: &App| {
+        format!(
+            "Waiting for 2 agents ({}s, esc to interrupt)",
+            app.run_started.unwrap().elapsed().as_secs()
+        )
+    };
+    assert_eq!(label(&app), expected(&app));
     send_to(
         &mut app,
         &events,
@@ -740,7 +770,7 @@ fn esc_in_an_agent_view_goes_back_without_interrupting_or_clearing() {
     type_text(&mut app, "draft");
     app.handle_key(code(KeyCode::Esc));
     assert_eq!(app.focus, None);
-    assert!(rx.try_recv().is_err(), "nothing was interrupted");
+    assert!(rx_idle(&rx), "nothing was interrupted");
     app.focus_agent(child);
     assert_eq!(app.input().text(), "draft", "esc never eats the draft");
 }
@@ -764,7 +794,7 @@ fn ctrl_c_in_an_agent_view_stops_it_while_running_and_goes_back_when_idle() {
     );
     assert_eq!(app.handle_key(ctrl('c')), None);
     assert_eq!(app.focus, None);
-    assert!(rx.try_recv().is_err());
+    assert!(rx_idle(&rx));
     assert_eq!(app.handle_key(ctrl('c')), None, "the main view arms quit");
     assert_eq!(app.footer_hint(), "ctrl+c again to quit");
     assert_eq!(app.handle_key(ctrl('c')), Some(AppExit::Quit));
@@ -779,7 +809,7 @@ fn vim_normal_esc_goes_back_from_an_agent_view() {
     assert!(app.focus.is_some(), "insert Esc only leaves insert mode");
     app.handle_key(code(KeyCode::Esc));
     assert_eq!(app.focus, None);
-    assert!(rx.try_recv().is_err());
+    assert!(rx_idle(&rx));
 }
 
 #[test]
@@ -847,7 +877,7 @@ fn a_running_agent_takes_steering_and_a_finished_one_is_read_only() {
     assert_eq!(app.footer_hint(), "esc to go back");
     type_text(&mut app, "one more");
     app.handle_key(code(KeyCode::Enter));
-    assert!(rx.try_recv().is_err(), "nothing reaches the engine");
+    assert!(rx_idle(&rx), "nothing reaches the engine");
     assert_eq!(app.input.text(), "");
 }
 
@@ -1026,7 +1056,7 @@ fn x_in_the_agents_overlay_stops_the_selected_agent_and_esc_closes() {
     app.handle_key(code(KeyCode::Esc));
     assert!(app.agents_overlay.is_none());
     assert_eq!(app.focus, None);
-    assert!(rx.try_recv().is_err());
+    assert!(rx_idle(&rx));
 }
 
 #[test]
@@ -1396,6 +1426,8 @@ fn ctrl_t_opens_the_agents_overlay_over_an_approval_that_keeps_its_keys() {
         app.agents_overlay.as_ref().unwrap().selected(),
         Some(general)
     );
+    // dispatch_key reads the clock itself, so the guard has to elapse
+    // in real time here.
     std::thread::sleep(crate::overlay::approval::TYPE_AHEAD_GUARD);
     app.handle_key(key('y'));
     assert_eq!(

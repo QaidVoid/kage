@@ -210,9 +210,14 @@ impl AgentReport {
 
     /// The report an `<agent ...>` header line describes, without a
     /// body. Attributes an older transcript lacks read as zero.
+    /// Leading padding on the line is ignored.
     #[must_use]
     pub fn header(line: &str) -> Option<Self> {
-        let attrs = line.strip_prefix("<agent ")?.split_once('>')?.0;
+        let attrs = line
+            .trim_start()
+            .strip_prefix("<agent ")?
+            .split_once('>')?
+            .0;
         let attr = |key: &str| attr_value(attrs, key);
         let num =
             |key: &str| -> u64 { attr(key).and_then(|value| value.parse().ok()).unwrap_or(0) };
@@ -352,8 +357,9 @@ pub fn split_agent_text(text: &str) -> Option<(&str, Vec<AgentText>)> {
 }
 
 /// The value of `key="..."` in an attribute list, matched as a whole
-/// attribute name.
-fn attr_value<'a>(attrs: &'a str, key: &str) -> Option<&'a str> {
+/// attribute name so `xkey="..."` never matches a `key` lookup. Shared
+/// by the report parser and the swarm aggregate parser.
+pub(crate) fn attr_value<'a>(attrs: &'a str, key: &str) -> Option<&'a str> {
     let needle = format!(" {key}=\"");
     let padded = format!(" {attrs}");
     let start = padded.find(&needle)? + needle.len();
@@ -536,5 +542,20 @@ mod tests {
         assert_eq!(stats.tool_calls, 2);
         assert_eq!(stats.model, "");
         assert_eq!(stats.run_ms, None);
+    }
+
+    #[test]
+    fn a_padded_header_line_still_reads() {
+        let report = AgentReport::header(
+            "  <agent name=\"general\" session=\"01K62W8Q3T9V5M2C7X4B1N0R6S\" state=\"completed\" tools=\"2\">",
+        )
+        .expect("leading padding is ignored");
+        assert_eq!(report.name, "general");
+        assert_eq!(report.stats.unwrap().tool_calls, 2);
+        assert_eq!(
+            AgentReport::header("plain text line"),
+            None,
+            "text without the element is not a header"
+        );
     }
 }

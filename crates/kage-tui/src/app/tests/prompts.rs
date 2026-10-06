@@ -114,9 +114,44 @@ fn events_from_other_sessions_are_ignored() {
         text: text.into(),
         transient: false,
     };
+    events
+        .send(envelope(
+            mine,
+            1,
+            kage_core::protocol::HostEvent::SessionChanged {
+                path: "/tmp/s.jsonl".into(),
+                title: None,
+                messages: Vec::new(),
+                compaction: None,
+            },
+        ))
+        .unwrap();
+    app.drain_engine_events();
+    assert_eq!(app.active_session, Some(mine), "startup pinned the session");
+    events.send(envelope(mine, 2, notice("mine"))).unwrap();
+    events.send(envelope(other, 2, notice("other"))).unwrap();
+    app.drain_engine_events();
+    let count = app.buffer.lock().unwrap().blocks().len();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn the_first_session_to_report_becomes_the_main_one() {
+    let (mut app, _rx, events) = app_with_events();
+    let (mine, other) = (kage_core::SessionId::new(), kage_core::SessionId::new());
+    let notice = |text: &str| kage_core::protocol::HostEvent::Notice {
+        level: kage_core::protocol::NoticeLevel::Error,
+        text: text.into(),
+        transient: false,
+    };
     events.send(envelope(mine, 1, notice("mine"))).unwrap();
     events.send(envelope(other, 1, notice("other"))).unwrap();
     app.drain_engine_events();
+    assert_eq!(
+        app.active_session,
+        Some(mine),
+        "with no SessionChanged, first wins"
+    );
     let count = app.buffer.lock().unwrap().blocks().len();
     assert_eq!(count, 1);
 }
@@ -407,7 +442,7 @@ fn up_on_the_prompt_recalls_a_pending_prompt() {
 fn recall_with_nothing_pending_sends_nothing() {
     let (mut app, rx, _events) = app_with_events();
     app.apply(InputAction::RecallPrompt);
-    assert!(rx.try_recv().is_err());
+    assert!(rx_idle(&rx));
 }
 
 #[test]
@@ -415,20 +450,21 @@ fn pasting_an_image_path_attaches_instead_of_inserting_text() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
     let mut app = app_with_defaults(buffer, tx);
-    let dir = std::env::temp_dir().join(format!("kage-paste-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let png = dir.join("shot.png");
+    let dir = tempfile::tempdir().unwrap();
+    let png = dir.path().join("caf\u{e9} \u{1f5d7}.png");
     std::fs::write(&png, [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1]).unwrap();
 
     app.handle_paste(&png.to_string_lossy());
     assert_eq!(app.input.attached().len(), 1, "image path attached");
     assert!(
-        app.input.text().contains("[\u{200b}image #1 shot.png"),
+        app.input
+            .text()
+            .contains("[\u{200b}image #1 caf\u{e9} \u{1f5d7}.png"),
         "an editable marker is inserted, not the raw path: {:?}",
         app.input.text()
     );
     assert!(
-        !app.input.text().contains(&*dir.to_string_lossy()),
+        !app.input.text().contains(&*dir.path().to_string_lossy()),
         "the path itself was not pasted as text: {:?}",
         app.input.text()
     );
@@ -439,7 +475,6 @@ fn pasting_an_image_path_attaches_instead_of_inserting_text() {
         app.input.text().contains("just some text"),
         "non-image paste inserted verbatim"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

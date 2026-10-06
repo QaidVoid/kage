@@ -175,7 +175,7 @@ fn enter_on_a_prompt_first_completes_then_sends() {
     }
     app.handle_key(code(KeyCode::Enter));
     assert_eq!(app.input.text(), "/everything:simple_prompt");
-    assert!(rx.try_recv().is_err(), "nothing runs yet");
+    assert!(rx_idle(&rx), "nothing runs yet");
     app.handle_key(code(KeyCode::Enter));
     assert!(matches!(
         rx.try_recv(),
@@ -257,7 +257,7 @@ fn drafts_the_engine_expands_are_queued_never_steered() {
     // An unknown `/command` is a command error now, not a prompt: the
     // text goes back to the draft and nothing submits.
     app.handle_submit("/linear:prompt is not live".into(), false);
-    assert!(rx.try_recv().is_err());
+    assert!(rx_idle(&rx));
     assert_eq!(app.input.text(), "/linear:prompt is not live");
 }
 
@@ -355,7 +355,7 @@ fn logging_in_to_an_mcp_server_queues_the_flow() {
     let _ = app.run_command_validated("mcp", &registry);
     app.handle_key(code(KeyCode::Down));
     app.handle_key(code(KeyCode::Enter));
-    assert!(rx.try_recv().is_err(), "a login row restarts nothing yet");
+    assert!(rx_idle(&rx), "a login row restarts nothing yet");
     assert_eq!(
         app.pending_login,
         Some(crate::app::PendingLogin::Mcp("linear".to_owned()))
@@ -386,7 +386,7 @@ fn a_finished_mcp_login_restarts_the_server() {
     assert_eq!(rx.try_recv(), Ok(RunRequest::RestartMcp("linear".into())));
 
     app.run_login_flow(crate::app::PendingLogin::Mcp("broken".to_owned()));
-    assert!(rx.try_recv().is_err(), "a failed login restarts nothing");
+    assert!(rx_idle(&rx), "a failed login restarts nothing");
     assert!(last_block_text(&app.buffer).contains("mcp login broken: authorization discovery"));
     assert_eq!(*asked.lock().unwrap(), ["linear", "broken"]);
 }

@@ -59,14 +59,50 @@ fn autocomplete_respects_explicit_range() {
 fn builtin_at_file_completion_without_plugins() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("README.md"), "x").unwrap();
-    let buffer = shared_buffer();
-    let (tx, _rx) = mpsc::channel();
-    let mut app = app_with_defaults(buffer, tx);
-    app.set_workdir(dir.path().to_path_buf());
+    std::fs::write(dir.path().join("my notes.md"), "x").unwrap();
+    std::fs::write(dir.path().join("caf\u{e9}.md"), "x").unwrap();
+    std::fs::write(dir.path().join(".hidden.md"), "x").unwrap();
+    let app_over = || {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = app_with_defaults(buffer, tx);
+        app.set_workdir(dir.path().to_path_buf());
+        app
+    };
+    let offered = |app: &App| {
+        app.input_completion
+            .as_ref()
+            .expect("completion open")
+            .items()
+            .iter()
+            .map(|i| i.value.clone())
+            .collect::<Vec<_>>()
+    };
+
+    let mut app = app_over();
     app.handle_key(key('@'));
     assert!(app.input_completion.is_some(), "@ opens file completion");
+    let values = offered(&app);
+    assert!(
+        !values.iter().any(|v| v.contains("hidden")),
+        "dotfiles stay hidden: {values:?}"
+    );
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    assert_eq!(app.input().text(), "@README.md");
+    assert_eq!(app.input().text(), "@caf\u{e9}.md", "shortest name first");
+
+    let mut app = app_over();
+    for c in "@my".chars() {
+        app.handle_key(key(c));
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.input().text(), "@my notes.md");
+
+    let mut app = app_over();
+    for c in "@caf".chars() {
+        app.handle_key(key(c));
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.input().text(), "@caf\u{e9}.md");
 }
 
 #[test]
@@ -137,7 +173,7 @@ fn enter_accepts_the_highlighted_completion_before_sending() {
 
     app.handle_key(code(KeyCode::Enter));
     assert_eq!(app.input().text(), "check @README.md");
-    assert!(rx.try_recv().is_err(), "the partial path was sent");
+    assert!(rx_idle(&rx), "the partial path was sent");
     assert!(
         app.input_completion.is_none(),
         "a complete path offers nothing"
@@ -251,7 +287,7 @@ fn enter_accepts_a_slash_completion_then_the_next_enter_sends() {
     assert!(app.input_completion.is_some());
     app.handle_key(code(KeyCode::Enter));
     assert_eq!(app.input().text(), "/model");
-    assert!(rx.try_recv().is_err(), "the bare command was sent");
+    assert!(rx_idle(&rx), "the bare command was sent");
 
     app.handle_key(code(KeyCode::Enter));
     assert!(app.picker.is_some(), "/model opens the model picker");

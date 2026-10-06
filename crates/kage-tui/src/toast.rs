@@ -25,8 +25,9 @@ use kage_core::sync::lock;
 pub const DEFAULT_TOAST_DURATION: Duration = Duration::from_secs(3);
 
 /// Cap on simultaneous on-screen toasts. New toasts past this cap
-/// drop the oldest. Keeps the overlay from drowning the buffer when
-/// a plugin spams notifications.
+/// drop the oldest entry that is not an error (the oldest error only
+/// when nothing else is queued). Keeps the overlay from drowning the
+/// buffer when a plugin spams notifications.
 pub const MAX_VISIBLE_TOASTS: usize = 4;
 
 /// Severity / intent of a toast. Drives the left-edge accent color
@@ -91,7 +92,9 @@ impl Toast {
 
 /// Shared queue of live toasts. The renderer reads from it; the App
 /// and host plugin sink push into it. Bounded by
-/// [`MAX_VISIBLE_TOASTS`] - the oldest entry is dropped on overflow.
+/// [`MAX_VISIBLE_TOASTS`] - on overflow the oldest non-error entry is
+/// dropped, and the oldest error only when the queue holds nothing
+/// else.
 pub type SharedToasts = Arc<Mutex<VecDeque<Toast>>>;
 
 /// Construct an empty shared toast queue.
@@ -101,12 +104,18 @@ pub fn shared_toasts() -> SharedToasts {
 }
 
 /// Push a toast onto a shared queue, dropping the oldest if past the
-/// visible cap. Recovers from a poisoned mutex instead of skipping -
-/// toasts are decorative, never load-bearing.
+/// visible cap. An error toast is never evicted while a non-error is
+/// queued: the oldest non-error goes first, so plugin chatter cannot
+/// bury an error nobody saw. Recovers from a poisoned mutex instead
+/// of skipping - toasts are decorative, never load-bearing.
 pub fn push_toast(toasts: &SharedToasts, toast: Toast) {
     let mut q = lock(toasts);
     while q.len() >= MAX_VISIBLE_TOASTS {
-        q.pop_front();
+        let evict = q
+            .iter()
+            .position(|t| t.kind != ToastKind::Error)
+            .unwrap_or(0);
+        q.remove(evict);
     }
     q.push_back(toast);
 }
@@ -151,6 +160,44 @@ mod tests {
         assert_eq!(q.len(), MAX_VISIBLE_TOASTS);
         // The two oldest were dropped; the survivors start with t2.
         assert_eq!(q.front().unwrap().text, "t2");
+    }
+
+    #[test]
+    fn push_never_evicts_an_error_while_a_non_error_is_queued() {
+        let q = shared_toasts();
+        for i in 0..3 {
+            push_toast(
+                &q,
+                Toast::with_kind(format!("e{i}"), ToastKind::Error, DEFAULT_TOAST_DURATION),
+            );
+        }
+        for i in 0..4 {
+            push_toast(&q, Toast::info(format!("i{i}")));
+        }
+        let q = q.lock().unwrap();
+        assert_eq!(q.len(), MAX_VISIBLE_TOASTS);
+        let errors = q
+            .iter()
+            .filter(|t| t.kind == ToastKind::Error)
+            .map(|t| t.text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(errors, ["e0", "e1", "e2"], "plugin chatter evicts instead");
+        assert_eq!(q.back().unwrap().text, "i3");
+    }
+
+    #[test]
+    fn an_all_error_queue_still_gives_up_its_oldest() {
+        let q = shared_toasts();
+        for i in 0..5 {
+            push_toast(
+                &q,
+                Toast::with_kind(format!("e{i}"), ToastKind::Error, DEFAULT_TOAST_DURATION),
+            );
+        }
+        let q = q.lock().unwrap();
+        assert_eq!(q.len(), MAX_VISIBLE_TOASTS);
+        assert_eq!(q.front().unwrap().text, "e1", "the oldest error dropped");
+        assert_eq!(q.back().unwrap().text, "e4");
     }
 
     #[test]

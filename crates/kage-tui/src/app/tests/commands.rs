@@ -7,7 +7,7 @@ use super::*;
 fn goal_command_sets_and_clears_the_goal() {
     let (mut app, rx, _events) = app_with_events();
     app.dispatch_builtin("goal", "", &crate::command::ParsedArgs::new());
-    assert!(rx.try_recv().is_err(), "no argument is a usage error");
+    assert!(rx_idle(&rx), "no argument is a usage error");
     app.dispatch_builtin("goal", "tests pass", &crate::command::ParsedArgs::new());
     assert!(matches!(
         rx.try_recv(),
@@ -25,7 +25,7 @@ fn swarm_command_flips_the_mode_and_runs_one_shot_tasks() {
     let (mut app, rx, events) = app_with_events();
 
     app.dispatch_builtin("swarm", "", &crate::command::ParsedArgs::new());
-    assert!(rx.try_recv().is_err(), "no argument is a usage error");
+    assert!(rx_idle(&rx), "no argument is a usage error");
 
     app.dispatch_builtin("swarm", "on", &crate::command::ParsedArgs::new());
     assert!(matches!(
@@ -95,10 +95,7 @@ fn a_session_switch_clears_a_pending_oneshot_swarm() {
         &events,
         vec![run_ended(kage_core::protocol::RunOutcome::Completed)],
     );
-    assert!(
-        rx.try_recv().is_err(),
-        "the cleared one-shot sends no exit note"
-    );
+    assert!(rx_idle(&rx), "the cleared one-shot sends no exit note");
 }
 
 #[test]
@@ -189,7 +186,7 @@ fn ctrl_c_interrupts_over_an_open_cmdline() {
     lock(app.session_usage.as_ref().unwrap()).working = false;
     app.handle_key(ctrl('c'));
     assert!(app.cmdline.is_none(), "idle, ctrl+c closes the cmdline");
-    assert!(rx.try_recv().is_err());
+    assert!(rx_idle(&rx));
 }
 
 #[test]
@@ -626,21 +623,21 @@ fn a_slash_submission_runs_the_command() {
         }) => assert_eq!(text, "whatever"),
         other => panic!("expected the task prompt, got {other:?}"),
     }
-    assert!(rx.try_recv().is_err(), "the literal text must not submit");
+    assert!(rx_idle(&rx), "the literal text must not submit");
 }
 
 #[test]
 fn a_bare_slash_submission_does_nothing() {
     let (mut app, rx, _events) = app_with_events();
     app.handle_submit("/".into(), false);
-    assert!(rx.try_recv().is_err());
+    assert!(rx_idle(&rx));
 }
 
 #[test]
 fn an_unknown_slash_submission_returns_to_the_draft() {
     let (mut app, rx, _events) = app_with_events();
     app.handle_submit("/nope args".into(), false);
-    assert!(rx.try_recv().is_err(), "unknown commands send nothing");
+    assert!(rx_idle(&rx), "unknown commands send nothing");
     assert_eq!(app.input.text(), "/nope args");
 }
 
@@ -669,7 +666,7 @@ fn a_skill_submission_sends_its_body_and_args() {
         }
         other => panic!("expected the skill prompt, got {other:?}"),
     }
-    assert!(rx.try_recv().is_err(), "the literal text must not submit");
+    assert!(rx_idle(&rx), "the literal text must not submit");
 }
 
 #[test]
@@ -684,7 +681,7 @@ fn a_disabled_skill_takes_no_command() {
         path: std::path::PathBuf::from("/skills/review"),
     }]);
     app.handle_submit("/review".into(), false);
-    assert!(rx.try_recv().is_err());
+    assert!(rx_idle(&rx));
     assert_eq!(app.input.text(), "/review");
 }
 

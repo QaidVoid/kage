@@ -1,6 +1,8 @@
 //! Integration tests: every public type with serde derives must round-trip
 //! losslessly through JSON.
 
+use std::collections::BTreeMap;
+
 use kage_core::{
     Config, Content, ImageSource, LoopError, LoopEvent, Message, MessageId, Risk, Role, StopReason,
     TokenUsage, ToolCallId, ToolOutput,
@@ -157,6 +159,40 @@ fn config_default_roundtrips() {
     roundtrip(&Config::default());
 }
 
+/// Non-default values across the nested tables must survive a JSON
+/// round trip unchanged, so a config rewrite never silently resets
+/// settings the way a lost field would.
+#[test]
+fn config_non_default_values_roundtrip() {
+    let mut config = Config::default();
+    config.provider.default_model = "zai/glm-5.3-flash".to_owned();
+    config.loop_settings.compaction_threshold = 0.75;
+    config.permissions.confine_paths = false;
+    config.permissions.tools.insert(
+        "shell".to_owned(),
+        kage_core::permissions::ToolPermissionRules {
+            default: kage_core::permissions::PermissionAction::Ask,
+            allow: vec!["git *".to_owned()],
+            deny: vec!["git push *".to_owned()],
+        },
+    );
+    config.mcp.servers.insert(
+        "docs".to_owned(),
+        kage_core::config::McpServer {
+            startup_timeout_secs: Some(5),
+            command: Some("docs-server".to_owned()),
+            args: vec!["--stdio".to_owned()],
+            env: BTreeMap::from([("DOCS_TOKEN".to_owned(), "x".to_owned())]),
+            url: None,
+            headers: BTreeMap::new(),
+            disabled: false,
+            oauth: None,
+            disabled_tools: vec!["slow_tool".to_owned()],
+        },
+    );
+    roundtrip(&config);
+}
+
 #[test]
 fn token_usage_with_cache_roundtrips() {
     roundtrip(&TokenUsage {
@@ -195,4 +231,7 @@ fn message_id_serializes_as_ulid_string() {
     let s = serde_json::to_string(&mid).expect("encode");
     assert!(s.starts_with('"') && s.ends_with('"'));
     assert_eq!(s.len(), 28);
+    assert_eq!(s, format!("\"{mid}\""), "the string form is the bare ULID");
+    let back: MessageId = serde_json::from_str(&s).expect("decode");
+    assert_eq!(back, mid, "the string decodes to the same id");
 }

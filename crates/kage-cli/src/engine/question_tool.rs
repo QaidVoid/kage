@@ -165,10 +165,7 @@ impl Tool for QuestionTool {
         );
         let watch = cx.cancel_flag().watch();
         select_biased! {
-            recv(answer) -> answers => Ok(ToolOutput {
-                text: reply_text(&input.questions, answers.ok().flatten()),
-                ..ToolOutput::default()
-            }),
+            recv(answer) -> answers => Ok(reply_text(&input.questions, answers.ok().flatten())),
             recv(watch.receiver()) -> _ => {
                 lock(&self.questions).remove(&request_id);
                 self.bus.publish(self.session, HostEvent::QuestionClosed { request_id });
@@ -200,14 +197,26 @@ fn check(questions: &[Question]) -> Result<(), String> {
     Ok(())
 }
 
-/// What the model reads back: each question with the user's answer, or
-/// that the user declined.
-fn reply_text(questions: &[Question], answers: Answers) -> String {
+/// What the model reads back: each question with the user's answer,
+/// that the user declined, or an error naming both counts when the
+/// answers do not match the questions, so the model asks again
+/// instead of silently losing the trailing ones.
+fn reply_text(questions: &[Question], answers: Answers) -> ToolOutput {
     let Some(answers) = answers else {
-        return "The user declined to answer. Go on with your best judgement, or ask in your \
+        return ToolOutput {
+            text: "The user declined to answer. Go on with your best judgement, or ask in your \
                 reply instead."
-            .to_owned();
+                .to_owned(),
+            ..ToolOutput::default()
+        };
     };
+    if answers.len() != questions.len() {
+        return super::agent_tool::error_output(format!(
+            "the client answered {} of {} questions; ask them all again",
+            answers.len(),
+            questions.len()
+        ));
+    }
     let mut text = "The user answered:".to_owned();
     for (question, answer) in questions.iter().zip(answers) {
         let answer = if answer.is_empty() {
@@ -217,7 +226,10 @@ fn reply_text(questions: &[Question], answers: Answers) -> String {
         };
         let _ = write!(text, "\n- {}: {answer}", question.question);
     }
-    text
+    ToolOutput {
+        text,
+        ..ToolOutput::default()
+    }
 }
 
 #[cfg(test)]
@@ -259,11 +271,31 @@ mod tests {
                 vec!["choice 1".into(), "choice 2".into()],
             ]),
         );
+        assert!(!text.is_error);
         assert_eq!(
-            text,
+            text.text,
             "The user answered:\n- Which auth method?: choice 0\n- Which auth method?: choice 1, \
              choice 2"
         );
-        assert!(reply_text(&asked, None).starts_with("The user declined"));
+        assert!(
+            reply_text(&asked, None)
+                .text
+                .starts_with("The user declined")
+        );
+    }
+
+    #[test]
+    fn a_mismatched_answer_count_is_an_error_naming_both_counts() {
+        let asked = [question(2), question(3)];
+        let short = reply_text(&asked, Some(vec![vec!["choice 0".into()]]));
+        assert!(short.is_error);
+        assert!(short.text.contains("1 of 2"), "{}", short.text);
+
+        let long = reply_text(
+            &asked,
+            Some(vec![vec!["a".into()], vec!["b".into()], vec!["c".into()]]),
+        );
+        assert!(long.is_error);
+        assert!(long.text.contains("3 of 2"), "{}", long.text);
     }
 }

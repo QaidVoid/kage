@@ -26,6 +26,9 @@ use crate::writer::SessionWriter;
 /// and timestamp, inherited cwd, model and system prompt, and
 /// `parent_session` / `parent_entry` linking back to the source.
 ///
+/// Returns whether the source's tail was torn: the copy then ends at
+/// the last whole entry before it.
+///
 /// # Errors
 ///
 /// Errors if `src` cannot be opened, if its first entry is not a header,
@@ -35,7 +38,7 @@ pub fn fork(
     dst: &Path,
     new_session: SessionId,
     at: EntryId,
-) -> Result<(), SessionError> {
+) -> Result<bool, SessionError> {
     let mut reader = SessionReader::iter(src)?;
     let first = reader.next().ok_or_else(|| SessionError::Empty {
         path: src.to_path_buf(),
@@ -67,6 +70,9 @@ pub fn fork(
 /// Use this instead of [`fork`] when the new session needs its own
 /// model or system prompt, as forked agent children do.
 ///
+/// Returns whether the source's tail was torn: the copy then ends at
+/// the last whole entry before it.
+///
 /// # Errors
 ///
 /// Errors if `src` cannot be read, if its first entry is not a header,
@@ -76,7 +82,7 @@ pub fn fork_as(
     dst: &Path,
     new_header: Header,
     at: EntryId,
-) -> Result<(), SessionError> {
+) -> Result<bool, SessionError> {
     let snapshot = snapshot(src, |entry| entry.id() == at)?;
     if snapshot.at != at {
         return Err(SessionError::EntryNotFound {
@@ -84,8 +90,9 @@ pub fn fork_as(
             at,
         });
     }
+    let truncated = snapshot.truncated;
     snapshot.write(dst, new_header)?;
-    Ok(())
+    Ok(truncated)
 }
 
 /// A session's entries after its header, up to and including the last
@@ -96,6 +103,9 @@ pub struct Snapshot {
     pub at: EntryId,
     /// The entry lines up to `at`, each ending in `\n`.
     pub lines: Vec<u8>,
+    /// Whether the source's tail was torn, so entries after `at` may
+    /// have been lost.
+    pub truncated: bool,
 }
 
 impl Snapshot {
@@ -123,7 +133,8 @@ impl Snapshot {
 
 /// Read `src` once and keep its entries up to the last one `keep`
 /// accepts. A trailing line that does not parse is a torn write and
-/// ends the file, as it does for [`SessionReader`].
+/// ends the file, as it does for [`SessionReader`]; the snapshot's
+/// `truncated` flag reports it.
 ///
 /// # Errors
 ///
@@ -160,6 +171,7 @@ pub fn snapshot(
     };
     let start = offset;
     let mut kept = (header_id, start);
+    let mut truncated = false;
     let mut line_no = 1;
     while let Some(line) = lines.next() {
         line_no += 1;
@@ -170,7 +182,10 @@ pub fn snapshot(
         match serde_json::from_slice::<SessionEntry>(line) {
             Ok(entry) if keep(&entry) => kept = (entry.id(), offset),
             Ok(_) => {}
-            Err(_) if lines.peek().is_none() => break,
+            Err(_) if lines.peek().is_none() => {
+                truncated = true;
+                break;
+            }
             Err(err) => {
                 return Err(SessionError::Decode {
                     path: src.to_path_buf(),
@@ -185,7 +200,11 @@ pub fn snapshot(
     if lines.last().is_some_and(|byte| *byte != b'\n') {
         lines.push(b'\n');
     }
-    Ok(Snapshot { at, lines })
+    Ok(Snapshot {
+        at,
+        lines,
+        truncated,
+    })
 }
 
 /// Resolve `prefix` against entry ids in `src`. Errors if zero or multiple
@@ -294,6 +313,7 @@ mod tests {
         let is_assistant = |entry: &SessionEntry| matches!(entry, SessionEntry::Message(m) if m.message.role == Role::Assistant);
         let snap = snapshot(&src, is_assistant).unwrap();
         assert_eq!(snap.at, entries[1].id());
+        assert!(snap.truncated, "the torn tail is reported");
         let dst = dir.path().join("dst.jsonl");
         drop(snap.write(&dst, fresh_header("x:y")).unwrap());
         let copied: Vec<EntryId> = SessionReader::iter(&dst)
@@ -306,6 +326,58 @@ mod tests {
         let none = snapshot(&src, |_| false).unwrap();
         assert!(none.is_empty());
         assert_eq!(none.at, header_id);
+        assert!(none.truncated);
+    }
+
+    #[test]
+    fn a_whole_snapshot_reports_no_truncation() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.jsonl");
+        let m1 = message_entry(Role::User, "one");
+        write(&src, fresh_header("x:y"), &[m1.clone()]);
+        let snap = snapshot(&src, |_| true).unwrap();
+        assert!(!snap.truncated);
+    }
+
+    #[test]
+    fn a_fork_from_a_torn_source_reports_the_truncation() {
+        let dir = tempdir().unwrap();
+        let torn = dir.path().join("torn.jsonl");
+        let whole = dir.path().join("whole.jsonl");
+        let m1 = message_entry(Role::User, "one");
+        let m2 = message_entry(Role::Assistant, "two");
+        let m3 = message_entry(Role::User, "three");
+        write(
+            &torn,
+            fresh_header("x:y"),
+            &[m1.clone(), m2.clone(), m3.clone()],
+        );
+        write(&whole, fresh_header("x:y"), &[m1, m2.clone(), m3]);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&torn)
+            .unwrap();
+        std::io::Write::write_all(&mut file, b"{\"type\":\"mess").unwrap();
+
+        let torn_id = SessionId::new();
+        let torn_at = m2.id();
+        assert_eq!(
+            fork(&torn, &dir.path().join("torn-fork.jsonl"), torn_id, torn_at).unwrap(),
+            true,
+            "the torn tail is reported"
+        );
+        let whole_id = SessionId::new();
+        assert_eq!(
+            fork(
+                &whole,
+                &dir.path().join("whole-fork.jsonl"),
+                whole_id,
+                torn_at
+            )
+            .unwrap(),
+            false,
+            "an intact source is not truncated"
+        );
     }
 
     #[test]

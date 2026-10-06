@@ -309,18 +309,8 @@ impl BlockWidget for CustomBlockWidget {
 mod tests {
     use super::*;
     use crate::theme::Theme;
+    use crate::view::testutil;
     use ratatui::style::Color;
-
-    fn ctx(theme: &Theme) -> RenderCtx<'_> {
-        RenderCtx {
-            theme,
-            focused: false,
-            emphasis: Emphasis::None,
-            selection: None,
-            search_pattern: None,
-            row_budget: None,
-        }
-    }
 
     fn painted(lines: &[Line<'_>]) -> String {
         lines
@@ -355,7 +345,7 @@ mod tests {
     fn lines_paint_kind_and_body() {
         let w = CustomBlockWidget::from_block(&custom_block()).unwrap();
         let theme = Theme::default();
-        let text = painted(&w.lines(60, &ctx(&theme)));
+        let text = painted(&w.lines(60, &testutil::ctx(&theme)));
         assert!(text.contains("myplugin:cards"), "got {text:?}");
         assert!(text.contains("log payload"), "got {text:?}");
     }
@@ -375,7 +365,7 @@ mod tests {
                 folded: false,
             };
             let w = CustomBlockWidget::from_block(&block).unwrap();
-            let text = painted(&w.lines(60, &ctx(&Theme::default())));
+            let text = painted(&w.lines(60, &testutil::ctx(&Theme::default())));
             assert!(!text.contains(kind), "{kind} must not leak: {text:?}");
             assert!(text.contains("welcome to kage"), "{text:?}");
         }
@@ -388,13 +378,7 @@ mod tests {
             folded: false,
         };
         let w = CustomBlockWidget::from_block(&block).unwrap();
-        w.lines(60, &ctx(&Theme::default()))
-            .iter()
-            .map(|l| {
-                let row: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-                row.strip_prefix("  ").unwrap_or(&row).to_owned()
-            })
-            .collect()
+        testutil::rows(&w.lines(60, &testutil::ctx(&Theme::default())))
     }
 
     #[test]
@@ -441,7 +425,7 @@ mod tests {
             folded: true,
         };
         let w = CustomBlockWidget::from_block(&block).unwrap();
-        let text = painted(&w.lines(60, &ctx(&Theme::default())));
+        let text = painted(&w.lines(60, &testutil::ctx(&Theme::default())));
         assert!(text.contains("first line"), "{text:?}");
         assert!(!text.contains("second line"), "{text:?}");
     }
@@ -454,7 +438,7 @@ mod tests {
             folded: false,
         };
         let w = CustomBlockWidget::from_block(&block).unwrap();
-        let lines = w.lines(60, &ctx(&Theme::default()));
+        let lines = w.lines(60, &testutil::ctx(&Theme::default()));
         let text = lines[0]
             .spans
             .iter()
@@ -486,7 +470,7 @@ mod tests {
     #[test]
     fn usage_panel_drops_the_kind_tag_and_styles_sections() {
         let w = CustomBlockWidget::from_block(&usage_block(usage_fixture())).unwrap();
-        let lines = w.lines(60, &ctx(&Theme::default()));
+        let lines = w.lines(60, &testutil::ctx(&Theme::default()));
         let text = painted(&lines);
         assert!(!text.contains("kage:usage"), "no raw tag: {text:?}");
         let header = text.lines().next().unwrap_or_default();
@@ -535,7 +519,7 @@ mod tests {
         let w = CustomBlockWidget::from_block(&usage_block(text)).unwrap();
         let theme = Theme::default();
         let styled: Vec<(String, Option<Color>)> = w
-            .lines(60, &ctx(&theme))
+            .lines(60, &testutil::ctx(&theme))
             .iter()
             .flat_map(|l| l.spans.iter())
             .map(|s| (s.content.to_string(), s.style.fg))
@@ -560,7 +544,7 @@ mod tests {
         ]
         .join("\n");
         let w = CustomBlockWidget::from_block(&usage_block(text)).unwrap();
-        let rendered = painted(&w.lines(60, &ctx(&Theme::default())));
+        let rendered = painted(&w.lines(60, &testutil::ctx(&Theme::default())));
         assert!(rendered.contains("(unknown window)"), "{rendered:?}");
     }
 
@@ -572,7 +556,7 @@ mod tests {
             folded: true,
         })
         .unwrap();
-        let rendered = painted(&w.lines(60, &ctx(&Theme::default())));
+        let rendered = painted(&w.lines(60, &testutil::ctx(&Theme::default())));
         assert!(rendered.contains("Session usage"), "{rendered:?}");
         assert!(rendered.contains("p:m"), "{rendered:?}");
         assert!(!rendered.contains("650.2M"), "{rendered:?}");

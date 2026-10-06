@@ -112,6 +112,7 @@ mod tests {
     use super::*;
     use crate::buffer::Buffer;
     use crate::theme::Theme;
+    use crate::view::testutil;
 
     fn rows(buf: &Buffer) -> Vec<String> {
         rows_at(buf, 0)
@@ -119,27 +120,8 @@ mod tests {
 
     fn rows_at(buf: &Buffer, index: usize) -> Vec<String> {
         let theme = Theme::default();
-        let ctx = RenderCtx {
-            theme: &theme,
-            focused: false,
-            emphasis: Emphasis::None,
-            selection: None,
-            search_pattern: None,
-            row_budget: None,
-        };
-        ThinkingBlockWidget::from_block(&buf.blocks()[index])
-            .unwrap()
-            .lines(40, &ctx)
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-                    .trim()
-                    .to_owned()
-            })
-            .collect()
+        let w = ThinkingBlockWidget::from_block(&buf.blocks()[index]).unwrap();
+        testutil::rows(&w.lines(40, &testutil::ctx(&theme)))
     }
 
     fn live(text: &str) -> Buffer {
@@ -208,16 +190,8 @@ mod tests {
         buf.push_thinking("body", None);
         buf.toggle_fold(0);
         let theme = Theme::default();
-        let ctx = RenderCtx {
-            theme: &theme,
-            focused: false,
-            emphasis: Emphasis::None,
-            selection: None,
-            search_pattern: None,
-            row_budget: None,
-        };
         let w = ThinkingBlockWidget::from_block(&buf.blocks()[0]).unwrap();
-        for row in w.lines(30, &ctx) {
+        for row in w.lines(30, &testutil::ctx(&theme)) {
             let text: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
             assert!(text.starts_with("  "), "reserved gutter, got {text:?}");
         }

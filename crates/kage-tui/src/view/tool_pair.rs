@@ -96,35 +96,10 @@ impl BlockWidget for ToolPairBlockWidget {
 mod tests {
     use serde_json::json;
 
-    use super::super::Emphasis;
     use super::*;
     use crate::buffer::Buffer;
     use crate::theme::Theme;
-
-    fn ctx(theme: &Theme) -> RenderCtx<'_> {
-        RenderCtx {
-            theme,
-            focused: false,
-            emphasis: Emphasis::None,
-            selection: None,
-            search_pattern: None,
-            row_budget: None,
-        }
-    }
-
-    fn rows_of(lines: &[Line<'_>]) -> Vec<String> {
-        lines
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-                    .trim_end()
-                    .to_owned()
-            })
-            .collect()
-    }
+    use crate::view::testutil;
 
     fn widget(
         name: &str,
@@ -140,11 +115,11 @@ mod tests {
             buf.toggle_fold(0);
         }
         let w = ToolPairBlockWidget::from_pair(&buf.blocks()[0], &buf.blocks()[1]).unwrap();
-        w.lines(80, &ctx(&Theme::default()))
+        w.lines(80, &testutil::ctx(&Theme::default()))
     }
 
     fn rows(name: &str, input: Value, output: &str, is_error: bool) -> Vec<String> {
-        rows_of(&widget(name, input, output, is_error, true))
+        testutil::aligned_rows(&widget(name, input, output, is_error, true))
     }
 
     #[test]
@@ -162,7 +137,7 @@ mod tests {
         let blocks = buf.blocks();
         assert!(ToolPairBlockWidget::from_pair(&blocks[0], &blocks[2]).is_none());
         let paired = ToolPairBlockWidget::from_pair(&blocks[1], &blocks[2]).unwrap();
-        let rows = rows_of(&paired.lines(80, &ctx(&Theme::default())));
+        let rows = testutil::aligned_rows(&paired.lines(80, &testutil::ctx(&Theme::default())));
         assert!(rows[0].contains("Read b"), "{rows:?}");
     }
 
@@ -172,7 +147,7 @@ mod tests {
         buf.push_tool_call("c1", "shell", json!({"command": "seq 8"}));
         buf.push_tool_result("c1", kage_core::event::TOOL_CANCELLED_TEXT, true);
         let paired = ToolPairBlockWidget::from_pair(&buf.blocks()[0], &buf.blocks()[1]).unwrap();
-        let rows = rows_of(&paired.lines(80, &ctx(&Theme::default())));
+        let rows = testutil::aligned_rows(&paired.lines(80, &testutil::ctx(&Theme::default())));
         assert!(
             rows.iter()
                 .any(|r| r.ends_with(kage_core::event::TOOL_CANCELLED_TEXT)),
@@ -243,11 +218,11 @@ mod tests {
                        echo \"SHELL=$SHELL\"; ls -a | head -n 100; echo done";
         let input = json!({"command": command});
         let error = "io error: No such file or directory (os error 2)";
-        let folded = rows_of(&widget("shell", input.clone(), error, true, true));
+        let folded = testutil::aligned_rows(&widget("shell", input.clone(), error, true, true));
         assert_eq!(folded.len(), 2, "{folded:?}");
         assert!(folded[0].contains("..."), "{folded:?}");
 
-        let unfolded = rows_of(&widget("shell", input, error, true, false));
+        let unfolded = testutil::aligned_rows(&widget("shell", input, error, true, false));
         let header: Vec<&str> = unfolded
             .iter()
             .take_while(|r| !r.contains("io error"))
@@ -279,7 +254,7 @@ mod tests {
         let input = json!({"command": "cd x\ncargo test"});
         let folded = rows("shell", input.clone(), "(no output)\nexit: 0", false);
         assert!(folded[0].contains("Ran cd x (+1 line)"), "{folded:?}");
-        let unfolded = rows_of(&widget(
+        let unfolded = testutil::aligned_rows(&widget(
             "shell",
             input,
             "(no output)\nexit: 0",
@@ -319,7 +294,7 @@ mod tests {
         buf.set_tool_phase("c1", ToolPhase::Denied);
         buf.push_tool_result("c1", "denied by user", true);
         let w = ToolPairBlockWidget::from_pair(&buf.blocks()[0], &buf.blocks()[1]).unwrap();
-        let denied = rows_of(&w.lines(80, &ctx(&Theme::default())));
+        let denied = testutil::aligned_rows(&w.lines(80, &testutil::ctx(&Theme::default())));
         assert!(denied[0].contains("\u{2298} Edit a.rs"), "{denied:?}");
         assert!(denied[0].ends_with("denied"), "{denied:?}");
         assert!(!denied[0].contains("Edited"), "{denied:?}");

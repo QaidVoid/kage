@@ -88,6 +88,7 @@ fn strip_summary_framing(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::theme::Theme;
+    use crate::view::testutil;
 
     fn rows(text: &str, folded: bool) -> Vec<String> {
         let block = Block::Custom {
@@ -96,27 +97,8 @@ mod tests {
             folded,
         };
         let theme = Theme::default();
-        let ctx = RenderCtx {
-            theme: &theme,
-            focused: false,
-            emphasis: Emphasis::None,
-            selection: None,
-            search_pattern: None,
-            row_budget: None,
-        };
-        CompactionBlockWidget::from_block(&block)
-            .unwrap()
-            .lines(80, &ctx)
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-                    .trim()
-                    .to_owned()
-            })
-            .collect()
+        let w = CompactionBlockWidget::from_block(&block).unwrap();
+        testutil::rows(&w.lines(80, &testutil::ctx(&theme)))
     }
 
     #[test]

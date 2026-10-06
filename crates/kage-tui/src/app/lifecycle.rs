@@ -353,7 +353,7 @@ impl App {
         } else {
             None
         };
-        let render_width = terminal.size().map_or(80, |r| r.width);
+        let render_width = terminal.size().map_or(80, |r| r.width.max(1));
         let branch = self.branch();
         self.refresh_plugin_widget_texts_if_due(render_width);
         let (mut buffer, buffer_version) = self.take_draw_snapshot();

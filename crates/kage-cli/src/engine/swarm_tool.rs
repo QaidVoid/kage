@@ -2,7 +2,7 @@
 //! template and waits for every child, then returns one aggregated
 //! result.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -372,8 +372,8 @@ fn collect(
         return arrived;
     }
     if arrived.len() < total {
-        for id in children {
-            let _ = engine.send(Input::Command(Command::to(*id, CommandKind::Cancel)));
+        for id in unreported(children, &arrived) {
+            let _ = engine.send(Input::Command(Command::to(id, CommandKind::Cancel)));
         }
         let grace = Instant::now() + CANCEL_GRACE;
         while arrived.len() < total {
@@ -387,6 +387,19 @@ fn collect(
         }
     }
     arrived
+}
+
+/// The children to cancel when a batch gives up: the ones that never
+/// reported. A child that reported was reaped once its result was
+/// delivered, so cancelling it only draws an `unknown session` error
+/// notice onto its id.
+fn unreported(children: &[SessionId], arrived: &[ToolOutput]) -> Vec<SessionId> {
+    let reported: HashSet<SessionId> = arrived.iter().filter_map(session_in).collect();
+    children
+        .iter()
+        .copied()
+        .filter(|id| !reported.contains(id))
+        .collect()
 }
 
 impl SwarmTool {
@@ -1062,5 +1075,20 @@ mod tests {
             .insert(id.to_string().to_lowercase(), "go on too".into());
         let err = expand(&call, &AgentDefs::builtin(), 32).unwrap_err();
         assert!(err.contains("twice"), "{err}");
+    }
+
+    #[test]
+    fn the_backstop_cancels_only_children_that_never_reported() {
+        let (_members, children) = two_members();
+        let reported = vec![agent_block(children[1], "completed", "did b")];
+        assert_eq!(unreported(&children, &reported), [children[0]]);
+
+        let none: Vec<ToolOutput> = Vec::new();
+        assert_eq!(unreported(&children, &none), children);
+
+        // A refusal is a result the child delivered, session id
+        // included, so its sibling is the only one left to cancel.
+        let refused = vec![agent_tool::refused(children[0], "general", "no")];
+        assert_eq!(unreported(&children, &refused), [children[1]]);
     }
 }

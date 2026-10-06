@@ -34,3 +34,6 @@ tempfile.workspace = true
 
 [target."cfg(unix)".dependencies]
 nix.workspace = true
+
+[target."cfg(windows)".dependencies]
+win32job = "2"

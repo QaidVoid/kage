@@ -276,11 +276,17 @@ impl Live {
     }
 
     /// Keeps the latest state, usage and MCP servers of client
-    /// sessions, which a link client attaching later is sent.
+    /// sessions, which a link client attaching later is sent. Link
+    /// clients are unix-only, so on other platforms nothing is cached.
+    #[cfg_attr(
+        not(unix),
+        allow(unused_variables, reason = "only link clients read the cache")
+    )]
     fn remember(&mut self, session: SessionId, event: &HostEvent) {
         if self.tree.get(session).is_some() {
             return;
         }
+        #[cfg(unix)]
         match event {
             HostEvent::StateChanged { state } => {
                 self.states.insert(session, state.clone());
@@ -882,8 +888,7 @@ impl CliAcpAgent {
                 }
             }
         }
-        lock(&self.shown)
-            .insert(id, Shown::fresh(settings.clone()));
+        lock(&self.shown).insert(id, Shown::fresh(settings.clone()));
         lock(&self.held).insert(id, HeldUpdates::default());
         lock(&self.ids).insert(client.to_owned(), id);
         if let Some(ctx) = ctx {

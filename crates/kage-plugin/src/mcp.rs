@@ -136,6 +136,7 @@ fn add_server_fn(lua: &Lua, servers: SharedMcpServers) -> mlua::Result<mlua::Fun
             .insert(
                 name,
                 McpServer {
+                    startup_timeout_secs: None,
                     command: Some(command),
                     args,
                     env,

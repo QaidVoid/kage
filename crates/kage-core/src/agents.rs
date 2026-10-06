@@ -127,8 +127,9 @@ pub fn project_dirs(workdir: &Path) -> [PathBuf; 2] {
     ]
 }
 
-/// Load every `*.md` file directly under `dir`, one result per file.
-/// A missing directory is empty.
+/// Load every markdown file directly under `dir`, one result per file.
+/// The extension matches case-insensitively, in lockstep with the
+/// trust scan. A missing directory is empty.
 #[must_use]
 pub fn load_agents_dir(dir: &Path, source: AgentSource) -> Vec<Result<AgentDef, AgentError>> {
     let Ok(entries) = fs::read_dir(dir) else {
@@ -137,7 +138,11 @@ pub fn load_agents_dir(dir: &Path, source: AgentSource) -> Vec<Result<AgentDef, 
     let mut paths: Vec<PathBuf> = entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "md") && path.is_file())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+                && path.is_file()
+        })
         .collect();
     paths.sort();
     paths
@@ -481,6 +486,18 @@ mod tests {
             .collect();
         assert_eq!(names, ["a", "b"]);
         assert!(load_agents_dir(Path::new("/definitely/not/here"), AgentSource::User).is_empty());
+    }
+
+    #[test]
+    fn dir_loads_the_md_extension_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "reviewer.MD", "---\ndescription: caps\n---\n");
+        write(dir.path(), "notes.mdown", "ignored");
+        let names: Vec<String> = load_agents_dir(dir.path(), AgentSource::User)
+            .into_iter()
+            .map(|r| r.unwrap().name)
+            .collect();
+        assert_eq!(names, ["reviewer"]);
     }
 
     #[test]

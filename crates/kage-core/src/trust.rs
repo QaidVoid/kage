@@ -158,8 +158,9 @@ fn config_subset(table: &toml::Table) -> Option<serde_json::Map<String, Value>> 
     Some(out)
 }
 
-/// Name to full text of each `*.md` file directly under the project
-/// agent directory.
+/// Name to full text of each markdown file directly under the project
+/// agent directory. The extension matches case-insensitively, in
+/// lockstep with the loader.
 fn agent_files(workdir: &Path) -> serde_json::Map<String, Value> {
     let mut out = serde_json::Map::new();
     // Same order as loading: `.agents` replaces `.kage` under the same
@@ -168,11 +169,10 @@ fn agent_files(workdir: &Path) -> serde_json::Map<String, Value> {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };
-        for path in entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
-        {
+        for path in entries.flatten().map(|entry| entry.path()).filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+        }) {
             let Some(text) = std::fs::read_to_string(&path).ok() else {
                 continue;
             };
@@ -625,6 +625,25 @@ mod tests {
 
             write_agent(&project, "extra", REVIEWER)?;
             assert!(!project_extensions_trusted(&project));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn agent_files_cover_the_md_extension_case_insensitively() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, "")?;
+            std::fs::remove_file(Config::project_path(&project)).map_err(io)?;
+            assert!(untrusted_project(&project).is_none());
+
+            let dir = crate::agents::project_dirs(&project)[0].clone();
+            std::fs::create_dir_all(&dir).map_err(io)?;
+            std::fs::write(dir.join("reviewer.MD"), REVIEWER).map_err(io)?;
+
+            let summary = untrusted_project(&project).expect("untrusted");
+            assert_eq!(summary.keys, ["agents"]);
+            assert_eq!(summary.agents, ["reviewer"]);
             Ok(())
         });
     }

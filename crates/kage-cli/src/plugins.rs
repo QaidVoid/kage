@@ -201,13 +201,16 @@ fn migrate_store_dir(old: &Path, new: &Path) -> std::io::Result<bool> {
 }
 
 /// Copy every file and subdirectory of `src` into `dst`, creating `dst`
-/// as needed.
+/// as needed. Directory entries are classified through
+/// `std::fs::metadata`, which follows symlinks, so a link to a
+/// directory or file migrates with its content instead of aborting
+/// the copy with `EISDIR`.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let target = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        if std::fs::metadata(entry.path())?.is_dir() {
             copy_dir_recursive(&entry.path(), &target)?;
         } else {
             std::fs::copy(entry.path(), target)?;
@@ -759,6 +762,34 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(new.join("nested/b.json")).unwrap(),
             "{}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_copy_fallback_follows_symlinks_to_dirs_and_files() {
+        use std::os::unix::fs::symlink;
+
+        let src_root = tempdir().unwrap();
+        let dst_root = tempdir().unwrap();
+        let src = src_root.path().join("plugin-state");
+        let dst = dst_root.path().join("plugin-state");
+        std::fs::create_dir_all(src.join("real")).unwrap();
+        std::fs::write(src.join("real/a.json"), "{\"a\":1}").unwrap();
+        std::fs::write(src.join("b.json"), "{\"b\":2}").unwrap();
+        symlink(src.join("real"), src.join("link-dir")).unwrap();
+        symlink(src.join("b.json"), src.join("link-file.json")).unwrap();
+
+        copy_dir_recursive(&src, &dst).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dst.join("link-dir/a.json")).unwrap(),
+            "{\"a\":1}",
+            "a symlinked directory migrates with its content"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.join("link-file.json")).unwrap(),
+            "{\"b\":2}"
         );
     }
 

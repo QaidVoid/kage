@@ -12,6 +12,7 @@ use kage_tools::tool::ToolContext;
 /// `[mcp.servers.kage]` pointed at this test binary's `kage mcp serve`.
 fn kage_serve_config() -> McpServer {
     McpServer {
+        startup_timeout_secs: None,
         command: Some(env!("CARGO_BIN_EXE_kage").to_owned()),
         args: vec!["mcp".to_owned(), "serve".to_owned()],
         env: BTreeMap::new(),

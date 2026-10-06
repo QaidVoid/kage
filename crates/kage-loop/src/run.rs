@@ -201,7 +201,7 @@ where
                             emit(LoopEvent::ProviderRetry {
                                 attempt,
                                 max_attempts: config.max_provider_retries,
-                                wait_secs: wait.as_secs().max(1),
+                                wait_secs: wait.as_secs(),
                                 requested_secs: requested.map(|d| d.as_secs()),
                                 error: e.to_string(),
                             });
@@ -573,6 +573,65 @@ fn sleep_cancelable(cancel: &CancelFlag, dur: Duration) -> bool {
         return false;
     }
     cancel.watch().receiver().recv_timeout(dur).is_err() && !cancel.is_cancelled()
+}
+
+#[cfg(test)]
+mod retry_display {
+    use std::sync::Arc;
+
+    use kage_core::{CancelFlag, TokenUsage};
+    use kage_provider::testing::{MockProvider, user_msg};
+    use kage_provider::{ProviderError, ProviderEvent, StopReason};
+    use kage_tools::ToolRegistry;
+
+    use super::*;
+    use crate::NoopHooks;
+
+    fn good_turn() -> Vec<Result<ProviderEvent, ProviderError>> {
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::TextDelta { delta: "hi".into() }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        ]
+    }
+
+    /// A 1 ms `retry_after` used to display as "in 1s"; the event must
+    /// carry the raw sub-second wait instead.
+    #[test]
+    fn a_sub_second_hint_is_not_rounded_up_to_a_second() {
+        let mock = MockProvider::sequence(vec![
+            vec![Err(ProviderError::RateLimited {
+                retry_after: Some(Duration::from_millis(1)),
+            })],
+            good_turn(),
+        ]);
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(Arc::new(user_msg("hello")));
+        let cancel = CancelFlag::new();
+        let events = std::cell::RefCell::new(Vec::new());
+        let res = run(
+            &mock,
+            &ToolRegistry::new(),
+            &mut cx,
+            LoopConfig::default(),
+            &mut NoopHooks,
+            &cancel,
+            |e| events.borrow_mut().push(e),
+        );
+        assert!(res.is_ok(), "{res:?}");
+        let wait = events
+            .into_inner()
+            .iter()
+            .find_map(|e| match e {
+                LoopEvent::ProviderRetry { wait_secs, .. } => Some(*wait_secs),
+                _ => None,
+            })
+            .expect("retry event");
+        assert_eq!(wait, 0, "a 1 ms hint must not display as 1s");
+    }
 }
 
 #[cfg(test)]

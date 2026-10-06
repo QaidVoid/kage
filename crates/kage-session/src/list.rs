@@ -1,6 +1,7 @@
 //! Listing recorded sessions in a directory.
 //!
-//! [`list`] scans a directory for `*.jsonl` files, reads each one's header
+//! [`list`] scans a directory for `*.jsonl` files, matching the
+//! extension without case, reads each one's header
 //! plus the most recent user prompt, and returns the resulting summaries
 //! sorted by creation time (newest first).
 //!
@@ -181,29 +182,10 @@ impl SessionCache {
             self.loaded = true;
             self.load_index(dir);
         }
-        let read_dir = match std::fs::read_dir(dir) {
-            Ok(d) => d,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(err) => {
-                return Err(SessionError::Io {
-                    path: dir.to_path_buf(),
-                    source: err,
-                });
-            }
-        };
-
         let mut summaries = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut fresh = false;
-        for entry in read_dir {
-            let entry = entry.map_err(|err| SessionError::Io {
-                path: dir.to_path_buf(),
-                source: err,
-            })?;
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
+        for path in crate::resume::jsonl_candidates(dir)? {
             if let Some(summary) = self.summarize(&path, &mut fresh) {
                 summaries.push(summary);
             }
@@ -692,6 +674,42 @@ mod tests {
 
         let summaries = list(dir.path()).unwrap();
         assert_eq!(summaries.len(), 1);
+    }
+
+    #[test]
+    fn lists_uppercase_extensions() {
+        let dir = tempdir().unwrap();
+        write_session(dir.path(), "REAL.JSONL", "hi");
+
+        let summaries = list(dir.path()).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].last_user_prompt.as_deref(), Some("hi"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lists_a_session_with_a_non_utf8_stem() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(OsStr::from_bytes(b"weird\xff.jsonl"));
+        let header = Header {
+            version: FORMAT_VERSION,
+            session: SessionId::new(),
+            id: EntryId::new(),
+            ts: Utc::now(),
+            cwd: PathBuf::from("/work"),
+            model: "anthropic:claude".into(),
+            system_prompt: "be helpful".into(),
+            parent_session: None,
+            parent_entry: None,
+        };
+        SessionWriter::create(&path, header).unwrap();
+
+        let summaries = list(dir.path()).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].path, path);
     }
 
     #[test]

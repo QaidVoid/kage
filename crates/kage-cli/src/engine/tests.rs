@@ -549,6 +549,7 @@ fn denied_permission_refuses_the_tool() {
     assert!(output.unwrap().is_error);
 }
 
+#[cfg(unix)]
 fn capture(command: &str, dir: &std::path::Path) -> (Option<i32>, String) {
     run_shell(command, None, &ToolContext::new(dir, &CancelFlag::new())).unwrap()
 }
@@ -592,6 +593,7 @@ fn run_shell_capture_truncates_large_output() {
 }
 
 #[test]
+#[cfg(unix)]
 fn run_shell_capture_runs_in_the_given_workdir() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("marker.txt"), "in the workdir").unwrap();

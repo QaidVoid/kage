@@ -312,8 +312,26 @@ pub(super) fn probe_acp(agent: &kage_core::config::AcpAgent) -> ConfigTestResult
     }
 }
 
-/// Lists the models of provider `id` at `target`.
+/// Lists the models of provider `id` at `target`, warning when the key
+/// rides a cleartext request.
 fn list(id: &str, target: &Target) -> ConfigTestResult {
+    let mut result = list_models(id, target);
+    if let Some(warning) = cleartext_warning(target) {
+        result.message = format!("{warning}\n{}", result.message);
+    }
+    result
+}
+
+/// The warning when a non-empty key would be sent over `http://`, which
+/// any network peer can read. `None` for https and for providers that
+/// need no key, where `http://` is the normal local case.
+fn cleartext_warning(target: &Target) -> Option<&'static str> {
+    let cleartext = target.base.starts_with("http://") && !target.key.is_empty();
+    cleartext.then_some("warning: the key is sent over cleartext http; use https")
+}
+
+/// The model list request of `list`, without the cleartext warning.
+fn list_models(id: &str, target: &Target) -> ConfigTestResult {
     let url = match target.kind {
         Kind::OpenAi => format!("{}/models", target.base),
         Kind::Anthropic => format!("{}/v1/models", target.base),
@@ -455,6 +473,7 @@ fn with_catalog(id: &str, mut model: ProbeModel) -> ProbeModel {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
 
@@ -463,7 +482,7 @@ mod tests {
 
     use kage_acp::acp::KeySource;
 
-    use super::{Kind, probe, provider_keys, resolve};
+    use super::{Kind, Target, cleartext_warning, probe, provider_keys, resolve};
     use crate::auth::AuthStore;
 
     /// Answers one request with `status` and `body`, handing back the
@@ -528,6 +547,32 @@ mod tests {
         assert_eq!(ids, ["alpha", "zeta"]);
         assert_eq!(result.models[0].context, Some(32_000));
         assert!(result.message.contains("2 models"), "{}", result.message);
+        assert!(result.message.contains("cleartext"), "{}", result.message);
+    }
+
+    #[test]
+    fn only_an_http_base_with_a_key_warns_about_cleartext() {
+        let warned = Target {
+            kind: Kind::OpenAi,
+            base: "http://localhost:11434/v1".to_owned(),
+            key: "sk-typed".to_owned(),
+            headers: BTreeMap::new(),
+        };
+        assert_eq!(
+            cleartext_warning(&warned),
+            Some("warning: the key is sent over cleartext http; use https")
+        );
+        let secure = Target {
+            base: "https://api.example.com/v1".to_owned(),
+            ..warned
+        };
+        assert_eq!(cleartext_warning(&secure), None);
+        let keyless = Target {
+            base: "http://localhost:11434/v1".to_owned(),
+            key: String::new(),
+            ..secure
+        };
+        assert_eq!(cleartext_warning(&keyless), None);
     }
 
     #[test]
@@ -617,6 +662,7 @@ mod tests {
     #[test]
     fn an_mcp_server_that_cannot_start_says_why() {
         let spec = kage_core::config::McpServer {
+            startup_timeout_secs: None,
             command: Some("/nonexistent/server".into()),
             args: Vec::new(),
             env: std::collections::BTreeMap::new(),

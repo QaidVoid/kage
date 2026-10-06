@@ -936,6 +936,11 @@ pub struct McpServer {
     /// (`[mcp.servers.<name>.oauth]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<McpOAuth>,
+    /// Seconds the `initialize` handshake may wait for a silent server
+    /// before kage gives up; 10 when unset. Raise it for a server whose
+    /// cold start (a first `npx` download) is slow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_timeout_secs: Option<u64>,
 }
 
 /// OAuth settings for one HTTP MCP server. Every field is optional:

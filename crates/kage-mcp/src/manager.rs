@@ -38,6 +38,7 @@
 //! no such server is left.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use kage_core::config::{McpConfig, McpServer};
 use kage_core::protocol::{
@@ -47,7 +48,7 @@ use kage_tools::ToolRegistry;
 
 use crate::oauth::TokenSource;
 use crate::resource_tool::{McpResourceTool, RESOURCE_TOOL, ResourceServer};
-use crate::server::{McpConnection, McpError, McpServerHandle};
+use crate::server::{INITIALIZE_TIMEOUT, McpConnection, McpError, McpServerHandle};
 use crate::tools::tools_from_connection;
 
 /// One configured server: its launch spec (kept so it can be
@@ -269,12 +270,16 @@ impl McpManager {
             if spec.disabled {
                 continue;
             }
-            let spawned = McpServerHandle::spawn_with(
+            let timeout = spec
+                .startup_timeout_secs
+                .map_or(INITIALIZE_TIMEOUT, Duration::from_secs);
+            let spawned = McpServerHandle::spawn_with_startup_timeout(
                 name.clone(),
                 spec,
                 &roots,
                 handler.clone(),
                 tokens.clone(),
+                timeout,
             );
             let managed = match spawned {
                 Ok(handle) => {
@@ -405,6 +410,7 @@ impl McpManager {
     /// catalog.
     pub fn adopt(&mut self, name: &str, conn: Arc<McpConnection>) {
         let spec = McpServer {
+            startup_timeout_secs: None,
             command: None,
             args: Vec::new(),
             env: std::collections::BTreeMap::new(),
@@ -533,8 +539,18 @@ impl McpManager {
             .map(|(_, m)| m)
             .ok_or_else(|| McpError::Unknown(name.to_owned()))?;
         managed.starting = false;
-        let spawned =
-            McpServerHandle::spawn_with(name.to_owned(), &managed.spec, &roots, handler, tokens);
+        let timeout = managed
+            .spec
+            .startup_timeout_secs
+            .map_or(INITIALIZE_TIMEOUT, Duration::from_secs);
+        let spawned = McpServerHandle::spawn_with_startup_timeout(
+            name.to_owned(),
+            &managed.spec,
+            &roots,
+            handler,
+            tokens,
+            timeout,
+        );
         let fresh = match spawned {
             Ok(fresh) => fresh,
             Err(e) => {
@@ -723,6 +739,7 @@ mod tests {
         cfg.servers.insert(
             "off".to_owned(),
             McpServer {
+                startup_timeout_secs: None,
                 command: Some("definitely-not-a-real-binary-xyz".to_owned()),
                 args: vec![],
                 env: std::collections::BTreeMap::new(),
@@ -736,6 +753,7 @@ mod tests {
         cfg.servers.insert(
             "broken".to_owned(),
             McpServer {
+                startup_timeout_secs: None,
                 command: Some("definitely-not-a-real-binary-xyz".to_owned()),
                 args: vec![],
                 env: std::collections::BTreeMap::new(),
@@ -756,6 +774,7 @@ mod tests {
     fn a_failed_spawn_is_kept_for_gates_and_restart() {
         let mut cfg = McpConfig::default();
         let spec = McpServer {
+            startup_timeout_secs: None,
             command: Some("definitely-not-a-real-binary-xyz".to_owned()),
             args: vec![],
             env: std::collections::BTreeMap::new(),
@@ -769,6 +788,7 @@ mod tests {
         cfg.servers.insert(
             "off".to_owned(),
             McpServer {
+                startup_timeout_secs: None,
                 disabled: true,
                 ..spec
             },
@@ -937,6 +957,7 @@ mod tests {
         cfg.servers.insert(
             "broken".to_owned(),
             McpServer {
+                startup_timeout_secs: None,
                 command: Some("definitely-not-a-real-binary-xyz".to_owned()),
                 args: vec![],
                 env: std::collections::BTreeMap::new(),
@@ -950,6 +971,7 @@ mod tests {
         cfg.servers.insert(
             "off".to_owned(),
             McpServer {
+                startup_timeout_secs: None,
                 disabled: true,
                 ..cfg.servers["broken"].clone()
             },
@@ -1041,6 +1063,7 @@ mod tests {
         let kill = Arc::new(AtomicBool::new(false));
         let conn = killable_server(Arc::clone(&kill), serde_json::json!({}));
         let spec = McpServer {
+            startup_timeout_secs: None,
             command: Some("definitely-not-a-real-binary-xyz".to_owned()),
             args: vec![],
             env: std::collections::BTreeMap::new(),
@@ -1128,6 +1151,7 @@ mod tests {
         cfg.servers.insert(
             "broken".to_owned(),
             McpServer {
+                startup_timeout_secs: None,
                 command: Some("definitely-not-a-real-binary-xyz".to_owned()),
                 args: vec![],
                 env: std::collections::BTreeMap::new(),
@@ -1231,6 +1255,7 @@ mod tests {
         cfg.servers.insert(
             "remote".to_owned(),
             McpServer {
+                startup_timeout_secs: None,
                 command: None,
                 args: vec![],
                 env: std::collections::BTreeMap::new(),
@@ -1419,8 +1444,8 @@ mod tests {
         assert!(mgr.register_into(&mut reg).is_empty());
         let tool = reg.get(RESOURCE_TOOL).expect("x advertises resources");
         assert!(
-            tool.description().contains("Servers with resources: x."),
-            "{}",
+            !tool.description().contains('x'),
+            "server names stay out of the static description: {}",
             tool.description()
         );
         assert_eq!(tool.risk(), kage_core::Risk::Read);

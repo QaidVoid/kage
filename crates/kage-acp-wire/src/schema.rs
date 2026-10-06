@@ -782,6 +782,10 @@ pub struct ThemesRequest {}
 pub struct ThemesResult {
     /// One entry per theme file, sorted by name.
     pub themes: Vec<UserTheme>,
+    /// Files left out, as `"<file name>: <reason>"` with reason one of
+    /// `non-utf8`, `unreadable`, `invalid`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
 
 /// One user theme file, as a client that draws its own palette reads it.

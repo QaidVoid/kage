@@ -1,10 +1,11 @@
 //! `kage doctor`: diagnostic command.
 //!
 //! Lists the four directories kage resolves (config, data, state,
-//! cache), then walks a fixed checklist (config, credentials,
-//! providers, plugins, mcp) and prints one row per item with
-//! status + body. Exit code is `0` when every check is OK or WARN; `1`
-//! if any check FAILs.
+//! cache), then walks a fixed checklist (config, credentials, auth
+//! file permissions, state-dir writability, providers, plugins, mcp)
+//! and prints one row per item with status + body. The closing
+//! verdict names the checks that ran. Exit code is `0` when every
+//! check is OK or WARN; `1` if any check FAILs.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -16,7 +17,7 @@ use kage_core::config::Config;
 use kage_plugin::{HostLog, LogLevel, PluginRuntime};
 use serde_json::json;
 
-use crate::auth::{self, AuthStore, KNOWN_PROVIDERS};
+use crate::auth::{self, AuthStore};
 
 /// Outcome bucket for a single check row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,8 +54,6 @@ pub fn run() -> ExitCode {
     let _ = writeln!(stdout);
 
     let checks = collect_checks();
-    let any_fail = checks.iter().any(|c| matches!(c.status, Status::Fail));
-
     for check in &checks {
         let _ = writeln!(
             stdout,
@@ -69,13 +68,23 @@ pub fn run() -> ExitCode {
     }
 
     let _ = writeln!(stdout);
-    if any_fail {
-        let _ = writeln!(stdout, "doctor: one or more checks failed");
+    write_verdict(&mut stdout, &checks);
+    if checks.iter().any(|c| matches!(c.status, Status::Fail)) {
         ExitCode::from(1)
     } else {
-        let _ = writeln!(stdout, "doctor: all checks ok");
         ExitCode::SUCCESS
     }
+}
+
+/// Print the closing verdict line. The all-clear names the checks that
+/// ran, so `doctor` never claims more than what it covered.
+fn write_verdict(out: &mut impl Write, checks: &[Check]) {
+    if checks.iter().any(|c| matches!(c.status, Status::Fail)) {
+        let _ = writeln!(out, "doctor: one or more checks failed");
+        return;
+    }
+    let names = checks.iter().map(|c| c.name).collect::<Vec<_>>().join(", ");
+    let _ = writeln!(out, "doctor: {names} all ok");
 }
 
 /// The directories kage keeps its files in, as `(role, path)` rows:
@@ -106,13 +115,14 @@ fn write_directories(out: &mut impl Write, rows: &[(&'static str, Result<PathBuf
 /// them.
 fn collect_checks() -> Vec<Check> {
     let workdir = std::env::current_dir().unwrap_or_else(|_| ".".into());
-    vec![
-        check_config(&workdir),
-        check_auth(),
-        check_providers(),
-        check_plugins(&workdir),
-        check_mcp(&workdir),
-    ]
+    let mut checks = vec![check_config(&workdir), check_auth()];
+    #[cfg(unix)]
+    checks.push(check_auth_mode());
+    checks.push(check_state_dir());
+    checks.push(check_providers());
+    checks.push(check_plugins(&workdir));
+    checks.push(check_mcp(&workdir));
+    checks
 }
 
 /// Per-server bound for the spawn + `initialize` + `tools/list`
@@ -307,25 +317,152 @@ fn check_auth() -> Check {
             };
         }
     };
-    let stored = store.providers.len();
-    let oauth = store.providers.values().filter(|c| c.is_oauth()).count();
-    let env_count = KNOWN_PROVIDERS
-        .iter()
-        .filter(|p| {
-            let env = auth::env_var_for(p);
-            !env.is_empty() && std::env::var(env).is_ok_and(|v| !v.is_empty())
-        })
-        .count();
-    let body = format!(
-        "{stored} stored ({oauth} oauth, {} api-key), {env_count} via env",
-        stored - oauth,
-    );
+    // Raw on purpose: the credentials row must render even when the
+    // permission or shell tables are what is broken, and through the
+    // same provider-key list `auth list` and the `providers` row use,
+    // so a custom env key counts everywhere or nowhere.
+    let config = Config::load_default_raw().unwrap_or_default();
     Check {
         name: "auth",
         status: Status::Ok,
-        body,
+        body: auth_body(&store, &auth::provider_keys(&config), |env| {
+            std::env::var(env).is_ok_and(|v| !v.is_empty())
+        }),
         hint: None,
     }
+}
+
+/// The `auth` row body: stored credential counts plus how many
+/// providers find a key in the environment.
+fn auth_body(
+    store: &AuthStore,
+    keys: &[auth::ProviderKey],
+    env_set: impl Fn(&str) -> bool,
+) -> String {
+    let stored = store.providers.len();
+    let oauth = store.providers.values().filter(|c| c.is_oauth()).count();
+    let env_count = keys
+        .iter()
+        .filter(|key| !key.env.is_empty() && env_set(&key.env))
+        .count();
+    format!(
+        "{stored} stored ({oauth} oauth, {} api-key), {env_count} via env",
+        stored - oauth
+    )
+}
+
+/// The `permissions` row (Unix): the auth file holds provider keys,
+/// so a mode looser than `0600` is a warning with the fix.
+#[cfg(unix)]
+fn check_auth_mode() -> Check {
+    match AuthStore::default_path() {
+        Ok(path) => auth_mode_check(&path),
+        Err(err) => Check {
+            name: "permissions",
+            status: Status::Warn,
+            body: format!("auth file unresolved: {err}"),
+            hint: None,
+        },
+    }
+}
+
+/// The auth-file mode as a [`Check`] against an explicit path.
+#[cfg(unix)]
+fn auth_mode_check(path: &Path) -> Check {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if !path.exists() {
+        return Check {
+            name: "permissions",
+            status: Status::Ok,
+            body: "no auth file yet".into(),
+            hint: None,
+        };
+    }
+    let mode = match std::fs::metadata(path) {
+        Ok(meta) => meta.permissions().mode() & 0o777,
+        Err(err) => {
+            return Check {
+                name: "permissions",
+                status: Status::Warn,
+                body: format!("stat {}: {err}", path.display()),
+                hint: None,
+            };
+        }
+    };
+    if mode.trailing_zeros() >= 6 {
+        Check {
+            name: "permissions",
+            status: Status::Ok,
+            body: format!("{} is mode {mode:o}", path.display()),
+            hint: None,
+        }
+    } else {
+        Check {
+            name: "permissions",
+            status: Status::Warn,
+            body: format!(
+                "{} is readable by other users (mode {mode:o})",
+                path.display()
+            ),
+            hint: Some(format!("run `chmod 600 {}`", path.display())),
+        }
+    }
+}
+
+/// The `state` row: whether the state root can hold the files kage
+/// writes there, proven by creating and removing a probe file.
+fn check_state_dir() -> Check {
+    match crate::state_root() {
+        Ok(dir) => state_dir_check(&dir),
+        Err(err) => Check {
+            name: "state",
+            status: Status::Warn,
+            body: format!("unresolved: {err}"),
+            hint: None,
+        },
+    }
+}
+
+/// Writability of `dir` as a [`Check`], creating it when missing.
+fn state_dir_check(dir: &Path) -> Check {
+    if let Err(err) = std::fs::create_dir_all(dir) {
+        return Check {
+            name: "state",
+            status: Status::Fail,
+            body: format!("mkdir {}: {err}", dir.display()),
+            hint: Some("check the KAGE_STATE_HOME / XDG_STATE_HOME environment variables".into()),
+        };
+    }
+    match probe_writable(dir) {
+        Ok(()) => Check {
+            name: "state",
+            status: Status::Ok,
+            body: format!("{} is writable", dir.display()),
+            hint: None,
+        },
+        Err(err) => Check {
+            name: "state",
+            status: Status::Fail,
+            body: err,
+            hint: Some("check the directory's ownership and permissions".into()),
+        },
+    }
+}
+
+/// Create and remove a probe file in `dir`, reporting the failing
+/// half. The name carries the process id so concurrent doctors do not
+/// race on one file.
+fn probe_writable(dir: &Path) -> Result<(), String> {
+    let probe = dir.join(format!(".kage-doctor-probe-{}", std::process::id()));
+    match std::fs::File::create(&probe) {
+        Ok(file) => drop(file),
+        Err(err) => return Err(format!("create {}: {err}", probe.display())),
+    }
+    if let Err(err) = std::fs::remove_file(&probe) {
+        return Err(format!("remove {}: {err}", probe.display()));
+    }
+    Ok(())
 }
 
 fn check_providers() -> Check {
@@ -585,5 +722,99 @@ mod tests {
         let check = providers_check(&config, &AuthStore::empty());
         assert_eq!(check.status, Status::Ok, "{}", check.body);
         assert!(check.body.contains("fake"), "{}", check.body);
+    }
+
+    fn check(name: &'static str, status: Status) -> Check {
+        Check {
+            name,
+            status,
+            body: String::new(),
+            hint: None,
+        }
+    }
+
+    #[test]
+    fn the_verdict_names_its_scope_and_changes_on_a_fail() {
+        let ok = vec![check("config", Status::Ok), check("auth", Status::Ok)];
+        let mut out = Vec::new();
+        write_verdict(&mut out, &ok);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "doctor: config, auth all ok\n"
+        );
+
+        let failed = vec![check("config", Status::Ok), check("auth", Status::Fail)];
+        let mut out = Vec::new();
+        write_verdict(&mut out, &failed);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "doctor: one or more checks failed\n"
+        );
+    }
+
+    #[test]
+    fn the_state_check_passes_when_a_probe_file_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = state_dir_check(dir.path());
+        assert_eq!(check.status, Status::Ok, "{}", check.body);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_state_check_fails_on_an_unwritable_dir() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        fs::create_dir_all(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o555)).unwrap();
+        let check = state_dir_check(&state);
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(check.status, Status::Fail, "{}", check.body);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_auth_mode_check_warns_looser_than_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::write(&path, "{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let check = auth_mode_check(&path);
+        assert_eq!(check.status, Status::Warn, "{}", check.body);
+        assert!(check.hint.unwrap().contains("chmod 600"), "{}", check.body);
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(auth_mode_check(&path).status, Status::Ok);
+        assert_eq!(
+            auth_mode_check(&dir.path().join("gone.json")).status,
+            Status::Ok
+        );
+    }
+
+    #[test]
+    fn the_auth_row_counts_the_credentials_auth_list_shows() {
+        let config: Config = toml::from_str(
+            "[providers.custom.lab]\nbase_url = \"http://lab:1/v1\"\napi_key_env = \"MY_KEY\"\n\
+             [[providers.custom.lab.models]]\nid = \"m\"\nname = \"M\"\n",
+        )
+        .unwrap();
+        let keys = auth::provider_keys(&config);
+        let store = AuthStore::empty();
+        let body = auth_body(&store, &keys, |env| env == "MY_KEY");
+        assert!(body.contains("1 via env"), "{body}");
+
+        let ready: Vec<&str> = keys
+            .iter()
+            .filter(|key| key.source_with(&store, |env| env == "MY_KEY").is_some())
+            .map(|key| key.id.as_str())
+            .collect();
+        assert_eq!(
+            ready,
+            ["lab"],
+            "`auth list` shows ready exactly what the auth row counts"
+        );
     }
 }

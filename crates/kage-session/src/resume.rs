@@ -301,22 +301,25 @@ pub fn find_by_prefix(dir: &Path, prefix: &str) -> Result<Option<PathBuf>, Sessi
 }
 
 /// Find the most recently created session in `dir` that was recorded
-/// in working directory `cwd`, skipping agent sessions.
+/// in working directory `cwd`, skipping agent sessions. Candidates are
+/// ranked by their header timestamp, so a copied or renamed file whose
+/// name sorts high cannot win over a session that is newer by its
+/// header; stems break ties, newest first.
 pub fn find_last(dir: &Path, cwd: &Path) -> Result<Option<PathBuf>, SessionError> {
-    // Session ids are ULIDs, which sort by creation time, so the newest
-    // name is the newest session; only the head of each candidate is
-    // read, to skip agent sessions and files without a header.
     let mut files = session_files(dir)?;
     files.sort_by(|a, b| b.0.cmp(&a.0));
-    Ok(files
+    let mut ranked: Vec<(DateTime<Utc>, String, PathBuf)> = files
         .into_iter()
-        .map(|(_, path)| path)
-        .find(|path| opens_as_user_session(path, cwd)))
+        .filter_map(|(stem, path)| user_session_header(&path, cwd).map(|ts| (ts, stem, path)))
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    Ok(ranked.into_iter().next().map(|(_, _, path)| path))
 }
 
-/// The `*.jsonl` files of `dir` with their file stems, which are the
-/// session ids. A missing directory has none.
-fn session_files(dir: &Path) -> Result<Vec<(String, PathBuf)>, SessionError> {
+/// The `*.jsonl` files of `dir`, matching the extension without case,
+/// so a `SESSION.JSONL` copy is a candidate too. A missing directory
+/// has none.
+pub(crate) fn jsonl_candidates(dir: &Path) -> Result<Vec<PathBuf>, SessionError> {
     let read_dir = match std::fs::read_dir(dir) {
         Ok(read_dir) => read_dir,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -327,32 +330,57 @@ fn session_files(dir: &Path) -> Result<Vec<(String, PathBuf)>, SessionError> {
             });
         }
     };
-    Ok(read_dir
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("jsonl"))
-        .filter_map(|path| {
-            let stem = path.file_stem()?.to_str()?.to_owned();
-            Some((stem, path))
+    let mut candidates = Vec::new();
+    for entry in read_dir {
+        let entry = entry.map_err(|err| SessionError::Io {
+            path: dir.to_path_buf(),
+            source: err,
+        })?;
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("jsonl"))
+        {
+            candidates.push(path);
+        }
+    }
+    Ok(candidates)
+}
+
+/// The candidate session files of `dir` with their file stems, which
+/// are the session ids. Stems are kept lossy, so a file with a
+/// non-UTF8 name still lists and only misses a prefix that is not a
+/// prefix of its lossy form. A missing directory has none.
+fn session_files(dir: &Path) -> Result<Vec<(String, PathBuf)>, SessionError> {
+    Ok(jsonl_candidates(dir)?
+        .into_iter()
+        .map(|path| {
+            let stem = path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            (stem, path)
         })
         .collect())
 }
 
-/// Whether `path` starts with a header recorded in `cwd` and is not an
-/// agent session, through the one session-identity scan the summary
-/// and `is_agent_session` share.
-fn opens_as_user_session(path: &Path, cwd: &Path) -> bool {
+/// The header timestamp when `path` starts with a header recorded in
+/// `cwd` and is not an agent session, through the one
+/// session-identity scan the summary and `is_agent_session` share.
+/// `None` when it is not a user session for `cwd`.
+fn user_session_header(path: &Path, cwd: &Path) -> Option<DateTime<Utc>> {
     use std::io::BufRead as _;
-    let Ok(file) = std::fs::File::open(path) else {
-        return false;
-    };
+    let file = std::fs::File::open(path).ok()?;
     let header = std::io::BufReader::new(file)
         .lines()
         .next()
         .and_then(Result::ok)
         .and_then(|line| serde_json::from_str::<SessionEntry>(&line).ok());
-    matches!(header, Some(SessionEntry::Header(header)) if header.cwd == cwd)
-        && !crate::list::is_agent_session(path)
+    let ts = match header {
+        Some(SessionEntry::Header(header)) if header.cwd == cwd => header.ts,
+        _ => return None,
+    };
+    (!crate::list::is_agent_session(path)).then_some(ts)
 }
 
 #[cfg(test)]
@@ -836,5 +864,73 @@ mod tests {
             main,
             "the forked child is not the last user session"
         );
+    }
+
+    #[test]
+    fn find_last_ranks_by_header_timestamp_not_stem() {
+        let dir = tempdir().unwrap();
+        let mut older = fresh_header();
+        older.ts = Utc::now() - chrono::Duration::hours(1);
+        let older_path = dir.path().join("z.jsonl");
+        write(&older_path, older, &[]);
+        let newer_path = dir.path().join("a.jsonl");
+        write(&newer_path, fresh_header(), &[]);
+
+        let last = find_last(dir.path(), Path::new("/work")).unwrap().unwrap();
+        assert_eq!(
+            last, newer_path,
+            "a high-sorting stem with an older header must lose"
+        );
+    }
+
+    #[test]
+    fn jsonl_candidates_match_the_extension_without_case() {
+        let dir = tempdir().unwrap();
+        write(&dir.path().join("a.jsonl"), fresh_header(), &[]);
+        write(&dir.path().join("UPPER.JSONL"), fresh_header(), &[]);
+        std::fs::write(dir.path().join("notes.txt"), b"nope").unwrap();
+
+        let mut found: Vec<String> = jsonl_candidates(dir.path())
+            .unwrap()
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        assert_eq!(found, ["UPPER.JSONL", "a.jsonl"]);
+    }
+
+    #[test]
+    fn find_last_sees_an_uppercase_extension() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ONLY.JSONL");
+        write(&path, fresh_header(), &[]);
+
+        assert_eq!(
+            find_last(dir.path(), Path::new("/work")).unwrap().unwrap(),
+            path
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_last_and_prefix_scan_carry_a_non_utf8_stem() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(OsStr::from_bytes(b"bad\xff.jsonl"));
+        write(&path, fresh_header(), &[]);
+
+        assert_eq!(
+            find_last(dir.path(), Path::new("/work")).unwrap().unwrap(),
+            path,
+            "a non-UTF8 stem stays a find_last candidate"
+        );
+        let stems: Vec<String> = session_files(dir.path())
+            .unwrap()
+            .into_iter()
+            .map(|(stem, _)| stem)
+            .collect();
+        assert_eq!(stems, ["bad\u{fffd}"], "stems are kept lossy");
     }
 }

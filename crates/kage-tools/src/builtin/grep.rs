@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use grep::regex::RegexMatcherBuilder;
-use grep::searcher::{Searcher, Sink, SinkMatch};
+use grep::searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkMatch};
 use ignore::WalkBuilder;
 use kage_core::{Risk, ToolOutput};
 use schemars::JsonSchema;
@@ -50,8 +50,9 @@ impl Tool for GrepTool {
 
     fn description(&self) -> &'static str {
         "Recursively search files for a regex pattern. Honors \
-         `.gitignore` and `.kageignore`. Returns lines as `path:line:text`. \
-         Capped at 1000 matches by default."
+         `.gitignore` and `.kageignore`; skips dotfiles and binary \
+         files (a file stops at its first NUL byte). Returns lines as \
+         `path:line:text`. Capped at 1000 matches by default."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -100,7 +101,9 @@ impl Tool for GrepTool {
                 continue;
             }
             let path = entry.path().to_path_buf();
-            let mut searcher = Searcher::new();
+            let mut searcher = SearcherBuilder::new()
+                .binary_detection(BinaryDetection::quit(b'\x00'))
+                .build();
             let mut sink = MatchSink {
                 matcher: &matcher,
                 hits: &mut hits,
@@ -309,6 +312,24 @@ mod tests {
         fs::write(dir.path().join(".kageignore"), "b.txt\n").unwrap();
         let out = run(dir.path(), serde_json::json!({"pattern":"shadow"})).unwrap();
         assert_eq!(out.text, "(no matches)");
+    }
+
+    #[test]
+    fn a_file_quitting_at_a_nul_byte_is_not_searched() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("bin.dat"), b"x\0y\nneedle\n").unwrap();
+        let out = run(dir.path(), serde_json::json!({"pattern":"needle"})).unwrap();
+        assert_eq!(out.text, "(no matches)");
+    }
+
+    #[test]
+    fn dotfiles_are_not_searched() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env"), "needle\n").unwrap();
+        fs::write(dir.path().join("a.txt"), "needle\n").unwrap();
+        let out = run(dir.path(), serde_json::json!({"pattern":"needle"})).unwrap();
+        assert!(out.text.contains("a.txt:1:needle"), "{}", out.text);
+        assert!(!out.text.contains(".env"), "{}", out.text);
     }
 
     #[test]

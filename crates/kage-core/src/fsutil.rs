@@ -46,6 +46,10 @@ pub fn atomic_write(target: &Path, content: &[u8]) -> io::Result<()> {
 /// written, so the secret is never readable by other users, and the
 /// target ends up `0600` whatever its previous mode was.
 ///
+/// On Windows `private` has no effect yet: the file inherits the parent
+/// directory's default ACL instead of a DACL restricted to the current
+/// user, SYSTEM, and Administrators.
+///
 /// # Errors
 ///
 /// Same as [`atomic_write`].

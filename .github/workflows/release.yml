@@ -52,7 +52,10 @@ jobs:
 
       - name: Install cross
         if: matrix.cross
-        run: cargo install cross --locked --git https://github.com/cross-rs/cross
+        # Pinned to a tagged release so the musl binaries stay
+        # reproducible across runs; bump the version deliberately
+        # instead of floating on the cross git HEAD.
+        run: cargo install cross --locked --version 0.2.5
 
       - name: Build
         shell: bash
@@ -78,6 +81,32 @@ jobs:
           else
             tar -cJf "$file" "$artifact"
           fi
+
+      # Fails when a file did not make it into the archive; the binary,
+      # license, readme and man page are what downloaders script against.
+      - name: Verify archives
+        shell: bash
+        run: |
+          artifact="kage-${{ matrix.name }}"
+          file="dist/$artifact.${{ matrix.ext }}"
+          bin="kage"
+          if [ "$RUNNER_OS" = "Windows" ]; then bin="kage.exe"; fi
+          if [ "${{ matrix.ext }}" = "zip" ]; then
+            listing="$(7z l -slt "$file" | sed -n 's/^Path = //p' | tr '\\' '/')"
+          else
+            listing="$(tar -tJf "$file")"
+          fi
+          echo "$listing"
+          for wanted in \
+            "$artifact/$bin" \
+            "$artifact/LICENSE" \
+            "$artifact/README.md" \
+            "$artifact/man/kage.1"; do
+            echo "$listing" | grep -qx "$wanted" || {
+              echo "$file is missing $wanted" >&2
+              exit 1
+            }
+          done
 
       - uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # 2.11.5
         with:

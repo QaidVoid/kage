@@ -166,6 +166,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn exec_runs_a_process_and_reports_exit_code() {
         let rt = rt_with_exec();
         let v = rt
@@ -180,7 +181,27 @@ mod tests {
         assert_eq!(v.as_boolean(), Some(true));
     }
 
+    /// Windows port of `exec_runs_a_process_and_reports_exit_code`:
+    /// `cmd /C exit N` replaces the `true`/`false` fixtures. Run on a
+    /// Windows CI leg.
     #[test]
+    #[cfg(windows)]
+    fn exec_runs_a_process_and_reports_exit_code_windows() {
+        let rt = rt_with_exec();
+        let v = rt
+            .eval_plugin(
+                "p",
+                "kage.request_capabilities({'exec'}); \
+                 local ok = kage.exec({ cmd = 'cmd', args = { '/C', 'exit', '0' } }); \
+                 local no = kage.exec({ cmd = 'cmd', args = { '/C', 'exit', '3' } }); \
+                 return ok.code == 0 and no.code ~= 0",
+            )
+            .unwrap();
+        assert_eq!(v.as_boolean(), Some(true));
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn exec_captures_stdout() {
         let rt = rt_with_exec();
         let v = rt
@@ -188,6 +209,22 @@ mod tests {
                 "p",
                 "kage.request_capabilities({'exec'}); \
                  local r = kage.exec({ cmd = 'echo', args = { 'hello' } }); \
+                 return r.code == 0 and r.stdout:find('hello') ~= nil",
+            )
+            .unwrap();
+        assert_eq!(v.as_boolean(), Some(true));
+    }
+
+    /// Windows port of `exec_captures_stdout`. Run on a Windows CI leg.
+    #[test]
+    #[cfg(windows)]
+    fn exec_captures_stdout_windows() {
+        let rt = rt_with_exec();
+        let v = rt
+            .eval_plugin(
+                "p",
+                "kage.request_capabilities({'exec'}); \
+                 local r = kage.exec({ cmd = 'cmd', args = { '/C', 'echo hello' } }); \
                  return r.code == 0 and r.stdout:find('hello') ~= nil",
             )
             .unwrap();
@@ -212,6 +249,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn exec_kills_a_runaway_process_at_the_deadline() {
         let rt = rt_with_exec();
         let start = std::time::Instant::now();
@@ -231,7 +269,34 @@ mod tests {
         );
     }
 
+    /// Windows port of `exec_kills_a_runaway_process_at_the_deadline`:
+    /// `ping -n 30` runs for about 30 seconds and needs no console, so
+    /// `timeout` cannot be used (it fails without a console). ping
+    /// prints replies, so unlike the Unix twin the `stdout` assert is
+    /// dropped. Run on a Windows CI leg.
     #[test]
+    #[cfg(windows)]
+    fn exec_kills_a_runaway_process_at_the_deadline_windows() {
+        let rt = rt_with_exec();
+        let start = std::time::Instant::now();
+        let v = rt
+            .eval_plugin(
+                "p",
+                "kage.request_capabilities({'exec'}); \
+                 local r = kage.exec({ cmd = 'ping', args = { '-n', '30', '127.0.0.1' }, timeout_secs = 1 }); \
+                 return r.timed_out and r.code ~= 0",
+            )
+            .unwrap();
+        assert_eq!(v.as_boolean(), Some(true), "timed_out must be set");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(8),
+            "deadline must kill the child promptly, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn exec_reports_no_timeout_for_a_fast_exit() {
         let rt = rt_with_exec();
         let v = rt
@@ -244,7 +309,24 @@ mod tests {
         assert_eq!(v.as_boolean(), Some(true));
     }
 
+    /// Windows port of `exec_reports_no_timeout_for_a_fast_exit`. Run
+    /// on a Windows CI leg.
     #[test]
+    #[cfg(windows)]
+    fn exec_reports_no_timeout_for_a_fast_exit_windows() {
+        let rt = rt_with_exec();
+        let v = rt
+            .eval_plugin(
+                "p",
+                "kage.request_capabilities({'exec'}); \
+                 return kage.exec({ cmd = 'cmd', args = { '/C', 'exit', '0' } }).timed_out == false",
+            )
+            .unwrap();
+        assert_eq!(v.as_boolean(), Some(true));
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn exec_truncates_output_past_the_cap_and_sets_the_flag() {
         let rt = rt_with_exec();
         let v = rt
@@ -252,6 +334,33 @@ mod tests {
                 "p",
                 "kage.request_capabilities({'exec'}); \
                  local r = kage.exec({ cmd = 'head', args = { '-c', '2097152', '/dev/zero' } }); \
+                 return r.truncated and r.stdout:len() == 1048576 and r.stderr:len() == 0",
+            )
+            .unwrap();
+        assert_eq!(v.as_boolean(), Some(true));
+    }
+
+    /// Windows port of
+    /// `exec_truncates_output_past_the_cap_and_sets_the_flag`: no
+    /// `/dev/zero`, so a 3 MB file is typed through `cmd` from a
+    /// workdir the test controls. Run on a Windows CI leg.
+    #[test]
+    #[cfg(windows)]
+    fn exec_truncates_output_past_the_cap_and_sets_the_flag_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("big.txt"), "x".repeat(3_000_000)).unwrap();
+        let mut caps = std::collections::BTreeMap::new();
+        caps.insert("p".to_owned(), vec!["exec".to_owned()]);
+        let rt = PluginRuntime::builder()
+            .capabilities(caps)
+            .workdir(dir.path().to_path_buf())
+            .build()
+            .unwrap();
+        let v = rt
+            .eval_plugin(
+                "p",
+                "kage.request_capabilities({'exec'}); \
+                 local r = kage.exec({ cmd = 'cmd', args = { '/C', 'type', 'big.txt' } }); \
                  return r.truncated and r.stdout:len() == 1048576 and r.stderr:len() == 0",
             )
             .unwrap();

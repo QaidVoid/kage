@@ -20,7 +20,8 @@ struct LsInput {
     /// Optional subdirectory under workdir. Defaults to workdir.
     #[serde(default, alias = "filePath", deserialize_with = "super::optional_path")]
     path: Option<String>,
-    /// Recurse into subdirectories. Honors `.gitignore` and `.kageignore`.
+    /// Recurse into subdirectories. Both modes honor `.gitignore` and
+    /// `.kageignore` and skip dotfiles.
     #[serde(default)]
     recursive: bool,
 }
@@ -35,10 +36,10 @@ impl Tool for LsTool {
     }
 
     fn description(&self) -> &'static str {
-        "List directory contents. With `recursive: true`, walks subdirectories \
-         honoring `.gitignore` and `.kageignore`. Entries are prefixed with \
-         `f` (file), `d` (directory), or `l` (symlink). Output is capped at \
-         5000 entries."
+        "List directory contents. With `recursive: true`, walks subdirectories. \
+         Both modes honor `.gitignore` and `.kageignore` and skip dotfiles. \
+         Entries are prefixed with `f` (file), `d` (directory), or `l` (symlink). \
+         Output is capped at 5000 entries."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -63,40 +64,25 @@ impl Tool for LsTool {
 
         let mut entries: Vec<String> = Vec::new();
         let mut truncated = false;
-        if input.recursive {
-            let walker = WalkBuilder::new(&target)
-                .add_custom_ignore_filename(".kageignore")
-                .build();
-            for entry in walker {
-                if cx.is_cancelled() {
-                    return Err(ToolError::Cancelled);
-                }
-                let Ok(entry) = entry else { continue };
-                let rel = entry.path().strip_prefix(&target).unwrap_or(entry.path());
-                if rel.as_os_str().is_empty() {
-                    continue;
-                }
-                let prefix = entry_prefix(entry.file_type());
-                entries.push(format!("{prefix} {}", kage_core::fsutil::slashed(rel)));
-                if entries.len() > MAX_ENTRIES {
-                    truncated = true;
-                    break;
-                }
+        let mut walker = WalkBuilder::new(&target);
+        walker.add_custom_ignore_filename(".kageignore");
+        if !input.recursive {
+            walker.max_depth(Some(1));
+        }
+        for entry in walker.build() {
+            if cx.is_cancelled() {
+                return Err(ToolError::Cancelled);
             }
-        } else {
-            for entry in std::fs::read_dir(&target).map_err(ToolError::io_at("list", &target))? {
-                if cx.is_cancelled() {
-                    return Err(ToolError::Cancelled);
-                }
-                let Ok(entry) = entry else { continue };
-                let file_type = entry.file_type().ok();
-                let prefix = entry_prefix(file_type);
-                let name = entry.file_name();
-                entries.push(format!("{prefix} {}", name.to_string_lossy()));
-                if entries.len() > MAX_ENTRIES {
-                    truncated = true;
-                    break;
-                }
+            let Ok(entry) = entry else { continue };
+            if entry.depth() == 0 {
+                continue;
+            }
+            let rel = entry.path().strip_prefix(&target).unwrap_or(entry.path());
+            let prefix = entry_prefix(entry.file_type());
+            entries.push(format!("{prefix} {}", kage_core::fsutil::slashed(rel)));
+            if entries.len() > MAX_ENTRIES {
+                truncated = true;
+                break;
             }
         }
         if truncated {
@@ -212,6 +198,51 @@ mod tests {
         let out = run(dir.path(), serde_json::json!({"recursive":true})).unwrap();
         assert!(out.text.contains("a.txt"));
         assert!(!out.text.contains("b.txt"));
+    }
+
+    #[test]
+    fn non_recursive_honors_kageignore() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "x").unwrap();
+        fs::write(dir.path().join("b.txt"), "x").unwrap();
+        fs::write(dir.path().join(".kageignore"), "b.txt\n").unwrap();
+        let out = run(dir.path(), serde_json::json!({"recursive":false})).unwrap();
+        assert!(out.text.contains("a.txt"), "{}", out.text);
+        assert!(!out.text.contains("b.txt"), "{}", out.text);
+    }
+
+    #[test]
+    fn non_recursive_lists_each_direct_child_once() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "x").unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/inner.txt"), "x").unwrap();
+        let out = run(dir.path(), serde_json::json!({"recursive":false})).unwrap();
+        assert!(out.text.contains("f a.txt"), "{}", out.text);
+        assert!(out.text.contains("d sub"), "{}", out.text);
+        assert!(!out.text.contains("inner.txt"), "{}", out.text);
+        assert_eq!(out.structured.unwrap()["count"], 2);
+    }
+
+    #[test]
+    fn a_directory_empty_after_filtering_is_the_empty_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("gone.txt"), "x").unwrap();
+        fs::write(dir.path().join(".kageignore"), "gone.txt\n").unwrap();
+        let out = run(dir.path(), serde_json::json!({"recursive":false})).unwrap();
+        assert_eq!(out.text, "(empty)");
+    }
+
+    #[test]
+    fn both_modes_skip_dotfiles() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
+        fs::write(dir.path().join("a.txt"), "x").unwrap();
+        for recursive in [false, true] {
+            let out = run(dir.path(), serde_json::json!({"recursive":recursive})).unwrap();
+            assert!(out.text.contains("a.txt"), "{}", out.text);
+            assert!(!out.text.contains(".env"), "{}", out.text);
+        }
     }
 
     #[test]

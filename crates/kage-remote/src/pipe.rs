@@ -299,6 +299,12 @@ fn read_loop(
         match received {
             Ok(Message::Text(text)) => {
                 last_inbound.store(millis_since(epoch), Ordering::Release);
+                if text.contains('\n') {
+                    eprintln!(
+                        "kage-remote: frame carried a raw newline; replaced so the frame stays \
+                         one message"
+                    );
+                }
                 let mut line = text.as_str().replace('\n', " ");
                 line.push('\n');
                 if pipe.write_all(line.as_bytes()).is_err() {
@@ -404,10 +410,14 @@ fn drain(ws: &mut WebSocket<WriterWire>, rx: &Receiver<Vec<u8>>, bytes: &Mutex<u
     }
 }
 
+/// Sends every queued line as one text frame. A message that is not
+/// UTF-8 is corrupt JSON from the local agent: the connection is torn
+/// down (false) so the breakage surfaces locally instead of reaching
+/// the remote client as mangled text.
 fn send_frame(ws: &mut WebSocket<WriterWire>, message: Vec<u8>) -> bool {
-    let text = match String::from_utf8(message) {
-        Ok(text) => text,
-        Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+    let Ok(text) = String::from_utf8(message) else {
+        eprintln!("kage-remote: dropped a non-UTF8 message; closing the connection");
+        return false;
     };
     ws.send(Message::text(text)).is_ok()
 }
@@ -422,4 +432,133 @@ fn release(bytes: &Mutex<u64>, len: usize) {
 
 fn millis_since(epoch: Instant) -> u64 {
     u64::try_from(epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::BufRead as _;
+    use std::net::TcpListener;
+
+    use super::*;
+
+    /// One loopback socket pair.
+    fn socket_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
+
+    /// The writer half of [`upgrade`]'s plumbing, driven through a
+    /// channel so a test controls what goes into the queue.
+    struct WriterHarness {
+        queue: Sender<Vec<u8>>,
+        _blobs: Sender<Vec<u8>>,
+        thread: thread::JoinHandle<()>,
+        sock: Arc<TcpStream>,
+    }
+
+    /// Starts [`write_loop`] against one end of a socket pair and
+    /// hands back the harness and the client end.
+    fn start_writer() -> (WriterHarness, TcpStream) {
+        let (client, server) = socket_pair();
+        let (queue, rx) = bounded(4);
+        let (blobs, blob_rx) = bounded::<Vec<u8>>(8);
+        let bytes = Arc::new(Mutex::new(0));
+        let last_inbound = Arc::new(AtomicU64::new(0));
+        let sock = Arc::new(server);
+        let loop_sock = Arc::clone(&sock);
+        let wire_sock = Arc::clone(&sock);
+        let thread = thread::spawn(move || {
+            let ws = WebSocket::from_raw_socket(
+                WriterWire { sock: wire_sock },
+                Role::Server,
+                Some(config()),
+            );
+            write_loop(
+                ws,
+                &blob_rx,
+                &rx,
+                &bytes,
+                &loop_sock,
+                Instant::now(),
+                &last_inbound,
+            );
+        });
+        (
+            WriterHarness {
+                queue,
+                _blobs: blobs,
+                thread,
+                sock,
+            },
+            client,
+        )
+    }
+
+    #[test]
+    fn a_non_utf8_message_tears_the_connection_down_without_a_frame() {
+        let (writer, mut client) = start_writer();
+        writer.queue.send(vec![0xff, 0xfe, 0x00]).unwrap();
+        writer.thread.join().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut rest = Vec::new();
+        let read = client.read_to_end(&mut rest).unwrap();
+        assert_eq!(read, 0, "no frame may reach the peer: {rest:?}");
+    }
+
+    #[test]
+    fn a_utf8_message_reaches_the_peer_as_one_text_frame() {
+        let (writer, client) = start_writer();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        writer.queue.send(b"{\"ok\":true}".to_vec()).unwrap();
+        let mut peer = WebSocket::from_raw_socket(client, Role::Client, None);
+        loop {
+            match peer.read().unwrap() {
+                Message::Text(text) => {
+                    assert_eq!(text.as_str(), "{\"ok\":true}");
+                    break;
+                }
+                Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
+                other => panic!("expected a text frame, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_frame_with_a_raw_newline_still_arrives_as_one_line() {
+        let (client, server) = socket_pair();
+        server.set_read_timeout(Some(READER_TICK)).unwrap();
+        let (blobs, blob_rx) = bounded::<Vec<u8>>(8);
+        let (pipe_read, pipe_write) = io::pipe().unwrap();
+        let sock = Arc::new(server);
+        let epoch = Instant::now();
+        let last_inbound = Arc::new(AtomicU64::new(0));
+        let reader_sock = Arc::clone(&sock);
+        let wire_sock = Arc::clone(&sock);
+        let reader = thread::spawn(move || {
+            let mut ws = WebSocket::from_raw_socket(
+                ReaderWire {
+                    sock: wire_sock,
+                    blobs,
+                },
+                Role::Server,
+                Some(config()),
+            );
+            read_loop(&mut ws, pipe_write, &reader_sock, epoch, &last_inbound);
+        });
+        let mut peer = WebSocket::from_raw_socket(client, Role::Client, None);
+        peer.send(Message::text("line one\nline two")).unwrap();
+        let mut line = String::new();
+        BufReader::new(pipe_read).read_line(&mut line).unwrap();
+        assert_eq!(line, "line one line two\n");
+        let _ = peer.close(None);
+        reader.join().unwrap();
+        drop(blob_rx);
+    }
 }

@@ -70,7 +70,8 @@ pub enum TemplateError {
     },
 }
 
-/// Walk a `templates/` directory and load every `*.md` file in it.
+/// Walk a `templates/` directory and load every markdown file in it.
+/// The extension matches case-insensitively, so `Review.MD` loads too.
 #[must_use]
 pub fn load_templates_dir(dir: &Path) -> Vec<Result<Template, TemplateError>> {
     let Ok(entries) = fs::read_dir(dir) else {
@@ -79,7 +80,11 @@ pub fn load_templates_dir(dir: &Path) -> Vec<Result<Template, TemplateError>> {
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+        if !path
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+        {
             continue;
         }
         if !path.is_file() {
@@ -297,9 +302,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("review.md"), "---\n---\nbody\n").unwrap();
         std::fs::write(dir.path().join("notes.txt"), "ignored").unwrap();
+        std::fs::write(dir.path().join("review.mdown"), "ignored").unwrap();
         let results = load_templates_dir(dir.path());
         assert_eq!(results.len(), 1);
         assert!(results.into_iter().next().unwrap().is_ok());
+    }
+
+    #[test]
+    fn loads_templates_dir_matches_the_extension_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("review.MD"),
+            "---\ndescription: caps\n---\nbody\n",
+        )
+        .unwrap();
+        let mut results = load_templates_dir(dir.path());
+        assert_eq!(results.len(), 1);
+        let tpl = results.pop().unwrap().unwrap();
+        assert_eq!(tpl.name, "review");
+        assert_eq!(tpl.description, "caps");
     }
 
     #[test]

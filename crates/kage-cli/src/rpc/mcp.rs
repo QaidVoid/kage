@@ -20,6 +20,7 @@ pub(super) fn editor_servers(servers: &[McpServer]) -> Result<BTreeMap<String, M
             McpServer::Stdio(stdio) => Ok((
                 stdio.name.clone(),
                 McpSpec {
+                    startup_timeout_secs: None,
                     command: Some(stdio.command.clone()),
                     args: stdio.args.clone(),
                     env: stdio
@@ -37,6 +38,7 @@ pub(super) fn editor_servers(servers: &[McpServer]) -> Result<BTreeMap<String, M
             McpServer::Http(http) => Ok((
                 http.name.clone(),
                 McpSpec {
+                    startup_timeout_secs: None,
                     command: None,
                     args: Vec::new(),
                     env: BTreeMap::new(),

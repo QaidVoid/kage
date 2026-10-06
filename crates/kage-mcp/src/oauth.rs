@@ -1632,6 +1632,7 @@ mod tests {
         let tokens = exchange(&discovery, &client, &redirect, &code, &pkce).unwrap();
 
         let cfg = kage_core::config::McpServer {
+            startup_timeout_secs: None,
             command: None,
             args: Vec::new(),
             env: BTreeMap::new(),

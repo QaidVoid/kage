@@ -186,9 +186,7 @@ impl AgentReport {
         let mut report = Self::header(header)?;
         let body = rest.strip_suffix("</agent>")?;
         let body = body.strip_suffix('\n').unwrap_or(body);
-        report.body = body
-            .replace("<\\/agent", "</agent")
-            .replace("\\\\", "\\");
+        report.body = body.replace("<\\/agent", "</agent").replace("\\\\", "\\");
         Some(report)
     }
 

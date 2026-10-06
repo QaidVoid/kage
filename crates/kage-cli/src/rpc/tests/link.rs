@@ -357,12 +357,7 @@ fn a_link_detaching_answers_an_open_question_with_no_answers() {
     let (_ask, _) = until_ask(&h.inbox, &mut Vec::new());
 
     let mut link = LinkClient::attach(&h.host, h.id).unwrap();
-    link.until(|envelope| {
-        matches!(
-            host_event(envelope),
-            Some(HostEvent::QuestionAsked { .. })
-        )
-    });
+    link.until(|envelope| matches!(host_event(envelope), Some(HostEvent::QuestionAsked { .. })));
     let Harness {
         client,
         inbox,

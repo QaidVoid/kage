@@ -2,9 +2,12 @@
 //! resources of live MCP servers.
 //!
 //! [`crate::McpManager`] registers it while at least one live server
-//! advertises resources and unregisters it otherwise. Listing answers
-//! from the manager's cached catalog without a request. Reading goes
-//! through `resources/read` and caps text like a mention does
+//! advertises resources and unregisters it otherwise. Its descriptor
+//! is static, so re-registering it as servers come and go never
+//! changes the tools payload a provider has cached. Listing answers
+//! from the manager's cached catalog without a request; a call
+//! without `server` names the servers that have resources. Reading
+//! goes through `resources/read` and caps text like a mention does
 //! ([`crate::expand::MAX_RESOURCE_TEXT`] per part and
 //! [`crate::expand::MAX_PROMPT_TEXT`] per call). Errors read like a
 //! mention's, and a URI with a template placeholder is refused.
@@ -27,6 +30,13 @@ use crate::server::McpConnection;
 /// Name the model invokes.
 pub const RESOURCE_TOOL: &str = "mcp_resource";
 
+/// The tool description, identical across every server set so the
+/// tools payload a provider sees never changes mid-conversation.
+const DESCRIPTION: &str = "List or read MCP resources; omit `server` to list \
+     the servers that have resources. Pass only `server` to list its \
+     resources and resource templates. Pass `server` and `uri` to read \
+     one resource.";
+
 /// One live server that advertises resources, with its cached lists.
 pub(crate) struct ResourceServer {
     pub(crate) name: String,
@@ -39,7 +49,6 @@ pub(crate) struct ResourceServer {
 /// resource by URI.
 pub struct McpResourceTool {
     servers: Vec<ResourceServer>,
-    description: String,
 }
 
 impl std::fmt::Debug for McpResourceTool {
@@ -52,25 +61,20 @@ impl std::fmt::Debug for McpResourceTool {
 }
 
 impl McpResourceTool {
-    /// Build the tool over `servers`. The description names them sorted,
-    /// so it changes only when the set of servers does.
+    /// Build the tool over `servers`. The description is static, so
+    /// the server names never reach the provider's tools payload.
     pub(crate) fn new(mut servers: Vec<ResourceServer>) -> Self {
         servers.sort_by(|a, b| a.name.cmp(&b.name));
-        let names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
-        let description = format!(
-            "List or read the resources of MCP servers. Servers with resources: {}. \
-             Pass only `server` to list its resources and resource templates. \
-             Pass `server` and `uri` to read one resource.",
-            names.join(", ")
-        );
-        Self {
-            servers,
-            description,
-        }
+        Self { servers }
     }
 
     fn server(&self, name: &str) -> Option<&ResourceServer> {
         self.servers.iter().find(|s| s.name == name)
+    }
+
+    /// The names of the servers with resources, sorted.
+    fn server_names(&self) -> Vec<&str> {
+        self.servers.iter().map(|s| s.name.as_str()).collect()
     }
 }
 
@@ -80,7 +84,7 @@ impl Tool for McpResourceTool {
     }
 
     fn description(&self) -> &str {
-        &self.description
+        DESCRIPTION
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -96,7 +100,6 @@ impl Tool for McpResourceTool {
                     "description": "URI of the resource to read. Omit it to list the server's resources.",
                 },
             },
-            "required": ["server"],
             "additionalProperties": false,
         })
     }
@@ -111,8 +114,15 @@ impl Tool for McpResourceTool {
         _cx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
         let field = |key: &str| input.get(key).and_then(serde_json::Value::as_str);
-        let name = field("server")
-            .ok_or_else(|| ToolError::InvalidInput("`server` must be a string".to_owned()))?;
+        let Some(name) = field("server") else {
+            let known = self.server_names();
+            let text = if known.is_empty() {
+                "no MCP server has resources".to_owned()
+            } else {
+                format!("MCP servers with resources: {}", known.join(", "))
+            };
+            return Ok(output(false, text));
+        };
         let Some(server) = self.server(name) else {
             let known: Vec<&str> = self.servers.iter().map(|s| s.name.as_str()).collect();
             return Ok(output(
@@ -353,25 +363,30 @@ mod tests {
         assert!(out.is_error);
         assert_eq!(out.text, "no MCP server `nope` with resources. Known: srv");
         assert!(seen.lock().unwrap().is_empty());
-
-        let cancel = CancelFlag::default();
-        let cx = ToolContext::new(std::path::Path::new("."), &cancel);
-        let err = tool.execute(json!({ "uri": "test://a" }), &cx).unwrap_err();
-        assert!(matches!(err, ToolError::InvalidInput(_)), "{err}");
     }
 
     #[test]
-    fn the_description_names_the_sorted_servers_only() {
+    fn a_call_without_a_server_lists_the_servers() {
+        let (b, _) = server("b", vec![resource("test://1", "one")]);
+        let (a, _) = server("a", Vec::new());
+        let tool = McpResourceTool::new(vec![b, a]);
+        let out = run(&tool, json!({}));
+        assert!(!out.is_error);
+        assert_eq!(out.text, "MCP servers with resources: a, b");
+
+        let (empty, _) = server("only", Vec::new());
+        let tool = McpResourceTool::new(vec![empty]);
+        assert_eq!(
+            run(&tool, json!({ "uri": "test://a" })).text,
+            "MCP servers with resources: only"
+        );
+    }
+
+    #[test]
+    fn the_description_is_static_across_server_sets() {
         let (b, _) = server("b", vec![resource("test://1", "one")]);
         let (a, _) = server("a", Vec::new());
         let first = McpResourceTool::new(vec![b, a]);
-        assert!(
-            first
-                .description()
-                .contains("Servers with resources: a, b."),
-            "{}",
-            first.description()
-        );
         assert_eq!(first.risk(), Risk::Read);
         assert_eq!(first.name(), "mcp_resource");
 
@@ -382,6 +397,26 @@ mod tests {
 
         let (a, _) = server("a", Vec::new());
         let fewer = McpResourceTool::new(vec![a]);
-        assert_ne!(fewer.description(), first.description());
+        assert_eq!(fewer.description(), first.description());
+
+        let (p, _) = server("perl", Vec::new());
+        let (q, _) = server("quartz", Vec::new());
+        let other_names = McpResourceTool::new(vec![p, q]);
+        assert_eq!(
+            other_names.description(),
+            first.description(),
+            "server names must stay out of the description"
+        );
+    }
+
+    #[test]
+    fn the_schema_makes_no_argument_required() {
+        let (srv, _) = server("srv", Vec::new());
+        let tool = McpResourceTool::new(vec![srv]);
+        assert!(
+            tool.schema().get("required").is_none(),
+            "{:?}",
+            tool.schema()
+        );
     }
 }

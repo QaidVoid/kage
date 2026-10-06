@@ -35,8 +35,8 @@ use crate::oauth::TokenSource;
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// How long the `initialize` handshake waits before giving up on a
-/// silent server.
-const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
+/// silent server when the config sets no deadline.
+pub(crate) const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long a client-issued request (e.g. `tools/list`) waits before
 /// giving up on a silent server. Long-running `tools/call` is exempt:
@@ -641,7 +641,6 @@ impl McpServerHandle {
     ) -> Result<Self, McpError> {
         Self::spawn_with(name, cfg, roots, handler, None)
     }
-
     /// [`Self::spawn`] with a bearer token source for an HTTP server.
     /// The transport asks `tokens` only when `cfg` has no
     /// `authorization` header of its own. A stdio server ignores it.
@@ -657,10 +656,33 @@ impl McpServerHandle {
         handler: Option<Arc<dyn ServerRequestHandler>>,
         tokens: Option<Arc<dyn TokenSource>>,
     ) -> Result<Self, McpError> {
+        Self::spawn_with_startup_timeout(name, cfg, roots, handler, tokens, INITIALIZE_TIMEOUT)
+    }
+
+    /// [`Self::spawn_with`] with an explicit startup deadline for the
+    /// `initialize` handshake, for a server whose cold start (a first
+    /// `npx` download, say) outlasts the default. The 15 s per-request
+    /// deadline is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::spawn_with`], plus the handshake timeout error.
+    pub fn spawn_with_startup_timeout(
+        name: impl Into<String>,
+        cfg: &McpServer,
+        roots: &[std::path::PathBuf],
+        handler: Option<Arc<dyn ServerRequestHandler>>,
+        tokens: Option<Arc<dyn TokenSource>>,
+        startup_timeout: Duration,
+    ) -> Result<Self, McpError> {
         let name = name.into();
         match (cfg.command.as_deref(), cfg.url.as_deref()) {
-            (Some(command), None) => Self::spawn_stdio(name, command, cfg, roots, handler),
-            (None, Some(url)) => Self::connect_http(name, url, cfg, roots, handler, tokens),
+            (Some(command), None) => {
+                Self::spawn_stdio(name, command, cfg, roots, handler, startup_timeout)
+            }
+            (None, Some(url)) => {
+                Self::connect_http(name, url, cfg, roots, handler, tokens, startup_timeout)
+            }
             (Some(_), Some(_)) => Err(McpError::Config {
                 server: name,
                 detail: "set exactly one of `command` (stdio) or `url` (http), not both".to_owned(),
@@ -673,12 +695,14 @@ impl McpServerHandle {
     }
 
     /// Spawn a stdio child and run the handshake over its pipes.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_stdio(
         name: String,
         command: &str,
         cfg: &McpServer,
         roots: &[std::path::PathBuf],
         handler: Option<Arc<dyn ServerRequestHandler>>,
+        startup_timeout: Duration,
     ) -> Result<Self, McpError> {
         let mut process = Command::new(command);
         process
@@ -712,8 +736,13 @@ impl McpServerHandle {
         let stderr = child.stderr.take().map(StderrTail::capture);
         let (peer, inbound, _reader) =
             connect_with(BufReader::new(stdout), stdin, Some(cancel_notice()));
-        let conn = Arc::new(McpConnection::initialize(
-            name, peer, inbound, roots, handler,
+        let conn = Arc::new(McpConnection::initialize_with_timeout(
+            name,
+            peer,
+            inbound,
+            roots,
+            handler,
+            startup_timeout,
         )?);
         Ok(Self {
             conn,
@@ -731,14 +760,20 @@ impl McpServerHandle {
         roots: &[std::path::PathBuf],
         handler: Option<Arc<dyn ServerRequestHandler>>,
         tokens: Option<Arc<dyn TokenSource>>,
+        startup_timeout: Duration,
     ) -> Result<Self, McpError> {
         let (peer, inbound, _reader) = crate::http::connect_http(url, &cfg.headers, tokens)
             .map_err(|detail| McpError::Http {
                 server: name.clone(),
                 detail,
             })?;
-        let conn = Arc::new(McpConnection::initialize(
-            name, peer, inbound, roots, handler,
+        let conn = Arc::new(McpConnection::initialize_with_timeout(
+            name,
+            peer,
+            inbound,
+            roots,
+            handler,
+            startup_timeout,
         )?);
         Ok(Self {
             conn,
@@ -942,6 +977,7 @@ mod tests {
 
     fn empty_server() -> McpServer {
         McpServer {
+            startup_timeout_secs: None,
             command: None,
             args: vec![],
             env: std::collections::BTreeMap::new(),
@@ -964,6 +1000,7 @@ mod tests {
     #[test]
     fn spawn_rejects_both_transports() {
         let cfg = McpServer {
+            startup_timeout_secs: None,
             command: Some("npx".to_owned()),
             url: Some("https://example.com/sse".to_owned()),
             ..empty_server()
@@ -972,6 +1009,36 @@ mod tests {
             .err()
             .expect("both transports must error");
         assert!(matches!(err, McpError::Config { .. }), "got {err:?}");
+    }
+
+    /// A stdio server that never answers the handshake misses a short
+    /// startup deadline, and the failure says so.
+    #[cfg(unix)]
+    #[test]
+    fn a_silent_server_misses_a_short_startup_deadline() {
+        let cfg = McpServer {
+            startup_timeout_secs: None,
+            command: Some("sleep".to_owned()),
+            args: vec!["30".to_owned()],
+            ..empty_server()
+        };
+        let start = std::time::Instant::now();
+        let err = McpServerHandle::spawn_with_startup_timeout(
+            "silent",
+            &cfg,
+            &[],
+            None,
+            None,
+            Duration::from_secs(1),
+        )
+        .err()
+        .expect("a silent server must fail the handshake");
+        assert!(err.to_string().contains("timed out"), "got {err}");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the deadline must bound the startup, took {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

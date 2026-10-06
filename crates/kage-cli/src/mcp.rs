@@ -351,6 +351,7 @@ mod tests {
 
     fn stdio(command: &str) -> kage_core::config::McpServer {
         kage_core::config::McpServer {
+            startup_timeout_secs: None,
             command: Some(command.to_owned()),
             args: Vec::new(),
             env: std::collections::BTreeMap::new(),

@@ -6,10 +6,11 @@
 //! before returning, so a successful return implies the entry has reached
 //! disk.
 //!
-//! Writers hold an advisory exclusive lock (`flock`) on the file for their
-//! lifetime, so a second appender (say, a `kage -r` in another terminal)
-//! fails instead of interleaving two JSONL streams into one file. On
-//! filesystems where `flock` is unsupported the lock is skipped.
+//! Writers hold an advisory exclusive lock on the file for their
+//! lifetime (`flock` on Unix, `LockFileEx` on Windows), so a second
+//! appender (say, a `kage -r` in another terminal) fails instead of
+//! interleaving two JSONL streams into one file. On filesystems where
+//! the lock is unsupported it is skipped.
 //!
 //! Crash safety is "newline-only": entries are always terminated by a single
 //! `\n`. A process killed mid-append leaves a partial trailing line which
@@ -38,6 +39,14 @@ pub struct SessionWriter {
         reason = "held only so the lock lives as long as the writer"
     )]
     lock: Option<nix::fcntl::Flock<File>>,
+    /// The duplicated Windows handle the `LockFileEx` lock is held on;
+    /// the lock is released when the handle closes.
+    #[cfg(windows)]
+    #[expect(
+        dead_code,
+        reason = "held only so the lock lives as long as the writer"
+    )]
+    lock: Option<File>,
 }
 
 impl SessionWriter {
@@ -67,7 +76,7 @@ impl SessionWriter {
             path: path.clone(),
             source: err,
         })?;
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let lock = {
             let dup = file.try_clone().map_err(|err| SessionError::Io {
                 path: path.clone(),
@@ -78,7 +87,7 @@ impl SessionWriter {
         let mut writer = Self {
             path,
             inner: BufWriter::new(file),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             lock,
         };
         writer.append(&SessionEntry::Header(header))?;
@@ -115,7 +124,7 @@ impl SessionWriter {
                 source: err,
             })?;
         check_version(&file, &path)?;
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let lock = {
             let dup = file.try_clone().map_err(|err| SessionError::Io {
                 path: path.clone(),
@@ -127,7 +136,7 @@ impl SessionWriter {
         Ok(Self {
             path,
             inner: BufWriter::new(file),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             lock,
         })
     }
@@ -270,7 +279,7 @@ fn repair_torn_tail(file: &mut File, path: &Path) -> Result<(), SessionError> {
 /// Whether another writer holds the advisory lock on the session file
 /// at `path`, such as a TUI or `kage serve` hosting the session. The
 /// probe lock is released before returning. `false` when the file is
-/// missing or the filesystem does not support `flock`.
+/// missing or the filesystem does not support the lock.
 #[must_use]
 pub fn is_locked(path: &Path) -> bool {
     #[cfg(unix)]
@@ -284,7 +293,22 @@ pub fn is_locked(path: &Path) -> bool {
             Err((_, nix::errno::Errno::EWOULDBLOCK))
         )
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::fs::TryLockError;
+        let Ok(file) = File::open(path) else {
+            return false;
+        };
+        match file.try_lock() {
+            Ok(()) => {
+                let _ = file.unlock();
+                false
+            }
+            Err(TryLockError::WouldBlock) => true,
+            Err(TryLockError::Error(_)) => false,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
         false
@@ -306,6 +330,28 @@ fn acquire_lock(file: File, path: &Path) -> Result<Option<nix::fcntl::Flock<File
             path: path.to_path_buf(),
         }),
         Err((_, _)) => Ok(None),
+    }
+}
+
+/// Take an exclusive non-blocking advisory lock on the file with
+/// `LockFileEx` over the whole file, mirroring the Unix `flock` shape.
+///
+/// A held lock is reported as [`SessionError::Locked`]. Any other lock
+/// failure (filesystems without lock support) proceeds unlocked: the
+/// lock guards against a second kage process, not against the storage
+/// layer. Unlike `flock`, Windows byte-range locks belong to the whole
+/// process: closing any other handle to the file in this process
+/// releases them, so the lock is only meaningful against other
+/// processes.
+#[cfg(windows)]
+fn acquire_lock(file: File, path: &Path) -> Result<Option<File>, SessionError> {
+    use std::fs::TryLockError;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Err(SessionError::Locked {
+            path: path.to_path_buf(),
+        }),
+        Err(TryLockError::Error(_)) => Ok(None),
     }
 }
 
@@ -467,6 +513,90 @@ mod tests {
         drop(w);
         assert!(!is_locked(&path));
         let _w = SessionWriter::open(&path).unwrap();
+    }
+
+    /// Windows mirror of
+    /// `open_fails_while_another_writer_holds_the_lock`. Run on a
+    /// Windows CI leg.
+    #[cfg(windows)]
+    #[test]
+    fn open_fails_while_another_writer_holds_the_lock_windows() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        let w = SessionWriter::create(&path, fresh_header()).unwrap();
+        let err = SessionWriter::open(&path).unwrap_err();
+        assert!(matches!(err, SessionError::Locked { .. }));
+        drop(w);
+        SessionWriter::open(&path).unwrap();
+    }
+
+    /// Windows mirror of `is_locked_while_a_writer_holds_the_file`.
+    /// Unlike the Unix twin this does not re-probe while the writer
+    /// holds the lock: Windows releases a process's byte-range locks
+    /// when the process closes any handle to the file, so the first
+    /// probe's close can end the writer's lock. Run on a Windows CI
+    /// leg.
+    #[cfg(windows)]
+    #[test]
+    fn is_locked_while_a_writer_holds_the_file_windows() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        assert!(!is_locked(&path), "a missing file is not locked");
+        let w = SessionWriter::create(&path, fresh_header()).unwrap();
+        assert!(is_locked(&path));
+        drop(w);
+        assert!(!is_locked(&path));
+        let _w = SessionWriter::open(&path).unwrap();
+    }
+
+    /// The lock must be taken before the torn-tail repair: a second
+    /// opener that loses the lock must leave the tail alone. Run on a
+    /// Windows CI leg.
+    #[cfg(windows)]
+    #[test]
+    fn lock_is_taken_before_repair_on_windows() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        let header = serde_json::to_string(&SessionEntry::Header(fresh_header())).unwrap();
+        let kept = serde_json::to_string(&SessionEntry::Label(Label {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            text: "kept".into(),
+            anchor: EntryId::new(),
+        }))
+        .unwrap();
+        let torn = format!("{header}\n{kept}\n{{\"type\":\"label\",\"id\":\"01");
+        std::fs::write(&path, torn).unwrap();
+
+        // A foreign writer holding the lock, exactly as another kage
+        // process would.
+        let mut holder = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        holder.try_lock().unwrap();
+        let err = SessionWriter::open(&path).unwrap_err();
+        assert!(matches!(err, SessionError::Locked { .. }), "{err:?}");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .ends_with("\"id\":\"01"),
+            "the loser truncated while a writer held the lock"
+        );
+        drop(holder);
+
+        let mut w = SessionWriter::open(&path).unwrap();
+        w.append(&SessionEntry::Label(Label {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            text: "after".into(),
+            anchor: EntryId::new(),
+        }))
+        .unwrap();
+        drop(w);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("01{"), "torn fragment was not truncated");
     }
 
     #[test]

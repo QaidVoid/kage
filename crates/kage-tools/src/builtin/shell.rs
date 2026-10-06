@@ -131,8 +131,12 @@ fn shell_args(program: &str) -> &'static [&'static str] {
 }
 
 impl ShellTool {
-    /// Glob patterns (case-sensitive, matched against the whole name) of
-    /// environment variables to strip from the shell child's environment.
+    /// Glob patterns of environment variables to strip from the shell
+    /// child's environment, so a model-authored command cannot read
+    /// variables the user withheld. Patterns match the whole variable
+    /// name, case-sensitively on Unix and case-insensitively on
+    /// Windows, following each platform's env name rules. Invalid
+    /// patterns are skipped; config validation refuses them at startup.
     #[must_use]
     pub fn with_env_scrub(mut self, patterns: &[String]) -> Self {
         self.env_scrub = Arc::from(patterns);
@@ -217,9 +221,18 @@ fn scrub_env(cmd: &mut Command, patterns: &[String]) {
     if patterns.is_empty() {
         return;
     }
+    // Windows variable names are case-insensitive, so a configured
+    // `PATH` pattern must match the variable spelled `Path` there.
+    let case_insensitive = cfg!(windows);
     let matchers: Vec<_> = patterns
         .iter()
-        .filter_map(|p| globset::Glob::new(p).ok().map(|g| g.compile_matcher()))
+        .filter_map(|p| {
+            globset::GlobBuilder::new(p)
+                .case_insensitive(case_insensitive)
+                .build()
+                .ok()
+                .map(|g| g.compile_matcher())
+        })
         .collect();
     let parent: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os().collect();
     cmd.env_clear();
@@ -231,9 +244,10 @@ fn scrub_env(cmd: &mut Command, patterns: &[String]) {
     }
 }
 
-/// Run `command` with `shell` in `cwd`, in its own process group, and
-/// report the last lines of its output through `cx`'s progress sink while
-/// it runs. A cancel of `cx` or passing `timeout` kills the whole group.
+/// Run `command` with `shell` in `cwd`, in its own process group (a
+/// job object on Windows), and report the last lines of its output
+/// through `cx`'s progress sink while it runs. A cancel of `cx` or
+/// passing `timeout` kills the whole group.
 /// The child sees the environment minus the variables matched by
 /// `env_scrub`.
 ///
@@ -272,6 +286,7 @@ pub fn run(
         cmd.process_group(0);
     }
     let mut child = cmd.spawn()?;
+    let group = ProcessGroup::new(&child);
 
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
@@ -290,7 +305,7 @@ pub fn run(
             break s;
         }
         if start.elapsed() > timeout {
-            kill_process_group(&mut child);
+            group.kill(&mut child);
             let _ = child.wait();
             return Err(ToolError::Timeout {
                 name: "shell".into(),
@@ -307,7 +322,7 @@ pub fn run(
             }
         }
         if watch.receiver().recv_timeout(POLL_INTERVAL).is_ok() {
-            kill_process_group(&mut child);
+            group.kill(&mut child);
             let _ = child.wait();
             return Err(ToolError::Cancelled);
         }
@@ -317,7 +332,7 @@ pub fn run(
     // pipes; they would block the joins below on EOF forever. Once the
     // shell has exited, anything left in its process group is a
     // straggler: release the group before reading.
-    kill_process_group(&mut child);
+    group.kill(&mut child);
     let _ = child.wait();
     let (stdout, stdout_truncated) = stdout_handle.join().unwrap_or_default();
     let (stderr, stderr_truncated) = stderr_handle.join().unwrap_or_default();
@@ -392,20 +407,87 @@ fn cwd_display(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
-/// Kill the spawned shell and everything it left running. The child runs
-/// in its own process group (`pgid == pid`), so a group kill reaches
-/// grandchildren that inherited our pipes; killing only the shell can
-/// leave those alive, and the reader threads then block on EOF forever.
-fn kill_process_group(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
+/// Kill handle for the child's whole process tree. Killing only the
+/// shell can leave grandchildren that inherited our pipes alive, and
+/// the reader threads then block on EOF forever, so the kill must
+/// reach the tree. Unix: the child runs in its own process group
+/// (`pgid == pid`) and gets a group `SIGKILL`. Windows: the child is
+/// assigned to a kill-on-close job object, so releasing the job
+/// terminates the tree at once, including grandchildren that detached
+/// from the console.
+#[cfg(unix)]
+struct ProcessGroup;
+
+#[cfg(unix)]
+impl ProcessGroup {
+    fn new(child: &std::process::Child) -> Self {
+        let _ = child;
+        Self
+    }
+
+    fn kill(self, child: &mut std::process::Child) {
+        let _ = self;
         let pgid = nix::unistd::Pid::from_raw(child.id().cast_signed());
         if nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL).is_err() {
             let _ = child.kill();
         }
     }
-    #[cfg(not(unix))]
-    let _ = child.kill();
+}
+
+#[cfg(windows)]
+struct ProcessGroup {
+    /// The job holds the tree: dropping the kill-on-close job
+    /// terminates every process still in it, including a panic path
+    /// that never reaches `kill`.
+    job: Option<win32job::Job>,
+}
+
+#[cfg(windows)]
+impl ProcessGroup {
+    fn new(child: &std::process::Child) -> Self {
+        Self {
+            job: attach_job(child).ok(),
+        }
+    }
+
+    fn kill(self, child: &mut std::process::Child) {
+        drop(self.job);
+        let _ = child.kill();
+    }
+}
+
+/// No tracked group on other targets; only the shell can be killed.
+#[cfg(not(any(unix, windows)))]
+struct ProcessGroup;
+
+#[cfg(not(any(unix, windows)))]
+impl ProcessGroup {
+    fn new(child: &std::process::Child) -> Self {
+        let _ = child;
+        Self
+    }
+
+    fn kill(self, child: &mut std::process::Child) {
+        let _ = self;
+        let _ = child.kill();
+    }
+}
+
+/// Put `child` in a kill-on-close job object, so dropping the job
+/// terminates the whole process tree at once. kage itself may already
+/// sit in a job (a terminal or CI runner); nested jobs are supported
+/// on Windows 8+. Any failure leaves the caller with `job: None`,
+/// where a kill falls back to the shell process alone.
+#[cfg(windows)]
+fn attach_job(child: &std::process::Child) -> Result<win32job::Job, win32job::JobError> {
+    use std::os::windows::io::AsRawHandle;
+
+    let job = win32job::Job::create()?;
+    let mut info = job.query_extended_limit_info()?;
+    info.limit_kill_on_job_close();
+    job.set_extended_limit_info(&info)?;
+    job.assign_process(child.as_raw_handle() as _)?;
+    Ok(job)
 }
 
 /// Read `reader` to EOF, keeping at most [`MAX_STREAM_BYTES`] and feeding
@@ -562,6 +644,81 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 
+    /// Windows mirror of `timeout_reaps_pipe_holding_grandchildren`:
+    /// the nested pwsh sleeps with our pipes inherited, so the reader
+    /// threads only drain once the job object has terminated the whole
+    /// tree. Run on a Windows CI leg.
+    #[test]
+    #[cfg(windows)]
+    fn timeout_reaps_pipe_holding_grandchildren_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let err = run(
+            dir.path(),
+            serde_json::json!({"command":"pwsh -NoProfile -Command 'Start-Sleep -Seconds 30'","timeout_ms":150}),
+        )
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(matches!(err, ToolError::Timeout { .. }));
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "kill took {elapsed:?}; the job object was not released"
+        );
+    }
+
+    /// Windows mirror of `cancel_kills_the_process_group`. Run on a
+    /// Windows CI leg.
+    #[test]
+    #[cfg(windows)]
+    fn cancel_kills_the_process_group_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = CancelFlag::new();
+        let trip = cancel.clone();
+        let canceller = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            trip.cancel();
+        });
+        let started = Instant::now();
+        let cx = ToolContext::new(dir.path(), &cancel);
+        let err = super::run(
+            "pwsh -NoProfile -Command 'Start-Sleep -Seconds 30'",
+            dir.path(),
+            Duration::MAX,
+            &[],
+            DEFAULT_SHELL,
+            &cx,
+        )
+        .unwrap_err();
+        canceller.join().unwrap();
+        assert!(matches!(err, ToolError::Cancelled));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    /// Windows mirror of
+    /// `backgrounded_grandchild_does_not_block_success_path`, and the
+    /// one test that truly discriminates the job object: `Start-Process
+    /// -NoNewWindow` leaves a detached grandchild holding our pipe,
+    /// and the success path joins the readers, so a kill that misses
+    /// the tree blocks here for the full sleep. Run on a Windows CI
+    /// leg.
+    #[test]
+    #[cfg(windows)]
+    fn backgrounded_grandchild_does_not_block_success_path_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let out = run(
+            dir.path(),
+            serde_json::json!({"command":"Start-Process pwsh '-NoProfile','-Command','Start-Sleep -Seconds 30' -NoNewWindow; 'started'"}),
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        assert!(out.text.contains("started"));
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "blocked on orphaned pipe holder for {elapsed:?}"
+        );
+    }
+
     #[test]
     #[cfg(unix)]
     fn backgrounded_grandchild_does_not_block_success_path() {
@@ -622,7 +779,6 @@ mod tests {
         assert!(out.text.contains('x'));
     }
 
-    #[cfg(unix)]
     fn run_with(
         workdir: &Path,
         scrub: &[String],
@@ -673,6 +829,22 @@ mod tests {
         )
         .unwrap();
         assert!(out.text.contains("has-path"), "{}", out.text);
+    }
+
+    /// Windows env names are case-insensitive, so a configured `PATH`
+    /// must strip the variable whatever its spelling. Run on a Windows
+    /// CI leg.
+    #[test]
+    #[cfg(windows)]
+    fn scrub_matches_windows_env_names_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run_with(
+            dir.path(),
+            &["PATH".to_owned()],
+            serde_json::json!({"command": "if ($env:Path) { 'has-path' } else { 'stripped' }"}),
+        )
+        .unwrap();
+        assert!(out.text.contains("stripped"), "{}", out.text);
     }
 
     #[test]

@@ -3116,6 +3116,7 @@ fn config_get_names_headers_and_env_without_their_values() {
     config.mcp.servers.insert(
         "gh".into(),
         McpSpec {
+            startup_timeout_secs: None,
             command: None,
             args: Vec::new(),
             url: Some("https://mcp.example".into()),
@@ -5846,5 +5847,51 @@ fn an_interrupted_swarm_gets_its_members_back_from_their_files() {
         members
             .iter()
             .all(|m| m.tool_call_id.as_deref() == Some("call_sw"))
+    );
+}
+
+/// The state, usage and MCP caches feed link clients on unix: a state
+/// observed after the fresh attach survives in the attach replay.
+#[cfg(unix)]
+#[test]
+fn a_state_observed_after_a_fresh_attach_reaches_the_link_replay() {
+    use std::collections::HashSet;
+
+    use kage_core::protocol::{Envelope, Event, HostEvent, SessionState};
+    use kage_core::sync::lock;
+
+    let dir = tempfile::tempdir().unwrap();
+    let host = test_host(
+        Arc::new(Listed::of(MockProvider::sequence(Vec::new()))),
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+        false,
+    );
+    let id = SessionId::new();
+    lock(&host.live).attach(id, true);
+    let envelope = Envelope {
+        session: id,
+        seq: 0,
+        event: Event::Host(
+            HostEvent::StateChanged {
+                state: SessionState {
+                    working: true,
+                    ..SessionState::default()
+                },
+            }
+            .into(),
+        ),
+    };
+    lock(&host.live).observe(&envelope);
+    let replayed = lock(&host.live).envelopes(id, &HashSet::new());
+    assert!(
+        replayed
+            .iter()
+            .any(|e| matches!(&e.event, Event::Host(HostEvent::StateChanged { .. }))),
+        "the cached state must replay: {:?}",
+        replayed
+            .iter()
+            .map(|e| format!("{:?}", e.event))
+            .collect::<Vec<_>>()
     );
 }

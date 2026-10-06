@@ -163,7 +163,8 @@ impl Highlights {
     /// The spec for `name` with links followed. A missing group, a
     /// cycle, or a chain deeper than 16 links gives an empty style.
     #[must_use]
-    pub fn resolve(&self, name: &str) -> HlSpec {        let mut name = name;
+    pub fn resolve(&self, name: &str) -> HlSpec {
+        let mut name = name;
         for _ in 0..=MAX_LINK_DEPTH {
             let Some(spec) = self.get(name) else {
                 break;

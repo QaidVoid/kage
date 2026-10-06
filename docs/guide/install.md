@@ -20,6 +20,7 @@ always a `kage` one, so the link below fetches the newest `kage`.
 
 ```bash
 curl -fsSL https://github.com/QaidVoid/kage/releases/latest/download/kage-x86_64-linux.tar.xz | tar -xJ
+mkdir -p ~/.local/bin
 install -m 755 kage-x86_64-linux/kage ~/.local/bin/kage
 ```
 
@@ -63,6 +64,7 @@ The binary lands at `target/release/kage`. Put it on your `PATH` or
 symlink it from `~/.local/bin`:
 
 ```bash
+mkdir -p ~/.local/bin
 ln -s "$PWD/target/release/kage" ~/.local/bin/kage
 ```
 
@@ -87,12 +89,18 @@ chmod +x kage-desktop-x86_64-linux.onelf
 ./kage-desktop-x86_64-linux.onelf --onelf-integrate
 ```
 
-The `.tar.xz` holds the bare binary instead, which loads the system's
-display libraries and needs glibc 2.35 or newer. The macOS builds are
-not signed yet, so clear the quarantine flag once:
+The Linux `.tar.xz` holds the bare binary, which loads the system's
+display libraries and needs glibc 2.35 or newer, beside a `share/`
+folder with a `kage.desktop` entry and the hicolor icons; copy that
+`share/` into `~/.local/share/` to add the client to your app menu.
+The macOS `.tar.xz` unpacks to a `kage-desktop-<arch>-macos` folder
+holding `Kage.app` beside the license and readme; move `Kage.app`
+wherever you keep applications. The builds are not signed yet, so
+clear the quarantine flag on the extracted folder once (browser
+downloads arrive quarantined, `curl` downloads do not):
 
 ```bash
-xattr -d com.apple.quarantine kage-desktop
+xattr -dr com.apple.quarantine kage-desktop-aarch64-macos
 ```
 
 The desktop client needs `kage` itself: it runs the one on your

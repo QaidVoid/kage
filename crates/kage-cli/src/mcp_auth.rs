@@ -347,15 +347,33 @@ fn read_paste(tx: &Sender<String>) {
     }
 }
 
+/// The program that can show a URL in this session's browser: `open`
+/// on macOS, `xdg-open` when X11 or Wayland is attached, and `None`
+/// when no display is attached. The display variables are parameters
+/// so the choice stays testable.
+fn browser_program(
+    display: Option<&std::ffi::OsStr>,
+    wayland: Option<&std::ffi::OsStr>,
+) -> Option<&'static str> {
+    if cfg!(target_os = "macos") {
+        return Some("open");
+    }
+    if display.is_some() || wayland.is_some() {
+        return Some("xdg-open");
+    }
+    None
+}
+
 /// Show `url` in a browser when there seems to be one. Never fails, and
-/// never lets the opener touch the terminal.
+/// never lets the opener touch the terminal. When no browser applies,
+/// the login flow's URL and paste prompt remain, so say the opening
+/// was skipped rather than leaving the user waiting for one.
 fn open_browser(url: &str) {
-    let program = if cfg!(target_os = "macos") {
-        "open"
-    } else if std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
-    {
-        "xdg-open"
-    } else {
+    let Some(program) = browser_program(
+        std::env::var_os("DISPLAY").as_deref(),
+        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+    ) else {
+        eprintln!("kage: no browser detected; open the URL above manually");
         return;
     };
     let child = std::process::Command::new(program)
@@ -661,6 +679,7 @@ mod tests {
 
     fn server(command: Option<&str>, url: Option<&str>) -> McpServer {
         McpServer {
+            startup_timeout_secs: None,
             command: command.map(str::to_owned),
             args: Vec::new(),
             env: BTreeMap::new(),
@@ -1032,5 +1051,22 @@ mod tests {
         assert!(debug.contains("kage-client"), "{debug}");
         assert!(!debug.contains("access-old"), "{debug}");
         assert!(!debug.contains("refresh-old"), "{debug}");
+    }
+
+    #[test]
+    fn a_browser_needs_macos_or_a_display() {
+        if cfg!(target_os = "macos") {
+            assert!(browser_program(None, None).is_some());
+        } else {
+            assert_eq!(browser_program(None, None), None);
+            assert_eq!(
+                browser_program(Some(std::ffi::OsStr::new(":0")), None),
+                Some("xdg-open")
+            );
+            assert_eq!(
+                browser_program(None, Some(std::ffi::OsStr::new("wayland-0"))),
+                Some("xdg-open")
+            );
+        }
     }
 }

@@ -12,7 +12,11 @@
 //! [`TcpStream::try_clone`] handle for every connection.
 //! [`KillRegistry::shutdown_all`] shuts those handles down, which wakes
 //! the blocked read with a connection error, lets the worker exit, and
-//! closes the connection instead of draining it to the deadline.
+//! closes the connection instead of draining it to the deadline. That
+//! wake works on Unix alone: Windows cannot wake a read that is
+//! blocked in another thread, so reads there poll the registry in
+//! 200 ms slices (see `POLL_FOR_KILL`) and a cancel is observed up to
+//! 200 ms late instead of immediately.
 //!
 //! The agent built on this transport is per-request (see
 //! [`crate::http`]). Connection-pool reuse hands out a socket without

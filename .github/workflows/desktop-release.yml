@@ -53,11 +53,19 @@ jobs:
           REBUILD: ${{ inputs.tag }}
         run: |
           if [ -n "$REBUILD" ]; then
+            echo "$REBUILD" | grep -Eq '^kage-desktop-v[0-9]+\.[0-9]+\.[0-9]+$' || {
+              echo "::error::tag '$REBUILD' is not kage-desktop-v<major>.<minor>.<patch>" >&2
+              exit 1
+            }
             echo "tag=$REBUILD" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           version="$(awk '/^\[package\]/ { p = 1; next } /^\[/ { p = 0 }
             p && /^version *=/ { gsub(/"/, "", $3); print $3; exit }' gui/Cargo.toml)"
+          echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+            echo "::error::gui/Cargo.toml has no semver [package] version (parsed '$version')" >&2
+            exit 1
+          }
           tag="kage-desktop-v$version"
           if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
             echo "$tag exists; nothing to release"
@@ -193,14 +201,60 @@ jobs:
           bin="target/${{ matrix.target }}/release/kage-desktop"
           if [ "$RUNNER_OS" = "Windows" ]; then bin="$bin.exe"; fi
           mkdir -p "$artifact" ../dist
-          cp "$bin" ../LICENSE ../README.md "$artifact/"
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            mkdir -p "$artifact/share/applications" "$artifact/share/icons"
-            printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=kage' \
-              'Comment=Desktop client for the kage coding agent' \
-              'Exec=kage-desktop' 'Icon=kage' 'Terminal=false' \
-              'Categories=Development;' > "$artifact/share/applications/kage.desktop"
-            cp -R assets/icons/hicolor "$artifact/share/icons/hicolor"
+          cp ../LICENSE ../README.md "$artifact/"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            version="${TAG#kage-desktop-v}"
+            app="$artifact/Kage.app"
+            mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+            cp "$bin" "$app/Contents/MacOS/kage-desktop"
+            cat > "$app/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>kage-desktop</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.qaidvoid.kage-desktop</string>
+              <key>CFBundleName</key>
+              <string>Kage</string>
+              <key>CFBundleIconFile</key>
+              <string>kage</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>$version</string>
+              <key>CFBundleVersion</key>
+              <string>$version</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+            # The icns comes from the brand raster; the 608 px source
+            # covers every standard slot except the 1024 px @2x leg.
+            iconset="$RUNNER_TEMP/kage.iconset"
+            mkdir -p "$iconset"
+            for slot in 16 32 128 256 512; do
+              sips -z "$slot" "$slot" assets/brand/kage-glyph-shadow.png \
+                --out "$iconset/icon_${slot}x${slot}.png" >/dev/null
+              px=$((slot * 2))
+              if [ "$px" -le 608 ]; then
+                sips -z "$px" "$px" assets/brand/kage-glyph-shadow.png \
+                  --out "$iconset/icon_${slot}x${slot}@2x.png" >/dev/null
+              fi
+            done
+            iconutil -c icns "$iconset" -o "$app/Contents/Resources/kage.icns"
+          else
+            cp "$bin" "$artifact/"
+            if [ "$RUNNER_OS" = "Linux" ]; then
+              mkdir -p "$artifact/share/applications" "$artifact/share/icons"
+              printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=kage' \
+                'Comment=Desktop client for the kage coding agent' \
+                'Exec=kage-desktop' 'Icon=kage' 'Terminal=false' \
+                'Categories=Development;' > "$artifact/share/applications/kage.desktop"
+              cp -R assets/icons/hicolor "$artifact/share/icons/hicolor"
+            fi
           fi
           if [ "$RUNNER_OS" = "Windows" ]; then
             7z a "../dist/$artifact.zip" "$artifact"
@@ -208,26 +262,36 @@ jobs:
             tar -cJf "../dist/$artifact.tar.xz" "$artifact"
           fi
 
-      # Lists the archive and fails when the freedesktop sidecars are
-      # missing. The Windows zip carries the embedded icon resource
+      # Lists the archive and fails when the integration files are
+      # missing: the freedesktop sidecars on Linux, the app bundle on
+      # macOS. The Windows zip carries the embedded icon resource
       # instead, so it has no leg here.
       - name: Verify archives
-        if: runner.os == 'Linux'
+        if: runner.os != 'Windows'
         run: |
-          artifact="kage-desktop-${{ matrix.name }}.tar.xz"
+          folder="kage-desktop-${{ matrix.name }}"
+          artifact="$folder.tar.xz"
           listing="$(tar -tJf "../dist/$artifact")"
           echo "$listing"
-          for wanted in \
-            share/applications/kage.desktop \
-            share/icons/hicolor/16/apps/kage.png \
-            share/icons/hicolor/32/apps/kage.png \
-            share/icons/hicolor/48/apps/kage.png \
-            share/icons/hicolor/256/apps/kage.png; do
-            echo "$listing" | grep -qx "$artifact/$wanted" || {
-              echo "$artifact is missing $wanted" >&2
+          check() {
+            echo "$listing" | grep -qx "$folder/$1" || {
+              echo "$artifact is missing $1" >&2
               exit 1
             }
-          done
+          }
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            check share/applications/kage.desktop
+            for size in 16x16 32x32 48x48 64x64 128x128 256x256 512x512; do
+              check "share/icons/hicolor/$size/apps/kage.png"
+            done
+          else
+            check Kage.app/Contents/MacOS/kage-desktop
+            check Kage.app/Contents/Info.plist
+            check Kage.app/Contents/Resources/kage.icns
+            tar -xJf "../dist/$artifact" -C "$RUNNER_TEMP" \
+              "$folder/Kage.app/Contents/Info.plist"
+            plutil -lint "$RUNNER_TEMP/$folder/Kage.app/Contents/Info.plist"
+          fi
 
       - name: Subjects
         id: subjects
@@ -269,14 +333,32 @@ jobs:
             image: archlinux:latest
             onelf-sha256: 3a990243790c026c902330a7744e8c21b25fdc8c694a88e79d6fb25d761a6351
             vulkan: vulkan-radeon vulkan-intel vulkan-nouveau
-            slim: llvm-libs-nano mesa-nano vulkan-radeon-nano vulkan-intel-nano vulkan-nouveau-nano libxml2-iculess
+            # Slimmed packages, one "name archive sha256" row per
+            # package. Upstream rebuilds the continuous release between
+            # our runs, so a stale row fails the hash check: re-read the
+            # digests from the release page and update the row.
+            # https://github.com/pkgforge-dev/archlinux-pkgs-debloated/releases/tag/continuous
+            slim: |
+              llvm-libs-nano pkg.tar.zst f186b7d2f8367e3b53f0192a9ad60e69987188efa7a2c0770577fb3f03981170
+              mesa-nano pkg.tar.zst e2baccc2b6fedf34ab634b895d43d6dbee4811c92b31af42229deb044f2ba911
+              vulkan-radeon-nano pkg.tar.zst a581ac3323f33ca8f9e18858118c11db87a43b23a578aea5dd26c91fde5fb803
+              vulkan-intel-nano pkg.tar.zst 9717c22556d01e95fcbd8b843b42f874fd76e0aab0292ab4b120642327a8b9ba
+              vulkan-nouveau-nano pkg.tar.zst 20d27dfd967be73fa23e0107fb0977c3a560b81e8a3506e79df9be47a8352dec
+              libxml2-iculess pkg.tar.zst d5220136f8d9b4eaaf173a44d3f0092e97b61cfe9f5d627c570c6e81add9e789
           - name: aarch64-linux
             arch: aarch64
             runner: ubuntu-24.04-arm
             image: menci/archlinuxarm:latest
             onelf-sha256: 9b5b2c3d031756a064bd9a71a977e229cb359f324937a5ba8a28db1568bae15b
             vulkan: vulkan-radeon vulkan-nouveau vulkan-panfrost vulkan-broadcom
-            slim: llvm-libs-nano mesa-nano vulkan-radeon-nano vulkan-nouveau-nano vulkan-panfrost-nano vulkan-broadcom-nano libxml2-iculess
+            slim: |
+              llvm-libs-nano pkg.tar.zst 29176214b13708c7a6e188807d79f31af5a25f160fe14d241ff149a608467f9a
+              mesa-nano pkg.tar.zst 2944de900fe6981bbe25bb96096e83f2e3faa1b3ec0b775f6b07fa62d45b1b1b
+              vulkan-radeon-nano pkg.tar.zst c8b075ca391b72965476416f6bfaf8263565ee26921cea695b86ec94c7a0fe01
+              vulkan-nouveau-nano pkg.tar.zst b9fac6605dbf0900deb70c61c34407efee059d12a230e8b928a8bcf59507eeaa
+              vulkan-panfrost-nano pkg.tar.zst 2c81802506eed29e99d16232c4957d782d3e5f113fc5cf1c44b75b23d36cdf15
+              vulkan-broadcom-nano pkg.tar.zst 4dbf17aa723ce5c1a7cf9e808a87dd7c1fac94b84423b0dc78426b3c3a4b6d28
+              libxml2-iculess pkg.tar.xz 3e9eed60d2a40ad1ca623a0ba4607c22ac4030e18416080538c04fd82ce3add4
     defaults:
       run:
         shell: bash
@@ -314,17 +396,22 @@ jobs:
           base="https://github.com/pkgforge-dev/archlinux-pkgs-debloated/releases/download/continuous"
           mkdir -p debloated
           cd debloated
-          # The archive format varies by package and moves between
-          # builds, so take whichever one is published.
-          for pkg in ${{ matrix.slim }}; do
-            for ext in pkg.tar.zst pkg.tar.xz; do
-              if curl -fsSL -O "$base/$pkg-${{ matrix.arch }}.$ext"; then
-                continue 2
-              fi
-            done
-            echo "no $pkg build for ${{ matrix.arch }}" >&2
-            exit 1
-          done
+          # The matrix pins the archive format and its sha256 per
+          # package: these libraries are linked into the attested bundle,
+          # so the downloads must match the rows. Upstream rebuilds the
+          # continuous release between runs; a changed asset fails the
+          # check and the digests get re-read from the release page.
+          while read -r pkg ext sha; do
+            [ -n "$pkg" ] || continue
+            file="$pkg-${{ matrix.arch }}.$ext"
+            curl -fsSL -O "$base/$file" || {
+              echo "no $file published" >&2
+              exit 1
+            }
+            echo "$sha  $file" | sha256sum -c -
+          done <<'ROWS'
+          ${{ matrix.slim }}
+          ROWS
           pacman -U --disable-sandbox --noconfirm ./*.pkg.tar.*
 
       - name: Install onelf
@@ -336,15 +423,35 @@ jobs:
 
       - name: Pack with onelf
         run: |
-          mkdir -p AppDir/bin AppDir/.onelf/icons AppDir/.onelf/desktop ../dist
+          mkdir -p AppDir/bin AppDir/.onelf/icons AppDir/.onelf/desktop \
+            AppDir/share/icons ../dist
           cp target/release/kage-desktop AppDir/bin/kage-desktop
+          # Shadow stays the default icon and dawn rides under the
+          # entrypoint name; the hicolor ladder serves theme lookups.
           cp assets/brand/kage-glyph-shadow.png AppDir/.onelf/icons/default.png
+          cp assets/brand/kage-glyph-dawn.png AppDir/.onelf/icons/kage-desktop.png
+          cp -R assets/icons/hicolor AppDir/share/icons/hicolor
           printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=kage' \
             'Comment=Desktop client for the kage coding agent' \
             'Exec=kage-desktop' 'Icon=default' 'Terminal=false' \
             'Categories=Development;' > AppDir/.onelf/desktop/default.desktop
+          for wanted in \
+            AppDir/.onelf/icons/default.png \
+            AppDir/.onelf/icons/kage-desktop.png \
+            AppDir/.onelf/desktop/default.desktop \
+            AppDir/share/icons/hicolor/512x512/apps/kage.png; do
+            [ -f "$wanted" ] || {
+              echo "the onelf AppDir is missing $wanted" >&2
+              exit 1
+            }
+          done
           cp onelf.toml AppDir/onelf.toml
-          sed -i "s/^version = .*/version = \"${TAG#kage-desktop-v}\"/" AppDir/onelf.toml
+          version="${TAG#kage-desktop-v}"
+          sed -i "s/^version[[:space:]]*=.*/version = \"$version\"/" AppDir/onelf.toml
+          grep -qx "version = \"$version\"" AppDir/onelf.toml || {
+            echo "AppDir/onelf.toml does not name version $version" >&2
+            exit 1
+          }
           onelf build AppDir
           onelf verify AppDir/kage-desktop.onelf
           mv AppDir/kage-desktop.onelf "../dist/kage-desktop-${{ matrix.name }}.onelf"

@@ -44,11 +44,17 @@ pub fn load_from(path: &Path) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Convenience wrapper using [`default_path`].
+/// Convenience wrapper using [`default_path`]. A read failure other
+/// than a missing file is announced on stderr; the session then
+/// starts from an empty history instead of failing startup.
 pub fn load() -> Vec<String> {
-    default_path()
-        .and_then(|p| load_from(&p))
-        .unwrap_or_default()
+    match default_path().and_then(|p| load_from(&p)) {
+        Ok(entries) => entries,
+        Err(err) => {
+            eprintln!("kage: {err}; starting from empty history");
+            Vec::new()
+        }
+    }
 }
 
 /// Append `entry` to the history file, creating it if needed.
@@ -124,5 +130,13 @@ mod tests {
         let path = dir.path().join("history.txt");
         append_to(&path, "").unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_directory_path_is_a_read_error_naming_the_path() {
+        let dir = tempdir().unwrap();
+        let err = load_from(dir.path()).unwrap_err();
+        assert!(err.starts_with("history: read "), "{err}");
+        assert!(err.contains(&dir.path().display().to_string()), "{err}");
     }
 }

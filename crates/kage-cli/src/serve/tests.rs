@@ -546,6 +546,54 @@ fn the_seventeenth_concurrent_connection_gets_503() {
     server.stop();
 }
 
+/// Refusals run off the accept loop: every peer at the limit gets its
+/// 503 while the loop keeps accepting, instead of paying one inline
+/// drain (up to 200 ms) per rejected connection.
+#[test]
+fn simultaneous_rejections_are_answered_without_stalling_the_accept_loop() {
+    let server = spawn_server(vec![]);
+    let mut held = Vec::new();
+    for _ in 0..MAX_CONNECTIONS {
+        let (stream, reply) = open_upgrade(server.addr, &server.token);
+        assert!(reply.starts_with("HTTP/1.1 101 "), "{reply}");
+        held.push(stream);
+    }
+
+    let started = std::time::Instant::now();
+    let readers: Vec<_> = (0..=MAX_CONNECTIONS)
+        .map(|_| {
+            let addr = server.addr;
+            let token = Arc::clone(&server.token);
+            thread::spawn(move || {
+                let mut stream = TcpStream::connect(addr).unwrap();
+                stream.set_read_timeout(Some(WAIT)).unwrap();
+                let request = format!(
+                    "GET /acp HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {}\r\n\r\n",
+                    token.as_str()
+                );
+                stream.write_all(request.as_bytes()).unwrap();
+                let mut reply = String::new();
+                stream.read_to_string(&mut reply).unwrap();
+                reply
+            })
+        })
+        .collect();
+    let replies: Vec<String> = readers
+        .into_iter()
+        .map(|reader| reader.join().unwrap())
+        .collect();
+    let elapsed = started.elapsed();
+    for reply in &replies {
+        assert!(reply.starts_with("HTTP/1.1 503 "), "{reply}");
+    }
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "{} rejections took {elapsed:?}",
+        replies.len()
+    );
+    server.stop();
+}
+
 #[test]
 fn the_connect_url_lands_beside_the_token_and_never_in_the_log() {
     let dir = tempfile::tempdir().unwrap();

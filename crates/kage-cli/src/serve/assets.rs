@@ -68,7 +68,9 @@ impl WebDir {
     /// Answers one asset request: `/` with the page, `/`-separated
     /// names with the file under the web directory, everything else
     /// with `404`. A path that decodes out of the directory is
-    /// reported as [`Outcome::Traversal`] and never read.
+    /// reported as [`Outcome::Traversal`] and never read, and a target
+    /// that is itself a symlink is refused, so a file swapped for a
+    /// link between the checks cannot escape the directory.
     pub(crate) fn serve(&self, raw_path: &str, stream: &mut TcpStream) -> Outcome {
         let Some(decoded) = percent_decode(raw_path) else {
             reject(stream, 404, "Not Found", BODY_404);
@@ -95,10 +97,15 @@ impl WebDir {
         } else {
             target.extend(segments.iter().copied());
         }
-        let body = std::fs::canonicalize(&target)
-            .ok()
-            .filter(|path| path.starts_with(root) && path.is_file())
-            .and_then(|path| std::fs::read(path).ok());
+        let body =
+            if std::fs::symlink_metadata(&target).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                None
+            } else {
+                std::fs::canonicalize(&target)
+                    .ok()
+                    .filter(|path| path.starts_with(root) && path.is_file())
+                    .and_then(|path| std::fs::read(path).ok())
+            };
         let Some(body) = body else {
             reject(stream, 404, "Not Found", BODY_404);
             return Outcome::NotFound;
@@ -375,5 +382,35 @@ mod tests {
             .read_to_string(&mut reply)
             .unwrap();
         assert!(reply.starts_with("HTTP/1.1 404"), "{reply}");
+    }
+
+    /// A link inside the web directory must not serve its target,
+    /// inside or outside the directory: the bundle ships plain files.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_asset_is_refused() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), b"secret").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), b"page").unwrap();
+        std::fs::write(dir.path().join("plain.txt"), b"plain").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            dir.path().join("leak.txt"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("plain.txt", dir.path().join("inside.txt")).unwrap();
+        let web = WebDir::open(dir.path());
+
+        let reply = serve_get(&web, "/leak.txt");
+        assert!(reply.starts_with("HTTP/1.1 404"), "{reply}");
+        assert!(!reply.contains("secret"), "{reply}");
+
+        let reply = serve_get(&web, "/inside.txt");
+        assert!(reply.starts_with("HTTP/1.1 404"), "{reply}");
+
+        let reply = serve_get(&web, "/plain.txt");
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert!(reply.ends_with("plain"), "{reply}");
     }
 }

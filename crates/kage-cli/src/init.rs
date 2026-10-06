@@ -252,16 +252,20 @@ fn write_lua_lsp<W: Write>(types_dir: &Path, luarc: &Path, out: &mut W) -> Resul
 /// flow as `kage auth login`.
 fn handle_auth<W: Write>(out: &mut W) -> Result<(), String> {
     let store = AuthStore::load()?;
-    let env_count = KNOWN_PROVIDERS
+    let workdir = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+    let config = Config::load_layered(&workdir).unwrap_or_default();
+    let keys = auth::provider_keys(&config);
+    let state = credential_state(&store, &keys, |env| {
+        std::env::var(env).is_ok_and(|v| !v.is_empty())
+    });
+    let custom_env: Vec<String> = state
+        .env_keys
         .iter()
-        .filter(|p| {
-            let env = auth::env_var_for(p);
-            !env.is_empty() && std::env::var(env).is_ok_and(|v| !v.is_empty())
-        })
-        .count();
-    let stored_count = store.providers.len();
-    let _ = writeln!(out, "  auth:    {stored_count} stored, {env_count} via env");
-    if stored_count > 0 || env_count > 0 {
+        .filter(|(id, _)| config.providers.custom.contains_key(id))
+        .map(|(id, env)| format!("{id} via {env}"))
+        .collect();
+    let _ = writeln!(out, "  {}", credential_line(&state, &custom_env));
+    if state.any() {
         return Ok(());
     }
 
@@ -285,6 +289,57 @@ fn handle_auth<W: Write>(out: &mut W) -> Result<(), String> {
     store.save()?;
     let _ = writeln!(out, "  saved {provider} key to auth.json");
     Ok(())
+}
+
+/// The credential state the auth step reports and gates on.
+struct CredentialState {
+    /// Entries in the auth store.
+    stored: usize,
+    /// Providers with a key in the environment, as `(id, env var)`.
+    env_keys: Vec<(String, String)>,
+}
+
+impl CredentialState {
+    /// `true` when the user already has some way to authenticate, so
+    /// the wizard must not walk them into adding an irrelevant key.
+    fn any(&self) -> bool {
+        self.stored > 0 || !self.env_keys.is_empty()
+    }
+}
+
+/// Summarize the store and the shared provider-key list against
+/// `env_set`, so the count works for custom providers and does not
+/// depend on the process env in tests.
+fn credential_state(
+    store: &AuthStore,
+    keys: &[auth::ProviderKey],
+    env_set: impl Fn(&str) -> bool,
+) -> CredentialState {
+    CredentialState {
+        stored: store.providers.len(),
+        env_keys: keys
+            .iter()
+            .filter(|key| !key.env.is_empty() && env_set(&key.env))
+            .map(|key| (key.id.clone(), key.env.clone()))
+            .collect(),
+    }
+}
+
+/// The `auth:` summary line, naming the custom providers whose env
+/// var carries a key so a custom-only setup is never mistaken for a
+/// missing one.
+fn credential_line(state: &CredentialState, custom_env: &[String]) -> String {
+    let mut line = format!(
+        "auth:    {} stored, {} via env",
+        state.stored,
+        state.env_keys.len()
+    );
+    if !custom_env.is_empty() {
+        line.push_str(" (custom: ");
+        line.push_str(&custom_env.join(", "));
+        line.push(')');
+    }
+    line
 }
 
 /// Prompt the user to pick a provider id from [`KNOWN_PROVIDERS`].
@@ -413,5 +468,37 @@ mod tests {
         // The stub still lands, but the broken file is preserved.
         assert!(types.join("kage.lua").exists());
         assert_eq!(fs::read_to_string(&luarc).unwrap(), "{ not json at all");
+    }
+
+    /// The F2 regression: a custom provider whose `api_key_env` is set
+    /// is a credential, so the wizard reports it and never prompts.
+    #[test]
+    fn a_custom_env_key_counts_as_a_credential_and_is_named() {
+        let config: Config = toml::from_str(
+            "[providers.custom.lab]\nbase_url = \"http://lab:1/v1\"\napi_key_env = \"MY_KEY\"\n\
+             [[providers.custom.lab.models]]\nid = \"m\"\nname = \"M\"\n",
+        )
+        .unwrap();
+        let state = credential_state(&AuthStore::empty(), &auth::provider_keys(&config), |env| {
+            env == "MY_KEY"
+        });
+        assert!(state.any(), "the env key means no credential prompt");
+        assert_eq!(
+            state.env_keys,
+            vec![("lab".to_owned(), "MY_KEY".to_owned())]
+        );
+        let line = credential_line(&state, &["lab via MY_KEY".to_owned()]);
+        assert!(line.contains("custom: lab via MY_KEY"), "{line}");
+    }
+
+    #[test]
+    fn with_no_credentials_the_wizard_gates_on_a_prompt() {
+        let state = credential_state(
+            &AuthStore::empty(),
+            &auth::provider_keys(&Config::default()),
+            |_| false,
+        );
+        assert!(!state.any());
+        assert_eq!(credential_line(&state, &[]), "auth:    0 stored, 0 via env");
     }
 }

@@ -340,11 +340,13 @@ pub const KNOWN_PROVIDERS: &[&str] = &[
 ];
 
 /// Env-var name that, when set, supersedes any saved key for `provider`.
+/// `openai-responses` shares `OPENAI_API_KEY`: both providers are
+/// registered from the same credential at runtime.
 #[must_use]
 pub fn env_var_for(provider: &str) -> &'static str {
     match provider {
         "anthropic" => "ANTHROPIC_API_KEY",
-        "openai" => "OPENAI_API_KEY",
+        "openai" | "openai-responses" => "OPENAI_API_KEY",
         "gemini" => "GEMINI_API_KEY",
         "zai" => "ZAI_API_KEY",
         "zai-coding-plan" | "zhipuai-coding-plan" => "ZAI_CODING_API_KEY",
@@ -439,11 +441,20 @@ impl ProviderKey {
     /// Where the credential comes from right now, or `None` when the
     /// provider has none.
     pub(crate) fn source(&self, store: &AuthStore) -> Option<String> {
+        self.source_with(store, |env| std::env::var(env).is_ok_and(|v| !v.is_empty()))
+    }
+
+    /// [`Self::source`] against an injected env check, so callers can
+    /// rate providers without touching the process env.
+    pub(crate) fn source_with(
+        &self,
+        store: &AuthStore,
+        env_set: impl Fn(&str) -> bool,
+    ) -> Option<String> {
         if self.keyless {
             return Some("no key needed".to_owned());
         }
-        let env = (!self.env.is_empty() && std::env::var(&self.env).is_ok_and(|v| !v.is_empty()))
-            .then_some(self.env.as_str());
+        let env = (!self.env.is_empty() && env_set(&self.env)).then_some(self.env.as_str());
         let stored = store.credential(&self.id).map(|c| {
             if c.is_oauth() {
                 "auth.json (oauth)"
@@ -895,6 +906,31 @@ mod tests {
             Some("no key needed")
         );
         assert!(keys.windows(2).all(|w| w[0].id <= w[1].id));
+    }
+
+    /// The one credential list behind `auth list`, doctor and init:
+    /// custom env names, synthesized env names, and the
+    /// `openai-responses` alias must all resolve here.
+    #[test]
+    fn provider_keys_resolve_every_credential_shape() {
+        let config: kage_core::config::Config = toml::from_str(
+            "[providers.custom.lab]\nbase_url = \"http://lab:1/v1\"\napi_key_env = \"MY_KEY\"\n\
+             [[providers.custom.lab.models]]\nid = \"m\"\nname = \"M\"\n\n\
+             [providers.custom.synth]\nbase_url = \"http://s:1/v1\"\n\
+             [[providers.custom.synth.models]]\nid = \"m\"\nname = \"M\"\n",
+        )
+        .unwrap();
+        let keys = provider_keys(&config);
+
+        let lab = keys.iter().find(|k| k.id == "lab").unwrap();
+        assert_eq!(lab.env, "MY_KEY");
+        assert!(!lab.keyless);
+
+        let synth = keys.iter().find(|k| k.id == "synth").unwrap();
+        assert_eq!(synth.env, "SYNTH_API_KEY", "the env name is synthesized");
+        assert!(!synth.keyless);
+
+        assert_eq!(env_var_for("openai-responses"), "OPENAI_API_KEY");
     }
 
     #[test]

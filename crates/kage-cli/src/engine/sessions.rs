@@ -104,11 +104,12 @@ pub(crate) fn render_session_markdown(replay: &kage_session::ReplayResult) -> St
                 Content::ToolCall { name, input, .. } => {
                     let pretty =
                         serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
+                    let fence = fence_for(&pretty);
                     let _ = writeln!(md, "**tool call: `{name}`**");
                     let _ = writeln!(md);
-                    let _ = writeln!(md, "```json");
+                    let _ = writeln!(md, "{fence}json");
                     let _ = writeln!(md, "{pretty}");
-                    let _ = writeln!(md, "```");
+                    let _ = writeln!(md, "{fence}");
                     let _ = writeln!(md);
                 }
                 Content::ToolResultBlock {
@@ -119,11 +120,12 @@ pub(crate) fn render_session_markdown(replay: &kage_session::ReplayResult) -> St
                     } else {
                         "tool result"
                     };
+                    let fence = fence_for(output);
                     let _ = writeln!(md, "**{label}**");
                     let _ = writeln!(md);
-                    let _ = writeln!(md, "```");
+                    let _ = writeln!(md, "{fence}");
                     let _ = writeln!(md, "{output}");
-                    let _ = writeln!(md, "```");
+                    let _ = writeln!(md, "{fence}");
                     let _ = writeln!(md);
                 }
                 Content::Image { mime, .. } => {
@@ -133,17 +135,36 @@ pub(crate) fn render_session_markdown(replay: &kage_session::ReplayResult) -> St
                 Content::Custom { kind, data } => {
                     let pretty =
                         serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string());
+                    let fence = fence_for(&pretty);
                     let _ = writeln!(md, "_[custom block: {kind}]_");
                     let _ = writeln!(md);
-                    let _ = writeln!(md, "```json");
+                    let _ = writeln!(md, "{fence}json");
                     let _ = writeln!(md, "{pretty}");
-                    let _ = writeln!(md, "```");
+                    let _ = writeln!(md, "{fence}");
                     let _ = writeln!(md);
                 }
             }
         }
     }
     md
+}
+
+/// A fenced code block fence for `body`: one backtick longer than the
+/// longest backtick run inside it, minimum three, per the `CommonMark`
+/// fence rule, so the wrapper can never close on the body's own
+/// fences.
+fn fence_for(body: &str) -> String {
+    let mut longest = 2;
+    let mut run = 0;
+    for ch in body.chars() {
+        if ch == '`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    "`".repeat(longest + 1)
 }
 
 impl super::Dispatcher {
@@ -618,5 +639,63 @@ mod tests {
             SessionEntry::Header(h) => assert_eq!(h.parent_session, Some(src_id)),
             other => panic!("expected header, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn fence_for_is_one_longer_than_the_longest_inner_run() {
+        assert_eq!(fence_for("plain"), "```");
+        assert_eq!(fence_for("a ``` b"), "````");
+        assert_eq!(fence_for("``\ntext\n````"), "`````");
+        assert_eq!(fence_for(""), "```");
+    }
+
+    #[test]
+    fn exported_fences_exceed_every_backtick_run_in_tool_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let header = Header {
+            version: FORMAT_VERSION,
+            session: id,
+            id: EntryId::new(),
+            ts: Utc::now(),
+            cwd: PathBuf::from("/work"),
+            model: "anthropic:claude".into(),
+            system_prompt: String::new(),
+            parent_session: None,
+            parent_entry: None,
+        };
+        let output = "read notes.md:\n```rust\nfn main() {}\n```\n````txt\nfour\n````";
+        let mut writer =
+            SessionWriter::create(&dir.path().join(format!("{id}.jsonl")), header).unwrap();
+        writer
+            .append(&SessionEntry::Message(MessageEntry {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                message: Arc::new(Message::new(
+                    Role::ToolResult,
+                    vec![Content::ToolResultBlock {
+                        call_id: kage_core::ToolCallId::new("c1"),
+                        output: output.to_owned(),
+                        is_error: false,
+                    }],
+                    None,
+                )),
+                usage: None,
+            }))
+            .unwrap();
+
+        let replay = kage_session::replay(&dir.path().join(format!("{id}.jsonl"))).unwrap();
+        let md = render_session_markdown(&replay);
+        assert!(md.contains(output), "the body round-trips: {md}");
+        let fences: Vec<usize> = md
+            .lines()
+            .filter(|line| !line.is_empty() && line.chars().all(|c| c == '`'))
+            .map(|line| line.len())
+            .collect();
+        assert_eq!(fences.first(), Some(&5), "fence beats the ```` run: {md}");
+        assert!(
+            fences.iter().all(|len| *len >= 3),
+            "every wrapper is a valid fence: {fences:?}"
+        );
     }
 }

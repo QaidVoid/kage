@@ -246,13 +246,32 @@ fn run_tool(
 }
 
 /// The version to answer `initialize` with: the client's requested
-/// `protocolVersion` when kage knows it, else its own.
-fn negotiate(params: &serde_json::Value) -> &'static str {
+/// `protocolVersion` when kage knows it, else its own, with whether
+/// the answer is not the requested version.
+fn negotiate_with_flag(params: &serde_json::Value) -> (&'static str, bool) {
     let requested = params.get("protocolVersion").and_then(|v| v.as_str());
-    SUPPORTED_VERSIONS
+    match SUPPORTED_VERSIONS
         .into_iter()
         .find(|v| Some(*v) == requested)
-        .unwrap_or(PROTOCOL_VERSION)
+    {
+        Some(version) => (version, false),
+        None => (PROTOCOL_VERSION, requested.is_some()),
+    }
+}
+
+/// [`negotiate_with_flag`] with one stderr line on a downgrade, so a
+/// client asking for an unknown revision is visible; stderr is
+/// log-safe for a stdio MCP server.
+fn negotiate(params: &serde_json::Value) -> &'static str {
+    let (version, drifted) = negotiate_with_flag(params);
+    if drifted {
+        let requested = params.get("protocolVersion").and_then(|v| v.as_str());
+        eprintln!(
+            "kage mcp serve: client asked for protocol {}, answering {version}",
+            requested.unwrap_or_default()
+        );
+    }
+    version
 }
 
 /// The registry as MCP tool descriptors.
@@ -378,6 +397,23 @@ mod tests {
             )
             .unwrap();
         assert_eq!(res["protocolVersion"], PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn negotiate_flags_only_an_unsupported_requested_version() {
+        let (version, drifted) =
+            negotiate_with_flag(&serde_json::json!({ "protocolVersion": "2099-01-01" }));
+        assert_eq!(version, PROTOCOL_VERSION);
+        assert!(drifted, "an unknown version is a downgrade");
+
+        let (version, drifted) =
+            negotiate_with_flag(&serde_json::json!({ "protocolVersion": "2025-03-26" }));
+        assert_eq!(version, "2025-03-26");
+        assert!(!drifted, "a supported version is answered verbatim");
+
+        let (version, drifted) = negotiate_with_flag(&serde_json::json!({}));
+        assert_eq!(version, PROTOCOL_VERSION);
+        assert!(!drifted, "no request, no downgrade");
     }
 
     #[test]

@@ -298,7 +298,12 @@ fn accept_until(
                 log(&format!("connect {peer}"));
                 if active.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
                     log(&format!("refuse {peer} (503)"));
-                    reject(stream, 503, "Service Unavailable", BODY_503);
+                    // The rejection drains up to REJECT_DRAIN, so it
+                    // runs on its own thread and the accept loop never
+                    // stalls one drain per refused peer.
+                    let _ = thread::Builder::new()
+                        .name("kage-serve-reject".to_owned())
+                        .spawn(move || reject(stream, 503, "Service Unavailable", BODY_503));
                     continue;
                 }
                 active.fetch_add(1, Ordering::SeqCst);

@@ -97,8 +97,7 @@ impl Changed {
     fn agree(&self, settings: &Settings, requested: &Settings) -> bool {
         (self.model || settings.model == requested.model)
             && (self.thinking || settings.thinking == requested.thinking)
-            && (self.mode
-                || (settings.mode == requested.mode && settings.plan == requested.plan))
+            && (self.mode || (settings.mode == requested.mode && settings.plan == requested.plan))
             && (self.swarm || settings.swarm == requested.swarm)
             && (self.goal || settings.goal == requested.goal)
     }

@@ -1790,6 +1790,7 @@ version = "0.1.0"
 dependencies = [
  "kage-acp-wire",
  "kage-core",
+ "log",
  "serde",
  "serde_json",
 ]

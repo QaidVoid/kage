@@ -468,13 +468,18 @@ pub struct SwarmResumeResponse {
 
 /// A prompt of a session, named by its text and how many earlier
 /// prompts carried the same text, so a client finds it without knowing
-/// the session's entry ids.
+/// the session's entry ids. A prompt without a text block, such as an
+/// image-only message, is named by the absent text: `occurrence`
+/// counts the earlier textless prompts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptRef {
-    /// The prompt's first text block, as typed.
-    pub text: String,
-    /// How many earlier prompts of the session had this same text.
+    /// The prompt's first text block, as typed. Absent names a prompt
+    /// with no text block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// How many earlier prompts of the session were the same kind with
+    /// the same text.
     #[serde(default)]
     pub occurrence: u32,
 }
@@ -622,7 +627,8 @@ pub struct ConfigSetRequest {
     pub session_id: Option<String>,
     /// The table names leading to the entry, such as
     /// `["mcp", "servers", "github"]`. The first is `providers`, `mcp`,
-    /// `permissions` or `plugins`.
+    /// `permissions`, `plugins` or `acp`; `ui` only as the two-key
+    /// `ui.theme_dark` or `ui.theme_light`.
     pub path: Vec<String>,
     /// The entry's new value in the snapshot's shape; `null` removes the
     /// entry. A string the snapshot redacted keeps the value on file.

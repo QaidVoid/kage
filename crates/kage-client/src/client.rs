@@ -245,18 +245,26 @@ impl Client {
     }
 
     /// Opens a recorded session and replays its transcript, which
-    /// streams as updates before this answer arrives.
-    pub fn load_session(&mut self, session_id: &str, cwd: &str, mcp_servers: &[McpServer]) -> u64 {
+    /// streams as updates before this answer arrives. Returns the
+    /// request id and the change the reset of the local session made.
+    pub fn load_session(
+        &mut self,
+        session_id: &str,
+        cwd: &str,
+        mcp_servers: &[McpServer],
+    ) -> (u64, Vec<Change>) {
         self.open("session/load", session_id, cwd, mcp_servers)
     }
 
-    /// Opens a recorded session without replaying its history.
+    /// Opens a recorded session without replaying its history. Returns
+    /// the request id and the change the reset of the local session
+    /// made.
     pub fn resume_session(
         &mut self,
         session_id: &str,
         cwd: &str,
         mcp_servers: &[McpServer],
-    ) -> u64 {
+    ) -> (u64, Vec<Change>) {
         self.open("session/resume", session_id, cwd, mcp_servers)
     }
 
@@ -321,19 +329,22 @@ impl Client {
     }
 
     /// Removes the queued prompt at `index` of `session_id` before it
-    /// ever went on the wire, reporting whether there was one.
+    /// ever went on the wire, reporting the change the emptied queue
+    /// made. An empty report names no such prompt.
     ///
     /// The ACP surface has no withdraw method: the engine-side prompt
     /// queue is only reachable through `session/prompt` deliveries, so
     /// a client that holds the queue, as this one does, withdraws by
     /// dropping the held prompt.
-    pub fn withdraw_queued(&mut self, session_id: &str, index: usize) -> bool {
+    pub fn withdraw_queued(&mut self, session_id: &str, index: usize) -> Vec<Change> {
         let queue = &mut self.session_mut(session_id).queue;
         if index >= queue.len() {
-            return false;
+            return Vec::new();
         }
         queue.remove(index);
-        true
+        vec![Change::Session {
+            id: session_id.to_owned(),
+        }]
     }
 
     /// Sends the queued prompt at `index` of `session_id` as a steer
@@ -365,11 +376,22 @@ impl Client {
         });
     }
 
-    /// Changes one config option of a session. The answer replaces the
-    /// session's config options.
-    pub fn set_config_option(&mut self, session_id: &str, config_id: &str, value: &str) -> u64 {
+    /// Changes one config option of a session. The value shows at
+    /// once, ahead of the agent's answer, and the answer replaces the
+    /// session's config options. Returns the request id and the change
+    /// the shown value made; an empty report means nothing was shown
+    /// because the session or the option is not known yet.
+    pub fn set_config_option(
+        &mut self,
+        session_id: &str,
+        config_id: &str,
+        value: &str,
+    ) -> (u64, Vec<Change>) {
         let previous = self.set_shown_option(session_id, config_id, value);
-        self.request(
+        let shown = previous.is_some().then(|| Change::Session {
+            id: session_id.to_owned(),
+        });
+        let id = self.request(
             "session/set_config_option",
             params(&SetSessionConfigOptionRequest {
                 session_id: session_id.to_owned(),
@@ -381,7 +403,8 @@ impl Client {
                 config_id: config_id.to_owned(),
                 previous,
             },
-        )
+        );
+        (id, shown.into_iter().collect())
     }
 
     /// Shows `value` for option `config_id` of `session_id` at once,
@@ -409,24 +432,26 @@ impl Client {
     /// the queue once answered, a decision record joins the session's
     /// transcript so a redraw shows what was chosen, and the answer
     /// goes out. A [`PermissionDecision::Feedback`] verdict rides the
-    /// `_meta.kage.planReview` channel. Returns false when no such
-    /// ask is open, in which case nothing is sent.
+    /// `_meta.kage.planReview` channel. Returns the changes the reply
+    /// made: the ask left the queue and the record joined the
+    /// transcript. An empty report means no such ask was open, in
+    /// which case nothing is sent.
     pub fn reply_permission(
         &mut self,
         session_id: &str,
         request_id: RequestId,
         decision: &PermissionDecision,
-    ) -> bool {
+    ) -> Vec<Change> {
         let (outcome, meta) = {
             let Some(session) = self.state.sessions.get_mut(session_id) else {
-                return false;
+                return Vec::new();
             };
             let Some(index) = session
                 .permissions
                 .iter()
                 .position(|ask| ask.request_id == request_id)
             else {
-                return false;
+                return Vec::new();
             };
             let ask = &session.permissions[index];
             let mut meta = None;
@@ -476,7 +501,7 @@ impl Client {
                 })
             } else {
                 if *decision != PermissionDecision::Cancel {
-                    return false;
+                    return Vec::new();
                 }
                 PermissionOutcome::Cancelled
             };
@@ -489,7 +514,14 @@ impl Client {
             id: request_id,
             result: params(&RequestPermissionResult { outcome, meta }),
         });
-        true
+        vec![
+            Change::Permission {
+                id: session_id.to_owned(),
+            },
+            Change::Transcript {
+                id: session_id.to_owned(),
+            },
+        ]
     }
 
     /// Releases the session: the answer removes it from the state.
@@ -805,7 +837,7 @@ impl Client {
         session_id: &str,
         cwd: &str,
         mcp_servers: &[McpServer],
-    ) -> u64 {
+    ) -> (u64, Vec<Change>) {
         let request = if method == "session/load" {
             params(&LoadSessionRequest {
                 session_id: session_id.to_owned(),
@@ -840,12 +872,18 @@ impl Client {
             ..Session::default()
         };
         *session = kept;
-        self.request(
+        let id = self.request(
             method,
             request,
             Pending::Open {
                 session_id: session_id.to_owned(),
             },
+        );
+        (
+            id,
+            vec![Change::Session {
+                id: session_id.to_owned(),
+            }],
         )
     }
 
@@ -943,10 +981,22 @@ impl Client {
 
     fn handle_notification(&mut self, method: &str, params: Value) -> Vec<Change> {
         match method {
-            "session/update" => match serde_json::from_value::<SessionNotification>(params) {
-                Ok(note) => self.apply_update(&note.session_id, note.update),
-                Err(_) => Vec::new(),
-            },
+            "session/update" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                match serde_json::from_value::<SessionNotification>(params) {
+                    Ok(note) => self.apply_update(&note.session_id, note.update),
+                    Err(error) => {
+                        log::debug!("an unreadable session/update arrived: {error}");
+                        vec![Change::Unknown {
+                            session_id,
+                            method: method.to_owned(),
+                        }]
+                    }
+                }
+            }
             "$/cancel_request" => {
                 let Some(request_id) = params.get("requestId").and_then(RequestId::from_value)
                 else {
@@ -1173,6 +1223,7 @@ impl Client {
         let Some((RequestId::Number(id), pending)) = self.pending.remove_entry(id) else {
             return Vec::new();
         };
+        let mut changes = Vec::new();
         match pending {
             Pending::Prompt {
                 session_id,
@@ -1186,11 +1237,17 @@ impl Client {
                 config_id,
                 previous: Some(previous),
             } => {
-                self.set_shown_option(&session_id, &config_id, &previous);
+                let restored = self
+                    .set_shown_option(&session_id, &config_id, &previous)
+                    .is_some();
+                if restored {
+                    changes.push(Change::Session { id: session_id });
+                }
             }
             _ => {}
         }
-        vec![Change::Failed { request: id, error }]
+        changes.push(Change::Failed { request: id, error });
+        changes
     }
 
     /// Marks a turn of `session_id` begun, or records its end.
@@ -1291,7 +1348,13 @@ impl Client {
                     id: session_id.into(),
                 }]
             }
-            SessionUpdate::Unknown => Vec::new(),
+            SessionUpdate::Unknown => {
+                log::debug!("a session/update of an unknown kind arrived");
+                vec![Change::Unknown {
+                    session_id: Some(session_id.to_owned()),
+                    method: "session/update".to_owned(),
+                }]
+            }
         }
     }
 }
@@ -1562,7 +1625,7 @@ mod tests {
             RequestId::String("abc".into()),
             &PermissionDecision::Allow,
         );
-        assert!(answered);
+        assert!(!answered.is_empty());
         let outgoing = client.take_outgoing();
         assert_eq!(outgoing.len(), 1);
         match &outgoing[0] {

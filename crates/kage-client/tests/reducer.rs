@@ -265,7 +265,14 @@ fn a_permission_ask_is_held_and_answered_with_the_picked_option() {
         "an unknown kind falls back instead of failing the ask"
     );
 
-    assert!(client.reply_permission("s1", n(101), &kage_client::PermissionDecision::Allow));
+    assert_eq!(
+        client.reply_permission("s1", n(101), &kage_client::PermissionDecision::Allow),
+        vec![
+            kage_client::Change::Permission { id: "s1".into() },
+            kage_client::Change::Transcript { id: "s1".into() },
+        ],
+        "the reply reports the ask it closed and the record it wrote"
+    );
     let outgoing = client.take_outgoing();
     assert_eq!(
         outgoing.last(),
@@ -329,10 +336,10 @@ fn a_failure_answer_to_a_prompt_ends_the_run() {
     let session = client.state().session("s1").unwrap();
     assert!(!session.running, "the failed run ends");
     assert!(
-        session.items.iter().all(|item| !matches!(
-            item,
-            TranscriptItem::Assistant { .. }
-        )),
+        session
+            .items
+            .iter()
+            .all(|item| !matches!(item, TranscriptItem::Assistant { .. })),
         "no assistant text is invented: {:?}",
         session.items
     );
@@ -358,16 +365,30 @@ fn an_option_change_shows_at_once_and_a_refusal_restores_it() {
             session.mode.clone(),
         )
     };
-    let id = client.set_config_option("s1", "mode", "plan");
+    let (id, shown) = client.set_config_option("s1", "mode", "plan");
+    assert_eq!(
+        shown,
+        vec![kage_client::Change::Session { id: "s1".into() }],
+        "the shown value is reported at once"
+    );
     assert_eq!(mode(&client), ("plan".into(), Some("plan".into())));
-    client.handle(Frame::Failure {
+    let error = kage_client::RpcError {
+        code: -32602,
+        message: "no".into(),
+        data: None,
+    };
+    let changes = client.handle(Frame::Failure {
         id: n(id),
-        error: kage_client::RpcError {
-            code: -32602,
-            message: "no".into(),
-            data: None,
-        },
+        error: error.clone(),
     });
+    assert_eq!(
+        changes,
+        vec![
+            kage_client::Change::Session { id: "s1".into() },
+            kage_client::Change::Failed { request: id, error },
+        ],
+        "the restored value is reported with the refusal"
+    );
     assert_eq!(
         mode(&client),
         ("default".into(), Some("default".into())),

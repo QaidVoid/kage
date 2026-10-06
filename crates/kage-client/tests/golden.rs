@@ -296,7 +296,14 @@ fn the_approval_fixture_round_trips_a_permission_ask() {
         Some("allow")
     );
 
-    assert!(client.reply_permission(PARENT, n(101), &PermissionDecision::Allow));
+    assert_eq!(
+        client.reply_permission(PARENT, n(101), &PermissionDecision::Allow),
+        vec![
+            Change::Permission { id: PARENT.into() },
+            Change::Transcript { id: PARENT.into() },
+        ],
+        "the reply closes the ask and records the decision"
+    );
     let outgoing = client.take_outgoing();
     assert_eq!(
         outgoing.last(),
@@ -498,14 +505,18 @@ fn feedback_rides_the_meta_channel_and_the_record_quotes_it() {
     let _ = client.take_outgoing();
     drive(&mut client, &frames[2..5]);
 
-    assert!(client.reply_permission(
-        PARENT,
-        n(101),
-        &PermissionDecision::Feedback {
-            option_id: "reject".into(),
-            feedback: "use rustfmt first".into(),
-        },
-    ));
+    assert!(
+        !client
+            .reply_permission(
+                PARENT,
+                n(101),
+                &PermissionDecision::Feedback {
+                    option_id: "reject".into(),
+                    feedback: "use rustfmt first".into(),
+                },
+            )
+            .is_empty()
+    );
     let outgoing = client.take_outgoing();
     assert_eq!(
         outgoing.last(),
@@ -547,7 +558,11 @@ fn a_dismissal_answers_cancelled_and_records_no_choice() {
     let _ = client.take_outgoing();
     drive(&mut client, &frames[2..5]);
 
-    assert!(client.reply_permission(PARENT, n(101), &PermissionDecision::Cancel));
+    assert!(
+        !client
+            .reply_permission(PARENT, n(101), &PermissionDecision::Cancel)
+            .is_empty()
+    );
     let outgoing = client.take_outgoing();
     assert_eq!(
         outgoing.last(),
@@ -612,7 +627,11 @@ fn the_subagent_fixture_builds_the_agent_tree_and_the_child_transcript() {
     );
     assert_eq!(client.state().asker_byline(PARENT), None);
 
-    assert!(client.reply_permission(CHILD, n(101), &PermissionDecision::Allow));
+    assert!(
+        !client
+            .reply_permission(CHILD, n(101), &PermissionDecision::Allow)
+            .is_empty()
+    );
     assert!(
         client
             .take_outgoing()
@@ -815,15 +834,19 @@ fn queued_prompts_withdraw_and_promote_to_steer() {
     assert_eq!(client.prompt("s1", text("second")), PromptOutcome::Queued);
     assert_eq!(client.state().session("s1").unwrap().queue.len(), 2);
 
-    assert!(
+    assert_eq!(
         client.withdraw_queued("s1", 0),
+        vec![Change::Session { id: "s1".into() }],
         "the held prompt is dropped"
     );
     assert_eq!(
         client.state().session("s1").unwrap().queue[0].prompt,
         text("second")
     );
-    assert!(!client.withdraw_queued("s1", 5), "nothing at the index");
+    assert!(
+        client.withdraw_queued("s1", 5).is_empty(),
+        "nothing at the index"
+    );
     assert_eq!(client.state().session("s1").unwrap().queue.len(), 1);
     assert!(
         client.take_outgoing().is_empty(),
@@ -1090,11 +1113,27 @@ fn list_pages_merge_and_config_and_close_land_on_the_session() {
         Some("Renamed")
     );
 
-    client.set_config_option("s1", "mode", "ask");
+    drive(
+        &mut client,
+        &[Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({"sessionId": "s1", "update": {"sessionUpdate":
+                "config_option_update", "configOptions": [{
+                "id": "mode", "name": "Mode", "category": "mode",
+                "type": "select", "currentValue": "default", "options": []
+            }]}}),
+        }],
+    );
+    let (request, shown) = client.set_config_option("s1", "mode", "ask");
+    assert_eq!(
+        shown,
+        vec![Change::Session { id: "s1".into() }],
+        "the optimistic value is reported at once"
+    );
     let changes = drive(
         &mut client,
         &[Frame::Success {
-            id: n(5),
+            id: n(request),
             result: serde_json::json!({"configOptions": [{
                 "id": "mode", "name": "Mode", "category": "mode",
                 "type": "select", "currentValue": "ask", "options": []
@@ -1145,17 +1184,62 @@ fn unheard_of_answers_and_frames_change_nothing() {
         ),
         Vec::<Change>::new()
     );
-    assert_eq!(
-        drive(
-            &mut client,
-            &[Frame::Notification {
-                method: "session/update".into(),
-                params: serde_json::json!({"sessionId": "s1", "update": {"sessionUpdate": "from the future"}}),
-            }],
-        ),
-        Vec::<Change>::new(),
-        "an unknown update kind changes nothing"
+}
+
+#[test]
+fn an_unknown_update_is_reported_not_dropped() {
+    let mut client = Client::new();
+    let changes = drive(
+        &mut client,
+        &[Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({
+                "sessionId": "s1",
+                "update": {"sessionUpdate": "from the future"},
+            }),
+        }],
     );
+    assert_eq!(
+        changes,
+        vec![Change::Unknown {
+            session_id: Some("s1".into()),
+            method: "session/update".into(),
+        }],
+        "an unknown update kind is named, not dropped"
+    );
+
+    let changes = drive(
+        &mut client,
+        &[Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({"sessionId": "s1", "update": "not an object"}),
+        }],
+    );
+    assert_eq!(
+        changes,
+        vec![Change::Unknown {
+            session_id: Some("s1".into()),
+            method: "session/update".into(),
+        }],
+        "an unreadable update is named, not dropped"
+    );
+
+    let changes = drive(
+        &mut client,
+        &[Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({"update": {"sessionUpdate": 7}}),
+        }],
+    );
+    assert_eq!(
+        changes,
+        vec![Change::Unknown {
+            session_id: None,
+            method: "session/update".into(),
+        }],
+        "an update without a session is still named"
+    );
+    assert!(client.take_outgoing().is_empty());
 }
 
 #[test]
@@ -1228,7 +1312,10 @@ fn a_fork_names_its_prompt_by_text_and_occurrence() {
         .rposition(|item| matches!(item, TranscriptItem::User { .. }))
         .unwrap();
     let before = session.prompt_ref(last).unwrap();
-    assert_eq!((before.text.as_str(), before.occurrence), ("again", 1));
+    assert_eq!(
+        (before.text.as_deref(), before.occurrence),
+        (Some("again"), 1)
+    );
     assert_eq!(session.prompt_ref(last + 1), None);
 
     let id = client.fork_session("s1", Some(before));

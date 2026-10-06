@@ -175,18 +175,24 @@ impl Session {
         }
     }
 
-    /// The prompt at transcript `index` as the agent finds it again: its
-    /// first text block and how many earlier prompts carried the same.
-    /// `None` when the item is not a prompt with text.
+    /// The prompt at transcript `index` as the agent finds it again:
+    /// its first text block, when the prompt has one, and how many
+    /// earlier prompts were the same kind with the same text. `None`
+    /// when the item is not a prompt.
     #[must_use]
     pub fn prompt_ref(&self, index: usize) -> Option<PromptRef> {
-        let text = prompt_text(self.items.get(index)?)?;
+        let item = self.items.get(index)?;
+        if !matches!(item, TranscriptItem::User { .. }) {
+            return None;
+        }
+        let text = prompt_text(item);
         let occurrence = self.items[..index]
             .iter()
-            .filter(|item| prompt_text(item) == Some(text))
+            .filter(|earlier| matches!(earlier, TranscriptItem::User { .. }))
+            .filter(|earlier| prompt_text(earlier) == text)
             .count();
         Some(PromptRef {
-            text: text.to_owned(),
+            text: text.map(str::to_owned),
             occurrence: u32::try_from(occurrence).unwrap_or(u32::MAX),
         })
     }
@@ -534,6 +540,34 @@ fn prompt_text(item: &TranscriptItem) -> Option<&str> {
 mod tests {
     use super::*;
     use kage_acp_wire::{DiffContent, MessageChunk};
+
+    #[test]
+    fn an_image_only_prompt_names_itself_without_text() {
+        let image = ContentBlock::Image(kage_acp_wire::BlobContent {
+            data: "AAAA".into(),
+            mime_type: "image/png".into(),
+            uri: None,
+        });
+        let user_image = |content| TranscriptItem::User {
+            content,
+            steered: false,
+        };
+        let mut session = Session::new("s1");
+        session.items.push(user_image(vec![image.clone()]));
+        session.items.push(TranscriptItem::Assistant {
+            text: "nice".into(),
+        });
+        session.items.push(user_image(vec![image]));
+        let first = session.prompt_ref(0).unwrap();
+        assert_eq!((first.text, first.occurrence), (None, 0));
+        assert_eq!(session.prompt_ref(1), None, "a reply is no prompt");
+        let second = session.prompt_ref(2).unwrap();
+        assert_eq!(
+            (second.text, second.occurrence),
+            (None, 1),
+            "the earlier image-only prompt counts"
+        );
+    }
 
     #[test]
     fn usage_fill_reports_a_fraction_of_the_window() {

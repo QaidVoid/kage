@@ -553,7 +553,7 @@ impl Store {
                 .find(|info| info.session_id == id)
                 .map(|info| info.cwd.clone())
                 .unwrap_or_else(|| self.cwd.clone());
-            let request = self.client.load_session(&id, &cwd, &[]);
+            let (request, _) = self.client.load_session(&id, &cwd, &[]);
             self.loads.insert(request, (id.clone(), false));
         }
         self.unread.remove(&id);
@@ -760,7 +760,7 @@ impl Store {
             .find(|info| info.session_id == session)
             .map(|info| info.cwd.clone())
             .unwrap_or_else(|| self.cwd.clone());
-        let request = self.client.load_session(&session, &cwd, &[]);
+        let (request, _) = self.client.load_session(&session, &cwd, &[]);
         self.loads.insert(request, (session, true));
     }
 
@@ -873,7 +873,7 @@ impl Store {
                 .map(|session| (session.id.clone(), session.cwd.clone()))
                 .collect();
             for (id, cwd) in open {
-                let request =
+                let (request, _) =
                     self.client
                         .load_session(&id, cwd.as_deref().unwrap_or(&self.cwd), &[]);
                 self.loads.insert(request, (id, false));
@@ -955,7 +955,7 @@ impl Store {
             .active_session()
             .and_then(|session| session.cwd.clone())
             .unwrap_or_else(|| self.cwd.clone());
-        let request = self.client.load_session(id, &cwd, &[]);
+        let (request, _) = self.client.load_session(id, &cwd, &[]);
         self.loads.insert(request, (id.to_owned(), false));
     }
 
@@ -1034,7 +1034,7 @@ impl Store {
         let id = session.id.clone();
         let plan = ForkPlan::Rewind {
             title: session.title.clone(),
-            prompt: before.text.clone(),
+            prompt: before.text.clone().unwrap_or_default(),
         };
         self.forking.insert(id.clone(), plan);
         self.client.fork_session(&id, Some(before));
@@ -1052,7 +1052,7 @@ impl Store {
             .session(from)
             .and_then(|session| session.cwd.clone())
             .unwrap_or_else(|| self.cwd.clone());
-        let request = self.client.load_session(to, &cwd, &[]);
+        let (request, _) = self.client.load_session(to, &cwd, &[]);
         self.loads.insert(request, (to.to_owned(), false));
         self.unread.remove(to);
         self.active = Some(to.to_owned());
@@ -1497,7 +1497,10 @@ impl Store {
         request_id: RequestId,
         decision: &kage_client::PermissionDecision,
     ) -> bool {
-        self.client.reply_permission(session, request_id, decision)
+        !self
+            .client
+            .reply_permission(session, request_id, decision)
+            .is_empty()
     }
 
     /// Stores the composer draft of `session`, when the state knows
@@ -1554,8 +1557,10 @@ impl Store {
             },
             None => kage_client::PermissionDecision::Option(option_id),
         };
-        self.client
+        !self
+            .client
             .reply_permission(&session_id, review.request_id, &decision)
+            .is_empty()
     }
 
     /// Whether swarm cards draw the constellation.
@@ -1741,12 +1746,12 @@ impl Store {
     }
 
     /// Removes the queued prompt at `index` of the active session
-    /// before it went on the wire.
+    /// before it went on the wire. Reports whether there was one.
     pub fn withdraw_queued(&mut self, index: usize) -> bool {
         let Some(session) = self.active.clone() else {
             return false;
         };
-        self.client.withdraw_queued(&session, index)
+        !self.client.withdraw_queued(&session, index).is_empty()
     }
 
     /// Sends the queued prompt at `index` of the active session as a

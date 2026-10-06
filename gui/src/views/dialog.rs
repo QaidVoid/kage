@@ -63,7 +63,7 @@ pub(crate) fn rewind_preview(
     session: &Session,
     prompt: usize,
 ) -> Option<RewindPreview> {
-    let text = session.prompt_ref(prompt)?.text;
+    let text = session.prompt_ref(prompt)?.text.unwrap_or_default();
     let gone = &session.items[prompt..];
     let calls: Vec<&str> = gone
         .iter()

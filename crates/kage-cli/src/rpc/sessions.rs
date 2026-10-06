@@ -226,7 +226,7 @@ fn fork_point(path: &Path, before: Option<&PromptRef>) -> Result<EntryId, RpcErr
         let entry = entry.map_err(internal)?;
         if let (Some(before), SessionEntry::Message(m)) = (before, &entry)
             && m.message.role == Role::User
-            && prompt_text(&m.message) == before.text
+            && prompt_text(&m.message) == before.text.as_deref()
         {
             if seen == before.occurrence {
                 return last.ok_or_else(|| RpcError::internal("the prompt has no entry before it"));
@@ -242,16 +242,13 @@ fn fork_point(path: &Path, before: Option<&PromptRef>) -> Result<EntryId, RpcErr
 }
 
 /// The first text block of a user message: the prompt as typed, ahead
-/// of any attachment rendered as text.
-fn prompt_text(message: &Message) -> &str {
-    message
-        .content
-        .iter()
-        .find_map(|block| match block {
-            Content::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .unwrap_or_default()
+/// of any attachment rendered as text. `None` when the prompt has no
+/// text block, such as an image-only message.
+fn prompt_text(message: &Message) -> Option<&str> {
+    message.content.iter().find_map(|block| match block {
+        Content::Text { text } => Some(text.as_str()),
+        _ => None,
+    })
 }
 
 /// The subagent updates that rebuild the finished agents of the

@@ -43,6 +43,16 @@ pub enum Change {
         /// The request id that was withdrawn.
         request_id: RequestId,
     },
+    /// A `session/update` the client could not read: its payload did
+    /// not parse, or its update kind is one this build does not know.
+    /// The state is unchanged; a host may tell the user the agent sent
+    /// something this build cannot show, instead of failing silently.
+    Unknown {
+        /// The session the update named, when the payload carried one.
+        session_id: Option<String>,
+        /// The wire method the frame arrived on.
+        method: String,
+    },
     /// A session's agent tree changed.
     Agents {
         /// The session whose subagents moved.
@@ -157,6 +167,7 @@ impl Change {
             | Self::Permission { id }
             | Self::AnsweredElsewhere { id, .. }
             | Self::Agents { id } => Some(id),
+            Self::Unknown { session_id, .. } => session_id.as_deref(),
             Self::Fs { session_id, .. } | Self::Exported { session_id, .. } => Some(session_id),
             Self::Forked { from, .. } => Some(from),
             Self::Connection

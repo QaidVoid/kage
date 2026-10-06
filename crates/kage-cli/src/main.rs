@@ -755,24 +755,22 @@ fn config_error() -> Option<ExitCode> {
 }
 
 /// Open the print-mode session recorder, unless `no_session`. A failed
-/// open stops the run: an unrecorded `-p` turn loses its transcript.
+/// open is an error for the caller to turn into an exit status:
+/// an unrecorded `-p` turn loses its transcript.
 fn open_session_writer(
     no_session: bool,
     model: &str,
     system_prompt: &str,
-) -> Option<kage_session::SessionWriter> {
+) -> Result<Option<kage_session::SessionWriter>, String> {
     if no_session {
-        return None;
+        return Ok(None);
     }
     match open_session(model, system_prompt) {
         Ok(w) => {
             eprintln!("kage: recording session to {}", w.path().display());
-            Some(w)
+            Ok(Some(w))
         }
-        Err(e) => {
-            eprintln!("kage: failed to open session file: {e}");
-            std::process::exit(1);
-        }
+        Err(e) => Err(format!("failed to open session file: {e}")),
     }
 }
 
@@ -865,7 +863,13 @@ fn run_print_mode(cli: Cli) -> ExitCode {
     if let Some(out) = runtime_env::max_output_tokens_for(&registry, &model) {
         cx = cx.with_max_output_tokens(out);
     }
-    let writer = open_session_writer(cli.no_session, &model, &system_prompt);
+    let writer = match open_session_writer(cli.no_session, &model, &system_prompt) {
+        Ok(writer) => writer,
+        Err(e) => {
+            eprintln!("kage: {e}");
+            return ExitCode::from(1);
+        }
+    };
 
     let exit = execute_print_run(
         Arc::new(registry),
@@ -966,10 +970,12 @@ pub(crate) fn print_session_table<W: Write>(out: &mut W, summaries: &[SessionSum
     let created_h = "CREATED";
     let model_h = "MODEL";
     let title_h = "TITLE";
-    let _ = writeln!(out, "{id_h:<10}  {created_h:<16}  {model_h:<32}  {title_h}");
+    let _ = writeln!(out, "{id_h:<8}  {created_h:<16}  {model_h:<32}  {title_h}");
     for s in summaries {
         let id = s.id.to_string();
-        let id_short: String = id.chars().take(10).collect();
+        // Eight chars, matching the prefixes engine notices and the
+        // TUI show, so the id can be pasted where those are expected.
+        let id_short: String = id.chars().take(8).collect();
         let created = s
             .created_at
             .with_timezone(&chrono::Local)
@@ -984,7 +990,7 @@ pub(crate) fn print_session_table<W: Write>(out: &mut W, summaries: &[SessionSum
                 || "(untitled session)".to_owned(),
                 |text| truncate_one_line(text, 60),
             );
-        let _ = writeln!(out, "{id_short:<10}  {created:<16}  {model:<32}  {title}");
+        let _ = writeln!(out, "{id_short:<8}  {created:<16}  {model:<32}  {title}");
     }
 }
 
@@ -1081,6 +1087,14 @@ mod tests {
         let text = String::from_utf8(out).expect("utf-8");
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].ends_with("TITLE"), "{text}");
+        let id = rows[0].id.to_string();
+        let prefix8: String = id.chars().take(8).collect();
+        assert!(
+            lines[1].starts_with(&format!("{prefix8}  ")),
+            "the id column shows the 8-char prefix the engine notices and the TUI use: {text}"
+        );
+        let prefix10: String = id.chars().take(10).collect();
+        assert!(!lines[1].contains(&prefix10), "{text}");
         let local = rows[0]
             .created_at
             .with_timezone(&chrono::Local)

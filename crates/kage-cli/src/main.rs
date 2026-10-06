@@ -194,6 +194,12 @@ pub(crate) enum Command {
         /// Destination path for the generated manpage.
         #[arg(long = "out", default_value = "man/kage.1")]
         out: PathBuf,
+        /// Compare the rendered page against the file at `--out` and
+        /// fail when they differ, instead of writing. The CI man-page
+        /// gate runs this so a CLI change without a page refresh is
+        /// caught before it ships.
+        #[arg(long = "check")]
+        check: bool,
     },
     /// Print a shell completion script for `kage` to stdout.
     ///
@@ -379,7 +385,7 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
             non_interactive,
         } => init::run(force, non_interactive),
         Command::Doctor => doctor::run(),
-        Command::GenManpage { out } => run_gen_manpage(&out),
+        Command::GenManpage { out, check } => run_gen_manpage(&out, check),
         Command::Completions { shell } => run_completions(shell),
         Command::Rpc { model, system } => {
             config_error().unwrap_or_else(|| rpc::run(model.as_deref(), &system))
@@ -449,10 +455,12 @@ pub(crate) fn run_completions(shell: clap_complete::Shell) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Render the manpage via `clap_mangen` and write it to `out`.
-/// Creates the parent directory when missing so a fresh checkout can
-/// run `kage gen-manpage --out man/kage.1` without a prior `mkdir`.
-pub(crate) fn run_gen_manpage(out: &std::path::Path) -> ExitCode {
+/// Render the manpage via `clap_mangen` and write it to `out`, or with
+/// `check`, compare the rendered page against the file at `out` and
+/// fail when they differ. Creates the parent directory when missing so
+/// a fresh checkout can run `kage gen-manpage --out man/kage.1`
+/// without a prior `mkdir`.
+pub(crate) fn run_gen_manpage(out: &std::path::Path, check: bool) -> ExitCode {
     use clap::CommandFactory as _;
     let buffer = match render_manpage(&Cli::command()) {
         Ok(buffer) => buffer,
@@ -461,6 +469,30 @@ pub(crate) fn run_gen_manpage(out: &std::path::Path) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if check {
+        return match std::fs::read_to_string(out) {
+            Ok(stored) if stored == buffer => {
+                eprintln!("kage: gen-manpage --check: {} is current", out.display());
+                ExitCode::SUCCESS
+            }
+            Ok(_) => {
+                eprintln!(
+                    "kage: gen-manpage --check: {} is stale; run `kage gen-manpage --out {}` and commit the result",
+                    out.display(),
+                    out.display()
+                );
+                ExitCode::from(1)
+            }
+            Err(err) => {
+                eprintln!(
+                    "kage: gen-manpage --check: cannot read {}: {err}; run `kage gen-manpage --out {}` and commit the result",
+                    out.display(),
+                    out.display()
+                );
+                ExitCode::from(1)
+            }
+        };
+    }
     if let Some(parent) = out.parent()
         && !parent.as_os_str().is_empty()
         && let Err(err) = std::fs::create_dir_all(parent)
@@ -521,6 +553,9 @@ fn render_manpage(cmd: &clap::Command) -> io::Result<String> {
     use clap_mangen::Man;
     use clap_mangen::roff::{Roff, bold, italic, roman};
 
+    let mut built = cmd.clone();
+    built.build();
+    let cmd = &built;
     type Section = fn(&Man, &mut dyn Write) -> io::Result<()>;
     let man = Man::new(cmd.clone());
     let preamble = Roff::new().render();
@@ -575,6 +610,18 @@ fn render_manpage(cmd: &clap::Command) -> io::Result<String> {
             if let Some(about) = page.get_about() {
                 roff.text([roman(about.to_string())]);
             }
+            let args = subcommand_args(page);
+            if !args.is_empty() {
+                let mut options = Roff::new();
+                for (tag, help) in args {
+                    options.control("TP", []);
+                    options.text(tag);
+                    if !help.is_empty() {
+                        options.text(help);
+                    }
+                }
+                push(options.render());
+            }
         }
     }
     roff.control("PP", []);
@@ -599,6 +646,61 @@ fn render_manpage(cmd: &clap::Command) -> io::Result<String> {
     push(roff.render());
     push(render(Man::render_version_section)?);
     Ok(page)
+}
+
+/// Option and positional lines for one command in the COMMANDS
+/// section, styled like the OPTIONS section: bold flags, italic
+/// `<VALUE>`, roman help. Each entry is a (`tag`, `help`) pair emitted
+/// as one `.TP` block. Hidden arguments are skipped;
+/// `--help`/`--version` are documented once in OPTIONS.
+fn subcommand_args(
+    cmd: &clap::Command,
+) -> Vec<(
+    Vec<clap_mangen::roff::Inline>,
+    Vec<clap_mangen::roff::Inline>,
+)> {
+    use clap_mangen::roff::{bold, italic, roman};
+    let mut blocks = Vec::new();
+    for arg in cmd.get_arguments() {
+        if arg.is_hide_set() || matches!(arg.get_id().as_str(), "help" | "version") {
+            continue;
+        }
+        let mut tag = Vec::new();
+        if arg.is_positional() {
+            let name = arg
+                .get_value_names()
+                .map(|names| names.join(" "))
+                .unwrap_or_else(|| arg.get_id().as_str().to_owned());
+            tag.push(italic(name));
+        } else {
+            match (arg.get_short(), arg.get_long()) {
+                (Some(short), Some(long)) => {
+                    tag.push(bold(format!("-{short}")));
+                    tag.push(roman(", "));
+                    tag.push(bold(format!("--{long}")));
+                }
+                (Some(short), None) => tag.push(bold(format!("-{short}"))),
+                (None, Some(long)) => tag.push(bold(format!("--{long}"))),
+                (None, None) => continue,
+            }
+            let takes_values = arg
+                .get_num_args()
+                .map(|range| range.takes_values())
+                .unwrap_or(false);
+            if takes_values && let Some(names) = arg.get_value_names() {
+                for name in names {
+                    tag.push(italic(format!(" <{name}>")));
+                }
+            }
+        }
+        let help = arg
+            .get_help()
+            .or_else(|| arg.get_long_help())
+            .map(|help| vec![roman(help.to_string())])
+            .unwrap_or_default();
+        blocks.push((tag, help));
+    }
+    blocks
 }
 
 /// `-p/--print` belongs to print mode, which only runs without a
@@ -1000,6 +1102,33 @@ mod tests {
         assert!(!page.contains("For example:"));
         assert!(page.contains("\\fBkage auth list\\fR"));
         assert!(page.contains(".SH FILES"));
+    }
+
+    #[test]
+    fn manpage_lists_per_command_options_and_positionals() {
+        use clap::CommandFactory as _;
+        let page = render_manpage(&Cli::command()).unwrap();
+        assert!(
+            page.contains("\\fB\\-\\-non\\-interactive\\fR"),
+            "per-command options missing"
+        );
+        assert!(
+            page.contains("\\fISESSION\\fR") || page.contains("\\fIID\\fR"),
+            "positional arguments missing"
+        );
+    }
+
+    #[test]
+    fn gen_manpage_check_fails_on_drift_and_passes_on_current() {
+        use clap::CommandFactory as _;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("kage.1");
+        assert_eq!(run_gen_manpage(&out, true), ExitCode::from(1), "missing");
+        std::fs::write(&out, "stale\n").unwrap();
+        assert_eq!(run_gen_manpage(&out, true), ExitCode::from(1), "stale");
+        let page = render_manpage(&Cli::command()).unwrap();
+        std::fs::write(&out, &page).unwrap();
+        assert_eq!(run_gen_manpage(&out, true), ExitCode::SUCCESS, "current");
     }
 
     #[test]

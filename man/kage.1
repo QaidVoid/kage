@@ -34,6 +34,81 @@ Print help
 .TP
 \fB\-V\fR, \fB\-\-version\fR
 Print version
+.TP
+\fIID\fR
+Session id or unique prefix. Mutually exclusive with \-\-last
+.TP
+\fB\-\-last\fR
+Resume the most recently created session of the current directory
+.TP
+\fB\-p\fR, \fB\-\-print\fR\fI <PRINT>\fR
+New user prompt to append in print mode. Without it the session opens in the interactive TUI
+.TP
+\fB\-m\fR, \fB\-\-model\fR\fI <MODEL>\fR
+Override the recorded model. Defaults to the model the session was last using
+.TP
+\fB\-\-json\fR
+Emit one JSON object per event on stdout instead of plain text. Same format as the top\-level `\-\-json` flag
+.TP
+\fIID\fR
+Source session id or unique prefix
+.TP
+\fB\-\-at\fR\fI <AT>\fR
+Entry id (or unique prefix) to fork at; everything up through this entry is copied into the new session
+.TP
+\fIQUERY\fR
+Regex query, ripgrep\-style
+.TP
+\fIPROVIDER\fR
+Provider id. Omit to pick from a list
+.TP
+\fIPROVIDER\fR
+Provider id
+.TP
+\fB\-\-force\fR
+Overwrite an existing `~/.config/kage/config.toml` instead of keeping it
+.TP
+\fB\-\-non\-interactive\fR
+Skip every prompt. Useful for scripted bootstrap; will still write a fresh config when one is missing but never asks for an API key
+.TP
+\fISHELL\fR
+Target shell
+.TP
+\fB\-m\fR, \fB\-\-model\fR\fI <MODEL>\fR
+Provider\-qualified model id (`provider/model`). Defaults the same way as the top\-level `\-m`
+.TP
+\fB\-\-system\fR\fI <SYSTEM>\fR
+System\-prompt role override forwarded to the agent loop
+.TP
+\fB\-m\fR, \fB\-\-model\fR\fI <MODEL>\fR
+Provider\-qualified model id (`provider/model`). Defaults the same way as the top\-level `\-m`
+.TP
+\fB\-\-system\fR\fI <SYSTEM>\fR
+System\-prompt role override forwarded to the agent loop
+.TP
+\fB\-\-host\fR\fI <HOST>\fR
+Address to bind. Loopback by default; a non\-loopback address prints a warning because kage itself has no TLS
+.TP
+\fB\-\-port\fR\fI <PORT>\fR
+TCP port to bind. `0` picks a free port and the connect URL shows it
+.TP
+\fB\-\-rotate\-token\fR
+Replace the stored token with a fresh one before serving, so every client holding the old connect URL must be sent the new one
+.TP
+\fB\-\-web\-dir\fR\fI <WEB_DIR>\fR
+Directory with the web client bundle to serve at `/` (built from `gui/`). Defaults to a `web/` directory beside the executable. A missing or empty directory only disables the web UI; `/acp` keeps working
+.TP
+\fB\-\-revoke\fR
+Forget the trust recorded for this directory
+.TP
+\fB\-\-tools\fR\fI <TOOLS>\fR
+Comma\-separated built\-in tools to expose. Unknown names are an error
+.TP
+\fISERVER\fR
+Server name from `[mcp.servers.<name>]`
+.TP
+\fISERVER\fR
+Server name from `[mcp.servers.<name>]`
 .SH COMMANDS
 .TP
 \fBkage list\fR

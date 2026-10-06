@@ -122,8 +122,8 @@ impl Remote {
         remote
     }
 
-    /// Sends `command` to the serve. Once the serve is gone a prompt is
-    /// refused with a notice and anything else is dropped.
+    /// Sends `command` to the serve. Once the serve is gone every
+    /// command is refused with a notice instead of vanishing.
     pub(crate) fn send(&self, command: &Command) {
         if !self.closed.load(Ordering::SeqCst) {
             let mut line = serde_json::to_vec(command).unwrap_or_default();
@@ -138,9 +138,7 @@ impl Remote {
             }
             self.closed.store(true, Ordering::SeqCst);
         }
-        if matches!(command.kind, CommandKind::Prompt { .. }) {
-            self.notice(NoticeLevel::Error, DETACHED, false);
-        }
+        self.notice(NoticeLevel::Error, DETACHED, false);
     }
 
     /// Shows `event` in the App as if the serve had published it.
@@ -339,6 +337,9 @@ mod tests {
         }));
         let refused = app.recv_timeout(wait).unwrap();
         assert_eq!(notice_text(&refused), Some(DETACHED));
+        remote.send(&Command::active(CommandKind::Cancel));
+        let refused_too = app.recv_timeout(wait).unwrap();
+        assert_eq!(notice_text(&refused_too), Some(DETACHED));
         assert!(lock(&sent).is_empty(), "nothing goes out once detached");
     }
 

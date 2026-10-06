@@ -110,6 +110,8 @@ enum Pending {
     },
     Open {
         session_id: String,
+        /// The session the open replaced, put back when it fails.
+        snapshot: Box<Session>,
     },
     List {
         /// The directory filter of the first page, kept for the next.
@@ -856,8 +858,10 @@ impl Client {
         // draft, the held queue, the place in the forest) stays. A run
         // that was in flight answers on the old connection, which is
         // gone, so the session reads idle until the replay says
-        // otherwise.
+        // otherwise. A failed open puts the replaced session back,
+        // reading idle with it.
         let session = self.session_mut(session_id);
+        let snapshot = Box::new(session.clone());
         let kept = Session {
             id: session_id.to_owned(),
             cwd: if cwd.is_empty() {
@@ -877,6 +881,7 @@ impl Client {
             request,
             Pending::Open {
                 session_id: session_id.to_owned(),
+                snapshot,
             },
         );
         (
@@ -1046,7 +1051,10 @@ impl Client {
         match pending {
             Pending::Initialize => self.apply_initialize(id, result),
             Pending::NewSession { cwd } => self.apply_new_session(id, cwd, result),
-            Pending::Open { session_id } => {
+            Pending::Open {
+                session_id,
+                snapshot: _,
+            } => {
                 match answer::<kage_acp_wire::LoadSessionResponse>(
                     id,
                     result,
@@ -1243,6 +1251,18 @@ impl Client {
                 if restored {
                     changes.push(Change::Session { id: session_id });
                 }
+            }
+            Pending::Open {
+                session_id,
+                snapshot,
+            } => {
+                let session = self.session_mut(&session_id);
+                *session = *snapshot;
+                // The run the old state read busy with rode the
+                // connection this load replaced, so it reads idle.
+                session.running = false;
+                session.in_turn = false;
+                changes.push(Change::Session { id: session_id });
             }
             _ => {}
         }
@@ -1726,5 +1746,51 @@ mod tests {
             }),
         });
         assert_eq!(client.state().protocol_version, Some(1));
+    }
+
+    #[test]
+    fn a_failed_load_restores_the_transcript_it_replaced() {
+        let mut client = Client::new();
+        let sent = client.prompt("s1", vec![ContentBlock::text("first ask")]);
+        assert!(matches!(sent, PromptOutcome::Sent { .. }));
+        let held = client.prompt("s1", vec![ContentBlock::text("second ask")]);
+        assert_eq!(held, PromptOutcome::Queued);
+
+        let (load_id, _) = client.load_session("s1", "", &[]);
+        assert!(
+            client.state().session("s1").unwrap().items.is_empty(),
+            "the open replaced the transcript"
+        );
+
+        let changes = client.handle(Frame::Failure {
+            id: RequestId::Number(load_id),
+            error: RpcError::new(-32000, "no such session"),
+        });
+        let session = client.state().session("s1").unwrap();
+        assert_eq!(session.items.len(), 1, "the prior transcript came back");
+        assert!(matches!(session.items[0], TranscriptItem::User { .. }));
+        assert_eq!(session.queue.len(), 1, "the held prompt came back");
+        assert!(!session.running, "the session reads idle");
+        assert!(changes.contains(&Change::Session { id: "s1".into() }));
+        assert!(
+            changes
+                .iter()
+                .any(|change| matches!(change, Change::Failed { .. }))
+        );
+    }
+
+    #[test]
+    fn a_failed_load_removes_its_pending_entry() {
+        let mut client = Client::new();
+        let (load_id, _) = client.load_session("s1", "", &[]);
+        let failure = Frame::Failure {
+            id: RequestId::Number(load_id),
+            error: RpcError::new(-32000, "no such session"),
+        };
+        assert!(!client.handle(failure.clone()).is_empty());
+        assert!(
+            client.handle(failure).is_empty(),
+            "the pending entry is gone"
+        );
     }
 }

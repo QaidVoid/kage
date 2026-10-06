@@ -62,7 +62,8 @@ impl CommandLine {
         &self.text
     }
 
-    /// Byte offset of the cursor inside [`Self::text`].
+    /// Byte offset of the cursor inside [`Self::text`]; every mutation
+    /// keeps it on a char boundary.
     #[must_use]
     pub fn cursor(&self) -> usize {
         self.cursor
@@ -319,6 +320,10 @@ impl CommandLine {
     }
 
     fn refresh(&mut self, registry: &[&CommandSpec], resolver: &dyn Resolver) {
+        // Keystroke edits end here and completion inserts end in
+        // `replace_at_anchor`, so these two debug asserts catch a
+        // mutation that strands the cursor mid-char.
+        debug_assert!(self.text.is_char_boundary(self.cursor));
         self.popup_open = false;
         self.selected = None;
         self.completions = complete(registry, &self.text, self.cursor, resolver);
@@ -330,6 +335,7 @@ impl CommandLine {
         self.text.drain(anchor..end);
         self.text.insert_str(anchor, value);
         self.cursor = anchor + value.len();
+        debug_assert!(self.text.is_char_boundary(self.cursor));
     }
 
     /// Apply a readline-style Ctrl chord. Unbound chords do nothing,

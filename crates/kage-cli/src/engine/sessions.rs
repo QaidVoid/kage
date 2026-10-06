@@ -215,9 +215,16 @@ impl super::Dispatcher {
                 }),
         );
         for dropped in &dropped {
+            // A queued child still owes its call a result, so it ends
+            // through the waiting path, which publishes its cancelled
+            // `RunEnded` and delivers the cancelled report.
+            if self.waiting.contains(dropped) {
+                self.end_waiting(*dropped);
+            }
             self.sessions.remove(dropped);
-            self.waiting.retain(|w| w != dropped);
             self.swarm_requeues.remove(dropped);
+            self.bus.forget(*dropped);
+            self.report_closed(*dropped);
         }
         if self.active == Some(id) {
             self.active = None;
@@ -507,6 +514,8 @@ impl super::Dispatcher {
         let path = recorder.path().to_path_buf();
         let mut session = self.sessions.remove(&old).expect("session checked");
         self.swarm_requeues.remove(&old);
+        self.bus.forget(old);
+        self.report_closed(old);
         let messages = cx.history.clone();
         session.usage = super::usage_of(&cx);
         session.state.thinking = cx.thinking_level;
@@ -541,6 +550,8 @@ impl super::Dispatcher {
         for agent in agents {
             self.sessions.remove(&agent);
             self.swarm_requeues.remove(&agent);
+            self.bus.forget(agent);
+            self.report_closed(agent);
         }
         self.sessions.insert(new, session);
         if self.active == Some(old) {

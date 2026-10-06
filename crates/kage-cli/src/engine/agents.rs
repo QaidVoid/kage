@@ -147,7 +147,13 @@ impl super::Dispatcher {
             });
             match forked {
                 Ok((spec, missing, path)) => (spec, missing, Some(path)),
-                Err(text) => return fail(text),
+                Err(text) => {
+                    // A failed child never runs, so once the batch is
+                    // done spawning the cached parent transcript has
+                    // no reader left.
+                    self.release_snapshot(swarm.as_ref());
+                    return fail(text);
+                }
             }
         } else {
             let (spec, missing) = agent_spec(from, parent, id, &def, &setup, &workdir);

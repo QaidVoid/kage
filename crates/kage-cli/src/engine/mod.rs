@@ -171,6 +171,8 @@ pub(crate) struct Engine {
     commander: Commander,
     bus: Arc<Bus>,
     thread: Option<thread::JoinHandle<()>>,
+    /// The session ids the engine removed, its closes confirmed.
+    closed_sessions: crossbeam_channel::Receiver<SessionId>,
 }
 
 /// Cloneable handle for sending commands to an engine.
@@ -270,6 +272,9 @@ enum Input {
     /// Test-only: report the hosted session ids.
     #[cfg(test)]
     HostedSessions(crossbeam_channel::Sender<Vec<(SessionId, Option<usize>)>>),
+    /// Test-only: report the batch id of the cached fork snapshot.
+    #[cfg(test)]
+    ForkSnapshot(crossbeam_channel::Sender<Option<ToolCallId>>),
 }
 
 /// One verified resume target, from its session marker.
@@ -315,6 +320,7 @@ impl Engine {
     pub(crate) fn start(registry: Arc<ProviderRegistry>) -> Self {
         let (tx, rx) = mpsc::channel();
         let bus = Arc::new(Bus::new());
+        let (closed, closed_sessions) = crossbeam_channel::unbounded();
         let dispatcher = Dispatcher {
             bus: Arc::clone(&bus),
             registry,
@@ -330,12 +336,14 @@ impl Engine {
             watchdogs: HashMap::new(),
             swarm_requeues: HashMap::new(),
             fork_snapshot: None,
+            closed,
         };
         let thread = thread::spawn(move || dispatcher.run(&rx));
         Self {
             commander: Commander(tx),
             bus,
             thread: Some(thread),
+            closed_sessions,
         }
     }
 
@@ -358,6 +366,13 @@ impl Engine {
     /// unsubscribe, or it deadlocks on the same lock.
     pub(crate) fn hold_events<R>(&self, f: impl FnOnce() -> R) -> R {
         self.bus.hold(f)
+    }
+
+    /// The session ids the engine removed, its closes confirmed, so
+    /// the host can drop the bookkeeping of sessions it will never
+    /// host again. The stream ends when the engine stops.
+    pub(crate) fn closed_sessions(&self) -> crossbeam_channel::Receiver<SessionId> {
+        self.closed_sessions.clone()
     }
 
     pub(crate) fn commander(&self) -> Commander {
@@ -546,6 +561,9 @@ struct Dispatcher {
     /// its children, read once per call and dropped after its last
     /// child spawns.
     fork_snapshot: Option<(ToolCallId, kage_session::Snapshot)>,
+    /// Reports every session the dispatcher removed, so the host can
+    /// prune the bookkeeping of sessions it will never host again.
+    closed: crossbeam_channel::Sender<SessionId>,
 }
 
 impl Dispatcher {
@@ -585,6 +603,10 @@ impl Dispatcher {
                             .map(|(id, s)| (*id, s.idle.as_ref().map(|idle| idle.cx.history.len())))
                             .collect(),
                     );
+                }
+                #[cfg(test)]
+                Input::ForkSnapshot(reply) => {
+                    let _ = reply.send(self.fork_snapshot.as_ref().map(|(batch, _)| batch.clone()));
                 }
                 Input::McpDone(done) => self.mcp_done(*done),
                 Input::ShellDone(done) => self.shell_done(*done),
@@ -1599,6 +1621,14 @@ impl Dispatcher {
         self.watchdogs.remove(&id);
         self.swarm_requeues.remove(&id);
         self.sessions.remove(&id);
+        self.bus.forget(id);
+        self.report_closed(id);
+    }
+
+    /// Report a session the dispatcher removed, so the host can prune
+    /// its bookkeeping. The engine outliving every listener is fine.
+    fn report_closed(&self, id: SessionId) {
+        let _ = self.closed.send(id);
     }
 
     /// Re-prompt a swarm child whose run failed on a rate limit, or

@@ -54,12 +54,15 @@ fn tool_turn(tool: &str) -> Vec<Result<ProviderEvent, ProviderError>> {
 /// Blocks until the test releases it or the run is cancelled.
 #[derive(Debug)]
 struct Gate {
+    /// Registered tool name, so a test can host several independent
+    /// gates.
+    name: &'static str,
     release: Mutex<Receiver<()>>,
 }
 
 impl Tool for Gate {
-    fn name(&self) -> &'static str {
-        "gate"
+    fn name(&self) -> &str {
+        self.name
     }
     fn description(&self) -> &'static str {
         "waits for the test"
@@ -69,6 +72,9 @@ impl Tool for Gate {
     }
     fn risk(&self) -> kage_core::Risk {
         kage_core::Risk::Read
+    }
+    fn execution_mode(&self) -> Option<kage_tools::ExecMode> {
+        Some(kage_tools::ExecMode::Parallel)
     }
     fn execute(
         &self,
@@ -105,6 +111,7 @@ fn harness_on(registry: ProviderRegistry) -> Harness {
     let (release, release_rx) = channel();
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(Gate {
+        name: "gate",
         release: Mutex::new(release_rx),
     }));
     let (tx, events) = channel();
@@ -5285,4 +5292,217 @@ fn only_an_answerable_main_session_gets_the_question_tool() {
         has_tool(false, false).iter().all(|has| !has),
         "nobody to ask"
     );
+}
+
+#[test]
+fn closing_the_root_ends_a_queued_descendant_as_cancelled() {
+    let (h, _main, _agents) = split_harness(
+        vec![
+            agent_turn(&[("call_a", background_task("fan out"))]),
+            text_turn("waiting for the tests"),
+        ],
+        vec![
+            agent_turn(&[("call_g1", task("one")), ("call_g2", task("two"))]),
+            tool_turn("gate"),
+            text_turn("spare"),
+        ],
+    );
+    let root = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(AgentSetup {
+            max_running: 1,
+            ..background_setup(Background::Wake)
+        }),
+    );
+    prompt(&h.engine, root, "go", Delivery::Steer);
+    // The root may end before or after the queued grandchild spawns,
+    // so wait for both without assuming an order.
+    let root_ended = std::cell::Cell::new(false);
+    let mut events = wait_for(&h.events, |e| {
+        if run_ended_on(root)(e) {
+            root_ended.set(true);
+        }
+        root_ended.get()
+            && matches!(&e.event,
+                Event::Host(HostEvent::AgentSpawned { tool_call_id, .. }) if tool_call_id.0 == "call_g2")
+    });
+    let g2 = events
+        .iter()
+        .rev()
+        .find_map(|e| {
+            matches!(&e.event,
+                Event::Host(HostEvent::AgentSpawned { tool_call_id, .. }) if tool_call_id.0 == "call_g2")
+                .then_some(e.session)
+        })
+        .expect("g2 spawned");
+
+    // The root is idle while its background child runs one grandchild
+    // and waits on the queued other.
+    let children = spawned(&events);
+    assert_eq!(children[0].1.0, "call_a");
+    let b = children[0].0;
+    assert_eq!(outcome_of(&events, g2).len(), 0, "still queued");
+
+    h.engine.send(Command::to(root, CommandKind::Close));
+    events.extend(wait_for(&h.events, |e| {
+        e.session == g2
+            && matches!(&e.event, Event::Host(HostEvent::RunEnded { outcome })
+                if *outcome == RunOutcome::Cancelled)
+    }));
+    // The queued child's cancelled result reaches the waiting call on
+    // the parent's worker, a step after its `RunEnded`.
+    let ended = wait_for(&h.events, |e| {
+        matches!(&e.event, Event::Loop(LoopEvent::ToolCallEnd { id, .. })
+            if e.session == b && id.0 == "call_g2")
+    });
+    h.engine.shutdown();
+
+    let Event::Loop(LoopEvent::ToolCallEnd { output, .. }) = &ended.last().unwrap().event else {
+        unreachable!("the wait matched a ToolCallEnd");
+    };
+    assert!(
+        output
+            .text
+            .contains(&format!("session=\"{g2}\" state=\"cancelled\"")),
+        "{}",
+        output.text
+    );
+    assert!(
+        !output.text.contains("the engine stopped"),
+        "{}",
+        output.text
+    );
+}
+
+#[test]
+fn a_reaped_agent_forgets_its_event_sequence() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("work"))]),
+        text_turn("child reply"),
+        text_turn("parent done"),
+    ]));
+    let (recorder, _) = recorder_in(dir.path(), SessionId::new());
+    let parent = h.open_parent(
+        Some(recorder),
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 2);
+    let (child, _) = spawned(&events)[0];
+    assert!(events.iter().any(|e| e.session == child && e.seq >= 1));
+
+    let deadline = Instant::now() + WAIT;
+    while Instant::now() < deadline
+        && h.engine
+            .hosted_sessions()
+            .iter()
+            .any(|(id, _)| *id == child)
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !h.engine
+            .hosted_sessions()
+            .iter()
+            .any(|(id, _)| *id == child),
+        "the delivered child is dropped"
+    );
+    assert_eq!(
+        h.engine.bus.seq_of(child),
+        None,
+        "the reaped child's sequence is forgotten"
+    );
+    assert!(
+        h.engine.bus.seq_of(parent).is_some(),
+        "the parent keeps its sequence"
+    );
+    h.engine.shutdown();
+}
+
+#[test]
+fn a_failed_fork_spawn_releases_the_snapshot_when_the_batch_is_done() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::replaying(text_turn("ok")));
+    let parent = SessionId::new();
+    let (recorder, _) = recorder_in(dir.path(), parent);
+    h.engine.open(SessionSpec {
+        recorder: Some(recorder),
+        agents: Some(swarm_setup(4, 60_000)),
+        ..h.spec(parent)
+    });
+    let batch = ToolCallId::new("swarm_batch");
+    let spawn = |id: SessionId, index: usize, reply: crossbeam_channel::Sender<ToolOutput>| {
+        Input::Spawn(Box::new(Spawn {
+            parent,
+            tool_call_id: ToolCallId::new("call_s"),
+            agent: "general".to_owned(),
+            description: "a task".to_owned(),
+            prompt: "work".to_owned(),
+            reply,
+            fork: true,
+            swarm: Some(SwarmInfo {
+                id,
+                batch_id: batch.clone(),
+                index,
+                item: "a".to_owned(),
+                total: 3,
+            }),
+            model: None,
+            thinking: None,
+            background: false,
+        }))
+    };
+    let probe = |h: &Harness| {
+        let (reply, answer) = crossbeam_channel::bounded(1);
+        h.engine
+            .commander()
+            .0
+            .send(Input::ForkSnapshot(reply))
+            .unwrap();
+        answer.recv_timeout(WAIT).unwrap()
+    };
+    let refused = |h: &Harness, id: SessionId, index: usize| {
+        let (reply, answer) = crossbeam_channel::bounded(1);
+        h.engine
+            .commander()
+            .0
+            .send(spawn(id, index, reply))
+            .unwrap();
+        answer.recv_timeout(WAIT).unwrap()
+    };
+
+    // Spawning the same id twice leaves the first child's file in the
+    // way, so later forks of the batch cannot write their copies.
+    let dup = SessionId::new();
+    let (first_reply, first) = crossbeam_channel::bounded(1);
+    h.engine
+        .commander()
+        .0
+        .send(spawn(dup, 0, first_reply))
+        .unwrap();
+    assert_eq!(
+        probe(&h),
+        Some(batch.clone()),
+        "the first child cached the parent transcript"
+    );
+    let mid = refused(&h, dup, 1);
+    assert!(mid.text.contains("cannot fork"), "{}", mid.text);
+    assert_eq!(
+        probe(&h),
+        Some(batch.clone()),
+        "a mid-batch failure keeps the cache for the later children"
+    );
+    let last = refused(&h, dup, 2);
+    assert!(last.text.contains("cannot fork"), "{}", last.text);
+    assert_eq!(
+        probe(&h),
+        None,
+        "the last failure releases the parent transcript"
+    );
+    let done = first.recv_timeout(WAIT).unwrap();
+    assert!(done.text.contains("state=\"completed\""), "{}", done.text);
+    h.engine.shutdown();
 }

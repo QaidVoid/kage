@@ -6,6 +6,7 @@ use std::io::BufRead;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::thread;
 
 use kage_acp::acp::SessionConfigSelectOption;
 use kage_acp::agent::serve_agent;
@@ -158,7 +159,25 @@ impl Host {
         let live = Arc::clone(&host.live);
         host.engine
             .subscribe(Box::new(move |envelope| lock(&live).observe(envelope)));
+        host.prune_closed_sessions();
         host
+    }
+
+    /// Drops the open-session and workdir bookkeeping of every session
+    /// the engine closed, so the maps cannot grow with the sessions a
+    /// long-lived host served. The stream ends when the engine stops.
+    fn prune_closed_sessions(self: &Arc<Self>) {
+        let closed = self.engine.closed_sessions();
+        let host = Arc::clone(self);
+        thread::Builder::new()
+            .name("kage-host-prune".to_owned())
+            .spawn(move || {
+                for id in closed {
+                    lock(&host.open).remove(&id);
+                    lock(&host.workdirs).remove(&id);
+                }
+            })
+            .expect("the host prune thread");
     }
 
     /// The providers in effect.
@@ -466,4 +485,86 @@ fn session_spec(
         agents: Some(agents),
         shell: config.shell.program.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use kage_core::permissions::PermissionsConfig;
+    use kage_provider::testing::MockProvider;
+
+    use super::super::options::Settings;
+    use super::*;
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// A host with no plugins and a plain session spec on the mock.
+    fn host_in(dir: &tempfile::TempDir) -> Arc<Host> {
+        let registry =
+            Arc::new(ProviderRegistry::new().with(Arc::new(MockProvider::sequence(Vec::new()))));
+        let spec: SpecBuilder = Box::new(|_, id, cwd, _, _| {
+            Ok(SessionSpec {
+                id,
+                model: "mock/m".to_owned(),
+                cx: AgentContext::new("mock/m", "").with_workdir(cwd),
+                recorder: None,
+                tools: builtin_registry(),
+                gate: PermissionGate::new(PermissionsConfig::default()),
+                loop_cfg: LoopConfig::default(),
+                plugins: None,
+                mcp: None,
+                interactive: true,
+                title: true,
+                agents: None,
+                shell: None,
+            })
+        });
+        Host::new(
+            registry,
+            "mock/m".into(),
+            dir.path().to_path_buf(),
+            spec,
+            BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn a_released_session_prunes_the_host_bookkeeping() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host_in(&dir);
+        let id = SessionId::new();
+        let spec = (host.spec)(
+            &host.registry(),
+            id,
+            dir.path().to_str().unwrap(),
+            "mock/m",
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let settings = Settings::of(&spec, &host.registry());
+        host.launch(spec, settings);
+
+        assert!(host.open_settings(id).is_some());
+        assert!(host.workdir(id).is_some());
+
+        host.attach(id, false);
+        host.release(id);
+        assert!(
+            host.open_settings(id).is_some() && host.workdir(id).is_some(),
+            "one attachment is left"
+        );
+
+        host.release(id);
+        let deadline = std::time::Instant::now() + WAIT;
+        while std::time::Instant::now() < deadline && host.workdir(id).is_some() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(host.workdir(id).is_none(), "the workdir is pruned");
+        assert!(
+            host.open_settings(id).is_none(),
+            "the open record is pruned"
+        );
+        host.shutdown();
+    }
 }

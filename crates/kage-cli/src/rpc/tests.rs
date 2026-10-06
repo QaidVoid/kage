@@ -1799,6 +1799,54 @@ fn session_list_hides_agents_filters_by_cwd_and_orders_newest_first() {
 }
 
 #[test]
+fn session_fork_names_an_image_only_prompt_without_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = dir.path();
+    let image = || Content::Image {
+        source: ImageSource::Base64 {
+            data: "AAAA".into(),
+        },
+        mime: "image/png".into(),
+    };
+    let entries = [
+        message(Role::User, vec![image()], None),
+        message(Role::Assistant, vec![text("one")], None),
+        message(Role::User, vec![image()], None),
+    ];
+    let source = record(sessions, "/p", "mock/m", 1, &entries);
+    let h = serve(Vec::new(), sessions, sessions);
+    let history = |id: &str| {
+        let path = kage_session::find_by_prefix(sessions, id).unwrap().unwrap();
+        kage_session::replay(&path).unwrap().history.len()
+    };
+    let fork = |before: serde_json::Value| {
+        h.client
+            .request(
+                "_kage/session/fork",
+                serde_json::json!({ "sessionId": source, "before": before }),
+            )
+            .map(|page| page["sessionId"].as_str().unwrap().to_owned())
+    };
+    let second = fork(serde_json::json!({ "occurrence": 1 })).unwrap();
+    assert_eq!(
+        history(&second),
+        2,
+        "copies through the first image-only turn"
+    );
+    let first = fork(serde_json::json!({})).unwrap();
+    assert_eq!(
+        history(&first),
+        0,
+        "the first image-only prompt has no past"
+    );
+    let textful = fork(serde_json::json!({ "text": "" })).unwrap_err();
+    assert_eq!(
+        textful.code, -32602,
+        "empty text no longer matches a textless prompt"
+    );
+}
+
+#[test]
 fn session_fork_copies_up_to_the_named_prompt_and_links_its_parent() {
     let dir = tempfile::tempdir().unwrap();
     let sessions = dir.path();

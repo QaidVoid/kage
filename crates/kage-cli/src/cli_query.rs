@@ -62,7 +62,7 @@ pub(crate) fn run_resume(
         }
     };
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let provisional_model = model_override.unwrap_or(&replay.model).to_owned();
+    let provisional_model = kage_core::canonical_model(model_override.unwrap_or(&replay.model));
     let plugin_runtime = match plugins_dir() {
         Ok(dir) => match setup_runtime(
             &dir,

@@ -133,6 +133,21 @@ impl SessionWriter {
             acquire_lock(dup, &path)?
         };
         repair_torn_tail(&mut file, &path)?;
+        // The repair opens a second handle to truncate through, and
+        // Windows releases this process's byte-range locks when any
+        // handle to the file closes, so take the lock again before
+        // appends resume.
+        #[cfg(windows)]
+        if let Some(lock) = lock.as_ref() {
+            use std::fs::TryLockError;
+            match lock.try_lock() {
+                Ok(()) => {}
+                Err(TryLockError::WouldBlock) => {
+                    return Err(SessionError::Locked { path: path.clone() });
+                }
+                Err(TryLockError::Error(_)) => {}
+            }
+        }
         Ok(Self {
             path,
             inner: BufWriter::new(file),
@@ -597,6 +612,23 @@ mod tests {
         drop(w);
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(!raw.contains("01{"), "torn fragment was not truncated");
+    }
+
+    /// The repair closes its second truncate handle, and on Windows
+    /// that releases the process's byte-range locks, so `open` must
+    /// take the lock again before appends resume. Run on a Windows CI
+    /// leg.
+    #[cfg(windows)]
+    #[test]
+    fn lock_survives_the_repair_on_windows() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        let header = serde_json::to_string(&SessionEntry::Header(fresh_header())).unwrap();
+        let torn = format!("{header}\n{{\"type\":\"label\",\"id\":\"01");
+        std::fs::write(&path, torn).unwrap();
+        let _w = SessionWriter::open(&path).unwrap();
+        let err = SessionWriter::open(&path).unwrap_err();
+        assert!(matches!(err, SessionError::Locked { .. }), "{err:?}");
     }
 
     #[test]

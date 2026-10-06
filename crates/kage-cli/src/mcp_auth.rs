@@ -11,14 +11,14 @@
 //! Only the authorization URL and status lines are printed. No token,
 //! code or verifier reaches the terminal, an error or a `Debug` string.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -42,11 +42,28 @@ const REFRESH_SLACK: chrono::Duration = chrono::Duration::seconds(60);
 /// it waits.
 const POLL: Duration = Duration::from_millis(50);
 
-/// Serializes token refreshes in this process. A refresh only fires
-/// when the stored access token is still the one that was rejected, so
-/// a 401 storm and a second kage process collapse into one rotation
-/// instead of one per request.
-static REFRESH: Mutex<()> = Mutex::new(());
+/// Serializes token refreshes per server in this process. A refresh
+/// only fires when the stored access token is still the one that was
+/// rejected, so a 401 storm and a second kage process collapse into
+/// one rotation instead of one per request. Locks are keyed by the
+/// canonical server URL, so a refresh for one server never blocks
+/// another. Cleared wholesale past the cap, which only pathological
+/// server churn could hit.
+static REFRESH_LOCKS: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Upper bound on tracked per-server refresh locks.
+const REFRESH_LOCK_CAP: usize = 1024;
+
+/// The refresh lock for the canonical server URL `key`, created on
+/// first use.
+fn refresh_lock(key: &str) -> Arc<Mutex<()>> {
+    let mut locks = lock(&REFRESH_LOCKS);
+    if locks.len() > REFRESH_LOCK_CAP {
+        locks.clear();
+    }
+    Arc::clone(locks.entry(key.to_owned()).or_default())
+}
 
 /// The stored tokens of every logged-in MCP server.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,15 +176,14 @@ impl McpTokens {
         Ok(store)
     }
 
-    /// The entry for `url`, with its canonical key.
-    fn entry(&self, url: &str) -> Option<(String, McpAuthEntry)> {
-        let key = oauth::canonical_url(url).ok()?;
-        let entry = self.load().ok()?.servers.get(&key)?.clone();
-        Some((key, entry))
+    /// The entry stored under the canonical key `key`.
+    fn entry(&self, key: &str) -> Option<McpAuthEntry> {
+        self.load().ok()?.servers.get(key).cloned()
     }
 
     /// Refresh the entry under `key` and save the rotated tokens. The
-    /// caller holds [`REFRESH`], and the file was just read under it.
+    /// caller holds the server's [`refresh_lock`], and the file was
+    /// just read under it.
     fn refresh(&self, key: &str, entry: &McpAuthEntry) -> Option<String> {
         let refresh_token = entry.token.refresh_token.as_deref()?;
         let tokens = oauth::refresh(
@@ -194,8 +210,10 @@ impl McpTokens {
 
 impl TokenSource for McpTokens {
     fn bearer(&self, url: &str) -> Option<String> {
-        let _guard = lock(&REFRESH);
-        let (key, entry) = self.entry(url)?;
+        let key = oauth::canonical_url(url).ok()?;
+        let refresh = refresh_lock(&key);
+        let _guard = lock(&refresh);
+        let entry = self.entry(&key)?;
         let now = Utc::now();
         if !entry.token.expires_within(REFRESH_SLACK, now) {
             return Some(entry.token.access_token);
@@ -207,8 +225,10 @@ impl TokenSource for McpTokens {
     }
 
     fn rejected(&self, url: &str, token: &str) -> Option<String> {
-        let _guard = lock(&REFRESH);
-        let (key, entry) = self.entry(url)?;
+        let key = oauth::canonical_url(url).ok()?;
+        let refresh = refresh_lock(&key);
+        let _guard = lock(&refresh);
+        let entry = self.entry(&key)?;
         // Single-flight: while the rejected token was in flight,
         // another request or process may have rotated already. The
         // stored token then differs from ours, and refreshing again
@@ -509,6 +529,7 @@ mod tests {
     use std::collections::HashMap;
     use std::io::{BufReader, Read};
     use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    use std::time::Instant;
 
     use kage_core::config::McpOAuth;
     use tempfile::tempdir;
@@ -572,6 +593,12 @@ mod tests {
 
     impl FakeServer {
         fn start() -> Self {
+            Self::start_with_token_delay(Duration::ZERO)
+        }
+
+        /// `token_delay` is how long a `/token` response waits before
+        /// answering, so a test can hold a refresh open.
+        fn start_with_token_delay(token_delay: Duration) -> Self {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
             let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
             let seen = Arc::new(Mutex::new(Vec::new()));
@@ -579,7 +606,7 @@ mod tests {
             thread::spawn(move || {
                 for stream in listener.incoming() {
                     let Ok(stream) = stream else { continue };
-                    answer(&stream, &origin, &log);
+                    answer(&stream, &origin, &log, token_delay);
                 }
             });
             Self { base, seen }
@@ -594,7 +621,7 @@ mod tests {
         }
     }
 
-    fn answer(mut stream: &TcpStream, base: &str, log: &Mutex<Vec<Seen>>) {
+    fn answer(mut stream: &TcpStream, base: &str, log: &Mutex<Vec<Seen>>, token_delay: Duration) {
         let Some(request) = read_request(stream) else {
             return;
         };
@@ -636,17 +663,20 @@ mod tests {
                 String::new(),
                 serde_json::json!({ "client_id": "kage-client" }).to_string(),
             ),
-            ("POST", "/token") => (
-                200,
-                String::new(),
-                serde_json::json!({
-                    "access_token": format!("access-{issued}"),
-                    "refresh_token": format!("refresh-{issued}"),
-                    "token_type": "Bearer",
-                    "expires_in": 3600,
-                })
-                .to_string(),
-            ),
+            ("POST", "/token") => {
+                thread::sleep(token_delay);
+                (
+                    200,
+                    String::new(),
+                    serde_json::json!({
+                        "access_token": format!("access-{issued}"),
+                        "refresh_token": format!("refresh-{issued}"),
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                    })
+                    .to_string(),
+                )
+            }
             _ => (404, String::new(), String::new()),
         };
         let head = format!(
@@ -900,6 +930,55 @@ mod tests {
             Some("access-2")
         );
         assert_eq!(server.tokens_issued().len(), 2);
+    }
+
+    /// The per-key locks this guards: a refresh of one server must not
+    /// block another, which the former process-wide mutex did.
+    #[test]
+    fn a_refresh_of_one_server_does_not_block_another() {
+        let slow = FakeServer::start_with_token_delay(Duration::from_millis(600));
+        let fast = FakeServer::start();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+        let slow_key = format!("{}/mcp", slow.base);
+        let fast_key = format!("{}/mcp", fast.base);
+        store_with(
+            &path,
+            &[
+                (&slow_key, entry(&slow.base, 10)),
+                (&fast_key, entry(&fast.base, 10)),
+            ],
+        );
+        let tokens = McpTokens::new(path);
+
+        std::thread::scope(|scope| {
+            let tokens = &tokens;
+            let (done_tx, done_rx) = mpsc::channel();
+            scope.spawn(move || {
+                let token = tokens.bearer(&slow_key);
+                done_tx.send(token).unwrap();
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while slow.tokens_issued().is_empty() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                !slow.tokens_issued().is_empty(),
+                "the slow refresh must be in flight"
+            );
+
+            let start = Instant::now();
+            assert_eq!(tokens.bearer(&fast_key).as_deref(), Some("access-1"));
+            assert!(
+                start.elapsed() < Duration::from_millis(200),
+                "the fast refresh waited for the slow one"
+            );
+            assert!(
+                done_rx.try_recv().is_err(),
+                "the slow refresh must still be in flight"
+            );
+            assert_eq!(done_rx.recv().unwrap().as_deref(), Some("access-1"));
+        });
     }
 
     #[cfg(unix)]

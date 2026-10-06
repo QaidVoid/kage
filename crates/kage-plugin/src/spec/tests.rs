@@ -64,6 +64,38 @@ fn every_func_has_a_since_within_the_api_version() {
     );
 }
 
+/// No "Since API N" prose in the api reference may name a generation
+/// above `API_VERSION`: a reader who trusts it writes a `requires`
+/// check every load fails.
+#[test]
+fn api_md_never_advertises_a_generation_above_the_api_version() {
+    let md = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/plugins/api.md"),
+    )
+    .expect("docs/plugins/api.md sits beside the crate");
+    let max = crate::api::API_VERSION;
+    let mut claimed = 0;
+    for (at, _) in md.match_indices("Since API ") {
+        let after = &md[at + "Since API ".len()..];
+        let number: String = after.chars().take_while(char::is_ascii_digit).collect();
+        // "Since API N" prose (the generic form) names no generation.
+        if number.is_empty() {
+            continue;
+        }
+        let parsed: i64 = number.parse().unwrap_or(0);
+        let line = md[..at].matches('\n').count() + 1;
+        assert!(
+            (1..=max).contains(&parsed),
+            "docs/plugins/api.md:{line} says \"Since API {number}\" but the host provides {max}"
+        );
+        claimed += 1;
+    }
+    assert!(
+        claimed > 0,
+        "no Since API claims found; the doc-lint lost its target"
+    );
+}
+
 #[test]
 fn surface_has_no_duplicate_func_paths() {
     let s = surface();

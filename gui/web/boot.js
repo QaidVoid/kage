@@ -90,6 +90,9 @@ async function boot() {
     const glue = await import("./kage_desktop.js");
     await glue.default();
   } catch (error) {
+    // The wasm read clears the holder on success; on failure nothing
+    // else would, so drop the token here too.
+    window.__kageConnect = null;
     const stage = document.createElement("main");
     stage.append(failure(error));
     document.body.replaceChildren(stage);

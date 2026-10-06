@@ -53,10 +53,14 @@ pub(crate) fn agent_session_name(path: &Path) -> Option<String> {
     let Ok(file) = File::open(path) else {
         return None;
     };
+    // A foreign or hand-edited file can reorder keys or add spacing,
+    // so the scan prefilters on the quoted kind alone and decodes only
+    // the lines that carry it.
+    let needle = format!("\"{AGENT_ENTRY_KIND}\"").into_bytes();
     BufReader::new(file)
         .split(b'\n')
         .map_while(Result::ok)
-        .filter(|line| line.starts_with(br#"{"type":"custom""#))
+        .filter(|line| line.windows(needle.len()).any(|at| at == needle.as_slice()))
         .find_map(|line| match serde_json::from_slice::<SessionEntry>(&line) {
             Ok(SessionEntry::Custom(custom)) if is_agent_marker(&custom) => Some(
                 custom
@@ -980,6 +984,46 @@ mod tests {
         let summary = summarize_one(&path).unwrap();
         assert_eq!(summary, full_decode(&path));
         assert_eq!(summary.last_user_prompt, None);
+    }
+
+    #[test]
+    fn a_marker_with_reordered_keys_or_spaces_still_names_the_agent() {
+        let dir = tempdir().unwrap();
+        let header = Header {
+            version: FORMAT_VERSION,
+            session: SessionId::new(),
+            id: EntryId::new(),
+            ts: Utc::now(),
+            cwd: PathBuf::from("/work"),
+            model: "anthropic:claude".into(),
+            system_prompt: "explore".into(),
+            parent_session: Some(SessionId::new()),
+            parent_entry: None,
+        };
+        let ts = serde_json::to_string(&Utc::now()).unwrap();
+        let id = serde_json::to_string(&EntryId::new()).unwrap();
+        let reordered = format!(
+            "{{\"data\":{{\"agent\":\"reordered\"}},\"kind\":\"kage:agent\",\"ts\":{ts},\"id\":{id},\"type\":\"custom\"}}\n"
+        );
+        let spaced = format!(
+            "{{\"type\": \"custom\", \"id\": {id}, \"ts\": {ts}, \"kind\": \"kage:agent\", \"data\": {{\"agent\": \"spaced\"}}}}\n"
+        );
+
+        for (name, raw, agent) in [
+            ("reordered.jsonl", reordered, "reordered"),
+            ("spaced.jsonl", spaced, "spaced"),
+        ] {
+            let path = dir.path().join(name);
+            SessionWriter::create(&path, header.clone()).unwrap();
+            append_raw(&path, &raw);
+            assert!(is_agent_session(&path), "{name} is an agent session");
+            assert_eq!(agent_session_name(&path).as_deref(), Some(agent));
+        }
+
+        // The marker text inside a message never promotes a user
+        // session.
+        let plain = write_session(dir.path(), "plain.jsonl", "quotes \"kage:agent\" inline");
+        assert!(!is_agent_session(&plain));
     }
 
     #[test]

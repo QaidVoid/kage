@@ -49,9 +49,9 @@ jobs:
         run: |
           cargo build -p kage-cli
           ./target/debug/kage gen-manpage --out man/kage.1 --check
-      # Enforce the ASCII-only source rule. Scans crates/, xtask/src,
-      # plugins/ and man/; Unicode glyphs must be written as `\u{..}`
-      # escapes, not raw bytes.
+      # Enforce the ASCII-only source rule. Scans crates/, gui/src,
+      # xtask/src, plugins/ and man/; Unicode glyphs must be written as
+      # `\u{..}` escapes, not raw bytes.
       - run: cargo xtask check-ascii
 
   clippy:

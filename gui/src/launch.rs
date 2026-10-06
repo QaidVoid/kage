@@ -295,8 +295,10 @@ mod tests {
             Some("/opt/kage")
         );
         assert_eq!(
-            parse(&["--rpc-bin", " ~/kägé "]).rpc_bin.as_deref(),
-            Some("~/kägé")
+            parse(&["--rpc-bin", " ~/k\u{e4}g\u{e9} "])
+                .rpc_bin
+                .as_deref(),
+            Some("~/k\u{e4}g\u{e9}")
         );
         assert_eq!(
             parse(&["--rpc-bin", "\"/opt/kage"]).rpc_bin.as_deref(),

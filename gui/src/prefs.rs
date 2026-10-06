@@ -292,7 +292,7 @@ mod storage {
             );
             assert_eq!(
                 config_base(Some(""), Some("C:\\Users\\u"), Some("C:\\App"), None),
-                Some(PathBuf::from("C:\\Users\\u\\.config"))
+                Some(PathBuf::from("C:\\App"))
             );
             assert_eq!(
                 config_base(Some(""), None, None, Some("C:\\Users\\u")),

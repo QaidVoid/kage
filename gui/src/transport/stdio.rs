@@ -527,7 +527,7 @@ printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id"
     fn resolve_unquotes_a_pasted_path_before_the_lookup() {
         use std::os::unix::fs::PermissionsExt;
         let dir = unique_dir("unix");
-        let program = dir.join("käge");
+        let program = dir.join("k\u{e4}ge");
         std::fs::write(&program, b"").unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         let pasted = format!("\"{}\"", program.display());

@@ -93,7 +93,8 @@ impl State {
 pub struct Link {
     /// The engine command on the other end: `kage rpc` or `kage serve`.
     pub name: &'static str,
-    /// Where it runs: `stdio · local`, or the endpoint's host and path.
+    /// Where it runs: `stdio` and `local` joined by a middle dot, or
+    /// the endpoint's host and path.
     pub detail: String,
 }
 

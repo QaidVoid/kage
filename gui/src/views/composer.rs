@@ -1859,7 +1859,7 @@ impl ComposerView {
                 .child(
                     div()
                         .text_color(pal.faint)
-                        .child(SharedString::from(format!("· {level}"))),
+                        .child(SharedString::from(format!("\u{b7} {level}"))),
                 )
                 .text_color(pal.ink);
         }

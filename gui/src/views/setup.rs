@@ -341,7 +341,7 @@ mod tests {
         assert_eq!(clean_path("  /opt/kage  "), "/opt/kage");
         assert_eq!(clean_path("\"/opt/my dir/kage\""), "/opt/my dir/kage");
         assert_eq!(clean_path("'/opt/my dir/kage'"), "/opt/my dir/kage");
-        assert_eq!(clean_path(" \"~/käge\" "), "~/käge");
+        assert_eq!(clean_path(" \"~/k\u{e4}ge\" "), "~/k\u{e4}ge");
         assert_eq!(
             clean_path("\"/opt/kage"),
             "\"/opt/kage",

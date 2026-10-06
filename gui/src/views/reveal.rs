@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn a_prefix_counts_characters() {
-        assert_eq!(prefix("héllo", 2), "hé");
+        assert_eq!(prefix("h\u{e9}llo", 2), "h\u{e9}");
         assert_eq!(prefix("hi", 5), "hi");
     }
 }

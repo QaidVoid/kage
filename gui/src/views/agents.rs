@@ -419,7 +419,7 @@ pub(crate) fn state_chip(facts: &AgentFacts, pal: &Palette) -> Div {
         .child(facts.phase.label())
 }
 
-/// `4s · 2.3k tok`, from what was measured.
+/// `4s` and `2.3k tok` joined by a middle dot, from what was measured.
 pub(crate) fn meta_line(facts: &AgentFacts) -> String {
     [
         facts.elapsed.map(crate::clock::span),

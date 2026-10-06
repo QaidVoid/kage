@@ -232,9 +232,23 @@ pub fn clipboard_image() -> Result<Vec<u8>, String> {
     let img = clipboard
         .get_image()
         .map_err(|e| format!("no image on the clipboard ({e})"))?;
-    let width = u32::try_from(img.width).map_err(|_| "clipboard image too wide".to_owned())?;
-    let height = u32::try_from(img.height).map_err(|_| "clipboard image too tall".to_owned())?;
-    let rgba = image::RgbaImage::from_raw(width, height, img.bytes.into_owned())
+    clipboard_png(img.width, img.height, img.bytes.into_owned())
+}
+
+/// Everything [`clipboard_image`] does once the bytes are in hand:
+/// validate the dimensions and pixel buffer, then PNG-encode. Free of
+/// clipboard access so its error branches are unit-testable.
+fn clipboard_png(width: usize, height: usize, bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    let width = u32::try_from(width).map_err(|_| "clipboard image too wide".to_owned())?;
+    let height = u32::try_from(height).map_err(|_| "clipboard image too tall".to_owned())?;
+    let needed = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .and_then(|len| usize::try_from(len).ok());
+    if needed != Some(bytes.len()) {
+        return Err("clipboard image had a malformed pixel buffer".to_owned());
+    }
+    let rgba = image::RgbaImage::from_raw(width, height, bytes)
         .ok_or_else(|| "clipboard image had a malformed pixel buffer".to_owned())?;
     let mut png = Vec::new();
     image::DynamicImage::ImageRgba8(rgba)
@@ -337,11 +351,44 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // `clipboard_image()` is intentionally not unit-tested: it reads
-    // the live OS clipboard via `arboard`, which has no deterministic
-    // behavior in a headless/CI process. Its pure inputs/outputs
-    // (`from_bytes`, `path_if_image`) are covered above; failures
+    // `clipboard_image()` itself is not unit-tested: acquiring the
+    // live OS clipboard via `arboard` has no deterministic behavior
+    // in a headless/CI process. Everything after acquisition lives
+    // in `clipboard_png`, whose dimension checks, malformed-buffer
+    // and encoding error branches are covered below; failures still
     // surface to the user inline via the `:attach` / Ctrl+V path.
+
+    #[test]
+    fn clipboard_png_rejects_dimensions_past_u32() {
+        assert_eq!(
+            clipboard_png(usize::MAX, 1, vec![0; 4]),
+            Err("clipboard image too wide".to_owned())
+        );
+        assert_eq!(
+            clipboard_png(1, usize::MAX, vec![0; 4]),
+            Err("clipboard image too tall".to_owned())
+        );
+    }
+
+    #[test]
+    fn clipboard_png_rejects_a_malformed_pixel_buffer() {
+        let short = Err("clipboard image had a malformed pixel buffer".to_owned());
+        assert_eq!(clipboard_png(2, 2, vec![0; 15]), short);
+        assert_eq!(clipboard_png(2, 2, vec![0; 17]), short);
+    }
+
+    #[test]
+    fn clipboard_png_encodes_rgba_pixels_as_png() {
+        let png = clipboard_png(1, 1, vec![0xFF, 0x00, 0x00, 0xFF]).unwrap();
+        assert!(png.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]));
+    }
+
+    #[test]
+    fn clipboard_png_maps_an_unencodable_image_to_an_error() {
+        // A 0x0 buffer is structurally valid but has no PNG form.
+        let err = clipboard_png(0, 0, Vec::new()).unwrap_err();
+        assert!(err.starts_with("encode clipboard image as png"), "{err}");
+    }
 
     #[test]
     fn path_if_image_rejects_non_images_and_text() {

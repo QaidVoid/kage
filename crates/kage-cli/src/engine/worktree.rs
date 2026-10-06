@@ -5,14 +5,18 @@
 //! dropped. Nothing is merged: the agent's report says where its work
 //! is and how to take it.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use kage_core::SessionId;
 use kage_core::reaper;
 
-/// One agent's checkout. Dropping it removes the checkout; work the
-/// agent left stays in the repository as a jj change or a git branch.
+/// One agent's checkout. Dropping it removes the checkout in the
+/// background, without blocking the caller; work the agent left stays
+/// in the repository as a jj change or a git branch.
 #[derive(Debug)]
 pub(super) struct Worktree {
     /// Where the checkout is.
@@ -29,8 +33,19 @@ pub(super) struct Worktree {
 
 #[derive(Debug)]
 enum Vcs {
-    Jj { workspace: String },
-    Git { branch: String, base: String },
+    Jj {
+        workspace: String,
+    },
+    Git {
+        branch: String,
+        base: String,
+    },
+    /// A raw cleanup command, so tests can make the drop path slow.
+    #[cfg(test)]
+    Command {
+        program: String,
+        args: Vec<String>,
+    },
 }
 
 impl Worktree {
@@ -136,34 +151,97 @@ impl Worktree {
                     }
                 }
             }
+            #[cfg(test)]
+            Vcs::Command { .. } => {
+                unreachable!("the test-only cleanup command has nothing to checkpoint")
+            }
         }
     }
 }
 
+/// How long one drop-path VCS command may run before it is killed:
+/// generous for a real `git` or `jj` on a slow disk, but bounded so a
+/// stuck VCS cannot hold the cleanup thread forever.
+const DROP_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Drop-path cleanups started but not finished. Production drops are
+/// detached and unsignalled; only tests wait for this to reach zero.
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
 impl Drop for Worktree {
+    /// Removes the checkout on a detached thread so a slow VCS never
+    /// blocks the caller, with every command killed at
+    /// [`DROP_COMMAND_TIMEOUT`]. Best-effort: when the process exits
+    /// before the thread finishes, the checkout is left behind.
     fn drop(&mut self) {
-        let target = self.path.to_string_lossy().into_owned();
-        match &self.vcs {
-            Vcs::Jj { workspace } => {
-                if run(&self.repo, "jj", &["workspace", "forget", workspace]).is_ok() {
-                    let _ = std::fs::remove_dir_all(&self.path);
-                }
-            }
-            Vcs::Git { branch, base } => {
-                if run(&self.repo, "git", &["worktree", "remove", &target]).is_err() {
-                    return;
-                }
-                let ahead = run(
-                    &self.repo,
-                    "git",
-                    &["rev-list", "--count", &format!("{base}..{branch}")],
-                );
-                if ahead.as_deref() == Ok("0") {
-                    let _ = run(&self.repo, "git", &["branch", "-D", branch]);
-                }
-            }
+        let vcs = std::mem::replace(
+            &mut self.vcs,
+            Vcs::Jj {
+                workspace: String::new(),
+            },
+        );
+        let path = std::mem::take(&mut self.path);
+        let repo = std::mem::take(&mut self.repo);
+        IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+        let thread = std::thread::Builder::new()
+            .name("kage-worktree-drop".to_owned())
+            .spawn(move || {
+                cleanup(&path, &repo, &vcs);
+                IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+            });
+        if thread.is_err() {
+            // No thread available: skip the cleanup rather than block
+            // the caller. A leftover workspace or worktree is
+            // recoverable by hand.
+            IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
         }
     }
+}
+
+/// Remove a dropped worktree's checkout: `jj workspace forget` plus
+/// the directory, or `git worktree remove` plus the branch when it
+/// holds no commits.
+fn cleanup(path: &Path, repo: &Path, vcs: &Vcs) {
+    let target = path.to_string_lossy().into_owned();
+    match vcs {
+        Vcs::Jj { workspace } => {
+            if run_bounded(repo, "jj", &["workspace", "forget", workspace]).is_ok() {
+                let _ = std::fs::remove_dir_all(path);
+            }
+        }
+        Vcs::Git { branch, base } => {
+            if run_bounded(repo, "git", &["worktree", "remove", &target]).is_err() {
+                return;
+            }
+            let ahead = run_bounded(
+                repo,
+                "git",
+                &["rev-list", "--count", &format!("{base}..{branch}")],
+            );
+            if ahead.as_deref() == Ok("0") {
+                let _ = run_bounded(repo, "git", &["branch", "-D", branch]);
+            }
+        }
+        #[cfg(test)]
+        Vcs::Command { program, args } => {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            let _ = run_bounded(repo, program, &args);
+        }
+    }
+}
+
+/// Wait until every drop-path cleanup has finished, or `timeout`
+/// passes. Test hook: `false` on timeout.
+#[cfg(test)]
+fn wait_for_drops(timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if IN_FLIGHT.load(Ordering::SeqCst) == 0 {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    IN_FLIGHT.load(Ordering::SeqCst) == 0
 }
 
 /// The trimmed output of `program args` run in `dir`, or what it
@@ -179,6 +257,54 @@ fn run(dir: &Path, program: &str, args: &[&str]) -> Result<String, String> {
             "{program} {}: {}",
             args.first().unwrap_or(&""),
             String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+/// Like [`run`], but the child is killed once it outlives
+/// [`DROP_COMMAND_TIMEOUT`]: a drop must never wait on a stuck VCS
+/// forever.
+fn run_bounded(dir: &Path, program: &str, args: &[&str]) -> Result<String, String> {
+    let mut command = Command::new(program);
+    command.args(args).current_dir(dir);
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("{program}: {err}"))?;
+    let deadline = Instant::now() + DROP_COMMAND_TIMEOUT;
+    let status = loop {
+        match reaper::try_wait(&mut child) {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(err) => return Err(format!("{program}: {err}")),
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = reaper::wait(&mut child);
+            return Err(format!(
+                "{program} {}: killed after {DROP_COMMAND_TIMEOUT:?}",
+                args.first().unwrap_or(&"")
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_end(&mut stdout);
+    }
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_end(&mut stderr);
+    }
+    if status.success() {
+        Ok(String::from_utf8_lossy(&stdout).trim().to_owned())
+    } else {
+        Err(format!(
+            "{program} {}: {}",
+            args.first().unwrap_or(&""),
+            String::from_utf8_lossy(&stderr).trim()
         ))
     }
 }
@@ -256,6 +382,7 @@ mod tests {
         assert!(report.contains(&format!("git merge {branch}")), "{report}");
         let path = tree.path.clone();
         drop(tree);
+        assert!(wait_for_drops(Duration::from_secs(30)));
         assert!(!path.exists());
         assert_eq!(
             sh(repo.path(), "git", &["branch", "--list", &branch]),
@@ -266,6 +393,7 @@ mod tests {
         let tree = Worktree::create(repo.path(), dir.path(), id, "general: look".into()).unwrap();
         assert!(tree.checkpoint().contains("has no changes"));
         drop(tree);
+        assert!(wait_for_drops(Duration::from_secs(30)));
         let branch = format!("kage/agent-{}", short(id));
         assert_eq!(sh(repo.path(), "git", &["branch", "--list", &branch]), "");
     }
@@ -293,6 +421,7 @@ mod tests {
             .to_owned();
         let path = tree.path.clone();
         drop(tree);
+        assert!(wait_for_drops(Duration::from_secs(30)));
         assert!(!path.exists());
         let files = sh(repo.path(), "jj", &["file", "list", "-r", &change]);
         assert!(files.lines().any(|f| f == "b.txt"), "{files}");
@@ -305,5 +434,44 @@ mod tests {
         let err = Worktree::create(plain.path(), dir.path(), SessionId::new(), String::new())
             .unwrap_err();
         assert_eq!(err, "worktree isolation needs a git or jj repository");
+    }
+
+    /// A drop whose cleanup command hangs must return at once, and the
+    /// bounded kill must end the command well inside the command's own
+    /// runtime.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_hanging_cleanup_command_does_not_block_the_drop_and_is_killed() {
+        let repo = tempfile::tempdir().unwrap();
+        let tree = Worktree {
+            path: repo.path().join("wt"),
+            workdir: repo.path().join("wt"),
+            repo: repo.path().to_path_buf(),
+            label: String::new(),
+            vcs: Vcs::Command {
+                program: "sleep".to_owned(),
+                args: vec!["30".to_owned()],
+            },
+        };
+        let start = Instant::now();
+        drop(tree);
+        let drop_took = start.elapsed();
+        assert!(
+            drop_took < Duration::from_secs(1),
+            "drop blocked for {drop_took:?}"
+        );
+        assert!(
+            wait_for_drops(Duration::from_secs(20)),
+            "the cleanup thread never finished"
+        );
+        let cleanup_took = start.elapsed();
+        assert!(
+            cleanup_took < Duration::from_secs(15),
+            "cleanup ran {cleanup_took:?}, not bounded well under the 30s sleep"
+        );
+        assert!(
+            cleanup_took >= DROP_COMMAND_TIMEOUT.saturating_sub(Duration::from_secs(2)),
+            "cleanup returned in {cleanup_took:?}; the kill path never fired"
+        );
     }
 }

@@ -4,8 +4,9 @@
 -- On `agent_end`, computes throughput against wall-clock and pushes a
 -- one-line summary through `kage.notify`.
 --
--- `message_end` carries message text, so the subscription needs the
--- `context` capability: request it here and grant it in
+-- `message_end` rides behind the `context` capability like the other
+-- transcript-bearing events, even though this plugin reads only its
+-- usage: request it here and grant it in
 -- [plugins.capabilities], or kage.on silently drops the hook.
 --
 -- Drop into ~/.config/kage/plugins/ and load with `cargo run -p kage-cli -- ...`.

@@ -159,7 +159,7 @@ cargo +nightly build --release --locked --target wasm32-unknown-unknown
 wasm-bindgen --out-dir web --target web \
     target/wasm32-unknown-unknown/release/kage_desktop.wasm
 mkdir -p web/assets/icons
-cp "$(ls -d ~/.local/share/cargo/registry/src/*/gpui-kit-assets-0.7.0/assets/icons)"/*.svg \
+cp "$(ls -d "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/gpui-kit-assets-*/assets/icons)"/*.svg \
     web/assets/icons/
 cd ..
 cargo run --bin kage -- serve --web-dir gui/web
@@ -172,6 +172,8 @@ and `kage_desktop_bg.wasm.d.ts` declarations beside it, `index.html`
 (a page shell that loads `boot.js`, which draws the connection form
 and then imports the glue), and `assets/icons/` (the 1830 Lucide SVGs
 the component library fetches from its own origin on first use;
+the `gpui-kit-assets` folder the cp glob matches follows the
+`gui/Cargo.lock` version;
 without them the page still works, it just logs a 404 per missing
 icon and draws the label only).
 `kage serve --web-dir` is the serving path for real deployments: it

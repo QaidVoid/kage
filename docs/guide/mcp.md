@@ -500,8 +500,8 @@ kage mcp serve --tools read,grep,find,ls,edit
 Every call is also checked against the `[permissions]` rules of the
 working directory. A project's rules count only when the project is
 trusted. A `deny` verdict refuses the call, and so does
-`ask`, because there is no one to ask. `confine_paths = true` keeps
-the file tools inside the working directory.
+`ask`, because there is no one to ask. Path confinement (on by
+default) keeps the file tools inside the working directory.
 
 Point any MCP client's server command at `kage mcp serve`. Tool
 failures and refusals come back as a normal result with

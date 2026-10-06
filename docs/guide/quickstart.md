@@ -171,7 +171,9 @@ shell mode without running anything.
 
 Type `/model <provider>/<model>`, or open the model picker with
 `ctrl+p` or a bare `/model`. The next turn uses the new model, and
-the conversation so far carries over.
+the conversation so far carries over. The older `<provider>:<model>`
+spelling still parses, so configs written before the slash form keep
+working.
 
 ## leaving kage
 

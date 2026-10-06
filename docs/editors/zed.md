@@ -178,7 +178,8 @@ The `mode` values override the permission rules for the session:
 session in plan mode, which rides above the permission mode: the
 option reads back `plan` until a regular mode is picked, and picking
 one leaves plan mode in the same change. `allow` is the same override
-the TUI's `/permission allow` sets.
+the TUI's `/permission allow` sets, and `default` matches
+`/permission default`.
 
 ## prompt content
 
@@ -188,7 +189,7 @@ Each block of a `session/prompt` reaches the model:
 | ----- | ------------------- |
 | `text` | the text |
 | `image` | the image |
-| `resource` with text | the text in a `<resource uri="..." mime="...">` block |
+| `resource` with text | the text in a `<resource uri="..." mime="...">` block; text wins when a resource carries both text and a blob |
 | `resource` with an image blob | the image |
 | `resource` with another blob | `[binary resource <uri>: <mime>]`, with `application/octet-stream` when the resource names no MIME type |
 | `resource` with no text or blob | `[resource omitted]` |

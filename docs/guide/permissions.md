@@ -7,11 +7,11 @@ they ask unless you allow their server (see
 
 ```toml
 [permissions]
-# opt in to path confinement for the built-in file tools (read,
-# write, edit, grep, find, ls). when true, paths that escape the
-# working directory through `..`, absolute paths outside it, or
-# symlinks that point outside it are rejected. default false.
-confine_paths = false
+# path confinement for the built-in file tools (read, write, edit,
+# grep, find, ls). paths that escape the working directory through
+# `..`, absolute paths outside it, or symlinks that point outside it
+# are rejected. on by default; set false to turn it off.
+# confine_paths = false
 
 [permissions.tools.shell]
 # what happens when neither the deny nor the allow list matches.
@@ -214,9 +214,10 @@ once you trust the project. See
 
 ## path confinement
 
-`confine_paths = true` routes the built-in file tools through
+Confined paths (the default) route the built-in file tools through
 escape-checked resolution: a read or write must stay under the working
-directory. `shell` is unaffected, because a shell can always reach the whole
+directory. Set `confine_paths = false` to turn it off.
+`shell` is unaffected, because a shell can always reach the whole
 filesystem. Confine it with `deny` rules instead. Agents inherit the setting.
 
 ## runtime mode (`/permission`)

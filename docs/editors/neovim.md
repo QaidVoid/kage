@@ -66,6 +66,9 @@ function M.start(opts)
   -- mcpServers is a JSON array on the wire. vim.json.encode turns the
   -- empty Lua table into [], which is what the host expects; a Python
   -- or JS port must send [] too, not {} (an object is rejected).
+  -- cwd is a plain absolute path in the host's own spelling: no ~
+  -- expansion, no file:// form. An empty string means the server's
+  -- working directory.
   M.request("session/new", { cwd = vim.fn.getcwd(), mcpServers = {} })
   return M
 end

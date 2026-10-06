@@ -238,6 +238,11 @@ kage.on("turn_end", function()
 end)
 ```
 
+The guard order matters: `files` is the exec capability, checked
+before `in_git_repo()`, so a plugin without the grant returns before
+any command runs; the git check follows, because it is the one that
+needs the grant.
+
 `/undo` is the one-step ergonomic case: it drops the last exchange by
 forking back to the entry just before your most recent prompt and
 restoring files there. Repeat it to walk further back, one exchange

@@ -18,6 +18,8 @@ kage-loop       (core + provider + tools)
 kage-remote     (core + tungstenite)
 kage-tui        (core + plugin)
 kage-cli        (binary)            (depends on everything it uses)
+
+kage-desktop (gui/, outside the workspace) builds on kage-client.
 ```
 
 Layering is strict: depend only downward. The `kage-cli` binary is

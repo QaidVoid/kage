@@ -41,6 +41,9 @@ switch modes or panes.
 `ctrl+o` also expands a collapsed bracketed paste if one is present
 in the input. When no paste is collapsed, it toggles the fold.
 
+Terminals that do not send `shift+tab` can run `/plan` instead, or
+rebind `kage.action.TogglePlanMode` to another key.
+
 ## vim modes
 
 | Key             | From    | Effect                              |

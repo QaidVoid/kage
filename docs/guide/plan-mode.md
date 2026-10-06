@@ -6,7 +6,8 @@ Nothing changes until you approve the plan.
 
 ## turning it on
 
-- `shift+tab` toggles plan mode in any editing state.
+- `shift+tab` toggles plan mode in any editing state (terminals that
+  do not send it can use `/plan`, or rebind `kage.action.TogglePlanMode`).
 - `/plan on` and `/plan off` set it, and a bare `/plan` toggles it.
 - `/plan <task>` turns plan mode on and sends the task as a prompt,
   for example `/plan move the retry logic into its own module`. It

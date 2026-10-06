@@ -7,10 +7,12 @@ For exhaustive detail, the code is the source of truth.
 
 ```
 kage-core                                             (leaf)
+kage-acp-wire                                         (leaf, serde-only wire types)
 kage-jsonrpc                                          (depends on core)
 kage-provider  kage-session  kage-tools               (depend on core)
 kage-mcp        (core + jsonrpc + tools)
-kage-acp        (core + jsonrpc + provider)
+kage-acp        (core + jsonrpc + provider + acp-wire)
+kage-client     (core + acp-wire)
 kage-plugin     (core + provider + tools)
 kage-loop       (core + provider + tools)
 kage-remote     (core + tungstenite)
@@ -33,6 +35,8 @@ the only crate that wires the whole graph together.
 | `kage-loop`      | The agent loop, compaction, hooks                   |
 | `kage-mcp`       | MCP client (tools, resources, prompts, the OAuth protocol, prompt expansion) and MCP server (kage's built-in tools over stdio) |
 | `kage-acp`       | ACP agent (editors drive kage) and ACP client (kage drives another agent as a provider) |
+| `kage-acp-wire`  | The ACP wire schema: serde-only, wasm-clean types (protocol version 1) shared by the agent, the serve host and the browser client |
+| `kage-client`    | The sans-IO client side of ACP: frames in mirrored into a renderable state, commands out as frames, over any transport |
 | `kage-plugin`    | Lua runtime, sandbox, host API surface, embedded stdlib and defaults, `init.lua` loading |
 | `kage-remote`    | The ACP WebSocket transport: request-head parsing and token authorization, the bearer token file, and the frame-to-line pipe that turns one accepted TCP stream into the reader and writer pair the agent serving loop consumes |
 | `kage-tui`       | The interactive TUI, modal input, block renderer    |
@@ -189,7 +193,11 @@ the chain. Cancelling a session stops every agent below it through the
 checks every loop, tool and gate already makes, while cancelling an
 agent never reaches its parent. The dispatcher resets a session's own
 flag when its run ends, so an idle parent that was cancelled cannot
-cancel a run later started in one of its agents.
+cancel a run later started in one of its agents. Cancellation is
+immediate on Unix, where shutting the provider socket down wakes the
+blocked read; on Windows, which cannot wake a read blocked in another
+thread, the reader polls for kill events in 200 ms slices and observes
+a cancel up to 200 ms late.
 
 **The agent tree.** Agents need one new event and no new commands.
 `agent_spawned` is published as the agent's first envelope, on the

@@ -9,7 +9,7 @@ runtime. Copy whichever fits and tweak.
 `plugins/examples/tps.lua` reports the throughput of each run as a
 toast. It adds up the output tokens of every `message_end` payload and
 divides by the run's wall-clock time when `agent_end` fires.
-`message_end` carries message text, so it needs the `context`
+`message_end` is one of the events gated behind the `context`
 [capability](/plugins/capabilities#context); the plugin requests it at
 load and you grant it with:
 
@@ -35,10 +35,16 @@ end)
 
 kage.on("agent_end", function()
   if started_at == nil then return end
-  local elapsed_ms = math.max(kage.now_ms() - started_at, 1)
+  local elapsed_ms = kage.now_ms() - started_at
+  if elapsed_ms <= 0 then
+    kage.notify(string.format("tps: %d output tokens (no elapsed time)", total_output))
+    return
+  end
+  local tps = total_output * 1000 / elapsed_ms
   kage.notify(string.format("tps: %d tokens in %.2fs (%.1f tok/s)",
-    total_output, elapsed_ms / 1000, total_output * 1000 / elapsed_ms))
+    total_output, elapsed_ms / 1000, tps))
   started_at = nil
+  total_output = 0
 end)
 ```
 
@@ -128,8 +134,9 @@ kage.ui.set_slot("footer", {
 })
 ```
 
-The spec repeats kage's default footer and adds the readout at the
-end. `TpsReadout` is not a `Kage*` group, so it survives theme
+The shipped default footer stacks two rows; this spec paints a single
+row that keeps its main components and adds the readout at the end.
+`TpsReadout` is not a `Kage*` group, so it survives theme
 switches. A user who prefers another footer can replace it from
 `init.lua`, which loads after every plugin.
 
@@ -203,7 +210,8 @@ kage.override_tool({
 
 `kage.exec` blocks until the command exits and kills it after 30
 seconds, so this override has neither the live output nor the
-cancellation of the built-in tool.
+cancellation of the built-in tool. The snippet is Unix-only: on
+Windows the shell tool uses PowerShell.
 
 ## conversation and file rewind
 
@@ -219,9 +227,13 @@ It snapshots tracked files with `git stash create` on every
 `turn_end`, keyed by the session's last entry id:
 
 ```lua
+local checkpoints, redo = {}, {} -- redo survives later turns: a prompt
+                                 -- between /undo and /redo does not wipe it
+
 kage.on("turn_end", function()
-  if not in_git_repo() then return end
+  if not files or not in_git_repo() then return end
   local id = last_entry_id()
+  if not id then return end
   checkpoints[#checkpoints + 1] = { id = id, sha = snapshot() }
 end)
 ```

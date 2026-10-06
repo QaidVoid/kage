@@ -63,6 +63,9 @@ function M.start(opts)
   -- session/new -> sessionId arrives in M.on_message; stash it, then
   -- M.request("session/prompt", { sessionId = session, prompt = {
   --   { type = "text", text = "explain this file" } } })
+  -- mcpServers is a JSON array on the wire. vim.json.encode turns the
+  -- empty Lua table into [], which is what the host expects; a Python
+  -- or JS port must send [] too, not {} (an object is rejected).
   M.request("session/new", { cwd = vim.fn.getcwd(), mcpServers = {} })
   return M
 end

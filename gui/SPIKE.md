@@ -167,11 +167,13 @@ cargo run --bin kage -- serve --web-dir gui/web
 ```
 
 The bundle lands in `gui/web/`: `kage_desktop.js` (the wasm-bindgen
-glue), `kage_desktop_bg.wasm`, `index.html` (a page shell that loads
-`boot.js`, which draws the connection form and then imports the glue),
-and `assets/icons/` (the 1830 Lucide SVGs the component library fetches
-from its own origin on first use; without them the page still works,
-it just logs a 404 per missing icon and draws the label only).
+glue), `kage_desktop_bg.wasm` with the generated `kage_desktop.d.ts`
+and `kage_desktop_bg.wasm.d.ts` declarations beside it, `index.html`
+(a page shell that loads `boot.js`, which draws the connection form
+and then imports the glue), and `assets/icons/` (the 1830 Lucide SVGs
+the component library fetches from its own origin on first use;
+without them the page still works, it just logs a 404 per missing
+icon and draws the label only).
 `kage serve --web-dir` is the serving path for real deployments: it
 serves the bundle at `/` with the MIME types, security headers and
 cross-origin isolation the page needs, next to the token-gated
@@ -223,7 +225,8 @@ Playwright):
   to single-threaded dispatcher` and
   `WebGPU initialization failed; falling back to WebGL2: browser
   WebGPU probe did not return a usable adapter`, then rendering
-  proceeds. The only page error is the cosmetic `favicon.ico` 404.
+  proceeds. The page links `favicon.svg`, which ships in the bundle,
+  so no favicon 404 is logged.
 
 ### COOP/COEP
 
@@ -343,7 +346,8 @@ flags. Sizes are for the bundle `gui/web/` as built; gzip is
 | `kage_desktop.js` glue | 171,419 bytes (167 KiB) | `ls -l web/` |
 | same, gzip -9 | 25,747 bytes (25 KiB) | `gzip -9` |
 | icons, 1830 SVGs | 8.1 MiB on disk, fetched per icon on demand | `du -sh web/assets/icons` |
-| `index.html` | 675 bytes | `ls -l web/` |
+| `index.html` | 427 bytes | `ls -l web/` |
+| `boot.js` (the connection form) | 6,201 bytes (6.1 KiB) | `ls -l web/` |
 | wasm build, clean release | 92 s wall | `cargo +nightly build --release --target wasm32-unknown-unknown` |
 | wasm-bindgen step | under 5 s | `wasm-bindgen --target web` |
 

@@ -50,9 +50,9 @@ needs a C compiler. It carries no browser client.
 You need a working Rust toolchain at version 1.89 or newer. The
 project pins 1.95 in `rust-toolchain.toml`, which rustup installs the
 first time you build. You also need a C compiler: the Xcode
-command-line tools on macOS, or a C compiler and `pkg-config` on
-Linux. Lua 5.4 is vendored and built with kage, so no system Lua is
-needed.
+command-line tools on macOS, the Visual Studio C++ build tools on
+Windows, or a C compiler and `pkg-config` on Linux. Lua 5.4 is
+vendored and built with kage, so no system Lua is needed.
 
 ```bash
 git clone https://github.com/QaidVoid/kage
@@ -67,6 +67,10 @@ symlink it from `~/.local/bin`:
 mkdir -p ~/.local/bin
 ln -s "$PWD/target/release/kage" ~/.local/bin/kage
 ```
+
+On Windows, the same build runs in PowerShell and the binary lands at
+`target\release\kage.exe`. Put `target\release` on your `PATH`, or copy
+`kage.exe` into a folder that is already on it.
 
 ## desktop client
 
@@ -117,7 +121,7 @@ kage --help
 If your shell cannot find `kage`, restart it or re-source your shell
 init file so the new directory shows up in `PATH`.
 
-Optional shell completion (`bash`, `zsh`, `fish`, `elvish`):
+Optional shell completion (`bash`, `zsh`, `fish`, `powershell`, `elvish`):
 
 ```bash
 kage completions zsh > ~/.zfunc/_kage

@@ -46,9 +46,11 @@ Inspect and reseat the live conversation.
 
 | call | effect |
 | --- | --- |
-| `kage.session.entries()` | metadata for every entry in the current session, in order: `{ id, kind, role?, ts }`. The rewind point picker. |
+| `kage.session.entries()` | metadata for every entry in the current session, in order: `{ id, kind, role?, ts }`. `kind` is one of `header`, `message`, `thinking_level_change`, `model_change`, `compaction`, `label`, `title`, `custom`; `role` rides only on `message` entries and is one of `user`, `assistant`, `tool_result`, `system`. The rewind point picker. |
 | `kage.session.switch(target)` | reseat onto an existing session (an id or a path from `kage.session.list()`). |
 | `kage.session.fork_to(at?)` | fork the current session at entry-id prefix `at` (latest if omitted) and land on the new branch. The rewind move: base `kage.session.fork` branches and stays, while `fork_to` branches and goes there. |
+| `kage.session.append_entry(kind, data?)` | append a custom entry: a namespaced `kind` such as `"my-plugin:bookmark"` plus any JSON-serializable `data` table (`{}` by default). The host writes it between turns. |
+| `kage.send_message(text, opts?)` | queue a synthetic user message the host delivers between turns. `opts` takes `trigger_turn` (default `true`) and `deliver_as` (only `"user"` is wired). |
 
 `entries()` returns metadata only (ids, kinds and timestamps, no
 message text) because it is a navigation index, not a transcript
@@ -60,7 +62,7 @@ veto, so a plugin can confirm or block its own rewind.
 
 ```lua
 local r = kage.exec({ cmd = "git", args = { "stash", "create" } })
--- r = { code = 0, timed_out = false, stdout = "...", stderr = "" }
+-- r = { code = 0, timed_out = false, truncated = false, stdout = "...", stderr = "" }
 ```
 
 Spawns a subprocess **directly, with no shell**, so there is no quoting
@@ -70,7 +72,9 @@ under it but never escape it (the same check `kage.fs` uses). The call
 blocks until the process exits and returns its captured output, the
 way `kage.http.get` blocks. A process still running after
 `timeout_secs` seconds (30 by default, at least 1) is killed and the
-result has `timed_out = true`. `code` is `-1` when a signal ended the
+result has `timed_out = true`. `truncated` is `true` when stdout or
+stderr passed the 1 MiB cap per stream and the rest of that stream
+was dropped. `code` is `-1` when a signal ended the
 process.
 
 The grant is coarse: a granted plugin may run any program with any

@@ -37,10 +37,12 @@ The table lists every built-in command.
 | Command                   | What it does                                    |
 | ------------------------- | ----------------------------------------------- |
 | `/model [id]`             | Switch the active model (`provider/model`). Without an id, open the model picker. |
+| `/usage` | Show the session's token usage (input, output, cache, cost) and a context window bar as a block in the conversation |
 | `/new`                    | Start a fresh empty session, keeping the current model |
 | `/compact`                | Run a compaction pass right now                 |
 | `/agents`                 | Open the agents overlay: every agent of the session, live or finished (see [agents](/guide/agents#the-agents-overlay)) |
 | `/plan [on\|off\|<task>]` | Turn plan mode on or off (a bare `/plan` toggles it), or plan one task now (see [plan mode](/guide/plan-mode)) |
+| `/todo_list` / `/todos` | Open every task of the session's todo list in a scroll-only modal |
 | `/goal <goal>\|clear` | Set what done looks like. Setting one sends it to the agent as its own turn, right away when idle or after the one running. After each completed turn the model judges the goal against the work since the goal was set: the replies, the tool calls and what they returned. While it is not met, kage says what is missing and keeps working toward it on its own, up to 8 turns in a row, and says so when it is met; later turns are checked too, and a goal that slips is picked back up. A check that fails or gives no clear answer stops the loop and says so. Your own prompts reset the count. `/goal clear` drops it |
 | `/swarm [on\|off\|<task>]` | Turn swarm mode on or off, or hand one task to a swarm now (see [swarms](/guide/agents#the-swarm-command)) |
 | `/permission [mode]` / `/perm` | Without a mode, show the session permission mode. `allow`, `ask` or `deny` override the configured rules for this session (`allow` runs everything; configured denies still deny), and `default` returns to them (see [permissions](/guide/permissions)) |

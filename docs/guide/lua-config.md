@@ -222,7 +222,7 @@ mapping in `i` or `g` would catch it while you type.
 `ScrollToTop`, `ScrollToBottom`, `ToggleFold`, `UnfoldAll`, `FoldAll`,
 `Yank`, `ClearSelection`, `OpenModelPicker`, `OpenSessionPicker`,
 `SearchNext`, `SearchPrev`, `YankFocusedBlock`,
-`CycleThinkingLevel`, `CyclePane`, `FocusPrev`, `FocusNext`,
+`CycleThinkingLevel`, `TogglePlanMode`, `CyclePane`, `FocusPrev`, `FocusNext`,
 `OpenHelp`, `OpenJumpPicker`, `AttachClipboardImage`, `EnterVisual`,
 `QueuePrompt`, `RecallPrompt`, `OpenAgents`, and the function
 `scroll(n)`.

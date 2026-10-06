@@ -50,7 +50,7 @@ Plugins and `init.lua` share this API but not the same privileges.
 
 | | plugins | `init.lua` and its `lua/` modules |
 | --- | --- | --- |
-| Capabilities (`exec`, `env`, `net`, `session_write`) | only when granted in `[plugins.capabilities]` and requested | all, without asking |
+| Capabilities (`session_write`, `exec`, `env`, `net`, `crypto`, `context`, `provider`, `fs_write`) | only when granted in `[plugins.capabilities]` and requested | all, without asking |
 | `require` | not available | confined to `~/.config/kage/lua/` |
 | the `io` library, `os.execute`, `debug` | removed | removed |
 | Loaded by | the TUI, print mode and `kage rpc` | the TUI only |
@@ -81,9 +81,10 @@ missing function.
 ### `kage.log(level: string, message: string)`
 
 Record a structured log line. `level` is one of `"trace"`, `"debug"`,
-`"info"`, `"warn"`, `"error"`. In the TUI the line also shows in the
-conversation, in order with the turn that logged it. Lines logged
-while kage starts show as `kage:log` blocks instead.
+`"info"`, `"warn"`, `"error"`. An unrecognized level falls back to
+`"info"`, unlike `kage.ui.notify`, which raises. In the TUI the line
+also shows in the conversation, in order with the turn that logged
+it. Lines logged while kage starts show as `kage:log` blocks instead.
 
 ### `kage.sleep_ms(ms: integer)`
 
@@ -128,7 +129,8 @@ file per plugin under `~/.local/share/kage/plugin-state/`.
 
 ### `kage.request_capabilities(names)` -> `{ name = granted }`
 
-Ask for the elevated APIs (`exec`, `env`, `net`, `session_write`) the
+Ask for the elevated APIs (`session_write`, `exec`, `env`, `net`,
+`crypto`, `context`, `provider`, `fs_write`) the
 user granted this plugin. See [capabilities](/plugins/capabilities).
 
 ## ui
@@ -234,7 +236,7 @@ something, one row minimum and four at most, and the open `:` or `/`
 line keeps the top row. An item is a built-in component name (`brand`,
 `breadcrumb`, `title`, `model`, `widgets`, `search`, `session`, `working`,
 `activity`, `context`, `tokens`, `thinking`, `permission`, `plan`, `swarm`,
-`tasks`, `mode`,
+`agents`, `tasks`, `mode`,
 `hint`, `cwd`, `version`, and in `start` also `sessions` and
 `notices`), a span table, or a Lua component
 `{ render = fn(ctx), events?, interval?, hl? }` whose output kage
@@ -354,6 +356,14 @@ Same shape as `register_tool` but replaces the existing entry by name.
 Useful for filtering `shell` or auditing `write`. The override replaces
 the tool, so it must do the work itself. The host logs a warning if no
 tool with that name was previously registered.
+
+### `kage.rename_tool(spec)`
+
+**Since API 2.** Take `{ from, to }` and advertise the tool `from`
+under the name `to`: the model sees only `to`, while execution and
+permission rules keep using the real tool. Empty names raise. The
+host applies renames after tools and overrides; a rename whose `from`
+names no tool sits unused until one registers.
 
 ## commands
 
@@ -549,8 +559,8 @@ kage does expand (see [mcp](/guide/mcp#resources-and-mentions)).
 ### `kage.on_terminal_input(handler) -> off`
 
 Register a handler the host calls for every key *before* any modal
-layer or built-in binding sees it. Returning a truthy value consumes
-the event. The call returns an `off` function that unregisters the
+layer or built-in binding sees it. Returning `true` consumes the
+event. The call returns an `off` function that unregisters the
 handler. Calling it again does nothing.
 
 ```lua
@@ -870,8 +880,10 @@ Requires the `session_write`
 entry to the session JSONL. `kind` is a non-empty
 namespaced string such as `"my-plugin:bookmark"`. `data` is any
 table, JSON-serialized (defaults to `{}`). The host writes it
-between turns. Pair it with a custom block renderer to display
-your own entry kind end to end.
+between turns. You can register a block renderer for your kind and
+queue custom blocks, but custom content in replayed transcripts is
+not displayed yet: the host drops it when it rebuilds the
+conversation.
 
 ### `kage.session.set_label(anchor: string, label?: string)`
 
@@ -934,6 +946,28 @@ Requires the `fs_write`
 workdir. Same path restriction as `read`, including through
 symlinks; missing parent directories are created.
 
+## env
+
+`kage.env` and `kage.credential` are gated behind the `env`
+capability. A plugin must be granted `env` in `[plugins.capabilities]`
+and request it at load time before they are attached to its
+environment.
+
+### `kage.env(name: string)` -> string | nil
+
+Return the value of one variable from the host process environment,
+or `nil` when it is unset. Raises when the value is not valid UTF-8.
+Access is read-only, with no setter and no per-variable allowlist: a
+granted plugin can read every variable, including secrets. See
+[capabilities](/plugins/capabilities#env).
+
+### `kage.credential(provider: string)` -> string | nil
+
+Return the token the host holds for a provider id, the same store the
+login flow writes, or `nil` when nothing is stored. The same `env`
+grant attaches it: stored tokens are secrets of the same class as
+environment secrets.
+
 ## http
 
 `kage.http` is gated behind the `net` capability. A plugin must be
@@ -951,7 +985,7 @@ granted `crypto` in `[plugins.capabilities]` and request it at load time
 before the primitives are attached to its environment. The calls are
 stateless and synchronous: random bytes, SHA-256, SHA-512, HMAC-SHA256,
 HKDF-SHA256, AES-256-GCM decrypt, Ed25519 sign, and base64 and hex
-conversion, all over byte strings. Since API 3. See
+conversion, all over byte strings. Since API 2. See
 [capabilities](/plugins/capabilities#crypto) for the table.
 
 ## acp and mcp
@@ -986,7 +1020,7 @@ commands, events and renders run in between, so several agents can
 stream from the same provider at once. Code that busy-loops without
 calling any of these still holds the thread until it returns.
 
-### `kage.provider_error(kind, message[, status])
+### `kage.provider_error(kind, message, status?)`
 
 Requires the `provider` capability. Raise a typed
 provider error so the agent loop applies the right retry policy. Never

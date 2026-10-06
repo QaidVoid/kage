@@ -64,12 +64,12 @@ in every browser client. A subprotocol entry is echoed back in the
 `101` response. Browsers cannot set headers on a WebSocket, which is
 why the subprotocol and query forms exist.
 
-The token lives in `$XDG_DATA_HOME/kage/remote-token` with mode 0600,
-next to `auth.json`. It survives restarts, so the connect URL keeps
-working. `kage serve --rotate-token` replaces it with a fresh one and
-prints a new connect URL; every client holding the old URL must be
-sent the new one. Rotate when a URL has leaked or a collaborator
-leaves.
+The token lives in `$XDG_DATA_HOME/kage/remote-token` with mode 0600
+on Unix, next to `auth.json`. It survives restarts, so the connect
+URL keeps working. `kage serve --rotate-token` replaces it with a
+fresh one and prints a new connect URL; every client holding the old
+URL must be sent the new one. Rotate when a URL has leaked or a
+collaborator leaves.
 
 ## loopback default and the warning
 
@@ -214,7 +214,8 @@ that the port exists.
   observer can read everything, token included. Use loopback, an SSH
   tunnel, or a TLS-terminating proxy; do not point `--host` at a
   routable address across an untrusted network.
-- The token file is mode 0600, and the token is compared in constant
+- The token file is mode 0600 on Unix (elsewhere the file inherits
+  its directory's default ACL), and the token is compared in constant
   time. The token appears in exactly one place: the connect URL at
   startup. Log lines name peer addresses, never tokens.
 - URLs with tokens leak through shell history, pastebins, and browser
@@ -284,11 +285,16 @@ cargo +nightly build --release --locked --target wasm32-unknown-unknown
 wasm-bindgen --out-dir web --target web \
     target/wasm32-unknown-unknown/release/kage_desktop.wasm
 mkdir -p web/assets/icons
-cp "$(ls -d ~/.local/share/cargo/registry/src/*/gpui-kit-assets-0.7.0/assets/icons)"/*.svg \
+cp "$(ls -d "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/gpui-kit-assets-*/assets/icons)"/*.svg \
     web/assets/icons/
 cd ..
 cargo run --bin kage -- serve --web-dir gui/web
 ```
+
+The gui dependency versions are pinned in `gui/Cargo.toml` (one of
+them, `gpui-base`, as a git rev) and frozen in `gui/Cargo.lock`, so
+match the lockfile rather than any version number; the icon folder's
+version in the registry follows it.
 
 Then open the page URL from the startup output:
 

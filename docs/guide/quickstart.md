@@ -79,9 +79,9 @@ work (`ctrl+a`/`ctrl+e` line start/end, `ctrl+u`/`ctrl+k` kill,
 the draft, and `up` brings it back. `ctrl+g` opens the whole draft in
 an external editor (`$VISUAL` or `$EDITOR`) for longer prompts.
 `alt+t` cycles through the thinking levels the model accepts, and
-`shift+tab` toggles [plan mode](/guide/plan-mode): the agent
-investigates and presents a plan, and nothing changes until you
-approve it.
+`shift+tab` toggles [plan mode](/guide/plan-mode) (terminals that do
+not send `shift+tab` can use `/plan`): the agent investigates and
+presents a plan, and nothing changes until you approve it.
 
 Prefer vim? Set `editor = "vim"` under `[ui]` in config.toml (or
 toggle it in `/settings`) to get normal/insert/visual modes with
@@ -169,7 +169,7 @@ shell mode without running anything.
 
 ## switching models mid-session
 
-Type `/model <provider>:<model>`, or open the model picker with
+Type `/model <provider>/<model>`, or open the model picker with
 `ctrl+p` or a bare `/model`. The next turn uses the new model, and
 the conversation so far carries over.
 

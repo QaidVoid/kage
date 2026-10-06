@@ -110,6 +110,12 @@ compaction_threshold = 0.8
 max_depth = 1
 # how many agents run at once (1 to 16). further agents wait their turn.
 max_running = 4
+# most items one swarm call may run, one child agent per item (2 to
+# 128). a call listing more fails.
+swarm_max_items = 32
+# milliseconds one swarm child may run, from its run start (1000 to
+# 86400000). on deadline the child is cancelled.
+swarm_timeout_ms = 7200000
 # turns with tool calls one agent run may take (0 to 10000, 0 for no
 # limit). the agent gets one warning turn to reply first.
 max_turns = 100
@@ -143,7 +149,10 @@ allow_sampling = false
 ```
 
 Every table and key is optional. Omitted values fall back to the
-defaults shown above.
+defaults shown above. The two `swarm` keys under `[agents]` tune the
+[swarm command](/guide/agents#the-swarm-command): `swarm_max_items`
+caps how many items one call may run, and `swarm_timeout_ms` caps one
+child's runtime in milliseconds.
 
 When kage writes this file itself (saving `/settings`, or answering
 "always allow" to a permission prompt), it changes only the keys

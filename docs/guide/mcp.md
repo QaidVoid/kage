@@ -58,6 +58,12 @@ url = "https://api.githubcopilot.com/mcp/"
 disabled_tools = ["delete_repository", "merge_pull_request"]
 ```
 
+Startup has its own deadline, separate from the request timeouts
+[below](#progress-and-cancel): `startup_timeout_secs` (optional
+integer, default 10) raises how long kage waits for a server's
+`initialize` handshake before it gives up. Raise it for a server whose
+cold start is slow, such as a first `npx` download.
+
 Servers in your user config start right away. Servers in a
 project's `.kage/config.toml` start only once you trust that project:
 the TUI asks at startup, and print mode, `kage rpc` and

@@ -96,6 +96,7 @@ Client to agent:
 | `session/load`              | `{sessionId, cwd, mcpServers}` -> replays history as `session/update`, then `{configOptions}` |
 | `session/resume`            | `{sessionId, cwd, mcpServers}` -> `{configOptions}`, no replay |
 | `session/list`              | `{cwd?, cursor?}` -> `{sessions: [{sessionId, cwd, title?, updatedAt?}], nextCursor?}` |
+| `session/close`             | `{sessionId}` -> `{}`, releasing the caller's attachment; a session no connection holds and that is idle closes once released |
 | `session/set_config_option` | `{sessionId, configId, value}` -> `{configOptions}` |
 | `session/prompt`            | `{sessionId, prompt: ContentBlock[]}` -> `{stopReason}` |
 | `session/cancel`            | notification `{sessionId}` |
@@ -118,8 +119,12 @@ Agent to client:
 
 kage advertises:
 
-- `loadSession: true`, and `sessionCapabilities` with `list` and
-  `resume`.
+- `loadSession: true`, and `sessionCapabilities` with `list`,
+  `resume` and `close`.
+- `steer: true`: a `session/prompt` may set `delivery: "steer"` to
+  join a run already in flight at its next turn boundary; a prompt
+  without the field, or with `"queue"`, runs once the current run
+  ends.
 - `promptCapabilities` with `image` and `embeddedContext`.
 - `mcpCapabilities` with `http: true` and `sse: false`.
 - empty `authMethods`, and `agentInfo {name: "kage", version}`.
@@ -150,14 +155,17 @@ A generated title arrives as `session_info_update`.
 
 ## config options
 
-Every session has three select options, returned by `session/new`,
-`session/load`, `session/resume` and `session/set_config_option`:
+Every session has five options, four selects and one text, returned
+by `session/new`, `session/load`, `session/resume` and
+`session/set_config_option`:
 
-| id         | category        | values |
-| ---------- | --------------- | ------ |
-| `model`    | `model`         | the models the TUI model picker lists, plus the current one |
-| `thinking` | `thought_level` | `default`, named `auto` (high, or the nearest level the model accepts), then the levels the model accepts from `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
-| `mode`     | `mode`          | `default` (the configured rules decide), `ask`, `allow`, `deny` |
+| id         | category        | kind   | values |
+| ---------- | --------------- | ------ | ------ |
+| `model`    | `model`         | select | the models the TUI model picker lists, plus the current one |
+| `thinking` | `thought_level` | select | `default`, named `auto` (high, or the nearest level the model accepts), then the levels the model accepts from `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `mode`     | `mode`          | select | `default` (the configured rules decide), `ask`, `allow`, `deny`, and `plan` chained in after them |
+| `swarm`    | `mode`          | select | `off` (the session does the work itself) or `on` (repeated work is delegated to swarm batches) |
+| `goal`     | none            | text   | free-form text; empty clears the goal |
 
 A change applies from the next turn on. `session/set_config_option`
 answers with the options as they will be once it applies. When a
@@ -166,8 +174,11 @@ sends `config_option_update`.
 
 The `mode` values override the permission rules for the session:
 `ask` asks before every tool call, `deny` refuses every call, and
-`allow` runs every call without asking. `allow` differs from the
-TUI's `/permission allow`, which is an alias of `default`.
+`allow` runs every call without asking. Picking `plan` puts the
+session in plan mode, which rides above the permission mode: the
+option reads back `plan` until a regular mode is picked, and picking
+one leaves plan mode in the same change. `allow` is the same override
+the TUI's `/permission allow` sets.
 
 ## prompt content
 
@@ -179,10 +190,12 @@ Each block of a `session/prompt` reaches the model:
 | `image` | the image |
 | `resource` with text | the text in a `<resource uri="..." mime="...">` block |
 | `resource` with an image blob | the image |
-| `resource` with another blob | one line naming the URI and MIME type |
+| `resource` with another blob | `[binary resource <uri>: <mime>]`, with `application/octet-stream` when the resource names no MIME type |
+| `resource` with no text or blob | `[resource omitted]` |
 | `resource_link` to a `file://` URI | `Referenced file: <path>` |
 | other `resource_link` | `Referenced resource: <uri> (<name>)` |
 | `audio` | `[audio omitted]` |
+| a block type this kage does not know | `[unsupported block omitted]` |
 
 Prompt text can mention MCP resources and run MCP prompts exactly as
 in the TUI. See [mcp](/guide/mcp#resources-and-mentions). A mention or
@@ -336,3 +349,9 @@ capabilities, then a fresh `sessionId` with its `configOptions`.
 Session updates such as `available_commands_update` follow the
 `session/new` result. When stdin closes, kage still answers every
 request it has read except `session/prompt` before it exits.
+
+The `cwd` of `session/new`, `session/load` and `session/resume` is a
+plain absolute path in the host's spelling: no `~` expansion and no
+`file://` form. An empty `cwd` means the server's own working
+directory, the one the `initialize` result names in
+`_meta.kage.cwd`.

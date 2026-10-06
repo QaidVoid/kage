@@ -32,6 +32,16 @@ pub(super) fn render_buffer(
     // call id twice per frame.
     let topology = buffer.tool_topology();
     let n = buffer.blocks().len();
+    // Display-space match indices, precomputed once per frame so the
+    // per-block lookup is a binary search instead of a full scan of
+    // the match set.
+    let mut display_matches: Vec<usize> = search_match_set
+        .unwrap_or(&[])
+        .iter()
+        .map(|&m| topology.display_idx(m))
+        .collect();
+    display_matches.sort_unstable();
+    display_matches.dedup();
 
     let registry = read(registry::global());
     // Emphasis follows the explicit focus only: the fallback target of
@@ -180,7 +190,7 @@ pub(super) fn render_buffer(
             emitted_rows = emitted_rows.saturating_add(1);
         }
         let intra_block_skip = next_row.saturating_sub(block_top);
-        let emp = emphasis_for(idx, focus, search_match_set, &topology);
+        let emp = emphasis_for(idx, focus, &display_matches);
         let cached_owner;
         let built_owner;
         let take_rows = row_budget.saturating_sub(emitted_rows);
@@ -272,17 +282,12 @@ fn render_new_output_mark(frame: &mut Frame, area: Rect) {
 }
 
 /// Compute the emphasis for the displayed block at `idx`. `focus` is
-/// already mapped to its displayed block; a search hit in a merged
-/// result or a grouped call lights up the block that paints it.
-fn emphasis_for(
-    idx: usize,
-    focus: Option<usize>,
-    search_match_set: Option<&[usize]>,
-    topology: &crate::buffer::ToolTopology,
-) -> Emphasis {
+/// already mapped to its displayed block; `display_matches` holds the
+/// search hits mapped to the blocks that paint them, sorted.
+fn emphasis_for(idx: usize, focus: Option<usize>, display_matches: &[usize]) -> Emphasis {
     if focus == Some(idx) {
         Emphasis::Focused
-    } else if search_match_set.is_some_and(|s| s.iter().any(|&m| topology.display_idx(m) == idx)) {
+    } else if display_matches.binary_search(&idx).is_ok() {
         Emphasis::Match
     } else {
         Emphasis::None

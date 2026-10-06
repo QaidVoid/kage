@@ -546,10 +546,11 @@ pub(crate) use bubble::{
 };
 pub use buffer::CapturedCell;
 pub(crate) use buffer::build_block_lines;
-pub(crate) use input::{
-    AGENT_MAX_ROWS, INPUT_GLYPH_WIDTH, agents_height, pending_height, pinned_area_rows, split_input,
-};
 pub use input::{AgentRow, AgentRowState, PendingPrompt};
+pub(crate) use input::{
+    INPUT_GLYPH_WIDTH, agents_height, pending_height, pinned_area_rows, pinned_shown_agents,
+    pinned_summary_hit, split_input,
+};
 pub use modeline::input_visual_row_count;
 pub(crate) use modeline::{
     chrome_lines_to_ratatui, format_token_count, spinner_frame, spinner_frame_index,

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::permissions::PermissionGate;
 use kage_core::agents::{AgentDef, Isolation};
 use kage_core::protocol::{HostEvent, NoticeLevel, RunOutcome, SwarmMember, Usage};
 use kage_core::sync::lock;
@@ -19,8 +20,8 @@ use super::runner::Work;
 use super::swarm_tool::{self, Member, SWARM_TOOL, SwarmInfo};
 use super::worktree::Worktree;
 use super::{
-    AgentSetup, Attach, Background, CONTINUE_PROMPT, Recorder, ResumeChild, Session, SessionSpec,
-    notice,
+    AgentSetup, Attach, Background, CONTINUE_PROMPT, LoopConfig, Recorder, ResumeChild, Session,
+    SessionSpec, notice,
 };
 
 /// Tells a forked child that the conversation it starts with is
@@ -868,10 +869,6 @@ fn agent_spec(
         &[],
         from.shell.as_deref(),
     );
-    let mut cx = AgentContext::new(model.clone(), &system_prompt).with_workdir(workdir);
-    cx.confine_paths = from.confine_paths;
-    cx.thinking_level = def.thinking.or(from.state.thinking);
-    let (tools, missing) = agent_tools(&from.tools, def.tools.as_deref());
     let recorder = from.path.as_deref().and_then(Path::parent).map(|dir| {
         let header = kage_session::Header {
             version: kage_session::FORMAT_VERSION,
@@ -880,28 +877,24 @@ fn agent_spec(
             ts: chrono::Utc::now(),
             cwd: workdir.to_path_buf(),
             model: model.clone(),
-            system_prompt,
+            system_prompt: system_prompt.clone(),
             parent_session: Some(parent),
             parent_entry: None,
         };
         Recorder::planned(crate::build_session_path(dir, id), header, None)
     });
-    let spec = SessionSpec {
+    let thinking = def.thinking.or(from.state.thinking);
+    child_spec(
+        &spawn_parent(from),
         id,
         model,
-        cx,
+        system_prompt,
+        workdir.to_path_buf(),
+        def,
+        thinking,
         recorder,
-        tools,
-        plugins: None,
-        gate: from.gate.clone(),
-        loop_cfg: from.loop_cfg,
-        mcp: None,
-        interactive: from.interactive,
-        title: false,
-        agents: Some(setup.clone()),
-        shell: from.shell.clone(),
-    };
-    (spec, missing)
+        setup,
+    )
 }
 
 /// A checkout of its own for the agent `id` of `from`, when its
@@ -1039,6 +1032,68 @@ fn fork_snapshot<'a>(
     Ok(&cache.insert((batch, snapshot)).1)
 }
 
+/// What a spawned child inherits from its parent session: the sandbox
+/// boundary, the tool registry, and the runtime knobs the spec tail
+/// copies. Captured once per spawn so every spawn kind copies the
+/// same values.
+struct SpawnParent<'a> {
+    confine_paths: bool,
+    tools: &'a ToolRegistry,
+    gate: PermissionGate,
+    loop_cfg: LoopConfig,
+    interactive: bool,
+    shell: Option<String>,
+}
+
+fn spawn_parent<'a>(session: &'a Session) -> SpawnParent<'a> {
+    SpawnParent {
+        confine_paths: session.confine_paths,
+        tools: &session.tools,
+        gate: session.gate.clone(),
+        loop_cfg: session.loop_cfg,
+        interactive: session.interactive,
+        shell: session.shell.clone(),
+    }
+}
+
+/// The core of every agent spawn: confinement inherited from the
+/// parent, `thinking` over the parent's level, the definition's tools
+/// narrowed over the parent's, and the common `SessionSpec` tail.
+/// Every spawn kind funnels through here so a lost copy cannot strand
+/// the sandbox boundary or a knob on one path.
+fn child_spec(
+    parent: &SpawnParent<'_>,
+    id: SessionId,
+    model: String,
+    system_prompt: String,
+    workdir: PathBuf,
+    def: &AgentDef,
+    thinking: Option<kage_core::ThinkingLevel>,
+    recorder: Option<Recorder>,
+    setup: &AgentSetup,
+) -> (SessionSpec, Vec<String>) {
+    let mut cx = AgentContext::new(model.clone(), system_prompt).with_workdir(workdir);
+    cx.confine_paths = parent.confine_paths;
+    cx.thinking_level = thinking;
+    let (tools, missing) = agent_tools(parent.tools, def.tools.as_deref());
+    let spec = SessionSpec {
+        id,
+        model,
+        cx,
+        recorder,
+        tools,
+        plugins: None,
+        gate: parent.gate.clone(),
+        loop_cfg: parent.loop_cfg,
+        mcp: None,
+        interactive: parent.interactive,
+        title: false,
+        agents: Some(setup.clone()),
+        shell: parent.shell.clone(),
+    };
+    (spec, missing)
+}
+
 /// The session spec for a child spawned from `snapshot`, a copy of
 /// `from`'s conversation, instead of zero context. The snapshot is
 /// written into the child's own file, and the child's context history
@@ -1104,26 +1159,18 @@ fn forked_spec(
             .append(&notice)
             .map_err(|err| format!("cannot write the fork notice into session {id}: {err}"))?;
     }
-    let mut cx =
-        AgentContext::new(model.clone(), system_prompt).with_workdir(workdir.to_path_buf());
-    cx.confine_paths = from.confine_paths;
-    cx.thinking_level = def.thinking.or(from.state.thinking);
-    let (tools, missing) = agent_tools(&from.tools, def.tools.as_deref());
-    let spec = SessionSpec {
+    let thinking = def.thinking.or(from.state.thinking);
+    let (spec, missing) = child_spec(
+        &spawn_parent(from),
         id,
         model,
-        cx,
-        recorder: Some(Recorder::new(writer, None)),
-        tools,
-        plugins: None,
-        gate: from.gate.clone(),
-        loop_cfg: from.loop_cfg,
-        mcp: None,
-        interactive: from.interactive,
-        title: false,
-        agents: Some(setup.clone()),
-        shell: from.shell.clone(),
-    };
+        system_prompt,
+        workdir.to_path_buf(),
+        def,
+        thinking,
+        Some(Recorder::new(writer, None)),
+        setup,
+    );
     Ok((spec, missing, child_path))
 }
 
@@ -1171,36 +1218,28 @@ fn resumed_spec(
             )),
         )
     };
-    let mut cx = AgentContext::new(model.clone(), replay.header.system_prompt.clone())
-        .with_workdir(from.workdir.clone());
-    cx.confine_paths = from.confine_paths;
-    cx.thinking_level = replay
+    let thinking = replay
         .thinking_level
         .as_deref()
         .and_then(kage_core::ThinkingLevel::parse);
-    cx.history = replay.history.into_iter().map(Arc::new).collect();
-    cx.budget = TokenBudget {
+    let (mut spec, missing) = child_spec(
+        &spawn_parent(from),
+        id,
+        model,
+        replay.header.system_prompt.clone(),
+        from.workdir.clone(),
+        def,
+        thinking,
+        Some(Recorder::new(writer, None)),
+        setup,
+    );
+    spec.cx.history = replay.history.into_iter().map(Arc::new).collect();
+    spec.cx.budget = TokenBudget {
         used_input: replay.usage_total.input,
         used_output: replay.usage_total.output,
         used_cache_read: replay.usage_total.cache_read,
         used_cache_write: replay.usage_total.cache_write,
         current_context: replay.usage_total.last_context,
-    };
-    let (tools, missing) = agent_tools(&from.tools, def.tools.as_deref());
-    let spec = SessionSpec {
-        id,
-        model,
-        cx,
-        recorder: Some(Recorder::new(writer, None)),
-        tools,
-        plugins: None,
-        gate: from.gate.clone(),
-        loop_cfg: from.loop_cfg,
-        mcp: None,
-        interactive: from.interactive,
-        title: false,
-        agents: Some(setup.clone()),
-        shell: from.shell.clone(),
     };
     (spec, missing, note)
 }
@@ -1218,4 +1257,97 @@ fn agent_tools(parent: &ToolRegistry, only: Option<&[String]>) -> (ToolRegistry,
     let (tools, mut missing) = parent.retain_named(only);
     missing.retain(|name| ![AGENT_TOOL, SWARM_TOOL, MAILBOX_TOOL].contains(&name.as_str()));
     (tools, missing)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::permissions::PermissionGate;
+    use kage_core::agents::AgentSource;
+    use kage_core::permissions::PermissionsConfig;
+
+    fn def() -> AgentDef {
+        AgentDef {
+            name: "reviewer".to_owned(),
+            description: "Reviews a diff.".to_owned(),
+            tools: None,
+            model: None,
+            thinking: None,
+            max_turns: None,
+            timeout: None,
+            isolation: Isolation::default(),
+            body: "Review.".to_owned(),
+            path: None,
+            source: AgentSource::Builtin,
+        }
+    }
+
+    fn setup() -> AgentSetup {
+        AgentSetup {
+            defs: Arc::new(kage_core::agents::AgentDefs::builtin()),
+            max_depth: 1,
+            max_running: 1,
+            swarm_max_items: 32,
+            swarm_timeout_ms: 60_000,
+            background: Background::Off,
+            max_turns: 0,
+            timeout: None,
+            budget: 0,
+        }
+    }
+
+    /// The shared spawn core must copy the same security-relevant
+    /// knobs from the parent, whichever model, thinking level or
+    /// recorder the spawn kind supplies.
+    #[test]
+    fn spawn_kinds_share_confinement_tools_gate_and_tail() {
+        let tools = ToolRegistry::new();
+        let parent = SpawnParent {
+            confine_paths: true,
+            tools: &tools,
+            gate: PermissionGate::new(PermissionsConfig::default()),
+            loop_cfg: LoopConfig::default(),
+            interactive: true,
+            shell: Some("sh".to_owned()),
+        };
+        let workdir = std::env::temp_dir();
+        let (planned, planned_missing) = child_spec(
+            &parent,
+            SessionId::new(),
+            "mock/m".to_owned(),
+            "planned prompt".to_owned(),
+            workdir.clone(),
+            &def(),
+            Some(kage_core::ThinkingLevel::Off),
+            None,
+            &setup(),
+        );
+        let (live, live_missing) = child_spec(
+            &parent,
+            SessionId::new(),
+            "mock/other".to_owned(),
+            "live prompt".to_owned(),
+            workdir,
+            &def(),
+            None,
+            None,
+            &setup(),
+        );
+        assert!(planned.cx.confine_paths);
+        assert!(live.cx.confine_paths);
+        assert_eq!(planned.tools.len(), live.tools.len());
+        assert_eq!(
+            planned.tools.names().collect::<Vec<_>>(),
+            live.tools.names().collect::<Vec<_>>()
+        );
+        assert_eq!(planned.gate.mode(), live.gate.mode());
+        assert_eq!(planned.loop_cfg, live.loop_cfg);
+        assert_eq!(planned.interactive, live.interactive);
+        assert_eq!(planned.shell, live.shell);
+        assert!(planned.plugins.is_none() && live.plugins.is_none());
+        assert!(planned.mcp.is_none() && live.mcp.is_none());
+        assert_eq!(planned.agents.as_ref().map(|a| a.max_depth), Some(1));
+        assert_eq!(live.agents.as_ref().map(|a| a.max_depth), Some(1));
+        assert!(planned_missing.is_empty() && live_missing.is_empty());
+    }
 }

@@ -172,10 +172,37 @@ impl PermissionsConfig {
 
 /// Whether any pattern in `patterns` glob-matches `subject`.
 fn matches_any(patterns: &[String], subject: &str) -> bool {
-    patterns.iter().any(|p| match globset::Glob::new(p) {
-        Ok(g) => g.compile_matcher().is_match(subject),
-        Err(_) => false,
-    })
+    patterns
+        .iter()
+        .any(|p| compiled_glob(p).is_some_and(|m| m.is_match(subject)))
+}
+
+/// Process-wide compiled-glob memo. Patterns are few and static for
+/// the life of a process, so this turns every `check` compile into a
+/// hash lookup. Cleared wholesale past the cap, which only a
+/// pathological config churn could hit.
+fn compiled_glob(pattern: &str) -> Option<globset::GlobMatcher> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<globset::GlobMatcher>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.len() > 1024 {
+        guard.clear();
+    }
+    match guard.get(pattern) {
+        Some(hit) => hit.clone(),
+        None => {
+            let compiled = globset::Glob::new(pattern)
+                .ok()
+                .map(|g| g.compile_matcher());
+            guard.insert(pattern.to_owned(), compiled.clone());
+            compiled
+        }
+    }
 }
 
 #[cfg(test)]
@@ -204,6 +231,19 @@ mod tests {
         let cfg = PermissionsConfig::default();
         assert_eq!(cfg.check("shell", "rm -rf /"), PermissionAction::Allow);
         assert!(cfg.is_default());
+    }
+
+    #[test]
+    fn repeated_checks_answer_identically_through_the_glob_cache() {
+        let cfg = rules(PermissionAction::Allow, &["git *"], &["git push *"]);
+        for _ in 0..3 {
+            assert_eq!(
+                cfg.check("shell", "git push origin main"),
+                PermissionAction::Deny
+            );
+            assert_eq!(cfg.check("shell", "git status"), PermissionAction::Allow);
+            assert_eq!(cfg.check("shell", "hg status"), PermissionAction::Allow);
+        }
     }
 
     #[test]

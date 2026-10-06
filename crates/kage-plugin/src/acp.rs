@@ -78,40 +78,18 @@ pub(crate) fn register(registry: &CapabilityRegistry, agents: SharedAcpAgents) {
 
 fn add_agent_fn(lua: &Lua, agents: SharedAcpAgents) -> mlua::Result<mlua::Function> {
     lua.create_function(move |_lua, spec: Table| {
-        let name: String = spec.get("name")?;
-        let command: String = spec.get("command")?;
-        if name.is_empty() || command.is_empty() {
-            return Err(mlua::Error::external(
-                "kage.acp.add_agent: `name` and `command` are required",
-            ));
-        }
-        let args: Vec<String> = match spec.get::<Value>("args")? {
-            Value::Nil => Vec::new(),
-            Value::Table(t) => t
-                .sequence_values::<String>()
-                .collect::<Result<_, _>>()
-                .map_err(|_| {
-                    mlua::Error::external("kage.acp.add_agent: `args` must be a string array")
-                })?,
-            _ => {
-                return Err(mlua::Error::external(
-                    "kage.acp.add_agent: `args` must be a string array",
-                ));
-            }
-        };
-        let mut env = BTreeMap::new();
-        if let Value::Table(t) = spec.get::<Value>("env")? {
-            for pair in t.pairs::<String, String>() {
-                let (k, v) = pair.map_err(|_| {
-                    mlua::Error::external("kage.acp.add_agent: `env` must be a string map")
-                })?;
-                env.insert(k, v);
-            }
-        }
+        let launch = crate::launch::parse_launch("kage.acp.add_agent", &spec)?;
         agents
             .lock()
             .map_err(|_| mlua::Error::external("plugin acp agents map poisoned"))?
-            .insert(name, AcpAgent { command, args, env });
+            .insert(
+                launch.name,
+                AcpAgent {
+                    command: launch.command,
+                    args: launch.args,
+                    env: launch.env,
+                },
+            );
         Ok(())
     })
 }

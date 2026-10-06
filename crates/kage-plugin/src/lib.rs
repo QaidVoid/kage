@@ -53,6 +53,7 @@ pub mod highlight;
 pub(crate) mod host;
 pub mod http;
 pub mod keymap;
+pub mod launch;
 pub mod lifecycle;
 pub mod loader;
 pub mod mcp;

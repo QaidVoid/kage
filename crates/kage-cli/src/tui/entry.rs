@@ -566,7 +566,7 @@ fn print_exit_summary(
         let mut buffer = lock(buffer);
         buffer.finish_streaming();
         buffer.interrupt_running_tools();
-        kage_tui::transcript::render(&buffer, width, scope)
+        kage_tui::transcript::render(&mut buffer, width, scope)
     };
     if !transcript.is_empty() {
         println!("{transcript}\n");

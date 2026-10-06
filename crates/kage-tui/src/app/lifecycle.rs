@@ -463,7 +463,6 @@ impl App {
             .approval_panel
             .as_ref()
             .map(|panel| (panel, self.permission_queue.len()));
-        let has_approval = approval.is_some();
         let input_completion = if show_completion {
             self.input_completion.as_ref()
         } else {
@@ -562,14 +561,12 @@ impl App {
         self.park_draw_snapshot(buffer, buffer_version);
         self.captured_rows = captured_rows;
         self.pinned_hits = (pinned_area.y..pinned_area.bottom())
-            .zip(agent_rows.iter().take(view::AGENT_MAX_ROWS))
+            .zip(view::pinned_shown_agents(&agent_rows))
             .map(|(row, agent)| (row, agent.session))
             .collect();
         // The summary row is the pinned area's last one, and a click on
         // it opens the agents overlay.
-        self.pinned_summary_hit = (!has_approval && agent_rows.is_empty() && agents_total > 0)
-            .then(|| pinned_area.bottom().saturating_sub(1))
-            .filter(|_| pinned_area.height > 0);
+        self.pinned_summary_hit = view::pinned_summary_hit(&agent_rows, agents_total, pinned_area);
         Ok(())
     }
 

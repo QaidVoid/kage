@@ -2,6 +2,39 @@
 
 use super::*;
 
+/// A match whose buffer index lands on a grouped (hidden) member
+/// must light the group head that paints it, not vanish.
+#[test]
+fn a_match_on_a_grouped_member_marks_the_group_head() {
+    let buffer = shared_buffer();
+    {
+        let mut buf = buffer.lock().unwrap();
+        for (id, file) in [("c1", "a"), ("c2", "b"), ("c3", "c")] {
+            buf.push_tool_call(id, "read", serde_json::json!({ "path": file }));
+            buf.push_tool_result_with_duration(id, "x", false, None);
+        }
+    }
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    app.search_pattern = Some("b".into());
+    // Injected: the live scan skips hidden members, but a stale or
+    // hand-built set can still carry one after a fold regrouping.
+    app.search_match_set = vec![2];
+
+    let backend = TestBackend::new(60, 12);
+    let mut terminal = Terminal::new(backend).unwrap();
+    app.render_into(&mut terminal).unwrap();
+    let rows = snapshot_rows(&terminal);
+    let ruled = rows
+        .iter()
+        .filter(|row| row.contains(['\u{258e}', '\u{258c}']))
+        .count();
+    assert!(
+        ruled >= 1,
+        "the group head must carry the hidden member's rule: {rows:?}"
+    );
+}
+
 /// Four assistant blocks; "needle" appears in blocks 1 and 3.
 fn search_fixture() -> (App, SharedBuffer) {
     let buffer = shared_buffer();

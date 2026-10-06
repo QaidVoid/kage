@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use ratatui::text::Line;
 
-use crate::buffer::{Block, Buffer, ToolTopology, gap_between};
+use crate::buffer::{Block, Buffer, gap_between};
 use crate::view::{DECORATION_MARKER, Emphasis, build_block_lines, registry};
 
 /// How much of the conversation [`render`] prints, per the
@@ -40,7 +40,11 @@ impl TranscriptScope {
 /// and blocks are spaced as on screen. `Last` with no user
 /// prompt, and `None`, render nothing.
 #[must_use]
-pub fn render(buffer: &Buffer, width: u16, scope: TranscriptScope) -> String {
+/// Renders the transcript text for `buffer` at `width`. Uses the
+/// buffer's cached tool topology so the exit summary shares the
+/// grouping the live view built, instead of rebuilding it.
+pub fn render(buffer: &mut Buffer, width: u16, scope: TranscriptScope) -> String {
+    let topology = buffer.tool_topology();
     let blocks = buffer.blocks();
     let start = match scope {
         TranscriptScope::Full => 0,
@@ -55,7 +59,6 @@ pub fn render(buffer: &Buffer, width: u16, scope: TranscriptScope) -> String {
         }
         TranscriptScope::None => return String::new(),
     };
-    let topology = ToolTopology::build(blocks);
     let registry = read(registry::global());
     let mut out: Vec<String> = Vec::new();
     let mut above: Option<&Arc<Block>> = None;
@@ -138,7 +141,7 @@ mod tests {
 
     #[test]
     fn full_prints_every_block_without_decoration() {
-        let text = render(&fixture(), 60, TranscriptScope::Full);
+        let text = render(&mut fixture(), 60, TranscriptScope::Full);
         assert_eq!(
             text,
             "\u{2717} config: bad key\n\
@@ -158,8 +161,23 @@ mod tests {
     }
 
     #[test]
+    fn a_folded_group_renders_one_explored_block() {
+        let mut buf = Buffer::new();
+        for (id, file) in [("c1", "a"), ("c2", "b"), ("c3", "c")] {
+            buf.push_tool_call(id, "read", serde_json::json!({ "path": file }));
+            buf.push_tool_result_with_duration(id, "x", false, Some(1000));
+        }
+        buf.append_assistant_delta("Done.");
+        buf.finish_streaming();
+        let text = render(&mut buf, 60, TranscriptScope::Full);
+        assert!(text.contains("Explored"), "{text:?}");
+        assert!(text.contains("Read a, b, c"), "{text:?}");
+        assert!(text.contains("Done."), "{text:?}");
+    }
+
+    #[test]
     fn last_starts_at_the_last_user_block() {
-        let text = render(&fixture(), 60, TranscriptScope::Last);
+        let text = render(&mut fixture(), 60, TranscriptScope::Last);
         assert_eq!(
             text,
             "> second question\n  with two lines\n\nSecond answer."
@@ -170,8 +188,8 @@ mod tests {
     fn last_without_a_prompt_and_none_print_nothing() {
         let mut buf = Buffer::new();
         buf.push_custom("kage:error", "config: bad key", false);
-        assert_eq!(render(&buf, 60, TranscriptScope::Last), "");
-        assert_eq!(render(&fixture(), 60, TranscriptScope::None), "");
+        assert_eq!(render(&mut buf, 60, TranscriptScope::Last), "");
+        assert_eq!(render(&mut fixture(), 60, TranscriptScope::None), "");
     }
 
     #[test]
@@ -183,7 +201,7 @@ mod tests {
         buf.push_tool_result_with_duration("c2", "", false, Some(1000));
         buf.append_assistant_delta("Done.");
         buf.finish_streaming();
-        let text = render(&buf, 40, TranscriptScope::Full);
+        let text = render(&mut buf, 40, TranscriptScope::Full);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 4, "{text:?}");
         assert!(lines[0].contains("Ran true"), "{text:?}");
@@ -196,7 +214,7 @@ mod tests {
         let mut buf = Buffer::new();
         buf.append_assistant_delta("one two three four five six seven eight");
         buf.finish_streaming();
-        let text = render(&buf, 20, TranscriptScope::Full);
+        let text = render(&mut buf, 20, TranscriptScope::Full);
         assert!(text.lines().count() > 1, "{text:?}");
         assert!(text.lines().all(|l| l.len() <= 20), "{text:?}");
     }

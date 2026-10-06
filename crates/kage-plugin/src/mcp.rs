@@ -99,47 +99,18 @@ fn list_servers_fn(lua: &Lua, servers: SharedMcpServers) -> mlua::Result<mlua::F
 
 fn add_server_fn(lua: &Lua, servers: SharedMcpServers) -> mlua::Result<mlua::Function> {
     lua.create_function(move |_lua, spec: Table| {
-        let name: String = spec.get("name")?;
-        let command: String = spec.get("command")?;
-        if name.is_empty() || command.is_empty() {
-            return Err(mlua::Error::external(
-                "kage.mcp.add_server: `name` and `command` are required",
-            ));
-        }
-        let args: Vec<String> = match spec.get::<Value>("args")? {
-            Value::Nil => Vec::new(),
-            Value::Table(t) => t
-                .sequence_values::<String>()
-                .collect::<Result<_, _>>()
-                .map_err(|_| {
-                    mlua::Error::external("kage.mcp.add_server: `args` must be a string array")
-                })?,
-            _ => {
-                return Err(mlua::Error::external(
-                    "kage.mcp.add_server: `args` must be a string array",
-                ));
-            }
-        };
-        let mut env = BTreeMap::new();
-        if let Value::Table(t) = spec.get::<Value>("env")? {
-            for pair in t.pairs::<String, String>() {
-                let (k, v) = pair.map_err(|_| {
-                    mlua::Error::external("kage.mcp.add_server: `env` must be a string map")
-                })?;
-                env.insert(k, v);
-            }
-        }
+        let launch = crate::launch::parse_launch("kage.mcp.add_server", &spec)?;
         let disabled = matches!(spec.get::<Value>("disabled")?, Value::Boolean(true));
         servers
             .lock()
             .map_err(|_| mlua::Error::external("plugin mcp servers map poisoned"))?
             .insert(
-                name,
+                launch.name,
                 McpServer {
                     startup_timeout_secs: None,
-                    command: Some(command),
-                    args,
-                    env,
+                    command: Some(launch.command),
+                    args: launch.args,
+                    env: launch.env,
                     url: None,
                     headers: BTreeMap::new(),
                     disabled,

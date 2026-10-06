@@ -123,8 +123,34 @@ pub(crate) fn pinned_area_rows(agents: &[AgentRow], total: usize) -> usize {
     if agents.is_empty() {
         usize::from(total > 0)
     } else {
-        agents.len()
+        usize::from(list_height(agents.len(), AGENT_MAX_ROWS))
     }
+}
+
+/// The agents the pinned area paints: capped at [`AGENT_MAX_ROWS`],
+/// the cap the row heights share.
+pub(crate) fn pinned_shown_agents(agents: &[AgentRow]) -> &[AgentRow] {
+    &agents[..agents.len().min(AGENT_MAX_ROWS)]
+}
+
+/// How many live agents the [`AGENT_MAX_ROWS`] cap hid behind the
+/// `+N more` row. Zero when all of them show.
+pub(crate) fn pinned_more(agents: &[AgentRow]) -> usize {
+    agents.len().saturating_sub(AGENT_MAX_ROWS)
+}
+
+/// Whether the single finished-agents summary row paints instead of
+/// agent rows: none is live but the session still has finished ones.
+pub(crate) fn pinned_summary_painted(agents: &[AgentRow], total: usize) -> bool {
+    agents.is_empty() && total > 0
+}
+
+/// The terminal row of the finished-agents summary row inside the
+/// pinned `area`, when one is painted there. A click on it opens the
+/// agents overlay.
+pub(crate) fn pinned_summary_hit(agents: &[AgentRow], total: usize, area: Rect) -> Option<u16> {
+    (pinned_summary_painted(agents, total) && area.height > 0)
+        .then(|| area.bottom().saturating_sub(1))
 }
 
 /// Rows of a list of `count` entries that shows at most `max`, then a
@@ -411,7 +437,7 @@ fn paint_agents(
     if area.height == 0 {
         return;
     }
-    let shown = &agents[..agents.len().min(AGENT_MAX_ROWS)];
+    let shown = pinned_shown_agents(agents);
     let name_column = shown
         .iter()
         .map(|row| agent_name_offset(row) + name_width(row))
@@ -423,13 +449,14 @@ fn paint_agents(
         .map(|row| agent_line(row, name_column, width))
         .collect();
     let muted = Style::default().fg(crate::theme::current().muted_fg);
-    if let Some(more) = agents.len().checked_sub(AGENT_MAX_ROWS).filter(|n| *n > 0) {
+    let more = pinned_more(agents);
+    if more > 0 {
         let more = match key {
             Some(key) => format!("  +{more} more \u{b7} {key} for agents"),
             None => format!("  +{more} more"),
         };
         lines.push(Line::from(Span::styled(more, muted)));
-    } else if agents.is_empty() && total > 0 {
+    } else if pinned_summary_painted(agents, total) {
         let noun = if total == 1 { "agent" } else { "agents" };
         let row = match key {
             Some(key) => format!("  {total} {noun} \u{b7} {key} for agents"),
@@ -856,5 +883,71 @@ mod tests {
         );
         assert_eq!(lines[0].spans[0].style, command);
         assert_eq!(lines[1].spans[0].style, Style::default());
+    }
+
+    fn agent_row() -> AgentRow {
+        AgentRow {
+            session: kage_core::SessionId::new(),
+            depth: 1,
+            agent: "general".to_owned(),
+            description: "a task".to_owned(),
+            item: String::new(),
+            state: AgentRowState::Running,
+            activity: String::new(),
+            elapsed_ms: None,
+            background: false,
+        }
+    }
+
+    #[test]
+    fn finished_only_sessions_reserve_one_summary_row() {
+        assert_eq!(pinned_area_rows(&[], 3), 1);
+        assert_eq!(pinned_area_rows(&[], 0), 0);
+        assert!(pinned_summary_painted(&[], 3));
+        assert!(!pinned_summary_painted(&[], 0));
+        assert!(!pinned_summary_painted(&[agent_row()], 3));
+    }
+
+    #[test]
+    fn the_summary_hit_is_the_pinned_area_row_itself() {
+        let area = ratatui::layout::Rect {
+            x: 0,
+            y: 10,
+            width: 40,
+            height: 1,
+        };
+        assert_eq!(pinned_summary_hit(&[], 3, area), Some(10));
+        assert_eq!(pinned_summary_hit(&[agent_row()], 3, area), None);
+        assert_eq!(pinned_summary_hit(&[], 0, area), None);
+        assert_eq!(
+            pinned_summary_hit(&[], 3, ratatui::layout::Rect::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn split_agent_rows_never_exceed_the_chrome_height() {
+        let counts = [0, 1, 3, AGENT_MAX_ROWS, AGENT_MAX_ROWS + 2];
+        for count in counts {
+            let demand = pinned_area_rows(
+                &std::iter::repeat_with(agent_row)
+                    .take(count)
+                    .collect::<Vec<_>>(),
+                count,
+            );
+            let input = ratatui::layout::Rect {
+                x: 0,
+                y: 0,
+                width: 60,
+                height: crate::layout::input_height_for(1).saturating_add(agents_height(demand)),
+            };
+            let (agents, _, _) = split_input(input, demand, 0);
+            assert!(
+                agents.height <= agents_height(demand),
+                "count {count}: split {} exceeds chrome {}",
+                agents.height,
+                agents_height(demand)
+            );
+        }
     }
 }

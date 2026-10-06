@@ -502,6 +502,10 @@ pub struct SessionForkRequest {
 pub struct SessionForkResponse {
     /// The copy, a recorded session `session/load` opens.
     pub session_id: String,
+    /// The source ended in a torn trailing line that the copy leaves
+    /// behind, so the copy is shorter than the source's bytes.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// `_kage/session/export` and `_kage/session/compact` request params.

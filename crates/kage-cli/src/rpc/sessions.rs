@@ -3,7 +3,7 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use kage_acp::acp::{
     ContentBlock, ListSessionsRequest, ListSessionsResponse, McpServer, PromptRef,
@@ -197,9 +197,11 @@ impl super::CliAcpAgent {
         let at = fork_point(&path, req.before.as_ref())?;
         let id = SessionId::new();
         let dst = self.host.sessions.join(format!("{id}.jsonl"));
-        kage_session::fork(&path, &dst, id, at).map_err(|e| RpcError::internal(e.to_string()))?;
+        let truncated = kage_session::fork(&path, &dst, id, at)
+            .map_err(|e| RpcError::internal(e.to_string()))?;
         Ok(SessionForkResponse {
             session_id: id.to_string(),
+            truncated,
         })
     }
 
@@ -448,7 +450,7 @@ pub(super) fn orphaned_agents(
         .filter_map(|entry| {
             let path = entry.path();
             let session = crate::engine::session_id_of(&path)?;
-            let marker = leading_marker(&path)?;
+            let marker = leading_marker_cached(&path)?;
             let text = |key: &str| {
                 marker
                     .get(key)
@@ -505,6 +507,58 @@ pub(super) fn orphaned_agents(
         )
     });
     nodes.iter().map(restored_update).collect()
+}
+
+/// The memoized [`leading_marker`] verdicts, keyed by file and the
+/// (mtime, size) pair, so a session listing re-reads a file's head
+/// only when the file changed. The cap keeps restored sessions of a
+/// long-lived serve from growing it without bound.
+fn marker_cache() -> &'static Mutex<
+    HashMap<
+        PathBuf,
+        (
+            Option<std::time::SystemTime>,
+            u64,
+            Option<serde_json::Value>,
+        ),
+    >,
+> {
+    static PEEKED: std::sync::OnceLock<
+        Mutex<
+            HashMap<
+                PathBuf,
+                (
+                    Option<std::time::SystemTime>,
+                    u64,
+                    Option<serde_json::Value>,
+                ),
+            >,
+        >,
+    > = std::sync::OnceLock::new();
+    PEEKED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The `kage:agent` marker near the top of the session file at
+/// `path`, memoized by (mtime, size): the leading entries of a
+/// session file are fixed once written, so an unchanged file yields
+/// the same marker without the read.
+fn leading_marker_cached(path: &Path) -> Option<serde_json::Value> {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return None;
+    };
+    let stamp = (meta.modified().ok(), meta.len());
+    let mut cache = lock(marker_cache());
+    if let Some((seen_mtime, seen_size, marker)) = cache.get(path)
+        && (*seen_mtime, *seen_size) == stamp
+    {
+        return marker.clone();
+    }
+    let marker = leading_marker(path);
+    if cache.len() >= 1024 {
+        cache.clear();
+    }
+    cache.insert(path.to_path_buf(), (stamp.0, stamp.1, marker.clone()));
+    marker
 }
 
 /// The `kage:agent` marker near the top of the session file at `path`,

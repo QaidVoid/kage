@@ -51,6 +51,19 @@ pub struct Alias {
     pub variants: &'static [&'static str],
 }
 
+/// A `---@alias` union of type expressions. Unlike [`Alias`], whose
+/// variants are string literals, each member here is an emmylua type
+/// expression (e.g. `kage.ToolCallPayload`, `string[]`, `nil`).
+#[derive(Clone, Copy, Debug)]
+pub struct TypeAlias {
+    /// Fully qualified alias name (e.g. `kage.EventData`).
+    pub name: &'static str,
+    /// Doc lines emitted above the alias.
+    pub doc: &'static [&'static str],
+    /// Type expressions, one per union member, in order.
+    pub variants: &'static [&'static str],
+}
+
 /// A single function binding.
 #[derive(Clone, Copy, Debug)]
 pub struct Func {
@@ -94,6 +107,8 @@ pub struct GatedFunc {
 pub struct Surface {
     /// `---@alias` sum types.
     pub aliases: &'static [Alias],
+    /// `---@alias` unions of type expressions.
+    pub type_aliases: &'static [TypeAlias],
     /// `---@class` record types.
     pub classes: &'static [Class],
     /// Sub-tables declared before their first function.
@@ -116,6 +131,7 @@ pub struct Surface {
 pub fn surface() -> Surface {
     Surface {
         aliases: aliases::ALIASES,
+        type_aliases: aliases::TYPE_ALIASES,
         classes: classes::CLASSES,
         tables: tables::TABLES,
         funcs: funcs::FUNCS,

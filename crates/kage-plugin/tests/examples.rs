@@ -100,7 +100,6 @@ fn tps_example_emits_summary_on_agent_end() {
 }
 
 #[test]
-#[test]
 fn transform_demo_round_trips_an_empty_history() {
     // Settler for plans/verify/27 F8: an empty history enters Lua as an
     // empty table and the codec has no array marker to bring it back as
@@ -118,6 +117,7 @@ fn transform_demo_round_trips_an_empty_history() {
     assert_eq!(out, json!({}));
 }
 
+#[test]
 fn transform_demo_redacts_secrets_in_user_text() {
     let (rec, sink) = forwarding_sink();
     let rt = PluginRuntime::builder().sink(sink).build().unwrap();
@@ -909,4 +909,52 @@ fn block_renderer_demo_card_without_title_asks_via_ui_select() {
         &ops[0],
         PendingSessionOp::AppendCustom { kind, .. } if kind == "demo:card"
     ));
+}
+
+#[test]
+fn the_block_renderer_demo_roundtrips_through_the_host_payload() {
+    let (_rec, sink) = forwarding_sink();
+    let rt = load_block_demo(sink);
+    let bargs = card_command_args(&rt, "roundtrip");
+
+    match rt.bridge_call(&bargs.handler, &bargs.args).unwrap() {
+        BridgeStep::Done(v) => {
+            assert_eq!(
+                CommandOutput::from_json(&v).text,
+                "rendered card: roundtrip"
+            );
+        }
+        BridgeStep::Suspended(_) => panic!("card with a title must not suspend"),
+    }
+    let ops = rt.take_pending_session_ops();
+    assert_eq!(ops.len(), 1);
+    let (kind, data) = match &ops[0] {
+        PendingSessionOp::AppendCustom { kind, data } => (kind, data),
+        PendingSessionOp::SetLabel { .. } => panic!("expected AppendCustom"),
+    };
+    assert_eq!(kind, "demo:card");
+
+    // The host builds the custom-block payload from the appended
+    // entry: kind, the stored title as text, folded, and a per-frame
+    // width, exactly what block_payload produces for Block::Custom.
+    let payload = json!({
+        "kind": kind,
+        "text": data["title"].as_str().unwrap(),
+        "folded": false,
+        "width": 40,
+    });
+    let renderers = rt.registered_block_renderers();
+    assert_eq!(renderers.len(), 1, "demo registers exactly one renderer");
+    let lines = renderers[0]
+        .render(&payload)
+        .expect("an idle runtime renders on first use");
+    assert_eq!(lines.len(), 3, "top bar, title row, bottom bar: {lines:?}");
+    let top = &lines[0].spans[0];
+    assert_eq!(top.text.len(), 40);
+    assert!(top.text.starts_with('.') && top.text.ends_with('.'));
+    assert_eq!(top.fg.as_deref(), Some("cyan"));
+    assert_eq!(lines[1].spans[1].text, "roundtrip");
+    assert_eq!(lines[1].spans[1].fg.as_deref(), Some("green"));
+    let bottom = &lines[2].spans[0];
+    assert!(bottom.text.starts_with('\'') && bottom.text.ends_with('\''));
 }

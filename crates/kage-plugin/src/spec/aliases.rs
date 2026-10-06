@@ -1,6 +1,48 @@
 //! Generated-stub alias (`---@alias`) declarations.
 
-use super::Alias;
+use super::{Alias, TypeAlias};
+
+/// Unions of type expressions, rendered multi-line like a long string
+/// alias but with unquoted members.
+pub(super) const TYPE_ALIASES: &[TypeAlias] = &[TypeAlias {
+    name: "kage.EventData",
+    doc: &[
+        "Payload each `kage.Event` delivers: the argument a `kage.on`",
+        "handler receives, and `ev.data` of an autocmd callback. Which",
+        "member fires follows the event name; each `*Payload` class",
+        "below documents the event named after it. `user` delivers",
+        "whatever `data` `kage.api.autocmd_exec` was passed,",
+        "`session_before_switch` and `session_before_fork` the target",
+        "string, `transform_context` the message history, and",
+        "`resources_discover` nothing at all.",
+    ],
+    variants: &[
+        "kage.BeforeAgentStartPayload",
+        "kage.AgentStartPayload",
+        "kage.AgentEndPayload",
+        "kage.TurnStartPayload",
+        "kage.TurnEndPayload",
+        "kage.MessageStartPayload",
+        "kage.MessageUpdatePayload",
+        "kage.MessageEndPayload",
+        "kage.ToolCallPayload",
+        "kage.ToolUpdatePayload",
+        "kage.ToolResultPayload",
+        "kage.ModelSelectPayload",
+        "kage.ThinkingLevelSelectPayload",
+        "kage.UserShellPayload",
+        "kage.PermissionModeSelectPayload",
+        "kage.OptionSetPayload",
+        "kage.ColorSchemePayload",
+        "table",
+        "kage.HistoryMessage[]",
+        "kage.ProviderRequestPayload",
+        "kage.CompactPreparePayload",
+        "kage.ShouldStopAfterTurnPayload",
+        "string",
+        "nil",
+    ],
+}];
 
 pub(super) const ALIASES: &[Alias] = &[
     Alias {

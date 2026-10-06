@@ -70,6 +70,15 @@ pub fn lua_stub() -> String {
         }
     }
 
+    for a in surface.type_aliases {
+        s.push('\n');
+        doc_lines(&mut s, a.doc);
+        let _ = writeln!(s, "---@alias {}", a.name);
+        for v in a.variants {
+            let _ = writeln!(s, "---| {v}");
+        }
+    }
+
     for c in surface.classes {
         s.push('\n');
         doc_lines(&mut s, c.doc);

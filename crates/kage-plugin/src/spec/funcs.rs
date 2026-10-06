@@ -450,8 +450,8 @@ pub(super) const FUNCS: &[Func] = &[
             },
             Field {
                 name: "render",
-                ty: "fun(block: table): any|nil",
-                doc: "Gets { kind, text, width }; nil unregisters.",
+                ty: "fun(block: kage.Block): any|nil",
+                doc: "Gets the payload described by `kage.Block`; nil unregisters.",
             },
         ],
         ret: None,
@@ -633,8 +633,8 @@ pub(super) const FUNCS: &[Func] = &[
             },
             Field {
                 name: "handler",
-                ty: "fun(payload: any): any",
-                doc: "",
+                ty: "fun(payload: kage.EventData): any",
+                doc: "The event payload; its shape follows `event`.",
             },
         ],
         ret: Some("fun()"),
@@ -916,7 +916,7 @@ pub(super) const FUNCS: &[Func] = &[
             },
             Field {
                 name: "opts?",
-                ty: "{ pattern: string?, data: any }",
+                ty: "{ pattern: string?, data: kage.EventData }",
                 doc: "",
             },
         ],

@@ -1,8 +1,8 @@
 -- block_renderer_demo.lua - own how a block draws, in pure Lua.
 --
 -- A plugin fully controls how a custom block kind renders. `kage.register_block_
--- renderer(kind, fn)` takes a `{ kind, text, width }` table and
--- returns the same shape `kage.ui.set_header` uses - a string, a
+-- renderer(kind, fn)` hands the renderer a `{ kind, text, folded, width }`
+-- table and it returns the same shape `kage.ui.set_header` uses - a string, a
 -- span table `{ text=, fg=, bold= }`, or an array of either (one per
 -- line). The host keeps the conversation's focus rule and spacing;
 -- the plugin owns everything inside.

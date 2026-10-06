@@ -394,8 +394,8 @@ pub(super) const CLASSES: &[Class] = &[
             },
             Field {
                 name: "stream",
-                ty: "fun(req: table): table[]|fun(): table?",
-                doc: "Yields provider event tables; required.",
+                ty: "fun(req: table, emit: fun(event: table)): table[]|fun(): table?",
+                doc: "Yields provider event tables through `emit` or the return value; required.",
             },
         ],
     },
@@ -464,6 +464,11 @@ pub(super) const CLASSES: &[Class] = &[
                 name: "timed_out",
                 ty: "boolean",
                 doc: "Whether `timeout_secs` elapsed and the process was killed.",
+            },
+            Field {
+                name: "truncated",
+                ty: "boolean",
+                doc: "Whether stdout or stderr was cut at the 1 MiB cap and the rest dropped.",
             },
             Field {
                 name: "stdout",
@@ -574,8 +579,8 @@ pub(super) const CLASSES: &[Class] = &[
             },
             Field {
                 name: "data",
-                ty: "any",
-                doc: "Event payload.",
+                ty: "kage.EventData",
+                doc: "Event payload; its shape follows `event`.",
             },
         ],
     },
@@ -691,6 +696,76 @@ pub(super) const CLASSES: &[Class] = &[
                 name: "underline?",
                 ty: "boolean",
                 doc: "",
+            },
+        ],
+    },
+    Class {
+        name: "kage.Block",
+        doc: &[
+            "Block payload a `kage.register_block_renderer` render receives.",
+            "Every payload carries `kind` and `width`; the rest follow the",
+            "kind: `user` has `text`; `assistant` has `text` and `live`",
+            "(the block is still streaming); `thinking` has `text`, `folded`",
+            "and `live`; `tool_call` has `name`, `input_summary`,",
+            "`input_pretty` and `folded`; `tool_result` has `name`,",
+            "`output`, `is_error`, `folded` and `duration_ms`; a custom",
+            "kind has `text` and `folded`.",
+        ],
+        fields: &[
+            Field {
+                name: "kind",
+                ty: "string",
+                doc: "A namespaced custom kind or a reserved built-in name.",
+            },
+            Field {
+                name: "width",
+                ty: "integer",
+                doc: "Terminal width in columns.",
+            },
+            Field {
+                name: "text?",
+                ty: "string",
+                doc: "Block text: user, assistant, thinking and custom blocks.",
+            },
+            Field {
+                name: "live?",
+                ty: "boolean",
+                doc: "Whether the assistant or thinking block is still streaming.",
+            },
+            Field {
+                name: "folded?",
+                ty: "boolean",
+                doc: "Whether the block is collapsed: thinking, tool_call, tool_result and custom blocks.",
+            },
+            Field {
+                name: "name?",
+                ty: "string",
+                doc: "Tool name, for tool_call and tool_result.",
+            },
+            Field {
+                name: "input_summary?",
+                ty: "string",
+                doc: "One-line tool input summary, for tool_call.",
+            },
+            Field {
+                name: "input_pretty?",
+                ty: "string",
+                doc: "Pretty-printed tool input, for tool_call.",
+            },
+            Field {
+                name: "output?",
+                ty: "string",
+                doc: "Captured tool output, for tool_result.",
+            },
+            Field {
+                name: "is_error?",
+                ty: "boolean",
+                doc: "Whether the tool call failed, for tool_result.",
+            },
+            Field {
+                name: "duration_ms?",
+                ty: "integer",
+                doc: "Tool execution time in milliseconds, for tool_result.",
             },
         ],
     },
@@ -815,6 +890,452 @@ pub(super) const CLASSES: &[Class] = &[
                 name: "mode",
                 ty: "string",
                 doc: "Editor mode: `normal`, `insert` or `visual`.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.EventUsage",
+        doc: &["Token usage an event payload carries."],
+        fields: &[
+            Field {
+                name: "input",
+                ty: "integer",
+                doc: "Input tokens charged.",
+            },
+            Field {
+                name: "output",
+                ty: "integer",
+                doc: "Output tokens charged.",
+            },
+            Field {
+                name: "cache_read",
+                ty: "integer",
+                doc: "Cache-read tokens charged.",
+            },
+            Field {
+                name: "cache_write",
+                ty: "integer",
+                doc: "Cache-write tokens charged.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.BeforeAgentStartPayload",
+        doc: &["Payload of the `before_agent_start` event."],
+        fields: &[
+            Field {
+                name: "system_prompt",
+                ty: "string",
+                doc: "System prompt the run will send.",
+            },
+            Field {
+                name: "first_user_message",
+                ty: "string",
+                doc: "Text of the user message that started the run.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.AgentStartPayload",
+        doc: &["Payload of the `agent_start` event: an empty table."],
+        fields: &[],
+    },
+    Class {
+        name: "kage.AgentEndPayload",
+        doc: &["Payload of the `agent_end` event."],
+        fields: &[Field {
+            name: "ok",
+            ty: "boolean",
+            doc: "Whether the run returned without a provider error.",
+        }],
+    },
+    Class {
+        name: "kage.TurnStartPayload",
+        doc: &["Payload of the `turn_start` event."],
+        fields: &[Field {
+            name: "index",
+            ty: "integer",
+            doc: "Zero-based index of the turn inside the run.",
+        }],
+    },
+    Class {
+        name: "kage.TurnEndPayload",
+        doc: &["Payload of the `turn_end` event."],
+        fields: &[
+            Field {
+                name: "index",
+                ty: "integer",
+                doc: "Zero-based index of the turn inside the run.",
+            },
+            Field {
+                name: "had_tool_calls",
+                ty: "boolean",
+                doc: "Whether the model requested any tool calls this turn.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.MessageStartPayload",
+        doc: &["Payload of the `message_start` event."],
+        fields: &[Field {
+            name: "id",
+            ty: "string",
+            doc: "Id of the assistant message that began.",
+        }],
+    },
+    Class {
+        name: "kage.MessageUpdatePayload",
+        doc: &["Payload of the `message_update` event, fired per text delta."],
+        fields: &[
+            Field {
+                name: "id",
+                ty: "string",
+                doc: "Id of the assistant message being streamed.",
+            },
+            Field {
+                name: "delta",
+                ty: "string",
+                doc: "Text emitted since the previous update.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.MessageEndPayload",
+        doc: &[
+            "Payload of the `message_end` and `after_provider_response`",
+            "events.",
+        ],
+        fields: &[
+            Field {
+                name: "id",
+                ty: "string",
+                doc: "Id of the assistant message that finished.",
+            },
+            Field {
+                name: "usage",
+                ty: "kage.EventUsage",
+                doc: "Tokens the turn charged.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.ToolCallPayload",
+        doc: &["Payload of the `tool_call` event."],
+        fields: &[
+            Field {
+                name: "id",
+                ty: "string",
+                doc: "Provider correlation id of the call.",
+            },
+            Field {
+                name: "name",
+                ty: "string",
+                doc: "Tool being invoked; also the `match` key.",
+            },
+            Field {
+                name: "input",
+                ty: "table",
+                doc: "Arguments the model passed, as sent so far.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.ToolUpdatePayload",
+        doc: &["Payload of the `tool_update` event, fired mid-execution."],
+        fields: &[
+            Field {
+                name: "id",
+                ty: "string",
+                doc: "Provider correlation id of the running call.",
+            },
+            Field {
+                name: "content",
+                ty: "string",
+                doc: "Human-readable progress line.",
+            },
+            Field {
+                name: "structured?",
+                ty: "table",
+                doc: "Machine-readable progress detail, when the tool sent any.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.ToolResultPayload",
+        doc: &["Payload of the `tool_result` event."],
+        fields: &[
+            Field {
+                name: "id",
+                ty: "string",
+                doc: "Provider correlation id of the finished call.",
+            },
+            Field {
+                name: "name?",
+                ty: "string",
+                doc: "Tool that ran; also the `match` key.",
+            },
+            Field {
+                name: "is_error",
+                ty: "boolean",
+                doc: "Whether the call failed.",
+            },
+            Field {
+                name: "text",
+                ty: "string",
+                doc: "Output text returned to the model.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.ModelSelectPayload",
+        doc: &["Payload of the `model_select` event. Fires in the TUI only."],
+        fields: &[
+            Field {
+                name: "prev",
+                ty: "string",
+                doc: "Provider-qualified model id before the switch.",
+            },
+            Field {
+                name: "next",
+                ty: "string",
+                doc: "Model id after the switch; also the `match` key.",
+            },
+            Field {
+                name: "source",
+                ty: "string",
+                doc: "How the switch happened: `set` today.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.ThinkingLevelSelectPayload",
+        doc: &["Payload of the `thinking_level_select` event."],
+        fields: &[
+            Field {
+                name: "prev",
+                ty: "string",
+                doc: "Level before the switch, `default` for the automatic one.",
+            },
+            Field {
+                name: "next",
+                ty: "string",
+                doc: "Level after the switch; also the `match` key.",
+            },
+            Field {
+                name: "source",
+                ty: "string",
+                doc: "`cycle` or `settings`.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.UserShellPayload",
+        doc: &["Payload of the `user_shell` event, fired when a `!cmd` ends."],
+        fields: &[
+            Field {
+                name: "cmd",
+                ty: "string",
+                doc: "Command line that ran.",
+            },
+            Field {
+                name: "exit_code?",
+                ty: "integer",
+                doc: "Exit code, nil when a signal or a cancel ended the command.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.PermissionModeSelectPayload",
+        doc: &["Payload of the `permission_mode_select` event."],
+        fields: &[
+            Field {
+                name: "prev",
+                ty: "string",
+                doc: "Mode before the switch: `default`, `ask` or `deny`.",
+            },
+            Field {
+                name: "next",
+                ty: "string",
+                doc: "Mode after the switch.",
+            },
+            Field {
+                name: "source",
+                ty: "string",
+                doc: "`command` today.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.OptionSetPayload",
+        doc: &["Payload of the `option_set` event."],
+        fields: &[
+            Field {
+                name: "name",
+                ty: "string",
+                doc: "Option that changed; also the `match` key.",
+            },
+            Field {
+                name: "old",
+                ty: "string|boolean|integer|number",
+                doc: "Value before the set.",
+            },
+            Field {
+                name: "new",
+                ty: "string|boolean|integer|number",
+                doc: "Value after the set.",
+            },
+            Field {
+                name: "source",
+                ty: "kage.OptionSource",
+                doc: "Where the new value came from.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.ColorSchemePayload",
+        doc: &["Payload of the `color_scheme` event, fired on a theme switch."],
+        fields: &[Field {
+            name: "name",
+            ty: "string",
+            doc: "New theme name; also the `match` key.",
+        }],
+    },
+    Class {
+        name: "kage.HistoryMessage",
+        doc: &["One message of the history `transform_context` receives."],
+        fields: &[
+            Field {
+                name: "role",
+                ty: "string",
+                doc: "`user`, `assistant`, `tool_result` or `system`.",
+            },
+            Field {
+                name: "content",
+                ty: "table[]",
+                doc: "Content blocks, each tagged with its `kind`.",
+            },
+            Field {
+                name: "id",
+                ty: "string",
+                doc: "Stable message id.",
+            },
+            Field {
+                name: "parent?",
+                ty: "string",
+                doc: "Parent message id, when the message is a branch.",
+            },
+            Field {
+                name: "ts",
+                ty: "string",
+                doc: "RFC 3339 creation timestamp.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.ProviderRequestPayload",
+        doc: &["Outgoing request `before_provider_request` receives."],
+        fields: &[
+            Field {
+                name: "model",
+                ty: "string",
+                doc: "Provider-qualified model id.",
+            },
+            Field {
+                name: "messages",
+                ty: "kage.HistoryMessage[]",
+                doc: "Conversation history, ending with the latest user turn.",
+            },
+            Field {
+                name: "system?",
+                ty: "string",
+                doc: "System prompt, when one is set.",
+            },
+            Field {
+                name: "tools",
+                ty: "table[]",
+                doc: "Tool specs available to the model this turn.",
+            },
+            Field {
+                name: "max_output_tokens?",
+                ty: "integer",
+                doc: "Output-token cap, when one is set.",
+            },
+            Field {
+                name: "temperature?",
+                ty: "number",
+                doc: "Sampling temperature, when one is set.",
+            },
+            Field {
+                name: "thinking?",
+                ty: "{ budget_tokens: integer }",
+                doc: "Explicit thinking budget, when one is set.",
+            },
+            Field {
+                name: "level?",
+                ty: "string",
+                doc: "Thinking effort for this turn, when one is set.",
+            },
+            Field {
+                name: "reasoning?",
+                ty: "table",
+                doc: "Thinking settings the model accepts, tagged with a `kind`.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.CompactPreparePayload",
+        doc: &["Payload of the `compact_prepare` transform."],
+        fields: &[
+            Field {
+                name: "transcript",
+                ty: "string",
+                doc: "Plain-text transcript of the turns being summarized.",
+            },
+            Field {
+                name: "instruction",
+                ty: "string",
+                doc: "System instruction for the summarization call.",
+            },
+            Field {
+                name: "prompt",
+                ty: "string",
+                doc: "User-role prompt the summarizer receives.",
+            },
+            Field {
+                name: "model",
+                ty: "string",
+                doc: "Model id the summarization call uses.",
+            },
+            Field {
+                name: "summarized",
+                ty: "integer",
+                doc: "Messages being summarized away.",
+            },
+            Field {
+                name: "kept",
+                ty: "integer",
+                doc: "Recent messages kept verbatim after compaction.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.ShouldStopAfterTurnPayload",
+        doc: &["Turn summary the `should_stop_after_turn` predicate receives."],
+        fields: &[
+            Field {
+                name: "index",
+                ty: "integer",
+                doc: "Zero-based index of the finished turn inside the run.",
+            },
+            Field {
+                name: "had_tool_calls",
+                ty: "boolean",
+                doc: "Whether the assistant requested any tool calls.",
+            },
+            Field {
+                name: "usage",
+                ty: "kage.EventUsage",
+                doc: "Tokens the turn charged.",
             },
         ],
     },

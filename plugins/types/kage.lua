@@ -119,6 +119,40 @@
 ---| "session_before_fork"
 ---| "resources_discover"
 
+--- Payload each `kage.Event` delivers: the argument a `kage.on`
+--- handler receives, and `ev.data` of an autocmd callback. Which
+--- member fires follows the event name; each `*Payload` class
+--- below documents the event named after it. `user` delivers
+--- whatever `data` `kage.api.autocmd_exec` was passed,
+--- `session_before_switch` and `session_before_fork` the target
+--- string, `transform_context` the message history, and
+--- `resources_discover` nothing at all.
+---@alias kage.EventData
+---| kage.BeforeAgentStartPayload
+---| kage.AgentStartPayload
+---| kage.AgentEndPayload
+---| kage.TurnStartPayload
+---| kage.TurnEndPayload
+---| kage.MessageStartPayload
+---| kage.MessageUpdatePayload
+---| kage.MessageEndPayload
+---| kage.ToolCallPayload
+---| kage.ToolUpdatePayload
+---| kage.ToolResultPayload
+---| kage.ModelSelectPayload
+---| kage.ThinkingLevelSelectPayload
+---| kage.UserShellPayload
+---| kage.PermissionModeSelectPayload
+---| kage.OptionSetPayload
+---| kage.ColorSchemePayload
+---| table
+---| kage.HistoryMessage[]
+---| kage.ProviderRequestPayload
+---| kage.CompactPreparePayload
+---| kage.ShouldStopAfterTurnPayload
+---| string
+---| nil
+
 --- One result a tool may return instead of a bare string.
 ---@class kage.ToolResult
 ---@field text string Output text shown to the agent.
@@ -223,7 +257,7 @@
 ---@field supports_tool_use? boolean Defaults to true.
 ---@field preserves_thinking? boolean Skip flatten-thinking when replaying history. Defaults to false.
 ---@field models? kage.ProviderModel[] Models the provider advertises in the picker.
----@field stream fun(req: table): table[]|fun(): table? Yields provider event tables; required.
+---@field stream fun(req: table, emit: fun(event: table)): table[]|fun(): table? Yields provider event tables through `emit` or the return value; required.
 
 --- One model entry surfaced in the picker.
 ---@class kage.ProviderModel
@@ -243,6 +277,7 @@
 ---@class kage.ExecResult
 ---@field code integer Exit code; -1 if killed by a signal.
 ---@field timed_out boolean Whether `timeout_secs` elapsed and the process was killed.
+---@field truncated boolean Whether stdout or stderr was cut at the 1 MiB cap and the rest dropped.
 ---@field stdout string Captured standard output.
 ---@field stderr string Captured standard error.
 
@@ -273,7 +308,7 @@
 ---@field event kage.Event Event name.
 ---@field match? string Value the patterns matched against.
 ---@field group? integer Group id.
----@field data any Event payload.
+---@field data kage.EventData Event payload; its shape follows `event`.
 
 --- Options for `kage.keymap.set` and `kage.api.keymap_set`.
 ---@class kage.KeymapOpts
@@ -304,6 +339,27 @@
 ---@field dim? boolean
 ---@field italic? boolean
 ---@field underline? boolean
+
+--- Block payload a `kage.register_block_renderer` render receives.
+--- Every payload carries `kind` and `width`; the rest follow the
+--- kind: `user` has `text`; `assistant` has `text` and `live`
+--- (the block is still streaming); `thinking` has `text`, `folded`
+--- and `live`; `tool_call` has `name`, `input_summary`,
+--- `input_pretty` and `folded`; `tool_result` has `name`,
+--- `output`, `is_error`, `folded` and `duration_ms`; a custom
+--- kind has `text` and `folded`.
+---@class kage.Block
+---@field kind string A namespaced custom kind or a reserved built-in name.
+---@field width integer Terminal width in columns.
+---@field text? string Block text: user, assistant, thinking and custom blocks.
+---@field live? boolean Whether the assistant or thinking block is still streaming.
+---@field folded? boolean Whether the block is collapsed: thinking, tool_call, tool_result and custom blocks.
+---@field name? string Tool name, for tool_call and tool_result.
+---@field input_summary? string One-line tool input summary, for tool_call.
+---@field input_pretty? string Pretty-printed tool input, for tool_call.
+---@field output? string Captured tool output, for tool_result.
+---@field is_error? boolean Whether the tool call failed, for tool_result.
+---@field duration_ms? integer Tool execution time in milliseconds, for tool_result.
 
 --- A Rust action from `kage.action`, used as a mapping rhs.
 ---@class kage.Action
@@ -341,6 +397,137 @@
 ---@field session { id: string, title?: string } Active session.
 ---@field cwd string Working directory.
 ---@field mode string Editor mode: `normal`, `insert` or `visual`.
+
+--- Token usage an event payload carries.
+---@class kage.EventUsage
+---@field input integer Input tokens charged.
+---@field output integer Output tokens charged.
+---@field cache_read integer Cache-read tokens charged.
+---@field cache_write integer Cache-write tokens charged.
+
+--- Payload of the `before_agent_start` event.
+---@class kage.BeforeAgentStartPayload
+---@field system_prompt string System prompt the run will send.
+---@field first_user_message string Text of the user message that started the run.
+
+--- Payload of the `agent_start` event: an empty table.
+---@class kage.AgentStartPayload
+
+--- Payload of the `agent_end` event.
+---@class kage.AgentEndPayload
+---@field ok boolean Whether the run returned without a provider error.
+
+--- Payload of the `turn_start` event.
+---@class kage.TurnStartPayload
+---@field index integer Zero-based index of the turn inside the run.
+
+--- Payload of the `turn_end` event.
+---@class kage.TurnEndPayload
+---@field index integer Zero-based index of the turn inside the run.
+---@field had_tool_calls boolean Whether the model requested any tool calls this turn.
+
+--- Payload of the `message_start` event.
+---@class kage.MessageStartPayload
+---@field id string Id of the assistant message that began.
+
+--- Payload of the `message_update` event, fired per text delta.
+---@class kage.MessageUpdatePayload
+---@field id string Id of the assistant message being streamed.
+---@field delta string Text emitted since the previous update.
+
+--- Payload of the `message_end` and `after_provider_response`
+--- events.
+---@class kage.MessageEndPayload
+---@field id string Id of the assistant message that finished.
+---@field usage kage.EventUsage Tokens the turn charged.
+
+--- Payload of the `tool_call` event.
+---@class kage.ToolCallPayload
+---@field id string Provider correlation id of the call.
+---@field name string Tool being invoked; also the `match` key.
+---@field input table Arguments the model passed, as sent so far.
+
+--- Payload of the `tool_update` event, fired mid-execution.
+---@class kage.ToolUpdatePayload
+---@field id string Provider correlation id of the running call.
+---@field content string Human-readable progress line.
+---@field structured? table Machine-readable progress detail, when the tool sent any.
+
+--- Payload of the `tool_result` event.
+---@class kage.ToolResultPayload
+---@field id string Provider correlation id of the finished call.
+---@field name? string Tool that ran; also the `match` key.
+---@field is_error boolean Whether the call failed.
+---@field text string Output text returned to the model.
+
+--- Payload of the `model_select` event. Fires in the TUI only.
+---@class kage.ModelSelectPayload
+---@field prev string Provider-qualified model id before the switch.
+---@field next string Model id after the switch; also the `match` key.
+---@field source string How the switch happened: `set` today.
+
+--- Payload of the `thinking_level_select` event.
+---@class kage.ThinkingLevelSelectPayload
+---@field prev string Level before the switch, `default` for the automatic one.
+---@field next string Level after the switch; also the `match` key.
+---@field source string `cycle` or `settings`.
+
+--- Payload of the `user_shell` event, fired when a `!cmd` ends.
+---@class kage.UserShellPayload
+---@field cmd string Command line that ran.
+---@field exit_code? integer Exit code, nil when a signal or a cancel ended the command.
+
+--- Payload of the `permission_mode_select` event.
+---@class kage.PermissionModeSelectPayload
+---@field prev string Mode before the switch: `default`, `ask` or `deny`.
+---@field next string Mode after the switch.
+---@field source string `command` today.
+
+--- Payload of the `option_set` event.
+---@class kage.OptionSetPayload
+---@field name string Option that changed; also the `match` key.
+---@field old string|boolean|integer|number Value before the set.
+---@field new string|boolean|integer|number Value after the set.
+---@field source kage.OptionSource Where the new value came from.
+
+--- Payload of the `color_scheme` event, fired on a theme switch.
+---@class kage.ColorSchemePayload
+---@field name string New theme name; also the `match` key.
+
+--- One message of the history `transform_context` receives.
+---@class kage.HistoryMessage
+---@field role string `user`, `assistant`, `tool_result` or `system`.
+---@field content table[] Content blocks, each tagged with its `kind`.
+---@field id string Stable message id.
+---@field parent? string Parent message id, when the message is a branch.
+---@field ts string RFC 3339 creation timestamp.
+
+--- Outgoing request `before_provider_request` receives.
+---@class kage.ProviderRequestPayload
+---@field model string Provider-qualified model id.
+---@field messages kage.HistoryMessage[] Conversation history, ending with the latest user turn.
+---@field system? string System prompt, when one is set.
+---@field tools table[] Tool specs available to the model this turn.
+---@field max_output_tokens? integer Output-token cap, when one is set.
+---@field temperature? number Sampling temperature, when one is set.
+---@field thinking? { budget_tokens: integer } Explicit thinking budget, when one is set.
+---@field level? string Thinking effort for this turn, when one is set.
+---@field reasoning? table Thinking settings the model accepts, tagged with a `kind`.
+
+--- Payload of the `compact_prepare` transform.
+---@class kage.CompactPreparePayload
+---@field transcript string Plain-text transcript of the turns being summarized.
+---@field instruction string System instruction for the summarization call.
+---@field prompt string User-role prompt the summarizer receives.
+---@field model string Model id the summarization call uses.
+---@field summarized integer Messages being summarized away.
+---@field kept integer Recent messages kept verbatim after compaction.
+
+--- Turn summary the `should_stop_after_turn` predicate receives.
+---@class kage.ShouldStopAfterTurnPayload
+---@field index integer Zero-based index of the finished turn inside the run.
+---@field had_tool_calls boolean Whether the assistant requested any tool calls.
+---@field usage kage.EventUsage Tokens the turn charged.
 
 --- Every option `kage.opt` reads and writes.
 ---@class kage.Options
@@ -627,7 +814,7 @@ function kage.override_command(spec) end
 --- Pass `nil` to remove a renderer.
 --- Since API 1.
 ---@param kind string Custom block kind to take over.
----@param render fun(block: table): any|nil Gets { kind, text, width }; nil unregisters.
+---@param render fun(block: kage.Block): any|nil Gets the payload described by `kage.Block`; nil unregisters.
 function kage.register_block_renderer(kind, render) end
 
 --- Bind a chord to a handler in mode `g`. `spec` is a chord
@@ -712,7 +899,7 @@ function kage.clear_status(key) end
 --- An alias over `kage.api.autocmd_create`.
 --- Since API 1.
 ---@param event kage.Event
----@param handler fun(payload: any): any
+---@param handler fun(payload: kage.EventData): any The event payload; its shape follows `event`.
 ---@return fun()
 function kage.on(event, handler) end
 
@@ -865,7 +1052,7 @@ function kage.api.augroup_del(group) end
 --- raises.
 --- Since API 2.
 ---@param event kage.Event
----@param opts? { pattern: string?, data: any }
+---@param opts? { pattern: string?, data: kage.EventData }
 function kage.api.autocmd_exec(event, opts) end
 
 --- The value of option `name` and where it came from. Raises

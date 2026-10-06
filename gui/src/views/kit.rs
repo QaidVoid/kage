@@ -1,7 +1,9 @@
 //! Small controls more than one view draws the same way.
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::h_flex;
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::{Icon, Sizable as _};
 use gpui_kit::{
     Div, Entity, FontWeight, Hsla, InteractiveElement, ParentElement as _, SharedString, Stateful,
     Styled, div, px,
@@ -147,6 +149,19 @@ pub(crate) fn chip(
         .text_color(fg)
         .whitespace_nowrap()
         .child(text.into())
+}
+
+/// The state chip of the agent cards: an icon and its label in one
+/// color, without a fill, so a status reads as tinted text.
+pub(crate) fn status_chip(icon: IconName, label: impl Into<SharedString>, color: Hsla) -> Div {
+    h_flex()
+        .gap(px(5.))
+        .items_center()
+        .whitespace_nowrap()
+        .text_size(px(FS_XS))
+        .text_color(color)
+        .child(Icon::new(icon).with_size(px(12.)))
+        .child(label.into())
 }
 
 /// The dock pill shape: 28px tall, fully round, a hairline border over

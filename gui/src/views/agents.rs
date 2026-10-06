@@ -317,16 +317,7 @@ pub(crate) fn report_card(
                         .text_color(pal.ink_strong)
                         .child(SharedString::from(format!("{} finished", report.name))),
                 )
-                .child(
-                    h_flex()
-                        .gap(px(5.))
-                        .items_center()
-                        .whitespace_nowrap()
-                        .text_size(px(FS_XS))
-                        .text_color(phase.color(pal))
-                        .child(Icon::new(phase.icon()).with_size(px(12.)))
-                        .child(word),
-                )
+                .child(kit::status_chip(phase.icon(), word, phase.color(pal)))
                 .when_some(report.run_ms, |row, ms| {
                     row.child(
                         div()
@@ -409,14 +400,11 @@ pub(crate) fn avatar(name: &str, pal: &Palette) -> Div {
 
 /// The state label with its icon, in the state's color.
 pub(crate) fn state_chip(facts: &AgentFacts, pal: &Palette) -> Div {
-    h_flex()
-        .gap(px(5.))
-        .items_center()
-        .whitespace_nowrap()
-        .text_size(px(FS_XS))
-        .text_color(facts.phase.color(pal))
-        .child(Icon::new(facts.phase.icon()).with_size(px(12.)))
-        .child(facts.phase.label())
+    kit::status_chip(
+        facts.phase.icon(),
+        facts.phase.label(),
+        facts.phase.color(pal),
+    )
 }
 
 /// `4s` and `2.3k tok` joined by a middle dot, from what was measured.

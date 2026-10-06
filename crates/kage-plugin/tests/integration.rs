@@ -111,8 +111,12 @@ kage.register_provider({
 kage.fs.write('round-trip.txt', 'hello from lua')
 fs_round_trip = kage.fs.read('round-trip.txt')
 
--- http: every loopback URL must be rejected.
+-- http: every loopback URL must be rejected, whatever spelling the
+-- host string uses.
 http_blocked = pcall(kage.http.get, 'http://127.0.0.1:1/x') == false
+localhost_blocked = pcall(kage.http.get, 'http://localhost:1/x') == false
+decimal_blocked = pcall(kage.http.get, 'http://2130706433:1/x') == false
+octal_blocked = pcall(kage.http.get, 'http://0177.0.0.1:1/x') == false
 
 -- notify and log surface through the host sink.
 kage.notify('plugin loaded')
@@ -206,13 +210,20 @@ fn fixture_plugin_drives_every_surface() {
         .to_owned();
     assert_eq!(fs_value, "hello from lua");
 
-    // http rejected loopback URL.
-    let blocked: bool = rt
-        .eval_plugin("fixture", "return http_blocked")
-        .unwrap()
-        .as_boolean()
-        .unwrap();
-    assert!(blocked);
+    // http rejected loopback URL in every spelling.
+    for flag in [
+        "http_blocked",
+        "localhost_blocked",
+        "decimal_blocked",
+        "octal_blocked",
+    ] {
+        let blocked: bool = rt
+            .eval_plugin("fixture", &format!("return {flag}"))
+            .unwrap()
+            .as_boolean()
+            .unwrap();
+        assert!(blocked, "{flag} must be rejected");
+    }
 
     // notify + log went to the host sink.
     let r = rec.lock().unwrap();

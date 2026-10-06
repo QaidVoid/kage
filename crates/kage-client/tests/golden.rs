@@ -262,9 +262,11 @@ fn the_fix_fixture_replays_to_the_asserted_state() {
         Some(kage_acp_wire::TurnReason::NoToolCalls)
     );
     assert!(client.take_outgoing().is_empty());
-    assert!(
-        transcript >= 6,
-        "every transcript move was reported: {transcript}"
+    // The fixture drives exactly fifteen transcript notifications; a
+    // duplicate report would inflate this count.
+    assert_eq!(
+        transcript, 15,
+        "every transcript move is reported exactly once"
     );
 }
 

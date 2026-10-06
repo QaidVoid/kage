@@ -73,7 +73,10 @@ impl Head {
 pub enum HeadError {
     /// The head passed [`HEAD_CAP`] bytes without ending.
     TooLarge,
-    /// The peer hung up, sent garbage, or missed the deadline.
+    /// The peer missed the deadline: the per-read timeout fired, or
+    /// the whole head did not arrive in budget.
+    Timeout(String),
+    /// The peer hung up or sent garbage.
     Io(io::Error),
 }
 
@@ -81,6 +84,7 @@ impl fmt::Display for HeadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooLarge => f.write_str("request head exceeds the size cap"),
+            Self::Timeout(why) => write!(f, "request head timed out: {why}"),
             Self::Io(e) => write!(f, "{e}"),
         }
     }
@@ -123,7 +127,18 @@ pub fn read_head_with_timeout(
     let mut chunk = [0u8; 1024];
     let start = Instant::now();
     loop {
-        let n = stream.read(&mut chunk)?;
+        let n = match stream.read(&mut chunk) {
+            Ok(n) => n,
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock
+                    || e.kind() == io::ErrorKind::TimedOut =>
+            {
+                return Err(HeadError::Timeout(
+                    "a read missed its deadline".to_owned(),
+                ));
+            }
+            Err(e) => return Err(e.into()),
+        };
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -144,11 +159,9 @@ pub fn read_head_with_timeout(
             return Err(HeadError::TooLarge);
         }
         if start.elapsed() >= timeout {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "the request head missed its deadline",
-            )
-            .into());
+            return Err(HeadError::Timeout(
+                "the request head missed its deadline".to_owned(),
+            ));
         }
     }
 }
@@ -361,13 +374,10 @@ mod tests {
     fn silent_peer_times_out() {
         let (_client, mut server) = pair();
         let error = read_head_with_timeout(&mut server, Duration::from_millis(300)).unwrap_err();
-        match error {
-            HeadError::Io(ref e) => assert!(
-                e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut,
-                "{error}"
-            ),
-            other @ HeadError::TooLarge => panic!("expected a timeout, got {other:?}"),
-        }
+        assert!(
+            matches!(error, HeadError::Timeout(_)),
+            "expected a timeout, got {error}"
+        );
     }
 
     #[test]
@@ -388,14 +398,11 @@ mod tests {
         let error = read_head_with_timeout(&mut server, budget).unwrap_err();
         writer.join().unwrap();
         match error {
-            HeadError::Io(ref e) => {
-                assert_eq!(e.kind(), io::ErrorKind::TimedOut, "{error}");
-                assert!(
-                    e.to_string().contains("deadline"),
-                    "the whole-head deadline fired: {error}"
-                );
-            }
-            other @ HeadError::TooLarge => panic!("expected a timeout, got {other:?}"),
+            HeadError::Timeout(why) => assert!(
+                why.contains("deadline"),
+                "the whole-head deadline fired: {why}"
+            ),
+            other => panic!("expected the whole-head deadline, got {other:?}"),
         }
     }
 

@@ -808,6 +808,49 @@ mod tests {
         }
     }
 
+    /// A near-cap inbound line must survive: the reader must not
+    /// truncate, split or drop a message just under the cap.
+    #[test]
+    fn a_giant_just_under_the_cap_line_arrives_whole() {
+        let (in_r, mut in_w) = std::io::pipe().unwrap();
+        let (out_r, _out_w) = std::io::pipe().unwrap();
+        let (peer, inbound, _handle) = connect(BufReader::new(in_r), _out_w);
+        let mut out = BufReader::new(out_r);
+        let pad = usize::try_from(MAX_LINE / 2).unwrap();
+        let raw = format!(
+            "{{\"id\":77,\"method\":\"giant\",\"params\":{{\"pad\":\"{}\"}}}}\n",
+            "p".repeat(pad),
+        );
+        assert!(
+            (raw.len() as u64) <= MAX_LINE,
+            "fixture stays under the cap"
+        );
+        in_w.write_all(raw.as_bytes()).unwrap();
+
+        let call = {
+            let peer = peer.clone();
+            thread::spawn(move || peer.request("reply", serde_json::Value::Null))
+        };
+        let request = next_line(&mut out);
+        assert_eq!(request["method"], "reply");
+        in_w.write_all(format!("{{\"id\":{},\"result\":42}}\n", request["id"]).as_bytes())
+            .unwrap();
+        assert_eq!(call.join().unwrap().unwrap(), serde_json::json!(42));
+
+        match inbound.recv_timeout(Duration::from_secs(5)) {
+            Ok(Inbound::Request { id, method, params }) => {
+                assert_eq!(id, serde_json::json!(77));
+                assert_eq!(method, "giant");
+                assert_eq!(
+                    params["pad"].as_str().map(str::len),
+                    Some(pad),
+                    "no truncation"
+                );
+            }
+            other => panic!("expected the giant request whole, got {other:?}"),
+        }
+    }
+
     #[test]
     fn batch_and_scalar_get_32600() {
         let (_peer, mut in_w, mut out, _h) = recorded(None);

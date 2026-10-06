@@ -227,6 +227,118 @@ fn a_reload_replays_history_but_keeps_what_only_the_client_holds() {
 }
 
 #[test]
+fn a_permission_ask_is_held_and_answered_with_the_picked_option() {
+    let mut client = opened();
+    let ask = Frame::Request {
+        id: n(101),
+        method: "session/request_permission".into(),
+        params: json!({
+            "sessionId": "s1",
+            "toolCall": {"toolCallId": "call-sh", "title": "shell", "kind": "execute",
+                          "status": "pending", "rawInput": {"command": "cargo test"}},
+            "options": [
+                {"optionId": "allow", "name": "Allow shell", "kind": "allow_once"},
+                {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
+                {"optionId": "mystery", "name": "Mystery", "kind": "levity"},
+            ],
+        }),
+    };
+    let changes = client.handle(ask);
+    assert!(
+        changes.contains(&kage_client::Change::Permission { id: "s1".into() }),
+        "{changes:?}"
+    );
+    let session = client.state().session("s1").unwrap();
+    assert_eq!(session.permissions.len(), 1);
+    let held = &session.permissions[0];
+    assert_eq!(held.request_id, n(101));
+    assert_eq!(held.tool_call.title.as_deref(), Some("shell"));
+    assert_eq!(
+        held.option_of(kage_acp_wire::PermissionOptionKind::AllowOnce),
+        Some("allow"),
+        "option_of answers the option id"
+    );
+    assert_eq!(held.options.len(), 3, "a narrow ask keeps every option");
+    assert_eq!(
+        held.options[2].kind,
+        kage_acp_wire::PermissionOptionKind::Unknown,
+        "an unknown kind falls back instead of failing the ask"
+    );
+
+    assert!(client.reply_permission("s1", n(101), &kage_client::PermissionDecision::Allow));
+    let outgoing = client.take_outgoing();
+    assert_eq!(
+        outgoing.last(),
+        Some(&Frame::Success {
+            id: n(101),
+            result: json!({"outcome": {"outcome": "selected", "optionId": "allow"}}),
+        })
+    );
+    assert!(client.state().session("s1").unwrap().permissions.is_empty());
+}
+
+#[test]
+fn the_directory_tolerates_an_empty_page_and_a_failure() {
+    let mut client = opened();
+    let first = client.list_sessions(None, None);
+    let _ = client.take_outgoing();
+    client.handle(Frame::Success {
+        id: n(first),
+        result: json!({"sessions": []}),
+    });
+    assert!(
+        client.state().directory.is_empty(),
+        "an empty page is empty"
+    );
+
+    let second = client.list_sessions(None, None);
+    let _ = client.take_outgoing();
+    client.handle(Frame::Failure {
+        id: n(second),
+        error: kage_client::RpcError {
+            code: -32000,
+            message: "the directory is down".into(),
+            data: None,
+        },
+    });
+    assert!(
+        client.take_outgoing().is_empty(),
+        "a failed listing asks for no retry"
+    );
+    assert!(client.state().directory.is_empty());
+}
+
+/// A failed prompt answer ends the run without appending a fake
+/// reply, so the host can surface the error.
+#[test]
+fn a_failure_answer_to_a_prompt_ends_the_run() {
+    let mut client = opened();
+    let outcome = client.prompt("s1", vec![ContentBlock::text("go")]);
+    assert_eq!(outcome, PromptOutcome::Sent { request_id: 3 });
+    assert!(client.state().session("s1").unwrap().running);
+    let _ = client.take_outgoing();
+
+    client.handle(Frame::Failure {
+        id: n(3),
+        error: kage_client::RpcError {
+            code: -32000,
+            message: "provider exploded".into(),
+            data: None,
+        },
+    });
+    let session = client.state().session("s1").unwrap();
+    assert!(!session.running, "the failed run ends");
+    assert!(
+        session.items.iter().all(|item| !matches!(
+            item,
+            TranscriptItem::Assistant { .. }
+        )),
+        "no assistant text is invented: {:?}",
+        session.items
+    );
+}
+
+#[test]
 fn an_option_change_shows_at_once_and_a_refusal_restores_it() {
     let mut client = opened();
     client.handle(update(

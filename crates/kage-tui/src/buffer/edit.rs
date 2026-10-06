@@ -57,6 +57,41 @@ impl Buffer {
         });
     }
 
+    /// Ages the live thinking block's start instant, so a test can
+    /// record a known duration without sleeping.
+    #[cfg(test)]
+    pub(crate) fn age_live_thinking(&mut self, age: Duration) {
+        for block in &mut self.blocks {
+            if let Block::Thinking {
+                live: true,
+                started_at,
+                ..
+            } = Arc::make_mut(block)
+            {
+                if let Some(aged) = started_at.checked_sub(age) {
+                    *started_at = aged;
+                }
+            }
+        }
+    }
+
+    /// Ages the pending streaming-edit marker past any reparse
+    /// throttle, so a test's next render must rebuild without
+    /// sleeping.
+    #[cfg(test)]
+    pub(crate) fn age_stream_edits(&mut self, age: Duration) {
+        if let Some(since) = self.stream_dirty_since {
+            self.stream_dirty_since = since.checked_sub(age).or(self.stream_dirty_since);
+        }
+    }
+
+    /// Installs small scrollback caps so tests drive compaction at
+    /// kilobyte scale. Production sizing never sees this.
+    #[cfg(test)]
+    pub(crate) fn set_cap_overrides(&mut self, max_blocks: usize, max_bytes: usize) {
+        self.cap_overrides = Some((max_blocks, max_bytes));
+    }
+
     /// Append text to the most recent thinking block.
     pub fn append_thinking_delta(&mut self, delta: &str) {
         if !self.last_is_live_thinking() {
@@ -591,9 +626,9 @@ impl Buffer {
     /// Enforce [`MAX_BLOCKS`] and [`MAX_BYTES`]. Returns the number of
     /// blocks dropped (zero when under both caps). Both caps resolve
     /// into one drop frontier in a single pass, then the blocks drain
-    /// once: the count cap starts the frontier at `len - MAX_BLOCKS`
+    /// once: the count cap starts the frontier at `len - max_blocks`
     /// and the byte cap walks it forward while the kept text still
-    /// exceeds [`MAX_BYTES`], never below the newest block, so one
+    /// exceeds the byte cap, never below the newest block, so one
     /// oversized block is retained rather than erased. UI-
     /// thread only: it shifts every block index, so it must run before a
     /// draw snapshots the buffer; the version bump it performs makes
@@ -604,13 +639,14 @@ impl Buffer {
     /// that compacts the *session history* against the token budget;
     /// this only trims *rendered scrollback*.
     pub(crate) fn trim_scrollback(&mut self) -> usize {
+        let (max_blocks, max_bytes) = cap_limits(self);
         let len = self.blocks.len();
-        if len <= MAX_BLOCKS && self.total_text_bytes <= MAX_BYTES {
+        if len <= max_blocks && self.total_text_bytes <= max_bytes {
             return 0;
         }
-        let mut k = len.saturating_sub(MAX_BLOCKS);
+        let mut k = len.saturating_sub(max_blocks);
         let mut kept_bytes: usize = self.blocks[k..].iter().map(|b| b.text_bytes()).sum();
-        while self.blocks.len() - k > 1 && kept_bytes > MAX_BYTES {
+        while self.blocks.len() - k > 1 && kept_bytes > max_bytes {
             kept_bytes -= self.blocks[k].text_bytes();
             k += 1;
         }
@@ -811,4 +847,17 @@ fn renumber_after_compact<T, U>(rows: &mut Vec<(usize, T, U)>, k: usize) {
     for (i, ..) in rows.iter_mut() {
         *i -= k;
     }
+}
+
+/// The effective scrollback caps: the production constants, or the
+/// override the cap tests install so compaction is driven at
+/// kilobyte scale.
+#[cfg(not(test))]
+fn cap_limits(_: &Buffer) -> (usize, usize) {
+    (MAX_BLOCKS, MAX_BYTES)
+}
+
+#[cfg(test)]
+fn cap_limits(buffer: &Buffer) -> (usize, usize) {
+    buffer.cap_overrides.unwrap_or((MAX_BLOCKS, MAX_BYTES))
 }

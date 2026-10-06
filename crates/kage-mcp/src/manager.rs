@@ -235,6 +235,15 @@ pub struct McpManager {
 }
 
 impl McpManager {
+    /// The child process id of server `name`, for diagnostics.
+    /// `None` when the server is not running or is not a spawned
+    /// subprocess (an HTTP server has no child).
+    #[must_use]
+    pub fn server_pid(&self, name: &str) -> Option<u32> {
+        let managed = &self.servers.iter().find(|(n, _)| n == name)?.1;
+        managed.handle.as_ref()?.child_pid()
+    }
+
     /// Spawn every enabled server in `cfg` (sorted by name for a
     /// deterministic registration order). Disabled entries are
     /// skipped. Spawn/handshake failures are collected as

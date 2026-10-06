@@ -1,5 +1,7 @@
 //! Tests for view rendering helpers.
 
+use std::time::Duration;
+
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
@@ -260,6 +262,22 @@ fn finished_thinking_folds_to_a_timed_line() {
     assert!(!lines.iter().any(|l| l.contains("step 1")), "{lines:?}");
 }
 
+/// The live path must record the real elapsed duration, not rely on
+/// the 1s display floor: an aged start renders the actual seconds.
+#[test]
+fn a_finished_live_thinking_block_reports_its_real_duration() {
+    let mut buffer = Buffer::new();
+    buffer.append_thinking_delta("deliberating");
+    buffer.age_live_thinking(Duration::from_millis(2900));
+    buffer.finish_streaming();
+    let input = InputState::new();
+    let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 40, 6));
+    assert!(
+        lines.iter().any(|l| l.contains("Thought for 2s")),
+        "{lines:?}"
+    );
+}
+
 #[test]
 fn unfolded_thinking_includes_body() {
     let mut buffer = Buffer::new();
@@ -414,7 +432,10 @@ fn a_single_paragraph_streamed_word_by_word_shows_every_word() {
         buffer.append_assistant_delta(word);
         text.push_str(word);
         let _ = snapshot_lines(&mut buffer, &input, area);
-        std::thread::sleep(std::time::Duration::from_millis(60));
+        // Age the pending-edit marker past the reparse throttle so the
+        // next snapshot must rebuild, without a wall-clock sleep. The
+        // test then passes whatever the throttle constant is.
+        buffer.age_stream_edits(Duration::from_secs(3600));
         let lines = snapshot_lines(&mut buffer, &input, area);
         assert!(
             lines.iter().any(|l| l.contains(&text)),

@@ -68,15 +68,31 @@ fn raw_newline_frame_still_arrives_as_one_message() {
         '\n'
     );
     client.send(Message::text(raw)).unwrap();
+    // The client hangs up, so the server drains everything it parsed
+    // and exits. A split frame would show up as an extra inbound
+    // message or an outbound -32700 before the close.
+    let _ = client.send(Message::Close(None));
 
-    match seen.recv_timeout(TIMEOUT).unwrap() {
-        Inbound::Request { id, .. } => assert_eq!(id, serde_json::json!(9)),
-        other @ Inbound::Notification { .. } => panic!("expected one request, got {other:?}"),
+    let mut requests = Vec::new();
+    while let Ok(message) = seen.recv_timeout(TIMEOUT) {
+        requests.push(message);
     }
-    assert!(
-        seen.recv_timeout(Duration::from_millis(300)).is_err(),
-        "a raw newline must not split the frame into two messages"
-    );
+    let [Inbound::Request { id, .. }] = &requests[..] else {
+        panic!("exactly one parsed request expected, got {requests:?}");
+    };
+    assert_eq!(id, &serde_json::json!(9));
+
+    // Drain whatever the server sent before closing: only the close
+    // handshake, never a parse error for a split half.
+    loop {
+        match client.read() {
+            Ok(Message::Text(line)) => {
+                panic!("the server answered nothing before closing: {line}");
+            }
+            Ok(Message::Close(_)) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
 }
 
 #[test]
@@ -95,17 +111,19 @@ fn binary_frames_are_dropped() {
     let mut client = connect_client(addr, &token);
     client.send(Message::binary(vec![0, 1, 2, 3])).unwrap();
     client.send(Message::text(request(10))).unwrap();
+    // Hang up so the server drains everything it accepted and exits.
+    // A forwarded binary frame would appear in `seen` before the
+    // close.
+    let _ = client.send(Message::Close(None));
 
-    match seen.recv_timeout(TIMEOUT).unwrap() {
-        Inbound::Request { id, .. } => assert_eq!(id, serde_json::json!(10)),
-        other @ Inbound::Notification { .. } => {
-            panic!("expected only the text request, got {other:?}")
-        }
+    let mut requests = Vec::new();
+    while let Ok(message) = seen.recv_timeout(TIMEOUT) {
+        requests.push(message);
     }
-    assert!(
-        seen.recv_timeout(Duration::from_millis(300)).is_err(),
-        "the binary frame must be dropped, not forwarded"
-    );
+    let [Inbound::Request { id, .. }] = &requests[..] else {
+        panic!("only the text request expected, got {requests:?}");
+    };
+    assert_eq!(id, &serde_json::json!(10));
 }
 
 #[test]

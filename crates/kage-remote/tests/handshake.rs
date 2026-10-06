@@ -133,8 +133,7 @@ fn silent_client_gets_no_answer_until_the_deadline() {
     let _client = TcpStream::connect(addr).unwrap();
     let outcome = waited.recv_timeout(TIMEOUT + TIMEOUT).unwrap();
     assert!(
-        matches!(outcome, Err(kage_remote::head::HeadError::Io(ref e))
-            if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut),
+        matches!(outcome, Err(kage_remote::head::HeadError::Timeout(_))),
         "{outcome:?}"
     );
 }

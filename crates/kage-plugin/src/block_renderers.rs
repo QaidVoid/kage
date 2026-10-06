@@ -324,6 +324,28 @@ mod tests {
         );
     }
 
+    /// A renderer that reads `width` must degrade to no lines when
+    /// the payload omits it, not panic the host.
+    #[test]
+    fn a_payload_without_width_renders_empty_not_a_panic() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval(
+            r#"
+            kage.register_block_renderer("w", function(b)
+                return { { text = "wide " .. b.width } }
+            end)
+            "#,
+        )
+        .unwrap();
+        let map = rt.registered_block_renderers();
+        assert!(
+            map[0]
+                .render(&serde_json::json!({ "kind": "w", "text": "t" }))
+                .is_some_and(|lines| lines.is_empty()),
+            "concatenating a missing width errors in Lua and yields no lines"
+        );
+    }
+
     #[test]
     fn distinct_payloads_render_distinct_lines_and_cache_hit_skips_rerun() {
         let rt = PluginRuntime::new().unwrap();

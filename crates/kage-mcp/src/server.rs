@@ -789,6 +789,13 @@ impl McpServerHandle {
         &self.conn
     }
 
+    /// The child's process id, for diagnostics. `None` for a
+    /// transport without a child process.
+    #[must_use]
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child.as_ref().map(|child| child.id())
+    }
+
     /// The child's exit status once it has terminated, or `None`
     /// while it is still running and for a transport without a child
     /// process. The server's last stderr lines are quoted after the

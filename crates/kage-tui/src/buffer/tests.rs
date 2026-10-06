@@ -917,19 +917,22 @@ fn a_huge_tool_output_is_truncated_at_push_time() {
 
 #[test]
 fn the_byte_cap_compacts_oldest_blocks_first() {
+    // Small caps installed so the test holds kilobytes, not the
+    // production 48 MiB.
     let mut buf = Buffer::new();
-    let blob = "x".repeat(1024 * 1024);
-    for _ in 0..100 {
+    buf.set_cap_overrides(512, 4 * 1024);
+    let blob = "x".repeat(1024);
+    for _ in 0..8 {
         buf.push_custom("kage:notify", blob.clone(), false);
     }
-    assert_eq!(buf.total_text_bytes, 100 * 1024 * 1024);
+    assert_eq!(buf.total_text_bytes, 8 * 1024);
     assert!(buf.trim_scrollback() > 0);
     assert!(
-        buf.total_text_bytes <= MAX_BYTES,
+        buf.total_text_bytes <= 4 * 1024 && buf.total_text_bytes < MAX_BYTES,
         "{} bytes kept",
         buf.total_text_bytes
     );
-    assert!(buf.blocks().len() < 100);
+    assert!(buf.blocks().len() < 8);
     assert!(
         matches!(buf.blocks().last().map(Arc::as_ref), Some(Block::Custom { text, .. }) if text.len() == blob.len()),
         "the newest block survives"
@@ -940,20 +943,21 @@ fn the_byte_cap_compacts_oldest_blocks_first() {
 #[test]
 fn streamed_deltas_count_toward_the_byte_cap() {
     let mut buf = Buffer::new();
-    let chunk = "x".repeat(4 * 1024 * 1024);
+    buf.set_cap_overrides(512, 3 * 1024);
+    let chunk = "x".repeat(1024);
     buf.push_user("start");
     buf.begin_assistant();
-    for _ in 0..20 {
+    for _ in 0..5 {
         buf.append_assistant_delta(&chunk);
     }
-    assert_eq!(buf.total_text_bytes, 20 * 4 * 1024 * 1024 + "start".len());
+    assert_eq!(buf.total_text_bytes, 5 * 1024 + "start".len());
     buf.trim_scrollback();
     assert_eq!(
         buf.blocks().len(),
         1,
         "older blocks compact away before the live one"
     );
-    assert_eq!(buf.total_text_bytes, 20 * 4 * 1024 * 1024);
+    assert_eq!(buf.total_text_bytes, 5 * 1024);
     assert!(matches!(
         buf.blocks()[0].as_ref(),
         Block::Assistant { live: true, .. }
@@ -963,10 +967,11 @@ fn streamed_deltas_count_toward_the_byte_cap() {
 #[test]
 fn a_single_oversized_block_survives_the_byte_cap() {
     let mut buf = Buffer::new();
-    buf.push_user("x".repeat(60 * 1024 * 1024));
+    buf.set_cap_overrides(512, 1024);
+    buf.push_user("x".repeat(4096));
     buf.trim_scrollback();
     assert_eq!(buf.blocks().len(), 1, "the newest block is never dropped");
-    assert!(buf.total_text_bytes > MAX_BYTES);
+    assert!(buf.total_text_bytes > 1024 && buf.total_text_bytes < MAX_BYTES);
 }
 
 #[test]

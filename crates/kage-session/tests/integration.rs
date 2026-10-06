@@ -310,13 +310,72 @@ fn search_indexes_assistant_text_and_user_prompts() {
     .unwrap();
     drop(w);
 
+    // A second session in the same dir whose text also matches, so hit
+    // identity across files is observable.
+    let path_b = dir.path().join("b.jsonl");
+    let mut wb = SessionWriter::create(&path_b, fresh_header()).unwrap();
+    wb.append(&SessionEntry::Message(MessageEntry {
+        id: EntryId::new(),
+        ts: Utc::now(),
+        message: Arc::new(Message::new(
+            Role::User,
+            vec![Content::Text {
+                text: "migration rollback plan".into(),
+            }],
+            None,
+        )),
+        usage: None,
+    }))
+    .unwrap();
+    drop(wb);
+
     let hits = search(dir.path(), "migration", 100).unwrap();
-    assert_eq!(hits.len(), 2);
+    assert_eq!(hits.len(), 3);
     let parsed: Vec<_> = hits
         .iter()
         .filter_map(kage_session::SearchHit::entry)
         .collect();
-    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed.len(), 3);
+    // Every hit names its file, so a wrong-file hit cannot pass.
+    let mut count_by_file: std::collections::BTreeMap<std::path::PathBuf, usize> =
+        std::collections::BTreeMap::new();
+    for hit in &hits {
+        *count_by_file.entry(hit.path.clone()).or_default() += 1;
+    }
+    let mut counted: Vec<(std::path::PathBuf, usize)> = count_by_file.into_iter().collect();
+    counted.sort();
+    assert_eq!(
+        counted,
+        vec![(path_a.clone(), 2), (path_b.clone(), 1)],
+        "each file contributes its own hits"
+    );
+    let hit_for = |path: &std::path::Path| -> Vec<&kage_session::SearchHit> {
+        hits.iter().filter(|h| h.path == path).collect()
+    };
+    let hits_a = hit_for(&path_a);
+    assert_eq!(hits_a.len(), 2);
+    for hit in &hits_a {
+        match hit.entry().expect("hit decodes to a message") {
+            SessionEntry::Message(message) => {
+                let text = message
+                    .message
+                    .content
+                    .iter()
+                    .filter_map(|c| match c {
+                        Content::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>();
+                assert!(
+                    text.contains("migration"),
+                    "hit line is the matched message: {text:?}"
+                );
+            }
+            other => panic!("hit decoded to {other:?}"),
+        }
+    }
+    let hits_b = hit_for(&path_b);
+    assert_eq!(hits_b.len(), 1);
 }
 
 /// The reader and writer sides of crash tolerance must agree: over

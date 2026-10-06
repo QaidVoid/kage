@@ -62,6 +62,16 @@ fn tps_example_emits_summary_on_agent_end() {
     let path = examples_dir().join("tps.lua");
     let source = std::fs::read_to_string(&path).expect("read tps.lua");
     rt.eval(&source).expect("tps.lua loads");
+    // A stubbed clock makes the summary deterministic: agent_start
+    // reads 1000, agent_end reads 3000, so 75 tokens over exactly
+    // 2.0s. No sleep, no branch flipping on machine speed.
+    rt.eval(
+        "do \
+            local t = 1000 \
+            kage.now_ms = function() t = t + 2000 return t end \
+        end",
+    )
+    .expect("clock stub installs");
 
     rt.dispatch_event("agent_start", &json!({})).unwrap();
     rt.dispatch_event(
@@ -74,9 +84,6 @@ fn tps_example_emits_summary_on_agent_end() {
         &json!({"usage": {"input": 100, "output": 25}}),
     )
     .unwrap();
-    // Force at least one millisecond of elapsed time so the throughput
-    // formula stays in the "real elapsed" branch.
-    std::thread::sleep(std::time::Duration::from_millis(5));
     rt.dispatch_event("agent_end", &json!({})).unwrap();
 
     let r = rec.lock().unwrap();
@@ -86,8 +93,10 @@ fn tps_example_emits_summary_on_agent_end() {
         .iter()
         .find(|s| s.starts_with("tps:"))
         .expect("tps summary fired");
-    assert!(summary.contains("75 tokens"), "summary text: {summary}");
-    assert!(summary.contains("tok/s"), "summary text: {summary}");
+    assert_eq!(
+        summary, "tps: 75 tokens in 2.00s (37.5 tok/s)",
+        "summary text: {summary}"
+    );
 }
 
 #[test]
@@ -189,6 +198,38 @@ fn transform_demo_appends_date_to_system_prompt() {
     );
 }
 
+/// A missing or empty system prompt is created, not appended to: the
+/// nil and empty-string branches of the hook.
+#[test]
+fn transform_demo_creates_a_missing_system_prompt() {
+    let (_rec, sink) = forwarding_sink();
+    let rt = PluginRuntime::builder().sink(sink).build().unwrap();
+    let source = std::fs::read_to_string(examples_dir().join("transform_demo.lua")).unwrap();
+    rt.eval(&source).unwrap();
+
+    let out = rt
+        .dispatch_transform(
+            "before_provider_request",
+            json!({"model": "mock:m", "messages": []}),
+        )
+        .unwrap();
+    let system = out["system"].as_str().expect("the nil branch sets one");
+    assert!(system.starts_with("Today is "), "got {system:?}");
+
+    let out2 = rt
+        .dispatch_transform(
+            "before_provider_request",
+            json!({"model": "mock:m", "messages": [], "system": ""}),
+        )
+        .unwrap();
+    let system2 = out2["system"].as_str().unwrap();
+    assert_eq!(
+        system2.matches("Today is ").count(),
+        1,
+        "the empty branch also creates, not appends: {system2:?}"
+    );
+}
+
 #[test]
 fn git_status_announces_branch_on_agent_start() {
     let dir = tempfile::tempdir().unwrap();
@@ -277,16 +318,22 @@ fn load_select_demo(sink: SharedHostLog) -> PluginRuntime {
     rt
 }
 
-fn pick_color_args(rt: &PluginRuntime) -> kage_plugin::BridgeArgs {
+/// The bridge arguments of registered command `name`, prepared with
+/// the empty raw string the demos take.
+fn command_args(rt: &PluginRuntime, name: &str) -> kage_plugin::BridgeArgs {
     let cmd = rt
         .registered_commands()
         .into_iter()
-        .find(|c| c.name() == "pick-color")
-        .expect("pick-color command registered");
+        .find(|c| c.name() == name)
+        .unwrap_or_else(|| panic!("{name} command registered"));
     match cmd.prepare_bridge("", &json!(null)).unwrap() {
         BridgePrep::Ready(bargs) => bargs,
         BridgePrep::ArgError(out) => panic!("unexpected arg error: {}", out.text),
     }
+}
+
+fn pick_color_args(rt: &PluginRuntime) -> kage_plugin::BridgeArgs {
+    command_args(rt, "pick-color")
 }
 
 #[test]
@@ -338,15 +385,7 @@ fn select_demo_cancel_path_returns_cancelled() {
 }
 
 fn confirm_delete_args(rt: &PluginRuntime) -> kage_plugin::BridgeArgs {
-    let cmd = rt
-        .registered_commands()
-        .into_iter()
-        .find(|c| c.name() == "confirm-delete")
-        .expect("confirm-delete command registered");
-    match cmd.prepare_bridge("", &json!(null)).unwrap() {
-        BridgePrep::Ready(bargs) => bargs,
-        BridgePrep::ArgError(out) => panic!("unexpected arg error: {}", out.text),
-    }
+    command_args(rt, "confirm-delete")
 }
 
 #[test]
@@ -395,15 +434,7 @@ fn select_demo_confirm_false_path_keeps() {
 }
 
 fn ask_name_args(rt: &PluginRuntime) -> kage_plugin::BridgeArgs {
-    let cmd = rt
-        .registered_commands()
-        .into_iter()
-        .find(|c| c.name() == "ask-name")
-        .expect("ask-name command registered");
-    match cmd.prepare_bridge("", &json!(null)).unwrap() {
-        BridgePrep::Ready(bargs) => bargs,
-        BridgePrep::ArgError(out) => panic!("unexpected arg error: {}", out.text),
-    }
+    command_args(rt, "ask-name")
 }
 
 #[test]
@@ -452,15 +483,7 @@ fn select_demo_input_cancel_is_anonymous() {
 }
 
 fn compose_note_args(rt: &PluginRuntime) -> kage_plugin::BridgeArgs {
-    let cmd = rt
-        .registered_commands()
-        .into_iter()
-        .find(|c| c.name() == "compose-note")
-        .expect("compose-note command registered");
-    match cmd.prepare_bridge("", &json!(null)).unwrap() {
-        BridgePrep::Ready(bargs) => bargs,
-        BridgePrep::ArgError(out) => panic!("unexpected arg error: {}", out.text),
-    }
+    command_args(rt, "compose-note")
 }
 
 #[test]
@@ -586,7 +609,17 @@ fn ui_extras_registers_chrome_autocomplete_and_raw_input() {
 
 /// Initialize a git work tree with one commit so `git stash create`
 /// has a base to diff against, then leave a tracked file dirty.
-fn init_git_repo(dir: &std::path::Path) {
+fn init_git_repo(dir: &std::path::Path) -> bool {
+    // A git-less machine skips the rewind test instead of failing the
+    // suite: the suite has no skip attribute, so early return it is.
+    let available = Command::new("git")
+        .arg("--version")
+        .status()
+        .is_ok_and(|s| s.success());
+    if !available {
+        eprintln!("skipping rewind checkpoint test: git is unavailable");
+        return false;
+    }
     let run = |args: &[&str]| {
         let ok = Command::new("git")
             .args(args)
@@ -603,6 +636,7 @@ fn init_git_repo(dir: &std::path::Path) {
     run(&["add", "-A"]);
     run(&["commit", "-q", "-m", "init"]);
     std::fs::write(dir.join("tracked.txt"), "v2\n").unwrap();
+    true
 }
 
 fn run_status_command(rt: &PluginRuntime) -> String {
@@ -624,7 +658,9 @@ fn run_status_command(rt: &PluginRuntime) -> String {
 #[test]
 fn rewind_records_a_checkpoint_per_turn_when_granted() {
     let dir = tempfile::tempdir().unwrap();
-    init_git_repo(dir.path());
+    if !init_git_repo(dir.path()) {
+        return;
+    }
 
     let (rec, sink) = forwarding_sink();
     let mut caps = BTreeMap::new();

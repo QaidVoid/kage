@@ -234,7 +234,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::entry::{EntryId, FORMAT_VERSION, Header, MessageEntry, SessionEntry, SessionId};
+    use crate::entry::{
+        EntryId, FORMAT_VERSION, Header, Label, MessageEntry, SessionEntry, SessionId,
+    };
     use crate::reader::SessionReader;
     use crate::writer::SessionWriter;
 
@@ -433,5 +435,76 @@ mod tests {
         write(&src, fresh_header("x:y"), &[message_entry(Role::User, "x")]);
         let err = resolve_entry_prefix(&src, "ZZZZZZZZZZ").unwrap_err();
         assert!(matches!(err, SessionError::Io { .. }));
+    }
+
+    #[test]
+    fn resolve_entry_prefix_rejects_an_ambiguous_prefix() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("s.jsonl");
+        // Two ids crafted to share a long prefix: the Crockford base32
+        // encodings differ only in their last characters.
+        let first = EntryId(ulid::Ulid::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap());
+        let second = EntryId(ulid::Ulid::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAW").unwrap());
+        assert_ne!(first, second);
+        let shared = &first.to_string()[..20];
+        assert!(
+            second.to_string().starts_with(shared),
+            "fixture ids share {shared}"
+        );
+        let a = SessionEntry::Message(MessageEntry {
+            id: first,
+            ts: Utc::now(),
+            message: Arc::new(Message::new(
+                Role::User,
+                vec![Content::Text { text: "a".into() }],
+                None,
+            )),
+            usage: None,
+        });
+        let b = SessionEntry::Message(MessageEntry {
+            id: second,
+            ts: Utc::now(),
+            message: Arc::new(Message::new(
+                Role::User,
+                vec![Content::Text { text: "b".into() }],
+                None,
+            )),
+            usage: None,
+        });
+        write(&src, fresh_header("x:y"), &[a, b]);
+
+        let err = resolve_entry_prefix(&src, shared).unwrap_err();
+        assert!(err.to_string().contains("ambiguous"), "{err}");
+    }
+
+    #[test]
+    fn fork_copies_labels() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.jsonl");
+        let m1 = message_entry(Role::User, "one");
+        let anchor = m1.id();
+        let label = SessionEntry::Label(Label {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            text: "milestone".to_owned(),
+            anchor: anchor.clone(),
+        });
+        let m2 = message_entry(Role::Assistant, "two");
+        write(&src, fresh_header("x:y"), &[m1, label, m2.clone()]);
+
+        let dst = dir.path().join("forked.jsonl");
+        fork(&src, &dst, SessionId::new(), m2.id()).unwrap();
+        let copied: Vec<SessionEntry> = SessionReader::iter(&dst)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        // Header + m1 + label + m2: the label is its own entry, so a
+        // fork through m2 carries four lines.
+        assert_eq!(copied.len(), 4, "header, the labeled message, the label and m2");
+        assert!(
+            matches!(&copied[2], SessionEntry::Label(l) if l.text == "milestone" && l.anchor == anchor),
+            "the label survives with its anchor: {:?}",
+            copied[2]
+        );
     }
 }

@@ -540,6 +540,11 @@ pub struct Buffer {
     /// miss so the renderer rebuilds. Cleared when a rebuild stores
     /// fresh lines and when the stream finishes.
     stream_dirty_since: Option<Instant>,
+    /// Test-only override of the scrollback caps, so cap tests drive
+    /// compaction at kilobyte scale. `None` in production, where
+    /// [`MAX_BYTES`] and [`MAX_BLOCKS`] always bind.
+    #[cfg(test)]
+    cap_overrides: Option<(usize, usize)>,
     /// Counts appended blocks and streamed deltas.
     output_serial: u64,
     /// [`Self::output_serial`] when the view stopped following the

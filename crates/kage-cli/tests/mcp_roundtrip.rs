@@ -52,7 +52,17 @@ fn spawn_kage_mcp_serve_and_round_trip_a_builtin_tool() {
         .execute(serde_json::json!({}), &cx)
         .expect("ls executes over MCP");
     assert!(!out.is_error, "ls reported success: {}", out.text);
-    assert!(out.structured.is_some(), "raw MCP result is preserved");
+    let structured = out.structured.expect("the raw MCP result is preserved");
+    let content = structured
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .expect("structuredContent carries the content array");
+    let text = content
+        .first()
+        .and_then(|item| item.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .expect("the first content item is a text block");
+    assert_eq!(text, out.text, "the structured text is the server's own");
 }
 
 #[test]
@@ -72,6 +82,9 @@ fn manager_restart_respawns_and_keeps_tools_registered() {
         "ls registered before restart"
     );
     let before = reg.len();
+    let pid_before = manager
+        .server_pid("kage")
+        .expect("the stdio server runs as a child process");
 
     manager
         .restart("kage", &mut reg)
@@ -82,4 +95,11 @@ fn manager_restart_respawns_and_keeps_tools_registered() {
         "ls re-registered after restart"
     );
     assert_eq!(reg.len(), before, "tool set is identical after restart");
+    let pid_after = manager
+        .server_pid("kage")
+        .expect("restart left a server running");
+    assert_ne!(
+        pid_before, pid_after,
+        "restart must respawn, not keep the old process"
+    );
 }

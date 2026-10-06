@@ -9,20 +9,28 @@ use schemars::JsonSchema;
 /// Derive a JSON Schema for a tool input type and return it as a generic
 /// `serde_json::Value` ready to embed in [`kage_core::ToolSpec::schema`].
 ///
-/// # Panics
-///
-/// Panics if the schema does not serialize to JSON, which would indicate a
-/// `schemars` bug or an exotic custom impl. Stock derived types never panic.
+/// A schema that fails to serialize (a `schemars` bug or an exotic
+/// custom impl) degrades to a permissive `{"type": "object"}` so one bad
+/// derivation cannot unwind a session.
 #[must_use]
 pub fn schema_for<T: JsonSchema>() -> serde_json::Value {
     let schema = schemars::schema_for!(T);
-    let mut value = serde_json::to_value(schema).expect("derived schema is always valid JSON");
+    let mut value = serialize_schema(schema);
     // The draft marker is tooling metadata; Gemini's OpenAPI subset
     // rejects it and no provider can use it.
     if let Some(object) = value.as_object_mut() {
         object.remove("$schema");
     }
     value
+}
+
+/// Serialize a derived schema, falling back to a permissive
+/// `{"type": "object"}` when serialization fails.
+fn serialize_schema(schema: impl serde::Serialize) -> serde_json::Value {
+    serde_json::to_value(schema).unwrap_or_else(|err| {
+        eprintln!("kage: tool schema failed to serialize ({err}); using a permissive schema");
+        serde_json::json!({ "type": "object" })
+    })
 }
 
 #[cfg(test)]
@@ -78,6 +86,22 @@ mod tests {
         assert!(
             !required.contains(&"start_line"),
             "Optional fields must not be required"
+        );
+    }
+
+    /// A schema whose serialization fails takes the permissive fallback
+    /// instead of unwinding the session.
+    #[test]
+    fn a_schema_that_fails_to_serialize_falls_back_to_a_permissive_object() {
+        struct Poisoned;
+        impl serde::Serialize for Poisoned {
+            fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("poisoned"))
+            }
+        }
+        assert_eq!(
+            serialize_schema(Poisoned),
+            serde_json::json!({ "type": "object" })
         );
     }
 }

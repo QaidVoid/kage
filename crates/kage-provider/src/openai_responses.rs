@@ -82,17 +82,13 @@ impl OpenAiResponsesProvider {
     /// credential (skipped when no key is configured), then the
     /// configured extras in key order.
     fn request_headers(&self) -> Vec<(String, String)> {
-        let mut headers = vec![("content-type".to_owned(), "application/json".to_owned())];
-        if !self.api_key.is_empty() {
-            headers.push((
-                "authorization".to_owned(),
-                format!("Bearer {}", self.api_key),
-            ));
-        }
-        for (name, value) in &self.extra_headers {
-            headers.push((name.clone(), value.clone()));
-        }
-        headers
+        let credential = (!self.api_key.is_empty())
+            .then(|| ("authorization", format!("Bearer {}", self.api_key)));
+        crate::headers::request_headers(
+            &[("content-type", "application/json".to_owned())],
+            credential,
+            &self.extra_headers,
+        )
     }
 }
 

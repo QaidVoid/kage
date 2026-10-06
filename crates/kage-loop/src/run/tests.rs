@@ -1876,6 +1876,47 @@ fn provider_retry_event_surfaces_server_retry_after() {
 }
 
 #[test]
+fn sub_second_backoff_reports_milliseconds() {
+    let mock = MockProvider::sequence(vec![transient_turn(), good_turn()]);
+    let mut cx = AgentContext::new("mock:m", "");
+    cx.history.push(Arc::new(user_msg("hello")));
+    let cfg = LoopConfig::default();
+    let cancel = CancelFlag::new();
+    let log = EventLog {
+        events: std::cell::RefCell::default(),
+        cancel_on_notice: None,
+    };
+    let registry = ToolRegistry::new();
+
+    let _ = run(
+        &mock,
+        &registry,
+        &mut cx,
+        cfg,
+        &mut NoopHooks,
+        &cancel,
+        |e| log.record(e),
+    );
+
+    let (wait_secs, wait_ms) = log
+        .events
+        .borrow()
+        .iter()
+        .find_map(|e| match e {
+            LoopEvent::ProviderRetry {
+                wait_secs, wait_ms, ..
+            } => Some((*wait_secs, *wait_ms)),
+            _ => None,
+        })
+        .expect("loop should have emitted ProviderRetry");
+    assert_eq!(
+        wait_secs, 0,
+        "a 1ms backoff must not round up to a whole second"
+    );
+    assert_eq!(wait_ms, 1);
+}
+
+#[test]
 fn cancel_during_backoff_aborts_cleanly() {
     let mock = MockProvider::sequence(vec![transient_turn(), good_turn()]);
     let mut cx = AgentContext::new("mock:m", "");

@@ -100,11 +100,17 @@ pub fn apply_loop_event(buf: &mut Buffer, event: &LoopEvent) {
             attempt,
             max_attempts,
             wait_secs,
+            wait_ms,
             requested_secs,
             error,
         } => {
+            let wait_text = if *wait_ms < 1000 {
+                format!("{wait_ms}ms")
+            } else {
+                format!("{wait_secs}s")
+            };
             let mut msg = format!(
-                "provider error ({error}); retrying {attempt}/{max_attempts} in {wait_secs}s"
+                "provider error ({error}); retrying {attempt}/{max_attempts} in {wait_text}"
             );
             if let Some(req) = requested_secs
                 && *req > *wait_secs
@@ -983,6 +989,7 @@ mod tests {
                 attempt,
                 max_attempts: 5,
                 wait_secs: 1,
+                wait_ms: 1000,
                 requested_secs: None,
                 error: "overloaded".into(),
             });

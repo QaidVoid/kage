@@ -148,12 +148,13 @@ where
             // Event contract for `LoopEvent::ProviderRetry`: every
             // delta streamed since the last `MessageEnd` belonged to a
             // dropped attempt and must be discarded by the receiver.
-            // The UIs shipped in this repo rely on the Notice breaking
-            // the live block (TUI) or persisting only `MessageAppended`
-            // (recorder), and the retrying turn reuses no message or
-            // tool-call ids, so id-keyed clients cannot concatenate the
-            // attempts either. The retry streams the full turn from
-            // scratch; no deltas are replayed.
+            // Hosts surface the event as a notice-like block (the
+            // TUI's `kage:retry`, the RPC notice update), and only the
+            // successful attempt is persisted because a failed attempt
+            // appends nothing. The retrying turn reuses no message or
+            // tool-call ids, so id-keyed clients cannot concatenate
+            // the attempts either. The retry streams the full turn
+            // from scratch; no deltas are replayed.
             let turn = {
                 let mut attempt: u32 = 0;
                 loop {
@@ -202,6 +203,7 @@ where
                                 attempt,
                                 max_attempts: config.max_provider_retries,
                                 wait_secs: wait.as_secs(),
+                                wait_ms: wait.as_millis() as u64,
                                 requested_secs: requested.map(|d| d.as_secs()),
                                 error: e.to_string(),
                             });

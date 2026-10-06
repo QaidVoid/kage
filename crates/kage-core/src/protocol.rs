@@ -893,6 +893,7 @@ mod tests {
                 attempt: 2,
                 max_attempts: 4,
                 wait_secs: 8,
+                wait_ms: 8000,
                 requested_secs: Some(300),
                 error: "busy".into(),
             },

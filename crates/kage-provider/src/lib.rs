@@ -13,6 +13,7 @@ pub mod compat;
 pub mod error;
 pub mod event;
 pub mod gemini;
+pub mod headers;
 pub mod http;
 pub mod interrupt;
 pub mod metadata;

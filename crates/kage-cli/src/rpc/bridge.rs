@@ -1147,12 +1147,22 @@ pub(super) fn to_update(
             attempt,
             max_attempts,
             wait_secs,
+            wait_ms,
             error,
             ..
-        } => Some(notice_update(
-            NoticeLevel::Info,
-            format!("provider error ({error}); retrying {attempt}/{max_attempts} in {wait_secs}s"),
-        )),
+        } => {
+            let wait_text = if *wait_ms < 1000 {
+                format!("{wait_ms}ms")
+            } else {
+                format!("{wait_secs}s")
+            };
+            Some(notice_update(
+                NoticeLevel::Info,
+                format!(
+                    "provider error ({error}); retrying {attempt}/{max_attempts} in {wait_text}"
+                ),
+            ))
+        }
         LoopEvent::Error { kind } => Some(notice_update(NoticeLevel::Error, kind.to_string())),
         _ => None,
     }

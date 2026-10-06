@@ -394,6 +394,11 @@ pub enum LoopEvent {
         /// Seconds the loop will actually sleep before retrying. Always
         /// less than or equal to the loop's internal cap (60s).
         wait_secs: u64,
+        /// The precise wait in milliseconds. Sub-second backoffs round
+        /// down to zero `wait_secs`, so UIs render this instead of
+        /// claiming "in 0s".
+        #[serde(default)]
+        wait_ms: u64,
         /// Seconds the server asked for via `Retry-After` when present.
         /// `Some` whenever the provider returned a hint, even if the
         /// hint did not exceed the cap; UIs decide whether to surface

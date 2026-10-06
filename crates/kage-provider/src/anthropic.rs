@@ -100,17 +100,15 @@ impl AnthropicProvider {
     /// configured, e.g. local endpoints), then the configured extras in
     /// key order.
     fn request_headers(&self) -> Vec<(String, String)> {
-        let mut headers = vec![
-            ("content-type".to_owned(), "application/json".to_owned()),
-            ("anthropic-version".to_owned(), ANTHROPIC_VERSION.to_owned()),
-        ];
-        if !self.api_key.is_empty() {
-            headers.push(("x-api-key".to_owned(), self.api_key.clone()));
-        }
-        for (name, value) in &self.extra_headers {
-            headers.push((name.clone(), value.clone()));
-        }
-        headers
+        let credential = (!self.api_key.is_empty()).then(|| ("x-api-key", self.api_key.clone()));
+        crate::headers::request_headers(
+            &[
+                ("content-type", "application/json".to_owned()),
+                ("anthropic-version", ANTHROPIC_VERSION.to_owned()),
+            ],
+            credential,
+            &self.extra_headers,
+        )
     }
 }
 

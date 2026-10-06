@@ -88,14 +88,13 @@ impl GeminiProvider {
     /// in key order. The key travels in a header, never the query
     /// string, so it cannot leak through URL logging or proxy records.
     fn request_headers(&self) -> Vec<(String, String)> {
-        let mut headers = vec![("content-type".to_owned(), "application/json".to_owned())];
-        if !self.api_key.is_empty() {
-            headers.push(("x-goog-api-key".to_owned(), self.api_key.clone()));
-        }
-        for (name, value) in &self.extra_headers {
-            headers.push((name.clone(), value.clone()));
-        }
-        headers
+        let credential =
+            (!self.api_key.is_empty()).then(|| ("x-goog-api-key", self.api_key.clone()));
+        crate::headers::request_headers(
+            &[("content-type", "application/json".to_owned())],
+            credential,
+            &self.extra_headers,
+        )
     }
 }
 

@@ -101,7 +101,7 @@ impl State {
             Ok(state) => state,
             Err(err) => {
                 eprintln!("kage: {err}; starting from empty state");
-                Self::default()
+                Self::empty()
             }
         }
     }

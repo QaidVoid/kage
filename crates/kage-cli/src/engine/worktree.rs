@@ -210,7 +210,12 @@ fn cleanup(path: &Path, repo: &Path, vcs: &Vcs) {
             }
         }
         Vcs::Git { branch, base } => {
-            if run_bounded(repo, "git", &["worktree", "remove", &target]).is_err() {
+            // A dirty or staged checkout refuses the plain remove,
+            // which the checkpoint could not clean up by committing;
+            // the stale directory is not worth keeping either.
+            if run_bounded(repo, "git", &["worktree", "remove", &target]).is_err()
+                && run_bounded(repo, "git", &["worktree", "remove", "--force", &target]).is_err()
+            {
                 return;
             }
             let ahead = run_bounded(
@@ -395,6 +400,31 @@ mod tests {
         drop(tree);
         assert!(wait_for_drops(Duration::from_secs(30)));
         let branch = format!("kage/agent-{}", short(id));
+        assert_eq!(sh(repo.path(), "git", &["branch", "--list", &branch]), "");
+    }
+
+    #[test]
+    fn a_dirty_checkout_is_force_removed_with_its_unchanged_branch() {
+        if !has("git") {
+            return;
+        }
+        let repo = git_repo();
+        let dir = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let tree = Worktree::create(repo.path(), dir.path(), id, "general: add b".into()).unwrap();
+        // An empty identity makes the checkpoint's commit fail even on
+        // a machine with a global one, so the checkout stays staged
+        // and the plain remove refuses it.
+        sh(tree.workdir(), "git", &["config", "user.name", ""]);
+        sh(tree.workdir(), "git", &["config", "user.email", ""]);
+        std::fs::write(tree.workdir().join("b.txt"), "b\n").unwrap();
+        let report = tree.checkpoint();
+        assert!(report.contains("could not be committed"), "{report}");
+        let branch = format!("kage/agent-{}", short(id));
+        let path = tree.path.clone();
+        drop(tree);
+        assert!(wait_for_drops(Duration::from_secs(30)));
+        assert!(!path.exists(), "the dirty checkout is removed anyway");
         assert_eq!(sh(repo.path(), "git", &["branch", "--list", &branch]), "");
     }
 

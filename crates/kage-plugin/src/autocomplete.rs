@@ -153,7 +153,7 @@ fn complete_on(
     {
         return fail(&e);
     }
-    match watchdog::run(lua, watchdog::BUDGET, || {
+    match watchdog::run(lua, watchdog::AUTOCOMPLETE_BUDGET, || {
         func.call::<Value>((prefix.to_owned(), ctx))
     }) {
         Ok(Value::Table(items)) => parse_items(&items),

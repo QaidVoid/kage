@@ -1,7 +1,7 @@
 //! Provider-qualified model ids: `provider/model`, such as
 //! `anthropic/claude-sonnet-4-6`.
 //!
-//! The older `provider/model` form still reads, so configs and session
+//! The older `provider:model` form still reads, so configs and session
 //! files written before the slash keep working; ids are written back
 //! with a slash.
 

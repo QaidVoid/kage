@@ -1,7 +1,8 @@
 //! Streaming session reader.
 //!
 //! [`SessionReader::iter`] opens a session file and yields one
-//! [`SessionEntry`] per non-empty line. A non-final line that fails to parse
+//! [`SessionEntry`] per line that is not empty or whitespace-only. A
+//! non-final line that fails to parse
 //! is yielded as `Err` and iteration continues. The trailing line is
 //! forgiven only when it is unterminated: the tail of a torn write from
 //! a crashed appender ends iteration silently with
@@ -85,7 +86,7 @@ impl Iterator for SessionReader {
                 }
             };
 
-            if line.is_empty() {
+            if line.trim_ascii().is_empty() {
                 if is_trailing {
                     return None;
                 }
@@ -282,6 +283,22 @@ mod tests {
         let reader = SessionReader::iter(&path).unwrap();
         let entries: Vec<_> = reader.collect::<Result<_, _>>().unwrap();
         assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn whitespace_only_line_is_skipped() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        let header = serde_json::to_string(&SessionEntry::Header(fresh_header())).unwrap();
+        let valid = serde_json::to_string(&label("ok")).unwrap();
+        let raw = format!("{header}\n   \n{valid}\n");
+        std::fs::write(&path, raw).unwrap();
+
+        let reader = SessionReader::iter(&path).unwrap();
+        let entries: Vec<_> = reader.collect::<Result<_, _>>().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(entries[0], SessionEntry::Header(_)));
+        assert!(matches!(entries[1], SessionEntry::Label(_)));
     }
 
     #[test]

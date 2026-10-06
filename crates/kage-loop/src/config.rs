@@ -33,7 +33,9 @@ pub struct LoopConfig {
     /// messages.
     pub parallel_tools: bool,
     /// Trigger compaction once estimated token usage exceeds this fraction
-    /// of the model's context window. Must be in `(0.0, 1.0]`.
+    /// of the model's context window. Must be in `[0.0, 1.0]`: `0`
+    /// disables compaction entirely, and `1` compacts as soon as usage
+    /// reaches the context window.
     pub compaction_threshold: f32,
     /// How the loop drains queued steering messages each turn.
     #[serde(default)]

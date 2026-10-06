@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use kage_acp::acp::{McpServer, SessionUpdate, ToolCallStatus, ToolKind};
+use kage_acp::acp::{
+    ContentBlock, EmbeddedResource, McpServer, SessionUpdate, ToolCallStatus, ToolKind,
+};
 use kage_core::agents::AgentDefs;
 use kage_core::config::McpServer as McpSpec;
 use kage_core::permissions::{PermissionAction, PermissionsConfig, ToolPermissionRules};
@@ -26,6 +28,7 @@ use crate::engine::{AgentSetup, Commander};
 use crate::permissions::PermissionGate;
 
 use super::bridge::{to_update, tool_kind, usage_update};
+use super::content::prompt_content;
 use super::host::Host;
 use super::mcp::{prompt_commands, without_login};
 use super::*;
@@ -1329,6 +1332,21 @@ fn prompt_blocks_reach_the_engine_as_content() {
             text("[audio omitted]"),
         ]
     );
+}
+
+#[test]
+fn an_unknown_prompt_block_is_omitted_with_a_note() {
+    let content = prompt_content(ContentBlock::Unknown);
+    assert_eq!(content, text("[unsupported block omitted]"));
+}
+
+#[test]
+fn a_resource_without_text_or_blob_is_omitted_with_a_note() {
+    let block = ContentBlock::Resource(EmbeddedResource {
+        resource: serde_json::json!({ "uri": "file:///w/e.txt" }),
+    });
+    let content = prompt_content(block);
+    assert_eq!(content, text("[resource omitted]"));
 }
 
 #[test]
@@ -5410,6 +5428,74 @@ fn the_model_catalog_lists_each_provider_with_its_models() {
         .collect();
     assert_eq!(ids, ["mock/m", "mock/other"]);
     assert_eq!(mock["models"][0]["name"], "Mock m");
+}
+
+/// A provider under a catalog id that declares no models, so the
+/// catalog drives what its picker lists.
+#[derive(Debug)]
+struct CatalogDriven {
+    meta: kage_provider::ProviderMetadata,
+}
+
+impl CatalogDriven {
+    fn of(id: &str, display_name: &str) -> Self {
+        Self {
+            meta: kage_provider::ProviderMetadata {
+                id: id.into(),
+                display_name: display_name.into(),
+                supports_caching: false,
+                supports_thinking: false,
+                supports_tool_use: true,
+            },
+        }
+    }
+}
+
+impl kage_provider::Provider for CatalogDriven {
+    fn metadata(&self) -> &kage_provider::ProviderMetadata {
+        &self.meta
+    }
+
+    fn stream(
+        &self,
+        _req: kage_provider::StreamRequest,
+        _cancel: &kage_core::CancelFlag,
+    ) -> Result<kage_provider::EventStream, ProviderError> {
+        Err(ProviderError::Auth("not used".into()))
+    }
+}
+
+#[test]
+fn a_provider_outside_the_catalog_with_no_declared_models_is_left_out() {
+    let registry = ProviderRegistry::new().with(Arc::new(MockProvider::replaying(vec![])));
+    let catalog = models::catalog(&registry);
+    assert!(
+        !catalog.providers.iter().any(|p| p.id == "mock"),
+        "mock declares no models and has no catalog entry"
+    );
+}
+
+#[test]
+fn a_catalog_provider_without_declared_models_lists_catalog_entries() {
+    let registry =
+        ProviderRegistry::new().with(Arc::new(CatalogDriven::of("anthropic", "Anthropic Direct")));
+    let catalog = models::catalog(&registry);
+    assert_eq!(catalog.providers.len(), 1);
+    let provider = &catalog.providers[0];
+    assert_eq!(provider.id, "anthropic");
+    assert_eq!(provider.name, "Anthropic", "the catalog names the provider");
+    let entry = provider
+        .models
+        .iter()
+        .find(|m| m.id == "anthropic/claude-fable-5")
+        .expect("the catalog's claude-fable-5");
+    assert_eq!(entry.name, "Claude Fable 5");
+    assert_eq!(entry.context, Some(1_000_000));
+    assert_eq!(entry.input_cost, Some(10.0));
+    assert!(
+        entry.released.is_some(),
+        "catalog entries carry release dates"
+    );
 }
 
 #[cfg(unix)]

@@ -500,7 +500,11 @@ mod tests {
             .unwrap();
         // Header + m1 + label + m2: the label is its own entry, so a
         // fork through m2 carries four lines.
-        assert_eq!(copied.len(), 4, "header, the labeled message, the label and m2");
+        assert_eq!(
+            copied.len(),
+            4,
+            "header, the labeled message, the label and m2"
+        );
         assert!(
             matches!(&copied[2], SessionEntry::Label(l) if l.text == "milestone" && l.anchor == anchor),
             "the label survives with its anchor: {:?}",

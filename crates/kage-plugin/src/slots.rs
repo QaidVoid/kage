@@ -429,6 +429,7 @@ impl Slots {
     /// recompute of every Lua component on the owner thread and returns
     /// at once.
     pub fn report(&self, width: u16, mode: &str) {
+        let width = width.max(1);
         let resized = {
             let mut ui = lock(&self.shared.ui);
             if ui.mode != mode {

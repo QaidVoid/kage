@@ -141,7 +141,9 @@ fn run_hook(
         Ok(v) => v,
         Err(e) => return fail(&e),
     };
-    match watchdog::run(lua, watchdog::BUDGET, || func.call::<Value>(payload)) {
+    match watchdog::run(lua, watchdog::TERMINAL_INPUT_BUDGET, || {
+        func.call::<Value>(payload)
+    }) {
         Ok(Value::Boolean(b)) => b,
         Ok(_) => false,
         Err(e) => fail(&e),

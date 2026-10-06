@@ -178,7 +178,9 @@ pub(crate) fn parse_grants(
 /// the plugin currently being evaluated, returns a truthful
 /// `{ name = bool }` table so a plugin can degrade when a capability
 /// is missing, and for each granted-and-requested capability runs its
-/// registered installer against that plugin's own `kage` proxy.
+/// registered installer against that plugin's own `kage` proxy. A
+/// granted name whose capability has no registered installer raises
+/// instead of reporting true.
 pub(crate) fn install_request_capabilities(
     lua: &Lua,
     current: CurrentPlugin,
@@ -204,6 +206,18 @@ pub(crate) fn install_request_capabilities(
             for name in &requested {
                 let cap = Capability::parse(name).map_err(mlua::Error::external)?;
                 let ok = granted.contains(&cap);
+                if ok {
+                    let installed = registry
+                        .lock()
+                        .map_err(|_| mlua::Error::external("capability registry mutex poisoned"))?
+                        .contains_key(&cap);
+                    if !installed {
+                        return Err(mlua::Error::external(format!(
+                            "capability {} has no installer",
+                            cap.name()
+                        )));
+                    }
+                }
                 result.set(name.as_str(), ok)?;
                 if ok {
                     attach_capability(lua, cap, plugin.as_deref(), &envs, &registry)?;
@@ -245,8 +259,9 @@ pub(crate) fn install_trusted(
 
 /// Run the registered installer for `cap` against the requesting
 /// plugin's `kage` proxy table, so the elevated API is visible only
-/// to that plugin. A capability with no registered installer (none
-/// have one until their phase lands) is a silent no-op here.
+/// to that plugin. `request_capabilities` has already refused a
+/// granted name with no installer, so every capability reaching here
+/// has one.
 fn attach_capability(
     lua: &Lua,
     cap: Capability,
@@ -354,6 +369,66 @@ mod tests {
         assert!(
             rt.eval_plugin("trusted", "return kage.request_capabilities({'teleport'})")
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn every_capability_granted_and_requested_reports_true() {
+        let mut caps = BTreeMap::new();
+        caps.insert(
+            "trusted".to_owned(),
+            Capability::ALL
+                .iter()
+                .map(|cap| cap.name().to_owned())
+                .collect(),
+        );
+        let rt = crate::PluginRuntime::builder()
+            .capabilities(caps)
+            .build()
+            .unwrap();
+        let names = Capability::ALL
+            .iter()
+            .map(|cap| format!("'{}'", cap.name()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!("return kage.request_capabilities({{{names}}})");
+        let Value::Table(result) = rt.eval_plugin("trusted", &source).unwrap() else {
+            panic!("expected a result table");
+        };
+        for cap in Capability::ALL {
+            assert!(
+                result.get::<bool>(cap.name()).unwrap(),
+                "{} was granted and has an installer",
+                cap.name()
+            );
+        }
+    }
+
+    #[test]
+    fn a_granted_capability_without_an_installer_errors() {
+        let lua = Lua::new();
+        lua.globals()
+            .set("kage", lua.create_table().unwrap())
+            .unwrap();
+        let mut grants = HashMap::new();
+        let mut granted = HashSet::new();
+        granted.insert(Capability::Net);
+        grants.insert("p".to_owned(), granted);
+        install_request_capabilities(
+            &lua,
+            Arc::new(Mutex::new(Some("p".to_owned()))),
+            Arc::new(grants),
+            Arc::new(Mutex::new(HashMap::new())),
+            capability_registry(),
+        )
+        .unwrap();
+        let err = lua
+            .load("return kage.request_capabilities({'net'})")
+            .eval::<Value>()
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("capability net has no installer"),
+            "the error names the capability: {err}"
         );
     }
 }

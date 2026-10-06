@@ -90,7 +90,9 @@ async function boot() {
     const glue = await import("./kage_desktop.js");
     await glue.default();
   } catch (error) {
-    document.body.replaceChildren(failure(error));
+    const stage = document.createElement("main");
+    stage.append(failure(error));
+    document.body.replaceChildren(stage);
   }
 }
 

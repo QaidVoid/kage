@@ -211,42 +211,12 @@ fn forward(out: &OutSlot, msg: &[u8]) -> io::Result<()> {
 
 /// Read the next SSE frame's joined `data` payload from `reader`,
 /// returning `None` at EOF. Comment lines (`:` prefix) and unknown
-/// fields (including `event:`) are ignored, multiple `data:` lines
-/// are joined with `\n`, and a blank line terminates the frame. Both
-/// a single line and the frame as a whole are bounded by `limit`.
+/// fields, including `event:`, are ignored by taking only the frame's
+/// data; multiple `data:` lines are joined with `\n`, and a blank
+/// line terminates the frame. Framing and the `limit` byte cap come
+/// from [`kage_core::sse::read_frame`].
 fn read_sse_frame<R: BufRead>(reader: &mut R, limit: u64) -> io::Result<Option<String>> {
-    let mut data: Vec<String> = Vec::new();
-    let mut saw_any = false;
-    let mut frame_bytes = 0u64;
-    loop {
-        let mut line = String::new();
-        let n = reader.by_ref().take(limit).read_line(&mut line)?;
-        frame_bytes += u64::try_from(n).unwrap_or(u64::MAX);
-        if frame_bytes > limit {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "sse frame exceeds size cap",
-            ));
-        }
-        if n == 0 {
-            if saw_any && !data.is_empty() {
-                return Ok(Some(data.join("\n")));
-            }
-            return Ok(None);
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            if saw_any && !data.is_empty() {
-                return Ok(Some(data.join("\n")));
-            }
-            continue;
-        }
-        saw_any = true;
-        if let Some(rest) = trimmed.strip_prefix("data:") {
-            data.push(rest.trim_start().to_owned());
-        }
-        // Comments (':' prefix) and unknown fields are ignored.
-    }
+    Ok(kage_core::sse::read_frame(reader, Some(limit))?.map(|frame| frame.data))
 }
 
 /// Pull SSE frames from `body` and forward every JSON payload into

@@ -4,8 +4,9 @@
 //! doc. An [`OptionStore`] holds the current values, seeded from a
 //! loaded [`Config`] and then written by Lua or the TUI. Every set
 //! records its source, queues an [`OptionChange`] for the host to
-//! apply, and bumps a generation counter. The plugin runtime fires the
-//! `option_set` event for each set.
+//! apply, and bumps a generation counter; a set that leaves the value
+//! unchanged does neither. The plugin runtime fires the `option_set`
+//! event for each set.
 
 use crate::config::{Config, EditorMode};
 use crate::keymap;
@@ -404,6 +405,32 @@ impl OptionValue {
     }
 }
 
+/// Convert an option value into its JSON form.
+#[must_use]
+pub fn option_to_json(value: &OptionValue) -> serde_json::Value {
+    match value {
+        OptionValue::Bool(b) => serde_json::Value::from(*b),
+        OptionValue::Int(n) => serde_json::Value::from(*n),
+        OptionValue::Float(x) => serde_json::Value::from(*x),
+        OptionValue::Str(s) => serde_json::Value::from(s.as_str()),
+    }
+}
+
+/// Parse an option value out of its JSON form, or `None` when the
+/// JSON is not a boolean, number or string.
+#[must_use]
+pub fn option_from_json(value: &serde_json::Value) -> Option<OptionValue> {
+    Some(match value {
+        serde_json::Value::Bool(b) => OptionValue::Bool(*b),
+        serde_json::Value::Number(n) => match n.as_i64() {
+            Some(n) => OptionValue::Int(n),
+            None => OptionValue::Float(n.as_f64()?),
+        },
+        serde_json::Value::String(s) => OptionValue::Str(s.clone()),
+        _ => return None,
+    })
+}
+
 /// Where the current value of an option came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OptionSource {
@@ -501,7 +528,9 @@ impl OptionStore {
     }
 
     /// Validate and set `name`, queue the change and bump the
-    /// generation. Returns the queued change.
+    /// generation. Setting the value `name` already holds queues
+    /// nothing and bumps nothing, so plugins are not notified, but
+    /// still returns the change. Returns the queued change.
     pub fn set(
         &mut self,
         name: &str,
@@ -511,6 +540,14 @@ impl OptionStore {
         let i = index(name).ok_or_else(|| unknown(name))?;
         let def = &OPTIONS[i];
         let new = def.validate(value)?;
+        if self.values[i].0 == new {
+            return Ok(OptionChange {
+                name: def.name,
+                old: new.clone(),
+                new,
+                source,
+            });
+        }
         let (old, _) = std::mem::replace(&mut self.values[i], (new.clone(), source));
         let change = OptionChange {
             name: def.name,
@@ -533,6 +570,23 @@ impl OptionStore {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+}
+
+/// Write `edits` into the config file at `path`, each at its option's
+/// TOML path, leaving the rest of the file as written.
+///
+/// # Errors
+///
+/// See [`Config::save_keys`].
+pub fn save_options(
+    path: &std::path::Path,
+    edits: &[(&OptionDef, OptionValue)],
+) -> crate::Result<()> {
+    let edits: Vec<(Vec<&str>, OptionValue)> = edits
+        .iter()
+        .map(|(def, value)| (def.toml.split('.').collect(), value.clone()))
+        .collect();
+    Config::save_keys(path, &edits)
 }
 
 fn index(name: &str) -> Option<usize> {
@@ -956,5 +1010,89 @@ mod tests {
                 "{level} is not a thinking level"
             );
         }
+    }
+
+    #[test]
+    fn option_to_json_maps_each_variant() {
+        assert_eq!(
+            option_to_json(&OptionValue::Bool(true)),
+            serde_json::json!(true)
+        );
+        assert_eq!(option_to_json(&OptionValue::Int(-3)), serde_json::json!(-3));
+        assert_eq!(
+            option_to_json(&OptionValue::Float(0.5)),
+            serde_json::json!(0.5)
+        );
+        assert_eq!(
+            option_to_json(&OptionValue::Str("vim".into())),
+            serde_json::json!("vim")
+        );
+    }
+
+    #[test]
+    fn option_from_json_accepts_scalars_and_rejects_the_rest() {
+        assert_eq!(
+            option_from_json(&serde_json::json!(true)),
+            Some(OptionValue::Bool(true))
+        );
+        assert_eq!(
+            option_from_json(&serde_json::json!(-3)),
+            Some(OptionValue::Int(-3))
+        );
+        assert_eq!(
+            option_from_json(&serde_json::json!(1.5)),
+            Some(OptionValue::Float(1.5))
+        );
+        assert_eq!(
+            option_from_json(&serde_json::json!("vim")),
+            Some(OptionValue::Str("vim".into()))
+        );
+        assert_eq!(option_from_json(&serde_json::json!(null)), None);
+        assert_eq!(option_from_json(&serde_json::json!([1])), None);
+        assert_eq!(option_from_json(&serde_json::json!({"a": 1})), None);
+    }
+
+    #[test]
+    fn save_options_writes_each_option_at_its_toml_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "# mine\n[ui]\nmouse = true\n").unwrap();
+        save_options(
+            &path,
+            &[
+                (find("mouse").unwrap(), OptionValue::Bool(false)),
+                (find("agent_max_depth").unwrap(), OptionValue::Int(2)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# mine\n[ui]\nmouse = false\n\n[agents]\nmax_depth = 2\n"
+        );
+    }
+
+    #[test]
+    fn an_idempotent_set_returns_the_change_without_queueing() {
+        let mut store = OptionStore::default();
+        let first = store
+            .set("mouse", OptionValue::Bool(false), OptionSource::Lua)
+            .unwrap();
+        assert_eq!(first.old, OptionValue::Bool(true));
+        assert_eq!(first.new, OptionValue::Bool(false));
+        let second = store
+            .set("mouse", OptionValue::Bool(false), OptionSource::Lua)
+            .unwrap();
+        assert_eq!(second.old, OptionValue::Bool(false));
+        assert_eq!(second.new, OptionValue::Bool(false));
+        let names: Vec<&str> = store.take_changes().iter().map(|c| c.name).collect();
+        assert_eq!(names, ["mouse"]);
+        assert_eq!(store.generation(), 1);
+        let third = store
+            .set("mouse", OptionValue::Bool(true), OptionSource::Lua)
+            .unwrap();
+        assert_eq!(third.old, OptionValue::Bool(false));
+        assert_eq!(third.new, OptionValue::Bool(true));
+        assert_eq!(store.take_changes().len(), 1);
+        assert_eq!(store.generation(), 2);
     }
 }

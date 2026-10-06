@@ -30,55 +30,23 @@ pub(crate) struct SseEvent {
 
 /// Read the next SSE frame, or `Ok(None)` at end of stream.
 ///
-/// Blank lines terminate a frame, `:` lines are comments, `event:`
-/// sets the name, and successive `data:` lines join with `\n`. A
-/// frame with content still buffered at EOF is flushed before the
-/// terminating `Ok(None)`. A frame whose name and data are both empty
-/// (a bare `data:` keepalive line) is skipped rather than surfaced.
+/// Framing is shared with the MCP transport
+/// ([`kage_core::sse::read_frame`]), uncapped: blank lines terminate
+/// a frame, `:` lines are comments, `event:` sets the name, and
+/// successive `data:` lines join with `\n`. A frame with content
+/// still buffered at EOF is flushed before the terminating `Ok(None)`.
+/// A frame whose name and data are both empty (a bare `data:`
+/// keepalive line) is skipped rather than surfaced.
 pub(crate) fn read_sse_event<R: BufRead>(
     reader: &mut R,
 ) -> Result<Option<SseEvent>, ProviderError> {
-    let mut name = String::new();
-    let mut data = String::new();
-    let mut have_content = false;
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
-        if n == 0 {
-            if have_content && !(name.is_empty() && data.is_empty()) {
-                return Ok(Some(SseEvent { name, data }));
-            }
-            return Ok(None);
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            if have_content && !(name.is_empty() && data.is_empty()) {
-                return Ok(Some(SseEvent { name, data }));
-            }
-            // An empty-data frame is a keepalive, not an event: reset
-            // and keep reading instead of surfacing a payload the state
-            // machines would fail to parse.
-            name.clear();
-            data.clear();
-            have_content = false;
-            continue;
-        }
-        if trimmed.starts_with(':') {
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("event:") {
-            rest.trim_start().clone_into(&mut name);
-            have_content = true;
-        } else if let Some(rest) = trimmed.strip_prefix("data:") {
-            if !data.is_empty() {
-                data.push('\n');
-            }
-            data.push_str(rest.trim_start());
-            have_content = true;
-        }
+    match kage_core::sse::read_frame(reader, None) {
+        Ok(Some(frame)) => Ok(Some(SseEvent {
+            name: frame.name.unwrap_or_default(),
+            data: frame.data,
+        })),
+        Ok(None) => Ok(None),
+        Err(e) => Err(ProviderError::Transport(e.to_string())),
     }
 }
 

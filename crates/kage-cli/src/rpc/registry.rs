@@ -5,7 +5,10 @@
 
 use kage_acp::acp::{OptionEntry, OptionSetRequest, OptionsResponse};
 use kage_core::config::Config;
-use kage_core::options::{OPTIONS, OptionKind, OptionSource, OptionStore, OptionValue, lookup};
+use kage_core::options::{
+    OPTIONS, OptionKind, OptionSource, OptionStore, lookup, option_from_json, option_to_json,
+    save_options,
+};
 use kage_jsonrpc::RpcError;
 
 /// Every option with the value `config` puts in effect.
@@ -35,8 +38,10 @@ pub(super) fn entries(config: &Config) -> OptionsResponse {
                 min,
                 max,
                 values,
-                default: to_json(&def.default_value()),
-                value: store.get(def.name).map_or(serde_json::Value::Null, to_json),
+                default: option_to_json(&def.default_value()),
+                value: store
+                    .get(def.name)
+                    .map_or(serde_json::Value::Null, option_to_json),
                 configured: store.source(def.name) == Some(OptionSource::Toml),
                 live: def.live,
             }
@@ -49,32 +54,10 @@ pub(super) fn entries(config: &Config) -> OptionsResponse {
 pub(super) fn set(path: &std::path::Path, req: &OptionSetRequest) -> Result<(), RpcError> {
     let invalid = |message: String| RpcError::new(-32602, message);
     let def = lookup(&req.name).map_err(|e| invalid(e.to_string()))?;
-    let value = from_json(&req.value)
+    let value = option_from_json(&req.value)
         .ok_or_else(|| invalid(format!("{} takes {}", def.name, def.expected())))?;
     let value = def.validate(value).map_err(|e| invalid(e.to_string()))?;
-    Config::save_keys(path, &[(def.toml.split('.').collect(), value)])
-        .map_err(|e| RpcError::internal(e.to_string()))
-}
-
-fn to_json(value: &OptionValue) -> serde_json::Value {
-    match value {
-        OptionValue::Bool(b) => serde_json::Value::from(*b),
-        OptionValue::Int(n) => serde_json::Value::from(*n),
-        OptionValue::Float(x) => serde_json::Value::from(*x),
-        OptionValue::Str(s) => serde_json::Value::from(s.as_str()),
-    }
-}
-
-fn from_json(value: &serde_json::Value) -> Option<OptionValue> {
-    Some(match value {
-        serde_json::Value::Bool(b) => OptionValue::Bool(*b),
-        serde_json::Value::Number(n) => match n.as_i64() {
-            Some(n) => OptionValue::Int(n),
-            None => OptionValue::Float(n.as_f64()?),
-        },
-        serde_json::Value::String(s) => OptionValue::Str(s.clone()),
-        _ => return None,
-    })
+    save_options(path, &[(def, value)]).map_err(|e| RpcError::internal(e.to_string()))
 }
 
 #[cfg(test)]

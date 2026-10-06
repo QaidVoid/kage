@@ -22,6 +22,7 @@ pub mod reaper;
 pub mod resource_block;
 pub mod risk;
 pub mod skills;
+pub mod sse;
 pub mod sync;
 pub mod templates;
 pub mod thinking;

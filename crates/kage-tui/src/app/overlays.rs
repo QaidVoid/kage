@@ -1,7 +1,7 @@
 //! Theme, clipboard/paste, and overlay (picker/settings/tree) handling.
 
 use super::*;
-use kage_core::options::OptionDef;
+use kage_core::options::{OptionDef, option_from_json, save_options};
 
 use crate::view::{UnicodeWidthStr as _, pad_to_width};
 
@@ -576,7 +576,7 @@ impl App {
             return;
         };
         if let Err(e) = save_options(&path, &edits) {
-            self.push_error(format!("settings: {e}"));
+            self.push_error(format!("settings: save failed: {e}"));
             return;
         }
         self.notify("settings saved");
@@ -808,28 +808,6 @@ impl App {
             ApprovalOutcome::Answer(answers) => self.answer_question(answers),
         }
     }
-}
-
-fn option_from_json(value: &serde_json::Value) -> Option<OptionValue> {
-    Some(match value {
-        serde_json::Value::Bool(b) => OptionValue::Bool(*b),
-        serde_json::Value::Number(n) => match n.as_i64() {
-            Some(n) => OptionValue::Int(n),
-            None => OptionValue::Float(n.as_f64()?),
-        },
-        serde_json::Value::String(s) => OptionValue::Str(s.clone()),
-        _ => return None,
-    })
-}
-
-/// Write `edits` into the user config at `path`, each at its option's
-/// TOML path, leaving the rest of the file as written.
-fn save_options(path: &std::path::Path, edits: &[(&OptionDef, OptionValue)]) -> Result<(), String> {
-    let edits: Vec<(Vec<&str>, OptionValue)> = edits
-        .iter()
-        .map(|(def, value)| (def.toml.split('.').collect(), value.clone()))
-        .collect();
-    kage_core::config::Config::save_keys(path, &edits).map_err(|e| format!("save failed: {e}"))
 }
 
 /// What a live MCP server offers, as the `/mcp` picker lists it: its

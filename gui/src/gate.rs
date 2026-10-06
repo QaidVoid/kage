@@ -106,7 +106,7 @@ pub(crate) fn is_below(version: &str, minimum: &str) -> bool {
 }
 
 /// Reads up to three dotted numbers, filling absent parts with zero.
-fn parse(version: &str) -> Option<(u64, u64, u64)> {
+pub(crate) fn parse(version: &str) -> Option<(u64, u64, u64)> {
     let mut parts = [0u64; 3];
     for (ix, part) in version.split('.').enumerate() {
         if ix >= 3 {

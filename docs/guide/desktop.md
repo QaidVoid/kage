@@ -24,7 +24,11 @@ Settings opens from the gear at the bottom of the sidebar. Its pages:
 | Connection | How the client reaches the engine, and the `kage` binary the desktop app runs |
 | Keyboard | Every shortcut, with the vim keys when vim mode is on |
 | Archived Sessions | Sessions archived from their menu, to restore |
-| About | The client and engine versions and the protocol |
+| About | The client and engine versions, the protocol, and the release check |
+
+The About page compares the engine and this client against the public
+releases at most once a day; **Check now** re-runs it, and **Releases**
+opens the releases page in your browser.
 
 The pages that edit engine options write the user config, as
 [configuration](/guide/config) describes. A project config that sets

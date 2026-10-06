@@ -56,6 +56,11 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 # Decodes the embedded brand art for the window icon; gpui's
 # `WindowOptions.icon` takes an `image::RgbaImage`.
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Fetches the release list and the engine binary for the update
+# check and the setup screen download; rustls, so no system OpenSSL.
+ureq = "2.10"
+# Verifies a downloaded binary against its `.sha256` sidecar.
+sha2 = "0.10"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Exactly the versions the toolkit's web stack resolved, so the lockfile

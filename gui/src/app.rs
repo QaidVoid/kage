@@ -408,6 +408,15 @@ impl Shell {
         )
         .detach();
 
+        // Asks the public releases once a day whether a newer engine
+        // or client is out, so the About page can say so unprompted.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let store = store.clone();
+            cx.spawn(async move |_, cx| crate::update::run_check(store, cx, false).await)
+                .detach();
+        }
+
         cx.observe(&store, |shell, _, cx| {
             shell.sync_themes(cx);
             shell.flush_outgoing(cx);

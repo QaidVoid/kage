@@ -23,6 +23,7 @@ pub mod theme;
 pub mod themes;
 pub mod timing;
 pub mod transport;
+pub mod update;
 pub mod views;
 
 /// Reports a problem where the platform can show it: stderr on the

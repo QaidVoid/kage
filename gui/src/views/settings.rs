@@ -30,6 +30,8 @@ use crate::transport::State;
 use crate::views::acp_form::AcpForm;
 use crate::views::directory_picker::{DirectoryPicker, Picked};
 use crate::views::kit::badge;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::views::kit::{BtnTone, btn_sm};
 use crate::views::mcp_form::{FormDone, McpForm};
 use crate::views::provider_form::{ProviderForm, Target as ProviderTarget};
 use crate::views::settings_config as config;
@@ -1580,39 +1582,117 @@ impl SettingsView {
         let protocol = state
             .protocol_version
             .map_or_else(|| "unknown".to_owned(), |v| format!("ACP v{v}"));
-        vec![
+        let header = h_flex()
+            .gap(px(14.))
+            .items_center()
+            .mt(px(8.))
+            .mb(px(18.))
+            .child(crate::views::eclipse::eclipse(48., None, pal))
+            .child(
+                v_flex()
+                    .child(
+                        div()
+                            .text_size(px(18.))
+                            .font_weight(WEIGHT_BOLD)
+                            .text_color(pal.ink_strong)
+                            .child("kage"),
+                    )
+                    .child(div().text_size(px(FS_SM)).text_color(pal.muted).child(
+                        SharedString::from(format!(
+                            "desktop {} \u{b7} {engine}",
+                            env!("CARGO_PKG_VERSION")
+                        )),
+                    )),
+            );
+        let rows = boxed(pal).child(row(
+            "Protocol",
+            "The Agent Client Protocol with the _kage/* extensions",
+            badge(SharedString::from(protocol), pal),
+            pal,
+        ));
+        #[cfg(not(target_arch = "wasm32"))]
+        let rows = rows.child(self.updates(pal, cx));
+        vec![header.into_any_element(), rows.into_any_element()]
+    }
+
+    /// The Updates row: what the last release check saw for the
+    /// engine and this client, with a manual re-check and the page a
+    /// newer build ships on.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn updates(&self, pal: &Palette, cx: &Context<Self>) -> Div {
+        let store = self.store.read(cx);
+        let prefs = store.prefs();
+        let engine = store
+            .state()
+            .agent
+            .as_ref()
+            .and_then(|agent| agent.version.clone());
+        let desktop = env!("CARGO_PKG_VERSION");
+        let engine_line = match (&prefs.latest_cli_version, &engine) {
+            (Some(latest), Some(now)) if crate::update::is_newer(latest, now) => {
+                format!("engine {now}; {latest} is available")
+            }
+            (Some(latest), Some(now)) => format!("engine {now}; current with {latest}"),
+            (Some(latest), None) => format!("engine version unknown; {latest} is available"),
+            (None, _) => "engine: no check has run yet".to_owned(),
+        };
+        let desktop_line = match &prefs.latest_desktop_version {
+            Some(latest) if crate::update::is_newer(latest, desktop) => {
+                format!("desktop {desktop}; {latest} is available")
+            }
+            Some(latest) => format!("desktop {desktop}; current with {latest}"),
+            None => "desktop: no check has run yet".to_owned(),
+        };
+        let view = cx.entity();
+        row(
+            "Updates",
+            "The public releases, checked at most once a day",
             h_flex()
-                .gap(px(14.))
+                .gap(px(12.))
                 .items_center()
-                .mt(px(8.))
-                .mb(px(18.))
-                .child(crate::views::eclipse::eclipse(48., None, pal))
                 .child(
                     v_flex()
+                        .gap(px(2.))
                         .child(
                             div()
-                                .text_size(px(18.))
-                                .font_weight(WEIGHT_BOLD)
-                                .text_color(pal.ink_strong)
-                                .child("kage"),
+                                .text_size(px(FS_XS))
+                                .text_color(pal.ink)
+                                .child(SharedString::from(engine_line)),
                         )
-                        .child(div().text_size(px(FS_SM)).text_color(pal.muted).child(
-                            SharedString::from(format!(
-                                "desktop {} \u{b7} {engine}",
-                                env!("CARGO_PKG_VERSION")
-                            )),
-                        )),
+                        .child(
+                            div()
+                                .text_size(px(FS_XS))
+                                .text_color(pal.muted)
+                                .child(SharedString::from(desktop_line)),
+                        ),
                 )
-                .into_any_element(),
-            boxed(pal)
-                .child(row(
-                    "Protocol",
-                    "The Agent Client Protocol with the _kage/* extensions",
-                    badge(SharedString::from(protocol), pal),
-                    pal,
-                ))
-                .into_any_element(),
-        ]
+                .child(
+                    h_flex()
+                        .gap(px(8.))
+                        .child(
+                            btn_sm("about-check", BtnTone::Plain, pal)
+                                .on_click(move |_, _, cx| {
+                                    view.update(cx, |this, cx| this.check_updates(cx));
+                                })
+                                .child("Check now"),
+                        )
+                        .child(
+                            btn_sm("about-releases", BtnTone::Plain, pal)
+                                .on_click(|_, _, _| crate::update::open_releases())
+                                .child(Icon::new(IconName::ExternalLink).with_size(px(12.)))
+                                .child("Releases"),
+                        ),
+                ),
+            pal,
+        )
+    }
+
+    /// Runs a release check now; the row refreshes when it lands.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn check_updates(&self, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        cx.spawn(async move |_, cx| crate::update::run_check(store, cx, true).await)
+            .detach();
     }
 
     fn toggle(

@@ -1642,6 +1642,13 @@ impl TranscriptView {
                             "this agent is too old or missing capabilities: {lines}"
                         ))),
                 )
+                .when(cfg!(not(target_arch = "wasm32")), |banner| {
+                    banner.child(
+                        Button::new("download-agent")
+                            .label("Download kage")
+                            .on_click(|_, _, _| crate::update::open_releases()),
+                    )
+                })
                 .child(
                     Button::new("dismiss-gate")
                         .label("Dismiss")

@@ -108,8 +108,11 @@ xattr -dr com.apple.quarantine kage-desktop-aarch64-macos
 ```
 
 The desktop client needs `kage` itself: it runs the one on your
-`PATH`, or the one Settings > Connection > kage binary names. Its
-settings are in [desktop and web client](/guide/desktop).
+`PATH`, or the one Settings > Connection > kage binary names. When
+neither exists, the setup screen offers to download the newest
+release, verify it against its published checksum and install it to
+your user bin (`~/.local/bin`, else `%LOCALAPPDATA%\Programs\kage` on
+Windows). Its settings are in [desktop and web client](/guide/desktop).
 
 ## verify
 

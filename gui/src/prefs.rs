@@ -49,6 +49,13 @@ pub struct Prefs {
     pub archived: BTreeSet<String>,
     /// The `kage` binary the setup screen chose, when the PATH has none.
     pub kage_path: Option<String>,
+    /// Unix seconds of the last completed release check, which runs
+    /// at most once a day.
+    pub update_checked_at: Option<i64>,
+    /// The newest engine release the last check saw, without the `v`.
+    pub latest_cli_version: Option<String>,
+    /// The newest desktop release the last check saw.
+    pub latest_desktop_version: Option<String>,
     /// The model, thinking and mode options the last session showed,
     /// which the welcome pane offers before a session exists.
     pub template: Vec<SessionConfigOption>,
@@ -70,6 +77,9 @@ impl Default for Prefs {
             starred_models: BTreeSet::new(),
             archived: BTreeSet::new(),
             kage_path: None,
+            update_checked_at: None,
+            latest_cli_version: None,
+            latest_desktop_version: None,
             template: Vec::new(),
         }
     }

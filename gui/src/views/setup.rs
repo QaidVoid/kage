@@ -3,7 +3,8 @@
 //!
 //! The app spawns `kage rpc` from the user's machine and never bundles
 //! it, so a missing binary gets this screen: point at a `kage` you
-//! have, or install one and check again. A chosen binary is probed with
+//! have, download one from the releases, or install it and check
+//! again. A chosen binary is probed with
 //! `--version` first and refused when it is not `kage` or is older than
 //! the minimum the gate checks. The web build runs nothing locally and
 //! never shows this screen.
@@ -84,6 +85,8 @@ pub struct SetupView {
     picked: Deferred,
     /// Why the last chosen path was refused.
     error: Option<String>,
+    /// Whether a release download and install is running.
+    downloading: bool,
 }
 
 impl EventEmitter<SetupEvent> for SetupView {}
@@ -102,6 +105,7 @@ impl SetupView {
             path,
             picked: Deferred::new(),
             error: None,
+            downloading: false,
         }
     }
 
@@ -121,6 +125,33 @@ impl SetupView {
             Err(why) => self.error = Some(why),
         }
         cx.notify();
+    }
+
+    /// Downloads the newest release for this platform, verifies it
+    /// and hands the installed binary to the shell when it checks
+    /// out. One download at a time; failures land in the error line.
+    fn download(&mut self, cx: &mut Context<Self>) {
+        if self.downloading {
+            return;
+        }
+        self.downloading = true;
+        self.error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { crate::update::install_latest() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.downloading = false;
+                match result {
+                    Ok(path) => cx.emit(SetupEvent::Use(path.display().to_string())),
+                    Err(why) => this.error = Some(why),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Opens the platform's file picker and fills the field with the
@@ -319,6 +350,49 @@ impl Render for SetupView {
                                     .child(error)
                             })),
                     )
+                    .child(group("Or download it here"))
+                    .children(crate::update::cli_asset().map(|asset| {
+                        let download_view = view.clone();
+                        boxed()
+                            .child(
+                                h_flex()
+                                    .px(px(16.))
+                                    .py(px(12.))
+                                    .gap(px(16.))
+                                    .items_center()
+                                    .child(
+                                        v_flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(
+                                                div()
+                                                    .font_family(FONT_MONO)
+                                                    .text_size(px(FS_SM))
+                                                    .text_color(pal.ink)
+                                                    .child(asset),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(FS_XS))
+                                                    .text_color(pal.muted)
+                                                    .child(crate::update::install_hint()),
+                                            ),
+                                    )
+                                    .child(
+                                        btn_sm("setup-download", BtnTone::Primary, pal)
+                                            .on_click(move |_, _, cx| {
+                                                download_view
+                                                    .update(cx, |this, cx| this.download(cx));
+                                            })
+                                            .child(Icon::new(IconName::Download).with_size(px(12.)))
+                                            .child(if self.downloading {
+                                                "Downloading\u{2026}"
+                                            } else {
+                                                "Download"
+                                            }),
+                                    ),
+                            )
+                    }))
                     .child(group("Or install it yourself"))
                     .child(install)
                     .child(
@@ -326,7 +400,7 @@ impl Render for SetupView {
                             .mt(px(16.))
                             .text_size(px(FS_XS))
                             .text_color(pal.faint)
-                            .child("kage runs as its own program and updates on its own, so this app and kage never have to ship together."),
+                            .child("kage stays its own program, so the app and the engine update separately."),
                     ),
             )
     }

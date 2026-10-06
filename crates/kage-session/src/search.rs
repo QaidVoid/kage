@@ -1,6 +1,7 @@
 //! Regex search across recorded sessions.
 //!
-//! [`search`] walks every `*.jsonl` file in a directory and reports each
+//! [`search`] walks every `*.jsonl` file in a directory (the extension
+//! matches without case) and reports each
 //! matching line. The query is a regular expression; matching is done with
 //! the same engine that powers `ripgrep` (`grep-regex` + `grep-searcher`).
 //! Results carry the source path, the 1-based line number, and the raw
@@ -37,7 +38,8 @@ impl SearchHit {
 }
 
 /// Run `query` against every `*.jsonl` file in `dir` and return up to
-/// `max_hits` hits.
+/// `max_hits` hits. The extension matches without case, like every
+/// session scan.
 ///
 /// `query` is parsed as a regex. Hits are returned in directory-traversal
 /// order; within a single file they appear in line order. Once `max_hits`
@@ -48,27 +50,8 @@ pub fn search(dir: &Path, query: &str, max_hits: usize) -> Result<Vec<SearchHit>
         source: std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()),
     })?;
 
-    let read_dir = match std::fs::read_dir(dir) {
-        Ok(d) => d,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => {
-            return Err(SessionError::Io {
-                path: dir.to_path_buf(),
-                source: err,
-            });
-        }
-    };
-
     let mut hits = Vec::new();
-    for entry in read_dir {
-        let entry = entry.map_err(|err| SessionError::Io {
-            path: dir.to_path_buf(),
-            source: err,
-        })?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-            continue;
-        }
+    for path in crate::resume::jsonl_candidates(dir)? {
         if search_one(&matcher, &path, max_hits, &mut hits)? {
             break;
         }
@@ -217,6 +200,16 @@ mod tests {
         let hits = search(dir.path(), "alpha", 100).unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].path.ends_with("real.jsonl"));
+    }
+
+    #[test]
+    fn search_sees_an_uppercase_extension() {
+        let dir = tempdir().unwrap();
+        write_session(&dir.path().join("REAL.JSONL"), "alpha");
+        std::fs::write(dir.path().join("notes.txt"), b"alpha\n").unwrap();
+        let hits = search(dir.path(), "alpha", 100).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].path.ends_with("REAL.JSONL"));
     }
 
     #[test]

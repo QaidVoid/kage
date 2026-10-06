@@ -2,8 +2,8 @@
 //!
 //! Each fixture is one connection's incoming frames in order, taken
 //! from the flows `kage rpc` produces: a fix with tool calls, a
-//! permission round trip, a cancel while asked, and a run with
-//! subagents. The tests drive a [`Client`] the way a host would,
+//! permission round trip, a cancel while asked, a run with
+//! subagents, and a run that fails mid-turn. The tests drive a [`Client`] the way a host would,
 //! sending the commands and feeding every fixture line, then assert
 //! the state the replay left behind.
 
@@ -117,6 +117,7 @@ fn every_fixture_line_parses_against_the_wire_types() {
         "approval.jsonl",
         "cancel.jsonl",
         "subagents.jsonl",
+        "error.jsonl",
     ] {
         for frame in fixture(name) {
             match frame {
@@ -150,7 +151,11 @@ fn every_fixture_line_parses_against_the_wire_types() {
                         "{name}"
                     );
                 }
-                Frame::Failure { .. } => panic!("{name} carries no failures"),
+                Frame::Failure { id, error } => {
+                    assert_eq!(id, n(3), "{name}");
+                    assert_eq!(error.code, -32603, "{name}");
+                    assert!(!error.message.is_empty(), "{name}");
+                }
             }
         }
     }
@@ -399,6 +404,45 @@ fn the_cancel_fixture_withdraws_the_ask_and_ends_cancelled() {
     assert!(
         session.in_turn,
         "the turn never closed on the wire, so it stays open"
+    );
+}
+
+#[test]
+fn the_error_fixture_surfaces_a_mid_turn_failure() {
+    let frames = fixture("error.jsonl");
+    let mut client = Client::new();
+    client.initialize(ClientCapabilities::default(), None);
+    client.new_session("/w", &[]);
+    let _ = client.take_outgoing();
+    drive(&mut client, &frames[..2]);
+    let outcome = client.prompt(PARENT, text("run the build"));
+    assert_eq!(outcome, PromptOutcome::Sent { request_id: 3 });
+    let _ = client.take_outgoing();
+    assert!(client.state().session(PARENT).unwrap().running);
+
+    let changes = drive(&mut client, &frames[2..]);
+    let error = kage_client::RpcError::new(-32603, "provider stream failed: connection reset");
+    assert!(
+        changes.contains(&Change::Failed { request: 3, error }),
+        "the mid-turn error is surfaced: {changes:?}"
+    );
+    let session = client.state().session(PARENT).unwrap();
+    assert!(!session.running, "the failed answer released the run");
+    assert!(
+        session.in_turn,
+        "the turn never closed on the wire, so it stays open"
+    );
+    assert_eq!(session.last_stop, None, "no stop reason rode the error");
+    assert_eq!(
+        match &own_prompt(&session.items)[0] {
+            TranscriptItem::Assistant { text } => text.as_str(),
+            other => panic!("expected the mid-turn chunk, got {other:?}"),
+        },
+        "Reading the build output."
+    );
+    assert!(
+        client.take_outgoing().is_empty(),
+        "an empty queue flushes nothing after the failure"
     );
 }
 

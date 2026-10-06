@@ -192,19 +192,22 @@ impl PermissionGate {
     /// The name a call should be judged under: the tool's real name if
     /// `name` is an alias, otherwise `name` itself. A name that is
     /// neither a tool nor an alias is returned unchanged, so an MCP
-    /// name still reaches the MCP branch.
-    fn canonical(&self, name: &str) -> String {
+    /// name still reaches the MCP branch. `None` when the alias chain
+    /// exhausts the hop budget or cycles: the name resolves to no
+    /// tool, and the caller must deny rather than judge the alias
+    /// spelling.
+    fn canonical(&self, name: &str) -> Option<String> {
         let mut current = name.to_owned();
         for _ in 0..8 {
             let Some(target) = self.aliases.get(&current) else {
-                return current;
+                return Some(current);
             };
             if *target == current {
-                return current;
+                return Some(current);
             }
             current.clone_from(target);
         }
-        name.to_owned()
+        None
     }
 
     /// The known MCP server `tool` belongs to. Matching by prefix
@@ -395,8 +398,13 @@ impl Hooks for PermissionGate {
         name: &str,
         input: &serde_json::Value,
     ) -> Option<ToolOutput> {
-        let name = self.canonical(name);
-        let name = name.as_ref();
+        let Some(resolved) = self.canonical(name) else {
+            return Some(error_output(
+                name,
+                "permission denied: the tool name does not resolve through the alias map",
+            ));
+        };
+        let name = resolved.as_str();
         let reads = matches!(
             lock(&self.risks).get(name),
             Some(Risk::Read | Risk::Network)
@@ -1211,7 +1219,8 @@ mod tests {
 
     /// A name that is neither a tool nor an alias must reach the MCP
     /// branch untouched, and a self-referential or cyclic alias must
-    /// terminate rather than hang.
+    /// terminate rather than hang. A cycle resolves to nothing, so the
+    /// verdict site can deny it.
     #[test]
     fn canonical_leaves_unknown_names_and_survives_cycles() {
         let gate =
@@ -1221,12 +1230,43 @@ mod tests {
                 ("self".to_owned(), "self".to_owned()),
             ]));
         assert_eq!(
-            gate.canonical("github__create_issue"),
-            "github__create_issue"
+            gate.canonical("github__create_issue").as_deref(),
+            Some("github__create_issue")
         );
-        assert_eq!(gate.canonical("self"), "self");
-        assert_eq!(gate.canonical("loop_a"), "loop_a");
-        assert_eq!(gate.canonical("bash"), "bash");
+        assert_eq!(gate.canonical("self").as_deref(), Some("self"));
+        assert_eq!(gate.canonical("bash").as_deref(), Some("bash"));
+        assert_eq!(gate.canonical("loop_a"), None);
+    }
+
+    /// The bypass this guards: a crafted alias cycle used to give up
+    /// the resolution and fall through to the allow-by-default fallback
+    /// under the alias spelling, so a deny rule written against the
+    /// canonical name never applied. An unresolvable name is denied.
+    #[test]
+    fn an_unresolvable_alias_cycle_is_denied() {
+        let mut rules = PermissionsConfig::default();
+        rules.tools.insert(
+            "shell".to_owned(),
+            ToolPermissionRules {
+                default: PermissionAction::Allow,
+                allow: Vec::new(),
+                deny: vec!["rm *".to_owned()],
+            },
+        );
+        let aliases = BTreeMap::from([
+            ("bash".to_owned(), "sh".to_owned()),
+            ("sh".to_owned(), "bash".to_owned()),
+        ]);
+        let mut gate = PermissionGate::new(rules).with_aliases(aliases);
+        let out = gate
+            .before_tool_call(
+                &kage_core::ToolCallId::new("call"),
+                "bash",
+                &serde_json::json!({"command": "rm -rf target"}),
+            )
+            .expect("a cyclic alias must be denied");
+        assert!(out.is_error);
+        assert!(out.text.contains("`bash`"), "{}", out.text);
     }
 
     /// An MCP name is never rewritten by an alias map, so a server

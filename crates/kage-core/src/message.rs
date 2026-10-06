@@ -111,7 +111,9 @@ pub enum Content {
     ToolResultBlock {
         /// The id of the tool call this result corresponds to.
         call_id: ToolCallId,
-        /// Stringified output. Structured output goes in [`Content::Custom`].
+        /// Stringified output, the text the model sees. A tool's
+        /// structured detail never enters history; it rides the
+        /// [`crate::event::ToolOutput`] event for host rendering.
         output: String,
         /// Whether the tool failed.
         is_error: bool,

@@ -118,9 +118,8 @@ system prompt.
 A `kage.on` (or `kage.api.autocmd_create`) registration for one of
 these from an ungranted plugin is dropped with a warning naming the
 capability to grant. The rest of the event table (`agent_start`,
-`turn_start`, `tool_call`, `tool_result`, option and theme changes,
-...) stays open to every plugin, because those payloads carry no
-conversation text.
+`turn_start`, option and theme changes, ...) stays open to every
+plugin, because those payloads carry no conversation text.
 
 ### `provider`
 

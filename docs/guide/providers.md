@@ -51,9 +51,9 @@ The four `xiaomi*` ids share one key, and so do the two coding plans.
 `zai` is billed apart from the coding plans and needs its own key.
 
 The model picker lists the models the [catalog](#model-catalog) knows
-for each provider. `kimi-for-coding` has no catalog entry, so the
-picker shows no models for it. Name the model yourself, as in
-`kage -m kimi-for-coding:<model>`.
+for each provider. Every provider in the table has catalog entries, so
+pick a model from the picker or name one yourself, as in
+`kage -m kimi-for-coding:k3`.
 
 ### Z.AI and Zhipu AI
 

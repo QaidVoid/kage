@@ -21,19 +21,38 @@ jobs:
       - run: rustup toolchain install
       - run: cargo fmt --all --check
 
-  lua-types:
-    name: lua-types
+  generated:
+    name: generated
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # Regenerate the lua-language-server stub and fail if the
-      # committed plugins/types/kage.lua drifts from the in-tree spec
-      # (same shape as the cargo fmt --check gate).
+      # Regenerate the tracked generated files and fail when the
+      # committed copies drift (same shape as the cargo fmt --check
+      # gate).
       - run: cargo xtask gen-lua-types --check
-      # Enforce the ASCII-only source rule (CLAUDE.md). Unicode glyphs
-      # must be written as `\u{..}` escapes, not raw bytes.
+      # Re-render crates/kage-provider/src/catalog/generated.rs from
+      # the committed upstream snapshot, so hand edits to the catalog
+      # and unregenerated generator changes fail here. The snapshot is
+      # rewritten by refresh-models whenever generated.rs is, keeping
+      # the gate offline and deterministic.
+      - run: >-
+          cargo xtask refresh-models --check
+          --source file://xtask/fixtures/models.json
+      # Re-render man/kage.1 from the clap CLI definition and diff it
+      # against the committed page, so flag changes force a refresh
+      # before release.yml ships a stale page in every archive. The
+      # page embeds the crate version, so a version bump must
+      # regenerate it in the same change.
+      - name: gen-manpage drift
+        run: |
+          cargo build -p kage-cli
+          ./target/debug/kage gen-manpage --out "$RUNNER_TEMP/kage.1"
+          diff -u man/kage.1 "$RUNNER_TEMP/kage.1"
+      # Enforce the ASCII-only source rule. Scans crates/, xtask/src,
+      # plugins/ and man/; Unicode glyphs must be written as `\u{..}`
+      # escapes, not raw bytes.
       - run: cargo xtask check-ascii
 
   clippy:
@@ -46,18 +65,39 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
 
   msrv:
-    name: msrv (1.89)
+    name: msrv (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: workspace
+            toolchain: "1.89.0"
+            workdir: .
+            check: cargo +1.89.0 check --workspace --all-targets --locked
+          # gui/ is its own Cargo workspace. Its pinned gpui-kit stack
+          # needs 1.95 (`slice_as_array`, `std::hint::cold_path`), so
+          # the floor is the pin; the leg still catches anything in the
+          # lockfile that quietly starts needing newer.
+          - name: gui
+            toolchain: "1.95.0"
+            workdir: gui
+            check: cargo +1.95.0 check --all-targets --locked
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ matrix.workdir }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The workspace pins its toolchain via rust-toolchain.toml; the
-      # MSRV gate checks the declared floor against the committed
-      # Cargo.lock, so install 1.89 and never touch the pinned one.
-      - run: rustup toolchain install 1.89.0 --profile minimal --no-self-update
+      # The workspace and gui pin their toolchains via
+      # rust-toolchain.toml; the MSRV gates check the declared floors
+      # against the committed Cargo.locks, so install the floors and
+      # never touch the pins.
+      - run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal --no-self-update
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: msrv-1.89
-      - run: cargo +1.89.0 check --workspace --all-targets --locked
+          key: msrv-${{ matrix.toolchain }}
+          workspaces: ${{ matrix.workdir }}
+      - run: ${{ matrix.check }}
 
   test:
     name: test (${{ matrix.os }})

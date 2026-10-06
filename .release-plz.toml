@@ -39,6 +39,7 @@ changelog_path = "./CHANGELOG.md"
 changelog_include = [
   "kage-acp",
   "kage-acp-wire",
+  "kage-client",
   "kage-core",
   "kage-jsonrpc",
   "kage-loop",

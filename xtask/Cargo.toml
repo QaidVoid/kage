@@ -19,3 +19,6 @@ ureq.workspace = true
 kage-core.workspace = true
 kage-plugin.workspace = true
 kage-provider.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

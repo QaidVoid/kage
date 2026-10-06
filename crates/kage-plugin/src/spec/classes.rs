@@ -395,7 +395,7 @@ pub(super) const CLASSES: &[Class] = &[
             Field {
                 name: "stream",
                 ty: "fun(req: table, emit: fun(event: table)): table[]|fun(): table?",
-                doc: "Yields provider event tables through `emit` or the return value; required.",
+                doc: "Yields provider event tables through `emit` or the return value; required. `emit` raises once the consumer cancels the stream, so stop yielding and return then.",
             },
         ],
     },
@@ -703,7 +703,8 @@ pub(super) const CLASSES: &[Class] = &[
         name: "kage.Block",
         doc: &[
             "Block payload a `kage.register_block_renderer` render receives.",
-            "Every payload carries `kind` and `width`; the rest follow the",
+            "Every payload carries `kind`; `width` is injected fresh per",
+            "render; the rest follow the",
             "kind: `user` has `text`; `assistant` has `text` and `live`",
             "(the block is still streaming); `thinking` has `text`, `folded`",
             "and `live`; `tool_call` has `name`, `input_summary`,",

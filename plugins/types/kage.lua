@@ -257,7 +257,7 @@
 ---@field supports_tool_use? boolean Defaults to true.
 ---@field preserves_thinking? boolean Skip flatten-thinking when replaying history. Defaults to false.
 ---@field models? kage.ProviderModel[] Models the provider advertises in the picker.
----@field stream fun(req: table, emit: fun(event: table)): table[]|fun(): table? Yields provider event tables through `emit` or the return value; required.
+---@field stream fun(req: table, emit: fun(event: table)): table[]|fun(): table? Yields provider event tables through `emit` or the return value; required. `emit` raises once the consumer cancels the stream, so stop yielding and return then.
 
 --- One model entry surfaced in the picker.
 ---@class kage.ProviderModel
@@ -341,7 +341,8 @@
 ---@field underline? boolean
 
 --- Block payload a `kage.register_block_renderer` render receives.
---- Every payload carries `kind` and `width`; the rest follow the
+--- Every payload carries `kind`; `width` is injected fresh per
+--- render; the rest follow the
 --- kind: `user` has `text`; `assistant` has `text` and `live`
 --- (the block is still streaming); `thinking` has `text`, `folded`
 --- and `live`; `tool_call` has `name`, `input_summary`,

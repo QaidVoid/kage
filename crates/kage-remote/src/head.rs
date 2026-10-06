@@ -130,12 +130,9 @@ pub fn read_head_with_timeout(
         let n = match stream.read(&mut chunk) {
             Ok(n) => n,
             Err(e)
-                if e.kind() == io::ErrorKind::WouldBlock
-                    || e.kind() == io::ErrorKind::TimedOut =>
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
             {
-                return Err(HeadError::Timeout(
-                    "a read missed its deadline".to_owned(),
-                ));
+                return Err(HeadError::Timeout("a read missed its deadline".to_owned()));
             }
             Err(e) => return Err(e.into()),
         };

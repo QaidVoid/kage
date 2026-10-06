@@ -88,7 +88,7 @@ mod tests {
     fn default_values_are_sane() {
         let cfg = LoopConfig::default();
         assert!(!cfg.parallel_tools);
-        assert!(cfg.compaction_threshold > 0.0 && cfg.compaction_threshold <= 1.0);
+        assert!((0.0..=1.0).contains(&cfg.compaction_threshold));
     }
 
     #[test]

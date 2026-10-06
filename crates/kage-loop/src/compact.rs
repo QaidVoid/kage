@@ -168,6 +168,8 @@ fn run_compaction<F: FnMut(LoopEvent)>(
 }
 
 fn should_compact(cx: &AgentContext, config: LoopConfig) -> bool {
+    // `0` turns compaction off; the semantic is owned by the
+    // `compaction_threshold` option doc in kage-core's options registry.
     if config.compaction_threshold <= 0.0 || cx.context_window == 0 {
         return false;
     }
@@ -379,6 +381,25 @@ mod tests {
         let ran = maybe_compact(&mut cx, cfg, &provider, &cancel, &mut hooks, &mut |_| {}).unwrap();
         assert!(!ran);
         assert_eq!(cx.history.len(), 3);
+    }
+
+    /// A validated threshold of `0` is compaction off, so the loop must
+    /// read it unchanged and never compact, however full the context is.
+    #[test]
+    fn zero_threshold_reaches_the_loop_and_compacts_nothing() {
+        let provider = MockProvider::replaying(vec![]);
+        let cancel = CancelFlag::new();
+        let mut hooks = NoopHooks;
+        let cfg = LoopConfig {
+            compaction_threshold: 0.0,
+            ..LoopConfig::default()
+        };
+        let mut cx = loaded_context(150_000, 10);
+        cx.context_window = 200_000;
+
+        let ran = maybe_compact(&mut cx, cfg, &provider, &cancel, &mut hooks, &mut |_| {}).unwrap();
+        assert!(!ran);
+        assert_eq!(cx.history.len(), 10);
     }
 
     #[test]

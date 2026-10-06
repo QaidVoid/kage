@@ -350,8 +350,9 @@ fn set_key(root: &mut toml_edit::Table, keys: &[&str], value: &OptionValue) -> R
 #[serde(default)]
 pub struct LoopSettings {
     /// Trigger compaction once estimated token usage exceeds this
-    /// fraction of the model's context window. The loop clamps it to
-    /// `(0.0, 1.0]`.
+    /// fraction of the model's context window. Must be in `[0.0, 1.0]`:
+    /// `0` disables compaction, and `1` compacts as soon as usage
+    /// reaches the context window.
     pub compaction_threshold: f32,
 }
 

@@ -897,6 +897,25 @@ mod tests {
         );
     }
 
+    /// `0` is a valid fraction that turns compaction off, so a
+    /// validated `0` must reach the loop config unchanged.
+    #[test]
+    fn compaction_threshold_validates_zero() {
+        let mut store = OptionStore::default();
+        let change = store
+            .set(
+                "compaction_threshold",
+                OptionValue::Float(0.0),
+                OptionSource::Lua,
+            )
+            .unwrap();
+        assert_eq!(change.new, OptionValue::Float(0.0));
+        assert_eq!(
+            store.get("compaction_threshold"),
+            Some(&OptionValue::Float(0.0))
+        );
+    }
+
     #[test]
     fn agent_limits_validate_their_ranges() {
         let mut store = OptionStore::default();

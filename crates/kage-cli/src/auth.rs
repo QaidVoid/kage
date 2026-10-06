@@ -312,6 +312,23 @@ impl AuthStore {
     }
 }
 
+/// How far ahead the OAuth expiry warnings look. Shared by the TUI
+/// startup notices, `auth list` and doctor.
+pub(crate) const OAUTH_EXPIRY_WARNING: Duration = Duration::days(3);
+
+/// The expiry phrase for an OAuth credential expiring at `at`,
+/// relative to `now`: `has expired`, `expires within a day`,
+/// `expires in 1 day` or `expires in N days`. Shared by the TUI
+/// startup notices, `auth list` and doctor.
+pub(crate) fn expiry_label(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    match (at - now).num_days() {
+        _ if at <= now => "has expired".to_owned(),
+        0 => "expires within a day".to_owned(),
+        1 => "expires in 1 day".to_owned(),
+        days => format!("expires in {days} days"),
+    }
+}
+
 /// Provider ids the auth subcommand can target. The list mirrors the
 /// catalog (and our hardcoded `Provider` impls). `zai` and the two
 /// coding plans are billed separately, so `zai` takes its own key;
@@ -441,26 +458,32 @@ impl ProviderKey {
     /// Where the credential comes from right now, or `None` when the
     /// provider has none.
     pub(crate) fn source(&self, store: &AuthStore) -> Option<String> {
-        self.source_with(store, |env| std::env::var(env).is_ok_and(|v| !v.is_empty()))
+        self.source_with(
+            store,
+            |env| std::env::var(env).is_ok_and(|v| !v.is_empty()),
+            Utc::now(),
+        )
     }
 
-    /// [`Self::source`] against an injected env check, so callers can
-    /// rate providers without touching the process env.
+    /// [`Self::source`] against an injected env check and clock, so
+    /// callers can rate providers without touching the process env or
+    /// the wall clock. An OAuth row carries its expiry label.
     pub(crate) fn source_with(
         &self,
         store: &AuthStore,
         env_set: impl Fn(&str) -> bool,
+        now: DateTime<Utc>,
     ) -> Option<String> {
         if self.keyless {
             return Some("no key needed".to_owned());
         }
         let env = (!self.env.is_empty() && env_set(&self.env)).then_some(self.env.as_str());
-        let stored = store.credential(&self.id).map(|c| {
-            if c.is_oauth() {
-                "auth.json (oauth)"
-            } else {
-                "auth.json"
-            }
+        let stored = store.credential(&self.id).map(|c| match c {
+            Credential::Oauth(o) => match o.expires_at {
+                Some(at) => format!("auth.json (oauth, {})", expiry_label(at, now)),
+                None => "auth.json (oauth)".to_owned(),
+            },
+            _ => "auth.json".to_owned(),
         });
         match (env, stored) {
             (Some(env), Some(label)) => Some(format!("{env} + {label}")),
@@ -515,7 +538,12 @@ pub fn run_list() -> ExitCode {
         eprintln!("kage: config: {e}; custom providers are not listed");
         kage_core::config::Config::default()
     });
-    let _ = write_list(&mut io::stdout().lock(), &provider_keys(&config), &store);
+    let _ = write_list(
+        &mut io::stdout().lock(),
+        &provider_keys(&config),
+        &store,
+        Utc::now(),
+    );
     ExitCode::SUCCESS
 }
 
@@ -525,6 +553,7 @@ fn write_list<W: Write>(
     out: &mut W,
     providers: &[ProviderKey],
     store: &AuthStore,
+    now: DateTime<Utc>,
 ) -> io::Result<()> {
     let width = providers
         .iter()
@@ -534,7 +563,11 @@ fn write_list<W: Write>(
         .unwrap_or_default();
     writeln!(out, "{:<width$}  {:<6}  SOURCE", "PROVIDER", "STATUS")?;
     for provider in providers {
-        let source = provider.source(store);
+        let source = provider.source_with(
+            store,
+            |env| std::env::var(env).is_ok_and(|v| !v.is_empty()),
+            now,
+        );
         let status = if source.is_some() { "ready" } else { "-" };
         writeln!(
             out,
@@ -937,7 +970,7 @@ mod tests {
     fn list_aligns_columns_to_the_longest_id() {
         let keys = provider_keys(&keyless_config("a-very-long-custom-provider"));
         let mut out = Vec::new();
-        write_list(&mut out, &keys, &AuthStore::empty()).unwrap();
+        write_list(&mut out, &keys, &AuthStore::empty(), fixed_now()).unwrap();
         let out = String::from_utf8(out).unwrap();
         let mut lines = out.lines();
         let header = lines.next().unwrap();
@@ -948,6 +981,51 @@ mod tests {
             assert_ne!(line.as_bytes()[column], b' ', "{line}");
         }
         assert!(out.contains("a-very-long-custom-provider  ready   no key needed"));
+    }
+
+    /// OAuth rows carry their expiry next to the source, using the
+    /// shared label: days left, the sub-day phrasing, or `expired`.
+    #[test]
+    fn list_labels_oauth_rows_with_their_expiry() {
+        let env_config = |id: &str, env: &str| {
+            let body = format!(
+                "[providers.custom.{id}]\nbase_url = \"http://127.0.0.1:1/v1\"\napi_key_env = \"{env}\"\n\
+                 [[providers.custom.{id}.models]]\nid = \"small\"\nname = \"Small\"\n"
+            );
+            toml::from_str(&body).unwrap()
+        };
+        let mut store = AuthStore::empty();
+        store.set_oauth(
+            "zai",
+            OAuthCredential {
+                access_token: "t".into(),
+                expires_at: Some(fixed_now() + Duration::days(3)),
+                ..OAuthCredential::default()
+            },
+        );
+        store.set_oauth(
+            "openai",
+            OAuthCredential {
+                access_token: "t".into(),
+                expires_at: Some(fixed_now() - Duration::hours(1)),
+                ..OAuthCredential::default()
+            },
+        );
+        let mut keys = provider_keys(&env_config("zai", "KAGE_TEST_UNSET_ZAI"));
+        keys.extend(provider_keys(&env_config(
+            "openai",
+            "KAGE_TEST_UNSET_OPENAI",
+        )));
+        let mut out = Vec::new();
+        write_list(&mut out, &keys, &store, fixed_now()).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        let zai = out.lines().find(|l| l.starts_with("zai ")).unwrap();
+        assert!(
+            zai.contains("auth.json (oauth, expires in 3 days)"),
+            "{zai}"
+        );
+        let openai = out.lines().find(|l| l.starts_with("openai ")).unwrap();
+        assert!(openai.contains("has expired"), "{openai}");
     }
 
     #[test]

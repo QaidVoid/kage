@@ -325,9 +325,12 @@ fn check_auth() -> Check {
     Check {
         name: "auth",
         status: Status::Ok,
-        body: auth_body(&store, &auth::provider_keys(&config), |env| {
-            std::env::var(env).is_ok_and(|v| !v.is_empty())
-        }),
+        body: auth_body(
+            &store,
+            &auth::provider_keys(&config),
+            |env| std::env::var(env).is_ok_and(|v| !v.is_empty()),
+            chrono::Utc::now(),
+        ),
         hint: None,
     }
 }
@@ -338,6 +341,7 @@ fn auth_body(
     store: &AuthStore,
     keys: &[auth::ProviderKey],
     env_set: impl Fn(&str) -> bool,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> String {
     let stored = store.providers.len();
     let oauth = store.providers.values().filter(|c| c.is_oauth()).count();
@@ -345,10 +349,24 @@ fn auth_body(
         .iter()
         .filter(|key| !key.env.is_empty() && env_set(&key.env))
         .count();
-    format!(
+    let mut body = format!(
         "{stored} stored ({oauth} oauth, {} api-key), {env_count} via env",
         stored - oauth
-    )
+    );
+    let expiring: Vec<String> = store
+        .oauth_expiring(auth::OAUTH_EXPIRY_WARNING, now)
+        .map(|(provider, at)| {
+            format!(
+                "the {provider} login {} (rerun `kage auth login {provider}`)",
+                auth::expiry_label(at, now)
+            )
+        })
+        .collect();
+    if !expiring.is_empty() {
+        body.push_str("; ");
+        body.push_str(&expiring.join(", "));
+    }
+    body
 }
 
 /// The `permissions` row (Unix): the auth file holds provider keys,
@@ -617,7 +635,13 @@ impl HostLog for SilentSink {
 mod tests {
     use std::fs;
 
+    use chrono::TimeZone;
+
     use super::*;
+
+    fn fixed_now() -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
+    }
 
     #[test]
     fn directories_list_all_four_roles() {
@@ -803,12 +827,15 @@ mod tests {
         .unwrap();
         let keys = auth::provider_keys(&config);
         let store = AuthStore::empty();
-        let body = auth_body(&store, &keys, |env| env == "MY_KEY");
+        let body = auth_body(&store, &keys, |env| env == "MY_KEY", fixed_now());
         assert!(body.contains("1 via env"), "{body}");
 
         let ready: Vec<&str> = keys
             .iter()
-            .filter(|key| key.source_with(&store, |env| env == "MY_KEY").is_some())
+            .filter(|key| {
+                key.source_with(&store, |env| env == "MY_KEY", fixed_now())
+                    .is_some()
+            })
             .map(|key| key.id.as_str())
             .collect();
         assert_eq!(
@@ -816,5 +843,32 @@ mod tests {
             ["lab"],
             "`auth list` shows ready exactly what the auth row counts"
         );
+    }
+
+    /// An OAuth login inside the expiry window is named in the auth
+    /// row with its label and the fix, so `kage doctor` surfaces what
+    /// the TUI notices surface at startup.
+    #[test]
+    fn the_auth_row_names_expiring_logins() {
+        let mut store = AuthStore::empty();
+        store.set_oauth(
+            "zai",
+            auth::OAuthCredential {
+                access_token: "t".into(),
+                expires_at: Some(fixed_now() + chrono::Duration::days(1)),
+                ..auth::OAuthCredential::default()
+            },
+        );
+        let body = auth_body(&store, &[], |_: &str| false, fixed_now());
+        assert!(body.contains("expires in 1 day"), "{body}");
+        assert!(body.contains("rerun `kage auth login zai`"), "{body}");
+
+        let fresh = auth_body(
+            &store,
+            &[],
+            |_: &str| false,
+            fixed_now() - chrono::Duration::days(30),
+        );
+        assert!(!fresh.contains("expires"), "{fresh}");
     }
 }

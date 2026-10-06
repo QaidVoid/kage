@@ -109,26 +109,60 @@ impl McpAuthStore {
     }
 }
 
-/// The [`TokenSource`] backed by `mcp-auth.json`. The file is read on
-/// every request, so a login in another process or a token it rotated
-/// is picked up without a restart.
+/// The [`TokenSource`] backed by `mcp-auth.json`. The store is cached
+/// against the file's mtime and size and re-read only when either
+/// changes, so a login or rotation in another process is picked up on
+/// the next request without re-reading the file per request.
 pub(crate) struct McpTokens {
     path: PathBuf,
+    cache: Mutex<Option<CachedStore>>,
+}
+
+/// The parsed store plus the file identity it came from.
+struct CachedStore {
+    mtime: Option<std::time::SystemTime>,
+    len: u64,
+    store: McpAuthStore,
 }
 
 impl McpTokens {
     /// Tokens stored at `path`.
     pub(crate) fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            cache: Mutex::new(None),
+        }
+    }
+
+    /// The parsed store, from the cache while the file's mtime and
+    /// size are unchanged. A missing file caches as an empty store.
+    fn load(&self) -> Result<McpAuthStore, String> {
+        let identity = match fs::metadata(&self.path) {
+            Ok(meta) => (meta.modified().ok(), meta.len()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => (None, 0),
+            Err(err) => {
+                return Err(format!("mcp auth: stat {}: {err}", self.path.display()));
+            }
+        };
+        let mut cache = lock(&self.cache);
+        if let Some(cached) = cache.as_ref()
+            && (cached.mtime, cached.len) == identity
+        {
+            return Ok(cached.store.clone());
+        }
+        let store = McpAuthStore::load_from(&self.path)?;
+        *cache = Some(CachedStore {
+            mtime: identity.0,
+            len: identity.1,
+            store: store.clone(),
+        });
+        Ok(store)
     }
 
     /// The entry for `url`, with its canonical key.
     fn entry(&self, url: &str) -> Option<(String, McpAuthEntry)> {
         let key = oauth::canonical_url(url).ok()?;
-        let entry = McpAuthStore::load_from(&self.path)
-            .ok()?
-            .servers
-            .remove(&key)?;
+        let entry = self.load().ok()?.servers.get(&key)?.clone();
         Some((key, entry))
     }
 
@@ -145,7 +179,7 @@ impl McpTokens {
         .ok()?;
         let token = credential(tokens);
         let access = token.access_token.clone();
-        let mut store = McpAuthStore::load_from(&self.path).ok()?;
+        let mut store = self.load().ok()?;
         store.servers.insert(
             key.to_owned(),
             McpAuthEntry {
@@ -693,6 +727,81 @@ mod tests {
 
     fn http_server(url: &str) -> McpServer {
         server(None, Some(url))
+    }
+
+    /// Another process rotating the token (new mtime) is picked up on
+    /// the next call.
+    #[test]
+    fn an_externally_rewritten_store_is_picked_up_by_the_next_call() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+        store_with(
+            &path,
+            &[(
+                "https://mcp.example.com/mcp",
+                entry("https://auth.example.com", 3600),
+            )],
+        );
+        let tokens = McpTokens::new(path.clone());
+        assert_eq!(
+            tokens.bearer("https://mcp.example.com/mcp").as_deref(),
+            Some("access-old")
+        );
+
+        let mut store = McpAuthStore::load_from(&path).unwrap();
+        let mut rotated = store.servers["https://mcp.example.com/mcp"].clone();
+        rotated.token.access_token = "access-rotated".to_owned();
+        store
+            .servers
+            .insert("https://mcp.example.com/mcp".to_owned(), rotated);
+        store.save_to(&path).unwrap();
+
+        assert_eq!(
+            tokens.bearer("https://mcp.example.com/mcp").as_deref(),
+            Some("access-rotated")
+        );
+    }
+
+    /// A rewrite that leaves mtime and size unchanged is invisible to
+    /// the stat-only identity check, so the cached store is served.
+    /// This pins the documented trade-off: identity, not content, is
+    /// what the cache keys on.
+    #[test]
+    fn an_unchanged_file_identity_is_served_from_the_cache() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+        store_with(
+            &path,
+            &[(
+                "https://mcp.example.com/mcp",
+                entry("https://auth.example.com", 3600),
+            )],
+        );
+        let original_mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        let tokens = McpTokens::new(path.clone());
+        assert_eq!(
+            tokens.bearer("https://mcp.example.com/mcp").as_deref(),
+            Some("access-old")
+        );
+
+        let mut store = McpAuthStore::load_from(&path).unwrap();
+        let mut rotated = store.servers["https://mcp.example.com/mcp"].clone();
+        rotated.token.access_token = "access-new".to_owned();
+        store
+            .servers
+            .insert("https://mcp.example.com/mcp".to_owned(), rotated);
+        store.save_to(&path).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(original_mtime)
+            .unwrap();
+
+        assert_eq!(
+            tokens.bearer("https://mcp.example.com/mcp").as_deref(),
+            Some("access-old")
+        );
     }
 
     #[test]

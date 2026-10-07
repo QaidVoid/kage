@@ -193,16 +193,14 @@ fn compiled_glob(pattern: &str) -> Option<globset::GlobMatcher> {
     if guard.len() > 1024 {
         guard.clear();
     }
-    match guard.get(pattern) {
-        Some(hit) => hit.clone(),
-        None => {
-            let compiled = globset::Glob::new(pattern)
-                .ok()
-                .map(|g| g.compile_matcher());
-            guard.insert(pattern.to_owned(), compiled.clone());
-            compiled
-        }
+    if let Some(hit) = guard.get(pattern) {
+        return hit.clone();
     }
+    let compiled = globset::Glob::new(pattern)
+        .ok()
+        .map(|g| g.compile_matcher());
+    guard.insert(pattern.to_owned(), compiled.clone());
+    compiled
 }
 
 #[cfg(test)]

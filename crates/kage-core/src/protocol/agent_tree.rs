@@ -776,8 +776,8 @@ mod tests {
     fn a_swarm_item_attribute_matches_whole_names_only() {
         let session = SessionId::new();
         for attrs in [
-            format!("item=\"real\" xitem=\"decoy\""),
-            format!("xitem=\"decoy\" item=\"real\""),
+            "item=\"real\" xitem=\"decoy\"".to_string(),
+            "xitem=\"decoy\" item=\"real\"".to_string(),
         ] {
             let aggregate = format!(
                 "completed: 1, failed: 0, cancelled: 0\n<swarm description=\"d\" \

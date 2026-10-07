@@ -21,6 +21,18 @@ args = ["rpc", "-m", "anthropic/claude-sonnet-4-6"]
 ANTHROPIC_API_KEY = "sk-..."
 ```
 
+Any ACP-speaking program works the same way, so Command Code's agent
+can be driven from kage too:
+
+```toml
+[acp.agents.commandcode]
+command = "cmd"
+args = ["acp"]
+
+[acp.agents.commandcode.env]
+CMD_API_KEY = "..."
+```
+
 Then select it as the model:
 
 ```sh

@@ -26,6 +26,7 @@
 //! - `KAGE_MODEL` to pick a specific model id (defaults are cheap).
 //! - `KAGE_PROMPT` to send a custom prompt.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::Arc;
 
@@ -41,15 +42,15 @@ fn main() {
     let prompt =
         std::env::var("KAGE_PROMPT").unwrap_or_else(|_| "Reply with exactly the word: pong".into());
 
-    let provider: Box<dyn Provider> = match provider_id.as_str() {
-        "anthropic" => Box::new(AnthropicProvider::new(must_env("ANTHROPIC_API_KEY"))),
-        "openai" => Box::new(OpenAiProvider::new(must_env("OPENAI_API_KEY"))),
-        "gemini" => Box::new(GeminiProvider::new(must_env("GEMINI_API_KEY"))),
-        "zai" => Box::new(compat_provider("zai").build(must_env("ZAI_API_KEY"))),
+    let provider: Arc<dyn Provider> = match provider_id.as_str() {
+        "anthropic" => Arc::new(AnthropicProvider::new(must_env("ANTHROPIC_API_KEY"))),
+        "openai" => Arc::new(OpenAiProvider::new(must_env("OPENAI_API_KEY"))),
+        "gemini" => Arc::new(GeminiProvider::new(must_env("GEMINI_API_KEY"))),
+        "zai" => compat_provider("zai").build(must_env("ZAI_API_KEY"), BTreeMap::new()),
         "zai-coding-plan" => {
             let key =
                 std::env::var("ZAI_CODING_API_KEY").unwrap_or_else(|_| must_env("ZAI_API_KEY"));
-            Box::new(compat_provider("zai-coding-plan").build(key))
+            compat_provider("zai-coding-plan").build(key, BTreeMap::new())
         }
         other => {
             eprintln!(

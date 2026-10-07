@@ -120,12 +120,12 @@ impl Tool for EditTool {
         // Read, splice and rename are one sequence: without the lock, a
         // concurrent edit could rewrite the file between the read and
         // the write and lose its change set.
-        with_path_lock(&path, || self.edit_locked(&input, &path))
+        with_path_lock(&path, || EditTool::edit_locked(&input, &path))
     }
 }
 
 impl EditTool {
-    fn edit_locked(&self, input: &EditInput, path: &Path) -> Result<ToolOutput, ToolError> {
+    fn edit_locked(input: &EditInput, path: &Path) -> Result<ToolOutput, ToolError> {
         let file = std::fs::File::open(path).map_err(ToolError::io_at("read", path))?;
         let total_bytes = file
             .metadata()
@@ -159,7 +159,7 @@ impl EditTool {
         let eol = Eol::detect(&original);
         let normalized = eol.normalize(&original);
 
-        let changes = match collect_changes(&input) {
+        let changes = match collect_changes(input) {
             Ok(c) => c,
             Err(msg) => return Ok(error(&input.path, msg)),
         };

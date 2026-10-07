@@ -176,16 +176,12 @@ fn register_compat_providers(
             .and_then(|o| o.api_key_env.as_deref())
             .unwrap_or_else(|| auth::env_var_for(entry.id));
         if let Some(key) = lookup_key_with_env(entry.id, env, store) {
-            let mut provider = match ov.and_then(|o| o.base_url.clone()) {
-                Some(base) => entry.build_with_base_url(key, base),
-                None => entry.build(key),
+            let headers = ov.map(|o| o.headers.clone()).unwrap_or_default();
+            let provider = match ov.and_then(|o| o.base_url.clone()) {
+                Some(base) => entry.build_with_base_url(key, base, headers),
+                None => entry.build(key, headers),
             };
-            if let Some(o) = ov
-                && !o.headers.is_empty()
-            {
-                provider = provider.with_extra_headers(o.headers.clone());
-            }
-            registry.register(Arc::new(provider));
+            registry.register(provider);
         }
     }
 }
@@ -308,6 +304,7 @@ const DEFAULT_MODEL_PRIORITY: &[&str] = &[
     "fireworks-ai",
     "moonshotai",
     "kimi-for-coding",
+    "commandcode",
 ];
 
 /// Printed when no provider other than `acp` is registered and the
@@ -316,7 +313,7 @@ pub(crate) const NO_CREDENTIALS_MESSAGE: &str = "kage: no provider credentials f
     Run `kage auth login` to save one, or export one of ANTHROPIC_API_KEY, \
     OPENAI_API_KEY, GEMINI_API_KEY, ZAI_API_KEY, ZAI_CODING_API_KEY, DEEPSEEK_API_KEY, \
     GROQ_API_KEY, MISTRAL_API_KEY, CEREBRAS_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY, \
-    FIREWORKS_API_KEY, MOONSHOT_API_KEY, KIMI_API_KEY or XIAOMI_API_KEY.";
+    FIREWORKS_API_KEY, MOONSHOT_API_KEY, KIMI_API_KEY, XIAOMI_API_KEY or CMD_API_KEY.";
 
 /// Printed when no model was requested and none could be picked.
 pub(crate) const NO_MODEL_MESSAGE: &str =
@@ -512,6 +509,130 @@ mod tests {
             "{request}"
         );
         assert!(request.contains("\"max_tokens\""), "{request}");
+    }
+
+    /// A tiny SSE response good enough for the Anthropic stream to
+    /// reach a clean end.
+    const CLAUDE_SSE: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\nevent: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-6\",\"stop_reason\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+
+    /// Read one request off `listener`, reply with `response`, and
+    /// return the raw request bytes.
+    fn serve_one(
+        listener: std::net::TcpListener,
+        response: &'static [u8],
+    ) -> std::thread::JoinHandle<String> {
+        use std::io::{Read as _, Write as _};
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !raw.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = conn.read(&mut buf).unwrap();
+                raw.extend_from_slice(&buf[..n]);
+            }
+            let head = String::from_utf8_lossy(&raw).to_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .map_or(0, |v| v.trim().parse().unwrap());
+            let body_start = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+            while raw.len() < body_start + length {
+                let n = conn.read(&mut buf).unwrap();
+                raw.extend_from_slice(&buf[..n]);
+            }
+            conn.write_all(response).unwrap();
+            String::from_utf8(raw).unwrap()
+        })
+    }
+
+    fn stream_one_model(registry: &ProviderRegistry, addressed: &str) {
+        let resolved = registry.resolve(addressed).unwrap();
+        let req = kage_provider::StreamRequest::new(
+            resolved.model.clone(),
+            vec![Arc::new(kage_core::Message::new(
+                kage_core::Role::User,
+                vec![kage_core::Content::Text { text: "hi".into() }],
+                None,
+            ))],
+        );
+        let events: Vec<_> = resolved
+            .provider
+            .stream(req, &kage_core::CancelFlag::new())
+            .unwrap()
+            .collect();
+        assert!(events.iter().all(Result::is_ok), "{events:?}");
+    }
+
+    #[test]
+    fn commandcode_posts_chat_completions_with_the_shared_key() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_one(listener, b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: [DONE]\n\n");
+        let config: kage_core::config::Config = toml::from_str(&format!(
+            r#"
+            [providers.commandcode]
+            base_url = "http://{addr}/provider/v1"
+            api_key_env = ""
+            "#
+        ))
+        .unwrap();
+        let mut store = auth::AuthStore::empty();
+        store.set_api_key("commandcode", "cmd-shared-key");
+        let mut registry = ProviderRegistry::new();
+        register_compat_providers(&config, &store, &mut registry);
+        stream_one_model(&registry, "commandcode/gpt-6-astra");
+        let request = server.join().unwrap();
+        let lower = request.to_lowercase();
+        assert!(
+            lower.starts_with("post /provider/v1/chat/completions "),
+            "{request}"
+        );
+        assert!(
+            lower.contains("\r\nauthorization: bearer cmd-shared-key\r\n"),
+            "{request}"
+        );
+        let compact = request.replace(' ', "");
+        assert!(compact.contains("\"model\":\"gpt-6-astra\""), "{request}");
+    }
+
+    #[test]
+    fn commandcode_claude_posts_messages_with_the_shared_key() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_one(listener, CLAUDE_SSE);
+        let config: kage_core::config::Config = toml::from_str(&format!(
+            r#"
+            [providers.commandcode-claude]
+            base_url = "http://{addr}/provider"
+            api_key_env = ""
+            "#
+        ))
+        .unwrap();
+        // Only the `commandcode` credential exists; the Claude flavor
+        // must pick the shared key up through its alias.
+        let mut store = auth::AuthStore::empty();
+        store.set_api_key("commandcode", "cmd-shared-key");
+        let mut registry = ProviderRegistry::new();
+        register_compat_providers(&config, &store, &mut registry);
+        assert!(registry.get("commandcode").is_some());
+        assert!(registry.get("commandcode-claude").is_some());
+        stream_one_model(&registry, "commandcode-claude/claude-sonnet-4-6");
+        let request = server.join().unwrap();
+        let lower = request.to_lowercase();
+        assert!(
+            lower.starts_with("post /provider/v1/messages "),
+            "{request}"
+        );
+        assert!(
+            lower.contains("\r\nx-api-key: cmd-shared-key\r\n"),
+            "{request}"
+        );
+        assert!(lower.contains("\r\nanthropic-version: "), "{request}");
+        let compact = request.replace(' ', "");
+        assert!(
+            compact.contains("\"model\":\"claude-sonnet-4-6\""),
+            "{request}"
+        );
     }
 
     #[derive(Debug)]

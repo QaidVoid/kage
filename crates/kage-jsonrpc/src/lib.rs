@@ -813,8 +813,8 @@ mod tests {
     #[test]
     fn a_giant_just_under_the_cap_line_arrives_whole() {
         let (in_r, mut in_w) = std::io::pipe().unwrap();
-        let (out_r, _out_w) = std::io::pipe().unwrap();
-        let (peer, inbound, _handle) = connect(BufReader::new(in_r), _out_w);
+        let (out_r, out_w) = std::io::pipe().unwrap();
+        let (peer, inbound, _handle) = connect(BufReader::new(in_r), out_w);
         let mut out = BufReader::new(out_r);
         let pad = usize::try_from(MAX_LINE / 2).unwrap();
         let raw = format!(

@@ -69,6 +69,13 @@ pub const SUPPORTED_PROVIDERS: &[ProviderMap] = &[
     ProviderMap::same("xiaomi-token-plan-ams"),
     ProviderMap::same("xiaomi-token-plan-cn"),
     ProviderMap::same("xiaomi-token-plan-sgp"),
+    // Command Code (commandcode.ai) is absent from models.dev; its
+    // snapshot rows come from the hand-maintained
+    // `xtask/fixtures/manual.json` the generator merges in. Claude
+    // models are served on the Anthropic Messages endpoint only, so
+    // they list under their own kage id.
+    ProviderMap::same("commandcode"),
+    ProviderMap::same("commandcode-claude"),
     // models.dev calls Google's API "google" but kage's Provider impl
     // is registered under "gemini".
     ProviderMap {

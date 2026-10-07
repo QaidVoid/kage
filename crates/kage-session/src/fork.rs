@@ -334,7 +334,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let src = dir.path().join("src.jsonl");
         let m1 = message_entry(Role::User, "one");
-        write(&src, fresh_header("x:y"), &[m1.clone()]);
+        write(&src, fresh_header("x:y"), std::slice::from_ref(&m1));
         let snap = snapshot(&src, |_| true).unwrap();
         assert!(!snap.truncated);
     }
@@ -361,21 +361,19 @@ mod tests {
 
         let torn_id = SessionId::new();
         let torn_at = m2.id();
-        assert_eq!(
+        assert!(
             fork(&torn, &dir.path().join("torn-fork.jsonl"), torn_id, torn_at).unwrap(),
-            true,
             "the torn tail is reported"
         );
         let whole_id = SessionId::new();
-        assert_eq!(
-            fork(
+        assert!(
+            !fork(
                 &whole,
                 &dir.path().join("whole-fork.jsonl"),
                 whole_id,
                 torn_at
             )
             .unwrap(),
-            false,
             "an intact source is not truncated"
         );
     }
@@ -559,7 +557,7 @@ mod tests {
             id: EntryId::new(),
             ts: Utc::now(),
             text: "milestone".to_owned(),
-            anchor: anchor.clone(),
+            anchor,
         });
         let m2 = message_entry(Role::Assistant, "two");
         write(&src, fresh_header("x:y"), &[m1, label, m2.clone()]);

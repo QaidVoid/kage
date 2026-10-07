@@ -61,12 +61,12 @@ impl Tool for WriteTool {
         // The exists check and the rename are one sequence: without the
         // lock, two concurrent non-overwriting writes could both pass
         // the check and both land, silently losing one.
-        with_path_lock(&target, || self.write_locked(&input, &target))
+        with_path_lock(&target, || WriteTool::write_locked(&input, &target))
     }
 }
 
 impl WriteTool {
-    fn write_locked(&self, input: &WriteInput, target: &Path) -> Result<ToolOutput, ToolError> {
+    fn write_locked(input: &WriteInput, target: &Path) -> Result<ToolOutput, ToolError> {
         if target.exists() && !input.overwrite {
             return Ok(ToolOutput {
                 is_error: true,
@@ -90,8 +90,8 @@ impl WriteTool {
             });
         }
 
-        atomic_write(&target, input.content.as_bytes())
-            .map_err(ToolError::io_at("write", &target))?;
+        atomic_write(target, input.content.as_bytes())
+            .map_err(ToolError::io_at("write", target))?;
 
         let bytes = input.content.len();
         Ok(ToolOutput {

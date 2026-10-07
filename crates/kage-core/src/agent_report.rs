@@ -365,24 +365,19 @@ pub fn split_agent_text(text: &str) -> Option<AgentBurst<'_>> {
             ("\n</agent>", true)
         } else if rest.starts_with("<message ") {
             ("\n</message>", false)
-        } else {
-            match next_open(rest) {
-                Some(next) => {
-                    let words = rest[..next].trim();
-                    if !words.is_empty() {
-                        burst.prose.push(words);
-                    }
-                    rest = &rest[next..];
-                    continue;
-                }
-                None => {
-                    let words = rest.trim();
-                    if !words.is_empty() {
-                        burst.prose.push(words);
-                    }
-                    break;
-                }
+        } else if let Some(next) = next_open(rest) {
+            let words = rest[..next].trim();
+            if !words.is_empty() {
+                burst.prose.push(words);
             }
+            rest = &rest[next..];
+            continue;
+        } else {
+            let words = rest.trim();
+            if !words.is_empty() {
+                burst.prose.push(words);
+            }
+            break;
         };
         let end = rest.find(close)? + close.len();
         let element = &rest[..end];

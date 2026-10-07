@@ -1326,6 +1326,28 @@ mod tests {
         );
     }
 
+    /// The concrete `OpenAiProvider` [`crate::compat::CompatProvider::
+    /// build`] returns for a catalog entry: the same construction, kept
+    /// concrete so these tests can reach the private `dialect` field
+    /// and `interleaved` method.
+    fn compat_openai(id: &str, base_url: &str) -> OpenAiProvider {
+        let metadata = ProviderMetadata {
+            id: id.to_owned(),
+            display_name: id.to_owned(),
+            supports_caching: false,
+            supports_thinking: false,
+            supports_tool_use: true,
+        };
+        OpenAiProvider::compatible("k", base_url, metadata)
+    }
+
+    fn compat_entry(id: &str) -> &'static crate::compat::CompatProvider {
+        crate::compat::COMPAT_PROVIDERS
+            .iter()
+            .find(|p| p.id == id)
+            .unwrap()
+    }
+
     #[test]
     fn interleaved_field_comes_from_own_models_then_catalog() {
         let custom = OpenAiProvider::new("k").with_models(vec![ProviderModel {
@@ -1338,11 +1360,7 @@ mod tests {
             Some(ReasoningField::ReasoningContent)
         );
         assert_eq!(custom.interleaved("gpt-5"), None);
-        let deepseek = crate::compat::COMPAT_PROVIDERS
-            .iter()
-            .find(|p| p.id == "deepseek")
-            .unwrap()
-            .build("k");
+        let deepseek = compat_openai("deepseek", compat_entry("deepseek").base_url);
         assert_eq!(
             deepseek.interleaved("deepseek-v4-pro"),
             Some(ReasoningField::ReasoningContent)
@@ -1386,13 +1404,17 @@ mod tests {
     #[test]
     fn zai_endpoints_are_detected_by_id_or_base_url() {
         for id in ["zai", "zai-coding-plan", "zhipuai-coding-plan"] {
-            let entry = crate::compat::COMPAT_PROVIDERS
-                .iter()
-                .find(|p| p.id == id)
-                .unwrap();
-            assert_eq!(entry.build("k").dialect, Dialect::Zai, "{id}");
-            let moved = entry.build_with_base_url("k", "http://127.0.0.1:1/v4");
-            assert_eq!(moved.dialect, Dialect::Zai, "{id} with base_url");
+            let entry = compat_entry(id);
+            assert_eq!(
+                compat_openai(id, entry.base_url).dialect,
+                Dialect::Zai,
+                "{id}"
+            );
+            assert_eq!(
+                compat_openai(id, "http://127.0.0.1:1/v4").dialect,
+                Dialect::Zai,
+                "{id} with base_url"
+            );
         }
         let custom = |url: &str| {
             let metadata = ProviderMetadata {

@@ -24,9 +24,10 @@ are configured under `[acp.*]`.
 
 ## openai-compatible providers
 
-Each of these is an OpenAI-compatible endpoint. kage registers it
-when a credential is available, and its models become addressable as
-`<id>:<model>`:
+Each of these is an OpenAI-compatible endpoint, except
+`commandcode-claude`, which speaks the Anthropic Messages format. kage
+registers one when a credential is available, and its models become
+addressable as `<id>:<model>`:
 
 | id                      | provider                      | credential env       | default base URL                              |
 | ----------------------- | ----------------------------- | -------------------- | --------------------------------------------- |
@@ -46,6 +47,8 @@ when a credential is available, and its models become addressable as
 | `xiaomi-token-plan-ams` | Xiaomi Token Plan (Europe)    | `XIAOMI_API_KEY`     | `https://token-plan-ams.xiaomimimo.com/v1`    |
 | `xiaomi-token-plan-cn`  | Xiaomi Token Plan (China)     | `XIAOMI_API_KEY`     | `https://token-plan-cn.xiaomimimo.com/v1`     |
 | `xiaomi-token-plan-sgp` | Xiaomi Token Plan (Singapore) | `XIAOMI_API_KEY`     | `https://token-plan-sgp.xiaomimimo.com/v1`    |
+| `commandcode`           | Command Code                  | `CMD_API_KEY`        | `https://api.commandcode.ai/provider/v1`      |
+| `commandcode-claude`    | Command Code (Claude)         | `CMD_API_KEY`        | `https://api.commandcode.ai/provider`         |
 
 The four `xiaomi*` ids share one key, and so do the two coding plans.
 `zai` is billed apart from the coding plans and needs its own key.
@@ -87,6 +90,48 @@ way Z.AI expects: `max_tokens` for the output limit, the system prompt as a
 models that list effort values, and `tool_stream: true` when tools
 are sent (except to `glm-4.5` models). kage sends its own
 `User-Agent`.
+
+### Command Code
+
+Command Code (commandcode.ai) fronts many model vendors behind one
+key and two wire formats. kage registers a provider for each:
+
+| id                   | format                  | endpoint                                 |
+| -------------------- | ----------------------- | ---------------------------------------- |
+| `commandcode`        | OpenAI Chat Completions | `https://api.commandcode.ai/provider/v1` |
+| `commandcode-claude` | Anthropic Messages      | `https://api.commandcode.ai/provider`    |
+
+Both read the same key: `CMD_API_KEY`, or the key saved with
+`kage auth login commandcode`. The Claude models are served on the
+Messages endpoint only and list under `commandcode-claude`, with
+prompt caching and thinking following the Anthropic rules. Everything
+else lists under `commandcode`. Models are addressed as
+`commandcode/gpt-6-astra` or `commandcode-claude/claude-sonnet-5-5`.
+
+Command Code is subscription-based, so its models carry no per-token
+pricing: the footer and the agents overlay show no dollar amount for
+them. The model list ships with kage and is checked at every catalog
+refresh against Command Code's published model list (ids, names,
+context windows, wire placement) and the official `command-code` CLI
+catalog (thinking levels), so new, retired or changed models surface
+at build time.
+
+Command Code retains request data by default, though most models
+already route through zero-retention upstreams without asking. To
+guarantee it, opt into their zero data retention flag on both
+flavors:
+
+```toml
+[providers.commandcode.headers]
+x-cmd-zdr = "1"
+
+[providers.commandcode-claude.headers]
+x-cmd-zdr = "1"
+```
+
+ZDR requests route only to ZDR-capable upstreams, fail with a 422
+when none have capacity, and can cost more. See [Command Code's ZDR
+docs](https://commandcode.ai/docs/resources/zdr).
 
 ## credentials
 

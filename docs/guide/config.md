@@ -239,6 +239,7 @@ API keys are read from environment variables:
 | `MOONSHOT_API_KEY`      | Moonshot                                      |
 | `KIMI_API_KEY`          | Kimi for Coding                               |
 | `XIAOMI_API_KEY`        | Xiaomi / Xiaomi Token Plan                    |
+| `CMD_API_KEY`           | Command Code                                  |
 
 The model id picks the provider. Without `-m`, kage uses
 `provider.default_model` when its provider has credentials, then the

@@ -456,7 +456,8 @@ mod tests {
         queue: Sender<Vec<u8>>,
         _blobs: Sender<Vec<u8>>,
         thread: thread::JoinHandle<()>,
-        sock: Arc<TcpStream>,
+        /// Held so the write half outlives the loop.
+        _sock: Arc<TcpStream>,
     }
 
     /// Starts [`write_loop`] against one end of a socket pair and
@@ -491,7 +492,7 @@ mod tests {
                 queue,
                 _blobs: blobs,
                 thread,
-                sock,
+                _sock: sock,
             },
             client,
         )

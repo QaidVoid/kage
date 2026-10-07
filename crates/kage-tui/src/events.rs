@@ -120,23 +120,27 @@ pub fn apply_loop_event(buf: &mut Buffer, event: &LoopEvent) {
             }
             buf.replace_or_push_custom("kage:retry", msg);
         }
-        LoopEvent::Error { kind } => {
-            buf.finish_streaming();
-            match kind {
-                LoopError::Cancelled => buf.push_custom("kage:notify", "Interrupted", false),
-                LoopError::Auth { message } => buf.push_custom(
-                    "kage:error",
-                    format!(
-                        "authentication failed: {}. Run /login to re-authenticate.",
-                        message.trim_end_matches('.')
-                    ),
-                    false,
-                ),
-                // The block's `error` chrome already names the severity;
-                // the payload adds nothing but the message.
-                other => buf.push_custom("kage:error", other.to_string(), false),
-            }
-        }
+        LoopEvent::Error { kind } => push_error(buf, kind),
+    }
+}
+
+/// Surface a loop error in `buf`: finalize the live assistant bubble,
+/// then add one notice naming the failure.
+fn push_error(buf: &mut Buffer, kind: &LoopError) {
+    buf.finish_streaming();
+    match kind {
+        LoopError::Cancelled => buf.push_custom("kage:notify", "Interrupted", false),
+        LoopError::Auth { message } => buf.push_custom(
+            "kage:error",
+            format!(
+                "authentication failed: {}. Run /login to re-authenticate.",
+                message.trim_end_matches('.')
+            ),
+            false,
+        ),
+        // The block's `error` chrome already names the severity;
+        // the payload adds nothing but the message.
+        other => buf.push_custom("kage:error", other.to_string(), false),
     }
 }
 

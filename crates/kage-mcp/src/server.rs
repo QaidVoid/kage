@@ -793,7 +793,7 @@ impl McpServerHandle {
     /// transport without a child process.
     #[must_use]
     pub fn child_pid(&self) -> Option<u32> {
-        self.child.as_ref().map(|child| child.id())
+        self.child.as_ref().map(Child::id)
     }
 
     /// The child's exit status once it has terminated, or `None`

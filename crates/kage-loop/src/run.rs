@@ -106,7 +106,7 @@ where
                 return finish_cancelled(&mut emit);
             }
 
-            match drain_messages(config.steering_mode, &cancel, || hooks.get_steering()) {
+            match drain_messages(config.steering_mode, cancel, || hooks.get_steering()) {
                 Ok(Some(text)) => push_user_text(cx, &mut emit, text),
                 Ok(None) => {}
                 Err(LoopError::Cancelled) => return finish_cancelled(&mut emit),
@@ -204,7 +204,9 @@ where
                                 attempt,
                                 max_attempts: config.max_provider_retries,
                                 wait_secs: wait.as_secs(),
-                                wait_ms: wait.as_millis() as u64,
+                                // A backoff past u64::MAX ms is impossible in
+                                // practice; saturation preserves intent.
+                                wait_ms: u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
                                 requested_secs: requested.map(|d| d.as_secs()),
                                 error: e.to_string(),
                             });
@@ -321,8 +323,7 @@ where
             }
         }
 
-        let followup = match drain_messages(config.followup_mode, &cancel, || hooks.get_followup())
-        {
+        let followup = match drain_messages(config.followup_mode, cancel, || hooks.get_followup()) {
             Ok(text) => text,
             Err(LoopError::Cancelled) => return finish_cancelled(&mut emit),
             Err(_) => unreachable!("drain_messages only fails with Cancelled"),
@@ -369,7 +370,8 @@ fn drain_messages<F: FnMut() -> Option<String>>(
             return Err(LoopError::Cancelled);
         }
         if drained >= MAX_DRAINED_MESSAGES {
-            out.push_str(&format!("\n\n{DRAIN_TRUNCATED_NOTE}"));
+            out.push_str("\n\n");
+            out.push_str(DRAIN_TRUNCATED_NOTE);
             break;
         }
         out.push_str("\n\n");

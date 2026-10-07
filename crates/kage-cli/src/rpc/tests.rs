@@ -2527,7 +2527,7 @@ fn an_unrelated_change_while_catching_up_is_forwarded_at_once() {
     };
     assert!(shown.observe(&unrelated));
     assert!(!shown.catching_up);
-    assert_eq!(shown.settings.swarm, true);
+    assert!(shown.settings.swarm);
 
     // A later state the client already saw is no longer suppressed.
     assert!(!shown.observe(&unrelated));
@@ -2542,7 +2542,7 @@ fn a_catch_up_that_never_settles_is_forwarded_after_a_bound() {
     // while the catch-up is young.
     let mut forwarded = 0;
     for _ in 0..CATCH_UP_CAP {
-        forwarded += shown.observe(&requested).then_some(1).unwrap_or(0);
+        forwarded += i32::from(shown.observe(&requested));
     }
     assert_eq!(forwarded, 0, "young catch-ups swallow what may settle");
 
@@ -6007,15 +6007,12 @@ fn a_state_observed_after_a_fresh_attach_reaches_the_link_replay() {
     let envelope = Envelope {
         session: id,
         seq: 0,
-        event: Event::Host(
-            HostEvent::StateChanged {
-                state: SessionState {
-                    working: true,
-                    ..SessionState::default()
-                },
-            }
-            .into(),
-        ),
+        event: Event::Host(HostEvent::StateChanged {
+            state: SessionState {
+                working: true,
+                ..SessionState::default()
+            },
+        }),
     };
     lock(&host.live).observe(&envelope);
     let replayed = lock(&host.live).envelopes(id, &HashSet::new());

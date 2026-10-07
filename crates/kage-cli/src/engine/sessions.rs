@@ -677,7 +677,7 @@ mod tests {
         };
         let output = "read notes.md:\n```rust\nfn main() {}\n```\n````txt\nfour\n````";
         let mut writer =
-            SessionWriter::create(&dir.path().join(format!("{id}.jsonl")), header).unwrap();
+            SessionWriter::create(dir.path().join(format!("{id}.jsonl")), header).unwrap();
         writer
             .append(&SessionEntry::Message(MessageEntry {
                 id: EntryId::new(),
@@ -701,7 +701,7 @@ mod tests {
         let fences: Vec<usize> = md
             .lines()
             .filter(|line| !line.is_empty() && line.chars().all(|c| c == '`'))
-            .map(|line| line.len())
+            .map(str::len)
             .collect();
         assert_eq!(fences.first(), Some(&5), "fence beats the ```` run: {md}");
         assert!(

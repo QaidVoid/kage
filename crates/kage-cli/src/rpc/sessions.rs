@@ -29,6 +29,19 @@ use super::mcp::editor_servers;
 use super::options::config_options;
 use crate::engine::{Recorder, render_session_markdown};
 
+/// The memoized [`leading_marker`] verdicts, keyed by file and the
+/// (mtime, size) pair.
+type MarkerCache = Mutex<
+    HashMap<
+        PathBuf,
+        (
+            Option<std::time::SystemTime>,
+            u64,
+            Option<serde_json::Value>,
+        ),
+    >,
+>;
+
 /// Sessions per `session/list` page.
 const LIST_PAGE: usize = 50;
 
@@ -513,28 +526,8 @@ pub(super) fn orphaned_agents(
 /// (mtime, size) pair, so a session listing re-reads a file's head
 /// only when the file changed. The cap keeps restored sessions of a
 /// long-lived serve from growing it without bound.
-fn marker_cache() -> &'static Mutex<
-    HashMap<
-        PathBuf,
-        (
-            Option<std::time::SystemTime>,
-            u64,
-            Option<serde_json::Value>,
-        ),
-    >,
-> {
-    static PEEKED: std::sync::OnceLock<
-        Mutex<
-            HashMap<
-                PathBuf,
-                (
-                    Option<std::time::SystemTime>,
-                    u64,
-                    Option<serde_json::Value>,
-                ),
-            >,
-        >,
-    > = std::sync::OnceLock::new();
+fn marker_cache() -> &'static MarkerCache {
+    static PEEKED: std::sync::OnceLock<MarkerCache> = std::sync::OnceLock::new();
     PEEKED.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

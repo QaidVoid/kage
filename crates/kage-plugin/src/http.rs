@@ -201,6 +201,13 @@ fn opt_u64(opts: &Table, name: &str) -> Result<Option<u64>, String> {
         Value::Integer(i) => u64::try_from(i)
             .map(Some)
             .map_err(|_| format!("opts.{name} must be a positive integer")),
+        // Guard bounds n to whole values in [0.0, 2^64]; `as` is the
+        // exact saturating conversion for that range (2^64 -> u64::MAX).
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
         Value::Number(n) if n.fract() == 0.0 && (0.0..=u64::MAX as f64).contains(&n) => {
             Ok(Some(n as u64))
         }

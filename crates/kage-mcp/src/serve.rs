@@ -195,8 +195,8 @@ fn reap(in_flight: &mut HashMap<serde_json::Value, InFlight<'_>>, peer: &Peer) -
 
 /// Prepare one `tools/call`: judge it through the gate and either answer
 /// immediately or spawn the worker that runs the tool.
-fn prepare_call<'scope, 'env>(
-    scope: &'scope thread::Scope<'scope, 'env>,
+fn prepare_call<'scope>(
+    scope: &'scope thread::Scope<'scope, '_>,
     registry: &ToolRegistry,
     workdir: &'scope Path,
     confine: bool,
@@ -220,13 +220,14 @@ fn prepare_call<'scope, 'env>(
     }
     let cancel = Arc::new(CancelFlag::new());
     let worker_cancel = Arc::clone(&cancel);
-    let worker = scope.spawn(move || run_tool(tool, workdir, confine, arguments, &worker_cancel));
+    let worker =
+        scope.spawn(move || run_tool(tool.as_ref(), workdir, confine, arguments, &worker_cancel));
     Prepared::Running(cancel, worker)
 }
 
 /// Run one tool call to completion, as an MCP `tools/call` result.
 fn run_tool(
-    tool: Arc<dyn Tool>,
+    tool: &dyn Tool,
     workdir: &Path,
     confine: bool,
     arguments: serde_json::Value,

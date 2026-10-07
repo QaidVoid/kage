@@ -81,7 +81,7 @@ use content::prompt_content;
 use host::Host;
 use live::Seed;
 use mcp::editor_servers;
-use options::{Settings, Shown, config_options};
+use options::{Changed, Settings, Shown, config_options};
 use sessions::list_page;
 
 use crate::engine::{Background, Recorder, SessionSpec, SubscriptionId};
@@ -328,7 +328,7 @@ impl CliAcpAgent {
         let shown = Shown {
             settings: settings.clone(),
             catching_up: false,
-            changed: Default::default(),
+            changed: Changed::default(),
             swallowed: 0,
         };
         lock(&self.shown).insert(spec.id, shown);

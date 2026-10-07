@@ -67,10 +67,9 @@ impl Buffer {
                 started_at,
                 ..
             } = Arc::make_mut(block)
+                && let Some(aged) = started_at.checked_sub(age)
             {
-                if let Some(aged) = started_at.checked_sub(age) {
-                    *started_at = aged;
-                }
+                *started_at = aged;
             }
         }
     }

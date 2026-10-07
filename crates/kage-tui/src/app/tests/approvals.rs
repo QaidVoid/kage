@@ -179,7 +179,9 @@ fn approval_keys_exactly_at_the_guard_boundary_flip() {
             permission_request("c3", 3),
         ],
     );
-    let inside = t0 + crate::overlay::approval::TYPE_AHEAD_GUARD - Duration::from_millis(1);
+    let inside = (t0 + crate::overlay::approval::TYPE_AHEAD_GUARD)
+        .checked_sub(Duration::from_millis(1))
+        .unwrap();
     app.approval_key_at(key('1'), inside);
     app.approval_key_at(code(KeyCode::Esc), inside);
     assert!(app.approval_panel.is_some(), "guarded keys are dropped");

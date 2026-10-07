@@ -491,12 +491,12 @@ impl ProviderKey {
                 Some(at) => format!("auth.json (oauth, {})", expiry_label(at, now)),
                 None => "auth.json (oauth)".to_owned(),
             },
-            _ => "auth.json".to_owned(),
+            Credential::ApiKey { .. } => "auth.json".to_owned(),
         });
         match (env, stored) {
             (Some(env), Some(label)) => Some(format!("{env} + {label}")),
             (Some(env), None) => Some(env.to_owned()),
-            (None, Some(label)) => Some(label.to_owned()),
+            (None, Some(label)) => Some(label.clone()),
             (None, None) => None,
         }
     }

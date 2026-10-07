@@ -2176,7 +2176,7 @@ fn an_absolute_workdir_runs_normally() {
 
 /// The opt-in `max_turns` failsafe stops the run with an error after the
 /// cap, answering any pending tool calls so history carries no dangling
-/// tool_use.
+/// `tool_use`.
 #[test]
 fn max_turns_stops_the_run_after_the_cap() {
     let call_id = kage_core::ToolCallId::new("call_1");
@@ -2354,7 +2354,7 @@ fn steering_all_mode_caps_the_drain_per_turn() {
                 Some(Content::Text { text }) if text.starts_with("note ") => Some(text.clone()),
                 _ => None,
             })
-            .last()
+            .next_back()
             .expect("a drained steering message")
     };
     let first = steering_text(&requests[0]);

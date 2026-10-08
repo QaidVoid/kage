@@ -1214,7 +1214,13 @@ fn forked_spec(
 fn agent_marker(path: &Path) -> Option<serde_json::Value> {
     let reader = kage_session::SessionReader::iter(path).ok()?;
     for entry in reader {
-        let Ok(kage_session::SessionEntry::Custom(custom)) = entry else {
+        // A read error is terminal: the iterator would yield the same
+        // error on every poll, so the scan ends here instead of
+        // spinning.
+        let Ok(entry) = entry else {
+            break;
+        };
+        let kage_session::SessionEntry::Custom(custom) = entry else {
             continue;
         };
         if custom.kind == kage_session::list::AGENT_ENTRY_KIND {

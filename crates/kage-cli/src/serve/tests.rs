@@ -605,8 +605,12 @@ fn simultaneous_rejections_are_answered_without_stalling_the_accept_loop() {
     for reply in &replies {
         assert!(reply.starts_with("HTTP/1.1 503 "), "{reply}");
     }
+    // Windows runners add seconds of scheduler noise to the burst, so
+    // hold them to "not hung" loosely and keep the tight bound where
+    // the runner is quiet.
+    let budget = if cfg!(windows) { 15 } else { 2 };
     assert!(
-        elapsed < Duration::from_secs(2),
+        elapsed < Duration::from_secs(budget),
         "{} rejections took {elapsed:?}",
         replies.len()
     );

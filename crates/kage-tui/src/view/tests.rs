@@ -1,6 +1,6 @@
 //! Tests for view rendering helpers.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -434,13 +434,20 @@ fn a_single_paragraph_streamed_word_by_word_shows_every_word() {
         let _ = snapshot_lines(&mut buffer, &input, area);
         // Age the pending-edit marker past the reparse throttle so the
         // next snapshot must rebuild, without a wall-clock sleep. The
-        // test then passes whatever the throttle constant is.
-        buffer.age_stream_edits(Duration::from_secs(3600));
-        let lines = snapshot_lines(&mut buffer, &input, area);
-        assert!(
-            lines.iter().any(|l| l.contains(&text)),
-            "{text:?}\n{lines:#?}"
-        );
+        // test then passes whatever the throttle constant is. Arithmetic
+        // aging is a silent no-op when the platform Instant epoch sits
+        // within `age` of now (a freshly booted Windows runner), so fall
+        // back to letting the real throttle elapse before failing.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            buffer.age_stream_edits(Duration::from_secs(3600));
+            let lines = snapshot_lines(&mut buffer, &input, area);
+            if lines.iter().any(|l| l.contains(&text)) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{text:?}\n{lines:#?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 

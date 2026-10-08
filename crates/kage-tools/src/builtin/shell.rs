@@ -779,6 +779,7 @@ mod tests {
         assert!(out.text.contains('x'));
     }
 
+    #[cfg(unix)]
     fn run_with(
         workdir: &Path,
         scrub: &[String],
@@ -832,19 +833,23 @@ mod tests {
     }
 
     /// Windows env names are case-insensitive, so a configured `PATH`
-    /// must strip the variable whatever its spelling. Run on a Windows
-    /// CI leg.
+    /// must strip the variable whatever its spelling. Asserted on the
+    /// scrubbed command's env map rather than through a spawned shell:
+    /// pwsh rebuilds a `Path` of its own at startup, so a shell-level
+    /// probe cannot witness the scrub. Run on a Windows CI leg.
     #[test]
     #[cfg(windows)]
     fn scrub_matches_windows_env_names_case_insensitively() {
-        let dir = tempfile::tempdir().unwrap();
-        let out = run_with(
-            dir.path(),
-            &["PATH".to_owned()],
-            serde_json::json!({"command": "if ($env:Path) { 'has-path' } else { 'stripped' }"}),
-        )
-        .unwrap();
-        assert!(out.text.contains("stripped"), "{}", out.text);
+        let mut cmd = Command::new("pwsh");
+        scrub_env(&mut cmd, &["PATH".to_owned()]);
+        assert!(
+            cmd.get_envs()
+                .all(|(name, _)| !name.eq_ignore_ascii_case("PATH")),
+            "a PATH case variant survived the scrub: {:?}",
+            cmd.get_envs()
+                .map(|(name, _)| name.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -343,7 +343,11 @@ mod tests {
     /// Windows port of
     /// `exec_truncates_output_past_the_cap_and_sets_the_flag`: no
     /// `/dev/zero`, so a 3 MB file is typed through `cmd` from a
-    /// workdir the test controls. Run on a Windows CI leg.
+    /// workdir the test controls. stderr is deliberately not
+    /// asserted: Windows has no SIGPIPE, so once the drain stops at
+    /// the cap the writer's next write fails and cmd reports that
+    /// failure on stderr, while the Unix twin's `head` dies silently
+    /// on SIGPIPE. Run on a Windows CI leg.
     #[test]
     #[cfg(windows)]
     fn exec_truncates_output_past_the_cap_and_sets_the_flag_windows() {
@@ -361,7 +365,7 @@ mod tests {
                 "p",
                 "kage.request_capabilities({'exec'}); \
                  local r = kage.exec({ cmd = 'cmd', args = { '/C', 'type', 'big.txt' } }); \
-                 return r.truncated and r.stdout:len() == 1048576 and r.stderr:len() == 0",
+                 return r.truncated and r.stdout:len() == 1048576",
             )
             .unwrap();
         assert_eq!(v.as_boolean(), Some(true));

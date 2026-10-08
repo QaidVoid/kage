@@ -109,6 +109,10 @@ fn init_git_repo(dir: &Path, content: &str) {
         assert!(ok, "git {args:?} failed");
     };
     run(&["init", "-q"]);
+    // CI runners set `core.autocrlf=true` globally, which would make
+    // the restore below rewrite LF as CRLF; pin the fixture so the
+    // snapshot round trip is byte-exact on every platform.
+    run(&["config", "core.autocrlf", "false"]);
     run(&["config", "user.email", "t@example.com"]);
     run(&["config", "user.name", "Tester"]);
     std::fs::write(dir.join("tracked.txt"), content).unwrap();

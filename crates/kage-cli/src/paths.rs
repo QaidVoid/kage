@@ -155,7 +155,11 @@ mod tests {
             let home = jail.directory().to_path_buf();
             jail.set_env("HOME", home.to_string_lossy().as_ref());
             jail.set_env("XDG_CONFIG_HOME", "");
-            assert_eq!(config_dir().unwrap(), home.join(".config").join("kage"));
+            // `dirs::home_dir()` follows `HOME` on Unix but reads the
+            // Windows Known Folder API on Windows, where the jail's
+            // `HOME` is inert; expect that platform home.
+            let expected = dirs::home_dir().expect("test needs a home directory");
+            assert_eq!(config_dir().unwrap(), expected.join(".config").join("kage"));
             Ok(())
         });
     }
@@ -169,8 +173,9 @@ mod tests {
                 "XDG_CONFIG_HOME",
                 home.join(".config").to_string_lossy().as_ref(),
             );
+            let expected = dirs::home_dir().expect("test needs a home directory");
             let p = resolve_plugin_dir(Path::new(" \"~/my-plugins\" "));
-            assert_eq!(p, home.join("my-plugins"));
+            assert_eq!(p, expected.join("my-plugins"));
             Ok(())
         });
     }

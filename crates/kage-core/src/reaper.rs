@@ -178,18 +178,20 @@ mod imp {
             after.split_whitespace().next().map(str::to_owned)
         }
 
-        /// Wait until `pid` has exited and been collected, either as a
-        /// zombie (`Z`) or reaped early by another test's drain pass,
-        /// which records the status all the same.
-        fn wait_for_zombie(pid: u32) {
+        /// Drive draining passes until the child `pid` has been
+        /// reaped and its status recorded, which is the moment the
+        /// kernel starts reporting `ECHILD` to its waiter. A drain
+        /// pass from another test may do the reaping; it records the
+        /// status all the same.
+        fn drain_until_reaped(pid: u32) {
             for _ in 0..100 {
-                match state(pid).as_deref() {
-                    Some("Z") | None => return,
-                    _ => {}
+                drain();
+                if records().lock().unwrap().contains_key(&pid) {
+                    return;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            panic!("pid {pid} never became a zombie");
+            panic!("pid {pid} was never reaped and recorded");
         }
 
         #[test]
@@ -197,8 +199,7 @@ mod imp {
         fn drain_reaps_a_finished_child() {
             let child = Command::new("true").spawn().unwrap();
             let pid = child.id();
-            wait_for_zombie(pid);
-            drain();
+            drain_until_reaped(pid);
             assert_eq!(state(pid), None, "zombie survived the drain");
         }
 
@@ -206,8 +207,7 @@ mod imp {
         fn wait_recovers_a_stolen_status() {
             let mut child = Command::new("true").spawn().unwrap();
             let pid = child.id();
-            wait_for_zombie(pid);
-            drain();
+            drain_until_reaped(pid);
             let status = wait(&mut child).expect("wait after the reaper stole the status");
             assert!(status.success());
         }
@@ -216,8 +216,7 @@ mod imp {
         fn try_wait_recovers_a_stolen_status() {
             let mut child = Command::new("true").spawn().unwrap();
             let pid = child.id();
-            wait_for_zombie(pid);
-            drain();
+            drain_until_reaped(pid);
             let status = try_wait(&mut child)
                 .expect("try_wait after the reaper stole the status")
                 .expect("child already exited");
@@ -232,8 +231,7 @@ mod imp {
                 .spawn()
                 .unwrap();
             let pid = child.id();
-            wait_for_zombie(pid);
-            drain();
+            drain_until_reaped(pid);
             let status = wait(&mut child).expect("wait after the reaper stole the status");
             assert_eq!(status.signal(), Some(15));
         }

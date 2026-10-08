@@ -4,7 +4,7 @@
 //! suite stays independently owned. Pins the demo-card payload shape
 //! (F1), the rewind exec-failure tolerance (F2), redo surviving turns
 //! (F3), the honest rewind scope on a scratch git repo (F4), and the
-//! sorted ui_extras completions (F10).
+//! sorted `ui_extras` completions (F10).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -109,6 +109,10 @@ fn init_git_repo(dir: &Path, content: &str) {
         assert!(ok, "git {args:?} failed");
     };
     run(&["init", "-q"]);
+    // CI runners set `core.autocrlf=true` globally, which would make
+    // the restore below rewrite LF as CRLF; pin the fixture so the
+    // snapshot round trip is byte-exact on every platform.
+    run(&["config", "core.autocrlf", "false"]);
     run(&["config", "user.email", "t@example.com"]);
     run(&["config", "user.name", "Tester"]);
     std::fs::write(dir.join("tracked.txt"), content).unwrap();
@@ -161,7 +165,9 @@ fn card_entry_payload_matches_the_field_the_renderer_reads() {
             assert_eq!(kind, "demo:card");
             data.clone()
         }
-        other => panic!("expected AppendCustom, got {other:?}"),
+        other @ PendingSessionOp::SetLabel { .. } => {
+            panic!("expected AppendCustom, got {other:?}")
+        }
     };
     assert_eq!(data["title"], "hello");
 

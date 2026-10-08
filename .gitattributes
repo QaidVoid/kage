@@ -1,0 +1,4 @@
+# Text fixtures and generated sources are compared byte-for-byte by
+# tests, so check every platform out with LF; binaries are still
+# auto-detected and left untouched.
+* text=auto eol=lf

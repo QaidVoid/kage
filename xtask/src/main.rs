@@ -147,8 +147,7 @@ fn refresh_models(source_url: &str, check: bool) -> Result<PathBuf, String> {
         if synced != manual {
             if check {
                 return Err(format!(
-                    "{} is out of date with the Command Code CLI catalog; run `cargo xtask refresh-models`",
-                    CATALOG_MANUAL
+                    "{CATALOG_MANUAL} is out of date with the Command Code CLI catalog; run `cargo xtask refresh-models`"
                 ));
             }
             kage_core::fsutil::atomic_write(&manual_path, synced.as_bytes())
@@ -222,6 +221,8 @@ fn merge_catalogs(upstream: &str, manual: &str) -> Result<String, String> {
 ///
 /// Either body does not parse, or drift was found.
 fn check_command_code_drift(manual: &str, live: &str) -> Result<(), String> {
+    // How many drift findings an error message lists before "... and N more".
+    const CAP: usize = 20;
     let manual: serde_json::Map<String, Value> =
         serde_json::from_str(manual).map_err(|e| format!("parse manual catalog: {e}"))?;
     let live: Value = serde_json::from_str(live).map_err(|e| format!("parse live models: {e}"))?;
@@ -261,13 +262,12 @@ fn check_command_code_drift(manual: &str, live: &str) -> Result<(), String> {
         let on_chat = item
             .get("supported_endpoints")
             .and_then(Value::as_array)
-            .map(|endpoints| {
+            .is_some_and(|endpoints| {
                 endpoints
                     .iter()
                     .filter_map(Value::as_str)
                     .any(|endpoint| endpoint == "/chat/completions")
-            })
-            .unwrap_or(false);
+            });
         live.insert(id, (name, context, on_chat));
     }
 
@@ -304,14 +304,13 @@ fn check_command_code_drift(manual: &str, live: &str) -> Result<(), String> {
     if problems.is_empty() {
         return Ok(());
     }
-    const CAP: usize = 20;
     let mut message = problems[..problems.len().min(CAP)].join("; ");
     if problems.len() > CAP {
-        message = format!("{message}; and {} more", problems.len() - CAP);
+        let hidden = problems.len() - CAP;
+        message = format!("{message}; and {hidden} more");
     }
     Err(format!(
-        "Command Code model drift, update {}: {message}",
-        CATALOG_MANUAL
+        "Command Code model drift, update {CATALOG_MANUAL}: {message}"
     ))
 }
 
@@ -747,8 +746,7 @@ mod tests {
             upstream_only
                 .iter()
                 .all(|p| p.id != "commandcode" && p.id != "commandcode-claude"),
-            "{} must stay a pure upstream snapshot",
-            CATALOG_FIXTURE
+            "{CATALOG_FIXTURE} must stay a pure upstream snapshot",
         );
         for map in SUPPORTED_PROVIDERS {
             assert!(
@@ -879,7 +877,7 @@ mod tests {
     /// The Efforts "none" cells read `__DASH__`, replaced with the
     /// real glyph the CLI ships: raw strings cannot escape it and
     /// sources stay ASCII.
-    const CLI_SAMPLE: &str = r#"
+    const CLI_SAMPLE: &str = r"
 # Command Code Models
 
 ## Anthropic
@@ -895,7 +893,7 @@ mod tests {
 |---|---|---|---|---|---|---|
 | `m-a` | A | 1M | off, high, max | $1/$2 | Go | desc |
 | `m-b` | B | 256K | __DASH__ | $0/$0 | Go | desc |
-"#;
+";
 
     fn cli_sample() -> String {
         CLI_SAMPLE.replace("__DASH__", "\u{2014}")

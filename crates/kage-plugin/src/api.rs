@@ -293,7 +293,7 @@ pub fn json_to_lua(lua: &Lua, value: &serde_json::Value) -> mlua::Result<Value> 
     json_to_lua_at(lua, value, 0)
 }
 
-/// Cap on [`json_to_lua`] nesting, matching serde_json's own recursion
+/// Cap on [`json_to_lua`] nesting, matching `serde_json`'s own recursion
 /// limit. Current inputs all come from serde parsers; the cap is
 /// defense in depth for a future caller passing a programmatically
 /// built deep value.

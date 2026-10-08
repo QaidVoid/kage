@@ -99,7 +99,9 @@ mod tests {
         assert!(result.skipped.is_empty());
     }
 
-    #[cfg(unix)]
+    // APFS and NTFS reject non-UTF-8 names, so the fixture only
+    // exists on Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn unreadable_and_non_utf8_files_are_skipped_with_a_reason() {
         use std::os::unix::ffi::OsStrExt;

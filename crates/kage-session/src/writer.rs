@@ -6,11 +6,14 @@
 //! before returning, so a successful return implies the entry has reached
 //! disk.
 //!
-//! Writers hold an advisory exclusive lock on the file for their
-//! lifetime (`flock` on Unix, `LockFileEx` on Windows), so a second
-//! appender (say, a `kage -r` in another terminal) fails instead of
-//! interleaving two JSONL streams into one file. On filesystems where
-//! the lock is unsupported it is skipped.
+//! Writers hold an advisory exclusive lock for their lifetime (`flock`
+//! on Unix, `LockFileEx` on Windows), so a second appender (say, a
+//! `kage -r` in another terminal) fails instead of interleaving two
+//! JSONL streams into one file. The lock lives on a `<session>.lock`
+//! sidecar, not on the session file itself: a Windows byte-range lock
+//! on the data file would also refuse this process's own reads of it,
+//! and fork, clone, export, and replay all read while the writer is
+//! open. On filesystems where the lock is unsupported it is skipped.
 //!
 //! Crash safety is "newline-only": entries are always terminated by a single
 //! `\n`. A process killed mid-append leaves a partial trailing line which
@@ -31,16 +34,15 @@ pub struct SessionWriter {
     path: PathBuf,
     inner: BufWriter<File>,
     /// Held for the writer's lifetime; released when the writer drops.
-    /// The lock lives on a duplicated fd, so it persists independently of
-    /// the `BufWriter`'s handle.
+    /// The lock lives on the sidecar file's own handle.
     #[cfg(unix)]
     #[expect(
         dead_code,
         reason = "held only so the lock lives as long as the writer"
     )]
     lock: Option<nix::fcntl::Flock<File>>,
-    /// The duplicated Windows handle the `LockFileEx` lock is held on;
-    /// the lock is released when the handle closes.
+    /// The sidecar lock file's handle; the lock is released when the
+    /// handle closes.
     #[cfg(windows)]
     #[expect(
         dead_code,
@@ -77,13 +79,7 @@ impl SessionWriter {
             source: err,
         })?;
         #[cfg(any(unix, windows))]
-        let lock = {
-            let dup = file.try_clone().map_err(|err| SessionError::Io {
-                path: path.clone(),
-                source: err,
-            })?;
-            acquire_lock(dup, &path)?
-        };
+        let lock = acquire_lock(&path)?;
         let mut writer = Self {
             path,
             inner: BufWriter::new(file),
@@ -123,31 +119,12 @@ impl SessionWriter {
                 path: path.clone(),
                 source: err,
             })?;
-        check_version(&file, &path)?;
+        // The lock precedes the version check and the repair so a
+        // second opener that loses it never touches the file's bytes.
         #[cfg(any(unix, windows))]
-        let lock = {
-            let dup = file.try_clone().map_err(|err| SessionError::Io {
-                path: path.clone(),
-                source: err,
-            })?;
-            acquire_lock(dup, &path)?
-        };
+        let lock = acquire_lock(&path)?;
+        check_version(&file, &path)?;
         repair_torn_tail(&mut file, &path)?;
-        // The repair opens a second handle to truncate through, and
-        // Windows releases this process's byte-range locks when any
-        // handle to the file closes, so take the lock again before
-        // appends resume.
-        #[cfg(windows)]
-        if let Some(lock) = lock.as_ref() {
-            use std::fs::TryLockError;
-            match lock.try_lock() {
-                Ok(()) => {}
-                Err(TryLockError::WouldBlock) => {
-                    return Err(SessionError::Locked { path: path.clone() });
-                }
-                Err(TryLockError::Error(_)) => {}
-            }
-        }
         Ok(Self {
             path,
             inner: BufWriter::new(file),
@@ -293,14 +270,15 @@ fn repair_torn_tail(file: &mut File, path: &Path) -> Result<(), SessionError> {
 
 /// Whether another writer holds the advisory lock on the session file
 /// at `path`, such as a TUI or `kage serve` hosting the session. The
-/// probe lock is released before returning. `false` when the file is
-/// missing or the filesystem does not support the lock.
+/// probe locks the `<session>.lock` sidecar and releases it before
+/// returning. `false` when the sidecar cannot be opened or the
+/// filesystem does not support the lock.
 #[must_use]
 pub fn is_locked(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use nix::fcntl::{Flock, FlockArg};
-        let Ok(file) = File::open(path) else {
+        let Some(file) = lock_file(path) else {
             return false;
         };
         matches!(
@@ -311,7 +289,7 @@ pub fn is_locked(path: &Path) -> bool {
     #[cfg(windows)]
     {
         use std::fs::TryLockError;
-        let Ok(file) = File::open(path) else {
+        let Some(file) = lock_file(path) else {
             return false;
         };
         match file.try_lock() {
@@ -330,15 +308,34 @@ pub fn is_locked(path: &Path) -> bool {
     }
 }
 
-/// Take an exclusive non-blocking advisory lock on the file.
+/// Open or create the `<session>.lock` sidecar that carries the
+/// writer's advisory lock. `None` when it cannot be opened.
+#[cfg(any(unix, windows))]
+fn lock_file(path: &Path) -> Option<File> {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(".lock");
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .read(true)
+        .open(PathBuf::from(sidecar))
+        .ok()
+}
+
+/// Take an exclusive non-blocking advisory lock on the session's
+/// sidecar lock file.
 ///
 /// `EWOULDBLOCK` means another appender holds the lock, reported as
 /// [`SessionError::Locked`]. Any other `flock` failure (filesystems
 /// without lock support) proceeds unlocked: the lock guards against a
 /// second kage process, not against the storage layer.
 #[cfg(unix)]
-fn acquire_lock(file: File, path: &Path) -> Result<Option<nix::fcntl::Flock<File>>, SessionError> {
+fn acquire_lock(path: &Path) -> Result<Option<nix::fcntl::Flock<File>>, SessionError> {
     use nix::fcntl::{Flock, FlockArg};
+    let Some(file) = lock_file(path) else {
+        return Ok(None);
+    };
     match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
         Ok(lock) => Ok(Some(lock)),
         Err((_, nix::errno::Errno::EWOULDBLOCK)) => Err(SessionError::Locked {
@@ -348,19 +345,22 @@ fn acquire_lock(file: File, path: &Path) -> Result<Option<nix::fcntl::Flock<File
     }
 }
 
-/// Take an exclusive non-blocking advisory lock on the file with
-/// `LockFileEx` over the whole file, mirroring the Unix `flock` shape.
+/// Take an exclusive non-blocking advisory lock with `LockFileEx` over
+/// the whole sidecar file, mirroring the Unix `flock` shape.
 ///
 /// A held lock is reported as [`SessionError::Locked`]. Any other lock
 /// failure (filesystems without lock support) proceeds unlocked: the
 /// lock guards against a second kage process, not against the storage
 /// layer. Unlike `flock`, Windows byte-range locks belong to the whole
-/// process: closing any other handle to the file in this process
+/// process: closing any other handle to the sidecar in this process
 /// releases them, so the lock is only meaningful against other
 /// processes.
 #[cfg(windows)]
-fn acquire_lock(file: File, path: &Path) -> Result<Option<File>, SessionError> {
+fn acquire_lock(path: &Path) -> Result<Option<File>, SessionError> {
     use std::fs::TryLockError;
+    let Some(file) = lock_file(path) else {
+        return Ok(None);
+    };
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),
         Err(TryLockError::WouldBlock) => Err(SessionError::Locked {
@@ -548,7 +548,7 @@ mod tests {
     /// Windows mirror of `is_locked_while_a_writer_holds_the_file`.
     /// Unlike the Unix twin this does not re-probe while the writer
     /// holds the lock: Windows releases a process's byte-range locks
-    /// when the process closes any handle to the file, so the first
+    /// when the process closes any handle to the sidecar, so the first
     /// probe's close can end the writer's lock. Run on a Windows CI
     /// leg.
     #[cfg(windows)]
@@ -584,12 +584,9 @@ mod tests {
         std::fs::write(&path, torn).unwrap();
 
         // A foreign writer holding the lock, exactly as another kage
-        // process would.
-        let mut holder = OpenOptions::new()
-            .read(true)
-            .append(true)
-            .open(&path)
-            .unwrap();
+        // process would: the lock lives on the sidecar, not on the
+        // data file.
+        let holder = lock_file(&path).unwrap();
         holder.try_lock().unwrap();
         let err = SessionWriter::open(&path).unwrap_err();
         assert!(matches!(err, SessionError::Locked { .. }), "{err:?}");
@@ -614,10 +611,9 @@ mod tests {
         assert!(!raw.contains("01{"), "torn fragment was not truncated");
     }
 
-    /// The repair closes its second truncate handle, and on Windows
-    /// that releases the process's byte-range locks, so `open` must
-    /// take the lock again before appends resume. Run on a Windows CI
-    /// leg.
+    /// The lock must outlive the torn-tail repair: the repair's
+    /// second truncate handle touches only the data file, never the
+    /// sidecar that carries the lock. Run on a Windows CI leg.
     #[cfg(windows)]
     #[test]
     fn lock_survives_the_repair_on_windows() {

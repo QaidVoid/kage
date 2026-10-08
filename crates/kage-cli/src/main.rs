@@ -553,10 +553,10 @@ fn render_manpage(cmd: &clap::Command) -> io::Result<String> {
     use clap_mangen::Man;
     use clap_mangen::roff::{Roff, bold, italic, roman};
 
+    type Section = fn(&Man, &mut dyn Write) -> io::Result<()>;
     let mut built = cmd.clone();
     built.build();
     let cmd = &built;
-    type Section = fn(&Man, &mut dyn Write) -> io::Result<()>;
     let man = Man::new(cmd.clone());
     let preamble = Roff::new().render();
     let mut page = preamble.clone();
@@ -669,8 +669,7 @@ fn subcommand_args(
         if arg.is_positional() {
             let name = arg
                 .get_value_names()
-                .map(|names| names.join(" "))
-                .unwrap_or_else(|| arg.get_id().as_str().to_owned());
+                .map_or_else(|| arg.get_id().as_str().to_owned(), |names| names.join(" "));
             tag.push(italic(name));
         } else {
             match (arg.get_short(), arg.get_long()) {
@@ -683,10 +682,7 @@ fn subcommand_args(
                 (None, Some(long)) => tag.push(bold(format!("--{long}"))),
                 (None, None) => continue,
             }
-            let takes_values = arg
-                .get_num_args()
-                .map(|range| range.takes_values())
-                .unwrap_or(false);
+            let takes_values = arg.get_num_args().is_some_and(|range| range.takes_values());
             if takes_values && let Some(names) = arg.get_value_names() {
                 for name in names {
                     tag.push(italic(format!(" <{name}>")));

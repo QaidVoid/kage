@@ -722,6 +722,20 @@ impl Live {
             || self.paused.contains_key(&session)
             || self.spawns.contains_key(&session)
     }
+
+    /// The open asks under `root`, with the session that raised each
+    /// and how to decline it.
+    pub(super) fn asks_under(&self, root: SessionId) -> Vec<AskRef> {
+        self.asks
+            .values()
+            .filter(|ask| self.tree.root_of(ask.session) == root)
+            .map(|ask| AskRef {
+                session: ask.session,
+                request_id: ask.request_id,
+                question: ask.tool == ASK_USER_QUESTION_TOOL,
+            })
+            .collect()
+    }
 }
 
 /// What link clients ([`super::link`]) read.
@@ -819,20 +833,6 @@ impl Live {
     /// The session that raised the open ask `request_id`.
     pub(super) fn asker(&self, request_id: RequestId) -> Option<SessionId> {
         self.asks.get(&request_id).map(|ask| ask.session)
-    }
-
-    /// The open asks under `root`, with the session that raised each
-    /// and how to decline it.
-    pub(super) fn asks_under(&self, root: SessionId) -> Vec<AskRef> {
-        self.asks
-            .values()
-            .filter(|ask| self.tree.root_of(ask.session) == root)
-            .map(|ask| AskRef {
-                session: ask.session,
-                request_id: ask.request_id,
-                question: ask.tool == ASK_USER_QUESTION_TOOL,
-            })
-            .collect()
     }
 }
 

@@ -161,13 +161,7 @@ impl super::Dispatcher {
         };
         spec.cx.confine_paths |= worktree.is_some();
         let background = background && depth == 1 && setup.background != Background::Off;
-        // A background agent outlives the run that started it, so the
-        // parent's cancel must not reach it.
-        let cancel = if background {
-            CancelFlag::new()
-        } else {
-            from.cancel.child()
-        };
+        let cancel = child_cancel(from, background);
         self.release_snapshot(swarm.as_ref());
         let batch_id = swarm.as_ref().map(|info| info.batch_id.clone());
         let (report, started) = if background {
@@ -893,11 +887,13 @@ fn agent_spec(
     child_spec(
         &spawn_parent(from),
         id,
-        model,
-        system_prompt,
+        ChildModel {
+            model,
+            system_prompt,
+            thinking,
+        },
         workdir.to_path_buf(),
         def,
-        thinking,
         recorder,
         setup,
     )
@@ -1051,7 +1047,7 @@ struct SpawnParent<'a> {
     shell: Option<String>,
 }
 
-fn spawn_parent<'a>(session: &'a Session) -> SpawnParent<'a> {
+fn spawn_parent(session: &Session) -> SpawnParent<'_> {
     SpawnParent {
         confine_paths: session.confine_paths,
         tools: &session.tools,
@@ -1062,6 +1058,31 @@ fn spawn_parent<'a>(session: &'a Session) -> SpawnParent<'a> {
     }
 }
 
+/// The cancel flag a spawned child hangs from. A background agent
+/// outlives the run that started it, so the parent's cancel must not
+/// reach it and it gets its own; every other child hangs from the
+/// parent's, so cancelling the parent's run stops it.
+fn child_cancel(from: &Session, background: bool) -> CancelFlag {
+    if background {
+        CancelFlag::new()
+    } else {
+        from.cancel.child()
+    }
+}
+
+/// The core of every agent spawn: confinement inherited from the
+/// parent, `thinking` over the parent's level, the definition's tools
+/// narrowed over the parent's, and the common `SessionSpec` tail.
+/// Every spawn kind funnels through here so a lost copy cannot strand
+/// the sandbox boundary or a knob on one path.
+/// The model a spawned child runs: which model, the system prompt
+/// built for its workdir, and the thinking level it starts at.
+struct ChildModel {
+    model: String,
+    system_prompt: String,
+    thinking: Option<kage_core::ThinkingLevel>,
+}
+
 /// The core of every agent spawn: confinement inherited from the
 /// parent, `thinking` over the parent's level, the definition's tools
 /// narrowed over the parent's, and the common `SessionSpec` tail.
@@ -1070,14 +1091,17 @@ fn spawn_parent<'a>(session: &'a Session) -> SpawnParent<'a> {
 fn child_spec(
     parent: &SpawnParent<'_>,
     id: SessionId,
-    model: String,
-    system_prompt: String,
+    model: ChildModel,
     workdir: PathBuf,
     def: &AgentDef,
-    thinking: Option<kage_core::ThinkingLevel>,
     recorder: Option<Recorder>,
     setup: &AgentSetup,
 ) -> (SessionSpec, Vec<String>) {
+    let ChildModel {
+        model,
+        system_prompt,
+        thinking,
+    } = model;
     let mut cx = AgentContext::new(model.clone(), system_prompt).with_workdir(workdir);
     cx.confine_paths = parent.confine_paths;
     cx.thinking_level = thinking;
@@ -1169,11 +1193,13 @@ fn forked_spec(
     let (spec, missing) = child_spec(
         &spawn_parent(from),
         id,
-        model,
-        system_prompt,
+        ChildModel {
+            model,
+            system_prompt,
+            thinking,
+        },
         workdir.to_path_buf(),
         def,
-        thinking,
         Some(Recorder::new(writer, None)),
         setup,
     );
@@ -1188,7 +1214,13 @@ fn forked_spec(
 fn agent_marker(path: &Path) -> Option<serde_json::Value> {
     let reader = kage_session::SessionReader::iter(path).ok()?;
     for entry in reader {
-        let Ok(kage_session::SessionEntry::Custom(custom)) = entry else {
+        // A read error is terminal: the iterator would yield the same
+        // error on every poll, so the scan ends here instead of
+        // spinning.
+        let Ok(entry) = entry else {
+            break;
+        };
+        let kage_session::SessionEntry::Custom(custom) = entry else {
             continue;
         };
         if custom.kind == kage_session::list::AGENT_ENTRY_KIND {
@@ -1231,11 +1263,13 @@ fn resumed_spec(
     let (mut spec, missing) = child_spec(
         &spawn_parent(from),
         id,
-        model,
-        replay.header.system_prompt.clone(),
+        ChildModel {
+            model,
+            system_prompt: replay.header.system_prompt.clone(),
+            thinking,
+        },
         from.workdir.clone(),
         def,
-        thinking,
         Some(Recorder::new(writer, None)),
         setup,
     );
@@ -1320,22 +1354,26 @@ mod tests {
         let (planned, planned_missing) = child_spec(
             &parent,
             SessionId::new(),
-            "mock/m".to_owned(),
-            "planned prompt".to_owned(),
+            ChildModel {
+                model: "mock/m".to_owned(),
+                system_prompt: "planned prompt".to_owned(),
+                thinking: Some(kage_core::ThinkingLevel::Off),
+            },
             workdir.clone(),
             &def(),
-            Some(kage_core::ThinkingLevel::Off),
             None,
             &setup(),
         );
         let (live, live_missing) = child_spec(
             &parent,
             SessionId::new(),
-            "mock/other".to_owned(),
-            "live prompt".to_owned(),
+            ChildModel {
+                model: "mock/other".to_owned(),
+                system_prompt: "live prompt".to_owned(),
+                thinking: None,
+            },
             workdir,
             &def(),
-            None,
             None,
             &setup(),
         );

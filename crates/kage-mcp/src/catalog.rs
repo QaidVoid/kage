@@ -234,18 +234,17 @@ impl McpConnection {
                 |c| serde_json::json!({ "cursor": c }),
             );
             let result = self.request(method, params)?;
-            match result.get(key).and_then(Value::as_array) {
-                Some(items) => out.extend(items.iter().cloned()),
-                None => {
-                    let has_cursor = result
-                        .get("nextCursor")
-                        .and_then(Value::as_str)
-                        .is_some_and(|next| !next.is_empty());
-                    if out.is_empty() && !has_cursor {
-                        return Ok(out);
-                    }
-                    return Err(self.protocol(format!("{method} result missing `{key}` array")));
+            if let Some(items) = result.get(key).and_then(Value::as_array) {
+                out.extend(items.iter().cloned());
+            } else {
+                let has_cursor = result
+                    .get("nextCursor")
+                    .and_then(Value::as_str)
+                    .is_some_and(|next| !next.is_empty());
+                if out.is_empty() && !has_cursor {
+                    return Ok(out);
                 }
+                return Err(self.protocol(format!("{method} result missing `{key}` array")));
             }
             if out.len() >= cap {
                 out.truncate(cap);

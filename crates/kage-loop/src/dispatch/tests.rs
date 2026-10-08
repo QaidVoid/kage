@@ -1784,7 +1784,7 @@ impl Tool for StructuredTool {
         input: serde_json::Value,
         _cx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
-        let size = input["bytes"].as_u64().unwrap_or(0) as usize;
+        let size = usize::try_from(input["bytes"].as_u64().unwrap_or(0)).unwrap_or(usize::MAX);
         Ok(ToolOutput {
             is_error: false,
             text: "text".into(),

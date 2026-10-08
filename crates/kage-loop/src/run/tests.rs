@@ -11,6 +11,12 @@ use super::*;
 use crate::NoopHooks;
 use crate::test_support::{Meet, MeetTool};
 
+/// Portable absolute workdir for loop tests, unique per test name. A
+/// literal `/tmp` is not absolute on Windows, where it lacks a drive.
+fn temp_workdir(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("kage-loop-test-{name}"))
+}
+
 #[test]
 fn build_request_forwards_max_output_tokens_from_context() {
     let mut cx = AgentContext::new("m", "");
@@ -1009,7 +1015,7 @@ fn followup_text_appears_in_next_provider_request() {
         })],
     ]);
 
-    let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
+    let mut cx = AgentContext::new("mock:m", "").with_workdir(temp_workdir("followup_text"));
     cx.history.push(Arc::new(user_msg("first ask")));
     let cfg = LoopConfig::default();
     let mut hooks = OneShotFollowup {
@@ -1057,7 +1063,7 @@ fn steering_is_polled_before_every_inner_turn() {
         })],
     ]);
 
-    let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
+    let mut cx = AgentContext::new("mock:m", "").with_workdir(temp_workdir("steering_poll"));
     cx.history.push(Arc::new(user_msg("go")));
     let cfg = LoopConfig::default();
     let mut hooks = CountingSteering::default();
@@ -1120,7 +1126,7 @@ fn cancellation_triggered_inside_tool_terminates_run_before_next_turn() {
         }),
     ]]);
 
-    let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
+    let mut cx = AgentContext::new("mock:m", "").with_workdir(temp_workdir("cancel_in_tool"));
     cx.history.push(Arc::new(user_msg("go")));
     let cfg = LoopConfig::default();
     let mut hooks = NoopHooks;
@@ -1205,7 +1211,7 @@ fn doom_loop_steers_after_three_repeat_failures() {
         ],
     ]);
 
-    let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
+    let mut cx = AgentContext::new("mock:m", "").with_workdir(temp_workdir("doom_steer"));
     cx.history.push(Arc::new(user_msg("try the thing")));
     let cfg = LoopConfig::default();
     let mut hooks = NoopHooks;
@@ -1267,7 +1273,7 @@ fn on_doom_loop_hook_can_suppress_steering() {
         })],
     ]);
 
-    let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
+    let mut cx = AgentContext::new("mock:m", "").with_workdir(temp_workdir("doom_suppress"));
     cx.history.push(Arc::new(user_msg("try the thing")));
     let mut hooks = SuppressDoom;
     let cancel = CancelFlag::new();
@@ -1394,7 +1400,7 @@ fn end_to_end_event_ordering_and_hook_callbacks() {
     let counting = std::sync::Arc::new(CountingTool::default());
     let registry = ToolRegistry::new().with(counting.clone());
 
-    let mut cx = AgentContext::new("mock:m", "be helpful").with_workdir("/tmp");
+    let mut cx = AgentContext::new("mock:m", "be helpful").with_workdir(temp_workdir("events"));
     cx.history.push(Arc::new(user_msg("kick off")));
     let mut hooks = OrderRecording::default();
     let log = std::rc::Rc::clone(&hooks.order);
@@ -1504,7 +1510,7 @@ fn message_appended_events_mirror_history() {
         ],
     ]);
     let registry = ToolRegistry::new().with(std::sync::Arc::new(StaticTool));
-    let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
+    let mut cx = AgentContext::new("mock:m", "").with_workdir(temp_workdir("appended"));
     cx.history.push(Arc::new(user_msg("go")));
     let mut appended = Vec::new();
 
@@ -1570,7 +1576,7 @@ fn end_to_end_tool_call_loop() {
         ],
     ]);
 
-    let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
+    let mut cx = AgentContext::new("mock:m", "").with_workdir(temp_workdir("e2e_tool_call"));
     cx.history.push(Arc::new(user_msg("do the thing")));
     let cfg = LoopConfig::default();
     let mut hooks = NoopHooks;
@@ -2158,7 +2164,7 @@ fn an_absolute_workdir_runs_normally() {
         stop_reason: StopReason::EndTurn,
         usage: TokenUsage::default(),
     })]);
-    let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
+    let mut cx = AgentContext::new("mock:m", "").with_workdir(temp_workdir("absolute"));
     cx.history.push(Arc::new(user_msg("hi")));
 
     let res = run(
@@ -2176,7 +2182,7 @@ fn an_absolute_workdir_runs_normally() {
 
 /// The opt-in `max_turns` failsafe stops the run with an error after the
 /// cap, answering any pending tool calls so history carries no dangling
-/// tool_use.
+/// `tool_use`.
 #[test]
 fn max_turns_stops_the_run_after_the_cap() {
     let call_id = kage_core::ToolCallId::new("call_1");
@@ -2202,7 +2208,7 @@ fn max_turns_stops_the_run_after_the_cap() {
             usage: TokenUsage::default(),
         })],
     ]);
-    let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
+    let mut cx = AgentContext::new("mock:m", "").with_workdir(temp_workdir("max_turns"));
     cx.history.push(Arc::new(user_msg("go")));
     let cfg = LoopConfig {
         max_turns: Some(2),
@@ -2354,7 +2360,7 @@ fn steering_all_mode_caps_the_drain_per_turn() {
                 Some(Content::Text { text }) if text.starts_with("note ") => Some(text.clone()),
                 _ => None,
             })
-            .last()
+            .next_back()
             .expect("a drained steering message")
     };
     let first = steering_text(&requests[0]);

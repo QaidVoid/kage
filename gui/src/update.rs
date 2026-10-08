@@ -72,20 +72,22 @@ pub fn parse_feed(text: &str) -> Feed {
         let Some(tag) = release.get("tag_name").and_then(|tag| tag.as_str()) else {
             continue;
         };
-        if let Some(version) = tag.strip_prefix("kage-desktop-v") {
-            if feed.desktop.is_none() && parses(version) {
-                feed.desktop = Some(Release {
-                    tag: tag.to_owned(),
-                    version: version.to_owned(),
-                });
-            }
-        } else if let Some(version) = tag.strip_prefix('v') {
-            if feed.cli.is_none() && parses(version) {
-                feed.cli = Some(Release {
-                    tag: tag.to_owned(),
-                    version: version.to_owned(),
-                });
-            }
+        if let Some(version) = tag.strip_prefix("kage-desktop-v")
+            && feed.desktop.is_none()
+            && parses(version)
+        {
+            feed.desktop = Some(Release {
+                tag: tag.to_owned(),
+                version: version.to_owned(),
+            });
+        } else if let Some(version) = tag.strip_prefix('v')
+            && feed.cli.is_none()
+            && parses(version)
+        {
+            feed.cli = Some(Release {
+                tag: tag.to_owned(),
+                version: version.to_owned(),
+            });
         }
     }
     feed

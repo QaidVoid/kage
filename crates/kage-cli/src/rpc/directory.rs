@@ -57,7 +57,7 @@ impl FetchCache {
     /// [`FRESH_FOR`] of `now`.
     fn fresh(&self, url: &str, now: Instant) -> Option<&[DirectoryProvider]> {
         let entry = self.entries.get(url)?;
-        (now.duration_since(entry.at) < FRESH_FOR).then(|| entry.providers.as_slice())
+        (now.duration_since(entry.at) < FRESH_FOR).then_some(entry.providers.as_slice())
     }
 
     /// Stores one fetch, dropping expired entries first and then the
@@ -129,7 +129,7 @@ fn fetch_url(url: &str) -> Result<(String, u16), String> {
     let uri: ureq::http::Uri = url
         .parse()
         .map_err(|e| format!("{url} is not a URL: {e}"))?;
-    if uri.scheme_str().as_deref() != Some("https") {
+    if uri.scheme_str() != Some("https") {
         return Err(format!("{url} must be an https URL"));
     }
     let host = uri.host().unwrap_or_default();

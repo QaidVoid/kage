@@ -324,10 +324,6 @@ impl Operator {
 
 /// Tracking the editing mode, the prompt text, the prompt history, and
 /// any pending leader key (e.g. `g` waiting for the second `g` of `gg`).
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "independent state flags, each documented"
-)]
 #[derive(Debug)]
 pub struct InputState {
     mode: Mode,

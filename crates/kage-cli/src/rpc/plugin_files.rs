@@ -238,8 +238,9 @@ mod tests {
     fn an_oversized_local_plugin_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let big = dir.path().join("big.lua");
-        let body = "kage.log('hi')\n".repeat((MAX_BYTES as usize) / 8 + 1);
-        assert!(body.len() > MAX_BYTES as usize);
+        let max = usize::try_from(MAX_BYTES).unwrap_or(usize::MAX);
+        let body = "kage.log('hi')\n".repeat(max / 8 + 1);
+        assert!(body.len() > max);
         std::fs::write(&big, body).unwrap();
         let req = PluginInstallRequest {
             source: big.display().to_string(),

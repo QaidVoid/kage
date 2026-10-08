@@ -49,10 +49,10 @@ impl DoomTracker {
 
         let key = (name.to_owned(), hash);
         if !self.streaks.contains_key(&key) {
-            if self.streaks.len() >= KEY_CAP {
-                if let Some(oldest) = self.order.pop_front() {
-                    self.streaks.remove(&oldest);
-                }
+            if self.streaks.len() >= KEY_CAP
+                && let Some(oldest) = self.order.pop_front()
+            {
+                self.streaks.remove(&oldest);
             }
             self.order.push_back(key.clone());
         }
@@ -64,8 +64,7 @@ impl DoomTracker {
             let msg = format!(
                 "You have called the '{name}' tool with the same input {streak} times in a \
                  row and each call has returned an error. Stop, take stock, and try a \
-                 different approach.",
-                streak = streak,
+                 different approach."
             );
             self.streaks.remove(&key);
             self.order.retain(|tracked| *tracked != key);

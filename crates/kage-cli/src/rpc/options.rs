@@ -65,6 +65,10 @@ impl Shown {
 
 /// The settings fields a client change touches, so the catch-up filter
 /// can tell the requested fields from the rest.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one flag per settings field a client command can change"
+)]
 #[derive(Default)]
 pub(super) struct Changed {
     model: bool,

@@ -227,34 +227,47 @@ fn execute_live<F, D>(
         }
     };
     if cancelled {
-        // In-flight tools get a short grace window to land their real
-        // results, then everything unreported is answered with
-        // `Cancelled`. The return happens without joining: stragglers
-        // finish in the background.
-        let deadline = std::time::Instant::now() + CANCEL_GRACE;
-        while remaining > 0 {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if left.is_zero() {
-                break;
-            }
-            match rx.recv_timeout(left.min(GRACE_SLICE)) {
-                Ok(Progress::Update(id, update)) => {
-                    emit(LoopEvent::ToolUpdate { id, update });
-                }
-                Ok(Progress::Done(index, result)) => {
-                    if !finished[index] {
-                        finished[index] = true;
-                        remaining -= 1;
-                        done(emit, index, result);
-                    }
-                }
-                Err(_) => break,
-            }
+        drain_cancel_grace(&rx, &mut finished, &mut remaining, emit, &mut done);
+    }
+}
+
+/// Answer a cancelled batch: give in-flight tools a short grace window to
+/// land their real results, then answer every unreported call with
+/// [`LoopError::Cancelled`]. The return happens without joining:
+/// stragglers finish in the background.
+fn drain_cancel_grace<F, D>(
+    rx: &crossbeam_channel::Receiver<Progress>,
+    finished: &mut [bool],
+    remaining: &mut usize,
+    emit: &mut F,
+    done: &mut D,
+) where
+    F: FnMut(LoopEvent),
+    D: FnMut(&mut F, usize, Result<ToolOutput, LoopError>),
+{
+    let deadline = std::time::Instant::now() + CANCEL_GRACE;
+    while *remaining > 0 {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
         }
-        for (index, reported) in finished.iter().enumerate() {
-            if !reported {
-                done(emit, index, Err(LoopError::Cancelled));
+        match rx.recv_timeout(left.min(GRACE_SLICE)) {
+            Ok(Progress::Update(id, update)) => {
+                emit(LoopEvent::ToolUpdate { id, update });
             }
+            Ok(Progress::Done(index, result)) => {
+                if !finished[index] {
+                    finished[index] = true;
+                    *remaining -= 1;
+                    done(emit, index, result);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    for (index, reported) in finished.iter().enumerate() {
+        if !reported {
+            done(emit, index, Err(LoopError::Cancelled));
         }
     }
 }

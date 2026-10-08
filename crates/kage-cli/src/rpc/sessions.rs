@@ -4,6 +4,7 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use kage_acp::acp::{
     ContentBlock, ListSessionsRequest, ListSessionsResponse, McpServer, PromptRef,
@@ -18,7 +19,7 @@ use kage_core::sync::lock;
 use kage_core::{Content, LoopEvent, Message, MessageId, Role, SessionId, ToolCallId, ToolOutput};
 use kage_jsonrpc::RpcError;
 use kage_loop::TokenBudget;
-use kage_session::{EntryId, SessionEntry, SessionReader, SessionWriter};
+use kage_session::{EntryId, SessionEntry, SessionError, SessionReader, SessionWriter};
 
 use super::live::Live;
 
@@ -28,6 +29,19 @@ use super::content::image_block;
 use super::mcp::editor_servers;
 use super::options::config_options;
 use crate::engine::{Recorder, render_session_markdown};
+
+/// The memoized [`leading_marker`] verdicts, keyed by file and the
+/// (mtime, size) pair.
+type MarkerCache = Mutex<
+    HashMap<
+        PathBuf,
+        (
+            Option<std::time::SystemTime>,
+            u64,
+            Option<serde_json::Value>,
+        ),
+    >,
+>;
 
 /// Sessions per `session/list` page.
 const LIST_PAGE: usize = 50;
@@ -102,7 +116,7 @@ impl super::CliAcpAgent {
                 }));
             }
         }
-        let writer = SessionWriter::open(&path).map_err(|e| RpcError::internal(e.to_string()))?;
+        let writer = Self::open_hosted(&path)?;
         let model = if self.host.registry().resolve(&replay.model).is_ok() {
             replay.model
         } else {
@@ -127,6 +141,24 @@ impl super::CliAcpAgent {
             .and_then(kage_core::ThinkingLevel::parse);
         spec.recorder = Some(Recorder::new(writer, spec.plugins.clone()));
         Ok(self.open(client_id.to_owned(), spec))
+    }
+
+    /// Opens a recorded session for hosting, waiting out the window
+    /// between the engine taking the close command and dropping the
+    /// writer: a load that lands there finds the file still locked by
+    /// this very process. A session locked by a real second kage
+    /// stays locked and the error surfaces after the wait.
+    fn open_hosted(path: &Path) -> Result<SessionWriter, RpcError> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match SessionWriter::open(path) {
+                Ok(writer) => return Ok(writer),
+                Err(SessionError::Locked { .. }) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(err) => return Err(RpcError::internal(err.to_string())),
+            }
+        }
     }
 
     /// Shows the recorded agent session at `path` without hosting it:
@@ -513,28 +545,8 @@ pub(super) fn orphaned_agents(
 /// (mtime, size) pair, so a session listing re-reads a file's head
 /// only when the file changed. The cap keeps restored sessions of a
 /// long-lived serve from growing it without bound.
-fn marker_cache() -> &'static Mutex<
-    HashMap<
-        PathBuf,
-        (
-            Option<std::time::SystemTime>,
-            u64,
-            Option<serde_json::Value>,
-        ),
-    >,
-> {
-    static PEEKED: std::sync::OnceLock<
-        Mutex<
-            HashMap<
-                PathBuf,
-                (
-                    Option<std::time::SystemTime>,
-                    u64,
-                    Option<serde_json::Value>,
-                ),
-            >,
-        >,
-    > = std::sync::OnceLock::new();
+fn marker_cache() -> &'static MarkerCache {
+    static PEEKED: std::sync::OnceLock<MarkerCache> = std::sync::OnceLock::new();
     PEEKED.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

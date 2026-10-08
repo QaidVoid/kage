@@ -928,7 +928,7 @@ fn the_byte_cap_compacts_oldest_blocks_first() {
     assert_eq!(buf.total_text_bytes, 8 * 1024);
     assert!(buf.trim_scrollback() > 0);
     assert!(
-        buf.total_text_bytes <= 4 * 1024 && buf.total_text_bytes < MAX_BYTES,
+        buf.total_text_bytes <= 4 * 1024,
         "{} bytes kept",
         buf.total_text_bytes
     );

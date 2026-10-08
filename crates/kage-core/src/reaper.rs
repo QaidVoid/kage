@@ -178,14 +178,26 @@ mod imp {
             after.split_whitespace().next().map(str::to_owned)
         }
 
-        /// Wait until `pid` has exited and been collected, either as a
-        /// zombie (`Z`) or reaped early by another test's drain pass,
-        /// which records the status all the same.
+        /// Wait until `pid` has exited and is a zombie, without
+        /// reaping it: `waitid` with `WNOWAIT` peeks at the status and
+        /// leaves the child waitable, so the drain in the test is
+        /// still the one that collects and records it.
         fn wait_for_zombie(pid: u32) {
+            use nix::sys::wait::{Id, waitid};
+            use nix::unistd::Pid;
+
+            let pid = Pid::from_raw(i32::try_from(pid).expect("pid fits in i32"));
+            let peek = WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT;
             for _ in 0..100 {
-                match state(pid).as_deref() {
-                    Some("Z") | None => return,
-                    _ => {}
+                match waitid(Id::Pid(pid), peek) {
+                    // A zombie, still waitable because of WNOWAIT; or
+                    // already reaped by another test's drain pass,
+                    // which recorded the status all the same.
+                    Ok(WaitStatus::Exited(_, _) | WaitStatus::Signaled(_, _, _)) | Err(_) => {
+                        return;
+                    }
+                    // Still alive: keep waiting.
+                    Ok(_) => {}
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }

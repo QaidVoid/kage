@@ -2307,7 +2307,8 @@ mod tests {
             assert_eq!(store.read(cx).active_id(), Some("s1"));
         });
 
-        let cases: Vec<(&str, Vec<&str>, Box<dyn Fn(&mut App)>)> = vec![
+        type FlushCase<'a> = (&'a str, Vec<&'a str>, Box<dyn Fn(&mut App) + 'a>);
+        let cases: Vec<FlushCase> = vec![
             (
                 "handshake",
                 vec!["initialize"],

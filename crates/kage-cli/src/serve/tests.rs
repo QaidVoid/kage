@@ -386,8 +386,15 @@ fn request_with_token(addr: SocketAddr, request_line: &str, token: &Token) -> (S
 
 /// Completes a WebSocket upgrade on a raw socket and keeps it open.
 fn open_upgrade(addr: SocketAddr, token: &Token) -> (TcpStream, String) {
-    let mut stream = TcpStream::connect(addr).unwrap();
-    stream.set_read_timeout(Some(WAIT)).unwrap();
+    try_open_upgrade(addr, token).expect("the upgrade went through")
+}
+
+/// Like [`open_upgrade`], but a connection the kernel reset or closed
+/// before a reply comes back as an error or an empty reply instead of
+/// a panic.
+fn try_open_upgrade(addr: SocketAddr, token: &Token) -> std::io::Result<(TcpStream, String)> {
+    let mut stream = TcpStream::connect(addr)?;
+    stream.set_read_timeout(Some(WAIT))?;
     let request = format!(
         "GET /acp HTTP/1.1\r\n\
          Host: {addr}\r\n\
@@ -398,19 +405,19 @@ fn open_upgrade(addr: SocketAddr, token: &Token) -> (TcpStream, String) {
          Authorization: Bearer {}\r\n\r\n",
         token.as_str()
     );
-    stream.write_all(request.as_bytes()).unwrap();
+    stream.write_all(request.as_bytes())?;
     let mut reply = String::new();
-    let mut buffered = BufReader::new(stream.try_clone().unwrap());
+    let mut buffered = BufReader::new(stream.try_clone()?);
     loop {
         let mut line = String::new();
-        let read = buffered.read_line(&mut line).unwrap();
+        let read = buffered.read_line(&mut line)?;
         let done = read == 0 || line == "\r\n";
         reply.push_str(&line);
         if done {
             break;
         }
     }
-    (stream, reply)
+    Ok((stream, reply))
 }
 
 #[test]
@@ -539,7 +546,19 @@ fn the_seventeenth_concurrent_connection_gets_503() {
         held.push(stream);
     }
 
-    let (_, reply) = open_upgrade(server.addr, &server.token);
+    // macOS resets a peer that lands while the accept loop is still
+    // busy with the upgrades above, before the server can write its
+    // refusal; a retry lands the same 503 once the loop is idle.
+    let mut reply = String::new();
+    for _ in 0..10 {
+        if let Ok((_, got)) = try_open_upgrade(server.addr, &server.token) {
+            reply = got;
+            if !reply.is_empty() {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     assert!(reply.starts_with("HTTP/1.1 503 "), "{reply}");
 
     server.wait_line(|l| l.contains("(503)"));

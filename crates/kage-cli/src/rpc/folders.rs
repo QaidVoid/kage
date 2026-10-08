@@ -194,7 +194,9 @@ mod tests {
         assert!(!listed.truncated);
     }
 
-    #[cfg(unix)]
+    // APFS and NTFS reject non-UTF-8 names, so the fixture only
+    // exists on Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_non_utf8_name_is_skipped_and_counted() {
         use std::ffi::OsStr;

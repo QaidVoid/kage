@@ -911,7 +911,9 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    // APFS and NTFS reject non-UTF-8 names, so the fixture only
+    // exists on Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn find_last_and_prefix_scan_carry_a_non_utf8_stem() {
         use std::ffi::OsStr;

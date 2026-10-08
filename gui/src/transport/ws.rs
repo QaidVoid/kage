@@ -651,7 +651,7 @@ mod tests {
             }
         );
 
-        for n in 0..super::BACKLOG_CAP as usize + 6 {
+        for n in 0..super::BACKLOG_CAP + 6 {
             transport.send(probe(n));
         }
 
@@ -680,14 +680,14 @@ mod tests {
         }
         assert_eq!(sent.len(), super::BACKLOG_CAP, "the cap held");
         assert!(
-            sent.first().unwrap().contains(&format!("probe/6")),
+            sent.first().unwrap().contains("probe/6"),
             "the six oldest frames were dropped: {}",
             sent.first().unwrap()
         );
         assert!(
             sent.last()
                 .unwrap()
-                .contains(&format!("probe/{}", super::BACKLOG_CAP as usize + 5)),
+                .contains(&format!("probe/{}", super::BACKLOG_CAP + 5)),
             "the newest frame survived: {}",
             sent.last().unwrap()
         );

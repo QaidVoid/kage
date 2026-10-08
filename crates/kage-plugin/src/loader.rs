@@ -340,7 +340,9 @@ mod tests {
         assert!(report.failed.is_empty());
     }
 
-    #[cfg(unix)]
+    // APFS and NTFS reject non-UTF-8 names, so the fixture only
+    // exists on Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn non_utf8_stems_fail_instead_of_colliding() {
         use std::ffi::OsStr;

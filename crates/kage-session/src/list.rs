@@ -690,7 +690,9 @@ mod tests {
         assert_eq!(summaries[0].last_user_prompt.as_deref(), Some("hi"));
     }
 
-    #[cfg(unix)]
+    // APFS and NTFS reject non-UTF-8 names, so the fixture only
+    // exists on Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn lists_a_session_with_a_non_utf8_stem() {
         use std::ffi::OsStr;

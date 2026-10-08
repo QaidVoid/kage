@@ -178,30 +178,20 @@ mod imp {
             after.split_whitespace().next().map(str::to_owned)
         }
 
-        /// Wait until `pid` has exited and is a zombie, without
-        /// reaping it: `waitid` with `WNOWAIT` peeks at the status and
-        /// leaves the child waitable, so the drain in the test is
-        /// still the one that collects and records it.
-        fn wait_for_zombie(pid: u32) {
-            use nix::sys::wait::{Id, waitid};
-            use nix::unistd::Pid;
-
-            let pid = Pid::from_raw(i32::try_from(pid).expect("pid fits in i32"));
-            let peek = WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT;
+        /// Drive draining passes until the child `pid` has been
+        /// reaped and its status recorded, which is the moment the
+        /// kernel starts reporting `ECHILD` to its waiter. A drain
+        /// pass from another test may do the reaping; it records the
+        /// status all the same.
+        fn drain_until_reaped(pid: u32) {
             for _ in 0..100 {
-                match waitid(Id::Pid(pid), peek) {
-                    // A zombie, still waitable because of WNOWAIT; or
-                    // already reaped by another test's drain pass,
-                    // which recorded the status all the same.
-                    Ok(WaitStatus::Exited(_, _) | WaitStatus::Signaled(_, _, _)) | Err(_) => {
-                        return;
-                    }
-                    // Still alive: keep waiting.
-                    Ok(_) => {}
+                drain();
+                if records().lock().unwrap().contains_key(&pid) {
+                    return;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            panic!("pid {pid} never became a zombie");
+            panic!("pid {pid} was never reaped and recorded");
         }
 
         #[test]
@@ -209,8 +199,7 @@ mod imp {
         fn drain_reaps_a_finished_child() {
             let child = Command::new("true").spawn().unwrap();
             let pid = child.id();
-            wait_for_zombie(pid);
-            drain();
+            drain_until_reaped(pid);
             assert_eq!(state(pid), None, "zombie survived the drain");
         }
 
@@ -218,8 +207,7 @@ mod imp {
         fn wait_recovers_a_stolen_status() {
             let mut child = Command::new("true").spawn().unwrap();
             let pid = child.id();
-            wait_for_zombie(pid);
-            drain();
+            drain_until_reaped(pid);
             let status = wait(&mut child).expect("wait after the reaper stole the status");
             assert!(status.success());
         }
@@ -228,8 +216,7 @@ mod imp {
         fn try_wait_recovers_a_stolen_status() {
             let mut child = Command::new("true").spawn().unwrap();
             let pid = child.id();
-            wait_for_zombie(pid);
-            drain();
+            drain_until_reaped(pid);
             let status = try_wait(&mut child)
                 .expect("try_wait after the reaper stole the status")
                 .expect("child already exited");
@@ -244,8 +231,7 @@ mod imp {
                 .spawn()
                 .unwrap();
             let pid = child.id();
-            wait_for_zombie(pid);
-            drain();
+            drain_until_reaped(pid);
             let status = wait(&mut child).expect("wait after the reaper stole the status");
             assert_eq!(status.signal(), Some(15));
         }

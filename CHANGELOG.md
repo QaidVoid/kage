@@ -1,4 +1,91 @@
 # Changelog
+## [0.2.0](https://github.com/QaidVoid/kage/compare/v0.1.0...v0.2.0) - 2026-10-09
+
+### Features
+
+- *(cli)* Per-command options in manpage, gen-manpage --check - ([eaf9cd5](https://github.com/QaidVoid/kage/commit/eaf9cd5a3db0cb832a80ea17f22cc1eccef76742))
+- *(client)* Local mutators emit Change records - ([3d5c224](https://github.com/QaidVoid/kage/commit/3d5c2244ce45f84d4804b4046eaa9793801871d9))
+- *(plugin)* Typed event, block and exec stubs in Lua types - ([69b5bb3](https://github.com/QaidVoid/kage/commit/69b5bb3858ad5a789862aa6169702d5eeecce9f9))
+- *(provider)* Add Command Code provider support ([#20](https://github.com/QaidVoid/kage/pull/20)) - ([7c19a11](https://github.com/QaidVoid/kage/commit/7c19a11c374afa91c1ff84c715e3c78ae5d2cc08))
+- *(serve)* Let the web client check its token before it dials - ([ef82a4f](https://github.com/QaidVoid/kage/commit/ef82a4fd8202cf8e311c72f70b55a6321f1b6dc6))
+- *(session)* Report a torn source tail from fork - ([6d9789d](https://github.com/QaidVoid/kage/commit/6d9789de1de15cc2edcd18624abc11f05cd5bf03))
+- Per-call model and thinking overrides for agents and swarms - ([1e72f7c](https://github.com/QaidVoid/kage/commit/1e72f7ca38ac3d395d10e6c609c17a2ef8de87bf))
+
+### Bug Fixes
+
+- *(acp)* Capture upstream stderr instead of inheriting it - ([06c4aa6](https://github.com/QaidVoid/kage/commit/06c4aa636457f9707703a5521467d0408938f9bd))
+- *(cli)* Start from empty state on a corrupt state file - ([b92b582](https://github.com/QaidVoid/kage/commit/b92b58265ea690ec8f10cbe4c748aed2a8ed9597))
+- *(cli)* Canonicalize the resumed model before probing - ([2e8eb2b](https://github.com/QaidVoid/kage/commit/2e8eb2bdef0135b2c452395bcf9cc6d0bb1bad05))
+- *(cli)* Surface session-writer failures and shorten listed ids - ([1a3491c](https://github.com/QaidVoid/kage/commit/1a3491c5099b725608dd6cb9e7e3a5b1dfc98c25))
+- *(cli)* Notice every command refused after the serve detaches - ([69bf3b7](https://github.com/QaidVoid/kage/commit/69bf3b7d16b9729ff3097cf6158508f93a76b697))
+- *(cli)* One credential source, doctor scope, token cache and browser hint - ([080a4d4](https://github.com/QaidVoid/kage/commit/080a4d4eb7189592b148fd0fa8ad448527ba562b))
+- *(core)* Config edit guards, template escapes, report parsing, toast eviction - ([256978b](https://github.com/QaidVoid/kage/commit/256978b9490e0360a881feeba8d1b5f0e31849f2))
+- *(daemon)* Reap orphaned grandchildren to stop pid leak - ([b48de14](https://github.com/QaidVoid/kage/commit/b48de14de4cdb0762f5c347f4b7727c2252f3bec))
+- *(engine)* Force-remove a worktree a failed checkpoint left dirty - ([c85b3ab](https://github.com/QaidVoid/kage/commit/c85b3ab7eea490c6a0ab243437ff4ccda9567a4a))
+- *(engine)* Cancel only unreported swarm children at the backstop - ([eafd0aa](https://github.com/QaidVoid/kage/commit/eafd0aaff4a3b8e769996407b3d57216bc6221ac))
+- *(engine)* Error on answer counts that miss the questions - ([90a6b77](https://github.com/QaidVoid/kage/commit/90a6b77372784a72a7134d63f7caa0f6078dd5c5))
+- *(engine)* Cancel waiting children on close and forget reaped ids - ([68f73d3](https://github.com/QaidVoid/kage/commit/68f73d3cfc4c53dd4890c220401b5e1b9b3e1007))
+- *(goal)* Send the goal to the agent and keep checking it - ([8cfa063](https://github.com/QaidVoid/kage/commit/8cfa063cda4bb7287536f75d1488b7eb9b341137))
+- *(gui)* Absorb RequestId enum from kage-client - ([f0e7464](https://github.com/QaidVoid/kage/commit/f0e74645afa315988c42f0998895adac30a10502))
+- *(host)* Prune closed sessions from the host bookkeeping - ([e6fc916](https://github.com/QaidVoid/kage/commit/e6fc916adc199071f501cacdea2791d3ade224f1))
+- *(loop)* Let compaction threshold 0 disable automatic compaction - ([bc163fe](https://github.com/QaidVoid/kage/commit/bc163feaa442896dc9d37d77dcb90754d6e37694))
+- *(loop,providers)* Millisecond retry waits, shared request headers - ([c4f0f61](https://github.com/QaidVoid/kage/commit/c4f0f61da00ebfc11b3d2a744f9c4f989a76a9d0))
+- *(loop,rpc)* Cancel grace window, bounded pools, ask handling - ([c2ebdce](https://github.com/QaidVoid/kage/commit/c2ebdce22add28e2b21af9ea38bb57c2cbb1aa82))
+- *(mcp)* Refresh tokens per server instead of one global lock - ([6e864c2](https://github.com/QaidVoid/kage/commit/6e864c2964545300cc50c28cc9a65c2fff5c0cb3))
+- *(paths)* Shared unquote_and_trim helper across every entry point - ([3d50ca7](https://github.com/QaidVoid/kage/commit/3d50ca7e1346675cff3738709a4b77239b6f8a22))
+- *(paths)* Shared unquote_and_trim helper across every entry point - ([88c9d4e](https://github.com/QaidVoid/kage/commit/88c9d4eb390294b00630dd5ef82eb80c92800330))
+- *(permissions)* Deny names an alias cycle leaves unresolved - ([80a3b64](https://github.com/QaidVoid/kage/commit/80a3b642e06d4e30ab47a469adcaf8e6f2258e92))
+- *(platform)* Windows job object, writer lock, packaging and remote hardening - ([4acdc8e](https://github.com/QaidVoid/kage/commit/4acdc8ec94fb89330ccd1e92ba4c456e02f5b6c4))
+- *(plugin)* Error on granted capabilities without an installer - ([f51a17c](https://github.com/QaidVoid/kage/commit/f51a17ce63eef5f3807dcb9588d0550dc1650462))
+- *(providers)* Show the upstream 429 body instead of a canned phrase - ([fae8698](https://github.com/QaidVoid/kage/commit/fae86983c5d40b0dfc7a89d6b2be776874cf47d1))
+- *(rpc)* Surface fork truncation and memoize orphan markers - ([eb48cf4](https://github.com/QaidVoid/kage/commit/eb48cf4b94b2edabaa1e7fb005d0fce7799bd7d3))
+- *(security)* Verify presented trust summary, case-insensitive bearer - ([3a38031](https://github.com/QaidVoid/kage/commit/3a3803176eb2277a957610a551e6473caff9f9c0))
+- *(security)* Confine by default, raw repair loaders, probe saved specs only - ([0c3317c](https://github.com/QaidVoid/kage/commit/0c3317c10ce9641405e6444a5fa030f8596bf2d5))
+- *(security)* Validate config, gate plugin events, close SSRF and token leaks - ([363c116](https://github.com/QaidVoid/kage/commit/363c116a1a641e95579847c0ffd25e8f0f694e7e))
+- *(session)* Search sees uppercase jsonl extensions - ([924dc69](https://github.com/QaidVoid/kage/commit/924dc69d46535a24d71f548d8bf586511038e214))
+- *(session)* Classify agent markers by their kind, not byte prefix - ([ed69542](https://github.com/QaidVoid/kage/commit/ed6954232e8f7abc204b1dde770a7e0c759c6a1b))
+- *(session)* Relock after windows torn-tail repair - ([33ab0c2](https://github.com/QaidVoid/kage/commit/33ab0c2207a7ce5ae6b6256d120f552788db8734))
+- *(tools)* Fall back to a permissive schema on serialization failure - ([0dfcfac](https://github.com/QaidVoid/kage/commit/0dfcfac622c1f3bab8449657d47776c9c3269230))
+- *(tui)* Render prose interleaved in agent bursts as bubbles - ([c981393](https://github.com/QaidVoid/kage/commit/c9813939ba61ca74490e03f55c3be46348348f86))
+- *(tui)* Assert char boundaries where the cmdline cursor is written - ([d9fe326](https://github.com/QaidVoid/kage/commit/d9fe326f504ace30f31cf2b58b7e17ea663aaed6))
+- *(tui)* Clamp zero render width in the lifecycle - ([9204a7b](https://github.com/QaidVoid/kage/commit/9204a7b70b88511ff1bd682bd5726de11bdda29a))
+- Bounded worktree drop, testable clipboard encoding - ([fab3bd7](https://github.com/QaidVoid/kage/commit/fab3bd796e540913cca63924e00f4c199074df27))
+- Deadline budgets, width clamps, blank lines, escapes - ([7b37d82](https://github.com/QaidVoid/kage/commit/7b37d82155560426fb4189aeeed3cfd6dbdfe15e))
+- Wave 3 correctness across loop, providers, mcp, tui, gui, rpc - ([2260738](https://github.com/QaidVoid/kage/commit/2260738af5b6818407a9ce4aa45cf45e0908c8fb))
+- Settle wave 0 runtime unknowns with tests and guards - ([16424ea](https://github.com/QaidVoid/kage/commit/16424ea724c358b6b59c003e5889c0697f5afaac))
+- Carry complete tool input while a tool runs - ([8e71ecc](https://github.com/QaidVoid/kage/commit/8e71eccae2404af70c752add0399bc61f7d0ca6d))
+- Fetch through the operator proxy in built-in web tools - ([32272a5](https://github.com/QaidVoid/kage/commit/32272a52481b97e7c5aa0c68dbc5a9807f545a20))
+- Ride the operator proxy in plugin http - ([1f37198](https://github.com/QaidVoid/kage/commit/1f37198b1d4c5180be4b785a4845893e556f6140))
+
+### Refactor
+
+- *(tui,plugin)* One spawn core, pinned rows, cached topology, launch parser - ([de37f91](https://github.com/QaidVoid/kage/commit/de37f9117f03aa8d8d6fb538451ab7a242a7e6af))
+- Shared SSE framing and option JSON helpers - ([3964df9](https://github.com/QaidVoid/kage/commit/3964df9c18713d479f7c2db25f91198a9b008a3f))
+
+### Documentation
+
+- *(plugin)* Note emit cancellation and per-render width in the stub - ([99b06c8](https://github.com/QaidVoid/kage/commit/99b06c8475e246224c2f3c1e9665932ef6f85495))
+- Fix plugin gating, tool result and kimi catalog claims - ([8d9f9eb](https://github.com/QaidVoid/kage/commit/8d9f9eb2a94dad327c955912b0571bbc759d2c53))
+
+### Styling
+
+- Fmt - ([2be2bf7](https://github.com/QaidVoid/kage/commit/2be2bf7e98ee797f5a0ac3eef000ade88a139230))
+- Fix reaper loop closure formatting - ([f0120e0](https://github.com/QaidVoid/kage/commit/f0120e0ba03632eaa641b4cdba2d2c5a92fa5419))
+- Cargo fmt remote head read arm - ([47dff2c](https://github.com/QaidVoid/kage/commit/47dff2c6bf506b0ef84e053a98c1faee24a7306f))
+
+### Testing
+
+- *(engine)* Find the goal intro request by content, not position - ([1ac0349](https://github.com/QaidVoid/kage/commit/1ac0349aaaf90bb60226f4a44e10976b00607f65))
+- *(plugin)* Pin api.md since-generations to the api version - ([eb50dea](https://github.com/QaidVoid/kage/commit/eb50dea5a234d03b07a6d449fe3e298b62ab2fca))
+- *(tui)* Share one rows helper across the view modules - ([3eb91b4](https://github.com/QaidVoid/kage/commit/3eb91b48ccfd082929cdb6e2fc65fb1a464ba81b))
+- *(wire)* Fork cut points survive image-only prompts - ([a36cd89](https://github.com/QaidVoid/kage/commit/a36cd89105a2c7b3c94f3e2e3abfe51b35b533a8))
+- Close the crate test-audit holes with exact, failure-path asserts - ([c769efe](https://github.com/QaidVoid/kage/commit/c769efe41476a097afec88913b95566ebd578302))
+
+### Miscellaneous Tasks
+
+- Fix workspace clippy warnings across all crates ([#21](https://github.com/QaidVoid/kage/pull/21)) - ([6bc3be9](https://github.com/QaidVoid/kage/commit/6bc3be9b8c47f6f808ab49f4c80ce21b87220419))
+- Update color - ([bc9f765](https://github.com/QaidVoid/kage/commit/bc9f765593d104c179200fd7873ae27348d01a94))
+
 ## [0.1.0] - 2026-10-02
 
 ### Features

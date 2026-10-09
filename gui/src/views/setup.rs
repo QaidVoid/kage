@@ -29,12 +29,11 @@ use crate::views::deferred::Deferred;
 use crate::views::kit::{BtnTone, btn_sm};
 
 /// The ways to install `kage`, with the command or page each names.
-const INSTALL: [(&str, &str); 3] = [
+const INSTALL: [(&str, &str); 2] = [
     (
         "Cargo",
         "cargo install --locked --git https://github.com/QaidVoid/kage kage-cli",
     ),
-    ("Nix", "nix profile install github:QaidVoid/kage"),
     (
         "Release archive",
         "https://github.com/QaidVoid/kage/releases/latest",
@@ -347,7 +346,7 @@ impl Render for SetupView {
                                     .text_size(px(FS_XS))
                                     .text_color(pal.danger)
                                     .child(Icon::new(IconName::TriangleAlert).with_size(px(12.)))
-                                    .child(error)
+                                    .child(div().flex_1().min_w_0().child(error))
                             })),
                     )
                     .child(group("Or download it here"))

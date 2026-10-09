@@ -28,7 +28,7 @@ const RELEASES_DOWNLOAD: &str = "https://github.com/QaidVoid/kage/releases/downl
 #[cfg(not(target_arch = "wasm32"))]
 const CHECK_INTERVAL: i64 = 24 * 60 * 60;
 
-/// The most bytes a downloaded engine binary may weigh. The binary
+/// The most bytes a downloaded engine archive may weigh. The archive
 /// has stayed far under this; the cap bounds a broken mirror's reply.
 #[cfg(not(target_arch = "wasm32"))]
 const BINARY_CAP: usize = 256 * 1024 * 1024;
@@ -106,16 +106,17 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
     crate::gate::is_below(current, latest)
 }
 
-/// The raw engine artifact built for `os` and `arch`, named the way
-/// the release workflow uploads it. `None` where no release is built.
+/// The engine release archive built for `os` and `arch`, named the
+/// way the release workflow uploads it. `None` where no release is
+/// built.
 #[must_use]
 pub fn cli_asset_for(os: &str, arch: &str) -> Option<&'static str> {
     match (os, arch) {
-        ("linux", "x86_64") => Some("kage-x86_64-unknown-linux-musl"),
-        ("linux", "aarch64") => Some("kage-aarch64-unknown-linux-musl"),
-        ("macos", "x86_64") => Some("kage-x86_64-apple-darwin"),
-        ("macos", "aarch64") => Some("kage-aarch64-apple-darwin"),
-        ("windows", "x86_64") => Some("kage-x86_64-pc-windows-msvc.exe"),
+        ("linux", "x86_64") => Some("kage-x86_64-linux.tar.xz"),
+        ("linux", "aarch64") => Some("kage-aarch64-linux.tar.xz"),
+        ("macos", "x86_64") => Some("kage-x86_64-macos.tar.xz"),
+        ("macos", "aarch64") => Some("kage-aarch64-macos.tar.xz"),
+        ("windows", "x86_64") => Some("kage-x86_64-windows.zip"),
         _ => None,
     }
 }
@@ -159,8 +160,9 @@ pub fn open_releases() {
     native::open_in_browser(RELEASES_PAGE);
 }
 
-/// Downloads the newest engine release for this platform, verifies it
-/// against its checksum sidecar and installs it where the user's
+/// Downloads the newest engine release archive for this platform,
+/// checks it against the release's checksum sidecar when one exists,
+/// extracts the engine binary and installs it where the user's
 /// account owns it, returning the binary's path. The web build
 /// reports the platform as unable.
 pub fn install_latest() -> Result<std::path::PathBuf, String> {
@@ -232,7 +234,7 @@ fn digest(bytes: &[u8]) -> String {
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use std::io::Read as _;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     /// The client the GitHub API asks for; it requires a user agent.
@@ -243,28 +245,46 @@ mod native {
             .build()
     }
 
+    /// The message for a failed release fetch. Releases older than
+    /// the raw-binary upload carry only archives, so a missing
+    /// artifact is expected there and should not read as HTTP jargon.
+    pub(super) fn did_not_load(error: ureq::Error, what: &str) -> String {
+        if matches!(error, ureq::Error::Status(404, _)) {
+            return format!("{what} was not found");
+        }
+        format!("{what} did not load: {error}")
+    }
+
     /// Gets a URL's body as text.
     fn fetch_text(url: &str, what: &str) -> Result<String, String> {
         agent()
             .get(url)
             .call()
-            .map_err(|error| format!("{what} did not load: {error}"))?
+            .map_err(|error| did_not_load(error, what))?
             .into_string()
             .map_err(|error| format!("{what} did not read: {error}"))
     }
 
-    /// Gets a URL's body as bytes, refusing past `cap`.
-    fn fetch_bytes(url: &str, cap: usize, what: &str) -> Result<Vec<u8>, String> {
+    /// Gets a URL's body as bytes, refusing past `cap`. `None` when
+    /// the release names no such artifact.
+    fn fetch_bytes_opt(url: &str, cap: usize, what: &str) -> Result<Option<Vec<u8>>, String> {
+        let response = match agent().get(url).call() {
+            Ok(response) => response,
+            Err(ureq::Error::Status(404, _)) => return Ok(None),
+            Err(error) => return Err(did_not_load(error, what)),
+        };
         let mut bytes = Vec::new();
-        agent()
-            .get(url)
-            .call()
-            .map_err(|error| format!("{what} did not load: {error}"))?
+        response
             .into_reader()
             .take(cap as u64)
             .read_to_end(&mut bytes)
             .map_err(|error| format!("{what} did not read: {error}"))?;
-        Ok(bytes)
+        Ok(Some(bytes))
+    }
+
+    /// Gets a URL's body as bytes, refusing past `cap`.
+    fn fetch_bytes(url: &str, cap: usize, what: &str) -> Result<Vec<u8>, String> {
+        fetch_bytes_opt(url, cap, what)?.ok_or_else(|| format!("{what} was not found"))
     }
 
     /// Fetches the releases list as text.
@@ -272,48 +292,119 @@ mod native {
         fetch_text(super::RELEASES_API, "the release list")
     }
 
-    /// Downloads, verifies and installs the newest engine release.
+    /// Downloads the newest release archive, checks it against the
+    /// release's checksum sidecar and installs the engine binary it
+    /// contains, returning the installed path.
     pub(super) fn install_latest() -> Result<PathBuf, String> {
-        let Some(asset) = super::cli_asset() else {
+        let Some(archive) = super::cli_asset() else {
             return Err("no kage release is built for this platform".to_owned());
         };
         let feed = super::parse_feed(&fetch_releases()?);
         let Some(release) = feed.cli else {
             return Err("the release list names no engine release".to_owned());
         };
-        let url = super::asset_url(&release.tag, asset);
-        let bytes = fetch_bytes(&url, super::BINARY_CAP, "the kage binary")?;
-        let sidecar = fetch_bytes(&format!("{url}.sha256"), super::SIDECAR_CAP, "its checksum")?;
+        let url = super::asset_url(&release.tag, archive);
+        let bytes = fetch_bytes(&url, super::BINARY_CAP, "the kage archive")?;
+        verify_against_sidecar(&url, &bytes)?;
+        install(archive, &bytes)
+    }
+
+    /// Checks the downloaded archive against the release's checksum
+    /// sidecar. Releases older than the sidecar upload ship none, and
+    /// a missing sidecar skips the check rather than failing it.
+    fn verify_against_sidecar(url: &str, bytes: &[u8]) -> Result<(), String> {
+        let Some(sidecar) =
+            fetch_bytes_opt(&format!("{url}.sha256"), super::SIDECAR_CAP, "its checksum")?
+        else {
+            return Ok(());
+        };
         let text = String::from_utf8(sidecar).map_err(|_| "its checksum is not text".to_owned())?;
         let expected = super::parse_sha256(&text)
             .ok_or_else(|| "its checksum file is unreadable".to_owned())?;
-        if super::digest(&bytes) != expected {
+        if super::digest(bytes) != expected {
             return Err("the download does not match its checksum".to_owned());
         }
-        install(&bytes)
+        Ok(())
     }
 
-    /// Writes the binary under the user's own bin and returns its path.
-    fn install(bytes: &[u8]) -> Result<PathBuf, String> {
+    /// Unpacks the archive in a scratch directory and installs the
+    /// engine binary it contains under the user's own bin, returning
+    /// the installed path.
+    fn install(archive: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+        let scratch = scratch_dir()?;
         let dir = install_dir()?;
         std::fs::create_dir_all(&dir)
             .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
         let name = if cfg!(windows) { "kage.exe" } else { "kage" };
-        let target = dir.join(name);
         let staging = dir.join(format!("{name}.new"));
-        std::fs::write(&staging, bytes)
-            .map_err(|error| format!("cannot write {}: {error}", staging.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755));
-        }
+        let staged = stage_binary(archive, bytes, &scratch, &staging);
+        let _ = std::fs::remove_dir_all(&scratch);
+        staged?;
+        let target = staging.with_file_name(name);
         if target.exists() {
             let _ = std::fs::remove_file(&target);
         }
         std::fs::rename(&staging, &target)
             .map_err(|error| format!("cannot move it into place: {error}"))?;
         Ok(target)
+    }
+
+    /// Writes the archive to `scratch`, unpacks it and copies the
+    /// engine binary to `staging`, executable bit set.
+    pub(super) fn stage_binary(
+        archive: &str,
+        bytes: &[u8],
+        scratch: &Path,
+        staging: &Path,
+    ) -> Result<(), String> {
+        let archive_path = scratch.join(archive);
+        std::fs::write(&archive_path, bytes)
+            .map_err(|error| format!("cannot write {}: {error}", archive_path.display()))?;
+        compak::extract_archive(archive_path.as_path(), scratch)
+            .map_err(|error| format!("cannot unpack {archive}: {error}"))?;
+        let binary = find_engine_binary(scratch)?;
+        std::fs::copy(&binary, staging)
+            .map_err(|error| format!("cannot stage {}: {error}", staging.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(staging, std::fs::Permissions::from_mode(0o755));
+        }
+        Ok(())
+    }
+
+    /// The extracted engine binary: the one file named `kage` (plus
+    /// the Windows suffix) under the unpacked archive. Release
+    /// archives nest it under a target-named directory, so the search
+    /// walks instead of assuming the layout.
+    pub(super) fn find_engine_binary(dir: &Path) -> Result<PathBuf, String> {
+        let wanted = if cfg!(windows) { "kage.exe" } else { "kage" };
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(next) = stack.pop() {
+            let entries = std::fs::read_dir(&next)
+                .map_err(|error| format!("cannot read {}: {error}", next.display()))?;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.file_name().is_some_and(|name| name == wanted) {
+                    return Ok(path);
+                }
+            }
+        }
+        Err(format!("the archive holds no {wanted}"))
+    }
+
+    /// A fresh scratch directory for one download and unpack.
+    pub(super) fn scratch_dir() -> Result<PathBuf, String> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let dir = std::env::temp_dir().join(format!("kage-install-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+        Ok(dir)
     }
 
     /// The user-owned directory an installed engine goes to.
@@ -403,11 +494,11 @@ mod tests {
     #[test]
     fn every_release_target_maps_to_an_asset() {
         for (os, arch, asset) in [
-            ("linux", "x86_64", "kage-x86_64-unknown-linux-musl"),
-            ("linux", "aarch64", "kage-aarch64-unknown-linux-musl"),
-            ("macos", "x86_64", "kage-x86_64-apple-darwin"),
-            ("macos", "aarch64", "kage-aarch64-apple-darwin"),
-            ("windows", "x86_64", "kage-x86_64-pc-windows-msvc.exe"),
+            ("linux", "x86_64", "kage-x86_64-linux.tar.xz"),
+            ("linux", "aarch64", "kage-aarch64-linux.tar.xz"),
+            ("macos", "x86_64", "kage-x86_64-macos.tar.xz"),
+            ("macos", "aarch64", "kage-aarch64-macos.tar.xz"),
+            ("windows", "x86_64", "kage-x86_64-windows.zip"),
         ] {
             assert_eq!(cli_asset_for(os, arch), Some(asset));
         }
@@ -418,8 +509,8 @@ mod tests {
     #[test]
     fn asset_urls_point_at_the_release_download() {
         assert_eq!(
-            asset_url("v0.2.0", "kage-x86_64-apple-darwin"),
-            "https://github.com/QaidVoid/kage/releases/download/v0.2.0/kage-x86_64-apple-darwin"
+            asset_url("v0.2.0", "kage-aarch64-macos.tar.xz"),
+            "https://github.com/QaidVoid/kage/releases/download/v0.2.0/kage-aarch64-macos.tar.xz"
         );
     }
 
@@ -440,5 +531,79 @@ mod tests {
             digest(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_missing_artifact_does_not_read_as_http_jargon() {
+        use super::native::did_not_load;
+        let missing = ureq::Error::Status(404, ureq::Response::new(404, "Not Found", "").unwrap());
+        assert_eq!(
+            did_not_load(missing, "the kage binary"),
+            "the kage binary was not found"
+        );
+        let broken = ureq::Error::Status(500, ureq::Response::new(500, "Nope", "").unwrap());
+        assert!(did_not_load(broken, "the kage binary").contains("did not load"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_engine_is_found_under_the_release_archive_layout() {
+        use super::native::{find_engine_binary, scratch_dir};
+        let scratch = scratch_dir().unwrap();
+        let nested = scratch.join("kage-x86_64-linux");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("kage"), "binary").unwrap();
+        std::fs::write(scratch.join("LICENSE"), "MIT").unwrap();
+        let found = find_engine_binary(&scratch).unwrap();
+        assert_eq!(found, nested.join("kage"));
+        let _ = std::fs::remove_dir_all(&scratch);
+
+        let empty = scratch_dir().unwrap();
+        let missing = find_engine_binary(&empty).unwrap_err();
+        assert!(missing.contains("holds no kage"), "got {missing}");
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    #[test]
+    fn a_release_archive_unpacks_and_yields_the_engine() {
+        use super::native::{scratch_dir, stage_binary};
+        let source = scratch_dir().unwrap();
+        let payload = source.join("kage-x86_64-linux");
+        std::fs::create_dir_all(&payload).unwrap();
+        std::fs::write(payload.join("kage"), "#!/bin/sh\necho ok\n").unwrap();
+        let archive = source.join("kage-x86_64-linux.tar.xz");
+        let built = std::process::Command::new("tar")
+            .args([
+                "-cJf",
+                archive.to_str().unwrap(),
+                "-C",
+                source.to_str().unwrap(),
+                "kage-x86_64-linux",
+            ])
+            .status()
+            .expect("system tar");
+        assert!(built.success(), "tar -cJf must build the test archive");
+
+        let out = scratch_dir().unwrap();
+        let staging = out.join("kage.new");
+        stage_binary(
+            "kage-x86_64-linux.tar.xz",
+            &std::fs::read(&archive).unwrap(),
+            &out,
+            &staging,
+        )
+        .unwrap();
+        let staged = std::fs::read_to_string(&staging).unwrap();
+        assert_eq!(staged, "#!/bin/sh\necho ok\n");
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(&staging).unwrap().permissions().mode() & 0o111,
+            0o111,
+            "the staged binary must be executable"
+        );
+        let _ = std::fs::remove_dir_all(&source);
+        let _ = std::fs::remove_dir_all(&out);
     }
 }

@@ -30,9 +30,9 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -1008,10 +1008,7 @@ mod tests {
             ProviderError::Transport("acp: handshake timed out".to_owned()),
             Some(&tail),
         );
-        assert!(
-            err.to_string().contains("agent stderr: boom"),
-            "got {err}"
-        );
+        assert!(err.to_string().contains("agent stderr: boom"), "got {err}");
 
         // An empty or absent tail leaves the error alone, and variants
         // without a message slot pass through untouched.

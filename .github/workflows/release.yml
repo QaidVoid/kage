@@ -75,7 +75,11 @@ jobs:
           bin="target/${{ matrix.target }}/release/kage"
           if [ "$RUNNER_OS" = "Windows" ]; then bin="$bin.exe"; fi
           mkdir -p "$artifact" dist
-          cp "$bin" LICENSE README.md man/kage.1 "$artifact/"
+          cp "$bin" LICENSE README.md "$artifact/"
+          # The man page rides in its own directory: the layout the
+          # verify step and manual installs script against.
+          mkdir -p "$artifact/man"
+          cp man/kage.1 "$artifact/man/"
           # Raw binary next to the archive for the GUI-side downloader,
           # named after the target triple; cp keeps the executable bit
           # and Windows keeps the .exe suffix.

@@ -3629,7 +3629,7 @@ dependencies = [
 
 [[package]]
 name = "kage-acp-wire"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3637,7 +3637,7 @@ dependencies = [
 
 [[package]]
 name = "kage-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kage-acp-wire",
  "kage-core",
@@ -3648,7 +3648,7 @@ dependencies = [
 
 [[package]]
 name = "kage-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "crossbeam-channel",
@@ -3667,7 +3667,7 @@ dependencies = [
 
 [[package]]
 name = "kage-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-channel",
  "chrono",

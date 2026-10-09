@@ -30,7 +30,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
@@ -216,10 +216,69 @@ fn permission_result(
     serde_json::to_value(RequestPermissionResponse { outcome }).unwrap_or(serde_json::Value::Null)
 }
 
+/// A small in-memory tail of the agent's stderr, drained on a
+/// background thread. Mirrors `kage-mcp`'s helper of the same name:
+/// the agent's stderr must not draw over the host's terminal, and a
+/// failed turn quotes its last lines.
+#[derive(Clone, Default)]
+struct StderrTail(Arc<Mutex<Vec<String>>>);
+
+impl StderrTail {
+    /// How many lines are kept.
+    const LINES: usize = 8;
+    /// How long one kept line may be.
+    const LINE_CHARS: usize = 160;
+
+    /// Drain `reader` on a background thread into the tail.
+    fn capture(reader: impl std::io::Read + Send + 'static) -> Self {
+        let tail = Self::default();
+        let shared = Arc::clone(&tail.0);
+        std::thread::spawn(move || {
+            let reader = std::io::BufReader::new(reader);
+            for line in std::io::BufRead::lines(reader) {
+                let Ok(line) = line else { return };
+                let line: String = line.chars().take(Self::LINE_CHARS).collect();
+                let Ok(mut lines) = shared.lock() else { return };
+                if lines.len() == Self::LINES {
+                    lines.remove(0);
+                }
+                lines.push(line);
+            }
+        });
+        tail
+    }
+
+    /// The kept lines as one short string, or an empty one.
+    fn snippet(&self) -> String {
+        let Ok(lines) = self.0.lock() else {
+            return String::new();
+        };
+        lines.join(" | ")
+    }
+}
+
+/// Append the agent's captured stderr to a failed turn's error.
+/// Variants without a message slot are returned unchanged.
+fn with_stderr_tail(err: ProviderError, tail: Option<&StderrTail>) -> ProviderError {
+    let Some(tail) = tail else { return err };
+    let snippet = tail.snippet();
+    if snippet.is_empty() {
+        return err;
+    }
+    match err {
+        ProviderError::Transport(m) => {
+            ProviderError::Transport(format!("{m}; agent stderr: {snippet}"))
+        }
+        ProviderError::Decode(m) => ProviderError::Decode(format!("{m}; agent stderr: {snippet}")),
+        other => other,
+    }
+}
+
 /// The translating iterator returned by [`AcpProvider::stream`].
 struct AcpClientStream {
     rx: Receiver<Result<ProviderEvent, ProviderError>>,
     child: Option<Child>,
+    stderr: Option<StderrTail>,
     finished: bool,
     shutdown: Arc<AtomicBool>,
     stop: CancelFlag,
@@ -235,6 +294,10 @@ impl Iterator for AcpClientStream {
         let Ok(item) = self.rx.recv() else {
             self.finished = true;
             return None;
+        };
+        let item = match item {
+            Err(e) => Err(with_stderr_tail(e, self.stderr.as_ref())),
+            ok => ok,
         };
         if matches!(item, Ok(ProviderEvent::MessageEnd { .. }) | Err(_)) {
             self.finished = true;
@@ -426,6 +489,7 @@ where
     Ok(AcpClientStream {
         rx,
         child: None,
+        stderr: None,
         finished: false,
         shutdown,
         stop,
@@ -452,7 +516,10 @@ impl Provider for AcpProvider {
             .envs(&agent.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            // Captured, never inherited: the agent's stderr must not
+            // draw over the host's terminal, and a failed turn quotes
+            // its last lines.
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| ProviderError::Transport(format!("acp: spawn {}: {e}", agent.command)))?;
         let stdin = child
@@ -463,11 +530,12 @@ impl Provider for AcpProvider {
             .stdout
             .take()
             .ok_or_else(|| ProviderError::Transport("acp: no child stdout".to_owned()))?;
+        let stderr = child.stderr.take().map(StderrTail::capture);
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
 
-        let mut stream = run_turn(
+        let mut stream = match run_turn(
             BufReader::new(stdout),
             stdin,
             prompt,
@@ -475,18 +543,23 @@ impl Provider for AcpProvider {
             cancel,
             self.permission.clone(),
             HANDSHAKE_TIMEOUT,
-        )
-        .inspect_err(|_| {
-            let _ = child.kill();
-            let _ = child.wait();
-        })?;
+        ) {
+            Ok(stream) => stream,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(with_stderr_tail(e, stderr.as_ref()));
+            }
+        };
         stream.child = Some(child);
+        stream.stderr = stderr;
         Ok(Box::new(stream))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
     use std::io::BufReader;
 
     use super::*;
@@ -880,5 +953,72 @@ mod tests {
             "deadline must bound the handshake, took {:?}",
             start.elapsed()
         );
+    }
+
+    /// Poll `pred` until it holds or about two seconds pass.
+    fn wait_until(mut pred: impl FnMut() -> bool) -> bool {
+        for _ in 0..200 {
+            if pred() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        pred()
+    }
+
+    #[test]
+    fn stderr_tail_keeps_the_last_capped_lines() {
+        let mut input = String::new();
+        for n in 1..=20 {
+            let _ = writeln!(input, "noise {n}");
+        }
+        input.push_str("fatal: no space\r");
+        let tail = StderrTail::capture(std::io::Cursor::new(input));
+        assert!(
+            wait_until(|| tail.snippet().contains("fatal: no space")),
+            "got {:?}",
+            tail.snippet()
+        );
+        let snippet = tail.snippet();
+        assert!(
+            !snippet.contains("noise 12"),
+            "early lines dropped: {snippet}"
+        );
+        assert_eq!(snippet.matches(" | ").count() + 1, StderrTail::LINES);
+
+        let long = "x".repeat(500);
+        let tail = StderrTail::capture(std::io::Cursor::new(long));
+        assert!(
+            wait_until(|| !tail.snippet().is_empty()),
+            "got {:?}",
+            tail.snippet()
+        );
+        assert_eq!(tail.snippet().chars().count(), StderrTail::LINE_CHARS);
+    }
+
+    #[test]
+    fn failed_turns_quote_the_agent_stderr() {
+        let tail = StderrTail::capture(std::io::Cursor::new("boom".to_owned()));
+        assert!(
+            wait_until(|| !tail.snippet().is_empty()),
+            "got {:?}",
+            tail.snippet()
+        );
+        let err = with_stderr_tail(
+            ProviderError::Transport("acp: handshake timed out".to_owned()),
+            Some(&tail),
+        );
+        assert!(
+            err.to_string().contains("agent stderr: boom"),
+            "got {err}"
+        );
+
+        // An empty or absent tail leaves the error alone, and variants
+        // without a message slot pass through untouched.
+        let empty = StderrTail::default();
+        let err = with_stderr_tail(ProviderError::Cancelled, Some(&empty));
+        assert!(matches!(err, ProviderError::Cancelled));
+        let err = with_stderr_tail(ProviderError::Cancelled, None);
+        assert!(matches!(err, ProviderError::Cancelled));
     }
 }

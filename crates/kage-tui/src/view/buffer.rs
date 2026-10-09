@@ -272,8 +272,8 @@ fn render_new_output_mark(frame: &mut Frame, area: Rect) {
     }
     let theme = crate::theme::current();
     let style = Style::default()
-        .fg(theme.selection_fg)
-        .bg(theme.user_rule)
+        .fg(theme.input_pill_insert_fg)
+        .bg(theme.input_pill_insert_bg)
         .add_modifier(DECORATION_MARKER);
     let x = area.right() - width - 2;
     frame

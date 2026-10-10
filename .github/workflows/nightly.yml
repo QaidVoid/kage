@@ -444,7 +444,9 @@ jobs:
             }
           done
           cp onelf.toml AppDir/onelf.toml
-          version="$(git rev-parse --short HEAD)"
+          # git refuses to run in the container: the checkout is owned by
+          # a different uid there, so take the sha from the environment.
+          version="${KAGE_BUILD_SHA:0:7}"
           sed -i "s/^version[[:space:]]*=.*/version = \"$version\"/" AppDir/onelf.toml
           grep -qx "version = \"$version\"" AppDir/onelf.toml || {
             echo "AppDir/onelf.toml does not name version $version" >&2

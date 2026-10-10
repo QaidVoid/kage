@@ -11,8 +11,8 @@
 //!
 //! A provider models.dev does not know at all falls back to the
 //! favicon of its own site: the endpoint host's `/favicon.ico`,
-//! reached by dropping a leading `api.` label (`api.commandcode.ai`
-//! serves no icon; `commandcode.ai` does).
+//! reached by dropping a leading `api.` label (`api.example.com`
+//! serves no icon; `example.com` does).
 //!
 //! Each logo is fetched at most once per run: the memory cache holds
 //! the decoded [`Image`], the disk cache under the kage cache
@@ -48,19 +48,13 @@ enum Logo {
 static CACHE: LazyLock<Mutex<BTreeMap<String, Logo>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
-/// Kage ids whose models.dev logo lives under another name. The
-/// catalog's own `ProviderMap` renames into kage's ids, so these
-/// pairs stay in step with it.
+/// Kage ids whose models.dev logo lives under another name. Only ids
+/// kage's own catalog registers get aliases; a custom provider's id
+/// passes through untouched and falls back to its site's favicon.
 fn models_dev_id(id: &str) -> &str {
     match id {
-        // kage registers OpenAI once per wire protocol; the brand is
-        // the one logo.
         "openai-responses" => "openai",
-        // models.dev names the regional plan flavors; the cn one is
-        // the endpoint kage's compat entry declares.
         "kimi-for-coding" => "kimi-code-plan-cn",
-        "zai-gateway" | "zai-proxy" => "zai",
-        "oc-free" => "opencode",
         other => other,
     }
 }
@@ -200,7 +194,7 @@ fn fetch(id: &str, site: Option<&str>, dir: Option<PathBuf>) -> Logo {
         return Logo::Ready(ready(&bytes).expect("checked above"));
     }
     // models.dev does not know the id; the provider's own site may
-    // still carry an icon. `api.commandcode.ai` serves none, its
+    // still carry an icon. `api.example.com` serves none, its
     // web home does, so the machine label steps aside.
     if let Some(domain) = site.and_then(site_domain)
         && let Some(bytes) = fetch_bytes(&format!("https://{domain}/favicon.ico"), LOGO_CAP)
@@ -259,10 +253,8 @@ mod tests {
         assert_eq!(models_dev_id("openai"), "openai");
         assert_eq!(models_dev_id("openai-responses"), "openai");
         assert_eq!(models_dev_id("kimi-for-coding"), "kimi-code-plan-cn");
-        assert_eq!(models_dev_id("zai-gateway"), "zai");
-        assert_eq!(models_dev_id("zai-proxy"), "zai");
-        assert_eq!(models_dev_id("oc-free"), "opencode");
         assert_eq!(models_dev_id("google"), "google");
+        assert_eq!(models_dev_id("some-custom"), "some-custom");
     }
 
     #[test]
@@ -282,11 +274,11 @@ mod tests {
     #[test]
     fn site_domains_drop_scheme_path_port_and_api_label() {
         assert_eq!(
-            site_domain("https://api.commandcode.ai/v1"),
-            Some("commandcode.ai")
+            site_domain("https://api.example.com/v1"),
+            Some("example.com")
         );
         assert_eq!(site_domain("http://localhost:11434"), Some("localhost"));
-        assert_eq!(site_domain("commandcode.ai/v1"), Some("commandcode.ai"));
+        assert_eq!(site_domain("example.com/v1"), Some("example.com"));
         assert_eq!(site_domain("https://"), None);
     }
 }

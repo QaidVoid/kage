@@ -458,7 +458,7 @@ fn mcp_manager(
 fn editor_server(dir: &Path) -> String {
     let script = dir.join("server.sh");
     let body = r#"while IFS= read -r line; do
-  id=$(printf '%s\n' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9]*\),.*/\1/p')
   [ -z "$id" ] && continue
   case "$line" in
     *'"method":"initialize"'*)

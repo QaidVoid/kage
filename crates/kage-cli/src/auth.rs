@@ -910,6 +910,7 @@ mod tests {
                 base_url: "http://localhost:8080/v1".to_owned(),
                 display_name: Some("Llama (local)".to_owned()),
                 api_key_env: None,
+                models_url: None,
                 headers: BTreeMap::new(),
                 models: vec![kage_core::config::CustomProviderModel {
                     id: "llama-3".to_owned(),

@@ -160,12 +160,13 @@ impl PermissionsConfig {
     /// The string glob patterns match against for one tool input:
     /// the `command` field when the input carries one (shell-style
     /// tools), otherwise the compact JSON encoding of the whole
-    /// input.
+    /// input, with object keys sorted so the same input yields the
+    /// same subject however it was ordered.
     #[must_use]
     pub fn subject_for(input: &serde_json::Value) -> String {
         match input.get("command").and_then(serde_json::Value::as_str) {
             Some(command) => command.to_owned(),
-            None => input.to_string(),
+            None => canonical(input).to_string(),
         }
     }
 }
@@ -175,6 +176,26 @@ fn matches_any(patterns: &[String], subject: &str) -> bool {
     patterns
         .iter()
         .any(|p| compiled_glob(p).is_some_and(|m| m.is_match(subject)))
+}
+
+/// `value` with every object's keys sorted, so its JSON text does not
+/// depend on the order it was built in.
+fn canonical(value: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => {
+            let mut pairs: Vec<_> = map.iter().collect();
+            pairs.sort_by(|a, b| a.0.cmp(b.0));
+            Value::Object(
+                pairs
+                    .into_iter()
+                    .map(|(key, value)| (key.clone(), canonical(value)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonical).collect()),
+        value => value.clone(),
+    }
 }
 
 /// Process-wide compiled-glob memo. Patterns are few and static for
@@ -289,11 +310,9 @@ mod tests {
 
     #[test]
     fn subject_for_canonicalizes_key_order() {
-        // serde_json sorts map keys, so a deny pattern written to
-        // mirror the model's emission order still matches the
-        // canonical subject. Enabling serde_json's `preserve_order`
-        // feature anywhere in the dependency graph breaks this pin
-        // loudly instead of silently reshaping every deny rule.
+        // The subject is canonicalized with sorted object keys, so a
+        // deny pattern written to mirror the model's emission order
+        // still matches the canonical subject.
         let input = serde_json::json!({"path": "/tmp/a", "content": "data"});
         assert_eq!(
             PermissionsConfig::subject_for(&input),

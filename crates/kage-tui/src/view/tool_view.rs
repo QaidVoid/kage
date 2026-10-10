@@ -1278,13 +1278,13 @@ mod tests {
         assert_eq!(
             rows,
             [
+                ("repo ".to_owned(), "qaidvoid/kage".to_owned()),
+                ("title".to_owned(), "Palette leads with quit".to_owned()),
                 (
                     "body ".to_owned(),
                     "The slash palette lists quit first. (+3 lines)".to_owned()
                 ),
                 ("n    ".to_owned(), "2".to_owned()),
-                ("repo ".to_owned(), "qaidvoid/kage".to_owned()),
-                ("title".to_owned(), "Palette leads with quit".to_owned()),
             ]
         );
         assert!(arg_rows(&Value::Null).is_empty());

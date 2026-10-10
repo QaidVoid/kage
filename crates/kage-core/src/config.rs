@@ -575,6 +575,12 @@ pub struct CustomProviderConfig {
     /// wins over a key stored via `kage auth login`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
+    /// Where `kage models fetch <id>` reads the model list from, when
+    /// the endpoint's own list will not do - a models.dev-style
+    /// directory document, for instance. A key and headers are only
+    /// sent when it shares the base URL's host and port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models_url: Option<String>,
     /// Extra HTTP headers sent on every request, e.g. `Authorization`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
@@ -1653,6 +1659,7 @@ default = "ask"   # keep asking
             base_url: "https://api.together.xyz/v1".into(),
             display_name: None,
             api_key_env: None,
+            models_url: None,
             headers: BTreeMap::new(),
             models: vec![CustomProviderModel {
                 id: "meta-llama/Llama-3.3-70B-Instruct-Turbo".into(),

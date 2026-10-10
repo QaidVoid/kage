@@ -381,6 +381,13 @@ impl Subagent {
 /// One grouped transcript entry. Consecutive message chunks of a kind
 /// merge into the trailing item, tool call updates merge into the call
 /// they name, and a plan update replaces the plan item before it.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "serde_json's preserve_order widens Value's map, and with \
+              it ToolCallItem; boxing would ripple through every \
+              constructor and match for a size the transcript holds \
+              by the dozen anyway"
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranscriptItem {
     /// One user prompt: the blocks this client sent, or the blocks an

@@ -268,6 +268,7 @@ impl ProviderForm {
             api_key: (self.key_from == KeyFrom::Paste)
                 .then(|| Self::read(&self.key, cx))
                 .filter(|key| !key.is_empty()),
+            models_url: None,
             headers: self.headers.values(cx),
         }
     }

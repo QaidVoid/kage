@@ -704,6 +704,13 @@ pub struct ProviderProbe {
     /// A key typed into the form, used for this request only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// The URL the model list is fetched from, when the endpoint's
+    /// own is not the right one - a models.dev-style directory
+    /// document, say. Empty or absent reads the endpoint itself. A
+    /// key and headers are only sent when it shares the base URL's
+    /// host and port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models_url: Option<String>,
     /// Extra headers. A redacted value keeps the saved one.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
@@ -911,6 +918,15 @@ pub struct ProbeModel {
     /// The most output tokens per turn, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output: Option<u64>,
+    /// Whether the model thinks, when the listing says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
+    /// The inputs it takes (`text`, `image`, ...), when listed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input: Vec<String>,
+    /// The effort levels it accepts, when listed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<String>,
 }
 
 /// `_kage/plugins/install` request params.

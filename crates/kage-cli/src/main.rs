@@ -317,6 +317,13 @@ pub(crate) enum ModelsAction {
         /// Environment variable that holds the API key.
         #[arg(long)]
         api_key_env: Option<String>,
+        /// The URL the model list is read from, when the endpoint's
+        /// own will not do - a models.dev-style directory document,
+        /// say. Overrides the provider's saved models URL. A key and
+        /// headers are only sent when it shares the base URL's host
+        /// and port.
+        #[arg(long)]
+        models_url: Option<String>,
         /// Save the fetched models into the saved
         /// `[providers.custom.<provider>]` entry: ids it does not list
         /// yet are appended as fresh `[[...models]]` tables, listed
@@ -445,6 +452,7 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
                 kind,
                 api_key,
                 api_key_env,
+                models_url,
                 save,
             } => run_models_fetch(
                 &provider,
@@ -452,6 +460,7 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
                 kind.as_deref(),
                 api_key.as_deref(),
                 api_key_env.as_deref(),
+                models_url.as_deref(),
                 save,
             ),
         },
@@ -498,6 +507,7 @@ fn run_models_fetch(
     kind: Option<&str>,
     api_key: Option<&str>,
     api_key_env: Option<&str>,
+    models_url: Option<&str>,
     save: bool,
 ) -> ExitCode {
     let config = match kage_core::config::Config::load_default_raw() {
@@ -520,6 +530,9 @@ fn run_models_fetch(
             .filter(|env| !env.trim().is_empty())
             .map(str::to_owned),
         api_key: api_key.filter(|key| !key.is_empty()).map(str::to_owned),
+        models_url: models_url
+            .filter(|url| !url.trim().is_empty())
+            .map(str::to_owned),
         ..kage_acp::acp::ProviderProbe::default()
     };
     let result = crate::rpc::probe::probe(&probe, &config, &store);
@@ -538,7 +551,13 @@ fn run_models_fetch(
         let out = model
             .max_output
             .map_or_else(|| "?".to_owned(), |n| n.to_string());
-        println!("{}{name}  ctx {context}  out {out}", model.id);
+        let input = model.input.join(",");
+        let input = if input.is_empty() {
+            String::new()
+        } else {
+            format!("  in {input}")
+        };
+        println!("{}{name}  ctx {context}  out {out}{input}", model.id);
     }
     if save {
         let saved = kage_core::config::Config::default_path().map_or_else(
@@ -573,6 +592,8 @@ fn save_fetched_models(
     provider: &str,
     fetched: &[kage_acp::acp::ProbeModel],
 ) -> Result<(usize, usize), String> {
+    use kage_core::modality::Input;
+    use kage_core::thinking::Effort;
     use serde_json::{Value, json};
     let keys = ["providers", "custom", provider];
     let mut entry = kage_core::config_edit::current(path, &keys)
@@ -603,8 +624,32 @@ fn save_fetched_models(
             if let Some(context) = model.context {
                 row["context"] = json!(context);
             }
-            if let Some(out) = model.max_output {
+            if let Some(out) = model.max_output.and_then(|out| u32::try_from(out).ok()) {
                 row["max_output"] = json!(out);
+            }
+            // Only values the config's own types re-parse make it in;
+            // an endpoint naming an unknown kind would fail the next
+            // load.
+            let input: Vec<&str> = model
+                .input
+                .iter()
+                .map(String::as_str)
+                .filter(|kind| Input::parse(kind).is_some())
+                .collect();
+            if !input.is_empty() {
+                row["input"] = json!(input);
+            }
+            let efforts: Vec<&str> = model
+                .efforts
+                .iter()
+                .map(String::as_str)
+                .filter(|level| Effort::parse(level).is_some())
+                .collect();
+            if !efforts.is_empty() {
+                row["efforts"] = json!(efforts);
+            }
+            if let Some(reasoning) = model.reasoning {
+                row["reasoning"] = json!(reasoning);
             }
             row
         })
@@ -1403,6 +1448,9 @@ efforts = ["max"]
                 name: Some("Fresh".into()),
                 context: Some(1024),
                 max_output: Some(64),
+                reasoning: Some(true),
+                input: vec!["text".into(), "image".into(), "hologram".into()],
+                efforts: vec!["low".into(), "xhigh".into(), "madeup".into()],
             },
         ];
         let (added, listed) = save_fetched_models(&path, "lab", &fetched).unwrap();
@@ -1411,7 +1459,17 @@ efforts = ["max"]
         assert!(text.contains("# a kept note"), "{text}");
         assert!(text.contains("id = \"held\""), "{text}");
         assert!(text.contains("id = \"fresh\""), "{text}");
-        assert!(text.contains("context = 1024"), "{text}");
+        let row = &text[text.find("id = \"fresh\"").unwrap()..];
+        let at = |needle: &str| row.find(needle).unwrap();
+        assert!(at("name = \"Fresh\"") < at("context = 1024"), "{row}");
+        assert!(at("context = 1024") < at("max_output = 64"), "{row}");
+        assert!(at("max_output = 64") < at("input = ["), "{row}");
+        assert!(at("input = [") < at("efforts = ["), "{row}");
+        assert!(at("efforts = [") < at("reasoning = true"), "{row}");
+        assert!(text.contains("input = [\"text\", \"image\"]"), "{text}");
+        assert!(text.contains("efforts = [\"low\", \"xhigh\"]"), "{text}");
+        assert!(!text.contains("hologram"), "{text}");
+        assert!(!text.contains("madeup"), "{text}");
     }
 
     #[test]

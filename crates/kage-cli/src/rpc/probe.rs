@@ -10,6 +10,7 @@ use kage_acp::acp::{
     ConfigTestResult, KeySource, ProbeModel, ProbeTool, ProviderKey, ProviderProbe,
 };
 use kage_core::config::{Config, CustomProviderKind};
+use kage_core::thinking::Reasoning;
 use kage_provider::catalog;
 use kage_provider::compat::COMPAT_PROVIDERS;
 use serde_json::Value;
@@ -33,6 +34,7 @@ enum Kind {
 struct Target {
     kind: Kind,
     base: String,
+    models_url: Option<String>,
     key: String,
     headers: BTreeMap<String, String>,
 }
@@ -120,9 +122,24 @@ fn resolve(probe: &ProviderProbe, config: &Config, store: &AuthStore) -> Result<
             }
         })
         .collect();
+    let saved_models_url = custom
+        .map(|custom| custom.models_url.clone())
+        .unwrap_or_default();
+    let models_url = probe
+        .models_url
+        .clone()
+        .filter(|url| !url.trim().is_empty())
+        .or(saved_models_url)
+        .filter(|url| !url.trim().is_empty());
+    if let Some(url) = &models_url
+        && !(url.starts_with("http://") || url.starts_with("https://"))
+    {
+        return Err(format!("{url} is not an http(s) URL"));
+    }
     Ok(Target {
         kind,
         base: base.trim_end_matches('/').to_owned(),
+        models_url,
         key,
         headers,
     })
@@ -344,24 +361,46 @@ fn list(id: &str, target: &Target) -> ConfigTestResult {
 /// any network peer can read. `None` for https and for providers that
 /// need no key, where `http://` is the normal local case.
 fn cleartext_warning(target: &Target) -> Option<&'static str> {
-    let cleartext = target.base.starts_with("http://") && !target.key.is_empty();
+    let url = models_url(target);
+    let same_origin = origin(&url) == origin(&target.base);
+    let cleartext = url.starts_with("http://") && same_origin && !target.key.is_empty();
     cleartext.then_some("warning: the key is sent over cleartext http; use https")
+}
+
+/// The URL the model list is read from: the models URL when one is
+/// set, else the wire protocol's own list path on the base.
+fn models_url(target: &Target) -> String {
+    match &target.models_url {
+        Some(url) => url.clone(),
+        None => match target.kind {
+            Kind::OpenAi => format!("{}/models", target.base),
+            Kind::Anthropic => format!("{}/v1/models", target.base),
+            Kind::Gemini => format!("{}/v1beta/models", target.base),
+        },
+    }
+}
+
+/// The `host:port` authority of an http(s) URL, for the same-origin
+/// check that guards the key and headers.
+fn origin(url: &str) -> Option<&str> {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split('/').next()?;
+    (!authority.is_empty()).then_some(authority)
 }
 
 /// The model list request of `list`, without the cleartext warning.
 fn list_models(id: &str, target: &Target) -> ConfigTestResult {
-    let url = match target.kind {
-        Kind::OpenAi => format!("{}/models", target.base),
-        Kind::Anthropic => format!("{}/v1/models", target.base),
-        Kind::Gemini => format!("{}/v1beta/models", target.base),
-    };
+    let url = models_url(target);
+    // The key and the provider's headers belong to the endpoint; a
+    // models URL elsewhere reads them anonymously.
+    let same_origin = origin(&url) == origin(&target.base);
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(TIMEOUT))
         .build()
         .new_agent();
     let mut request = agent.get(url.as_str());
-    if !target.key.is_empty() {
+    if same_origin && !target.key.is_empty() {
         request = match target.kind {
             Kind::OpenAi => request.header("authorization", format!("Bearer {}", target.key)),
             Kind::Anthropic => request
@@ -371,7 +410,9 @@ fn list_models(id: &str, target: &Target) -> ConfigTestResult {
         };
     }
     for (name, value) in &target.headers {
-        request = request.header(name.as_str(), value.as_str());
+        if same_origin {
+            request = request.header(name.as_str(), value.as_str());
+        }
     }
     let started = Instant::now();
     let response = request.call();
@@ -399,7 +440,7 @@ fn list_models(id: &str, target: &Target) -> ConfigTestResult {
     }
     let Some(models) = serde_json::from_str::<Value>(&body)
         .ok()
-        .and_then(|json| parse_models(target.kind, &json))
+        .and_then(|json| parse_models(target.kind, &json, &target.base))
     else {
         return ConfigTestResult {
             status: Some(status),
@@ -426,27 +467,68 @@ fn list_models(id: &str, target: &Target) -> ConfigTestResult {
 }
 
 /// The models a model list answer names, sorted by id. `None` when the
-/// answer has no list.
-fn parse_models(kind: Kind, json: &Value) -> Option<Vec<ProbeModel>> {
-    let number = |value: &Value| value.as_u64();
-    let mut models: Vec<ProbeModel> = match kind {
-        Kind::OpenAi | Kind::Anthropic => json["data"]
+/// answer has no list. Beyond the wire protocol's own shape, the
+/// models.dev directory shape is understood: an object keyed by
+/// provider, holding `models` maps with limits, modalities, reasoning
+/// and effort levels. The provider entry whose `api` names the asked
+/// base wins; with no match, a sole entry is taken.
+fn parse_models(kind: Kind, json: &Value, base: &str) -> Option<Vec<ProbeModel>> {
+    let mut models = match kind {
+        Kind::OpenAi | Kind::Anthropic => {
+            parse_envelope(json).or_else(|| parse_directory(json, base))
+        }
+        Kind::Gemini => parse_gemini(json).or_else(|| parse_directory(json, base)),
+    }?;
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    Some(models)
+}
+
+/// The `data` list the `OpenAI` and Anthropic protocols answer with.
+/// `None` when the answer carries no such list; an empty one reads as
+/// no models.
+fn parse_envelope(json: &Value) -> Option<Vec<ProbeModel>> {
+    json["data"].as_array()?;
+    Some(
+        json["data"]
             .as_array()?
             .iter()
             .filter_map(|entry| {
+                let mut input = string_list(&entry["architecture"]["input_modalities"]);
+                if input.is_empty() {
+                    input = string_list(&entry["input_modalities"]);
+                }
+                let mut efforts = Vec::new();
+                if let Some(effort) = entry["effort"].as_str() {
+                    efforts.push(effort.to_owned());
+                }
+                if efforts.is_empty() {
+                    efforts = string_list(&entry["support_efforts"]);
+                }
                 Some(ProbeModel {
                     id: entry["id"].as_str()?.to_owned(),
                     name: entry["display_name"]
                         .as_str()
                         .or_else(|| entry["name"].as_str())
                         .map(str::to_owned),
-                    context: number(&entry["context_length"])
-                        .or_else(|| number(&entry["context_window"])),
-                    max_output: number(&entry["top_provider"]["max_completion_tokens"]),
+                    context: number_of(&entry["context_length"])
+                        .or_else(|| number_of(&entry["context_window"])),
+                    max_output: number_of(&entry["top_provider"]["max_completion_tokens"])
+                        .or_else(|| number_of(&entry["max_output_tokens"])),
+                    input,
+                    efforts,
+                    ..ProbeModel::default()
                 })
             })
             .collect(),
-        Kind::Gemini => json["models"]
+    )
+}
+
+/// The `{"models": [...]}` listing the Gemini protocol answers with.
+/// `None` when the answer carries no `models` list.
+fn parse_gemini(json: &Value) -> Option<Vec<ProbeModel>> {
+    json["models"].as_array()?;
+    Some(
+        json["models"]
             .as_array()?
             .iter()
             .filter(|entry| {
@@ -459,14 +541,63 @@ fn parse_models(kind: Kind, json: &Value) -> Option<Vec<ProbeModel>> {
                 Some(ProbeModel {
                     id: name.strip_prefix("models/").unwrap_or(name).to_owned(),
                     name: entry["displayName"].as_str().map(str::to_owned),
-                    context: number(&entry["inputTokenLimit"]),
-                    max_output: number(&entry["outputTokenLimit"]),
+                    context: number_of(&entry["inputTokenLimit"]),
+                    max_output: number_of(&entry["outputTokenLimit"]),
+                    ..ProbeModel::default()
                 })
             })
             .collect(),
-    };
-    models.sort_by(|a, b| a.id.cmp(&b.id));
-    Some(models)
+    )
+}
+
+/// The models of a models.dev directory answer: an object keyed by
+/// provider id, each holding a `models` map of rich entries. The entry
+/// whose `api` names `base`, else the only entry, if there is just one.
+fn parse_directory(json: &Value, base: &str) -> Option<Vec<ProbeModel>> {
+    let providers = json.as_object()?;
+    let entry = if providers.len() == 1 {
+        providers.values().next()
+    } else {
+        providers.values().find(|provider| {
+            provider["api"]
+                .as_str()
+                .is_some_and(|api| api.trim_end_matches('/') == base.trim_end_matches('/'))
+        })
+    }?;
+    let models = entry["models"].as_object()?;
+    Some(
+        models
+            .iter()
+            .map(|(key, model)| ProbeModel {
+                id: model["id"].as_str().unwrap_or(key).to_owned(),
+                name: model["name"].as_str().map(str::to_owned),
+                context: number_of(&model["limit"]["context"]),
+                max_output: number_of(&model["limit"]["output"]),
+                reasoning: model["reasoning"].as_bool(),
+                input: string_list(&model["modalities"]["input"]),
+                efforts: string_list(&model["support_efforts"]),
+            })
+            .collect(),
+    )
+}
+
+/// The value as a list of strings, empty when it is not one.
+fn string_list(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The value as a number, `None` when it is not one.
+fn number_of(value: &Value) -> Option<u64> {
+    value.as_u64()
 }
 
 /// `model` with what the model catalog knows filling the gaps: the
@@ -484,6 +615,28 @@ fn with_catalog(id: &str, mut model: ProbeModel) -> ProbeModel {
         }
         if model.max_output.is_none() {
             model.max_output = known.output;
+        }
+        if model.reasoning.is_none() {
+            model.reasoning = match known.reasoning {
+                Reasoning::Unknown => None,
+                Reasoning::None => Some(false),
+                Reasoning::Fixed
+                | Reasoning::Toggle
+                | Reasoning::Budget { .. }
+                | Reasoning::Effort { .. } => Some(true),
+            };
+        }
+        if model.input.is_empty() {
+            model.input = known
+                .input
+                .iter()
+                .map(|kind| kind.as_str().to_owned())
+                .collect();
+        }
+        if model.efforts.is_empty()
+            && let Reasoning::Effort { efforts, .. } = known.reasoning
+        {
+            model.efforts = efforts.iter().map(|e| e.as_str().to_owned()).collect();
         }
     }
     model
@@ -542,6 +695,78 @@ mod tests {
     }
 
     #[test]
+    fn a_models_dev_directory_answer_maps_limits_modalities_and_efforts() {
+        let json = serde_json::json!({
+            "example-lab": {
+                "id": "example-lab",
+                "name": "Lab",
+                "api": "https://lab.pg.example.dev/v1",
+                "type": "openai",
+                "models": {
+                    "lab-big": {
+                        "id": "lab-big",
+                        "name": "Lab Big",
+                        "limit": {"context": 200_000, "output": 32_000},
+                        "tool_call": true,
+                        "modalities": {"input": ["text", "image"], "output": ["text"]}
+                    },
+                    "lab-thinker": {
+                        "id": "lab-thinker",
+                        "name": "Lab Thinker",
+                        "limit": {"context": 1_048_576, "output": 131_072},
+                        "reasoning": true,
+                        "support_efforts": ["minimal", "low", "medium", "high", "xhigh"],
+                        "default_effort": "xhigh"
+                    }
+                }
+            }
+        });
+        let models =
+            super::parse_models(Kind::Anthropic, &json, "https://lab.pg.example.dev/v1").unwrap();
+        assert_eq!(models.len(), 2);
+        let big = models.iter().find(|m| m.id == "lab-big").unwrap();
+        assert_eq!((big.context, big.max_output), (Some(200_000), Some(32_000)));
+        assert_eq!(big.input, ["text", "image"]);
+        let thinker = models.iter().find(|m| m.id == "lab-thinker").unwrap();
+        assert_eq!(thinker.reasoning, Some(true));
+        assert_eq!(
+            thinker.efforts,
+            ["minimal", "low", "medium", "high", "xhigh"]
+        );
+    }
+
+    #[test]
+    fn an_envelope_entry_effort_becomes_the_efforts_list() {
+        let json = serde_json::json!({
+            "data": [
+                {"id": "m", "context_window": 1000, "max_output_tokens": 100, "effort": "xhigh"}
+            ]
+        });
+        let models =
+            super::parse_models(Kind::Anthropic, &json, "https://lab.example.com/v1").unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].efforts, ["xhigh"]);
+    }
+
+    #[test]
+    fn a_directory_answer_picks_the_provider_whose_api_matches() {
+        let json = serde_json::json!({
+            "other": {
+                "api": "https://other.example.com/v1",
+                "models": {"decoy": {"id": "decoy", "name": "Decoy"}}
+            },
+            "lab": {
+                "api": "https://lab.example.com/v1",
+                "models": {"real": {"id": "real", "name": "Real"}}
+            }
+        });
+        let models =
+            super::parse_models(Kind::OpenAi, &json, "https://lab.example.com/v1").unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "real");
+    }
+
+    #[test]
     fn a_draft_lists_its_models_with_the_typed_key() {
         let (base, server) = serve_once(
             200,
@@ -569,10 +794,46 @@ mod tests {
     }
 
     #[test]
+    fn a_models_url_on_the_endpoint_serves_the_list_with_the_key() {
+        let body = r#"{"example-lab":{"api":"http://elsewhere","models":{"lab-one":{"id":"lab-one","name":"Lab One","limit":{"context":4096,"output":512},"modalities":{"input":["text","image"]}}}}}"#;
+        let (base, server) = serve_once(200, body);
+        let mut draft = draft("lab", &format!("{base}/v1"));
+        draft.models_url = Some(format!("{base}/directory.json"));
+        let result = probe(&draft, &Config::default(), &AuthStore::empty());
+        let head = server.join().unwrap();
+        assert!(head.starts_with("GET /directory.json "), "{head}");
+        assert!(
+            head.to_lowercase()
+                .contains("authorization: bearer sk-typed"),
+            "{head}"
+        );
+        assert!(result.ok, "{}", result.message);
+        let one = &result.models[0];
+        assert_eq!((one.context, one.max_output), (Some(4096), Some(512)));
+        assert_eq!(one.input, ["text", "image"]);
+    }
+
+    #[test]
+    fn a_models_url_on_another_host_is_read_anonymously() {
+        let body = r#"{"lab":{"models":{"lab-one":{"id":"lab-one","name":"Lab One"}}}}"#;
+        let (base, _endpoint) = serve_once(500, "{}");
+        let (models_base, server) = serve_once(200, body);
+        let mut draft = draft("lab", &base);
+        draft.api_key = Some("sk-secret".into());
+        draft.models_url = Some(format!("{models_base}/doc.json"));
+        let result = probe(&draft, &Config::default(), &AuthStore::empty());
+        assert!(result.ok, "{}", result.message);
+        assert_eq!(result.models.len(), 1);
+        let head = server.join().unwrap();
+        assert!(!head.to_lowercase().contains("authorization"), "{head}");
+    }
+
+    #[test]
     fn only_an_http_base_with_a_key_warns_about_cleartext() {
         let warned = Target {
             kind: Kind::OpenAi,
             base: "http://localhost:11434/v1".to_owned(),
+            models_url: None,
             key: "sk-typed".to_owned(),
             headers: BTreeMap::new(),
         };

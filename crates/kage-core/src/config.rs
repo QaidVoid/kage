@@ -480,9 +480,11 @@ impl ProvidersConfig {
     /// the ids a `[providers.<id>]` override may target: the built-in
     /// HTTP providers and the OpenAI-compatible ones, but not `acp`.
     ///
-    /// Structural problems (missing `base_url`, missing `models`) are
-    /// already load errors; this catches the semantic ones so
-    /// `kage` refuses to start on a config it would silently ignore.
+    /// Structural problems (missing `base_url`) are already load
+    /// errors; an omitted model list loads as empty and fails here
+    /// instead, so `kage models fetch` can still probe the endpoint.
+    /// This catches the semantic ones so `kage` refuses to start on a
+    /// config it would silently ignore.
     pub fn validate(&self, builtin_ids: &[&str], overridable_ids: &[&str]) -> Result<()> {
         for (id, cfg) in &self.custom {
             if id.is_empty()
@@ -576,7 +578,11 @@ pub struct CustomProviderConfig {
     /// Extra HTTP headers sent on every request, e.g. `Authorization`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
-    /// Models this provider serves. At least one is required.
+    /// Models this provider serves. Optional: a stanza without models
+    /// declares the provider and lists nothing yet, ready for
+    /// `kage models fetch <id>` to show what the endpoint serves.
+    /// Selecting a model on a provider that lists none fails.
+    #[serde(default)]
     pub models: Vec<CustomProviderModel>,
     /// Whether the endpoint accepts tool definitions. Defaults to true.
     #[serde(default = "default_true")]
@@ -1999,7 +2005,7 @@ default = "ask"   # keep asking
     }
 
     #[test]
-    fn providers_custom_requires_base_url_and_models() {
+    fn providers_custom_requires_base_url_and_defaults_models() {
         let _globals = process_globals();
         figment::Jail::expect_with(|jail| {
             jail.create_file(
@@ -2020,9 +2026,10 @@ default = "ask"   # keep asking
                 base_url = "https://api.example.com/v1"
                 "#,
             )?;
-            let err = Config::load(jail.directory().join("no-models.toml").as_path())
-                .expect_err("missing models must fail the load");
-            assert!(err.to_string().contains("models"), "{err}");
+            let cfg = Config::load(jail.directory().join("no-models.toml").as_path())
+                .expect("models are optional");
+            let broken = cfg.providers.custom.get("broken").expect("provider parsed");
+            assert!(broken.models.is_empty(), "{broken:?}");
             Ok(())
         });
     }

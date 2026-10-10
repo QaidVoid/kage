@@ -1,4 +1,10 @@
 # Changelog
+## [0.2.1](https://github.com/QaidVoid/kage/compare/v0.2.0...v0.2.1) - 2026-10-10
+
+### Testing
+
+- Gate agent completion and raise CI test budgets - ([07dc849](https://github.com/QaidVoid/kage/commit/07dc849f1007fe8381bf6d448210158f6b18cb4e))
+
 ## [0.2.0](https://github.com/QaidVoid/kage/compare/v0.1.0...v0.2.0) - 2026-10-09
 
 ### Features

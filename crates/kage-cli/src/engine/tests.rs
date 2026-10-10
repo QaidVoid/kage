@@ -5329,13 +5329,17 @@ fn closing_the_root_ends_a_queued_descendant_as_cancelled() {
     // The root may end before or after the queued grandchild spawns,
     // so wait for both without assuming an order.
     let root_ended = std::cell::Cell::new(false);
+    let g2_spawned = std::cell::Cell::new(false);
     let mut events = wait_for(&h.events, |e| {
         if run_ended_on(root)(e) {
             root_ended.set(true);
         }
-        root_ended.get()
-            && matches!(&e.event,
-                Event::Host(HostEvent::AgentSpawned { tool_call_id, .. }) if tool_call_id.0 == "call_g2")
+        if matches!(&e.event,
+            Event::Host(HostEvent::AgentSpawned { tool_call_id, .. }) if tool_call_id.0 == "call_g2")
+        {
+            g2_spawned.set(true);
+        }
+        root_ended.get() && g2_spawned.get()
     });
     let g2 = events
         .iter()

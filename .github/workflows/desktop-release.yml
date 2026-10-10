@@ -356,9 +356,9 @@ jobs:
             # https://github.com/pkgforge-dev/archlinux-pkgs-debloated/releases/tag/continuous
             slim: |
               llvm-libs-nano pkg.tar.zst f186b7d2f8367e3b53f0192a9ad60e69987188efa7a2c0770577fb3f03981170
-              mesa-nano pkg.tar.zst e2baccc2b6fedf34ab634b895d43d6dbee4811c92b31af42229deb044f2ba911
-              vulkan-radeon-nano pkg.tar.zst a581ac3323f33ca8f9e18858118c11db87a43b23a578aea5dd26c91fde5fb803
-              vulkan-intel-nano pkg.tar.zst 9717c22556d01e95fcbd8b843b42f874fd76e0aab0292ab4b120642327a8b9ba
+              mesa-nano pkg.tar.zst a32ecc91a446ce73318f16befbe04742517392d07bf75d55c652bca673550082
+              vulkan-radeon-nano pkg.tar.zst e2559a93f90835305cdc91f953681fd0d35aefab135acad0e191069621e66669
+              vulkan-intel-nano pkg.tar.zst fe1fb79cb47bad431e10c40cd34c83fac437d012525268c00c77de56b032e2f3
               vulkan-nouveau-nano pkg.tar.zst 20d27dfd967be73fa23e0107fb0977c3a560b81e8a3506e79df9be47a8352dec
               libxml2-iculess pkg.tar.zst d5220136f8d9b4eaaf173a44d3f0092e97b61cfe9f5d627c570c6e81add9e789
           - name: aarch64-linux
@@ -368,12 +368,12 @@ jobs:
             onelf-sha256: 9b5b2c3d031756a064bd9a71a977e229cb359f324937a5ba8a28db1568bae15b
             vulkan: vulkan-radeon vulkan-nouveau vulkan-panfrost vulkan-broadcom
             slim: |
-              llvm-libs-nano pkg.tar.zst 29176214b13708c7a6e188807d79f31af5a25f160fe14d241ff149a608467f9a
-              mesa-nano pkg.tar.zst 2944de900fe6981bbe25bb96096e83f2e3faa1b3ec0b775f6b07fa62d45b1b1b
-              vulkan-radeon-nano pkg.tar.zst c8b075ca391b72965476416f6bfaf8263565ee26921cea695b86ec94c7a0fe01
+              llvm-libs-nano pkg.tar.zst 4f2bd7d178432e42f2ba2a756fd0fd864795edf2fac73b5c51761103880e0b40
+              mesa-nano pkg.tar.zst 1fedba1c08c845f4a034ea73cd95ef96d8bf2be91fbb247672552c48d72d12a3
+              vulkan-radeon-nano pkg.tar.zst 17a0a0be41c5036346a57ca819174962f95b7b318d993559f76eca3e66104fad
               vulkan-nouveau-nano pkg.tar.zst b9fac6605dbf0900deb70c61c34407efee059d12a230e8b928a8bcf59507eeaa
-              vulkan-panfrost-nano pkg.tar.zst 2c81802506eed29e99d16232c4957d782d3e5f113fc5cf1c44b75b23d36cdf15
-              vulkan-broadcom-nano pkg.tar.zst 4dbf17aa723ce5c1a7cf9e808a87dd7c1fac94b84423b0dc78426b3c3a4b6d28
+              vulkan-panfrost-nano pkg.tar.zst cb52c18eb7365f984ac81932171dcbe9907181752f492da233f84710eaf541f2
+              vulkan-broadcom-nano pkg.tar.zst fe01d709afab23a3614efc53b35f2a42518ad24948a149880365a25010e02d64
               libxml2-iculess pkg.tar.xz 3e9eed60d2a40ad1ca623a0ba4607c22ac4030e18416080538c04fd82ce3add4
     defaults:
       run:

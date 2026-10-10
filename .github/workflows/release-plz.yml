@@ -60,3 +60,67 @@ jobs:
           command: release-pr
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+
+  # release-plz bumps the workspace crates but cannot run our
+  # generators, so a fresh release PR always fails its checks twice:
+  # the man page embeds the crate version, and gui/Cargo.lock pins the
+  # crates it builds against. Regenerate both on the PR branch, so the
+  # release PR lands green without a manual round trip.
+  fixup:
+    name: fix up the release PR
+    needs: release-pr
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Find the release PR branch
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          branch="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+            --limit 100 --json headRefName --jq '.[].headRefName' \
+            | grep '^release-plz-' | head -n 1)"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.pr.outputs.branch != ''
+        with:
+          ref: ${{ steps.pr.outputs.branch }}
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Toolchain
+        if: steps.pr.outputs.branch != ''
+        run: rustup toolchain install
+
+      - name: Regenerate the man page
+        if: steps.pr.outputs.branch != ''
+        run: |
+          cargo build --locked -p kage-cli --bin kage
+          ./target/debug/kage gen-manpage --out man/kage.1
+
+      - name: Refresh the gui lockfile
+        if: steps.pr.outputs.branch != ''
+        # `cargo metadata` re-resolves without compiling, which is all
+        # the lockfile refresh needs: the bumped path deps get their
+        # new versions, nothing else moves.
+        run: |
+          cd gui
+          cargo metadata --format-version 1 > /dev/null
+
+      - name: Commit and push the refreshes
+        if: steps.pr.outputs.branch != ''
+        env:
+          BRANCH: ${{ steps.pr.outputs.branch }}
+        run: |
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          git config user.name "kage fixup"
+          git config user.email "actions@users.noreply.github.com"
+          if git diff --quiet -- man/kage.1 gui/Cargo.lock; then
+            echo "the release PR is already current; nothing to push"
+            exit 0
+          fi
+          git add man/kage.1 gui/Cargo.lock
+          git commit -m "chore: regenerate the man page and gui lock for v$version"
+          git push origin "HEAD:$BRANCH"

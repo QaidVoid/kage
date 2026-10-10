@@ -1,4 +1,15 @@
 # Changelog
+## [0.2.2](https://github.com/QaidVoid/kage/compare/v0.2.1...v0.2.2) - 2026-10-10
+
+### Bug Fixes
+
+- *(cli)* Let headless entry points start without credentials - ([8314e65](https://github.com/QaidVoid/kage/commit/8314e65d2930960e0fb3a987ebf0818dee15745f))
+- *(paths)* Use the platform's directories on Windows - ([37cc619](https://github.com/QaidVoid/kage/commit/37cc619bc686c46acaf44c9ffcf9b55a89cb9de4))
+
+### Refactor
+
+- *(cli)* Extract the unresolvable-model message helper - ([74de0da](https://github.com/QaidVoid/kage/commit/74de0dac5cd79d25b37d2ad2a21017cd577dd979))
+
 ## [0.2.1](https://github.com/QaidVoid/kage/compare/v0.2.0...v0.2.1) - 2026-10-10
 
 ### Testing

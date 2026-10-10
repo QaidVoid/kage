@@ -71,13 +71,13 @@ fn resolve(probe: &ProviderProbe, config: &Config, store: &AuthStore) -> Result<
             Some(CustomProviderKind::Anthropic) => Kind::Anthropic,
             Some(CustomProviderKind::Gemini) => Kind::Gemini,
             None if id == "anthropic" => Kind::Anthropic,
-            None if id == "gemini" => Kind::Gemini,
+            None if id == "google" => Kind::Gemini,
             Some(CustomProviderKind::OpenAi) | None => Kind::OpenAi,
         },
     };
     let default_base = match id {
         "anthropic" => Some("https://api.anthropic.com"),
-        "gemini" => Some("https://generativelanguage.googleapis.com"),
+        "google" => Some("https://generativelanguage.googleapis.com"),
         "openai" | "openai-responses" => Some("https://api.openai.com/v1"),
         _ => compat.map(|entry| entry.base_url),
     };
@@ -129,7 +129,7 @@ fn resolve(probe: &ProviderProbe, config: &Config, store: &AuthStore) -> Result<
 }
 
 /// The ids of the providers kage registers itself.
-const BUILTIN: [&str; 4] = ["anthropic", "gemini", "openai", "openai-responses"];
+const BUILTIN: [&str; 4] = ["anthropic", "google", "openai", "openai-responses"];
 
 /// The environment variable provider `id` reads its key from: the
 /// config's, else the one kage knows for a registered provider, else

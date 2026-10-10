@@ -260,7 +260,7 @@ mod tests {
         // Catalog ships with at least the four hand-curated providers.
         assert!(provider("anthropic").is_some());
         assert!(provider("openai").is_some());
-        assert!(provider("gemini").is_some());
+        assert!(provider("google").is_some());
         assert!(provider("zai").is_some());
         assert!(provider("nope").is_none());
     }

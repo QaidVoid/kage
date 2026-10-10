@@ -502,7 +502,7 @@ mod tests {
 
     #[test]
     fn typing_filters_the_visible_set() {
-        let mut p = pick(&["anthropic", "openai", "gemini"]);
+        let mut p = pick(&["anthropic", "openai", "google"]);
         for c in "open".chars() {
             p.handle_key(key(KeyCode::Char(c)));
         }

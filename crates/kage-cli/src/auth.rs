@@ -340,7 +340,7 @@ pub(crate) fn expiry_label(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
 pub const KNOWN_PROVIDERS: &[&str] = &[
     "anthropic",
     "openai",
-    "gemini",
+    "google",
     "zai",
     "zai-coding-plan",
     "zhipuai-coding-plan",
@@ -369,7 +369,7 @@ pub fn env_var_for(provider: &str) -> &'static str {
     match provider {
         "anthropic" => "ANTHROPIC_API_KEY",
         "openai" | "openai-responses" => "OPENAI_API_KEY",
-        "gemini" => "GEMINI_API_KEY",
+        "google" => "GEMINI_API_KEY",
         "zai" => "ZAI_API_KEY",
         "zai-coding-plan" | "zhipuai-coding-plan" => "ZAI_CODING_API_KEY",
         "deepseek" => "DEEPSEEK_API_KEY",

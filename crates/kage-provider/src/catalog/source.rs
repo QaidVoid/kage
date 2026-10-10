@@ -76,12 +76,7 @@ pub const SUPPORTED_PROVIDERS: &[ProviderMap] = &[
     // they list under their own kage id.
     ProviderMap::same("commandcode"),
     ProviderMap::same("commandcode-claude"),
-    // models.dev calls Google's API "google" but kage's Provider impl
-    // is registered under "gemini".
-    ProviderMap {
-        api_id: "google",
-        kage_id: "gemini",
-    },
+    ProviderMap::same("google"),
 ];
 
 /// One provider read from the catalog, under its kage id.

@@ -49,7 +49,7 @@ impl GeminiProvider {
             api_key: api_key.into(),
             base_url: base_url.into(),
             metadata: ProviderMetadata {
-                id: "gemini".into(),
+                id: "google".into(),
                 display_name: "Google Gemini".into(),
                 supports_caching: false,
                 supports_thinking: false,

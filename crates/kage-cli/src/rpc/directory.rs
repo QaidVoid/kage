@@ -209,7 +209,7 @@ pub(super) fn parse(json: &str) -> Result<Vec<DirectoryProvider>, String> {
             let kind = match provider["npm"].as_str() {
                 Some("@ai-sdk/openai-compatible" | "@ai-sdk/openai") => Some("openai"),
                 Some("@ai-sdk/anthropic") => Some("anthropic"),
-                Some("@ai-sdk/google") => Some("gemini"),
+                Some("@ai-sdk/google") => Some("google"),
                 _ => None,
             };
             Some(DirectoryProvider {

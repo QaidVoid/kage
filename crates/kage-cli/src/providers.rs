@@ -10,7 +10,7 @@ use crate::{acp_glue, auth, state};
 /// `acp` is listed because it is a valid `-m` prefix, but it is not
 /// overridable: its configuration lives under `[acp.*]`.
 pub(crate) const BUILTIN_PROVIDER_IDS: &[&str] =
-    &["acp", "anthropic", "gemini", "openai", "openai-responses"];
+    &["acp", "anthropic", "google", "openai", "openai-responses"];
 
 /// Provider ids whose `[providers.<id>]` override kage honours: every
 /// builtin except `acp`, plus each OpenAI-compatible catalog entry.
@@ -86,11 +86,11 @@ pub(crate) fn build_provider_registry() -> Result<ProviderRegistry, String> {
         }
         registry.register(Arc::new(provider));
     }
-    let ov = config.providers.overrides.get("gemini");
+    let ov = config.providers.overrides.get("google");
     let env = ov
         .and_then(|o| o.api_key_env.as_deref())
-        .unwrap_or_else(|| auth::env_var_for("gemini"));
-    if let Some(key) = lookup_key_with_env("gemini", env, &store) {
+        .unwrap_or_else(|| auth::env_var_for("google"));
+    if let Some(key) = lookup_key_with_env("google", env, &store) {
         let mut provider = match ov.and_then(|o| o.base_url.clone()) {
             Some(base) => gemini::GeminiProvider::with_base_url(key, base),
             None => gemini::GeminiProvider::new(key),
@@ -294,7 +294,7 @@ const DEFAULT_MODEL_PRIORITY: &[&str] = &[
     "zai-coding-plan",
     "zhipuai-coding-plan",
     "zai",
-    "gemini",
+    "google",
     "deepseek",
     "groq",
     "mistral",
@@ -435,7 +435,7 @@ mod tests {
         assert!(registry.resolve("zhipu-anthropic/glm-5.3").is_ok());
         assert!(registry.resolve("my-gemini/g-1").is_ok());
         assert!(registry.get("anthropic").is_none());
-        assert!(registry.get("gemini").is_none());
+        assert!(registry.get("google").is_none());
     }
 
     #[test]

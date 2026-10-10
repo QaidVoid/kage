@@ -2071,12 +2071,12 @@ default = "ask"   # keep asking
         };
         providers
             .validate(
-                &["acp", "anthropic", "openai", "openai-responses", "gemini"],
+                &["acp", "anthropic", "openai", "openai-responses", "google"],
                 &[
                     "anthropic",
                     "openai",
                     "openai-responses",
-                    "gemini",
+                    "google",
                     "deepseek",
                 ],
             )

@@ -141,9 +141,16 @@ impl ProviderForm {
             state.env.clone()
         };
         let key_from = match base.get("api_key_env").and_then(Value::as_str) {
+            // The config names a key variable or turns the key off;
+            // honor that over anything else.
             Some("") => KeyFrom::None,
+            Some(_) => KeyFrom::Env,
+            // With nothing configured, start on the paste field so a
+            // typed key is what the probe uses and Save keeps in the
+            // auth store, rather than pointing at an env var.
             _ if state.source == "auth" => KeyFrom::Paste,
-            _ => KeyFrom::Env,
+            _ if state.source == "env" => KeyFrom::Env,
+            _ => KeyFrom::Paste,
         };
         let headers: BTreeMap<String, String> = base
             .get("headers")

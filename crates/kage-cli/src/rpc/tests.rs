@@ -33,7 +33,7 @@ use super::host::Host;
 use super::mcp::{prompt_commands, without_login};
 use super::*;
 
-const WAIT: Duration = Duration::from_secs(5);
+const WAIT: Duration = Duration::from_secs(20);
 
 /// How long a turn that runs a real shell loop may take. A loaded CI
 /// runner spawns processes slowly, and a passing run returns early.
@@ -5583,6 +5583,29 @@ impl kage_provider::Provider for Routed {
     }
 }
 
+/// Holds the agents provider's stream until the gate fires, so a test
+/// decides when a background agent completes.
+#[derive(Debug)]
+struct Gated {
+    inner: MockProvider,
+    gate: Mutex<mpsc::Receiver<()>>,
+}
+
+impl kage_provider::Provider for Gated {
+    fn metadata(&self) -> &kage_provider::ProviderMetadata {
+        self.inner.metadata()
+    }
+
+    fn stream(
+        &self,
+        req: kage_provider::StreamRequest,
+        cancel: &kage_core::CancelFlag,
+    ) -> Result<kage_provider::EventStream, ProviderError> {
+        let _ = self.gate.lock().unwrap().recv();
+        self.inner.stream(req, cancel)
+    }
+}
+
 #[test]
 fn a_prompt_returns_while_its_background_agent_still_runs() {
     let dir = tempfile::tempdir().unwrap();
@@ -5778,9 +5801,13 @@ fn a_kage_client_session_wakes_for_a_background_result() {
         text_turn("the agent listed the files"),
     ]);
     let agents = MockProvider::sequence(vec![text_turn("child done")]);
+    let (release, gate) = mpsc::channel();
     let routed = Routed {
         main: Listed::of(main.clone()),
-        agents: Arc::new(agents),
+        agents: Arc::new(Gated {
+            inner: agents,
+            gate: Mutex::new(gate),
+        }),
     };
     let host = test_host_agents(
         Arc::new(routed),
@@ -5810,6 +5837,9 @@ fn a_kage_client_session_wakes_for_a_background_result() {
         .unwrap()
         .unwrap();
     assert_eq!(response["stopReason"], "end_turn");
+    // Run 1 has ended; only now let the agent complete, so its report
+    // wakes the idle session instead of riding along mid-run.
+    release.send(()).unwrap();
     let mut report = None;
     loop {
         let Inbound::Notification { params, .. } = inbox.recv_timeout(WAIT).expect("no wake run")

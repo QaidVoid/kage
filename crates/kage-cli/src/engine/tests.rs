@@ -15,7 +15,7 @@ use kage_tools::{Tool, ToolContext, ToolError};
 use super::shell::run_shell;
 use super::*;
 
-const WAIT: Duration = Duration::from_secs(5);
+const WAIT: Duration = Duration::from_secs(20);
 
 fn text_turn(text: &str) -> Vec<Result<ProviderEvent, ProviderError>> {
     vec![

@@ -13,7 +13,9 @@ git_tag_enable = false
 pr_labels = ["release"]
 publish_allow_dirty = false
 semver_check = false
-release_always = false
+# A push whose push event never started this workflow (or a direct
+# version bump on main) still releases, instead of silently skipping.
+release_always = true
 # GitHub refuses release notes over 125,000 characters, as the first
 # release's full history was, so a longer changelog links the file.
 git_release_body = """

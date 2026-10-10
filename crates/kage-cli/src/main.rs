@@ -317,6 +317,14 @@ pub(crate) enum ModelsAction {
         /// Environment variable that holds the API key.
         #[arg(long)]
         api_key_env: Option<String>,
+        /// Save the fetched models into the saved
+        /// `[providers.custom.<provider>]` entry: ids it does not list
+        /// yet are appended as fresh `[[...models]]` tables, listed
+        /// ones and their comments stay untouched. Needs the entry to
+        /// exist; registered providers keep their models in the
+        /// catalog instead.
+        #[arg(long)]
+        save: bool,
     },
 }
 
@@ -437,12 +445,14 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
                 kind,
                 api_key,
                 api_key_env,
+                save,
             } => run_models_fetch(
                 &provider,
                 base_url.as_deref(),
                 kind.as_deref(),
                 api_key.as_deref(),
                 api_key_env.as_deref(),
+                save,
             ),
         },
         Command::Mcp { action } => match action {
@@ -479,12 +489,16 @@ fn run_models_refresh() -> ExitCode {
 /// Implement `kage models fetch`: list the models a provider serves.
 /// The user config and saved keys fill what the flags leave out, the
 /// same way the settings screen's connection test resolves a provider.
+/// With `--save`, the fetched models are merged into the saved custom
+/// provider's entry, the way the form's Fetch fills its models table
+/// before Save.
 fn run_models_fetch(
     provider: &str,
     base_url: Option<&str>,
     kind: Option<&str>,
     api_key: Option<&str>,
     api_key_env: Option<&str>,
+    save: bool,
 ) -> ExitCode {
     let config = match kage_core::config::Config::load_default_raw() {
         Ok(config) => config,
@@ -526,7 +540,86 @@ fn run_models_fetch(
             .map_or_else(|| "?".to_owned(), |n| n.to_string());
         println!("{}{name}  ctx {context}  out {out}", model.id);
     }
+    if save {
+        let saved = kage_core::config::Config::default_path().map_or_else(
+            || Err("no home directory for the config".to_owned()),
+            |path| save_fetched_models(&path, provider, &result.models),
+        );
+        match saved {
+            Ok((0, listed)) => {
+                println!("nothing to save: all {listed} fetched models are already listed");
+            }
+            Ok((added, listed)) => {
+                println!(
+                    "saved {added} new models to [providers.custom.{provider}] ({listed} already listed)"
+                );
+            }
+            Err(e) => {
+                eprintln!("kage: models fetch: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
     ExitCode::SUCCESS
+}
+
+/// Merges the fetched models into the saved custom provider's entry:
+/// new ids are appended, listed ones stay exactly as written. The
+/// config's own editor merges the `models` array positionally, so the
+/// comments inside listed tables survive. Returns the ids added and
+/// the count already listed.
+fn save_fetched_models(
+    path: &Path,
+    provider: &str,
+    fetched: &[kage_acp::acp::ProbeModel],
+) -> Result<(usize, usize), String> {
+    use serde_json::{Value, json};
+    let keys = ["providers", "custom", provider];
+    let mut entry = kage_core::config_edit::current(path, &keys)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            format!(
+                "--save edits [providers.custom.{provider}], and the config lists no such \
+                 custom provider; registered providers keep their models in the catalog"
+            )
+        })?;
+    let listed = entry
+        .get("models")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let held: Vec<String> = listed
+        .iter()
+        .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    let fresh: Vec<Value> = fetched
+        .iter()
+        .filter(|model| !held.iter().any(|id| id == &model.id))
+        .map(|model| {
+            let mut row = json!({
+                "id": model.id,
+                "name": model.name.clone().unwrap_or_else(|| model.id.clone()),
+            });
+            if let Some(context) = model.context {
+                row["context"] = json!(context);
+            }
+            if let Some(out) = model.max_output {
+                row["max_output"] = json!(out);
+            }
+            row
+        })
+        .collect();
+    let added = fresh.len();
+    if added == 0 {
+        return Ok((0, listed.len()));
+    }
+    let mut merged = listed;
+    merged.extend(fresh);
+    entry["models"] = Value::Array(merged);
+    let text =
+        kage_core::config_edit::edited(path, &keys, Some(&entry)).map_err(|e| e.to_string())?;
+    kage_core::fsutil::atomic_write(path, text.as_bytes()).map_err(|e| e.to_string())?;
+    Ok((added, held.len()))
 }
 
 /// Print a shell completion script for `kage` to stdout. The script
@@ -1279,5 +1372,84 @@ mod tests {
             assert_eq!(lint.description, "Shared lint");
             Ok(())
         });
+    }
+
+    #[test]
+    fn save_fetched_models_appends_new_ids_and_keeps_comments() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[providers.custom.lab]
+base_url = "https://lab.example.com/v1"
+kind = "anthropic"
+
+[[providers.custom.lab.models]]
+id = "held"
+name = "Held"
+# a kept note
+efforts = ["max"]
+"#,
+        )
+        .unwrap();
+        let fetched = [
+            kage_acp::acp::ProbeModel {
+                id: "held".into(),
+                ..kage_acp::acp::ProbeModel::default()
+            },
+            kage_acp::acp::ProbeModel {
+                id: "fresh".into(),
+                name: Some("Fresh".into()),
+                context: Some(1024),
+                max_output: Some(64),
+            },
+        ];
+        let (added, listed) = save_fetched_models(&path, "lab", &fetched).unwrap();
+        assert_eq!((added, listed), (1, 1));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# a kept note"), "{text}");
+        assert!(text.contains("id = \"held\""), "{text}");
+        assert!(text.contains("id = \"fresh\""), "{text}");
+        assert!(text.contains("context = 1024"), "{text}");
+    }
+
+    #[test]
+    fn save_fetched_models_writes_nothing_when_all_ids_are_listed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[providers.custom.lab]
+base_url = "https://lab.example.com/v1"
+
+[[providers.custom.lab.models]]
+id = "held"
+name = "Held"
+"#,
+        )
+        .unwrap();
+        let fetched = [kage_acp::acp::ProbeModel {
+            id: "held".into(),
+            ..kage_acp::acp::ProbeModel::default()
+        }];
+        let before = std::fs::read_to_string(&path).unwrap();
+        let (added, listed) = save_fetched_models(&path, "lab", &fetched).unwrap();
+        assert_eq!((added, listed), (0, 1));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn save_fetched_models_refuses_a_provider_the_config_lacks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[providers.custom.other]\nbase_url = \"https://x\"\nmodels = []\n",
+        )
+        .unwrap();
+        let err = save_fetched_models(&path, "lab", &[]).unwrap_err();
+        assert!(err.contains("[providers.custom.lab]"), "{err}");
     }
 }

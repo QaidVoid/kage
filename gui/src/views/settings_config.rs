@@ -1589,10 +1589,12 @@ pub(crate) fn plugins_page(
     pal: &'static Palette,
 ) -> Vec<AnyElement> {
     let plugins = &snapshot.plugins;
-    let dir = plugins
-        .dir
-        .clone()
-        .unwrap_or_else(|| "~/.config/kage/plugins".to_owned());
+    let dir = plugins.dir.clone().unwrap_or_else(|| {
+        std::path::Path::new(&crate::prefs::display_config_dir())
+            .join("plugins")
+            .to_string_lossy()
+            .into_owned()
+    });
     let mut out: Vec<AnyElement> = vec![
         boxed(pal)
             .child(

@@ -70,8 +70,9 @@ pub(crate) enum Routed {
 }
 
 /// When `KAGE_DEBUG_KEYS` is set to a non-empty value, every press is
-/// appended to the file at that path (or `$XDG_STATE_HOME/kage/keys.log`
-/// when the value is `1`). Lets us diagnose terminal-specific quirks
+/// appended to the file at that path (or the state directory's
+/// `keys.log`, [`kage_core::config::Config::state_dir`], when the
+/// value is `1`). Lets us diagnose terminal-specific quirks
 /// like "Shift+Enter doesn't transmit" without instrumenting the host.
 fn log_key_event(key: &ratatui::crossterm::event::KeyEvent) {
     let Ok(value) = std::env::var("KAGE_DEBUG_KEYS") else {
@@ -81,20 +82,11 @@ fn log_key_event(key: &ratatui::crossterm::event::KeyEvent) {
         return;
     }
     let path = if value == "1" {
-        let Some(home) = std::env::var_os("XDG_STATE_HOME").or_else(|| {
-            std::env::var_os("HOME").map(|h| {
-                let mut p = std::path::PathBuf::from(h);
-                p.push(".local/state");
-                p.into_os_string()
-            })
-        }) else {
+        let Some(state) = kage_core::config::Config::state_dir() else {
             return;
         };
-        let mut p = std::path::PathBuf::from(home);
-        p.push("kage");
-        let _ = std::fs::create_dir_all(&p);
-        p.push("keys.log");
-        p
+        let _ = std::fs::create_dir_all(&state);
+        state.join("keys.log")
     } else {
         std::path::PathBuf::from(value)
     };

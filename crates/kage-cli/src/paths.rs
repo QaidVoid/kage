@@ -1,4 +1,5 @@
-//! The XDG directories kage reads and writes.
+//! The directories kage reads and writes: XDG-style on Unix, the
+//! matching `dirs` Known Folders on Windows.
 
 use std::path::{Path, PathBuf};
 
@@ -90,11 +91,13 @@ pub(crate) fn themes_dir() -> Result<PathBuf, String> {
     Ok(config_dir()?.join("themes"))
 }
 
-/// Resolve an XDG base directory: prefers `$ENV_VAR` if set to
-/// something non-empty once quotes and padding are stripped
+/// Resolve a base directory: prefers `$ENV_VAR` if set to something
+/// non-empty once quotes and padding are stripped
 /// ([`kage_core::fsutil::unquote_and_trim`], so a quoted or spaced
-/// value still names the real directory), otherwise falls back to
-/// `$HOME/<fallback_subpath>`.
+/// value still names the real directory), otherwise the platform
+/// default for that tier: the `HOME`-relative XDG path on Unix, and
+/// the matching `dirs` Known Folder on Windows (`%APPDATA%` for
+/// config and data, `%LOCALAPPDATA%` for cache and state).
 pub(crate) fn xdg_dir(env_var: &str, fallback_subpath: &str) -> Result<PathBuf, String> {
     if let Ok(v) = std::env::var(env_var) {
         let v = kage_core::fsutil::unquote_and_trim(&v);
@@ -102,8 +105,19 @@ pub(crate) fn xdg_dir(env_var: &str, fallback_subpath: &str) -> Result<PathBuf, 
             return Ok(PathBuf::from(v));
         }
     }
-    let home = dirs::home_dir().ok_or_else(|| "no home directory".to_owned())?;
-    Ok(home.join(fallback_subpath))
+    #[cfg(windows)]
+    return match env_var {
+        "XDG_CONFIG_HOME" => dirs::config_dir(),
+        "XDG_DATA_HOME" => dirs::data_dir(),
+        "XDG_CACHE_HOME" => dirs::cache_dir(),
+        "XDG_STATE_HOME" => dirs::data_local_dir(),
+        _ => dirs::home_dir(),
+    }
+    .ok_or_else(|| "no home directory".to_owned());
+    #[cfg(unix)]
+    dirs::home_dir()
+        .ok_or_else(|| "no home directory".to_owned())
+        .map(|home| home.join(fallback_subpath))
 }
 
 #[cfg(test)]
@@ -150,16 +164,22 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_xdg_env_value_falls_back_to_home() {
+    fn an_empty_xdg_env_value_falls_back_to_the_platform_directory() {
         figment::Jail::expect_with(|jail| {
             let home = jail.directory().to_path_buf();
             jail.set_env("HOME", home.to_string_lossy().as_ref());
             jail.set_env("XDG_CONFIG_HOME", "");
             // `dirs::home_dir()` follows `HOME` on Unix but reads the
             // Windows Known Folder API on Windows, where the jail's
-            // `HOME` is inert; expect that platform home.
-            let expected = dirs::home_dir().expect("test needs a home directory");
-            assert_eq!(config_dir().unwrap(), expected.join(".config").join("kage"));
+            // `HOME` is inert; expect that platform directory.
+            let expected = if cfg!(windows) {
+                dirs::config_dir().expect("test needs a config directory")
+            } else {
+                dirs::home_dir()
+                    .expect("test needs a home directory")
+                    .join(".config")
+            };
+            assert_eq!(config_dir().unwrap(), expected.join("kage"));
             Ok(())
         });
     }

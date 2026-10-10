@@ -136,6 +136,36 @@ pub fn save(prefs: &Prefs) {
     }
 }
 
+/// The kage config directory the way the engine resolves it, for
+/// display: `$XDG_CONFIG_HOME/kage` when set, else `%APPDATA%\\kage`
+/// on Windows, else `~/.config/kage`.
+#[must_use]
+pub fn display_config_dir() -> String {
+    let env = |key: &str| {
+        std::env::var_os(key)
+            .map(|value| value.to_string_lossy().into_owned())
+            .filter(|value| !value.trim().is_empty())
+    };
+    if let Some(dir) = env("XDG_CONFIG_HOME") {
+        return std::path::PathBuf::from(dir).join("kage").to_string_lossy().into_owned();
+    }
+    if cfg!(windows) {
+        return env("APPDATA")
+            .map(|dir| std::path::PathBuf::from(dir).join("kage"))
+            .unwrap_or_else(|| std::path::PathBuf::from("%APPDATA%").join("kage"))
+            .to_string_lossy()
+            .into_owned();
+    }
+    match env("HOME") {
+        Some(home) => std::path::PathBuf::from(home)
+            .join(".config")
+            .join("kage"),
+        None => std::path::PathBuf::from("~/.config/kage"),
+    }
+    .to_string_lossy()
+    .into_owned()
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod storage {
     use std::path::{Path, PathBuf};

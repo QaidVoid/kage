@@ -128,17 +128,41 @@ fn env_base_dir(env_var: &str) -> Option<PathBuf> {
     (!cleaned.is_empty()).then(|| PathBuf::from(cleaned))
 }
 
+/// The platform base directory for a config-tier path, without the
+/// `XDG_*` override: `~/.config` on Unix, `%APPDATA%` (the Roaming
+/// profile) on Windows. `None` only when the platform has no home.
+fn platform_config_base() -> Option<PathBuf> {
+    #[cfg(windows)]
+    return dirs::config_dir();
+    #[cfg(unix)]
+    return dirs::home_dir().map(|home| home.join(".config"));
+    #[cfg(not(any(windows, unix)))]
+    None
+}
+
+/// The platform base directory for a state-tier path, without the
+/// `XDG_*` override: `~/.local/state` on Unix, `%LOCALAPPDATA%` on
+/// Windows (which has no state directory of its own). `None` only
+/// when the platform has no home.
+fn platform_state_base() -> Option<PathBuf> {
+    #[cfg(windows)]
+    return dirs::data_local_dir();
+    #[cfg(unix)]
+    return dirs::home_dir().map(|home| home.join(".local").join("state"));
+    #[cfg(not(any(windows, unix)))]
+    None
+}
+
 impl Config {
-    /// Path to the user config file, XDG-resolved:
-    /// `$XDG_CONFIG_HOME/kage/config.toml`, or `~/.config/kage/config.toml`
-    /// when `XDG_CONFIG_HOME` is unset, empty, or quoted-empty. This mirrors
-    /// how the rest of kage resolves config-tier paths (plugins, skills);
-    /// only the home directory case returns `None`.
+    /// Path to the user config file: `$XDG_CONFIG_HOME/kage/config.toml`
+    /// when `XDG_CONFIG_HOME` is set, else the platform directory
+    /// (`~/.config/kage/config.toml` on Unix, `%APPDATA%\kage\config.toml`
+    /// on Windows). `None` only when there is no home directory.
     #[must_use]
     pub fn default_path() -> Option<PathBuf> {
         let base = match env_base_dir("XDG_CONFIG_HOME") {
             Some(base) => base,
-            None => dirs::home_dir()?.join(".config"),
+            None => platform_config_base()?,
         };
         Some(base.join("kage").join("config.toml"))
     }
@@ -207,15 +231,15 @@ impl Config {
         workdir.join(".kage").join("config.toml")
     }
 
-    /// Directory for kage's mutable state, XDG-resolved:
-    /// `$XDG_STATE_HOME/kage`, or `~/.local/state/kage` when
-    /// `XDG_STATE_HOME` is unset, empty, or quoted-empty. `None` only
-    /// when there is no home directory.
+    /// Directory for kage's mutable state: `$XDG_STATE_HOME/kage`
+    /// when `XDG_STATE_HOME` is set, else the platform directory
+    /// (`~/.local/state/kage` on Unix, `%LOCALAPPDATA%\kage` on
+    /// Windows). `None` only when there is no home directory.
     #[must_use]
     pub fn state_dir() -> Option<PathBuf> {
         let base = match env_base_dir("XDG_STATE_HOME") {
             Some(base) => base,
-            None => dirs::home_dir()?.join(".local").join("state"),
+            None => platform_state_base()?,
         };
         Some(base.join("kage"))
     }

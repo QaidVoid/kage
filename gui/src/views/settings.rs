@@ -1681,12 +1681,15 @@ impl SettingsView {
         row(
             "Updates",
             "The public releases, checked at most once a day",
-            h_flex()
-                .gap(px(12.))
-                .items_center()
+            // The status lines and the buttons stack, and the lines
+            // cap their width, so a narrow window wraps the text
+            // instead of crushing the label column.
+            v_flex()
+                .gap(px(8.))
                 .child(
                     v_flex()
                         .gap(px(2.))
+                        .max_w(px(360.))
                         .child(
                             div()
                                 .text_size(px(FS_XS))

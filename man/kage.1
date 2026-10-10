@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH kage 1  "kage 0.2.2" 
+.TH kage 1  "kage 0.3.0" 
 .SH NAME
 kage \- A minimal, extensible coding agent in your terminal
 .SH SYNOPSIS
@@ -116,6 +116,12 @@ API key, used for this request only
 \fB\-\-api\-key\-env\fR\fI <API_KEY_ENV>\fR
 Environment variable that holds the API key
 .TP
+\fB\-\-models\-url\fR\fI <MODELS_URL>\fR
+The URL the model list is read from, when the endpoint\*(Aqs own will not do \- a models.dev\-style directory document, say. Overrides the provider\*(Aqs saved models URL. A key and headers are only sent when it shares the base URL\*(Aqs host and port
+.TP
+\fB\-\-save\fR
+Save the fetched models into the saved `[providers.custom.<provider>]` entry: ids it does not list yet are appended as fresh `[[...models]]` tables, listed ones and their comments stay untouched. Needs the entry to exist; registered providers keep their models in the catalog instead
+.TP
 \fB\-\-tools\fR\fI <TOOLS>\fR
 Comma\-separated built\-in tools to expose. Unknown names are an error
 .TP
@@ -218,4 +224,4 @@ Model catalog written by kage models refresh.
 .PP
 XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_STATE_HOME and XDG_CACHE_HOME replace the ~/.config, ~/.local/share, ~/.local/state and ~/.cache roots.
 .SH VERSION
-v0.2.2
+v0.3.0

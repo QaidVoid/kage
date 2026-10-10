@@ -936,7 +936,10 @@ mod tests {
     /// block another, which the former process-wide mutex did.
     #[test]
     fn a_refresh_of_one_server_does_not_block_another() {
-        let slow = FakeServer::start_with_token_delay(Duration::from_millis(600));
+        // The delay is long enough that a refresh serialized behind
+        // the slow one cannot fit inside the fast bound below, and
+        // short enough to keep the test quick.
+        let slow = FakeServer::start_with_token_delay(Duration::from_secs(2));
         let fast = FakeServer::start();
         let dir = tempdir().unwrap();
         let path = dir.path().join("mcp-auth.json");
@@ -956,7 +959,9 @@ mod tests {
             let (done_tx, done_rx) = mpsc::channel();
             scope.spawn(move || {
                 let token = tokens.bearer(&slow_key);
-                done_tx.send(token).unwrap();
+                // The receiver dies with the test on failure; the
+                // `recv` below notices a missing token.
+                let _ = done_tx.send(token);
             });
             let deadline = Instant::now() + Duration::from_secs(5);
             while slow.tokens_issued().is_empty() && Instant::now() < deadline {
@@ -969,15 +974,24 @@ mod tests {
 
             let start = Instant::now();
             assert_eq!(tokens.bearer(&fast_key).as_deref(), Some("access-1"));
+            // The bound only has to sit well under the slow server's
+            // 2 s answer: a refresh serialized behind it waits about
+            // that long. Scheduling alone must not fail this.
             assert!(
-                start.elapsed() < Duration::from_millis(200),
+                start.elapsed() < Duration::from_secs(1),
                 "the fast refresh waited for the slow one"
             );
             assert!(
                 done_rx.try_recv().is_err(),
                 "the slow refresh must still be in flight"
             );
-            assert_eq!(done_rx.recv().unwrap().as_deref(), Some("access-1"));
+            assert_eq!(
+                done_rx
+                    .recv()
+                    .expect("the slow refresh to complete")
+                    .as_deref(),
+                Some("access-1")
+            );
         });
     }
 

@@ -4,7 +4,7 @@ members = ["."]
 
 [package]
 name = "kage-desktop"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 # The pinned gpui-kit stack needs 1.95 (`slice_as_array`,
 # `std::hint::cold_path`); the msrv gui leg in CI enforces this floor.

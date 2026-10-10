@@ -101,6 +101,21 @@ Directory with the web client bundle to serve at `/` (built from `gui/`). Defaul
 \fB\-\-revoke\fR
 Forget the trust recorded for this directory
 .TP
+\fIPROVIDER\fR
+Provider id: a `[providers.<id>]` entry, an override, or a builtin such as `openai` or `anthropic`
+.TP
+\fB\-\-base\-url\fR\fI <BASE_URL>\fR
+Endpoint base URL, when the provider has none saved
+.TP
+\fB\-\-kind\fR\fI <KIND>\fR
+Wire protocol: openai, anthropic or gemini. Guessed from the provider when omitted
+.TP
+\fB\-\-api\-key\fR\fI <API_KEY>\fR
+API key, used for this request only
+.TP
+\fB\-\-api\-key\-env\fR\fI <API_KEY_ENV>\fR
+Environment variable that holds the API key
+.TP
 \fB\-\-tools\fR\fI <TOOLS>\fR
 Comma\-separated built\-in tools to expose. Unknown names are an error
 .TP
@@ -158,6 +173,9 @@ Manage the model catalog. kage ships a snapshot of models.dev; `kage models refr
 .TP
 \fBkage models refresh\fR
 Download the models.dev catalog into `$XDG_CACHE_HOME/kage/models.json`. It can add models and update their metadata, never provider endpoints or credentials. Only runs when asked; kage never refreshes on its own
+.TP
+\fBkage models fetch\fR
+List the models a provider endpoint serves. Names a saved provider to test its saved settings; the flags fill what the config leaves out, or probe an endpoint that is not configured
 .TP
 \fBkage mcp\fR
 Model Context Protocol: expose kage\*(Aqs built\-in tools to another agent over stdio (newline\-delimited JSON\-RPC) with `kage mcp serve`, or log in to remote MCP servers that need OAuth

@@ -39,7 +39,7 @@ struct Target {
 
 /// Asks the provider `probe` describes for its models, with `config`
 /// and `store` filling what the probe leaves out.
-pub(super) fn probe(probe: &ProviderProbe, config: &Config, store: &AuthStore) -> ConfigTestResult {
+pub(crate) fn probe(probe: &ProviderProbe, config: &Config, store: &AuthStore) -> ConfigTestResult {
     let target = match resolve(probe, config, store) {
         Ok(target) => target,
         Err(message) => {

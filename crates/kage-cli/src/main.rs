@@ -297,6 +297,27 @@ pub(crate) enum ModelsAction {
     /// their metadata, never provider endpoints or credentials. Only
     /// runs when asked; kage never refreshes on its own.
     Refresh,
+    /// List the models a provider endpoint serves. Names a saved
+    /// provider to test its saved settings; the flags fill what the
+    /// config leaves out, or probe an endpoint that is not configured.
+    Fetch {
+        /// Provider id: a `[providers.<id>]` entry, an override, or a
+        /// builtin such as `openai` or `anthropic`.
+        provider: String,
+        /// Endpoint base URL, when the provider has none saved.
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Wire protocol: openai, anthropic or gemini. Guessed from
+        /// the provider when omitted.
+        #[arg(long)]
+        kind: Option<String>,
+        /// API key, used for this request only.
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Environment variable that holds the API key.
+        #[arg(long)]
+        api_key_env: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -408,9 +429,22 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
             )
         }),
         Command::Trust { revoke } => trust::run(revoke),
-        Command::Models {
-            action: ModelsAction::Refresh,
-        } => run_models_refresh(),
+        Command::Models { action } => match action {
+            ModelsAction::Refresh => run_models_refresh(),
+            ModelsAction::Fetch {
+                provider,
+                base_url,
+                kind,
+                api_key,
+                api_key_env,
+            } => run_models_fetch(
+                &provider,
+                base_url.as_deref(),
+                kind.as_deref(),
+                api_key.as_deref(),
+                api_key_env.as_deref(),
+            ),
+        },
         Command::Mcp { action } => match action {
             McpAction::Serve { tools } => mcp::run_serve(&tools),
             McpAction::Login { server } => mcp_auth::run_login(&server),
@@ -440,6 +474,59 @@ fn run_models_refresh() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Implement `kage models fetch`: list the models a provider serves.
+/// The user config and saved keys fill what the flags leave out, the
+/// same way the settings screen's connection test resolves a provider.
+fn run_models_fetch(
+    provider: &str,
+    base_url: Option<&str>,
+    kind: Option<&str>,
+    api_key: Option<&str>,
+    api_key_env: Option<&str>,
+) -> ExitCode {
+    let config = match kage_core::config::Config::load_default_raw() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("kage: models fetch: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let store = crate::auth::AuthStore::load().unwrap_or_else(|_| crate::auth::AuthStore::empty());
+    let probe = kage_acp::acp::ProviderProbe {
+        id: provider.to_owned(),
+        kind: kind
+            .filter(|kind| !kind.trim().is_empty())
+            .map(str::to_owned),
+        base_url: base_url
+            .filter(|base| !base.trim().is_empty())
+            .map(str::to_owned),
+        api_key_env: api_key_env
+            .filter(|env| !env.trim().is_empty())
+            .map(str::to_owned),
+        api_key: api_key.filter(|key| !key.is_empty()).map(str::to_owned),
+        ..kage_acp::acp::ProviderProbe::default()
+    };
+    let result = crate::rpc::probe::probe(&probe, &config, &store);
+    println!("{}", result.message);
+    if !result.ok {
+        return ExitCode::from(1);
+    }
+    for model in &result.models {
+        let name = match &model.name {
+            Some(name) if !name.is_empty() && name != &model.id => format!(" ({name})"),
+            _ => String::new(),
+        };
+        let context = model
+            .context
+            .map_or_else(|| "?".to_owned(), |n| n.to_string());
+        let out = model
+            .max_output
+            .map_or_else(|| "?".to_owned(), |n| n.to_string());
+        println!("{}{name}  ctx {context}  out {out}", model.id);
+    }
+    ExitCode::SUCCESS
 }
 
 /// Print a shell completion script for `kage` to stdout. The script

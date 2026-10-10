@@ -42,7 +42,7 @@ mod mcp;
 mod models;
 mod options;
 mod plugin_files;
-mod probe;
+pub(crate) mod probe;
 mod registry;
 mod sessions;
 mod themes;

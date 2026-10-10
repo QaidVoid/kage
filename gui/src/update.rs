@@ -215,15 +215,38 @@ pub fn desktop_asset_for(os: &str, arch: &str, onelf: bool) -> Option<&'static s
 }
 
 /// The desktop artifact this running build updates with. A Linux
-/// binary named `.onelf` swaps for the portable bundle, whose
-/// bundled libraries the plain archive build lacks; anything else
-/// swaps for the plain archive.
+/// binary that carries an onelf footer swaps for the portable
+/// bundle, whose bundled libraries the plain archive build lacks;
+/// anything else swaps for the plain archive. The footer, not the
+/// file name, tells the two apart, so a renamed bundle keeps
+/// updating as the bundle it is.
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn desktop_asset() -> Option<&'static str> {
-    let onelf = cfg!(target_os = "linux")
-        && std::env::current_exe().is_ok_and(|exe| exe.to_string_lossy().ends_with(".onelf"));
+    let onelf =
+        cfg!(target_os = "linux") && std::env::current_exe().is_ok_and(|exe| is_onelf_bundle(&exe));
     desktop_asset_for(std::env::consts::OS, std::env::consts::ARCH, onelf)
+}
+
+/// Whether `path` is a packed onelf bundle: the file ends in the
+/// 76-byte footer the format pins, whose magic every version
+/// carries. Anything unreadable, shorter, or plain reads as not a
+/// bundle.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_onelf_bundle(path: &std::path::Path) -> bool {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut footer = [0; 76];
+    if file
+        .seek(SeekFrom::End(-76))
+        .and_then(|_| file.read_exact(&mut footer))
+        .is_err()
+    {
+        return false;
+    }
+    footer[..8] == *b"ONELF\0\x01\x00" && footer[68..] == *b"FLENONE\0"
 }
 
 /// The download URL for one release artifact.
@@ -950,6 +973,49 @@ mod tests {
         let missing = find_desktop_payload(&empty).unwrap_err();
         assert!(missing.contains("holds no kage-desktop"), "got {missing}");
         let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    #[test]
+    fn a_linux_bundle_is_known_by_its_footer_not_its_name() {
+        use super::is_onelf_bundle;
+        use std::io::Write as _;
+
+        let dir = super::native::scratch_dir().unwrap();
+        let mut bundle = std::fs::File::create(dir.join("kage-desktop")).unwrap();
+        bundle.write_all(b"\x7fELF runtime body").unwrap();
+        bundle.write_all(&[0; 30]).unwrap();
+        let mut footer = [0; 76];
+        footer[..8].copy_from_slice(b"ONELF\0\x01\x00");
+        footer[68..].copy_from_slice(b"FLENONE\0");
+        bundle.write_all(&footer).unwrap();
+        drop(bundle);
+        assert!(is_onelf_bundle(&dir.join("kage-desktop")));
+        std::fs::rename(dir.join("kage-desktop"), dir.join("renamed")).unwrap();
+        assert!(
+            is_onelf_bundle(&dir.join("renamed")),
+            "a rename must not change what the file updates with"
+        );
+
+        let plain = dir.join("plain");
+        std::fs::write(&plain, b"\x7fELF plain binary, no footer").unwrap();
+        assert!(!is_onelf_bundle(&plain));
+        assert!(!is_onelf_bundle(&plain), "repeat reads agree");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A real bundle of ours, when one sits on this machine,
+        // pins the reader to the shipped format.
+        if let Some(home) = std::env::var_os("HOME") {
+            let candidate =
+                std::path::Path::new(&home).join("Downloads/kage-desktop-x86_64-linux.onelf");
+            if candidate.is_file() {
+                assert!(
+                    is_onelf_bundle(&candidate),
+                    "the shipped bundle {} must read as a bundle",
+                    candidate.display()
+                );
+            }
+        }
     }
 
     #[cfg(all(unix, not(target_arch = "wasm32")))]

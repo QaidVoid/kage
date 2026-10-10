@@ -1205,13 +1205,7 @@ impl Dispatcher {
         let (provider, bare_model) = match self.registry.resolve(&model) {
             Ok(resolved) => (Arc::clone(resolved.provider), resolved.model),
             Err(err) => {
-                let message = if crate::has_usable_provider(&self.registry) {
-                    format!("model {model} unavailable: {err}")
-                } else {
-                    "no provider credentials found; add one with `kage auth login`, \
-                     an API-key env var, or the provider settings"
-                        .to_owned()
-                };
+                let message = unresolvable_model_message(&self.registry, &model, err);
                 notice(&self.bus, id, NoticeLevel::Error, message.clone());
                 let outcome = RunOutcome::Failed {
                     error: LoopError::Provider { message },
@@ -1973,6 +1967,23 @@ fn report_write(bus: &Bus, id: SessionId, result: Result<(), kage_session::Sessi
             NoticeLevel::Error,
             format!("session write failed: {err}"),
         );
+    }
+}
+
+/// The run-failure message for a model the registry cannot resolve:
+/// it names the credentials when none are registered, so a headless
+/// start points at the fix instead of the model.
+fn unresolvable_model_message(
+    registry: &ProviderRegistry,
+    model: &str,
+    err: impl std::fmt::Display,
+) -> String {
+    if crate::has_usable_provider(registry) {
+        format!("model {model} unavailable: {err}")
+    } else {
+        "no provider credentials found; add one with `kage auth login`, \
+         an API-key env var, or the provider settings"
+            .to_owned()
     }
 }
 

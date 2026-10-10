@@ -805,9 +805,16 @@ fn main() -> ExitCode {
         return code;
     }
     if let Ok(path) = models_cache_path() {
-        match kage_provider::catalog::use_cache(&path) {
-            Ok(count) => eprintln!("kage: model cache loaded ({count} models)"),
-            Err(reason) => eprintln!("kage: ignoring model cache {}: {reason}", path.display()),
+        // A missing cache just means `models refresh` has not run
+        // yet; the snapshot serves. One that exists but does not
+        // load is drift the user should hear about.
+        if path.exists() {
+            match kage_provider::catalog::use_cache(&path) {
+                Ok(count) => eprintln!("kage: model cache loaded ({count} models)"),
+                Err(reason) => {
+                    eprintln!("kage: ignoring model cache {}: {reason}", path.display());
+                }
+            }
         }
     }
 

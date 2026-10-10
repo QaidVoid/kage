@@ -1599,7 +1599,7 @@ impl SettingsView {
                     )
                     .child(div().text_size(px(FS_SM)).text_color(pal.muted).child(
                         SharedString::from(format!(
-                            "desktop {}{} · {engine}",
+                            "desktop {}{} \u{b7} {engine}",
                             env!("CARGO_PKG_VERSION"),
                             match option_env!("KAGE_BUILD_SHA") {
                                 Some(sha) => format!(" ({})", &sha[..sha.len().min(7)]),

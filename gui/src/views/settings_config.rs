@@ -17,7 +17,7 @@ use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Div, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, img, px,
 };
 use kage_client::wire::{McpServerStatus, SessionConfigOption};
 use serde::Deserialize;
@@ -67,6 +67,8 @@ pub(crate) struct KeyState {
     pub env: String,
     /// `env`, `auth`, `missing` or `unneeded`.
     pub source: String,
+    /// A display name the engine knows for the id, when it has one.
+    pub name: Option<String>,
 }
 
 impl Snapshot {
@@ -89,6 +91,15 @@ impl Snapshot {
             .keys()
             .map(String::as_str)
             .filter(|id| !self.providers.custom.contains_key(*id))
+    }
+
+    /// The name a row or chip shows for provider `id`: what the
+    /// engine's snapshot calls it, else the id itself.
+    #[must_use]
+    pub(crate) fn provider_name(&self, id: &str) -> String {
+        self.key_state(id)
+            .and_then(|key| key.name.clone())
+            .unwrap_or_else(|| id.to_owned())
     }
 
     /// The ACP agent configured as `name`.
@@ -255,7 +266,7 @@ pub(crate) fn provider_rows(
             Some(row) => row.models.push(name),
             None => rows.push(ProviderRow {
                 id: provider.to_owned(),
-                label: provider.to_owned(),
+                label: snapshot.provider_name(provider),
                 protocol: None,
                 base_url: None,
                 key_env: None,
@@ -274,7 +285,7 @@ pub(crate) fn provider_rows(
             None => {
                 rows.push(ProviderRow {
                     id: id.clone(),
-                    label: id.clone(),
+                    label: snapshot.provider_name(id),
                     protocol: None,
                     base_url: None,
                     key_env: None,
@@ -402,6 +413,31 @@ fn initials(id: &str, pal: &Palette) -> Div {
         .child(letters)
 }
 
+/// A provider's logo rendered at `size`, or the muted bot glyph
+/// while the fetch is in flight or when the id names no logo. The
+/// first miss starts the fetch; a landed one notifies the view and
+/// the next paint shows the image.
+fn logo_or_glyph(
+    id: &str,
+    view: &Entity<crate::views::settings::SettingsView>,
+    cx: &App,
+    pal: &Palette,
+    size: f32,
+) -> AnyElement {
+    match crate::logos::ensure(id, view, cx) {
+        Some(image) => img(image)
+            .size(px(size))
+            .rounded(px(4.))
+            .flex_none()
+            .into_any_element(),
+        None => Icon::new(IconName::Bot)
+            .with_size(px(size - 2.))
+            .text_color(pal.muted)
+            .flex_none()
+            .into_any_element(),
+    }
+}
+
 /// The waiting state while the snapshot is on its way.
 #[must_use]
 pub(crate) fn waiting(pal: &Palette) -> Vec<AnyElement> {
@@ -433,11 +469,13 @@ pub(crate) fn providers_page(
     model: Option<&SessionConfigOption>,
     choosing: bool,
     on_open: impl Fn(ProviderNav, &mut Window, &mut App) + Clone + 'static,
+    view: &Entity<crate::views::settings::SettingsView>,
     pal: &Palette,
+    cx: &App,
 ) -> Vec<AnyElement> {
     let rows = provider_rows(snapshot, model);
     if choosing {
-        return provider_chooser(snapshot, &rows, on_open, pal);
+        return provider_chooser(snapshot, &rows, on_open, pal, view, cx);
     }
     let add = on_open.clone();
     let mut out = vec![
@@ -473,7 +511,7 @@ pub(crate) fn providers_page(
         );
         let mut list = boxed(pal);
         for row in group_rows {
-            list = list.child(provider_row(snapshot, row, on_open.clone(), pal));
+            list = list.child(provider_row(snapshot, row, on_open.clone(), view, cx, pal));
         }
         out.push(list.into_any_element());
     }
@@ -535,12 +573,14 @@ pub(crate) fn providers_page(
     out
 }
 
-/// One provider's row: initials, name, protocol and origin badges, the
+/// One provider's row: logo, name, protocol and origin badges, the
 /// endpoint and models, and where its key is. A click opens its form.
 fn provider_row(
     snapshot: &Snapshot,
     row: &ProviderRow,
     on_open: impl Fn(ProviderNav, &mut Window, &mut App) + 'static,
+    view: &Entity<crate::views::settings::SettingsView>,
+    cx: &App,
     pal: &Palette,
 ) -> AnyElement {
     let mut name = h_flex().gap(px(6.)).items_center().child(
@@ -593,7 +633,7 @@ fn provider_row(
     };
     let hover = pal.fill_hover;
     list_row(
-        initials(&row.id, pal),
+        logo_or_glyph(&row.id, view, cx, pal, 22.),
         name,
         Some(SharedString::from(parts.join(" \u{b7} "))),
         pal,
@@ -606,27 +646,65 @@ fn provider_row(
     .into_any_element()
 }
 
+/// The chooser chip of the Add-provider screen: logo, name, hover.
+fn pick_chip(
+    id: String,
+    label: String,
+    logo: Option<(&str, &Entity<crate::views::settings::SettingsView>, &App)>,
+    on_open: impl Fn(&mut Window, &mut App) + 'static,
+    pal: &Palette,
+) -> Stateful<Div> {
+    let (muted, line, surface, hover) = (pal.muted, pal.line, pal.surface, pal.fill_hover);
+    div()
+        .id(SharedString::from(format!("provider-pick-{id}")))
+        .h(px(30.))
+        .pl(px(9.))
+        .pr(px(12.))
+        .flex()
+        .items_center()
+        .gap(px(7.))
+        .rounded(px(R_FULL))
+        .border_1()
+        .border_color(line)
+        .bg(surface)
+        .text_size(px(FS_XS))
+        .font_weight(crate::theme::WEIGHT_MEDIUM)
+        .text_color(pal.ink)
+        .cursor_pointer()
+        .hover(move |chip| chip.bg(hover).border_color(muted))
+        .children(logo.map(|(logo_id, view, cx)| logo_or_glyph(logo_id, view, cx, pal, 16.)))
+        .child(label)
+        .on_click(move |_, window, cx| on_open(window, cx))
+}
+
 /// A chooser chip that goes to `nav`.
 fn nav_chip(
     id: &'static str,
     label: &'static str,
+    icon: IconName,
     nav: ProviderNav,
     on_open: impl Fn(ProviderNav, &mut Window, &mut App) + 'static,
     pal: &Palette,
 ) -> Stateful<Div> {
+    let (muted, line, surface, hover) = (pal.muted, pal.line, pal.surface, pal.fill_hover);
     div()
         .id(id)
-        .px(px(10.))
-        .h(px(28.))
+        .h(px(30.))
+        .pl(px(9.))
+        .pr(px(12.))
         .flex()
         .items_center()
+        .gap(px(7.))
         .rounded(px(R_FULL))
         .border_1()
-        .border_color(pal.line)
-        .bg(pal.surface)
+        .border_color(line)
+        .bg(surface)
         .text_size(px(FS_XS))
+        .font_weight(crate::theme::WEIGHT_MEDIUM)
         .text_color(pal.ink)
         .cursor_pointer()
+        .hover(move |chip| chip.bg(hover).border_color(muted))
+        .child(Icon::new(icon).with_size(px(14.)).text_color(muted))
         .child(label)
         .on_click(move |_, window, cx| on_open(nav.clone(), window, cx))
 }
@@ -638,34 +716,30 @@ fn provider_chooser(
     rows: &[ProviderRow],
     on_open: impl Fn(ProviderNav, &mut Window, &mut App) + Clone + 'static,
     pal: &Palette,
+    view: &Entity<crate::views::settings::SettingsView>,
+    cx: &App,
 ) -> Vec<AnyElement> {
-    let chip = |id: String, label: String, target: Target| {
-        let on_open = on_open.clone();
-        div()
-            .id(SharedString::from(format!("provider-pick-{id}")))
-            .px(px(10.))
-            .h(px(28.))
-            .flex()
-            .items_center()
-            .rounded(px(R_FULL))
-            .border_1()
-            .border_color(pal.line)
-            .bg(pal.surface)
-            .text_size(px(FS_XS))
-            .text_color(pal.ink)
-            .cursor_pointer()
-            .child(label)
-            .on_click(move |_, window, cx| on_open(ProviderNav::Open(target.clone()), window, cx))
-    };
     let mut registered = h_flex().gap(px(6.)).flex_wrap();
     for id in snapshot
         .registered()
         .filter(|id| !rows.iter().any(|row| row.id == *id))
     {
-        registered = registered.child(chip(
-            id.to_owned(),
-            id.to_owned(),
-            Target::Registered(id.to_owned()),
+        let label = snapshot.provider_name(id);
+        let owned = id.to_owned();
+        let on_open = on_open.clone();
+        let view = view.clone();
+        registered = registered.child(pick_chip(
+            owned.clone(),
+            label,
+            Some((id, &view, cx)),
+            move |window, cx| {
+                on_open(
+                    ProviderNav::Open(Target::Registered(owned.clone())),
+                    window,
+                    cx,
+                )
+            },
+            pal,
         ));
     }
     let back = on_open.clone();
@@ -686,6 +760,7 @@ fn provider_chooser(
             .child(nav_chip(
                 "provider-pick-modelsdev",
                 "From models.dev",
+                IconName::Globe,
                 ProviderNav::Directory(false),
                 on_open.clone(),
                 pal,
@@ -693,6 +768,7 @@ fn provider_chooser(
             .child(nav_chip(
                 "provider-pick-apijson",
                 "api.json",
+                IconName::File,
                 ProviderNav::Directory(true),
                 on_open.clone(),
                 pal,
@@ -701,17 +777,36 @@ fn provider_chooser(
         note("Or an endpoint of your own.", pal).into_any_element(),
         h_flex()
             .gap(px(6.))
-            .child(chip(
-                "local".into(),
-                "Local server (Ollama)".into(),
-                Target::Local,
-            ))
-            .child(chip("custom".into(), "Custom".into(), Target::Custom(None)))
+            .child({
+                let on_open = on_open.clone();
+                pick_chip(
+                    "local".into(),
+                    "Local server (Ollama)".into(),
+                    None,
+                    move |window, cx| {
+                        on_open(ProviderNav::Open(Target::Local), window, cx);
+                    },
+                    pal,
+                )
+            })
+            .child({
+                let on_open = on_open.clone();
+                pick_chip(
+                    "custom".into(),
+                    "Custom".into(),
+                    None,
+                    move |window, cx| {
+                        on_open(ProviderNav::Open(Target::Custom(None)), window, cx);
+                    },
+                    pal,
+                )
+            })
             .child(nav_chip(
                 "provider-pick-acp",
                 "ACP agent",
+                IconName::Bot,
                 ProviderNav::Acp(None),
-                on_open.clone(),
+                on_open,
                 pal,
             ))
             .into_any_element(),

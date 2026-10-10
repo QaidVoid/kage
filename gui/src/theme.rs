@@ -53,7 +53,8 @@ pub const TRACKING_UPPER: f32 = 0.04;
 
 /// Regular text weight.
 pub const WEIGHT_REGULAR: FontWeight = FontWeight(400.0);
-
+/// Medium, used by chip labels and quiet emphasis.
+pub const WEIGHT_MEDIUM: FontWeight = FontWeight(500.0);
 /// Semibold, used by section labels and row titles.
 pub const WEIGHT_SEMIBOLD: FontWeight = FontWeight(600.0);
 

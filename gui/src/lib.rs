@@ -16,6 +16,7 @@ pub mod clock;
 pub mod gate;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod icon;
+mod logos;
 pub mod prefs;
 #[doc(hidden)]
 pub mod store;

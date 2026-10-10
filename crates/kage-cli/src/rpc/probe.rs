@@ -156,8 +156,7 @@ fn key_env(id: &str, config: &Config) -> String {
     })
 }
 
-/// Where each provider kage registers or the config defines finds its
-/// key.
+/// Where one provider finds its API key.
 pub(super) fn provider_keys(config: &Config, store: &AuthStore) -> BTreeMap<String, ProviderKey> {
     BUILTIN
         .iter()
@@ -175,9 +174,28 @@ pub(super) fn provider_keys(config: &Config, store: &AuthStore) -> BTreeMap<Stri
             } else {
                 KeySource::Missing
             };
-            (id.to_owned(), ProviderKey { env, source })
+            let name = display_name(id, config);
+            (id.to_owned(), ProviderKey { env, source, name })
         })
         .collect()
+}
+
+/// The display name a client should show for provider `id`: the
+/// compat list's curated one, else the model catalog's, else the
+/// config's own display name for a custom provider, else nothing and
+/// the client keeps the id.
+fn display_name(id: &str, config: &Config) -> Option<String> {
+    if let Some(entry) = COMPAT_PROVIDERS.iter().find(|entry| entry.id == id) {
+        return Some(entry.display_name.to_owned());
+    }
+    if let Some(known) = kage_provider::catalog::provider(id) {
+        return Some(known.name.to_owned());
+    }
+    config
+        .providers
+        .custom
+        .get(id)
+        .and_then(|custom| custom.display_name.clone())
 }
 
 /// How long an MCP server or ACP agent may take to answer.
@@ -630,6 +648,9 @@ mod tests {
             KeySource::Auth | KeySource::Env
         ));
         assert!(keys.contains_key("anthropic"));
+        assert_eq!(keys["deepseek"].name.as_deref(), Some("DeepSeek"));
+        assert_eq!(keys["anthropic"].name.as_deref(), Some("Anthropic"));
+        assert_eq!(keys["local"].name, None, "a bare custom id has no name");
     }
 
     #[test]

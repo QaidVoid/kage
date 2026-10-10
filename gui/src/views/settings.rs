@@ -1021,10 +1021,15 @@ impl SettingsView {
                     &snapshot,
                     option("model"),
                     self.provider_choosing,
-                    move |target, window, cx| {
-                        view.update(cx, |this, cx| this.open_provider(target, window, cx));
+                    {
+                        let view = view.clone();
+                        move |target, window, cx| {
+                            view.update(cx, |this, cx| this.open_provider(target, window, cx));
+                        }
                     },
+                    &view,
                     pal,
+                    cx,
                 )
             }
             Section::Mcp => {

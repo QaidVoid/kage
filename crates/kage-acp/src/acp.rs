@@ -83,6 +83,10 @@ pub struct ProviderKey {
     pub env: String,
     /// Where the key is now.
     pub source: KeySource,
+    /// A human-friendly display name, when the engine knows one for
+    /// the id; a client shows it instead of the raw id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// Where a provider's key is.

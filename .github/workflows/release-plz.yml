@@ -1,8 +1,11 @@
 name: release-plz
 
+# The dispatch exists so a release can be re-run at an exact commit,
+# such as a merge whose push event failed to start this workflow.
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   # Publishes the crates and tags the release once a release PR is

@@ -80,12 +80,6 @@ jobs:
           # verify step and manual installs script against.
           mkdir -p "$artifact/man"
           cp man/kage.1 "$artifact/man/"
-          # Raw binary next to the archive for the GUI-side downloader,
-          # named after the target triple; cp keeps the executable bit
-          # and Windows keeps the .exe suffix.
-          raw="dist/kage-${{ matrix.target }}"
-          if [ "$RUNNER_OS" = "Windows" ]; then raw="$raw.exe"; fi
-          cp "$bin" "$raw"
           file="dist/$artifact.${{ matrix.ext }}"
           if [ "$RUNNER_OS" = "Windows" ]; then
             7z a "$file" "$artifact"
@@ -119,19 +113,6 @@ jobs:
             }
           done
 
-      # One standard "<hex>  <name>" line per dist asset: the first token
-      # parses as the digest and `sha256sum -c` accepts the file, which is
-      # how the GUI-side downloader verifies archives and raw binaries.
-      # The upload glob below picks the sidecars up like any dist file.
-      - name: Checksums
-        shell: bash
-        working-directory: dist
-        run: |
-          for file in *; do
-            [ -f "$file" ] || continue
-            sha256sum "$file" > "$file.sha256"
-          done
-
       - uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # 2.11.5
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
@@ -140,8 +121,10 @@ jobs:
           overwrite: true
           tag: ${{ env.TAG }}
 
+      # Provenance for the archives. The GUI-side downloader and the
+      # setup screen download read the archives alone; integrity rides
+      # on TLS from github.com, and origin on these attestations.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             dist/kage-${{ matrix.name }}.${{ matrix.ext }}
-            dist/kage-${{ matrix.target }}${{ matrix.ext == 'zip' && '.exe' || '' }}

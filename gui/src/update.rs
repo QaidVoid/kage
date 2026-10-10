@@ -33,10 +33,6 @@ const CHECK_INTERVAL: i64 = 24 * 60 * 60;
 #[cfg(not(target_arch = "wasm32"))]
 const BINARY_CAP: usize = 256 * 1024 * 1024;
 
-/// The most bytes a checksum sidecar may weigh.
-#[cfg(not(target_arch = "wasm32"))]
-const SIDECAR_CAP: usize = 1024 * 1024;
-
 /// One release the feed named.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
@@ -143,16 +139,6 @@ pub fn install_hint() -> &'static str {
     }
 }
 
-/// The digest a `sha256sum` sidecar names: the first field of the
-/// first line, lowercased.
-#[must_use]
-pub fn parse_sha256(text: &str) -> Option<String> {
-    let line = text.lines().find(|line| !line.trim().is_empty())?;
-    let digest = line.split_whitespace().next()?;
-    let hex = digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit());
-    hex.then(|| digest.to_ascii_lowercase())
-}
-
 /// Opens the releases page in the user's browser. A no-op on the web
 /// build, where the page is one tab away already.
 pub fn open_releases() {
@@ -161,7 +147,6 @@ pub fn open_releases() {
 }
 
 /// Downloads the newest engine release archive for this platform,
-/// checks it against the release's checksum sidecar when one exists,
 /// extracts the engine binary and installs it where the user's
 /// account owns it, returning the binary's path. The web build
 /// reports the platform as unable.
@@ -216,19 +201,6 @@ fn due_for_check(prefs: &crate::prefs::Prefs, force: bool) -> bool {
         || prefs
             .update_checked_at
             .is_none_or(|at| at.saturating_add(CHECK_INTERVAL) <= crate::clock::unix_seconds())
-}
-
-/// The lowercase hex SHA-256 of `bytes`.
-#[cfg(not(target_arch = "wasm32"))]
-fn digest(bytes: &[u8]) -> String {
-    use sha2::Digest as _;
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -292,9 +264,8 @@ mod native {
         fetch_text(super::RELEASES_API, "the release list")
     }
 
-    /// Downloads the newest release archive, checks it against the
-    /// release's checksum sidecar and installs the engine binary it
-    /// contains, returning the installed path.
+    /// Downloads the newest release archive and installs the engine
+    /// binary it contains, returning the installed path.
     pub(super) fn install_latest() -> Result<PathBuf, String> {
         let Some(archive) = super::cli_asset() else {
             return Err("no kage release is built for this platform".to_owned());
@@ -305,26 +276,7 @@ mod native {
         };
         let url = super::asset_url(&release.tag, archive);
         let bytes = fetch_bytes(&url, super::BINARY_CAP, "the kage archive")?;
-        verify_against_sidecar(&url, &bytes)?;
         install(archive, &bytes)
-    }
-
-    /// Checks the downloaded archive against the release's checksum
-    /// sidecar. Releases older than the sidecar upload ship none, and
-    /// a missing sidecar skips the check rather than failing it.
-    fn verify_against_sidecar(url: &str, bytes: &[u8]) -> Result<(), String> {
-        let Some(sidecar) =
-            fetch_bytes_opt(&format!("{url}.sha256"), super::SIDECAR_CAP, "its checksum")?
-        else {
-            return Ok(());
-        };
-        let text = String::from_utf8(sidecar).map_err(|_| "its checksum is not text".to_owned())?;
-        let expected = super::parse_sha256(&text)
-            .ok_or_else(|| "its checksum file is unreadable".to_owned())?;
-        if super::digest(bytes) != expected {
-            return Err("the download does not match its checksum".to_owned());
-        }
-        Ok(())
     }
 
     /// Unpacks the archive in a scratch directory and installs the
@@ -511,25 +463,6 @@ mod tests {
         assert_eq!(
             asset_url("v0.2.0", "kage-aarch64-macos.tar.xz"),
             "https://github.com/QaidVoid/kage/releases/download/v0.2.0/kage-aarch64-macos.tar.xz"
-        );
-    }
-
-    #[test]
-    fn checksum_sidecars_read_as_sha256sum_output() {
-        let digest = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
-        assert_eq!(
-            parse_sha256(&format!("{digest}  kage-x86_64-apple-darwin\n")),
-            Some(digest.to_owned())
-        );
-        assert_eq!(parse_sha256("abc  x"), None);
-        assert_eq!(parse_sha256(""), None);
-    }
-
-    #[test]
-    fn digests_match_the_sha256_vectors() {
-        assert_eq!(
-            digest(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
 

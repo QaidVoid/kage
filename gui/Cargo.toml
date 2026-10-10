@@ -59,8 +59,6 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # Fetches the release list and the engine binary for the update
 # check and the setup screen download; rustls, so no system OpenSSL.
 ureq = "2.10"
-# Verifies a downloaded binary against its `.sha256` sidecar.
-sha2 = "0.10"
 # Unpacks the engine release archive (tar.xz, or zip on Windows) in
 # the setup screen's downloader.
 compak = "0.2"

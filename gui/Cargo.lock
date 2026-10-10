@@ -3678,7 +3678,6 @@ dependencies = [
  "kage-client",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "toml 1.1.6+spec-1.1.0",
  "tungstenite",
  "ureq",

@@ -1599,8 +1599,12 @@ impl SettingsView {
                     )
                     .child(div().text_size(px(FS_SM)).text_color(pal.muted).child(
                         SharedString::from(format!(
-                            "desktop {} \u{b7} {engine}",
-                            env!("CARGO_PKG_VERSION")
+                            "desktop {}{} · {engine}",
+                            env!("CARGO_PKG_VERSION"),
+                            match option_env!("KAGE_BUILD_SHA") {
+                                Some(sha) => format!(" ({})", &sha[..sha.len().min(7)]),
+                                None => String::new(),
+                            }
                         )),
                     )),
             );
@@ -1628,22 +1632,46 @@ impl SettingsView {
             .as_ref()
             .and_then(|agent| agent.version.clone());
         let desktop = env!("CARGO_PKG_VERSION");
-        let engine_line = match (&prefs.latest_cli_version, &engine) {
-            (Some(latest), Some(now)) if crate::update::is_newer(latest, now) => {
-                format!("engine {now}; {latest} is available")
-            }
-            (Some(latest), Some(now)) => format!("engine {now}; current with {latest}"),
-            (Some(latest), None) => format!("engine version unknown; {latest} is available"),
-            (None, _) => "engine: no check has run yet".to_owned(),
-        };
-        let desktop_line = match &prefs.latest_desktop_version {
-            Some(latest) if crate::update::is_newer(latest, desktop) => {
-                format!("desktop {desktop}; {latest} is available")
-            }
-            Some(latest) => format!("desktop {desktop}; current with {latest}"),
-            None => "desktop: no check has run yet".to_owned(),
+        let nightly = prefs.latest_nightly.as_ref();
+        let (engine_line, desktop_line) = if prefs.channel == crate::prefs::Channel::Nightly {
+            let engine_line = match nightly {
+                Some(build) => format!(
+                    "engine: nightly {} ({}) published",
+                    build.date,
+                    &build.commit[..build.commit.len().min(7)]
+                ),
+                None => "engine: no nightly seen yet".to_owned(),
+            };
+            let desktop_line = match nightly {
+                Some(build)
+                    if option_env!("KAGE_BUILD_SHA").is_some_and(|sha| sha == build.commit) =>
+                {
+                    format!("desktop {desktop}; on the {} nightly", build.date)
+                }
+                Some(build) => format!("desktop {desktop}; nightly {} available", build.date),
+                None => "desktop: no nightly seen yet".to_owned(),
+            };
+            (engine_line, desktop_line)
+        } else {
+            let engine_line = match (&prefs.latest_cli_version, &engine) {
+                (Some(latest), Some(now)) if crate::update::is_newer(latest, now) => {
+                    format!("engine {now}; {latest} is available")
+                }
+                (Some(latest), Some(now)) => format!("engine {now}; current with {latest}"),
+                (Some(latest), None) => format!("engine version unknown; {latest} is available"),
+                (None, _) => "engine: no check has run yet".to_owned(),
+            };
+            let desktop_line = match &prefs.latest_desktop_version {
+                Some(latest) if crate::update::is_newer(latest, desktop) => {
+                    format!("desktop {desktop}; {latest} is available")
+                }
+                Some(latest) => format!("desktop {desktop}; current with {latest}"),
+                None => "desktop: no check has run yet".to_owned(),
+            };
+            (engine_line, desktop_line)
         };
         let view = cx.entity();
+        let nightly = prefs.channel == crate::prefs::Channel::Nightly;
         row(
             "Updates",
             "The public releases, checked at most once a day",
@@ -1670,6 +1698,30 @@ impl SettingsView {
                     h_flex()
                         .gap(px(8.))
                         .child(
+                            btn_sm("channel-stable", Self::channel_tone(!nightly), pal)
+                                .on_click({
+                                    let view = view.clone();
+                                    move |_, _, cx| {
+                                        view.update(cx, |this, cx| {
+                                            this.set_channel(crate::prefs::Channel::Latest, cx)
+                                        });
+                                    }
+                                })
+                                .child("Stable"),
+                        )
+                        .child(
+                            btn_sm("channel-nightly", Self::channel_tone(nightly), pal)
+                                .on_click({
+                                    let view = view.clone();
+                                    move |_, _, cx| {
+                                        view.update(cx, |this, cx| {
+                                            this.set_channel(crate::prefs::Channel::Nightly, cx)
+                                        });
+                                    }
+                                })
+                                .child("Nightly"),
+                        )
+                        .child(
                             btn_sm("about-check", BtnTone::Plain, pal)
                                 .on_click(move |_, _, cx| {
                                     view.update(cx, |this, cx| this.check_updates(cx));
@@ -1685,6 +1737,28 @@ impl SettingsView {
                 ),
             pal,
         )
+    }
+
+    /// The active channel's button reads as filled, the other as
+    /// plain.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn channel_tone(active: bool) -> BtnTone {
+        if active {
+            BtnTone::Primary
+        } else {
+            BtnTone::Plain
+        }
+    }
+
+    /// Follows `channel` from now on and checks it right away, so the
+    /// row tells the new line's truth without a relaunch.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn set_channel(&self, channel: crate::prefs::Channel, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        store.update(cx, |store, _| {
+            store.update_prefs(|prefs| prefs.channel = channel);
+        });
+        self.check_updates(cx);
     }
 
     /// Runs a release check now; the row refreshes when it lands.

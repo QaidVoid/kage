@@ -389,10 +389,12 @@ pub(crate) fn preview_block<T: 'static>(
                 .text_color(pal.ink)
                 .child("config.toml"),
         )
-        .child(std::path::Path::new(&crate::prefs::display_config_dir())
-            .join("config.toml")
-            .to_string_lossy()
-            .into_owned())
+        .child(
+            std::path::Path::new(&crate::prefs::display_config_dir())
+                .join("config.toml")
+                .to_string_lossy()
+                .into_owned(),
+        )
         .on_click(move |_, _, cx| {
             owner.update(cx, |form, cx| {
                 let open = toggle(form);

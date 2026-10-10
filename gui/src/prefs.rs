@@ -56,6 +56,13 @@ pub struct Prefs {
     pub latest_cli_version: Option<String>,
     /// The newest desktop release the last check saw.
     pub latest_desktop_version: Option<String>,
+    /// Which release line updates follow: tagged stable releases or
+    /// the rolling nightly built from main. One choice governs both
+    /// the engine and this client's checks.
+    pub channel: Channel,
+    /// The newest nightly the last check saw, when the channel is
+    /// nightly.
+    pub latest_nightly: Option<NightlyBuild>,
     /// The model, thinking and mode options the last session showed,
     /// which the welcome pane offers before a session exists.
     pub template: Vec<SessionConfigOption>,
@@ -80,9 +87,32 @@ impl Default for Prefs {
             update_checked_at: None,
             latest_cli_version: None,
             latest_desktop_version: None,
+            channel: Channel::default(),
+            latest_nightly: None,
             template: Vec::new(),
         }
     }
+}
+
+/// Which release line the update checks follow.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Channel {
+    /// Tagged stable releases, the default.
+    #[default]
+    Latest,
+    /// The rolling `nightly` pre-release built from main.
+    Nightly,
+}
+
+/// One nightly build the last check saw.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NightlyBuild {
+    /// The full commit sha the nightly was built from.
+    pub commit: String,
+    /// The UTC date it was published, `YYYY-MM-DD`.
+    pub date: String,
 }
 
 impl Prefs {
@@ -147,7 +177,10 @@ pub fn display_config_dir() -> String {
             .filter(|value| !value.trim().is_empty())
     };
     if let Some(dir) = env("XDG_CONFIG_HOME") {
-        return std::path::PathBuf::from(dir).join("kage").to_string_lossy().into_owned();
+        return std::path::PathBuf::from(dir)
+            .join("kage")
+            .to_string_lossy()
+            .into_owned();
     }
     if cfg!(windows) {
         return env("APPDATA")
@@ -157,9 +190,7 @@ pub fn display_config_dir() -> String {
             .into_owned();
     }
     match env("HOME") {
-        Some(home) => std::path::PathBuf::from(home)
-            .join(".config")
-            .join("kage"),
+        Some(home) => std::path::PathBuf::from(home).join(".config").join("kage"),
         None => std::path::PathBuf::from("~/.config/kage"),
     }
     .to_string_lossy()

@@ -2,10 +2,11 @@
 //!
 //! GitHub's releases list is the one source both checks read: engine
 //! releases carry `v<semver>` tags, desktop releases
-//! `kage-desktop-v<semver>`. The parse half is pure, so tests run
-//! without a network; the fetch and install half exists only on
-//! native targets, and every entry point degrades to a no-op or a
-//! report on the web build.
+//! `kage-desktop-v<semver>`, and the rolling nightly is the `nightly`
+//! tag, whose commit comes from the tag ref. The parse half is pure,
+//! so tests run without a network; the fetch and install half exists
+//! only on native targets, and every entry point degrades to a no-op
+//! or a report on the web build.
 
 use gpui_kit::AsyncApp;
 use gpui_kit::Entity;
@@ -18,8 +19,19 @@ use crate::store::Store;
 #[cfg(not(target_arch = "wasm32"))]
 const RELEASES_API: &str = "https://api.github.com/repos/QaidVoid/kage/releases?per_page=50";
 
-/// The page a download action opens in the user's browser.
-pub const RELEASES_PAGE: &str = "https://github.com/QaidVoid/kage/releases/latest";
+/// The tag ref the nightly channel reads for the built commit.
+#[cfg(not(target_arch = "wasm32"))]
+const NIGHTLY_REF_API: &str = "https://api.github.com/repos/QaidVoid/kage/git/ref/tags/nightly";
+
+/// The page a download action opens in the user's browser, for the
+/// channel's releases.
+#[must_use]
+pub fn releases_page(channel: crate::prefs::Channel) -> &'static str {
+    match channel {
+        crate::prefs::Channel::Latest => "https://github.com/QaidVoid/kage/releases/latest",
+        crate::prefs::Channel::Nightly => "https://github.com/QaidVoid/kage/releases/tags/nightly",
+    }
+}
 
 /// Where release artifacts live.
 const RELEASES_DOWNLOAD: &str = "https://github.com/QaidVoid/kage/releases/download";
@@ -42,6 +54,14 @@ pub struct Release {
     pub version: String,
 }
 
+/// The rolling nightly the feed names. Its commit comes from the
+/// tag ref, which the fetch half reads separately.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NightlyRelease {
+    /// The UTC date it was published, `YYYY-MM-DD`.
+    pub date: String,
+}
+
 /// The newest release of each family the feed names.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Feed {
@@ -50,6 +70,8 @@ pub struct Feed {
     /// The newest desktop release, the first parsable
     /// `kage-desktop-v*` tag.
     pub desktop: Option<Release>,
+    /// The `nightly` rolling release, when it is on the list.
+    pub nightly: Option<NightlyRelease>,
 }
 
 /// Reads the releases list. Within each family the first parsable tag
@@ -76,6 +98,14 @@ pub fn parse_feed(text: &str) -> Feed {
                 tag: tag.to_owned(),
                 version: version.to_owned(),
             });
+        } else if tag == "nightly" && feed.nightly.is_none() {
+            feed.nightly = release
+                .get("published_at")
+                .and_then(|at| at.as_str())
+                .filter(|at| at.len() >= 10)
+                .map(|at| NightlyRelease {
+                    date: at[..10].to_owned(),
+                });
         } else if let Some(version) = tag.strip_prefix('v')
             && feed.cli.is_none()
             && parses(version)
@@ -139,20 +169,20 @@ pub fn install_hint() -> &'static str {
     }
 }
 
-/// Opens the releases page in the user's browser. A no-op on the web
-/// build, where the page is one tab away already.
+/// Opens the channel's releases page in the user's browser. A no-op
+/// on the web build, where the page is one tab away already.
 pub fn open_releases() {
     #[cfg(not(target_arch = "wasm32"))]
-    native::open_in_browser(RELEASES_PAGE);
+    native::open_in_browser(releases_page(crate::prefs::load().channel));
 }
 
-/// Downloads the newest engine release archive for this platform,
-/// extracts the engine binary and installs it where the user's
-/// account owns it, returning the binary's path. The web build
-/// reports the platform as unable.
+/// Downloads the newest engine release of the saved channel for this
+/// platform, extracts the engine binary and installs it where the
+/// user's account owns it, returning the binary's path. The web
+/// build reports the platform as unable.
 pub fn install_latest() -> Result<std::path::PathBuf, String> {
     #[cfg(not(target_arch = "wasm32"))]
-    return native::install_latest();
+    return native::install_latest(crate::prefs::load().channel);
 
     #[cfg(target_arch = "wasm32")]
     Err("this platform cannot download kage".to_owned())
@@ -167,7 +197,10 @@ pub async fn run_check(store: Entity<Store>, cx: &mut AsyncApp, force: bool) {
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let due = store.update(cx, |store, _| due_for_check(store.prefs(), force));
+        let (due, channel) = store.update(cx, |store, _| {
+            let prefs = store.prefs();
+            (due_for_check(prefs, force), prefs.channel)
+        });
         if !due {
             return;
         }
@@ -177,7 +210,23 @@ pub async fn run_check(store: Entity<Store>, cx: &mut AsyncApp, force: bool) {
             .await;
         let Ok(text) = fetched else { return };
         let feed = parse_feed(&text);
-        if feed.cli.is_none() && feed.desktop.is_none() {
+        let nightly = match channel {
+            crate::prefs::Channel::Latest => None,
+            crate::prefs::Channel::Nightly => {
+                let commit = cx
+                    .background_executor()
+                    .spawn(async { native::fetch_nightly_commit() })
+                    .await;
+                match (commit, feed.nightly.as_ref()) {
+                    (Ok(Some(commit)), Some(release)) => Some(crate::prefs::NightlyBuild {
+                        commit,
+                        date: release.date.clone(),
+                    }),
+                    _ => None,
+                }
+            }
+        };
+        if feed.cli.is_none() && feed.desktop.is_none() && nightly.is_none() {
             return;
         }
         store.update(cx, |store, _| {
@@ -187,6 +236,9 @@ pub async fn run_check(store: Entity<Store>, cx: &mut AsyncApp, force: bool) {
                 }
                 if let Some(release) = &feed.desktop {
                     prefs.latest_desktop_version = Some(release.version.clone());
+                }
+                if nightly.is_some() {
+                    prefs.latest_nightly = nightly;
                 }
                 prefs.update_checked_at = Some(crate::clock::unix_seconds());
             });
@@ -264,17 +316,31 @@ mod native {
         fetch_text(super::RELEASES_API, "the release list")
     }
 
-    /// Downloads the newest release archive and installs the engine
-    /// binary it contains, returning the installed path.
-    pub(super) fn install_latest() -> Result<PathBuf, String> {
+    /// The commit the `nightly` tag points at, when it exists.
+    pub(super) fn fetch_nightly_commit() -> Result<Option<String>, String> {
+        let text = fetch_text(super::NIGHTLY_REF_API, "the nightly tag")?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|error| format!("the nightly tag did not read: {error}"))?;
+        Ok(value["object"]["sha"].as_str().map(str::to_owned))
+    }
+
+    /// Downloads the newest engine release of `channel` and installs
+    /// the engine binary it contains, returning the installed path.
+    pub(super) fn install_latest(channel: crate::prefs::Channel) -> Result<PathBuf, String> {
         let Some(archive) = super::cli_asset() else {
             return Err("no kage release is built for this platform".to_owned());
         };
-        let feed = super::parse_feed(&fetch_releases()?);
-        let Some(release) = feed.cli else {
-            return Err("the release list names no engine release".to_owned());
+        let tag = match channel {
+            crate::prefs::Channel::Latest => {
+                let feed = super::parse_feed(&fetch_releases()?);
+                feed.cli
+                    .ok_or("the release list names no engine release")?
+                    .tag
+            }
+            // The rolling tag exists once the first nightly published.
+            crate::prefs::Channel::Nightly => "nightly".to_owned(),
         };
-        let url = super::asset_url(&release.tag, archive);
+        let url = super::asset_url(&tag, archive);
         let bytes = fetch_bytes(&url, super::BINARY_CAP, "the kage archive")?;
         install(archive, &bytes)
     }
@@ -433,6 +499,43 @@ mod tests {
         assert_eq!(parse_feed("not json"), Feed::default());
         assert_eq!(parse_feed("{}"), Feed::default());
         assert_eq!(parse_feed("[]"), Feed::default());
+    }
+
+    #[test]
+    fn the_nightly_release_names_its_date() {
+        let feed = parse_feed(
+            r#"[
+                {"tag_name": "nightly", "published_at": "2026-10-10T03:04:05Z"},
+                {"tag_name": "v0.2.1"}
+            ]"#,
+        );
+        assert_eq!(
+            feed.nightly.map(|nightly| nightly.date),
+            Some("2026-10-10".to_owned())
+        );
+        assert_eq!(
+            feed.cli.map(|release| release.version),
+            Some("0.2.1".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_nightly_without_a_date_names_nothing() {
+        let feed = parse_feed(r#"[{"tag_name": "nightly"}]"#);
+        assert_eq!(feed.nightly, None);
+    }
+
+    #[test]
+    fn each_channel_reads_its_own_releases_page() {
+        use crate::prefs::Channel;
+        assert_eq!(
+            releases_page(Channel::Latest),
+            "https://github.com/QaidVoid/kage/releases/latest"
+        );
+        assert_eq!(
+            releases_page(Channel::Nightly),
+            "https://github.com/QaidVoid/kage/releases/tags/nightly"
+        );
     }
 
     #[test]

@@ -1043,11 +1043,17 @@ mod tests {
             jail.set_env("XDG_CONFIG_HOME", "");
             // `dirs::home_dir()` follows `HOME` on Unix but reads the
             // Windows Known Folder API on Windows, where the jail's
-            // `HOME` is inert; expect that platform home.
-            let expected = dirs::home_dir().expect("test needs a home directory");
+            // `HOME` is inert; expect the platform's own directory.
+            let base = if cfg!(windows) {
+                dirs::config_dir().expect("test needs a config directory")
+            } else {
+                dirs::home_dir()
+                    .expect("test needs a home directory")
+                    .join(".config")
+            };
             assert_eq!(
                 Config::default_path(),
-                Some(expected.join(".config").join("kage").join("config.toml"))
+                Some(base.join("kage").join("config.toml"))
             );
             Ok(())
         });
@@ -1066,11 +1072,15 @@ mod tests {
             jail.set_env("XDG_STATE_HOME", spaced.as_str());
             assert_eq!(Config::state_dir(), Some(home.join("state").join("kage")));
             jail.set_env("XDG_STATE_HOME", "");
-            let expected = dirs::home_dir().expect("test needs a home directory");
-            assert_eq!(
-                Config::state_dir(),
-                Some(expected.join(".local").join("state").join("kage"))
-            );
+            let base = if cfg!(windows) {
+                dirs::data_local_dir().expect("test needs a local data directory")
+            } else {
+                dirs::home_dir()
+                    .expect("test needs a home directory")
+                    .join(".local")
+                    .join("state")
+            };
+            assert_eq!(Config::state_dir(), Some(base.join("kage")));
             Ok(())
         });
     }

@@ -1,0 +1,4 @@
+# The gui workspace's own MSRV: newer than the CLI's, as
+# gui/Cargo.toml declares.
+msrv = "1.95"
+doc-valid-idents = ["DuckDuckGo", "SearXNG", ".."]

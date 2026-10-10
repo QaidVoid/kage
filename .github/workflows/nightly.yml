@@ -1,0 +1,516 @@
+name: nightly
+
+# Builds the CLI and the desktop client from main every night and
+# republishes the rolling `nightly` pre-release. A night where main
+# has not moved since the last nightly skips the builds; a manual run
+# always rebuilds, so a broken nightly can be re-cut without pushing
+# an empty commit first.
+on:
+  schedule:
+    # 03:00 UTC every day
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-changes:
+    name: Check for new commits
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Compare HEAD with the nightly tag
+        id: check
+        shell: bash
+        run: |
+          # A manual run always rebuilds.
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The publish job force-pushes `nightly` onto the commit it
+          # built, so the tag pointing at HEAD means main has not moved
+          # since. Fetch it explicitly: the checkout above is shallow
+          # and carries no tags.
+          git fetch origin tag nightly --no-tags || true
+          tag_commit=$(git rev-parse -q --verify 'nightly^{commit}' || true)
+          if [ -n "$tag_commit" ] && [ "$tag_commit" = "$(git rev-parse HEAD)" ]; then
+            echo "No new commits since the last nightly; skipping"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  cli:
+    name: cli ${{ matrix.name }}
+    needs: check-changes
+    if: ${{ needs.check-changes.outputs.changed == 'true' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: x86_64-linux, os: ubuntu-latest, target: x86_64-unknown-linux-musl, cross: true, ext: tar.xz }
+          - { name: aarch64-linux, os: ubuntu-latest, target: aarch64-unknown-linux-musl, cross: true, ext: tar.xz }
+          - { name: aarch64-macos, os: macos-latest, target: aarch64-apple-darwin, cross: false, ext: tar.xz }
+          - { name: x86_64-macos, os: macos-latest, target: x86_64-apple-darwin, cross: false, ext: tar.xz }
+          - { name: x86_64-windows, os: windows-latest, target: x86_64-pc-windows-msvc, cross: false, ext: zip }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install
+          rustup target add "${{ matrix.target }}"
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked --version 0.2.5
+
+      - name: Build
+        shell: bash
+        env:
+          # Static musl binaries that run on any Linux.
+          RUSTFLAGS: ${{ matrix.cross && '-C target-feature=+crt-static' || '' }}
+        run: |
+          tool=cargo
+          if [ "${{ matrix.cross }}" = "true" ]; then tool=cross; fi
+          "$tool" build --release --locked -p kage-cli --target "${{ matrix.target }}"
+
+      - name: Package
+        shell: bash
+        run: |
+          artifact="kage-${{ matrix.name }}"
+          bin="target/${{ matrix.target }}/release/kage"
+          if [ "$RUNNER_OS" = "Windows" ]; then bin="$bin.exe"; fi
+          mkdir -p "$artifact" dist
+          cp "$bin" LICENSE README.md "$artifact/"
+          mkdir -p "$artifact/man"
+          cp man/kage.1 "$artifact/man/"
+          file="dist/$artifact.${{ matrix.ext }}"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a "$file" "$artifact"
+          else
+            tar -cJf "$file" "$artifact"
+          fi
+
+      - name: Verify archives
+        shell: bash
+        run: |
+          artifact="kage-${{ matrix.name }}"
+          file="dist/$artifact.${{ matrix.ext }}"
+          bin="kage"
+          if [ "$RUNNER_OS" = "Windows" ]; then bin="kage.exe"; fi
+          if [ "${{ matrix.ext }}" = "zip" ]; then
+            listing="$(7z l -slt "$file" | sed -n 's/^Path = //p' | tr '\\' '/')"
+          else
+            listing="$(tar -tJf "$file")"
+          fi
+          echo "$listing"
+          for wanted in \
+            "$artifact/$bin" \
+            "$artifact/LICENSE" \
+            "$artifact/README.md" \
+            "$artifact/man/kage.1"; do
+            echo "$listing" | grep -qx "$wanted" || {
+              echo "$file is missing $wanted" >&2
+              exit 1
+            }
+          done
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cli-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  # The browser client `kage serve` hands out.
+  web:
+    name: web client
+    needs: check-changes
+    if: ${{ needs.check-changes.outputs.changed == 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gui
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Toolchain
+        run: rustup toolchain install nightly --profile minimal --target wasm32-unknown-unknown
+
+      # The CLI has to match the wasm-bindgen crate gui/Cargo.lock pins.
+      - uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.87.16
+        with:
+          tool: wasm-bindgen@0.2.129
+
+      - name: Build
+        run: |
+          cargo +nightly build --release --locked --target wasm32-unknown-unknown
+          wasm-bindgen --out-dir web --target web \
+            target/wasm32-unknown-unknown/release/kage_desktop.wasm
+
+      - name: Package
+        run: |
+          bundle=../web-bundle/web
+          mkdir -p "$bundle/assets/icons"
+          cp web/index.html web/favicon.svg web/boot.js web/kage_desktop.js \
+            web/kage_desktop_bg.wasm "$bundle/"
+          manifest="$(cargo metadata --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "gpui-kit-assets") | .manifest_path')"
+          cp "$(dirname "$manifest")"/assets/icons/*.svg "$bundle/assets/icons/"
+          tar -C ../web-bundle -cJf ../kage-web.tar.xz web
+
+      - name: Verify bundle
+        run: |
+          listing="$(tar -tJf ../kage-web.tar.xz)"
+          echo "$listing"
+          echo "$listing" | grep -qx 'web/favicon.svg' || {
+            echo 'the web bundle is missing web/favicon.svg' >&2
+            exit 1
+          }
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web
+          path: kage-web.tar.xz
+          if-no-files-found: error
+
+  # The desktop client. Nightly builds stamp the commit into the app
+  # bundle and the About page, so the client can tell whether it is on
+  # the current nightly.
+  desktop:
+    name: desktop ${{ matrix.name }}
+    needs: check-changes
+    if: ${{ needs.check-changes.outputs.changed == 'true' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64-linux
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - name: aarch64-linux
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - { name: aarch64-macos, os: macos-latest, target: aarch64-apple-darwin }
+          - { name: x86_64-macos, os: macos-latest, target: x86_64-apple-darwin }
+          - { name: x86_64-windows, os: windows-latest, target: x86_64-pc-windows-msvc }
+    defaults:
+      run:
+        shell: bash
+        working-directory: gui
+    env:
+      KAGE_BUILD_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install
+          rustup target add "${{ matrix.target }}"
+
+      - name: Install Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libwayland-dev libxcb1-dev
+
+      - name: Build
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Package
+        run: |
+          artifact="kage-desktop-${{ matrix.name }}"
+          bin="target/${{ matrix.target }}/release/kage-desktop"
+          if [ "$RUNNER_OS" = "Windows" ]; then bin="$bin.exe"; fi
+          mkdir -p "$artifact" ../dist
+          cp ../LICENSE ../README.md "$artifact/"
+          version="$(git rev-parse --short HEAD)"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            app="$artifact/Kage.app"
+            mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+            cp "$bin" "$app/Contents/MacOS/kage-desktop"
+            cat > "$app/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>kage-desktop</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.qaidvoid.kage-desktop</string>
+              <key>CFBundleName</key>
+              <string>Kage</string>
+              <key>CFBundleIconFile</key>
+              <string>kage</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>$version</string>
+              <key>CFBundleVersion</key>
+              <string>$version</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+            iconset="$RUNNER_TEMP/kage.iconset"
+            mkdir -p "$iconset"
+            for slot in 16 32 128 256 512; do
+              sips -z "$slot" "$slot" assets/brand/kage-glyph-shadow.png \
+                --out "$iconset/icon_${slot}x${slot}.png" >/dev/null
+              px=$((slot * 2))
+              if [ "$px" -le 608 ]; then
+                sips -z "$px" "$px" assets/brand/kage-glyph-shadow.png \
+                  --out "$iconset/icon_${slot}x${slot}@2x.png" >/dev/null
+              fi
+            done
+            iconutil -c icns "$iconset" -o "$app/Contents/Resources/kage.icns"
+          else
+            cp "$bin" "$artifact/"
+            if [ "$RUNNER_OS" = "Linux" ]; then
+              mkdir -p "$artifact/share/applications" "$artifact/share/icons"
+              printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=kage' \
+                'Comment=Desktop client for the kage coding agent' \
+                'Exec=kage-desktop' 'Icon=kage' 'Terminal=false' \
+                'Categories=Development;' > "$artifact/share/applications/kage.desktop"
+              cp -R assets/icons/hicolor "$artifact/share/icons/hicolor"
+            fi
+          fi
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a "../dist/$artifact.zip" "$artifact"
+          else
+            tar -cJf "../dist/$artifact.tar.xz" "$artifact"
+          fi
+
+      - name: Verify archives
+        if: runner.os != 'Windows'
+        run: |
+          folder="kage-desktop-${{ matrix.name }}"
+          artifact="$folder.tar.xz"
+          listing="$(tar -tJf "../dist/$artifact")"
+          echo "$listing"
+          check() {
+            echo "$listing" | grep -qx "$folder/$1" || {
+              echo "$artifact is missing $1" >&2
+              exit 1
+            }
+          }
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            check share/applications/kage.desktop
+            for size in 16x16 32x32 48x48 64x64 128x128 256x256 512x512; do
+              check "share/icons/hicolor/$size/apps/kage.png"
+            done
+          else
+            check Kage.app/Contents/MacOS/kage-desktop
+            check Kage.app/Contents/Info.plist
+            check Kage.app/Contents/Resources/kage.icns
+            tar -xJf "../dist/$artifact" -C "$RUNNER_TEMP" \
+              "$folder/Kage.app/Contents/Info.plist"
+            plutil -lint "$RUNNER_TEMP/$folder/Kage.app/Contents/Info.plist"
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  # The portable Linux bundle, built in Arch exactly as the release's
+  # desktop-onelf job builds it. The slim-package digests are pinned,
+  # so a nightly catches upstream's rebuilds within a day.
+  desktop-onelf:
+    name: desktop onelf ${{ matrix.name }}
+    needs: check-changes
+    if: ${{ needs.check-changes.outputs.changed == 'true' }}
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64-linux
+            arch: x86_64
+            runner: ubuntu-latest
+            image: archlinux:latest
+            onelf-sha256: 3a990243790c026c902330a7744e8c21b25fdc8c694a88e79d6fb25d761a6351
+            vulkan: vulkan-radeon vulkan-intel vulkan-nouveau
+            slim: |
+              llvm-libs-nano pkg.tar.zst f186b7d2f8367e3b53f0192a9ad60e69987188efa7a2c0770577fb3f03981170
+              mesa-nano pkg.tar.zst a32ecc91a446ce73318f16befbe04742517392d07bf75d55c652bca673550082
+              vulkan-radeon-nano pkg.tar.zst e2559a93f90835305cdc91f953681fd0d35aefab135acad0e191069621e66669
+              vulkan-intel-nano pkg.tar.zst fe1fb79cb47bad431e10c40cd34c83fac437d012525268c00c77de56b032e2f3
+              vulkan-nouveau-nano pkg.tar.zst 20d27dfd967be73fa23e0107fb0977c3a560b81e8a3506e79df9be47a8352dec
+              libxml2-iculess pkg.tar.zst d5220136f8d9b4eaaf173a44d3f0092e97b61cfe9f5d627c570c6e81add9e789
+          - name: aarch64-linux
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+            image: menci/archlinuxarm:latest
+            onelf-sha256: 9b5b2c3d031756a064bd9a71a977e229cb359f324937a5ba8a28db1568bae15b
+            vulkan: vulkan-radeon vulkan-nouveau vulkan-panfrost vulkan-broadcom
+            slim: |
+              llvm-libs-nano pkg.tar.zst 4f2bd7d178432e42f2ba2a756fd0fd864795edf2fac73b5c51761103880e0b40
+              mesa-nano pkg.tar.zst 1fedba1c08c845f4a034ea73cd95ef96d8bf2be91fbb247672552c48d72d12a3
+              vulkan-radeon-nano pkg.tar.zst 17a0a0be41c5036346a57ca819174962f95b7b318d993559f76eca3e66104fad
+              vulkan-nouveau-nano pkg.tar.zst b9fac6605dbf0900deb70c61c34407efee059d12a230e8b928a8bcf59507eeaa
+              vulkan-panfrost-nano pkg.tar.zst cb52c18eb7365f984ac81932171dcbe9907181752f492da233f84710eaf541f2
+              vulkan-broadcom-nano pkg.tar.zst fe01d709afab23a3614efc53b35f2a42518ad24948a149880365a25010e02d64
+              libxml2-iculess pkg.tar.xz 3e9eed60d2a40ad1ca623a0ba4607c22ac4030e18416080538c04fd82ce3add4
+    defaults:
+      run:
+        shell: bash
+        working-directory: gui
+    env:
+      ONELF_VERSION: 0.3.3
+      KAGE_BUILD_SHA: ${{ github.sha }}
+    steps:
+      - name: Install Arch packages
+        working-directory: /
+        run: |
+          pacman -Syu --disable-sandbox --noconfirm --needed \
+            base-devel git curl tar xz rustup patchelf pkgconf \
+            libxcb libxkbcommon libxkbcommon-x11 wayland fontconfig \
+            mesa vulkan-icd-loader ${{ matrix.vulkan }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Toolchain
+        run: rustup toolchain install
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Slim the graphics stack
+        working-directory: /tmp
+        run: |
+          base="https://github.com/pkgforge-dev/archlinux-pkgs-debloated/releases/download/continuous"
+          mkdir -p debloated
+          cd debloated
+          while read -r pkg ext sha; do
+            [ -n "$pkg" ] || continue
+            file="$pkg-${{ matrix.arch }}.$ext"
+            curl -fsSL -O "$base/$file" || {
+              echo "no $file published" >&2
+              exit 1
+            }
+            echo "$sha  $file" | sha256sum -c -
+          done <<'ROWS'
+          ${{ matrix.slim }}
+          ROWS
+          pacman -U --disable-sandbox --noconfirm ./*.pkg.tar.*
+
+      - name: Install onelf
+        run: |
+          curl -fsSL -o /usr/local/bin/onelf \
+            "https://github.com/QaidVoid/onelf/releases/download/$ONELF_VERSION/onelf-${{ matrix.name }}"
+          echo "${{ matrix.onelf-sha256 }}  /usr/local/bin/onelf" | sha256sum -c -
+          chmod +x /usr/local/bin/onelf
+
+      - name: Pack with onelf
+        run: |
+          mkdir -p AppDir/bin AppDir/.onelf/icons AppDir/.onelf/desktop \
+            AppDir/share/icons ../dist
+          cp target/release/kage-desktop AppDir/bin/kage-desktop
+          cp assets/brand/kage-glyph-shadow.png AppDir/.onelf/icons/default.png
+          cp assets/brand/kage-glyph-dawn.png AppDir/.onelf/icons/kage-desktop.png
+          cp -R assets/icons/hicolor AppDir/share/icons/hicolor
+          printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=kage' \
+            'Comment=Desktop client for the kage coding agent' \
+            'Exec=kage-desktop' 'Icon=default' 'Terminal=false' \
+            'Categories=Development;' > AppDir/.onelf/desktop/default.desktop
+          for wanted in \
+            AppDir/.onelf/icons/default.png \
+            AppDir/.onelf/icons/kage-desktop.png \
+            AppDir/.onelf/desktop/default.desktop \
+            AppDir/share/icons/hicolor/512x512/apps/kage.png; do
+            [ -f "$wanted" ] || {
+              echo "the onelf AppDir is missing $wanted" >&2
+              exit 1
+            }
+          done
+          cp onelf.toml AppDir/onelf.toml
+          version="$(git rev-parse --short HEAD)"
+          sed -i "s/^version[[:space:]]*=.*/version = \"$version\"/" AppDir/onelf.toml
+          grep -qx "version = \"$version\"" AppDir/onelf.toml || {
+            echo "AppDir/onelf.toml does not name version $version" >&2
+            exit 1
+          }
+          onelf build AppDir
+          onelf verify AppDir/kage-desktop.onelf
+          mv AppDir/kage-desktop.onelf "../dist/kage-desktop-${{ matrix.name }}.onelf"
+
+      - name: Smoke run the bundle
+        run: |
+          pacman -S --disable-sandbox --noconfirm --needed ttf-dejavu
+          ZED_HEADLESS=1 timeout 60 "../dist/kage-desktop-${{ matrix.name }}.onelf" --smoke 3000
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: onelf-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Republish the nightly release
+    needs: [check-changes, cli, web, desktop, desktop-onelf]
+    # `!cancelled()` lets the release go out when only some legs built,
+    # so it re-asserts the changed check too.
+    if: ${{ !cancelled() && needs.check-changes.outputs.changed == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: '*'
+          merge-multiple: true
+          path: dist
+
+      - name: Compose release notes
+        run: |
+          short=$(git rev-parse --short HEAD)
+          subject=$(git log -1 --pretty=%s)
+          {
+            echo "Rolling pre-release rebuilt from \`main\` every night."
+            echo
+            echo "**Commit:** [\`$short\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }}) - $subject"
+            echo "**Built:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+            echo
+            echo "These builds track \`main\` and may be unstable. For tagged releases see https://github.com/${{ github.repository }}/releases/latest."
+          } > NIGHTLY_NOTES.md
+
+      - name: Refresh the nightly tag
+        run: |
+          git tag -f nightly
+          git push origin nightly --force
+
+      - name: Delete the previous nightly release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release delete nightly --repo "$GITHUB_REPOSITORY" --yes || true
+
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: nightly
+          name: Nightly
+          prerelease: true
+          target_commitish: ${{ github.sha }}
+          body_path: NIGHTLY_NOTES.md
+          files: dist/*

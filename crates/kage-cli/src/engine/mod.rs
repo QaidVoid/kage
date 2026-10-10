@@ -1205,7 +1205,13 @@ impl Dispatcher {
         let (provider, bare_model) = match self.registry.resolve(&model) {
             Ok(resolved) => (Arc::clone(resolved.provider), resolved.model),
             Err(err) => {
-                let message = format!("model {model} unavailable: {err}");
+                let message = if crate::has_usable_provider(&self.registry) {
+                    format!("model {model} unavailable: {err}")
+                } else {
+                    "no provider credentials found; add one with `kage auth login`, \
+                     an API-key env var, or the provider settings"
+                        .to_owned()
+                };
                 notice(&self.bus, id, NoticeLevel::Error, message.clone());
                 let outcome = RunOutcome::Failed {
                     error: LoopError::Provider { message },

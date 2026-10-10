@@ -91,15 +91,19 @@ impl Host {
         let plugin_providers = merge_plugin_providers(&mut registry, model_override, system_role);
         let default_model =
             model_override.map_or_else(|| crate::default_model(&registry), str::to_owned);
-        if !crate::has_usable_provider(&registry) && registry.resolve(&default_model).is_err() {
-            return Err(
-                "no provider credentials found; run `kage auth login` or set an API-key env var"
-                    .to_owned(),
+        if crate::has_usable_provider(&registry) {
+            registry
+                .resolve(&default_model)
+                .map_err(|e| format!("cannot resolve model {default_model}: {e}"))?;
+        } else {
+            // A headless entry point starts anyway: a GUI or editor
+            // client connects, saves a key through `_kage/auth/set`,
+            // and the reloaded providers resolve. Terminal users get
+            // the hint here; runs fail with the same hint per prompt.
+            eprintln!(
+                "kage: no provider credentials found; add one with `kage auth login` or an API-key env var"
             );
         }
-        registry
-            .resolve(&default_model)
-            .map_err(|e| format!("cannot resolve model {default_model}: {e}"))?;
         let sessions = crate::sessions_dir()?;
         let registry = Arc::new(registry);
         let aliases = {

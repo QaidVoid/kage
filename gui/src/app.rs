@@ -408,13 +408,61 @@ impl Shell {
         )
         .detach();
 
+        // A settings-driven engine install hands the new binary to
+        // the same path the setup screen does: saved as the chosen
+        // kage, then the engine restarts on it at once.
+        #[cfg(not(target_arch = "wasm32"))]
+        cx.subscribe_in(
+            &settings,
+            window,
+            |shell, _, event: &crate::views::settings::SettingsEvent, _, cx| {
+                use crate::views::settings::SettingsEvent;
+                let SettingsEvent::EngineReplaced(program) = event;
+                let saved = program.clone();
+                shell.store.act(cx, |store| {
+                    store.update_prefs(|prefs| prefs.kage_path = Some(saved));
+                });
+                shell.restart_stdio(program.clone(), cx);
+            },
+        )
+        .detach();
+
         // Asks the public releases once a day whether a newer engine
         // or client is out, so the About page can say so unprompted.
+        // A check that finds either behind raises a toast whose click
+        // opens the releases page; the badge lives in the prefs.
         #[cfg(not(target_arch = "wasm32"))]
         {
             let store = store.clone();
-            cx.spawn(async move |_, cx| crate::update::run_check(store, cx, false).await)
-                .detach();
+            cx.spawn(async move |this, cx| {
+                crate::update::run_check(store, cx, false).await;
+                let Some(shell) = this.upgrade() else {
+                    return;
+                };
+                shell.update(cx, |shell, cx| {
+                    let store = shell.store.read(cx);
+                    let prefs = store.prefs();
+                    let engine = store
+                        .state()
+                        .agent
+                        .as_ref()
+                        .and_then(|agent| agent.version.clone());
+                    let Some(text) = crate::update::pending_update(prefs, engine.as_deref()) else {
+                        return;
+                    };
+                    shell.toasts.update(cx, |toasts, cx| {
+                        toasts.push(
+                            ToastDraft {
+                                tone: NoticeTone::Info,
+                                text,
+                                action: ToastAction::OpenUpdates,
+                            },
+                            cx,
+                        );
+                    });
+                });
+            })
+            .detach();
         }
 
         cx.observe(&store, |shell, _, cx| {

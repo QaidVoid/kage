@@ -38,6 +38,14 @@ use crate::views::settings_config as config;
 
 gpui_kit::actions!(kage_desktop, [SettingsClose]);
 
+/// What the settings dialog tells the shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsEvent {
+    /// A new engine binary is installed and saved as the chosen
+    /// `kage` path; the shell should restart the engine with it.
+    EngineReplaced(String),
+}
+
 /// The width of a theme pick and its menu.
 const PICK_W: f32 = 220.0;
 
@@ -256,6 +264,21 @@ pub struct SettingsView {
     plugin_input: Option<Entity<InputState>>,
     /// The last plugin install sent.
     plugin_install: Option<u64>,
+    /// Which updater is running, so a second click cannot stack
+    /// downloads.
+    installing: Option<Install>,
+    /// What the last updater run ended with: success and a line to
+    /// show, or failure and why.
+    install_note: Option<(bool, String)>,
+}
+
+/// Which updater the Updates row is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Install {
+    /// The engine binary.
+    Engine,
+    /// This client's own desktop build.
+    Desktop,
 }
 
 impl Focusable for SettingsView {
@@ -263,6 +286,8 @@ impl Focusable for SettingsView {
         self.focus.clone()
     }
 }
+
+impl gpui_kit::EventEmitter<SettingsEvent> for SettingsView {}
 
 impl SettingsView {
     /// A closed settings dialog over `store`.
@@ -287,6 +312,8 @@ impl SettingsView {
             directory: None,
             plugin_input: None,
             plugin_install: None,
+            installing: None,
+            install_note: None,
         }
     }
 
@@ -527,6 +554,11 @@ impl SettingsView {
         if section == Section::Agents {
             self.store.act(cx, Store::ask_engine_options);
         }
+        if section == Section::About {
+            self.store.update(cx, |store, _| {
+                store.update_prefs(|prefs| prefs.update_badge = false);
+            });
+        }
         cx.notify();
     }
 
@@ -574,6 +606,7 @@ impl SettingsView {
         for section in Section::ALL {
             let on = section == self.section;
             let hover = pal.hover;
+            let show_badge = section == Section::About && self.store.read(cx).prefs().update_badge;
             nav = nav.child(
                 h_flex()
                     .id(SharedString::from(format!("set-nav-{}", section.label())))
@@ -588,7 +621,10 @@ impl SettingsView {
                     .when(!on, |row| row.hover(move |row| row.bg(hover)))
                     .on_click(cx.listener(move |this, _, _, cx| this.go(section, cx)))
                     .child(Icon::new(section.icon()).with_size(px(14.)))
-                    .child(section.label()),
+                    .child(section.label())
+                    .when(show_badge, |row| {
+                        row.child(badge("new", pal).text_size(px(FS_XS)).text_color(pal.ink))
+                    }),
             );
         }
         nav
@@ -1678,6 +1714,22 @@ impl SettingsView {
         let nightly = prefs.channel == crate::prefs::Channel::Nightly;
         let checking = self.checking;
         let check_error = prefs.check_error.clone();
+        let engine_behind = if nightly {
+            prefs.latest_nightly.is_some()
+        } else {
+            matches!((&prefs.latest_cli_version, &engine),
+                (Some(latest), Some(now)) if crate::update::is_newer(latest, now))
+        };
+        let desktop_behind = if nightly {
+            prefs.latest_nightly.as_ref().is_some_and(|build| {
+                option_env!("KAGE_BUILD_SHA").is_some_and(|sha| sha != build.commit)
+            })
+        } else {
+            prefs
+                .latest_desktop_version
+                .as_ref()
+                .is_some_and(|latest| crate::update::is_newer(latest, desktop))
+        };
         row(
             "Updates",
             "The public releases, checked at most once a day",
@@ -1739,8 +1791,11 @@ impl SettingsView {
                         )
                         .child(
                             btn_sm("about-check", BtnTone::Plain, pal)
-                                .on_click(move |_, _, cx| {
-                                    view.update(cx, |this, cx| this.check_updates(cx));
+                                .on_click({
+                                    let view = view.clone();
+                                    move |_, _, cx| {
+                                        view.update(cx, |this, cx| this.check_updates(cx));
+                                    }
                                 })
                                 .child(if checking {
                                     SharedString::from("Checking\u{2026}")
@@ -1748,13 +1803,53 @@ impl SettingsView {
                                     SharedString::from("Check now")
                                 }),
                         )
+                        .when(engine_behind, |bar| {
+                            let busy = self.installing == Some(Install::Engine);
+                            bar.child(
+                                btn_sm("update-engine", BtnTone::Primary, pal)
+                                    .on_click({
+                                        let view = view.clone();
+                                        move |_, _, cx| {
+                                            view.update(cx, |this, cx| this.install_engine(cx));
+                                        }
+                                    })
+                                    .child(if busy {
+                                        SharedString::from("Installing\u{2026}")
+                                    } else {
+                                        SharedString::from("Install engine")
+                                    }),
+                            )
+                        })
+                        .when(desktop_behind, |bar| {
+                            let busy = self.installing == Some(Install::Desktop);
+                            bar.child(
+                                btn_sm("update-desktop", BtnTone::Primary, pal)
+                                    .on_click({
+                                        let view = view.clone();
+                                        move |_, _, cx| {
+                                            view.update(cx, |this, cx| this.install_desktop(cx));
+                                        }
+                                    })
+                                    .child(if busy {
+                                        SharedString::from("Installing\u{2026}")
+                                    } else {
+                                        SharedString::from("Install desktop")
+                                    }),
+                            )
+                        })
                         .child(
                             btn_sm("about-releases", BtnTone::Plain, pal)
                                 .on_click(|_, _, _| crate::update::open_releases())
                                 .child(Icon::new(IconName::ExternalLink).with_size(px(12.)))
                                 .child("Releases"),
                         ),
-                ),
+                )
+                .children(self.install_note.as_ref().map(|(ok, text)| {
+                    div()
+                        .text_size(px(FS_XS))
+                        .text_color(if *ok { pal.ok } else { pal.warn })
+                        .child(SharedString::from(text.clone()))
+                })),
             pal,
         )
     }
@@ -1796,6 +1891,67 @@ impl SettingsView {
             if let Some(view) = view.upgrade() {
                 view.update(cx, |this, cx| {
                     this.checking = false;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Downloads and installs the newest engine build.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn install_engine(&mut self, cx: &mut Context<Self>) {
+        self.start_install(Install::Engine, cx);
+    }
+
+    /// Downloads and installs the newest desktop build, which takes
+    /// effect at the next launch.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn install_desktop(&mut self, cx: &mut Context<Self>) {
+        self.start_install(Install::Desktop, cx);
+    }
+
+    /// Runs one updater download at a time; the outcome lands in the
+    /// row's note line. An engine install is handed to the shell,
+    /// which restarts the engine on the new binary at once.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_install(&mut self, which: Install, cx: &mut Context<Self>) {
+        if self.installing.is_some() {
+            return;
+        }
+        self.installing = Some(which);
+        self.install_note = None;
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    match which {
+                        Install::Engine => crate::update::install_latest(),
+                        Install::Desktop => crate::update::install_desktop_latest(),
+                    }
+                })
+                .await;
+            if let Some(view) = view.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.installing = None;
+                    match result {
+                        Ok(path) if which == Install::Engine => {
+                            cx.emit(SettingsEvent::EngineReplaced(path.display().to_string()));
+                            this.install_note =
+                                Some((true, "engine installed; restarting it".to_owned()));
+                        }
+                        Ok(path) => {
+                            this.install_note = Some((
+                                true,
+                                format!(
+                                    "desktop installed at {}; restart kage to apply",
+                                    path.display()
+                                ),
+                            ));
+                        }
+                        Err(why) => this.install_note = Some((false, why)),
+                    }
                     cx.notify();
                 });
             }

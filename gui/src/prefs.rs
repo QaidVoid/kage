@@ -66,6 +66,10 @@ pub struct Prefs {
     /// Why the last release check failed, when it did. The next
     /// successful check clears it.
     pub check_error: Option<String>,
+    /// Whether a release check saw a newer engine or client, raised
+    /// as a toast and a badge on the settings entry, and cleared
+    /// when the Updates row is looked at.
+    pub update_badge: bool,
     /// The model, thinking and mode options the last session showed,
     /// which the welcome pane offers before a session exists.
     pub template: Vec<SessionConfigOption>,
@@ -93,6 +97,7 @@ impl Default for Prefs {
             channel: Channel::default(),
             latest_nightly: None,
             check_error: None,
+            update_badge: false,
             template: Vec::new(),
         }
     }

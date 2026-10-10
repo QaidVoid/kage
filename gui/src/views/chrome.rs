@@ -122,6 +122,9 @@ pub enum ToastAction {
     ActivateSession(String),
     /// Bring an archived session back.
     Restore(String),
+    /// Open the releases page in the browser; the update toast's
+    /// way in.
+    OpenUpdates,
 }
 
 /// One toast before it renders.
@@ -1204,6 +1207,12 @@ impl Toasts {
                 self.store.update(cx, |store, cx| {
                     store.restore(&session);
                     cx.notify();
+                });
+            }
+            Some(ToastAction::OpenUpdates) => {
+                crate::update::open_releases();
+                self.store.update(cx, |store, _| {
+                    store.update_prefs(|prefs| prefs.update_badge = false);
                 });
             }
             _ => {}

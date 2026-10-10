@@ -132,6 +132,49 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
     crate::gate::is_below(current, latest)
 }
 
+/// What the last check saw as out of date, as one summary line for
+/// the toast and the settings badge, or `None` when nothing is
+/// behind. The stable channel compares parsed semvers; the nightly
+/// channel compares this client's build commit against the nightly's,
+/// since an engine's nightly identity is not its version. A version
+/// that does not parse, such as a dev build, never counts as behind.
+#[must_use]
+pub fn pending_update(prefs: &crate::prefs::Prefs, engine: Option<&str>) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    match prefs.channel {
+        crate::prefs::Channel::Nightly => {
+            if let Some(build) = &prefs.latest_nightly
+                && let Some(sha) = option_env!("KAGE_BUILD_SHA")
+                && sha != build.commit
+            {
+                parts.push(format!("desktop nightly {}", build.date));
+            }
+        }
+        crate::prefs::Channel::Latest => {
+            let desktop = env!("CARGO_PKG_VERSION");
+            if let Some(latest) = &prefs.latest_desktop_version
+                && parses(desktop)
+                && is_newer(latest, desktop)
+            {
+                parts.push(format!("desktop {latest}"));
+            }
+            if let Some(latest) = &prefs.latest_cli_version
+                && let Some(now) = engine
+                && parses(now)
+                && is_newer(latest, now)
+            {
+                parts.push(format!("engine {latest}"));
+            }
+        }
+    }
+    match parts.as_slice() {
+        [] => None,
+        [one] => Some(format!("{one} is available")),
+        [first, second] => Some(format!("{first} and {second} are available")),
+        [others @ .., last] => Some(format!("{} and {last} are available", others.join(", "))),
+    }
+}
+
 /// The engine release archive built for `os` and `arch`, named the
 /// way the release workflow uploads it. `None` where no release is
 /// built.
@@ -151,6 +194,36 @@ pub fn cli_asset_for(os: &str, arch: &str) -> Option<&'static str> {
 #[must_use]
 pub fn cli_asset() -> Option<&'static str> {
     cli_asset_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// The desktop release archive built for `os` and `arch`, named the
+/// way the desktop release workflow uploads it. `onelf` picks the
+/// portable Linux bundle over the plain archive. `None` where no
+/// release is built.
+#[must_use]
+pub fn desktop_asset_for(os: &str, arch: &str, onelf: bool) -> Option<&'static str> {
+    match (os, arch) {
+        ("linux", "x86_64") if onelf => Some("kage-desktop-x86_64-linux.onelf"),
+        ("linux", "aarch64") if onelf => Some("kage-desktop-aarch64-linux.onelf"),
+        ("linux", "x86_64") => Some("kage-desktop-x86_64-linux.tar.xz"),
+        ("linux", "aarch64") => Some("kage-desktop-aarch64-linux.tar.xz"),
+        ("macos", "x86_64") => Some("kage-desktop-x86_64-macos.tar.xz"),
+        ("macos", "aarch64") => Some("kage-desktop-aarch64-macos.tar.xz"),
+        ("windows", "x86_64") => Some("kage-desktop-x86_64-windows.zip"),
+        _ => None,
+    }
+}
+
+/// The desktop artifact this running build updates with. A Linux
+/// binary named `.onelf` swaps for the portable bundle, whose
+/// bundled libraries the plain archive build lacks; anything else
+/// swaps for the plain archive.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn desktop_asset() -> Option<&'static str> {
+    let onelf = cfg!(target_os = "linux")
+        && std::env::current_exe().is_ok_and(|exe| exe.to_string_lossy().ends_with(".onelf"));
+    desktop_asset_for(std::env::consts::OS, std::env::consts::ARCH, onelf)
 }
 
 /// The download URL for one release artifact.
@@ -183,6 +256,19 @@ pub fn open_releases() {
 pub fn install_latest() -> Result<std::path::PathBuf, String> {
     #[cfg(not(target_arch = "wasm32"))]
     return native::install_latest(crate::prefs::load().channel);
+
+    #[cfg(target_arch = "wasm32")]
+    Err("this platform cannot download kage".to_owned())
+}
+
+/// Downloads the newest desktop release of the saved channel for
+/// this platform and swaps the running app for it, returning where
+/// the new install sits. A swap takes effect at the next launch; the
+/// running app keeps its own binary. The web build reports the
+/// platform as unable.
+pub fn install_desktop_latest() -> Result<std::path::PathBuf, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return native::install_desktop_latest(crate::prefs::load().channel);
 
     #[cfg(target_arch = "wasm32")]
     Err("this platform cannot download kage".to_owned())
@@ -243,6 +329,11 @@ pub async fn run_check(store: Entity<Store>, cx: &mut AsyncApp, force: bool) {
             return;
         }
         store.update(cx, |store, _| {
+            let engine = store
+                .state()
+                .agent
+                .as_ref()
+                .and_then(|agent| agent.version.clone());
             store.update_prefs(|prefs| {
                 if let Some(release) = &feed.cli {
                     prefs.latest_cli_version = Some(release.version.clone());
@@ -255,6 +346,7 @@ pub async fn run_check(store: Entity<Store>, cx: &mut AsyncApp, force: bool) {
                 }
                 prefs.check_error = None;
                 prefs.update_checked_at = Some(crate::clock::unix_seconds());
+                prefs.update_badge = pending_update(prefs, engine.as_deref()).is_some();
             });
         });
     }
@@ -357,6 +449,142 @@ mod native {
         let url = super::asset_url(&tag, archive);
         let bytes = fetch_bytes(&url, super::BINARY_CAP, "the kage archive")?;
         install(archive, &bytes)
+    }
+
+    /// Downloads the newest desktop release of `channel` and swaps
+    /// the running app for it, returning where the new install sits.
+    pub(super) fn install_desktop_latest(
+        channel: crate::prefs::Channel,
+    ) -> Result<PathBuf, String> {
+        let Some(archive) = super::desktop_asset() else {
+            return Err("no kage desktop release is built for this platform".to_owned());
+        };
+        let tag = match channel {
+            crate::prefs::Channel::Latest => {
+                let feed = super::parse_feed(&fetch_releases()?);
+                feed.desktop
+                    .ok_or("the release list names no desktop release")?
+                    .tag
+            }
+            crate::prefs::Channel::Nightly => "nightly".to_owned(),
+        };
+        let url = super::asset_url(&tag, archive);
+        let bytes = fetch_bytes(&url, super::BINARY_CAP, "the kage desktop archive")?;
+        let scratch = scratch_dir()?;
+        let swapped =
+            stage_desktop(archive, &bytes, &scratch).and_then(|payload| swap_into_place(&payload));
+        let _ = std::fs::remove_dir_all(&scratch);
+        swapped
+    }
+
+    /// Unpacks the desktop archive in `scratch` and returns the
+    /// payload to install: the app bundle on macOS, the app binary
+    /// elsewhere. The `.onelf` bundle is the download itself and only
+    /// needs writing out.
+    fn stage_desktop(archive: &str, bytes: &[u8], scratch: &Path) -> Result<PathBuf, String> {
+        if archive.ends_with(".onelf") {
+            let path = scratch.join(archive);
+            std::fs::write(&path, bytes)
+                .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+            }
+            return Ok(path);
+        }
+        let archive_path = scratch.join(archive);
+        std::fs::write(&archive_path, bytes)
+            .map_err(|error| format!("cannot write {}: {error}", archive_path.display()))?;
+        compak::extract_archive(archive_path.as_path(), scratch)
+            .map_err(|error| format!("cannot unpack {archive}: {error}"))?;
+        find_desktop_payload(scratch)
+    }
+
+    /// The extracted desktop payload: the `Kage.app` bundle on macOS,
+    /// the `kage-desktop` binary elsewhere. Release archives nest the
+    /// folder one level, so the search walks.
+    pub(super) fn find_desktop_payload(dir: &Path) -> Result<PathBuf, String> {
+        let wanted = if cfg!(windows) {
+            "kage-desktop.exe"
+        } else {
+            "kage-desktop"
+        };
+        let mut found = None;
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(next) = stack.pop() {
+            let entries = std::fs::read_dir(&next)
+                .map_err(|error| format!("cannot read {}: {error}", next.display()))?;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if cfg!(target_os = "macos")
+                        && path.file_name().is_some_and(|name| name == "Kage.app")
+                    {
+                        return Ok(path);
+                    }
+                    stack.push(path);
+                } else if path.file_name().is_some_and(|name| name == wanted) {
+                    found = Some(path);
+                }
+            }
+        }
+        found.ok_or_else(|| format!("the archive holds no {wanted}"))
+    }
+
+    /// Swaps the running app for the staged payload and returns where
+    /// the new install sits. A running binary cannot be overwritten
+    /// on Windows but can be renamed, so the old one steps aside
+    /// first and the new one takes its place at the next launch; on
+    /// Unix the rename replaces it in place while the running process
+    /// keeps its own copy. A macOS install swaps the whole bundle.
+    fn swap_into_place(staged: &Path) -> Result<PathBuf, String> {
+        let current = std::env::current_exe()
+            .map_err(|error| format!("cannot locate the running app: {error}"))?;
+        #[cfg(target_os = "macos")]
+        if let Some(app) = app_bundle_of(&current) {
+            return swap_bundle(&app, staged);
+        }
+        #[cfg(windows)]
+        {
+            let aside = current.with_file_name("kage-desktop.exe.old");
+            let _ = std::fs::remove_file(&aside);
+            std::fs::rename(&current, &aside)
+                .map_err(|error| format!("cannot move the old app aside: {error}"))?;
+            if let Err(error) = std::fs::copy(staged, &current) {
+                let _ = std::fs::rename(&aside, &current);
+                return Err(format!("cannot write {}: {error}", current.display()));
+            }
+        }
+        #[cfg(not(windows))]
+        std::fs::rename(staged, &current)
+            .map_err(|error| format!("cannot move the new app into place: {error}"))?;
+        Ok(current)
+    }
+
+    /// The `.app` bundle `exe` runs from, when it sits in one.
+    #[cfg(target_os = "macos")]
+    fn app_bundle_of(exe: &Path) -> Option<PathBuf> {
+        exe.parent()
+            .and_then(|macos| macos.parent())
+            .and_then(|contents| contents.parent())
+            .filter(|app| app.extension().is_some_and(|ext| ext == "app"))
+            .map(Path::to_path_buf)
+    }
+
+    /// Moves the old bundle aside and the staged one in. The old copy
+    /// stays until the next update, so a rollback is a rename away.
+    #[cfg(target_os = "macos")]
+    fn swap_bundle(app: &Path, staged: &Path) -> Result<PathBuf, String> {
+        let aside = app.with_extension("app.old");
+        let _ = std::fs::remove_dir_all(&aside);
+        std::fs::rename(app, &aside)
+            .map_err(|error| format!("cannot move the old app aside: {error}"))?;
+        if let Err(error) = std::fs::rename(staged, app) {
+            let _ = std::fs::rename(&aside, app);
+            return Err(format!("cannot move the new app into place: {error}"));
+        }
+        Ok(app.to_path_buf())
     }
 
     /// Unpacks the archive in a scratch directory and installs the
@@ -576,6 +804,82 @@ mod tests {
     }
 
     #[test]
+    fn every_desktop_target_maps_to_an_asset() {
+        assert_eq!(
+            desktop_asset_for("linux", "x86_64", false),
+            Some("kage-desktop-x86_64-linux.tar.xz")
+        );
+        assert_eq!(
+            desktop_asset_for("linux", "x86_64", true),
+            Some("kage-desktop-x86_64-linux.onelf")
+        );
+        assert_eq!(
+            desktop_asset_for("linux", "aarch64", true),
+            Some("kage-desktop-aarch64-linux.onelf")
+        );
+        assert_eq!(
+            desktop_asset_for("macos", "aarch64", false),
+            Some("kage-desktop-aarch64-macos.tar.xz")
+        );
+        assert_eq!(
+            desktop_asset_for("windows", "x86_64", false),
+            Some("kage-desktop-x86_64-windows.zip")
+        );
+        assert_eq!(desktop_asset_for("plan9", "x86_64", false), None);
+    }
+
+    #[test]
+    fn pending_update_names_what_is_behind_on_stable() {
+        use crate::prefs::Channel;
+        let mut prefs = crate::prefs::Prefs {
+            channel: Channel::Latest,
+            ..crate::prefs::Prefs::default()
+        };
+        assert_eq!(pending_update(&prefs, None), None);
+
+        prefs.latest_desktop_version = Some("99.0.0".to_owned());
+        assert_eq!(
+            pending_update(&prefs, None).as_deref(),
+            Some("desktop 99.0.0 is available")
+        );
+
+        prefs.latest_cli_version = Some("99.0.0".to_owned());
+        assert_eq!(
+            pending_update(&prefs, None).as_deref(),
+            Some("desktop 99.0.0 is available"),
+            "an engine whose version is unknown is not counted behind"
+        );
+        assert_eq!(
+            pending_update(&prefs, Some("0.1.0")).as_deref(),
+            Some("desktop 99.0.0 and engine 99.0.0 are available")
+        );
+
+        prefs.latest_desktop_version = Some("0.0.1".to_owned());
+        assert_eq!(
+            pending_update(&prefs, Some("0.1.0")).as_deref(),
+            Some("engine 99.0.0 is available")
+        );
+        prefs.latest_cli_version = Some("0.0.1".to_owned());
+        assert_eq!(pending_update(&prefs, Some("0.1.0")), None);
+    }
+
+    #[test]
+    fn a_dev_build_never_reads_as_behind_on_nightly() {
+        use crate::prefs::{Channel, NightlyBuild};
+        let prefs = crate::prefs::Prefs {
+            channel: Channel::Nightly,
+            latest_nightly: Some(NightlyBuild {
+                commit: "0123abcd".to_owned(),
+                date: "2026-10-10".to_owned(),
+            }),
+            ..crate::prefs::Prefs::default()
+        };
+        // A dev build carries no KAGE_BUILD_SHA, so the comparison
+        // stays silent instead of toasting on every launch.
+        assert_eq!(pending_update(&prefs, None), None);
+    }
+
+    #[test]
     fn asset_urls_point_at_the_release_download() {
         assert_eq!(
             asset_url("v0.2.0", "kage-aarch64-macos.tar.xz"),
@@ -612,6 +916,39 @@ mod tests {
         let empty = scratch_dir().unwrap();
         let missing = find_engine_binary(&empty).unwrap_err();
         assert!(missing.contains("holds no kage"), "got {missing}");
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    #[test]
+    fn the_desktop_payload_is_found_under_the_release_layouts() {
+        use super::native::{find_desktop_payload, scratch_dir};
+
+        let scratch = scratch_dir().unwrap();
+        let folder = scratch.join("kage-desktop-x86_64-linux");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("kage-desktop"), "binary").unwrap();
+        std::fs::write(folder.join("LICENSE"), "MIT").unwrap();
+        let found = find_desktop_payload(&scratch).unwrap();
+        assert_eq!(found, folder.join("kage-desktop"));
+        let _ = std::fs::remove_dir_all(&scratch);
+
+        // The bundle-wins rule is a macOS one; the macOS archives are
+        // the only ones that ship a Kage.app.
+        #[cfg(target_os = "macos")]
+        {
+            let scratch = scratch_dir().unwrap();
+            let macos = scratch.join("kage-desktop-aarch64-macos/Kage.app/Contents/MacOS");
+            std::fs::create_dir_all(&macos).unwrap();
+            std::fs::write(macos.join("kage-desktop"), "binary").unwrap();
+            let found = find_desktop_payload(&scratch).unwrap();
+            assert_eq!(found.file_name().unwrap(), "Kage.app");
+            let _ = std::fs::remove_dir_all(&scratch);
+        }
+
+        let empty = scratch_dir().unwrap();
+        let missing = find_desktop_payload(&empty).unwrap_err();
+        assert!(missing.contains("holds no kage-desktop"), "got {missing}");
         let _ = std::fs::remove_dir_all(&empty);
     }
 

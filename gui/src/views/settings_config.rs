@@ -417,18 +417,29 @@ fn initials(id: &str, pal: &Palette) -> Div {
 /// while the fetch is in flight or when the id names no logo. The
 /// first miss starts the fetch; a landed one notifies the view and
 /// the next paint shows the image.
+///
+/// The image sits on a white tile: models.dev draws the logos for a
+/// light page, and most carry no fill, which reads as black and
+/// would drown in the dark palette's surfaces. The tile shows every
+/// logo the way its designer did, in both palettes.
 fn logo_or_glyph(
     id: &str,
+    site: Option<&str>,
     view: &Entity<crate::views::settings::SettingsView>,
     cx: &App,
     pal: &Palette,
     size: f32,
 ) -> AnyElement {
-    match crate::logos::ensure(id, view, cx) {
-        Some(image) => img(image)
-            .size(px(size))
-            .rounded(px(4.))
+    match crate::logos::ensure(id, site, view, cx) {
+        Some(image) => div()
+            .size(px(size + 6.))
             .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.))
+            .bg(gpui_kit::white())
+            .child(img(image).size(px(size)))
             .into_any_element(),
         None => Icon::new(IconName::Bot)
             .with_size(px(size - 2.))
@@ -633,7 +644,7 @@ fn provider_row(
     };
     let hover = pal.fill_hover;
     list_row(
-        logo_or_glyph(&row.id, view, cx, pal, 22.),
+        logo_or_glyph(&row.id, row.base_url.as_deref(), view, cx, pal, 22.),
         name,
         Some(SharedString::from(parts.join(" \u{b7} "))),
         pal,
@@ -650,7 +661,12 @@ fn provider_row(
 fn pick_chip(
     id: String,
     label: String,
-    logo: Option<(&str, &Entity<crate::views::settings::SettingsView>, &App)>,
+    logo: Option<(
+        &str,
+        Option<&str>,
+        &Entity<crate::views::settings::SettingsView>,
+        &App,
+    )>,
     on_open: impl Fn(&mut Window, &mut App) + 'static,
     pal: &Palette,
 ) -> Stateful<Div> {
@@ -672,7 +688,9 @@ fn pick_chip(
         .text_color(pal.ink)
         .cursor_pointer()
         .hover(move |chip| chip.bg(hover).border_color(muted))
-        .children(logo.map(|(logo_id, view, cx)| logo_or_glyph(logo_id, view, cx, pal, 16.)))
+        .children(
+            logo.map(|(logo_id, site, view, cx)| logo_or_glyph(logo_id, site, view, cx, pal, 16.)),
+        )
         .child(label)
         .on_click(move |_, window, cx| on_open(window, cx))
 }
@@ -731,7 +749,7 @@ fn provider_chooser(
         registered = registered.child(pick_chip(
             owned.clone(),
             label,
-            Some((id, &view, cx)),
+            Some((id, None, &view, cx)),
             move |window, cx| {
                 on_open(
                     ProviderNav::Open(Target::Registered(owned.clone())),

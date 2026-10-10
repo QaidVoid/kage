@@ -136,16 +136,10 @@ jobs:
             exit 1
           }
 
-      # Same "<hex>  <name>" sidecar format as the CLI release, so the
-      # GUI-side downloader verifies every download uniformly.
-      - name: Checksums
-        run: sha256sum ../kage-web.tar.xz > ../kage-web.tar.xz.sha256
-
       - uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # 2.11.5
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: kage-web.tar.xz*
-          file_glob: true
+          file: kage-web.tar.xz
           overwrite: true
           tag: ${{ env.TAG }}
 
@@ -303,16 +297,6 @@ jobs:
         id: subjects
         working-directory: dist
         run: echo "subjects=$(printf 'dist/%s\n' * | paste -sd, -)" >> "$GITHUB_OUTPUT"
-
-      # Runs after Subjects so attestation keeps naming the archives only;
-      # the upload glob below ships the sidecars alongside them.
-      - name: Checksums
-        working-directory: dist
-        run: |
-          for file in *; do
-            [ -f "$file" ] || continue
-            sha256sum "$file" > "$file.sha256"
-          done
 
       - uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # 2.11.5
         with:
@@ -480,15 +464,10 @@ jobs:
           pacman -S --disable-sandbox --noconfirm --needed ttf-dejavu
           ZED_HEADLESS=1 timeout 60 "../dist/kage-desktop-${{ matrix.name }}.onelf" --smoke 3000
 
-      - name: Checksums
-        working-directory: dist
-        run: sha256sum "kage-desktop-${{ matrix.name }}.onelf" > "kage-desktop-${{ matrix.name }}.onelf.sha256"
-
       - uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # 2.11.5
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: dist/kage-desktop-${{ matrix.name }}.onelf*
-          file_glob: true
+          file: dist/kage-desktop-${{ matrix.name }}.onelf
           overwrite: true
           tag: ${{ env.TAG }}
 

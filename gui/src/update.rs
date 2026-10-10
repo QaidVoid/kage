@@ -208,7 +208,15 @@ pub async fn run_check(store: Entity<Store>, cx: &mut AsyncApp, force: bool) {
             .background_executor()
             .spawn(async { native::fetch_releases() })
             .await;
-        let Ok(text) = fetched else { return };
+        let text = match fetched {
+            Ok(text) => text,
+            Err(error) => {
+                store.update(cx, |store, _| {
+                    store.update_prefs(|prefs| prefs.check_error = Some(error));
+                });
+                return;
+            }
+        };
         let feed = parse_feed(&text);
         let nightly = match channel {
             crate::prefs::Channel::Latest => None,
@@ -227,6 +235,11 @@ pub async fn run_check(store: Entity<Store>, cx: &mut AsyncApp, force: bool) {
             }
         };
         if feed.cli.is_none() && feed.desktop.is_none() && nightly.is_none() {
+            store.update(cx, |store, _| {
+                store.update_prefs(|prefs| {
+                    prefs.check_error = Some("the release list named nothing".to_owned());
+                });
+            });
             return;
         }
         store.update(cx, |store, _| {
@@ -240,6 +253,7 @@ pub async fn run_check(store: Entity<Store>, cx: &mut AsyncApp, force: bool) {
                 if nightly.is_some() {
                     prefs.latest_nightly = nightly;
                 }
+                prefs.check_error = None;
                 prefs.update_checked_at = Some(crate::clock::unix_seconds());
             });
         });

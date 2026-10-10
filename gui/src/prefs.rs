@@ -63,6 +63,9 @@ pub struct Prefs {
     /// The newest nightly the last check saw, when the channel is
     /// nightly.
     pub latest_nightly: Option<NightlyBuild>,
+    /// Why the last release check failed, when it did. The next
+    /// successful check clears it.
+    pub check_error: Option<String>,
     /// The model, thinking and mode options the last session showed,
     /// which the welcome pane offers before a session exists.
     pub template: Vec<SessionConfigOption>,
@@ -89,6 +92,7 @@ impl Default for Prefs {
             latest_desktop_version: None,
             channel: Channel::default(),
             latest_nightly: None,
+            check_error: None,
             template: Vec::new(),
         }
     }

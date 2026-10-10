@@ -228,6 +228,9 @@ pub struct SettingsView {
     /// menu hangs below it.
     pick_bounds: [Rc<Cell<Option<Bounds<Pixels>>>>; 2],
     store: Entity<Store>,
+    /// Whether a release check is running, so the row can say so and
+    /// a second click cannot stack checks.
+    checking: bool,
     open: bool,
     section: Section,
     focus: FocusHandle,
@@ -270,6 +273,7 @@ impl SettingsView {
             pick_open: None,
             pick_bounds: Default::default(),
             store,
+            checking: false,
             open: false,
             section: Section::General,
             focus: cx.focus_handle(),
@@ -1672,6 +1676,8 @@ impl SettingsView {
         };
         let view = cx.entity();
         let nightly = prefs.channel == crate::prefs::Channel::Nightly;
+        let checking = self.checking;
+        let check_error = prefs.check_error.clone();
         row(
             "Updates",
             "The public releases, checked at most once a day",
@@ -1692,7 +1698,14 @@ impl SettingsView {
                                 .text_size(px(FS_XS))
                                 .text_color(pal.muted)
                                 .child(SharedString::from(desktop_line)),
-                        ),
+                        )
+                        .when_some(check_error, |row, error| {
+                            row.child(
+                                div().text_size(px(FS_XS)).text_color(pal.warn).child(
+                                    SharedString::from(format!("last check failed: {error}")),
+                                ),
+                            )
+                        }),
                 )
                 .child(
                     h_flex()
@@ -1726,7 +1739,11 @@ impl SettingsView {
                                 .on_click(move |_, _, cx| {
                                     view.update(cx, |this, cx| this.check_updates(cx));
                                 })
-                                .child("Check now"),
+                                .child(if checking {
+                                    SharedString::from("Checking\u{2026}")
+                                } else {
+                                    SharedString::from("Check now")
+                                }),
                         )
                         .child(
                             btn_sm("about-releases", BtnTone::Plain, pal)
@@ -1753,7 +1770,7 @@ impl SettingsView {
     /// Follows `channel` from now on and checks it right away, so the
     /// row tells the new line's truth without a relaunch.
     #[cfg(not(target_arch = "wasm32"))]
-    fn set_channel(&self, channel: crate::prefs::Channel, cx: &mut Context<Self>) {
+    fn set_channel(&mut self, channel: crate::prefs::Channel, cx: &mut Context<Self>) {
         let store = self.store.clone();
         store.update(cx, |store, _| {
             store.update_prefs(|prefs| prefs.channel = channel);
@@ -1761,12 +1778,26 @@ impl SettingsView {
         self.check_updates(cx);
     }
 
-    /// Runs a release check now; the row refreshes when it lands.
+    /// Runs a release check now; the row shows the progress and the
+    /// outcome, so a failed check never reads as a dead button.
     #[cfg(not(target_arch = "wasm32"))]
-    fn check_updates(&self, cx: &mut Context<Self>) {
+    fn check_updates(&mut self, cx: &mut Context<Self>) {
+        if self.checking {
+            return;
+        }
+        self.checking = true;
+        cx.notify();
         let store = self.store.clone();
-        cx.spawn(async move |_, cx| crate::update::run_check(store, cx, true).await)
-            .detach();
+        cx.spawn(async move |view, cx| {
+            crate::update::run_check(store, cx, true).await;
+            if let Some(view) = view.upgrade() {
+                view.update(cx, |this, cx| {
+                    this.checking = false;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn toggle(

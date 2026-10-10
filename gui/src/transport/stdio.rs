@@ -147,6 +147,33 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
+/// Windows process creation flag: run the child with no console.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Spawns `program args` with piped stdio. On Windows the child gets
+/// no console: the desktop has none to inherit, so a console
+/// subsystem engine would otherwise flash a console window whose
+/// closing kills the engine. Its stderr goes to the null device,
+/// since without a console the inherited handle is invalid and the
+/// engine's `eprintln!`s would abort it.
+fn spawn_engine(program: &Path, args: &[String]) -> std::io::Result<Child> {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(CREATE_NO_WINDOW);
+        command.stderr(Stdio::null());
+    }
+    #[cfg(not(windows))]
+    command.stderr(Stdio::inherit());
+    command.spawn()
+}
+
 /// The next line of a child's stdout, trailing newlines trimmed.
 /// `None` on end of stream or a read error.
 fn next_line(reader: &mut BufReader<std::process::ChildStdout>) -> Option<String> {
@@ -182,12 +209,7 @@ impl Transport for StdioTransport {
         };
         let mut child = Err(std::io::Error::other("not spawned"));
         for attempt in 0..5 {
-            child = Command::new(&program)
-                .args(&self.config.args)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
-                .spawn();
+            child = spawn_engine(&program, &self.config.args);
             match &child {
                 Ok(_) => break,
                 // A binary written moments ago can still be held open

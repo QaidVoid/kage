@@ -1,4 +1,24 @@
 # Changelog
+## [0.3.1](https://github.com/QaidVoid/kage/compare/v0.3.0...v0.3.1) - 2026-10-17
+
+### Features
+
+- *(gui)* Move the desktop client from GPUI to egui ([#42](https://github.com/QaidVoid/kage/pull/42)) - ([2d106be](https://github.com/QaidVoid/kage/commit/2d106be3ef04273b5786a9632d4460724e7659e8))
+- *(provider)* Add Kenari subscription models ([#43](https://github.com/QaidVoid/kage/pull/43)) - ([46f3b6f](https://github.com/QaidVoid/kage/commit/46f3b6fbc460161444e5aa6f712522d030240f37))
+- *(providers)* Add OpenCode Zen and Go - ([645e8ab](https://github.com/QaidVoid/kage/commit/645e8abf9c176233dab6624d7794fdc7bd4c73b3))
+- *(tui)* Add a rewind picker opened by double-esc - ([050ce70](https://github.com/QaidVoid/kage/commit/050ce70aa52c288bb89bd42ae0cc0ef7045372e3))
+- *(undo)* Branch the session in place for undo and rewind - ([f8df989](https://github.com/QaidVoid/kage/commit/f8df98929f642866932d507b75afac0978e60964))
+- *(undo)* Add /undo to drop the last exchange - ([0e2ee25](https://github.com/QaidVoid/kage/commit/0e2ee259fa0216ab0a6b9cdb5d421a25fec5d839))
+
+### Bug Fixes
+
+- *(steering)* Steer image prompts at the next turn boundary - ([cf65910](https://github.com/QaidVoid/kage/commit/cf6591020b964fda0901db79c0480dcbe432625f))
+
+### Refactor
+
+- *(plugins)* Scope rewind.lua to file checkpoints - ([b7fac19](https://github.com/QaidVoid/kage/commit/b7fac19d172225b663d9ef32ec56e526049de015))
+- *(provider)* Remove the opencode zen provider - ([f28ed0a](https://github.com/QaidVoid/kage/commit/f28ed0ad955c106a442e799e7f348043778692dc))
+
 ## [0.3.0](https://github.com/QaidVoid/kage/compare/v0.2.2...v0.3.0) - 2026-10-10
 
 ### Features

@@ -8,10 +8,9 @@ use kage_core::{Risk, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{Tool, ToolContext, ToolError, schema_for};
+use kage_core::config::ReadToolConfig;
 
-/// Files larger than this are truncated; the model is told via a footer.
-const MAX_BYTES: usize = 2_000_000;
+use crate::{Tool, ToolContext, ToolError, schema_for};
 
 /// Input shape for the `read` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -30,18 +29,42 @@ struct ReadInput {
 }
 
 /// Read a file from disk.
-#[derive(Debug, Default)]
-pub struct ReadTool;
+#[derive(Debug)]
+pub struct ReadTool {
+    /// Bytes one read returns before it is cut, with a footer saying so.
+    max_bytes: usize,
+    description: String,
+}
+
+impl Default for ReadTool {
+    fn default() -> Self {
+        Self::new(&ReadToolConfig::default())
+    }
+}
+
+impl ReadTool {
+    /// A `read` tool with the limits `[tools.read]` sets.
+    #[must_use]
+    pub fn new(cfg: &ReadToolConfig) -> Self {
+        Self {
+            max_bytes: usize::try_from(cfg.max_bytes).unwrap_or(usize::MAX),
+            description: format!(
+                "Read a file. Optional `start_line` and `end_line` limit \
+                 the returned range (1-indexed, inclusive). The returned range \
+                 is capped at {}; a capped read says so.",
+                super::human_bytes(cfg.max_bytes)
+            ),
+        }
+    }
+}
 
 impl Tool for ReadTool {
     fn name(&self) -> &'static str {
         "read"
     }
 
-    fn description(&self) -> &'static str {
-        "Read a file. Optional `start_line` and `end_line` limit \
-         the returned range (1-indexed, inclusive). The returned range \
-         is capped at 2MB; a capped read says so."
+    fn description(&self) -> &str {
+        &self.description
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -73,7 +96,7 @@ impl Tool for ReadTool {
         // Slice before capping: lines are streamed, so memory stays
         // bounded by the cap rather than by the file, and a range past
         // the byte cap still returns its lines.
-        let text = slice_file(&file, &path, &input, total_bytes)?;
+        let text = slice_file(&file, &path, &input, total_bytes, self.max_bytes)?;
 
         Ok(ToolOutput {
             is_error: false,
@@ -85,7 +108,7 @@ impl Tool for ReadTool {
 }
 
 /// Stream the line range out of the file behind `input`, appending the
-/// truncation footer when the [`MAX_BYTES`] cap cuts the range. Lines
+/// truncation footer when the `max_bytes` cap cuts the range. Lines
 /// before `start_line` are scanned in place and dropped, and a line is
 /// gathered only up to the remaining budget, so memory stays bounded
 /// by the cap, not by the file.
@@ -94,6 +117,7 @@ fn slice_file(
     path: &Path,
     input: &ReadInput,
     total_bytes: u64,
+    max_bytes: usize,
 ) -> Result<String, ToolError> {
     let skip = input
         .start_line
@@ -122,7 +146,7 @@ fn slice_file(
         {
             break;
         }
-        let budget = MAX_BYTES - shown;
+        let budget = max_bytes - shown;
         if budget == 0 {
             // Nothing may be shown past the cap, but the footer is
             // honest only when something is actually left.
@@ -290,6 +314,8 @@ fn gather_line<R: BufRead>(
 
 #[cfg(test)]
 mod tests {
+    /// The default `[tools.read] max_bytes`.
+    const MAX_BYTES: usize = 2_000_000;
     use std::fs;
 
     use kage_core::CancelFlag;
@@ -311,7 +337,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("hello.txt"), "line1\nline2\nline3").unwrap();
         let out = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"path":"hello.txt"}),
         )
@@ -325,7 +351,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("f.txt"), "a\nb\nc\nd\ne").unwrap();
         let out = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"path":"f.txt","start_line":2,"end_line":4}),
         )
@@ -338,7 +364,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let big = "x".repeat(MAX_BYTES + 100);
         fs::write(dir.path().join("big.txt"), &big).unwrap();
-        let out = run(&ReadTool, dir.path(), serde_json::json!({"path":"big.txt"})).unwrap();
+        let out = run(
+            &ReadTool::default(),
+            dir.path(),
+            serde_json::json!({"path":"big.txt"}),
+        )
+        .unwrap();
         assert!(out.text.contains("truncated"));
         assert!(out.text.len() > MAX_BYTES);
         // The cut lands exactly at the cap, so the buffer the tool
@@ -355,7 +386,12 @@ mod tests {
         let big = "a\n".repeat(MAX_BYTES / 2);
         assert_eq!(big.len(), MAX_BYTES);
         fs::write(dir.path().join("big.txt"), &big).unwrap();
-        let out = run(&ReadTool, dir.path(), serde_json::json!({"path":"big.txt"})).unwrap();
+        let out = run(
+            &ReadTool::default(),
+            dir.path(),
+            serde_json::json!({"path":"big.txt"}),
+        )
+        .unwrap();
         assert_eq!(out.text, big);
         assert!(!out.text.contains("truncated"), "{}", &out.text[..100]);
     }
@@ -371,7 +407,7 @@ mod tests {
         }
         fs::write(dir.path().join("f.txt"), &body).unwrap();
         let out = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"path":"f.txt","start_line":50,"end_line":10}),
         )
@@ -383,7 +419,7 @@ mod tests {
     fn missing_file_error_names_the_path() {
         let dir = tempfile::tempdir().unwrap();
         let err = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"path":"missing.txt"}),
         )
@@ -397,7 +433,7 @@ mod tests {
     #[test]
     fn invalid_input_returns_json_error() {
         let dir = tempfile::tempdir().unwrap();
-        let err = run(&ReadTool, dir.path(), serde_json::json!({})).unwrap_err();
+        let err = run(&ReadTool::default(), dir.path(), serde_json::json!({})).unwrap_err();
         assert!(matches!(err, ToolError::Json(_)), "got {err:?}");
     }
 
@@ -406,7 +442,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("short.txt"), "a\nb").unwrap();
         let out = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"path":"short.txt","start_line":1,"end_line":1000}),
         )
@@ -423,7 +459,7 @@ mod tests {
             serde_json::json!({"path":"f.txt","end_line":0}),
             serde_json::json!({"path":"f.txt","start_line":1,"end_line":0}),
         ] {
-            let err = run(&ReadTool, dir.path(), input).unwrap_err();
+            let err = run(&ReadTool::default(), dir.path(), input).unwrap_err();
             assert!(matches!(err, ToolError::InvalidInput(_)), "{err:?}");
             assert!(err.to_string().contains("1-based"), "{err}");
         }
@@ -434,16 +470,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("f.txt"), "a\nb\nc\n").unwrap();
         let out = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"path":"f.txt","start_line":2}),
         )
         .unwrap();
         assert_eq!(out.text, "b\nc\n");
-        let out = run(&ReadTool, dir.path(), serde_json::json!({"path":"f.txt"})).unwrap();
+        let out = run(
+            &ReadTool::default(),
+            dir.path(),
+            serde_json::json!({"path":"f.txt"}),
+        )
+        .unwrap();
         assert_eq!(out.text, "a\nb\nc\n");
         let out = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"path":"f.txt","end_line":2}),
         )
@@ -456,7 +497,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("f.txt"), "a\r\nb\r\n").unwrap();
         let out = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"path":"f.txt","start_line":1,"end_line":1}),
         )
@@ -468,7 +509,12 @@ mod tests {
     fn a_binary_file_is_rejected_not_mojibake() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("bin.dat"), [0xffu8, 0xfe, 0x00]).unwrap();
-        let err = run(&ReadTool, dir.path(), serde_json::json!({"path":"bin.dat"})).unwrap_err();
+        let err = run(
+            &ReadTool::default(),
+            dir.path(),
+            serde_json::json!({"path":"bin.dat"}),
+        )
+        .unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput(_)), "{err:?}");
         assert!(err.to_string().contains("bin.dat"), "{err}");
         assert!(err.to_string().contains("UTF-8"), "{err}");
@@ -480,7 +526,7 @@ mod tests {
         fs::write(root.path().join("outside-read.txt"), "secret").unwrap();
         let cancel = CancelFlag::new();
         let cx = ToolContext::new(&work, &cancel).with_confine();
-        let err = ReadTool
+        let err = ReadTool::default()
             .execute(serde_json::json!({"path":"../outside-read.txt"}), &cx)
             .unwrap_err();
         assert!(matches!(err, ToolError::Path { .. }), "got {err:?}");
@@ -491,7 +537,7 @@ mod tests {
         let (root, work) = nested_workdir();
         fs::write(root.path().join("outside-read.txt"), "secret").unwrap();
         let out = run(
-            &ReadTool,
+            &ReadTool::default(),
             &work,
             serde_json::json!({"path":"../outside-read.txt"}),
         )
@@ -513,14 +559,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a.txt"), "hello").unwrap();
         let out = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"filePath":"a.txt"}),
         )
         .unwrap();
         assert_eq!(out.text, "hello");
         // The canonical key still works: the alias is additive.
-        let out = run(&ReadTool, dir.path(), serde_json::json!({"path":"a.txt"})).unwrap();
+        let out = run(
+            &ReadTool::default(),
+            dir.path(),
+            serde_json::json!({"path":"a.txt"}),
+        )
+        .unwrap();
         assert_eq!(out.text, "hello");
     }
 
@@ -540,7 +591,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let last = big_numbered_file(dir.path());
         let out = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"path":"big.txt","start_line":last,"end_line":last}),
         )
@@ -565,7 +616,7 @@ mod tests {
         }
         fs::write(dir.path().join("f.txt"), &body).unwrap();
         let out = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"path":"f.txt","start_line":41,"end_line":41}),
         )
@@ -583,12 +634,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let last = big_numbered_file(dir.path());
         let existing = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"path":"big.txt","start_line":last,"end_line":last}),
         );
         let absent = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"path":"big.txt","start_line":last + 1_000_000,"end_line":last + 1_000_000}),
         );
@@ -604,7 +655,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         big_numbered_file(dir.path());
         let out = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"path":"big.txt","start_line":1,"end_line":5}),
         )
@@ -619,7 +670,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let last = big_numbered_file(dir.path());
         let err = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"path":"big.txt","start_line":last,"end_line":last + 500}),
         )
@@ -628,7 +679,7 @@ mod tests {
         // An `end_line` past EOF still clamps; only a `start_line` past
         // EOF is an error.
         let err = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"path":"big.txt","start_line":last + 1}),
         )

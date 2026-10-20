@@ -509,6 +509,7 @@ pub struct OpenAiStream {
 struct ToolCallBuilder {
     id: ToolCallId,
     args: String,
+    name: Option<String>,
     started: bool,
 }
 
@@ -655,18 +656,25 @@ impl OpenAiStream {
             .or_insert_with(|| ToolCallBuilder {
                 id: ToolCallId::new(""),
                 args: String::new(),
+                name: None,
                 started: false,
             });
         if let Some(id) = id_str {
             entry.id = ToolCallId::new(id);
         }
+        if let Some(n) = name {
+            entry.name.get_or_insert_with(|| n.to_owned());
+        }
+        // The call starts only once it has both an id and a name;
+        // whichever delta supplies the second of the two emits it.
         if !entry.started
-            && let Some(n) = name
+            && !entry.id.0.is_empty()
+            && let Some(n) = entry.name.clone()
         {
             entry.started = true;
             self.pending.push_back(Ok(ProviderEvent::ToolCallStart {
                 id: entry.id.clone(),
-                name: n.to_owned(),
+                name: n,
             }));
         }
         if let Some(partial) = args {
@@ -697,10 +705,18 @@ impl OpenAiStream {
         let calls = std::mem::take(&mut self.tool_calls);
         for (index, builder) in calls {
             if !builder.started {
-                self.pending.push_back(Err(ProviderError::Decode(format!(
-                    "tool call at index {index} never received an id and name"
-                ))));
-                continue;
+                let Some(name) = builder.name else {
+                    self.pending.push_back(Err(ProviderError::Decode(format!(
+                        "tool call at index {index} never received a name"
+                    ))));
+                    continue;
+                };
+                // An id-less server: the start was deferred for want of
+                // an id, so emit it now to pair with the end below.
+                self.pending.push_back(Ok(ProviderEvent::ToolCallStart {
+                    id: builder.id.clone(),
+                    name,
+                }));
             }
             let input = if builder.args.is_empty() {
                 Value::Object(serde_json::Map::new())
@@ -1647,6 +1663,50 @@ data: [DONE]\n\n";
                 .any(|r| matches!(r, Ok(ProviderEvent::ToolCallEnd { .. }))),
             "no ToolCallEnd for a call with no id and name"
         );
+    }
+
+    #[test]
+    fn name_before_id_does_not_emit_an_empty_id() {
+        let bytes: &[u8] = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"read\"}}]}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"arguments\":\"{\\\"path\\\":\\\"/tmp\\\"}\"}}]}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+        let starts: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::ToolCallStart { id, name } => Some((id.0.as_str(), name.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts, [("call_1", "read")]);
+        let end = events
+            .iter()
+            .find(|e| matches!(e, ProviderEvent::ToolCallEnd { .. }))
+            .expect("ToolCallEnd present");
+        if let ProviderEvent::ToolCallEnd { id, input } = end {
+            assert_eq!(id.0, "call_1");
+            assert_eq!(input["path"], "/tmp");
+        }
+    }
+
+    #[test]
+    fn name_without_any_id_still_completes() {
+        let bytes: &[u8] = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"/tmp\\\"}\"}}]}}]}\n\ndata: [DONE]\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+        let starts: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::ToolCallStart { id, .. } => Some(id.0.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts, [""]);
+        let end = events
+            .iter()
+            .find(|e| matches!(e, ProviderEvent::ToolCallEnd { .. }))
+            .expect("ToolCallEnd present");
+        if let ProviderEvent::ToolCallEnd { id, input } = end {
+            assert_eq!(id.0, "");
+            assert_eq!(input["path"], "/tmp");
+        }
     }
 }
 

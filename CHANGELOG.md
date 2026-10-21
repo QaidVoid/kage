@@ -1,5 +1,5 @@
 # Changelog
-## [0.4.1](https://github.com/QaidVoid/kage/compare/v0.4.0...v0.4.1) - 2026-10-21
+## [0.5.0](https://github.com/QaidVoid/kage/compare/v0.4.0...v0.5.0) - 2026-10-21
 
 ### Features
 
@@ -21,14 +21,9 @@
 - *(session)* Keep media bytes in a blob store beside the sessions - ([064686d](https://github.com/QaidVoid/kage/commit/064686d405219ff091f7465bed28d941921978b7))
 - *(thinking)* Add a max level above xhigh - ([a1ac692](https://github.com/QaidVoid/kage/commit/a1ac692352e0726a04002f760357b6b00fee29d6))
 - *(tools)* Add generate_image for OpenAI-compatible image endpoints ([#224](https://github.com/QaidVoid/kage/pull/224)) - ([8333084](https://github.com/QaidVoid/kage/commit/833308412f5db17af83111984de7ae66e4db2d1f))
-- *(tools)* Rename bash to shell with a configurable program - ([6f35801](https://github.com/QaidVoid/kage/commit/6f358011d0b5a4b7c20001aa7e02e98d1e04b06f))
-- *(tui)* Bundle kage themes and follow the terminal background - ([a76b2d2](https://github.com/QaidVoid/kage/commit/a76b2d2cf18b380163871d4dbf22c4413bc4c5b4))
 - Let a tool answer with images - ([cac5d99](https://github.com/QaidVoid/kage/commit/cac5d99363120e5be19bc869671028c4428fd5f8))
 - Open and save the images a model produces - ([bef0b74](https://github.com/QaidVoid/kage/commit/bef0b74c1bc206ab1ca3fe9a190c1950a0dde13b))
 - Show the images a model produces in every client - ([d9f57a4](https://github.com/QaidVoid/kage/commit/d9f57a42f167a6e5308fdfc4b26013fd2ecdc2aa))
-- Release desktop and web with kage at one version ([#182](https://github.com/QaidVoid/kage/pull/182)) - ([82e1231](https://github.com/QaidVoid/kage/commit/82e1231f8d336ada394952bc430f66f6b4e1065e))
-- Nekomata brand mark across the GUI, docs and TUI ([#181](https://github.com/QaidVoid/kage/pull/181)) - ([32903c5](https://github.com/QaidVoid/kage/commit/32903c5fba00bd7d15e22ab4e29b3887d06c4a23))
-- Add a swarm tool that spawns one child agent per item - ([289378d](https://github.com/QaidVoid/kage/commit/289378df2dd2cfa2d91a9480fe0ac72e7df69559))
 
 ### Bug Fixes
 
@@ -61,10 +56,6 @@
 ### Documentation
 
 - *(provider)* Explain what gateway cache detection relies on - ([57f5369](https://github.com/QaidVoid/kage/commit/57f5369f6a38a1ae333ae00f6e6be557b05dd74a))
-- Describe the release downloads and the desktop client - ([397502c](https://github.com/QaidVoid/kage/commit/397502ce2e87f2a8b4b2716e9017457d1da84351))
-- Refresh the tagline and the home page features - ([fcffbfe](https://github.com/QaidVoid/kage/commit/fcffbfe20beae7bbf76ee444e2134425d7686cbe))
-- Refresh the README and its credits - ([9ee4d03](https://github.com/QaidVoid/kage/commit/9ee4d03165f60989578092d748d9befeaffee8b0))
-- Rewrite the README - ([43d2060](https://github.com/QaidVoid/kage/commit/43d2060f02948a252ce6627940502348299a86e8))
 
 ### Performance
 
@@ -73,14 +64,6 @@
 ### Styling
 
 - Rustfmt the second fix batch - ([939da40](https://github.com/QaidVoid/kage/commit/939da40955dec6c1414fca5da7480c2504e8c131))
-
-### Miscellaneous Tasks
-
-- Release the desktop and web client on their own track - ([6633758](https://github.com/QaidVoid/kage/commit/6633758aebfdafdcd7b55eb5bce611e1b7896a18))
-- Release kage for Windows - ([7e81f12](https://github.com/QaidVoid/kage/commit/7e81f1203671c3e4ddd48c55c0d8c74ef7bc3175))
-- Remove the unmaintained nix flake - ([7a6dcd5](https://github.com/QaidVoid/kage/commit/7a6dcd52e620c096c6d43da91a46dbc7af4cdde3))
-- Raise the declared MSRV to 1.88 - ([574a18a](https://github.com/QaidVoid/kage/commit/574a18a79924df6560b31a5f22571f75ee301f8a))
-- Add cargo manifest metadata and committable README - ([2fa439a](https://github.com/QaidVoid/kage/commit/2fa439a56482c01e3f46668408ddc23c3eb84acb))
 
 ## [0.4.0](https://github.com/QaidVoid/kage/compare/v0.3.0...v0.4.0) - 2026-10-19
 

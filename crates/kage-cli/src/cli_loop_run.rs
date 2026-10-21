@@ -52,9 +52,6 @@ pub(crate) fn execute_print_run(
             return ExitCode::from(1);
         }
     };
-    let tools = tools
-        .with_shell_config(&layered.shell)
-        .with_web_search(&layered.tools.web_search);
     if layered.permissions.confine_paths {
         cx = cx.with_confine_paths();
     } else {

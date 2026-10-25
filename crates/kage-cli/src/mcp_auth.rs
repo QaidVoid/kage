@@ -254,6 +254,7 @@ fn credential(tokens: oauth::Tokens) -> OAuthCredential {
         refresh_token: tokens.refresh_token,
         expires_at: tokens.expires_at.map(DateTime::<Utc>::from),
         scope: tokens.scope,
+        account_id: None,
     }
 }
 
@@ -699,6 +700,7 @@ mod tests {
                 refresh_token: Some("refresh-old".to_owned()),
                 expires_at: Some(Utc::now() + chrono::Duration::seconds(expires_in)),
                 scope: None,
+                account_id: None,
             },
         }
     }

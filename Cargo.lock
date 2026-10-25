@@ -3100,6 +3100,7 @@ dependencies = [
  "crossbeam-channel",
  "dirs",
  "figment",
+ "getrandom 0.4.3",
  "ignore",
  "kage-acp",
  "kage-core",
@@ -3119,12 +3120,15 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "signal-hook 0.4.4",
  "tempfile",
+ "thiserror 2.0.21",
  "toml 1.1.6+spec-1.1.0",
  "tungstenite",
  "ulid",
  "ureq 3.4.2",
+ "url",
 ]
 
 [[package]]

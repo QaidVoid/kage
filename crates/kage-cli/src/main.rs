@@ -31,6 +31,7 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod acp_glue;
 mod agents;
 mod auth;
+mod chatgpt;
 mod doctor;
 mod engine;
 mod goal;

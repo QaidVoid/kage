@@ -99,6 +99,11 @@ pub struct OAuthCredential {
     /// Space-delimited scope string the provider granted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// Provider-specific account or workspace id parsed from the
+    /// login's `id_token` (the `ChatGPT` `chatgpt_account_id`). Sent as
+    /// a request header where the backend requires it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 impl OAuthCredential {
@@ -133,6 +138,7 @@ impl fmt::Debug for OAuthCredential {
             )
             .field("expires_at", &self.expires_at)
             .field("scope", &self.scope)
+            .field("account_id", &self.account_id)
             .finish()
     }
 }
@@ -304,7 +310,6 @@ impl AuthStore {
 
     /// Insert or replace `provider`'s credential as an OAuth record.
     /// Convenience wrapper around [`Self::set`].
-    #[cfg(test)]
     pub fn set_oauth(&mut self, provider: &str, creds: OAuthCredential) -> Option<Credential> {
         self.set(provider, Credential::Oauth(creds))
     }
@@ -400,10 +405,12 @@ pub fn env_var_for(provider: &str) -> &'static str {
     }
 }
 
-/// `kage auth login [provider]`: read an API key from a hidden prompt
-/// and persist it to the auth store. `provider` may name a builtin or
-/// catalog id, or a custom provider declared under
-/// `[providers.custom.*]` in `config`.
+/// `kage auth login [provider]`: sign in and persist the credential.
+/// `provider` may name a builtin or catalog id, or a custom provider
+/// declared under `[providers.custom.*]` in `config`. The `OpenAI`
+/// family offers the choice of a `ChatGPT` sign-in (the browser OAuth
+/// flow, stored as an OAuth credential) or a plain API key; every
+/// other provider prompts for a key.
 pub fn run_login(provider: Option<&str>, config: &kage_core::config::Config) -> ExitCode {
     let provider = match select_provider(provider, config) {
         Ok(p) => p,
@@ -412,6 +419,59 @@ pub fn run_login(provider: Option<&str>, config: &kage_core::config::Config) -> 
             return ExitCode::from(2);
         }
     };
+    if matches!(provider.as_str(), "openai" | "openai-responses") {
+        return run_openai_login();
+    }
+    run_login_api_key(&provider)
+}
+
+/// The `OpenAI` login: pick `ChatGPT` sign-in or an API key, then store
+/// the result under `openai` so both `openai` and `openai-responses`
+/// resolve it.
+fn run_openai_login() -> ExitCode {
+    let items = [
+        kage_tui::PickItem::simple("chatgpt")
+            .with_label("Sign in with ChatGPT (uses your ChatGPT plan)"),
+        kage_tui::PickItem::simple("api").with_label("Use an OpenAI API key"),
+    ];
+    let choice = match kage_tui::pick("How do you want to sign in to OpenAI?", &items) {
+        Ok(Some(choice)) => choice,
+        Ok(None) => {
+            eprintln!("kage: cancelled");
+            return ExitCode::from(2);
+        }
+        Err(_) => "api".to_owned(),
+    };
+    if choice != "chatgpt" {
+        return run_login_api_key("openai");
+    }
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let credential = match crate::chatgpt::login(&cancel) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("kage: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut store = match AuthStore::load() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("kage: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    store.set_oauth("openai", credential);
+    if let Err(e) = store.save() {
+        eprintln!("kage: {e}");
+        return ExitCode::from(1);
+    }
+    eprintln!("kage: signed in with ChatGPT; `openai-responses:` models now use your plan");
+    ExitCode::SUCCESS
+}
+
+/// The API-key path of [`run_login`], factored out so the `OpenAI`
+/// fallback reuses it.
+fn run_login_api_key(provider: &str) -> ExitCode {
     let mut store = match AuthStore::load() {
         Ok(s) => s,
         Err(e) => {
@@ -430,7 +490,7 @@ pub fn run_login(provider: Option<&str>, config: &kage_core::config::Config) -> 
             return ExitCode::from(1);
         }
     };
-    store.set_api_key(&provider, key);
+    store.set_api_key(provider, key);
     if let Err(e) = store.save() {
         eprintln!("kage: {e}");
         return ExitCode::from(1);
@@ -830,6 +890,7 @@ mod tests {
             refresh_token: Some("refresh-1".into()),
             expires_at: Some(expires_at),
             scope: Some("scope-x".into()),
+            account_id: Some("acc-7".into()),
         };
         store.set_oauth("anthropic", oauth.clone());
         let dir = tempdir().unwrap();
@@ -855,6 +916,7 @@ mod tests {
             refresh_token: None,
             expires_at: Some(now + Duration::seconds(120)),
             scope: None,
+            account_id: None,
         };
         assert!(!oauth.expires_within(Duration::seconds(60), now));
         assert!(oauth.expires_within(Duration::seconds(120), now));
@@ -877,6 +939,7 @@ mod tests {
             refresh_token: Some("refresh-secret".into()),
             expires_at: Some(fixed_now()),
             scope: Some("read".into()),
+            account_id: None,
         };
         let mut store = AuthStore::empty();
         store.set_api_key("anthropic", "sk-ant-secret");

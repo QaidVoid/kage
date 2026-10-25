@@ -12,6 +12,7 @@
 //! with this provider; nothing in the credential store is duplicated.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::fmt;
 use std::io::{BufReader, Read};
 
 use kage_core::{CancelFlag, Content, Message, Reasoning, Role, ToolCallId};
@@ -22,11 +23,12 @@ use crate::{
     StopReason, StreamRequest, ToolSpec,
 };
 
+use crate::bearer::SharedBearer;
+
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4_096;
 
 /// `OpenAI` Responses API provider.
-#[derive(Debug)]
 pub struct OpenAiResponsesProvider {
     api_key: String,
     base_url: String,
@@ -38,6 +40,23 @@ pub struct OpenAiResponsesProvider {
     models: Vec<ProviderModel>,
     /// Whether every model is offered `OpenAI`'s hosted image tool.
     image_generation: bool,
+    /// Renewable credential (an OAuth login). When set, `api_key` is
+    /// ignored and a 401 refreshes once and retries.
+    bearer: Option<SharedBearer>,
+}
+
+impl fmt::Debug for OpenAiResponsesProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenAiResponsesProvider")
+            .field("api_key", &self.api_key)
+            .field("base_url", &self.base_url)
+            .field("metadata", &self.metadata)
+            .field("extra_headers", &self.extra_headers)
+            .field("models", &self.models.len())
+            .field("image_generation", &self.image_generation)
+            .field("bearer", &self.bearer.as_ref().map(|_| "<set>"))
+            .finish()
+    }
 }
 
 impl OpenAiResponsesProvider {
@@ -63,6 +82,7 @@ impl OpenAiResponsesProvider {
             extra_headers: BTreeMap::new(),
             models: Vec::new(),
             image_generation: false,
+            bearer: None,
         }
     }
 
@@ -105,12 +125,27 @@ impl OpenAiResponsesProvider {
         self
     }
 
+    /// Draw the credential from `source` instead of the fixed API key:
+    /// the token of the moment rides every request, and a 401 refreshes
+    /// once and retries. For OAuth-backed logins the host renews.
+    #[must_use]
+    pub fn with_bearer(mut self, source: SharedBearer) -> Self {
+        self.bearer = Some(source);
+        self
+    }
+
     /// Headers every request carries: content type, the bearer
     /// credential (skipped when no key is configured), then the
-    /// configured extras in key order.
+    /// configured extras in key order. A [`crate::bearer::BearerSource`]
+    /// supplies the credential; a refresh updates it in place, so the
+    /// retry picks up the fresh token on its own.
     fn request_headers(&self) -> Vec<(String, String)> {
-        let credential = (!self.api_key.is_empty())
-            .then(|| ("authorization", format!("Bearer {}", self.api_key)));
+        let credential = self
+            .bearer
+            .as_ref()
+            .map(|source| source.token())
+            .or_else(|| (!self.api_key.is_empty()).then(|| self.api_key.clone()))
+            .map(|key| ("authorization", format!("Bearer {key}")));
         crate::headers::request_headers(
             &[("content-type", "application/json".to_owned())],
             credential,
@@ -146,12 +181,39 @@ impl Provider for OpenAiResponsesProvider {
         }
         let body = self.request_body(&req);
         let url = format!("{}/responses", self.base_url);
+        let session = req.session.clone();
+        // A renewable credential that came back rejected gets exactly
+        // one refresh-and-retry: the source updates its token in place,
+        // so the replay picks up the fresh one; a still-rejected token
+        // then fails as the auth error it is.
+        let first = self.dispatch(&body, &url, session.as_deref(), cancel);
+        match (&self.bearer, first) {
+            (Some(source), Err(ProviderError::Auth(_))) => {
+                source.refresh()?;
+                self.dispatch(&body, &url, session.as_deref(), cancel)
+            }
+            (_, other) => other,
+        }
+    }
+}
+
+impl OpenAiResponsesProvider {
+    /// Send one request and turn a non-2xx status into its error.
+    fn dispatch(
+        &self,
+        body: &Value,
+        url: &str,
+        session: Option<&str>,
+        cancel: &CancelFlag,
+    ) -> Result<EventStream, ProviderError> {
         let mut headers = self.request_headers();
         headers.extend(crate::headers::opencode_headers(
             &self.base_url,
-            req.session.as_deref(),
+            session,
             &self.extra_headers,
         ));
+        let body = body.clone();
+        let url = url.to_owned();
         let (response, kill) = crate::http::send(cancel, url, move |agent, url| {
             let mut request = agent.post(url);
             for (name, value) in &headers {
@@ -1356,6 +1418,170 @@ mod tests {
         let provider = OpenAiResponsesProvider::new("k").with_models(models.clone());
         assert_eq!(provider.models(), models);
         assert!(OpenAiResponsesProvider::new("k").models().is_empty());
+    }
+
+    struct FixedBearer {
+        token: std::sync::Mutex<String>,
+    }
+
+    impl FixedBearer {
+        fn new(token: &str) -> Self {
+            Self {
+                token: std::sync::Mutex::new(token.to_owned()),
+            }
+        }
+
+        fn set(&self, token: &str) {
+            *self.token.lock().unwrap() = token.to_owned();
+        }
+    }
+
+    impl crate::bearer::BearerSource for FixedBearer {
+        fn token(&self) -> String {
+            self.token.lock().unwrap().clone()
+        }
+
+        fn refresh(&self) -> Result<String, ProviderError> {
+            self.set("refreshed");
+            Ok(self.token())
+        }
+    }
+
+    #[test]
+    fn request_headers_prefer_the_bearer_token_over_the_stored_key() {
+        let bearer = Arc::new(FixedBearer::new("oauth"));
+        let provider = OpenAiResponsesProvider::new("static").with_bearer(Arc::clone(&bearer) as _);
+        let find = |headers: &[(String, String)]| {
+            headers
+                .iter()
+                .find(|(n, _)| n == "authorization")
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(find(&provider.request_headers()), "Bearer oauth");
+        crate::bearer::BearerSource::refresh(bearer.as_ref()).unwrap();
+        assert_eq!(
+            find(&provider.request_headers()),
+            "Bearer refreshed",
+            "the retry sees the refreshed token"
+        );
+    }
+
+    /// A 401 on a renewable credential refreshes once and replays the
+    /// request with the fresh token; the stream then proceeds.
+    #[test]
+    fn a_rejected_bearer_refreshes_once_and_retries() {
+        use std::io::Write as _;
+
+        const SSE: &str =
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: [DONE]\n\n";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let tokens: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let seen = Arc::clone(&tokens);
+        std::thread::spawn(move || {
+            for (i, conn) in listener.incoming().enumerate() {
+                let Ok(mut conn) = conn else { return };
+                let mut buf = [0u8; 8192];
+                let _ = conn.read(&mut buf);
+                let head = String::from_utf8_lossy(&buf).into_owned();
+                let token = head
+                    .lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with("authorization"))
+                    .and_then(|l| l.split_once(' '))
+                    .map(|(_, t)| t.to_owned())
+                    .unwrap_or_default();
+                seen.lock().unwrap().push(token);
+                if i == 0 {
+                    let body = "{\"error\":{\"message\":\"token expired\"}}";
+                    let _ = conn.write_all(
+                        format!(
+                            "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\n\
+                             content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .into_bytes()
+                        .as_slice(),
+                    );
+                } else {
+                    let _ = conn.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                             content-length: {}\r\nconnection: close\r\n\r\n{SSE}",
+                            SSE.len()
+                        )
+                        .into_bytes()
+                        .as_slice(),
+                    );
+                }
+            }
+        });
+
+        let bearer = Arc::new(FixedBearer::new("stale"));
+        let provider = OpenAiResponsesProvider::with_base_url("", origin)
+            .with_bearer(Arc::clone(&bearer) as _);
+        let req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
+        let events = collect_ok(provider.stream(req, &CancelFlag::new()).unwrap());
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ProviderEvent::TextDelta { delta } if delta == "ok"
+            )),
+            "{events:?}"
+        );
+        assert_eq!(
+            *tokens.lock().unwrap(),
+            ["Bearer stale", "Bearer refreshed"]
+        );
+        assert_eq!(
+            crate::bearer::BearerSource::token(bearer.as_ref()),
+            "refreshed"
+        );
+    }
+
+    /// When refresh itself fails, the 401 surfaces as the auth error.
+    #[test]
+    fn a_failed_refresh_leaves_the_auth_error() {
+        struct Refuses;
+        impl crate::bearer::BearerSource for Refuses {
+            fn token(&self) -> String {
+                "stale".to_owned()
+            }
+
+            fn refresh(&self) -> Result<String, ProviderError> {
+                Err(ProviderError::Auth("login expired".to_owned()))
+            }
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { return };
+                let mut buf = [0u8; 8192];
+                let _ = conn.read(&mut buf);
+                let body = "{\"error\":{\"message\":\"expired\"}}";
+                let _ = std::io::Write::write_all(
+                    &mut conn,
+                    format!(
+                        "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .into_bytes()
+                    .as_slice(),
+                );
+            }
+        });
+        let provider =
+            OpenAiResponsesProvider::with_base_url("", origin).with_bearer(Arc::new(Refuses));
+        let req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
+        let Err(err) = provider.stream(req, &CancelFlag::new()) else {
+            panic!("expected the auth error")
+        };
+        assert!(
+            matches!(err, ProviderError::Auth(ref detail) if detail == "login expired"),
+            "{err:?}"
+        );
     }
 }
 

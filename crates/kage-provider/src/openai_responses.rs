@@ -28,6 +28,9 @@ use crate::bearer::SharedBearer;
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4_096;
 
+/// The zstd level of compressed bodies, the one the Codex CLI uses.
+const ZSTD_LEVEL: i32 = 3;
+
 /// `OpenAI` Responses API provider.
 pub struct OpenAiResponsesProvider {
     api_key: String,
@@ -43,9 +46,12 @@ pub struct OpenAiResponsesProvider {
     /// Renewable credential (an OAuth login). When set, `api_key` is
     /// ignored and a 401 refreshes once and retries.
     bearer: Option<SharedBearer>,
-    /// Whether requests carry `max_output_tokens`. The `ChatGPT`
-    /// backend refuses the parameter.
-    output_limit: bool,
+    /// Whether requests follow the `ChatGPT` backend's rules: no
+    /// `max_output_tokens` or `temperature`, and the session as the
+    /// prompt cache key.
+    chatgpt: bool,
+    /// Whether request bodies go out zstd-compressed.
+    zstd: bool,
 }
 
 impl fmt::Debug for OpenAiResponsesProvider {
@@ -58,7 +64,8 @@ impl fmt::Debug for OpenAiResponsesProvider {
             .field("models", &self.models.len())
             .field("image_generation", &self.image_generation)
             .field("bearer", &self.bearer.as_ref().map(|_| "<set>"))
-            .field("output_limit", &self.output_limit)
+            .field("chatgpt", &self.chatgpt)
+            .field("zstd", &self.zstd)
             .finish()
     }
 }
@@ -87,13 +94,14 @@ impl OpenAiResponsesProvider {
             models: Vec::new(),
             image_generation: false,
             bearer: None,
-            output_limit: true,
+            chatgpt: false,
+            zstd: false,
         }
     }
 
     /// The streaming body for `req`, with the hosted image tool offered
-    /// when the provider switch is on and the output limit dropped when
-    /// it is off.
+    /// when the provider switch is on, in the `ChatGPT` backend's shape
+    /// when that is the endpoint.
     fn request_body(&self, req: &StreamRequest) -> Value {
         let mut body = if self.image_generation {
             let mut req = req.clone();
@@ -106,10 +114,17 @@ impl OpenAiResponsesProvider {
         } else {
             build_request_body(req, true)
         };
-        if !self.output_limit
-            && let Some(body) = body.as_object_mut()
+        if self.chatgpt
+            && let Some(fields) = body.as_object_mut()
         {
-            body.remove("max_output_tokens");
+            fields.remove("max_output_tokens");
+            fields.remove("temperature");
+            if let Some(session) = &req.session {
+                fields.insert(
+                    "prompt_cache_key".to_owned(),
+                    Value::String(session.clone()),
+                );
+            }
         }
         body
     }
@@ -147,11 +162,22 @@ impl OpenAiResponsesProvider {
         self
     }
 
-    /// Send requests without `max_output_tokens`, for backends that
-    /// refuse it (the `ChatGPT` backend answers it with a 400).
+    /// Shape requests for the `ChatGPT` backend: it answers
+    /// `max_output_tokens` with a 400 and serves only reasoning models,
+    /// which refuse `temperature`, and it routes its prompt cache on the
+    /// session, sent as `prompt_cache_key` and a `session-id` header.
     #[must_use]
-    pub fn without_output_limit(mut self) -> Self {
-        self.output_limit = false;
+    pub fn for_chatgpt_backend(mut self) -> Self {
+        self.chatgpt = true;
+        self
+    }
+
+    /// Send request bodies zstd-compressed. The `ChatGPT` backend
+    /// decodes them and refuses plain bodies past about 1 MiB; a proxy
+    /// in front of it may not, so this stays a separate switch.
+    #[must_use]
+    pub fn with_zstd_bodies(mut self) -> Self {
+        self.zstd = true;
         self
     }
 
@@ -234,14 +260,31 @@ impl OpenAiResponsesProvider {
             session,
             &self.extra_headers,
         ));
-        let body = body.clone();
+        if self.chatgpt
+            && let Some(session) = session
+            && !self
+                .extra_headers
+                .keys()
+                .any(|key| key.eq_ignore_ascii_case("session-id"))
+        {
+            headers.push(("session-id".to_owned(), session.to_owned()));
+        }
+        let json = serde_json::to_vec(body).map_err(|e| ProviderError::Decode(e.to_string()))?;
+        let payload = if self.zstd {
+            let compressed = zstd::stream::encode_all(json.as_slice(), ZSTD_LEVEL)
+                .map_err(|e| ProviderError::Transport(format!("compress the request: {e}")))?;
+            headers.push(("content-encoding".to_owned(), "zstd".to_owned()));
+            compressed
+        } else {
+            json
+        };
         let url = url.to_owned();
         let (response, kill) = crate::http::send(cancel, url, move |agent, url| {
             let mut request = agent.post(url);
             for (name, value) in &headers {
                 request = request.header(name.as_str(), value.as_str());
             }
-            request.send_json(&body)
+            request.send(payload.as_slice())
         })?;
 
         let status = response.status().as_u16();
@@ -1486,15 +1529,79 @@ mod tests {
     }
 
     #[test]
-    fn the_output_limit_can_be_left_out_of_the_body() {
-        let req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
-        let limited = OpenAiResponsesProvider::new("k").request_body(&req);
-        assert!(limited.get("max_output_tokens").is_some());
-        let open = OpenAiResponsesProvider::new("k")
-            .without_output_limit()
+    fn the_chatgpt_backend_body_drops_refused_fields_and_keys_the_cache() {
+        let mut req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
+        req.temperature = Some(0.2);
+        req.session = Some("ses-1".to_owned());
+        let public = OpenAiResponsesProvider::new("k").request_body(&req);
+        assert!(public.get("max_output_tokens").is_some());
+        assert!(public.get("temperature").is_some());
+        assert!(public.get("prompt_cache_key").is_none());
+        let chatgpt = OpenAiResponsesProvider::new("k")
+            .for_chatgpt_backend()
             .request_body(&req);
-        assert!(open.get("max_output_tokens").is_none(), "{open}");
-        assert_eq!(open["store"], false);
+        assert!(chatgpt.get("max_output_tokens").is_none(), "{chatgpt}");
+        assert!(chatgpt.get("temperature").is_none(), "{chatgpt}");
+        assert_eq!(chatgpt["prompt_cache_key"], "ses-1");
+        assert_eq!(chatgpt["store"], false);
+    }
+
+    /// A zstd provider compresses the body and says so; the `ChatGPT`
+    /// mode adds the session header.
+    #[test]
+    fn a_zstd_provider_sends_a_compressed_body_with_the_session_header() {
+        use std::io::Write as _;
+
+        const SSE: &str =
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: [DONE]\n\n";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 8192];
+            let head_end = loop {
+                let n = conn.read(&mut buf).unwrap();
+                raw.extend_from_slice(&buf[..n]);
+                if let Some(at) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break at + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&raw[..head_end]).to_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length: "))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            while raw.len() < head_end + length {
+                let n = conn.read(&mut buf).unwrap();
+                raw.extend_from_slice(&buf[..n]);
+            }
+            let _ = conn.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{SSE}",
+                    SSE.len()
+                )
+                .as_bytes(),
+            );
+            (head, raw[head_end..head_end + length].to_vec())
+        });
+        let provider = OpenAiResponsesProvider::with_base_url("k", origin)
+            .for_chatgpt_backend()
+            .with_zstd_bodies();
+        let mut req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
+        req.session = Some("ses-9".to_owned());
+        collect_ok(provider.stream(req, &CancelFlag::new()).unwrap());
+        let (head, body) = server.join().unwrap();
+        assert!(head.contains("\r\ncontent-encoding: zstd\r\n"), "{head}");
+        assert!(head.contains("\r\nsession-id: ses-9\r\n"), "{head}");
+        let json: Value =
+            serde_json::from_slice(&zstd::stream::decode_all(body.as_slice()).unwrap()).unwrap();
+        assert_eq!(json["model"], "gpt-5");
+        assert_eq!(json["prompt_cache_key"], "ses-9");
     }
 
     #[test]

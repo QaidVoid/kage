@@ -269,6 +269,22 @@ impl AuthStore {
         })
     }
 
+    /// The stored credential that serves `provider` the way the
+    /// registry wires it: [`Self::credential`], except that
+    /// `openai-responses` also falls back to the `openai` entry the two
+    /// share, and a `ChatGPT` login (an OAuth record under `openai`)
+    /// serves only `openai-responses`, never chat completions.
+    #[must_use]
+    pub fn credential_serving(&self, provider: &str) -> Option<&Credential> {
+        match provider {
+            "openai" => self.credential("openai").filter(|c| !c.is_oauth()),
+            "openai-responses" => self
+                .credential("openai-responses")
+                .or_else(|| self.credential("openai")),
+            _ => self.credential(provider),
+        }
+    }
+
     /// Look up a single bearer token for `provider`, regardless of
     /// credential kind. For API keys returns the raw key; for OAuth
     /// returns the access token *as currently stored*, which may be
@@ -566,7 +582,7 @@ impl ProviderKey {
             return Some("no key needed".to_owned());
         }
         let env = (!self.env.is_empty() && env_set(&self.env)).then_some(self.env.as_str());
-        let stored = store.credential(&self.id).map(|c| match c {
+        let stored = store.credential_serving(&self.id).map(|c| match c {
             Credential::Oauth(o) => match o.expires_at {
                 Some(at) => format!("auth.json (oauth, {})", expiry_label(at, now)),
                 None => "auth.json (oauth)".to_owned(),
@@ -892,6 +908,33 @@ mod tests {
         assert!(raw.contains("\"key\": \"sk-ant-old\""));
     }
 
+    /// `auth list` reports a `ChatGPT` login on `openai-responses`, the
+    /// only provider it serves, and an `OpenAI` key on both.
+    #[test]
+    fn a_chatgpt_login_serves_only_openai_responses() {
+        let mut store = AuthStore::empty();
+        store.set_oauth("openai", OAuthCredential::default());
+        assert!(store.credential_serving("openai").is_none());
+        assert!(store.credential_serving("openai-responses").is_some());
+        let row = |id: &str| ProviderKey {
+            id: id.to_owned(),
+            env: String::new(),
+            keyless: false,
+        };
+        let now = fixed_now();
+        assert_eq!(row("openai").source_with(&store, |_| false, now), None);
+        assert_eq!(
+            row("openai-responses")
+                .source_with(&store, |_| false, now)
+                .as_deref(),
+            Some("auth.json (oauth)")
+        );
+
+        store.set_api_key("openai", "sk-1");
+        assert!(store.credential_serving("openai").is_some());
+        assert!(store.credential_serving("openai-responses").is_some());
+    }
+
     #[test]
     fn logging_out_of_openai_responses_removes_the_shared_openai_login() {
         let mut store = AuthStore::empty();
@@ -1116,7 +1159,7 @@ mod tests {
             },
         );
         store.set_oauth(
-            "openai",
+            "lab",
             OAuthCredential {
                 access_token: "t".into(),
                 expires_at: Some(fixed_now() - Duration::hours(1)),
@@ -1124,10 +1167,7 @@ mod tests {
             },
         );
         let mut keys = provider_keys(&env_config("zai", "KAGE_TEST_UNSET_ZAI"));
-        keys.extend(provider_keys(&env_config(
-            "openai",
-            "KAGE_TEST_UNSET_OPENAI",
-        )));
+        keys.extend(provider_keys(&env_config("lab", "KAGE_TEST_UNSET_LAB")));
         let mut out = Vec::new();
         write_list(&mut out, &keys, &store, fixed_now()).unwrap();
         let out = String::from_utf8(out).unwrap();
@@ -1136,8 +1176,8 @@ mod tests {
             zai.contains("auth.json (oauth, expires in 3 days)"),
             "{zai}"
         );
-        let openai = out.lines().find(|l| l.starts_with("openai ")).unwrap();
-        assert!(openai.contains("has expired"), "{openai}");
+        let lab = out.lines().find(|l| l.starts_with("lab ")).unwrap();
+        assert!(lab.contains("has expired"), "{lab}");
     }
 
     #[test]

@@ -9,22 +9,24 @@
 //! credential carrying the `chatgpt_account_id` parsed from the
 //! `id_token`. The provider registry then routes `openai-responses`
 //! models through the `ChatGPT` backend at
-//! `https://chatgpt.com/backend-api/codex`.
+//! `https://chatgpt.com/backend-api/codex`. PKCE, the state check, the
+//! listener and the paste prompt are the ones MCP logins use.
 //!
-//! Access tokens expire within hours, so two paths renew them:
-//! [`ensure_fresh`] at registry build, and the provider's 401 handler
-//! through [`ChatGptBearer`]. Both persist the renewal.
+//! Access tokens expire, so two paths renew them: [`ensure_fresh`] at
+//! registry build, and the provider's 401 handler through
+//! [`ChatGptBearer`]. Both persist the renewal under a lock file beside
+//! `auth.json`, because a refresh token rotates only once and several
+//! kage processes may share the login.
 //!
 //! Every constant here matches the flow Codex CLI performs; they are
 //! collected at the top so a backend change is a one-place edit.
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, TcpListener, TcpStream};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::fs::{File, OpenOptions};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -32,8 +34,8 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
+use kage_mcp::oauth::{self, AuthCode, Expected, Loopback, OAuthError, Pkce};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::auth::{AuthStore, OAuthCredential};
 
@@ -62,15 +64,16 @@ pub const CALLBACK_PORT_FALLBACK: u16 = 1457;
 /// The redirect path of the registered callback URIs.
 const CALLBACK_PATH: &str = "/auth/callback";
 
-/// How long a login waits for the browser to come back.
-const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
-
 /// The `originator` header and authorize parameter the backend expects
 /// from first-party CLI clients.
 pub const ORIGINATOR: &str = "codex_cli_rs";
 
 /// The `OpenAI-Beta` value the `ChatGPT` Responses endpoint routes on.
 const OPENAI_BETA: &str = "responses=experimental";
+
+/// The Codex CLI release whose requests kage's match. The backend's
+/// model list answers with the models this version may use.
+const CODEX_CLIENT_VERSION: &str = "0.164.0";
 
 /// Refresh at registry build when the stored token expires within this
 /// window, the window the Codex CLI renews in. Renewing earlier only
@@ -83,35 +86,17 @@ pub const PROVIDER_ID: &str = "openai";
 /// Cap on a token endpoint answer body.
 const MAX_BODY: u64 = 1024 * 1024;
 
-/// Cap on the request head a browser sends the callback listener.
-const MAX_REQUEST_HEAD: u64 = 16 * 1024;
-
-/// How long the loopback waits for a connected browser to send its
-/// request before moving on.
-const READ_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// How often the wait checks its deadline and cancel flag.
-const POLL: Duration = Duration::from_millis(25);
-
 /// What `Debug` prints in place of a secret.
 const REDACTED: &str = "***";
 
 /// A failed login or refresh. Messages never carry a token.
 #[derive(Debug, thiserror::Error)]
 pub enum ChatGptError {
-    /// The local listener or the random source failed.
-    #[error("{0}")]
-    Local(String),
-    /// The browser did not come back in time.
-    #[error("timed out waiting for the browser to return")]
-    Timeout,
-    /// The wait was stopped by Ctrl+C.
-    #[error("the login was cancelled")]
-    Cancelled,
-    /// The redirect carried another `state` than this login sent.
-    #[error("the authorization redirect carried the wrong state. Start the login again")]
-    State,
-    /// The authorization server refused.
+    /// The browser leg failed: the listener, the redirect, a timeout
+    /// or Ctrl+C.
+    #[error(transparent)]
+    OAuth(#[from] OAuthError),
+    /// The token endpoint refused.
     #[error("the authorization server refused: {0}")]
     Denied(String),
     /// A token answer lacks a required field or a token is malformed.
@@ -122,42 +107,10 @@ pub enum ChatGptError {
     Http(String),
 }
 
-/// A PKCE verifier and its S256 challenge. `Debug` redacts the
-/// verifier.
-pub struct Pkce {
-    verifier: String,
-    challenge: String,
-}
-
-impl Pkce {
-    /// A fresh verifier of 43 unreserved characters (32 random bytes)
-    /// and its challenge, `BASE64URL(SHA256(verifier))`.
-    fn new() -> Result<Self, ChatGptError> {
-        let mut bytes = [0u8; 32];
-        getrandom::fill(&mut bytes)
-            .map_err(|e| ChatGptError::Local(format!("random source: {e}")))?;
-        let verifier = URL_SAFE_NO_PAD.encode(bytes);
-        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-        Ok(Self {
-            verifier,
-            challenge,
-        })
-    }
-}
-
-impl fmt::Debug for Pkce {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Pkce")
-            .field("verifier", &REDACTED)
-            .field("challenge", &self.challenge)
-            .finish()
-    }
-}
-
 /// The URL the browser opens: the `ChatGPT` authorize endpoint with the
-/// S256 challenge, a fresh `state`, and the parameters the Codex CLI
-/// sends so the account picker behaves the same.
-fn authorize_url(pkce: &Pkce, state: &str, redirect_uri: &str) -> String {
+/// S256 challenge, this login's `state`, and the parameters the Codex
+/// CLI sends so the account picker behaves the same.
+fn authorize_url(pkce: &Pkce, expected: &Expected, redirect_uri: &str) -> String {
     let mut url = url::Url::parse(&format!("{ISSUER}/oauth/authorize")).expect("constant URL");
     {
         let mut query = url.query_pairs_mut();
@@ -165,27 +118,15 @@ fn authorize_url(pkce: &Pkce, state: &str, redirect_uri: &str) -> String {
             .append_pair("response_type", "code")
             .append_pair("client_id", CLIENT_ID)
             .append_pair("redirect_uri", redirect_uri)
-            .append_pair("code_challenge", &pkce.challenge)
+            .append_pair("code_challenge", pkce.challenge())
             .append_pair("code_challenge_method", "S256")
-            .append_pair("state", state)
+            .append_pair("state", expected.state())
             .append_pair("scope", SCOPES)
             .append_pair("id_token_add_organizations", "true")
             .append_pair("codex_cli_simplified_flow", "true")
             .append_pair("originator", ORIGINATOR);
     }
     url.into()
-}
-
-/// Fresh 32 random bytes as an unpadded base64url `state`.
-fn random_state() -> Result<String, ChatGptError> {
-    let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).map_err(|e| ChatGptError::Local(format!("random source: {e}")))?;
-    Ok(URL_SAFE_NO_PAD.encode(bytes))
-}
-
-/// The redirect URI for `port`.
-fn redirect_uri_for(port: u16) -> String {
-    format!("http://127.0.0.1:{port}{CALLBACK_PATH}")
 }
 
 /// The claims of a JWT payload: base64url-decoded JSON. The signature
@@ -250,15 +191,6 @@ fn agent() -> ureq::Agent {
         .new_agent()
 }
 
-/// An OAuth error code reduced to the characters codes use, so a
-/// hostile answer or redirect cannot inject text into the terminal.
-fn error_code(raw: &str) -> String {
-    raw.chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-        .take(64)
-        .collect()
-}
-
 /// Parse a token-endpoint answer body.
 fn parse_answer(status: u16, body: &str) -> Result<TokenAnswer, ChatGptError> {
     let value: Value = serde_json::from_str(body)
@@ -267,7 +199,7 @@ fn parse_answer(status: u16, body: &str) -> Result<TokenAnswer, ChatGptError> {
         let code = value
             .get("error")
             .and_then(Value::as_str)
-            .map_or_else(|| "no error code".to_owned(), error_code);
+            .map_or_else(|| "no error code".to_owned(), oauth::error_code);
         return Err(ChatGptError::Denied(format!("status {status}: {code}")));
     }
     let text = |key: &str| {
@@ -294,17 +226,17 @@ fn parse_answer(status: u16, body: &str) -> Result<TokenAnswer, ChatGptError> {
 /// POST the authorization-code grant (form-encoded, as the endpoint
 /// requires) and parse the answer.
 fn exchange_code(
-    code: &str,
-    verifier: &str,
+    code: &AuthCode,
+    pkce: &Pkce,
     redirect_uri: &str,
 ) -> Result<TokenAnswer, ChatGptError> {
     let endpoint = format!("{ISSUER}/oauth/token");
     let form: &[(&str, &str)] = &[
         ("grant_type", "authorization_code"),
-        ("code", code),
+        ("code", code.secret()),
         ("redirect_uri", redirect_uri),
         ("client_id", CLIENT_ID),
-        ("code_verifier", verifier),
+        ("code_verifier", pkce.verifier()),
     ];
     let mut response = agent()
         .post(&endpoint)
@@ -375,161 +307,6 @@ fn credential_from(answer: &TokenAnswer, previous: Option<&OAuthCredential>) -> 
     }
 }
 
-/// A one-shot redirect listener on `127.0.0.1` for the browser to call
-/// back. Answers the callback path, 404 for anything else.
-struct Callback {
-    listener: TcpListener,
-    port: u16,
-}
-
-impl Callback {
-    /// Bind the registered port, falling back like the Codex CLI does.
-    fn bind() -> Result<Self, ChatGptError> {
-        Self::bind_on(&[CALLBACK_PORT, CALLBACK_PORT_FALLBACK]).ok_or_else(|| {
-            ChatGptError::Local(format!(
-                "callback listener: ports {CALLBACK_PORT} and {CALLBACK_PORT_FALLBACK} are \
-                 both in use; free one and start the login again"
-            ))
-        })
-    }
-
-    /// Bind the first free port of `ports`. The standard listener sets
-    /// `SO_REUSEADDR` on unix, so a second login rebinds while the last
-    /// one's connections sit in `TIME_WAIT`.
-    fn bind_on(ports: &[u16]) -> Option<Self> {
-        ports.iter().find_map(|&port| {
-            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).ok()?;
-            let port = listener.local_addr().ok()?.port();
-            Some(Self { listener, port })
-        })
-    }
-
-    /// The redirect URI this listener answers.
-    fn redirect_uri(&self) -> String {
-        redirect_uri_for(self.port)
-    }
-
-    /// Serve until a callback for `state` arrives, `cancel` is set, or
-    /// `timeout` passes.
-    fn wait(
-        self,
-        state: &str,
-        timeout: Duration,
-        cancel: &AtomicBool,
-    ) -> Result<String, ChatGptError> {
-        let local = |e| ChatGptError::Local(format!("callback listener: {e}"));
-        self.listener.set_nonblocking(true).map_err(local)?;
-        let deadline = std::time::Instant::now() + timeout;
-        loop {
-            if cancel.load(Ordering::SeqCst) {
-                return Err(ChatGptError::Cancelled);
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(ChatGptError::Timeout);
-            }
-            match self.listener.accept() {
-                Ok((stream, _)) => {
-                    if let Some(result) = serve(&stream, state) {
-                        return result;
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(POLL),
-                Err(e) => return Err(local(e)),
-            }
-        }
-    }
-}
-
-/// Answer one browser connection. `None` means it was not the callback
-/// (another path, or no readable request), so the wait goes on.
-fn serve(mut stream: &TcpStream, state: &str) -> Option<Result<String, ChatGptError>> {
-    stream.set_nonblocking(false).ok()?;
-    stream.set_read_timeout(Some(READ_TIMEOUT)).ok()?;
-    let target = read_target(stream)?;
-    let (path, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
-    if path != CALLBACK_PATH {
-        respond(&mut stream, "404 Not Found", "Not found.");
-        return None;
-    }
-    let result = accept(query, state);
-    if result.is_ok() {
-        respond(
-            &mut stream,
-            "200 OK",
-            "kage is authorized. You can close this tab.",
-        );
-    } else {
-        respond(
-            &mut stream,
-            "400 Bad Request",
-            "kage could not finish the login. Return to the terminal.",
-        );
-    }
-    Some(result)
-}
-
-/// Read the request line and the headers, returning the request target.
-/// The headers are drained so closing the socket does not reset the
-/// connection before the browser reads the answer.
-fn read_target(stream: &TcpStream) -> Option<String> {
-    let mut reader = BufReader::new(stream.take(MAX_REQUEST_HEAD));
-    let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
-    let target = line.split_whitespace().nth(1)?.to_owned();
-    loop {
-        let mut header = String::new();
-        match reader.read_line(&mut header) {
-            Ok(0) | Err(_) => break,
-            Ok(_) if header.trim_end().is_empty() => break,
-            Ok(_) => {}
-        }
-    }
-    Some(target)
-}
-
-/// Check the query of a redirect against this login's `state` and
-/// return its code.
-fn accept(query: &str, state: &str) -> Result<String, ChatGptError> {
-    let (mut code, mut carried, mut error) = (None, None, None);
-    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
-        match key.as_ref() {
-            "code" => code = Some(value.into_owned()),
-            "state" => carried = Some(value.into_owned()),
-            "error" => error = Some(value.into_owned()),
-            _ => {}
-        }
-    }
-    if carried.as_deref() != Some(state) {
-        return Err(ChatGptError::State);
-    }
-    if let Some(error) = error {
-        return Err(ChatGptError::Denied(error_code(&error)));
-    }
-    code.filter(|code| !code.is_empty())
-        .ok_or_else(|| ChatGptError::Response("the redirect carries no code".to_owned()))
-}
-
-/// Read the code from a redirect URL the user pasted, for hosts whose
-/// browser cannot reach the loopback listener (SSH without forwarding).
-fn parse_redirect(pasted: &str, state: &str) -> Result<String, ChatGptError> {
-    let url = url::Url::parse(pasted.trim())
-        .map_err(|_| ChatGptError::Response("the pasted text is not a URL".to_owned()))?;
-    accept(url.query().unwrap_or_default(), state)
-}
-
-/// Write a small HTML page and close.
-fn respond(stream: &mut &TcpStream, status: &str, message: &str) {
-    let body = format!("<!doctype html><title>kage</title><p>{message}</p>\n");
-    let head = format!(
-        "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\n\
-         content-length: {}\r\ncache-control: no-store\r\nconnection: close\r\n\r\n",
-        body.len()
-    );
-    let _ = stream.write_all(head.as_bytes());
-    let _ = stream.write_all(body.as_bytes());
-    let _ = stream.flush();
-}
-
 /// Run the whole login: authorize in the browser, wait for the
 /// callback or a pasted redirect URL, trade the code for tokens, and
 /// return the credential to store. The signal hook routes Ctrl+C into
@@ -549,7 +326,7 @@ pub fn login(cancel: &Arc<AtomicBool>) -> Result<OAuthCredential, String> {
         let stop = &stop;
         scope.spawn(move || kage_tui::terminal::forward_typed_lines(&tx, stop));
         let result = login_inner(&rx, cancel).map_err(|e| e.to_string());
-        stop.store(true, Ordering::SeqCst);
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
         result
     });
     if let Some(id) = sigint {
@@ -564,69 +341,22 @@ fn login_inner(
     cancel: &AtomicBool,
 ) -> Result<OAuthCredential, ChatGptError> {
     let pkce = Pkce::new()?;
-    let state = random_state()?;
-    let callback = Callback::bind()?;
-    let redirect = callback.redirect_uri();
-    let url = authorize_url(&pkce, &state, &redirect);
+    let expected = Expected::state_only()?;
+    let loopback = Loopback::bind_on(&[CALLBACK_PORT, CALLBACK_PORT_FALLBACK], CALLBACK_PATH)?;
+    let redirect = loopback.redirect_uri();
+    let url = authorize_url(&pkce, &expected, &redirect);
     eprintln!("Sign in with ChatGPT. Open this URL in your browser:\n\n{url}\n");
     if crate::opener::open(std::ffi::OsStr::new(&url)).is_err() {
         eprintln!("kage: no browser detected; open the URL above manually");
     }
-    eprintln!(
-        "Waiting for the browser to come back ({} minutes, Ctrl+C to cancel).",
-        LOGIN_TIMEOUT.as_secs() / 60
-    );
-    eprintln!("On another machine? Paste the URL your browser was sent to and press Enter:");
-    eprint!("> ");
-    let _ = io::stderr().flush();
-    let code = wait_for_code(callback, &state, LOGIN_TIMEOUT, pasted, cancel)?;
-    let answer = exchange_code(&code, &pkce.verifier, &redirect)?;
+    crate::mcp_auth::prompt_for_redirect();
+    let code = crate::mcp_auth::wait_for_code(loopback, &expected, pasted, cancel)?;
+    let answer = exchange_code(&code, &pkce, &redirect)?;
     let credential = credential_from(&answer, None);
     if credential.account_id.is_none() {
         eprintln!("kage: the login carries no ChatGPT account id; requests may be refused");
     }
     Ok(credential)
-}
-
-/// The first of the browser's redirect and a pasted one, or
-/// [`ChatGptError::Cancelled`] once `cancel` is set. Blank lines are
-/// ignored, and a closed input leaves only the browser. When the
-/// browser wins or the wait is cancelled, the prompt line is ended.
-fn wait_for_code(
-    callback: Callback,
-    state: &str,
-    timeout: Duration,
-    pasted: &Receiver<String>,
-    cancel: &AtomicBool,
-) -> Result<String, ChatGptError> {
-    let stop = AtomicBool::new(false);
-    thread::scope(|scope| {
-        let stop = &stop;
-        let browser = scope.spawn(move || callback.wait(state, timeout, stop));
-        let stopped = || ChatGptError::Local("the callback listener stopped".to_owned());
-        loop {
-            if browser.is_finished() {
-                eprintln!();
-                return browser.join().unwrap_or_else(|_| Err(stopped()));
-            }
-            if cancel.load(Ordering::SeqCst) {
-                stop.store(true, Ordering::SeqCst);
-                let _ = browser.join();
-                eprintln!();
-                return Err(ChatGptError::Cancelled);
-            }
-            match pasted.recv_timeout(POLL) {
-                Ok(line) if line.trim().is_empty() => {}
-                Ok(line) => {
-                    stop.store(true, Ordering::SeqCst);
-                    let _ = browser.join();
-                    return parse_redirect(&line, state);
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => thread::sleep(POLL),
-            }
-        }
-    })
 }
 
 /// Renew `credential` at the token endpoint. The refresh token is kept
@@ -646,29 +376,60 @@ pub fn refresh_credential(credential: &OAuthCredential) -> Result<OAuthCredentia
     Ok(credential_from(&answer, Some(credential)))
 }
 
-/// Refresh the stored `ChatGPT` credential when it expires within
-/// [`REFRESH_SLACK`], persisting the renewal. A no-op for any other
-/// credential shape, and silent: a failed renewal only fails when the
-/// caller needs a token, which is the 401 path's job.
+/// Take the exclusive lock that serializes renewals of the store at
+/// `path` across kage processes: `<path>.lock`, held until the returned
+/// file drops.
+fn renewal_lock(path: &Path) -> Result<File, String> {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    let lock_path = PathBuf::from(name);
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("open {}: {e}", lock_path.display()))?;
+    file.lock()
+        .map_err(|e| format!("lock {}: {e}", lock_path.display()))?;
+    Ok(file)
+}
+
+/// The `ChatGPT` login in `store`, if one is stored.
+fn stored_login(store: &AuthStore) -> Option<&OAuthCredential> {
+    match store.credential(PROVIDER_ID) {
+        Some(crate::auth::Credential::Oauth(oauth)) => Some(oauth),
+        _ => None,
+    }
+}
+
+/// Refresh the `ChatGPT` login in `store` (loaded from `path`) when it
+/// expires within [`REFRESH_SLACK`] of `now`, persisting the renewal. A
+/// no-op for any other credential shape. Under the renewal lock the
+/// file is read again, and `store` becomes that reading, so a renewal
+/// another process made in the meantime is adopted instead of repeated.
 ///
 /// # Errors
 ///
-/// When a due refresh cannot be persisted after succeeding; the next
-/// login overwrites the file, but the user should know the renewal was
-/// not saved.
-pub fn ensure_fresh(store: &mut AuthStore, now: DateTime<Utc>) -> Result<(), String> {
-    let Some(crate::auth::Credential::Oauth(oauth)) = store.credential(PROVIDER_ID) else {
-        return Ok(());
-    };
-    if !oauth.expires_within(REFRESH_SLACK, now) {
+/// When the lock, the reload, the renewal or the save fails. The 401
+/// path retries, so a caller that only builds providers may ignore it.
+pub fn ensure_fresh(store: &mut AuthStore, path: &Path, now: DateTime<Utc>) -> Result<(), String> {
+    if !stored_login(store).is_some_and(|oauth| oauth.expires_within(REFRESH_SLACK, now)) {
         return Ok(());
     }
-    let renewed = refresh_credential(oauth)?;
-    store.set(PROVIDER_ID, crate::auth::Credential::Oauth(renewed));
-    store.save()
+    let _lock = renewal_lock(path)?;
+    let mut current = AuthStore::load_from(path)?;
+    if let Some(oauth) = stored_login(&current)
+        && oauth.expires_within(REFRESH_SLACK, now)
+    {
+        let renewed = refresh_credential(oauth)?;
+        current.set(PROVIDER_ID, crate::auth::Credential::Oauth(renewed));
+        current.save_to(path)?;
+    }
+    *store = current;
+    Ok(())
 }
 
-/// Headers every ChatGPT-backend request carries beside the bearer:
+/// Headers every `ChatGPT` backend request carries beside the bearer:
 /// the experimental Responses opt-in, the originator the public client
 /// is known by, and the account id when the `id_token` carried one.
 #[must_use]
@@ -682,13 +443,23 @@ pub fn backend_headers(account_id: Option<&str>) -> BTreeMap<String, String> {
     headers
 }
 
+/// The backend's model list under `base`, a [`BACKEND_BASE_URL`] or a
+/// proxy of it, asked for the models [`CODEX_CLIENT_VERSION`] may use.
+#[must_use]
+pub fn models_url(base: &str) -> String {
+    format!(
+        "{}/models?client_version={CODEX_CLIENT_VERSION}",
+        base.trim_end_matches('/')
+    )
+}
+
 /// The provider-side renewable credential: hands the current token to
 /// every request and renews through the auth store at `path` on a 401.
 /// Cheap to clone (`Arc` inside).
 #[derive(Clone)]
 pub struct ChatGptBearer {
     /// The token of the moment. Held across a renewal, so concurrent
-    /// rejections renew once.
+    /// rejections in this process renew once.
     token: Arc<Mutex<String>>,
     path: PathBuf,
 }
@@ -726,8 +497,9 @@ impl kage_provider::BearerSource for ChatGptBearer {
             .token
             .lock()
             .map_err(|_| renewal_failed("the token lock is poisoned"))?;
+        let _lock = renewal_lock(&self.path).map_err(|e| renewal_failed(&e))?;
         let mut store = AuthStore::load_from(&self.path).map_err(|e| renewal_failed(&e))?;
-        let Some(crate::auth::Credential::Oauth(oauth)) = store.credential(PROVIDER_ID) else {
+        let Some(oauth) = stored_login(&store) else {
             return Err(kage_provider::ProviderError::Auth(
                 "no ChatGPT login stored; run `kage auth login openai`".to_owned(),
             ));
@@ -757,6 +529,9 @@ fn renewal_failed(e: &str) -> kage_provider::ProviderError {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read as _, Write as _};
+    use std::net::{Ipv4Addr, TcpStream};
+
     use super::*;
 
     /// A JWT with the claims of `json`, signed by nothing (the parser
@@ -794,8 +569,9 @@ mod tests {
     #[test]
     fn the_authorize_url_carries_every_codex_parameter() {
         let pkce = Pkce::new().unwrap();
-        let redirect = redirect_uri_for(CALLBACK_PORT);
-        let url = url::Url::parse(&authorize_url(&pkce, "state-1", &redirect)).unwrap();
+        let expected = Expected::state_only().unwrap();
+        let redirect = format!("http://127.0.0.1:{CALLBACK_PORT}{CALLBACK_PATH}");
+        let url = url::Url::parse(&authorize_url(&pkce, &expected, &redirect)).unwrap();
         assert!(
             url.as_str()
                 .starts_with("https://auth.openai.com/oauth/authorize?"),
@@ -806,28 +582,25 @@ mod tests {
         assert_eq!(query["response_type"], "code");
         assert_eq!(query["client_id"], CLIENT_ID);
         assert_eq!(query["scope"], SCOPES);
-        assert_eq!(query["state"], "state-1");
+        assert_eq!(query["state"], expected.state());
         assert_eq!(query["code_challenge_method"], "S256");
-        assert_eq!(query["code_challenge"], pkce.challenge);
+        assert_eq!(query["code_challenge"], pkce.challenge());
         assert_eq!(query["redirect_uri"], redirect);
         assert_eq!(query["codex_cli_simplified_flow"], "true");
         assert_eq!(query["originator"], ORIGINATOR);
         assert_eq!(query["id_token_add_organizations"], "true");
         assert!(!query.contains_key("resource"), "no RFC 8707 resource");
-        assert!(!format!("{pkce:?}").contains(&pkce.verifier));
+        assert!(!query.contains_key("code_verifier"));
     }
 
     #[test]
     fn a_token_answer_becomes_a_stored_credential() {
         let answer = TokenAnswer {
-            access_token: jwt(&serde_json::json!({ "exp": 1_800_000_000i64 })).clone(),
+            access_token: jwt(&serde_json::json!({ "exp": 1_800_000_000i64 })),
             refresh_token: Some("refresh-1".to_owned()),
-            id_token: Some(
-                jwt(&serde_json::json!({
-                    "https://api.openai.com/auth": { "chatgpt_account_id": "acc-9" },
-                }))
-                .clone(),
-            ),
+            id_token: Some(jwt(&serde_json::json!({
+                "https://api.openai.com/auth": { "chatgpt_account_id": "acc-9" },
+            }))),
             expires_in: Some(3600),
             scope: Some("openid".to_owned()),
         };
@@ -849,6 +622,20 @@ mod tests {
             "expiry falls back to the token's own exp"
         );
         assert_eq!(credential.scope.as_deref(), Some(SCOPES));
+    }
+
+    #[test]
+    fn the_account_id_falls_back_to_the_access_token() {
+        let answer = TokenAnswer {
+            access_token: jwt(&serde_json::json!({
+                "https://api.openai.com/auth": { "chatgpt_account_id": "acc-at" },
+            })),
+            ..TokenAnswer::default()
+        };
+        assert_eq!(
+            credential_from(&answer, None).account_id.as_deref(),
+            Some("acc-at")
+        );
     }
 
     #[test]
@@ -886,157 +673,97 @@ mod tests {
         assert!(matches!(err, ChatGptError::Response(_)), "{err}");
     }
 
-    /// A listener on a port the system picks, so parallel test
-    /// processes never fight over the fixed Codex ports.
-    fn ephemeral() -> Callback {
-        Callback::bind_on(&[0]).unwrap()
-    }
-
-    /// The callback server hands over the code for the right state and
-    /// ignores other paths.
+    /// The `ChatGPT` callback path is served, and a pasted redirect
+    /// carrying the login's state ends the wait.
     #[test]
-    fn the_callback_checks_state_and_hands_over_the_code() {
-        let callback = ephemeral();
-        let port = callback.port;
-        assert_eq!(callback.redirect_uri(), redirect_uri_for(port));
-        let browser = std::thread::spawn(move || {
-            let get = |target: &str| {
-                let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
-                write!(
-                    stream,
-                    "GET {target} HTTP/1.1\r\nhost: 127.0.0.1:{port}\r\n\r\n"
-                )
-                .unwrap();
-                let mut out = String::new();
-                let _ = stream.read_to_string(&mut out);
-                out
-            };
-            [
-                get("/favicon.ico"),
-                get(&format!("{CALLBACK_PATH}?code=the-code&state=s1")),
-            ]
-        });
-        let code = callback
-            .wait("s1", Duration::from_secs(10), &AtomicBool::new(false))
-            .unwrap();
-        assert_eq!(code, "the-code");
-        let [favicon, ok] = browser.join().unwrap();
-        assert!(favicon.contains("404"), "{favicon}");
-        assert!(ok.contains("200"), "{ok}");
-    }
-
-    /// A forged state or a provider error ends the wait.
-    #[test]
-    fn the_callback_refuses_a_forged_state_and_a_provider_error() {
-        let callback = ephemeral();
-        let port = callback.port;
-        let browser = std::thread::spawn(move || {
-            let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
-            write!(
-                stream,
-                "GET {CALLBACK_PATH}?code=x&state=forged HTTP/1.1\r\nhost: 127.0.0.1:{port}\r\n\r\n"
-            )
-            .unwrap();
-            let mut out = String::new();
-            let _ = stream.read_to_string(&mut out);
-            out
-        });
-        let err = callback
-            .wait("s1", Duration::from_secs(10), &AtomicBool::new(false))
-            .unwrap_err();
-        assert!(matches!(err, ChatGptError::State), "{err}");
-        assert!(browser.join().unwrap().contains("400"));
-
-        let callback = ephemeral();
-        let port = callback.port;
-        let browser = std::thread::spawn(move || {
-            let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
-            write!(
-                stream,
-                "GET {CALLBACK_PATH}?error=access_denied&state=s1 HTTP/1.1\r\nhost: 127.0.0.1:{port}\r\n\r\n"
-            )
-            .unwrap();
-            let mut out = String::new();
-            let _ = stream.read_to_string(&mut out);
-            out
-        });
-        let err = callback
-            .wait("s1", Duration::from_secs(10), &AtomicBool::new(false))
-            .unwrap_err();
-        assert!(
-            matches!(&err, ChatGptError::Denied(e) if e == "access_denied"),
-            "{err}"
+    fn the_callback_and_the_paste_both_hand_over_the_code() {
+        let expected = Expected::state_only().unwrap();
+        let loopback = Loopback::bind_on(&[0], CALLBACK_PATH).unwrap();
+        let redirect = loopback.redirect_uri();
+        assert!(redirect.ends_with(CALLBACK_PATH), "{redirect}");
+        let port = url::Url::parse(&redirect).unwrap().port().unwrap();
+        let target = format!(
+            "{CALLBACK_PATH}?code=from-browser&state={}",
+            expected.state()
         );
-        assert!(browser.join().unwrap().contains("400"));
-    }
-
-    #[test]
-    fn the_callback_times_out_and_cancels() {
-        let err = ephemeral()
-            .wait("s1", Duration::from_millis(80), &AtomicBool::new(false))
-            .unwrap_err();
-        assert!(matches!(err, ChatGptError::Timeout), "{err}");
-        let err = ephemeral()
-            .wait("s1", Duration::from_secs(30), &AtomicBool::new(true))
-            .unwrap_err();
-        assert!(matches!(err, ChatGptError::Cancelled), "{err}");
-    }
-
-    /// A pasted redirect ends the wait while the listener still runs,
-    /// and blank lines are skipped.
-    #[test]
-    fn a_pasted_redirect_wins_over_the_browser() {
-        let (tx, rx) = mpsc::channel();
-        tx.send(String::new()).unwrap();
-        tx.send(format!(
-            "{}?code=pasted&state=s1\n",
-            redirect_uri_for(CALLBACK_PORT)
-        ))
-        .unwrap();
-        let code = wait_for_code(
-            ephemeral(),
-            "s1",
-            Duration::from_secs(30),
-            &rx,
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        assert_eq!(code, "pasted");
-
-        let err = parse_redirect("not a url", "s1").unwrap_err();
-        assert!(matches!(err, ChatGptError::Response(_)), "{err}");
-        let err =
-            parse_redirect("http://127.0.0.1/auth/callback?code=c&state=s2", "s1").unwrap_err();
-        assert!(matches!(err, ChatGptError::State), "{err}");
-    }
-
-    /// Ctrl+C ends the wait even with nothing typed.
-    #[test]
-    fn the_wait_for_a_code_is_cancellable() {
+        let browser = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+            write!(stream, "GET {target} HTTP/1.1\r\nhost: x\r\n\r\n").unwrap();
+            let mut out = String::new();
+            let _ = stream.read_to_string(&mut out);
+            out
+        });
         let (_tx, rx) = mpsc::channel();
-        let err = wait_for_code(
-            ephemeral(),
-            "s1",
-            Duration::from_secs(30),
-            &rx,
-            &AtomicBool::new(true),
-        )
-        .unwrap_err();
-        assert!(matches!(err, ChatGptError::Cancelled), "{err}");
+        let code =
+            crate::mcp_auth::wait_for_code(loopback, &expected, &rx, &AtomicBool::new(false))
+                .unwrap();
+        assert_eq!(code.secret(), "from-browser");
+        assert!(browser.join().unwrap().contains("200"));
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(format!("{redirect}?code=pasted&state={}", expected.state()))
+            .unwrap();
+        let loopback = Loopback::bind_on(&[0], CALLBACK_PATH).unwrap();
+        let code =
+            crate::mcp_auth::wait_for_code(loopback, &expected, &rx, &AtomicBool::new(false))
+                .unwrap();
+        assert_eq!(code.secret(), "pasted");
+    }
+
+    fn stored(path: &Path, credential: OAuthCredential) {
+        let mut store = AuthStore::empty();
+        store.set_oauth(PROVIDER_ID, credential);
+        store.save_to(path).unwrap();
     }
 
     #[test]
-    fn the_account_id_falls_back_to_the_access_token() {
-        let answer = TokenAnswer {
-            access_token: jwt(&serde_json::json!({
-                "https://api.openai.com/auth": { "chatgpt_account_id": "acc-at" },
-            })),
-            ..TokenAnswer::default()
-        };
-        assert_eq!(
-            credential_from(&answer, None).account_id.as_deref(),
-            Some("acc-at")
+    fn ensure_fresh_leaves_everything_but_a_due_chatgpt_login_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = AuthStore::empty();
+        store.set_api_key("openai", "sk-key");
+        ensure_fresh(&mut store, &path, Utc::now()).unwrap();
+        assert_eq!(store.access_token("openai"), Some("sk-key"));
+
+        let mut store = AuthStore::empty();
+        store.set_oauth(
+            PROVIDER_ID,
+            OAuthCredential {
+                access_token: "live".to_owned(),
+                expires_at: Some(Utc::now() + chrono::Duration::hours(5)),
+                ..OAuthCredential::default()
+            },
         );
+        ensure_fresh(&mut store, &path, Utc::now()).unwrap();
+        assert_eq!(store.access_token("openai"), Some("live"));
+        assert!(!path.exists(), "nothing due, nothing locked or written");
+    }
+
+    /// A due login that another process renewed while this one waited
+    /// for the lock is adopted from the file, not renewed again.
+    #[test]
+    fn ensure_fresh_adopts_a_renewal_made_by_another_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        stored(
+            &path,
+            OAuthCredential {
+                access_token: "renewed-elsewhere".to_owned(),
+                expires_at: Some(Utc::now() + chrono::Duration::hours(5)),
+                ..OAuthCredential::default()
+            },
+        );
+        let mut store = AuthStore::empty();
+        store.set_oauth(
+            PROVIDER_ID,
+            OAuthCredential {
+                access_token: "due".to_owned(),
+                expires_at: Some(Utc::now()),
+                ..OAuthCredential::default()
+            },
+        );
+        ensure_fresh(&mut store, &path, Utc::now()).unwrap();
+        assert_eq!(store.access_token("openai"), Some("renewed-elsewhere"));
     }
 
     /// A rejection of a token another request already replaced adopts
@@ -1045,16 +772,14 @@ mod tests {
     fn a_stale_rejection_adopts_the_stored_token_without_renewing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("auth.json");
-        let mut store = AuthStore::empty();
-        store.set_oauth(
-            PROVIDER_ID,
+        stored(
+            &path,
             OAuthCredential {
                 access_token: "renewed-elsewhere".to_owned(),
                 refresh_token: Some("rotated".to_owned()),
                 ..OAuthCredential::default()
             },
         );
-        store.save_to(&path).unwrap();
         let bearer = ChatGptBearer::new(
             &OAuthCredential {
                 access_token: "stale".to_owned(),
@@ -1071,28 +796,6 @@ mod tests {
     }
 
     #[test]
-    fn ensure_fresh_leaves_everything_but_a_due_chatgpt_login_alone() {
-        let mut store = AuthStore::empty();
-        store.set_api_key("openai", "sk-key");
-        ensure_fresh(&mut store, Utc::now()).unwrap();
-        assert_eq!(store.access_token("openai"), Some("sk-key"));
-
-        let mut store = AuthStore::empty();
-        store.set(
-            PROVIDER_ID,
-            crate::auth::Credential::Oauth(OAuthCredential {
-                access_token: "live".to_owned(),
-                refresh_token: None,
-                expires_at: Some(Utc::now() + chrono::Duration::hours(5)),
-                scope: None,
-                account_id: None,
-            }),
-        );
-        ensure_fresh(&mut store, Utc::now()).unwrap();
-        assert_eq!(store.access_token("openai"), Some("live"));
-    }
-
-    #[test]
     fn the_bearer_hands_out_its_token_and_redacts_itself() {
         let credential = OAuthCredential {
             access_token: "at-1".to_owned(),
@@ -1102,5 +805,15 @@ mod tests {
         assert_eq!(kage_provider::BearerSource::token(&bearer), "at-1");
         assert!(format!("{bearer:?}").contains(REDACTED));
         assert!(!format!("{bearer:?}").contains("at-1"));
+    }
+
+    #[test]
+    fn the_models_url_asks_for_the_codex_version() {
+        assert_eq!(
+            models_url("https://chatgpt.com/backend-api/codex/"),
+            format!(
+                "https://chatgpt.com/backend-api/codex/models?client_version={CODEX_CLIENT_VERSION}"
+            )
+        );
     }
 }

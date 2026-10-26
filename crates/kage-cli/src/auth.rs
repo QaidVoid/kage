@@ -466,6 +466,11 @@ fn run_openai_login() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if let Err(e) = crate::chatgpt::models_cache_path()
+        .and_then(|cache| crate::chatgpt::refresh_models(&credential, &cache))
+    {
+        eprintln!("kage: {e}; `kage models refresh` retries");
+    }
     store.set_oauth("openai", credential);
     if let Err(e) = store.save() {
         eprintln!("kage: {e}");

@@ -353,6 +353,7 @@ endpoints, and per-provider overrides (base URL, headers, key env var).
 | `~/.local/state/kage/`              | session state (`state.json`) and input history (`history.txt`) |
 | `~/.local/state/kage/trust.json`    | trusted project configs                                        |
 | `~/.cache/kage/models.json`         | model catalog written by `kage models refresh`                 |
+| `~/.cache/kage/chatgpt-models.json` | ChatGPT plan models, written at sign-in and by `kage models refresh` |
 
 `XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_STATE_HOME` /
 `XDG_CACHE_HOME` override the `~/.config`, `~/.local/share`,

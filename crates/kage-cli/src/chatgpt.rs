@@ -453,6 +453,158 @@ pub fn models_url(base: &str) -> String {
     )
 }
 
+/// Cap on the backend's model list, which carries each model's prompt.
+const MAX_MODELS_BODY: u64 = 16 * 1024 * 1024;
+
+/// The fields of a backend model entry kage reads. The rest, prompts
+/// and tool settings among them, is dropped before caching.
+const MODEL_FIELDS: [&str; 6] = [
+    "slug",
+    "display_name",
+    "context_window",
+    "max_context_window",
+    "supported_reasoning_levels",
+    "input_modalities",
+];
+
+/// Where the `ChatGPT` plan's model list is kept between runs:
+/// `$XDG_CACHE_HOME/kage/chatgpt-models.json`.
+pub fn models_cache_path() -> Result<PathBuf, String> {
+    Ok(crate::paths::cache_root()?.join("chatgpt-models.json"))
+}
+
+/// Fetch the models the plan behind `login` may use and cache them at
+/// `path`, leaving out the ones the backend hides from pickers. Returns
+/// how many were cached.
+///
+/// # Errors
+///
+/// When the request fails, the backend refuses, or the cache cannot be
+/// written.
+pub fn refresh_models(login: &OAuthCredential, path: &Path) -> Result<usize, String> {
+    let mut request = agent()
+        .get(&models_url(BACKEND_BASE_URL))
+        .header("authorization", format!("Bearer {}", login.access_token));
+    for (name, value) in backend_headers(login.account_id.as_deref()) {
+        request = request.header(name, value);
+    }
+    let mut response = request.call().map_err(|e| format!("model list: {e}"))?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Err(format!("model list: status {status}"));
+    }
+    let body = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_MODELS_BODY)
+        .read_to_string()
+        .map_err(|e| format!("model list: {e}"))?;
+    let models = trim_models(&body)?;
+    let count = models.len();
+    let json = serde_json::to_string_pretty(&serde_json::json!({ "models": models }))
+        .map_err(|e| e.to_string())?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    let partial = path.with_extension("json.partial");
+    std::fs::write(&partial, json).map_err(|e| format!("{}: {e}", partial.display()))?;
+    std::fs::rename(&partial, path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(count)
+}
+
+/// The visible entries of the backend's model list `body`, cut down to
+/// [`MODEL_FIELDS`].
+fn trim_models(body: &str) -> Result<Vec<Value>, String> {
+    let json: Value =
+        serde_json::from_str(body).map_err(|_| "the model list is not JSON".to_owned())?;
+    let entries = json["models"]
+        .as_array()
+        .ok_or_else(|| "the model list has no models".to_owned())?;
+    Ok(entries
+        .iter()
+        .filter(|entry| entry["visibility"].as_str() != Some("hide"))
+        .map(|entry| {
+            MODEL_FIELDS
+                .iter()
+                .filter_map(|key| Some(((*key).to_owned(), entry.get(*key)?.clone())))
+                .collect::<serde_json::Map<_, _>>()
+                .into()
+        })
+        .collect())
+}
+
+/// The models cached at `path`, as `openai` offers them on the
+/// `ChatGPT` backend: free, since the plan pays, with the largest
+/// context the backend accepts. Empty without a cache, which leaves the
+/// catalog to drive the picker.
+#[must_use]
+pub fn cached_models(path: &Path) -> Vec<kage_provider::ProviderModel> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .map(|json| parse_models(&json))
+        .unwrap_or_default()
+}
+
+/// The entries of a cached model list. An effort kage does not know is
+/// skipped rather than failing the model.
+fn parse_models(json: &Value) -> Vec<kage_provider::ProviderModel> {
+    let strings = |value: &Value, key: &str| -> Vec<String> {
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                if key.is_empty() {
+                    item.as_str()
+                } else {
+                    item[key].as_str()
+                }
+                .map(str::to_owned)
+            })
+            .collect()
+    };
+    json["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let id = entry["slug"].as_str()?.to_owned();
+            let efforts: kage_core::Efforts =
+                strings(&entry["supported_reasoning_levels"], "effort")
+                    .iter()
+                    .filter_map(|effort| kage_core::Effort::parse(effort))
+                    .collect();
+            Some(kage_provider::ProviderModel {
+                name: entry["display_name"].as_str().unwrap_or(&id).to_owned(),
+                context: entry["max_context_window"]
+                    .as_u64()
+                    .or_else(|| entry["context_window"].as_u64()),
+                reasoning: if efforts.is_empty() {
+                    kage_core::Reasoning::Unknown
+                } else {
+                    kage_core::Reasoning::Effort {
+                        efforts,
+                        toggle: false,
+                    }
+                },
+                input: strings(&entry["input_modalities"], "")
+                    .iter()
+                    .filter_map(|kind| kage_core::Modality::parse(kind))
+                    .collect(),
+                cost: Some(kage_core::ModelCost {
+                    input: 0.0,
+                    output: 0.0,
+                    cache_read: None,
+                    cache_write: None,
+                }),
+                id,
+                ..kage_provider::ProviderModel::default()
+            })
+        })
+        .collect()
+}
+
 /// The provider-side renewable credential: hands the current token to
 /// every request and renews through the auth store at `path` on a 401.
 /// Cheap to clone (`Arc` inside).
@@ -815,5 +967,70 @@ mod tests {
                 "https://chatgpt.com/backend-api/codex/models?client_version={CODEX_CLIENT_VERSION}"
             )
         );
+    }
+
+    /// The cache keeps the visible models and only the fields kage
+    /// reads, and reads back as free models with the backend's largest
+    /// context, the efforts kage knows, and their input kinds.
+    #[test]
+    fn the_plan_model_list_caches_visible_models_for_free() {
+        let body = serde_json::json!({"models": [
+            {
+                "slug": "gpt-6-sol",
+                "display_name": "GPT-6-Sol",
+                "context_window": 272_000,
+                "max_context_window": 872_000,
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "fast"},
+                    {"effort": "ultra"},
+                    {"effort": "turbo"}
+                ],
+                "input_modalities": ["text", "image"],
+                "visibility": "list",
+                "base_instructions": "a long prompt"
+            },
+            {"slug": "gpt-reserve", "visibility": "hide"},
+            {"slug": "plain", "context_window": 128_000}
+        ]});
+        let trimmed = trim_models(&body.to_string()).unwrap();
+        assert_eq!(trimmed.len(), 2, "the hidden model is left out");
+        assert!(trimmed[0].get("base_instructions").is_none());
+        assert!(trimmed[0].get("visibility").is_none());
+
+        let models = parse_models(&serde_json::json!({ "models": trimmed }));
+        let sol = &models[0];
+        assert_eq!(sol.id, "gpt-6-sol");
+        assert_eq!(sol.name, "GPT-6-Sol");
+        assert_eq!(sol.context, Some(872_000));
+        assert_eq!(
+            sol.reasoning,
+            kage_core::Reasoning::Effort {
+                efforts: kage_core::Efforts::of(&[
+                    kage_core::Effort::Low,
+                    kage_core::Effort::Ultra
+                ]),
+                toggle: false,
+            }
+        );
+        assert_eq!(
+            sol.input,
+            kage_core::Modalities::of(&[kage_core::Modality::Text, kage_core::Modality::Image])
+        );
+        assert_eq!(sol.cost.map(|c| (c.input, c.output)), Some((0.0, 0.0)));
+
+        let plain = &models[1];
+        assert_eq!(plain.name, "plain");
+        assert_eq!(plain.context, Some(128_000));
+        assert_eq!(plain.reasoning, kage_core::Reasoning::Unknown);
+    }
+
+    #[test]
+    fn a_missing_or_broken_cache_offers_no_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chatgpt-models.json");
+        assert!(cached_models(&path).is_empty());
+        std::fs::write(&path, "not json").unwrap();
+        assert!(cached_models(&path).is_empty());
+        assert!(trim_models("{}").is_err());
     }
 }

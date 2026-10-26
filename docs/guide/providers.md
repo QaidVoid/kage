@@ -21,6 +21,13 @@ two ways in: an API key, or a ChatGPT sign-in that serves the same
 models from your ChatGPT plan instead of API billing. An exported
 `OPENAI_API_KEY` wins over a saved sign-in.
 
+With the ChatGPT sign-in, `openai` offers the models your plan may use,
+as ChatGPT's own model list reports them, with the largest context
+window it accepts and no per-token cost. kage saves that list in
+`~/.cache/kage/chatgpt-models.json` when you sign in, and
+`kage models refresh` updates it. Without it, the catalog's OpenAI
+models are offered instead.
+
 A model draws by calling OpenAI's hosted image tool, which runs at
 OpenAI and is billed on its own. kage offers it only when asked:
 

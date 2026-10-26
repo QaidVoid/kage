@@ -581,7 +581,8 @@ fn parse_codex(json: &Value) -> Option<Vec<ProbeModel>> {
                 Some(ProbeModel {
                     id: entry["slug"].as_str()?.to_owned(),
                     name: entry["display_name"].as_str().map(str::to_owned),
-                    context: number_of(&entry["context_window"]),
+                    context: number_of(&entry["max_context_window"])
+                        .or_else(|| number_of(&entry["context_window"])),
                     efforts: entry["supported_reasoning_levels"]
                         .as_array()
                         .into_iter()

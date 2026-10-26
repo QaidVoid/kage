@@ -173,10 +173,10 @@ fn env_key(name: &str) -> Option<String> {
 
 /// `openai` on the `ChatGPT` backend with a renewable
 /// [`chatgpt::ChatGptBearer`] over the auth store at `path`, in the
-/// backend's request shape. Override headers merge after the backend's
-/// own, so a proxy can add to them. Bodies are zstd-compressed only on
-/// the backend itself, as the Codex CLI does, since a proxy in between
-/// may not decode them.
+/// backend's request shape, offering the plan's cached models. Override
+/// headers merge after the backend's own, so a proxy can add to them.
+/// Bodies are zstd-compressed only on the backend itself, as the Codex
+/// CLI does, since a proxy in between may not decode them.
 fn register_chatgpt(
     config: &kage_core::config::Config,
     oauth: &auth::OAuthCredential,
@@ -199,6 +199,11 @@ fn register_chatgpt(
     }
     .with_bearer(Arc::new(chatgpt::ChatGptBearer::new(oauth, path)))
     .with_extra_headers(headers)
+    .with_models(
+        chatgpt::models_cache_path()
+            .map(|cache| chatgpt::cached_models(&cache))
+            .unwrap_or_default(),
+    )
     .for_chatgpt_backend();
     if let Some(o) = ov {
         provider = provider.with_image_generation(o.image_generation);

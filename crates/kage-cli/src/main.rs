@@ -1231,13 +1231,12 @@ fn run_print_mode(cli: Cli) -> ExitCode {
     for (server, err) in mcp_errors {
         eprintln!("kage: mcp `{server}`: {err}");
     }
-    let mut cx = AgentContext::new(resolved.model.clone(), &system_prompt).with_workdir(&workdir);
-    if let Some(window) = runtime_env::context_window_for(&registry, &model) {
-        cx = cx.with_context_window(window);
-    }
-    if let Some(out) = runtime_env::max_output_tokens_for(&registry, &model) {
-        cx = cx.with_max_output_tokens(out);
-    }
+    let cx = print_context(
+        AgentContext::new(resolved.model.clone(), &system_prompt).with_workdir(&workdir),
+        &registry,
+        &model,
+        &layered,
+    );
     let writer = match open_session_writer(cli.no_session, &model, &system_prompt) {
         Ok(writer) => writer,
         Err(e) => {
@@ -1262,6 +1261,32 @@ fn run_print_mode(cli: Cli) -> ExitCode {
         eprintln!("kage: {err}");
     }
     exit
+}
+
+/// `cx` sized for `model` of `registry` (its context window and output
+/// ceiling) and seeded with the `[ui] thinking_level` default of
+/// `config`, as a TUI session is. An unset level stays automatic.
+fn print_context(
+    mut cx: AgentContext,
+    registry: &kage_provider::ProviderRegistry,
+    model: &str,
+    config: &kage_core::config::Config,
+) -> AgentContext {
+    if let Some(level) = config
+        .ui
+        .thinking_level
+        .as_deref()
+        .and_then(kage_provider::ThinkingLevel::parse)
+    {
+        cx = cx.with_thinking_level(level);
+    }
+    if let Some(window) = runtime_env::context_window_for(registry, model) {
+        cx = cx.with_context_window(window);
+    }
+    if let Some(out) = runtime_env::max_output_tokens_for(registry, model) {
+        cx = cx.with_max_output_tokens(out);
+    }
+    cx
 }
 
 mod cli_loop_run;

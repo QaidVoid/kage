@@ -119,6 +119,9 @@ impl OpenAiResponsesProvider {
         {
             fields.remove("max_output_tokens");
             fields.remove("temperature");
+            if let Some(Value::Object(reasoning)) = fields.get_mut("reasoning") {
+                reasoning.insert("summary".to_owned(), Value::String("auto".to_owned()));
+            }
             if let Some(session) = &req.session {
                 fields.insert(
                     "prompt_cache_key".to_owned(),
@@ -166,6 +169,9 @@ impl OpenAiResponsesProvider {
     /// `max_output_tokens` with a 400 and serves only reasoning models,
     /// which refuse `temperature`, and it routes its prompt cache on the
     /// session, sent as `prompt_cache_key` and a `session-id` header.
+    /// Reasoning asks for summaries, as the Codex CLI does, so thinking
+    /// shows; the public API refuses them for unverified organizations,
+    /// so they stay off there.
     #[must_use]
     pub fn for_chatgpt_backend(mut self) -> Self {
         self.chatgpt = true;
@@ -1533,16 +1539,20 @@ mod tests {
         let mut req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
         req.temperature = Some(0.2);
         req.session = Some("ses-1".to_owned());
+        req.level = Some(kage_core::ThinkingLevel::Low);
         let public = OpenAiResponsesProvider::new("k").request_body(&req);
         assert!(public.get("max_output_tokens").is_some());
         assert!(public.get("temperature").is_some());
         assert!(public.get("prompt_cache_key").is_none());
+        assert!(public["reasoning"].get("summary").is_none(), "{public}");
         let chatgpt = OpenAiResponsesProvider::new("k")
             .for_chatgpt_backend()
             .request_body(&req);
         assert!(chatgpt.get("max_output_tokens").is_none(), "{chatgpt}");
         assert!(chatgpt.get("temperature").is_none(), "{chatgpt}");
         assert_eq!(chatgpt["prompt_cache_key"], "ses-1");
+        assert_eq!(chatgpt["reasoning"]["effort"], "low");
+        assert_eq!(chatgpt["reasoning"]["summary"], "auto");
         assert_eq!(chatgpt["store"], false);
     }
 

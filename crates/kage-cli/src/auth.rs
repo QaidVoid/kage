@@ -571,7 +571,9 @@ impl ProviderKey {
 
     /// [`Self::source`] against an injected env check and clock, so
     /// callers can rate providers without touching the process env or
-    /// the wall clock. An OAuth row carries its expiry label.
+    /// the wall clock. An OAuth row carries its expiry label, and the
+    /// `openai` row names a `ChatGPT` login as one for
+    /// `openai-responses`, the only provider it serves.
     pub(crate) fn source_with(
         &self,
         store: &AuthStore,
@@ -582,10 +584,15 @@ impl ProviderKey {
             return Some("no key needed".to_owned());
         }
         let env = (!self.env.is_empty() && env_set(&self.env)).then_some(self.env.as_str());
-        let stored = store.credential_serving(&self.id).map(|c| match c {
+        let kind = if self.id == "openai" {
+            "ChatGPT login, openai-responses only"
+        } else {
+            "oauth"
+        };
+        let stored = store.credential(&self.id).map(|c| match c {
             Credential::Oauth(o) => match o.expires_at {
-                Some(at) => format!("auth.json (oauth, {})", expiry_label(at, now)),
-                None => "auth.json (oauth)".to_owned(),
+                Some(at) => format!("auth.json ({kind}, {})", expiry_label(at, now)),
+                None => format!("auth.json ({kind})"),
             },
             Credential::ApiKey { .. } => "auth.json".to_owned(),
         });
@@ -908,26 +915,23 @@ mod tests {
         assert!(raw.contains("\"key\": \"sk-ant-old\""));
     }
 
-    /// `auth list` reports a `ChatGPT` login on `openai-responses`, the
-    /// only provider it serves, and an `OpenAI` key on both.
+    /// A `ChatGPT` login serves `openai-responses` only, and `auth
+    /// list` says so on the `openai` row it was saved under, which
+    /// still counts as ready.
     #[test]
     fn a_chatgpt_login_serves_only_openai_responses() {
         let mut store = AuthStore::empty();
         store.set_oauth("openai", OAuthCredential::default());
         assert!(store.credential_serving("openai").is_none());
         assert!(store.credential_serving("openai-responses").is_some());
-        let row = |id: &str| ProviderKey {
-            id: id.to_owned(),
+        let row = ProviderKey {
+            id: "openai".to_owned(),
             env: String::new(),
             keyless: false,
         };
-        let now = fixed_now();
-        assert_eq!(row("openai").source_with(&store, |_| false, now), None);
         assert_eq!(
-            row("openai-responses")
-                .source_with(&store, |_| false, now)
-                .as_deref(),
-            Some("auth.json (oauth)")
+            row.source_with(&store, |_| false, fixed_now()).as_deref(),
+            Some("auth.json (ChatGPT login, openai-responses only)")
         );
 
         store.set_api_key("openai", "sk-1");

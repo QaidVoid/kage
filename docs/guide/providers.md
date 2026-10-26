@@ -328,7 +328,7 @@ since kage has no catalog entry for it:
 - `reasoning`: `false` for a model that does not think, which sends no
   thinking setting. `true` offers every level.
 - `efforts`: the effort values the model takes (`none`, `minimal`,
-  `low`, `medium`, `high`, `xhigh`, `max`). Implies `reasoning = true`
+  `low`, `medium`, `high`, `xhigh`, `max`, `ultra`). Implies `reasoning = true`
   and limits the levels to these.
 - `input`: the kinds of input the model takes. Attaching an image to a
   model whose `input` leaves out `image` warns, and the image is not
@@ -381,7 +381,7 @@ run.
 ## thinking
 
 A session's thinking level is one of `off`, `minimal`, `low`,
-`medium`, `high`, `xhigh` and `max`, or automatic. Automatic is the default:
+`medium`, `high`, `xhigh`, `max` and `ultra`, or automatic. Automatic is the default:
 it sends `high`, or the nearest level the model accepts when it has no
 `high` (the higher one on a tie). A level you choose with
 `alt+t`, the settings dialog or `[ui] thinking_level` is fitted the

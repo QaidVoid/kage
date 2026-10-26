@@ -22,8 +22,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
-use std::sync::Mutex;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
 
 use base64::Engine;
@@ -69,15 +72,19 @@ pub const ORIGINATOR: &str = "codex_cli_rs";
 /// The `OpenAI-Beta` value the `ChatGPT` Responses endpoint routes on.
 const OPENAI_BETA: &str = "responses=experimental";
 
-/// Refresh when the stored token expires within this window; also the
-/// proactive slack used at registry build.
-const REFRESH_SLACK: chrono::Duration = chrono::Duration::minutes(60);
+/// Refresh at registry build when the stored token expires within this
+/// window, the window the Codex CLI renews in. Renewing earlier only
+/// spends refresh-token rotations.
+const REFRESH_SLACK: chrono::Duration = chrono::Duration::minutes(5);
 
 /// Which provider id the `ChatGPT` credential is stored under.
 pub const PROVIDER_ID: &str = "openai";
 
 /// Cap on a token endpoint answer body.
 const MAX_BODY: u64 = 1024 * 1024;
+
+/// Cap on the request head a browser sends the callback listener.
+const MAX_REQUEST_HEAD: u64 = 16 * 1024;
 
 /// How long the loopback waits for a connected browser to send its
 /// request before moving on.
@@ -98,7 +105,7 @@ pub enum ChatGptError {
     /// The browser did not come back in time.
     #[error("timed out waiting for the browser to return")]
     Timeout,
-    /// The wait was stopped (Ctrl+C or a pasted redirect ended it).
+    /// The wait was stopped by Ctrl+C.
     #[error("the login was cancelled")]
     Cancelled,
     /// The redirect carried another `state` than this login sent.
@@ -190,11 +197,10 @@ fn jwt_claims(jwt: &str) -> Option<Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// The `ChatGPT` workspace/account id inside an `id_token`, under the
-/// `https://api.openai.com/auth` claim.
-#[must_use]
-pub fn account_id_from_id_token(id_token: &str) -> Option<String> {
-    let claims = jwt_claims(id_token)?;
+/// The `ChatGPT` workspace/account id inside an `id_token` or access
+/// token, under the `https://api.openai.com/auth` claim.
+fn account_id_from_jwt(jwt: &str) -> Option<String> {
+    let claims = jwt_claims(jwt)?;
     let auth = claims.get("https://api.openai.com/auth")?;
     auth.get("chatgpt_account_id")
         .and_then(Value::as_str)
@@ -244,20 +250,24 @@ fn agent() -> ureq::Agent {
         .new_agent()
 }
 
+/// An OAuth error code reduced to the characters codes use, so a
+/// hostile answer or redirect cannot inject text into the terminal.
+fn error_code(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        .take(64)
+        .collect()
+}
+
 /// Parse a token-endpoint answer body.
 fn parse_answer(status: u16, body: &str) -> Result<TokenAnswer, ChatGptError> {
     let value: Value = serde_json::from_str(body)
         .map_err(|_| ChatGptError::Response("the token answer is not JSON".to_owned()))?;
     if !(200..300).contains(&status) {
-        let code = value.get("error").and_then(Value::as_str).map_or_else(
-            || "no error code".to_owned(),
-            |e| {
-                e.chars()
-                    .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-                    .take(64)
-                    .collect::<String>()
-            },
-        );
+        let code = value
+            .get("error")
+            .and_then(Value::as_str)
+            .map_or_else(|| "no error code".to_owned(), error_code);
         return Err(ChatGptError::Denied(format!("status {status}: {code}")));
     }
     let text = |key: &str| {
@@ -339,7 +349,8 @@ fn read_body(response: &mut ureq::http::Response<ureq::Body>) -> String {
 
 /// Build the stored credential from a token answer. Expiry prefers the
 /// `expires_in` the server stated, falling back to the access token's
-/// own `exp` claim.
+/// own `exp` claim. The account id comes from the `id_token`, else the
+/// access token, else the previous credential.
 fn credential_from(answer: &TokenAnswer, previous: Option<&OAuthCredential>) -> OAuthCredential {
     let expires_at = answer
         .expires_in
@@ -349,7 +360,8 @@ fn credential_from(answer: &TokenAnswer, previous: Option<&OAuthCredential>) -> 
     let account_id = answer
         .id_token
         .as_deref()
-        .and_then(account_id_from_id_token)
+        .and_then(account_id_from_jwt)
+        .or_else(|| account_id_from_jwt(&answer.access_token))
         .or_else(|| previous.and_then(|p| p.account_id.clone()));
     OAuthCredential {
         access_token: answer.access_token.clone(),
@@ -363,36 +375,6 @@ fn credential_from(answer: &TokenAnswer, previous: Option<&OAuthCredential>) -> 
     }
 }
 
-/// Bind a TCP listener that may rebind while earlier callback
-/// connections are still in `TIME_WAIT`: `SO_REUSEADDR` on unix, where a
-/// fixed port would otherwise refuse a second login for about a
-/// minute.
-fn bind_listener(ip: Ipv4Addr, port: u16) -> io::Result<TcpListener> {
-    #[cfg(unix)]
-    {
-        use nix::sys::socket::{self, Backlog, SockFlag, SockType, SockaddrIn, sockopt};
-        use std::os::fd::AsRawFd;
-
-        let [a, b, c, d] = ip.octets();
-        let fd = socket::socket(
-            socket::AddressFamily::Inet,
-            SockType::Stream,
-            SockFlag::SOCK_CLOEXEC,
-            None,
-        )
-        .map_err(io::Error::from)?;
-        socket::setsockopt(&fd, sockopt::ReuseAddr, &true).map_err(io::Error::from)?;
-        socket::bind(fd.as_raw_fd(), &SockaddrIn::new(a, b, c, d, port))
-            .map_err(io::Error::from)?;
-        socket::listen(&fd, Backlog::new(16).map_err(io::Error::from)?).map_err(io::Error::from)?;
-        Ok(TcpListener::from(fd))
-    }
-    #[cfg(not(unix))]
-    {
-        TcpListener::bind((ip, port))
-    }
-}
-
 /// A one-shot redirect listener on `127.0.0.1` for the browser to call
 /// back. Answers the callback path, 404 for anything else.
 struct Callback {
@@ -403,16 +385,23 @@ struct Callback {
 impl Callback {
     /// Bind the registered port, falling back like the Codex CLI does.
     fn bind() -> Result<Self, ChatGptError> {
-        let local = |e| ChatGptError::Local(format!("callback listener: {e}"));
-        for port in [CALLBACK_PORT, CALLBACK_PORT_FALLBACK] {
-            if let Ok(listener) = bind_listener(Ipv4Addr::LOCALHOST, port) {
-                return Ok(Self { listener, port });
-            }
-        }
-        Err(local(format!(
-            "ports {CALLBACK_PORT} and {CALLBACK_PORT_FALLBACK} are both in use; \
-             free one and start the login again"
-        )))
+        Self::bind_on(&[CALLBACK_PORT, CALLBACK_PORT_FALLBACK]).ok_or_else(|| {
+            ChatGptError::Local(format!(
+                "callback listener: ports {CALLBACK_PORT} and {CALLBACK_PORT_FALLBACK} are \
+                 both in use; free one and start the login again"
+            ))
+        })
+    }
+
+    /// Bind the first free port of `ports`. The standard listener sets
+    /// `SO_REUSEADDR` on unix, so a second login rebinds while the last
+    /// one's connections sit in `TIME_WAIT`.
+    fn bind_on(ports: &[u16]) -> Option<Self> {
+        ports.iter().find_map(|&port| {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).ok()?;
+            let port = listener.local_addr().ok()?.port();
+            Some(Self { listener, port })
+        })
     }
 
     /// The redirect URI this listener answers.
@@ -456,15 +445,51 @@ impl Callback {
 fn serve(mut stream: &TcpStream, state: &str) -> Option<Result<String, ChatGptError>> {
     stream.set_nonblocking(false).ok()?;
     stream.set_read_timeout(Some(READ_TIMEOUT)).ok()?;
-    let mut reader = BufReader::new(stream.take(16 * 1024));
-    let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
-    let target = line.split_whitespace().nth(1)?.to_owned();
+    let target = read_target(stream)?;
     let (path, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
     if path != CALLBACK_PATH {
         respond(&mut stream, "404 Not Found", "Not found.");
         return None;
     }
+    let result = accept(query, state);
+    if result.is_ok() {
+        respond(
+            &mut stream,
+            "200 OK",
+            "kage is authorized. You can close this tab.",
+        );
+    } else {
+        respond(
+            &mut stream,
+            "400 Bad Request",
+            "kage could not finish the login. Return to the terminal.",
+        );
+    }
+    Some(result)
+}
+
+/// Read the request line and the headers, returning the request target.
+/// The headers are drained so closing the socket does not reset the
+/// connection before the browser reads the answer.
+fn read_target(stream: &TcpStream) -> Option<String> {
+    let mut reader = BufReader::new(stream.take(MAX_REQUEST_HEAD));
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    let target = line.split_whitespace().nth(1)?.to_owned();
+    loop {
+        let mut header = String::new();
+        match reader.read_line(&mut header) {
+            Ok(0) | Err(_) => break,
+            Ok(_) if header.trim_end().is_empty() => break,
+            Ok(_) => {}
+        }
+    }
+    Some(target)
+}
+
+/// Check the query of a redirect against this login's `state` and
+/// return its code.
+fn accept(query: &str, state: &str) -> Result<String, ChatGptError> {
     let (mut code, mut carried, mut error) = (None, None, None);
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
@@ -475,38 +500,21 @@ fn serve(mut stream: &TcpStream, state: &str) -> Option<Result<String, ChatGptEr
         }
     }
     if carried.as_deref() != Some(state) {
-        respond(
-            &mut stream,
-            "400 Bad Request",
-            "kage could not finish the login.",
-        );
-        return Some(Err(ChatGptError::State));
+        return Err(ChatGptError::State);
     }
     if let Some(error) = error {
-        respond(
-            &mut stream,
-            "400 Bad Request",
-            "kage could not finish the login.",
-        );
-        return Some(Err(ChatGptError::Denied(error)));
+        return Err(ChatGptError::Denied(error_code(&error)));
     }
-    if let Some(code) = code.filter(|code| !code.is_empty()) {
-        respond(
-            &mut stream,
-            "200 OK",
-            "kage is authorized. You can close this tab.",
-        );
-        Some(Ok(code))
-    } else {
-        respond(
-            &mut stream,
-            "400 Bad Request",
-            "kage could not finish the login.",
-        );
-        Some(Err(ChatGptError::Response(
-            "the redirect carries no code".to_owned(),
-        )))
-    }
+    code.filter(|code| !code.is_empty())
+        .ok_or_else(|| ChatGptError::Response("the redirect carries no code".to_owned()))
+}
+
+/// Read the code from a redirect URL the user pasted, for hosts whose
+/// browser cannot reach the loopback listener (SSH without forwarding).
+fn parse_redirect(pasted: &str, state: &str) -> Result<String, ChatGptError> {
+    let url = url::Url::parse(pasted.trim())
+        .map_err(|_| ChatGptError::Response("the pasted text is not a URL".to_owned()))?;
+    accept(url.query().unwrap_or_default(), state)
 }
 
 /// Write a small HTML page and close.
@@ -523,24 +531,38 @@ fn respond(stream: &mut &TcpStream, status: &str, message: &str) {
 }
 
 /// Run the whole login: authorize in the browser, wait for the
-/// callback (or a pasted redirect URL), trade the code for tokens, and
+/// callback or a pasted redirect URL, trade the code for tokens, and
 /// return the credential to store. The signal hook routes Ctrl+C into
-/// `cancel`, so an interrupted login does not kill the host process.
+/// `cancel` for the length of the login, so an interrupted login does
+/// not kill the host process. The terminal reader stops when the login
+/// ends, so a TUI that suspended itself for `:login` gets its input
+/// back.
 ///
 /// # Errors
 ///
 /// A message for every way a login can fail, ready for a `kage: ` line.
-pub fn login(cancel: &std::sync::Arc<AtomicBool>) -> Result<OAuthCredential, String> {
-    // Held to the end of the function, which is what keeps the Ctrl+C
-    // flag registration alive for the whole login.
-    let _sig =
-        signal_hook::flag::register(signal_hook::consts::SIGINT, std::sync::Arc::clone(cancel))
-            .ok();
-    login_inner(cancel).map_err(|e| e.to_string())
+pub fn login(cancel: &Arc<AtomicBool>) -> Result<OAuthCredential, String> {
+    let sigint = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(cancel)).ok();
+    let stop = AtomicBool::new(false);
+    let result = thread::scope(|scope| {
+        let (tx, rx) = mpsc::channel();
+        let stop = &stop;
+        scope.spawn(move || kage_tui::terminal::forward_typed_lines(&tx, stop));
+        let result = login_inner(&rx, cancel).map_err(|e| e.to_string());
+        stop.store(true, Ordering::SeqCst);
+        result
+    });
+    if let Some(id) = sigint {
+        signal_hook::low_level::unregister(id);
+    }
+    result
 }
 
 /// The login steps, with the typed error kept for tests.
-fn login_inner(cancel: &AtomicBool) -> Result<OAuthCredential, ChatGptError> {
+fn login_inner(
+    pasted: &Receiver<String>,
+    cancel: &AtomicBool,
+) -> Result<OAuthCredential, ChatGptError> {
     let pkce = Pkce::new()?;
     let state = random_state()?;
     let callback = Callback::bind()?;
@@ -550,12 +572,14 @@ fn login_inner(cancel: &AtomicBool) -> Result<OAuthCredential, ChatGptError> {
     if crate::opener::open(std::ffi::OsStr::new(&url)).is_err() {
         eprintln!("kage: no browser detected; open the URL above manually");
     }
-    eprintln!("Waiting for the browser to come back (Ctrl+C to cancel)...");
-    let code = match callback.wait(&state, LOGIN_TIMEOUT, cancel) {
-        Ok(code) => code,
-        Err(ChatGptError::Timeout) => paste_fallback(&state)?,
-        Err(e) => return Err(e),
-    };
+    eprintln!(
+        "Waiting for the browser to come back ({} minutes, Ctrl+C to cancel).",
+        LOGIN_TIMEOUT.as_secs() / 60
+    );
+    eprintln!("On another machine? Paste the URL your browser was sent to and press Enter:");
+    eprint!("> ");
+    let _ = io::stderr().flush();
+    let code = wait_for_code(callback, &state, LOGIN_TIMEOUT, pasted, cancel)?;
     let answer = exchange_code(&code, &pkce.verifier, &redirect)?;
     let credential = credential_from(&answer, None);
     if credential.account_id.is_none() {
@@ -564,39 +588,45 @@ fn login_inner(cancel: &AtomicBool) -> Result<OAuthCredential, ChatGptError> {
     Ok(credential)
 }
 
-/// Ask for the redirect URL the browser was sent to, for hosts whose
-/// browser cannot reach the loopback listener (SSH without forwarding).
-fn paste_fallback(state: &str) -> Result<String, ChatGptError> {
-    eprintln!(
-        "No callback arrived. If your browser can reach this machine, \
-         paste the URL it was redirected to (Enter to cancel):"
-    );
-    let mut line = String::new();
-    io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .map_err(|e| ChatGptError::Local(format!("stdin: {e}")))?;
-    let pasted = line.trim();
-    if pasted.is_empty() {
-        return Err(ChatGptError::Cancelled);
-    }
-    let query = url::Url::parse(pasted)
-        .ok()
-        .and_then(|u| u.query().map(str::to_owned))
-        .unwrap_or_default();
-    let (mut code, mut carried) = (None, None);
-    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
-        match key.as_ref() {
-            "code" => code = Some(value.into_owned()),
-            "state" => carried = Some(value.into_owned()),
-            _ => {}
+/// The first of the browser's redirect and a pasted one, or
+/// [`ChatGptError::Cancelled`] once `cancel` is set. Blank lines are
+/// ignored, and a closed input leaves only the browser. When the
+/// browser wins or the wait is cancelled, the prompt line is ended.
+fn wait_for_code(
+    callback: Callback,
+    state: &str,
+    timeout: Duration,
+    pasted: &Receiver<String>,
+    cancel: &AtomicBool,
+) -> Result<String, ChatGptError> {
+    let stop = AtomicBool::new(false);
+    thread::scope(|scope| {
+        let stop = &stop;
+        let browser = scope.spawn(move || callback.wait(state, timeout, stop));
+        let stopped = || ChatGptError::Local("the callback listener stopped".to_owned());
+        loop {
+            if browser.is_finished() {
+                eprintln!();
+                return browser.join().unwrap_or_else(|_| Err(stopped()));
+            }
+            if cancel.load(Ordering::SeqCst) {
+                stop.store(true, Ordering::SeqCst);
+                let _ = browser.join();
+                eprintln!();
+                return Err(ChatGptError::Cancelled);
+            }
+            match pasted.recv_timeout(POLL) {
+                Ok(line) if line.trim().is_empty() => {}
+                Ok(line) => {
+                    stop.store(true, Ordering::SeqCst);
+                    let _ = browser.join();
+                    return parse_redirect(&line, state);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => thread::sleep(POLL),
+            }
         }
-    }
-    if carried.as_deref() != Some(state) {
-        return Err(ChatGptError::State);
-    }
-    code.filter(|code| !code.is_empty())
-        .ok_or_else(|| ChatGptError::Response("the redirect carries no code".to_owned()))
+    })
 }
 
 /// Renew `credential` at the token endpoint. The refresh token is kept
@@ -653,19 +683,24 @@ pub fn backend_headers(account_id: Option<&str>) -> BTreeMap<String, String> {
 }
 
 /// The provider-side renewable credential: hands the current token to
-/// every request and renews through the auth store on a 401. Cheap to
-/// clone (`Arc` inside).#[derive(Clone)]
+/// every request and renews through the auth store at `path` on a 401.
+/// Cheap to clone (`Arc` inside).
+#[derive(Clone)]
 pub struct ChatGptBearer {
-    token: std::sync::Arc<Mutex<String>>,
+    /// The token of the moment. Held across a renewal, so concurrent
+    /// rejections renew once.
+    token: Arc<Mutex<String>>,
+    path: PathBuf,
 }
 
 impl ChatGptBearer {
     /// A bearer source starting from `credential`, usually the one
-    /// `providers.rs` just read from the store.
+    /// `providers.rs` just read from the auth store at `path`.
     #[must_use]
-    pub fn new(credential: &OAuthCredential) -> Self {
+    pub fn new(credential: &OAuthCredential, path: PathBuf) -> Self {
         Self {
-            token: std::sync::Arc::new(Mutex::new(credential.access_token.clone())),
+            token: Arc::new(Mutex::new(credential.access_token.clone())),
+            path,
         }
     }
 }
@@ -674,6 +709,7 @@ impl fmt::Debug for ChatGptBearer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ChatGptBearer")
             .field("token", &REDACTED)
+            .field("path", &self.path)
             .finish()
     }
 }
@@ -685,20 +721,29 @@ impl kage_provider::BearerSource for ChatGptBearer {
             .map_or_else(|_| String::new(), |token| token.clone())
     }
 
-    fn refresh(&self) -> Result<String, kage_provider::ProviderError> {
-        let mut store = AuthStore::load().map_err(|e| renewal_failed(&e))?;
+    fn refresh(&self, rejected: &str) -> Result<String, kage_provider::ProviderError> {
+        let mut current = self
+            .token
+            .lock()
+            .map_err(|_| renewal_failed("the token lock is poisoned"))?;
+        let mut store = AuthStore::load_from(&self.path).map_err(|e| renewal_failed(&e))?;
         let Some(crate::auth::Credential::Oauth(oauth)) = store.credential(PROVIDER_ID) else {
             return Err(kage_provider::ProviderError::Auth(
                 "no ChatGPT login stored; run `kage auth login openai`".to_owned(),
             ));
         };
+        // Single-flight: another request or process may have renewed
+        // while the rejected token was in flight. Renewing again would
+        // reuse a rotated refresh token, which the server refuses.
+        if oauth.access_token != rejected {
+            current.clone_from(&oauth.access_token);
+            return Ok(oauth.access_token.clone());
+        }
         let renewed = refresh_credential(oauth).map_err(|e| renewal_failed(&e))?;
         let token = renewed.access_token.clone();
         store.set(PROVIDER_ID, crate::auth::Credential::Oauth(renewed));
-        store.save().map_err(|e| renewal_failed(&e))?;
-        if let Ok(mut current) = self.token.lock() {
-            current.clone_from(&token);
-        }
+        store.save_to(&self.path).map_err(|e| renewal_failed(&e))?;
+        current.clone_from(&token);
         Ok(token)
     }
 }
@@ -731,14 +776,11 @@ mod tests {
                 "chatgpt_plan_type": "plus",
             },
         }));
-        assert_eq!(
-            account_id_from_id_token(&id_token).as_deref(),
-            Some("acc-123")
-        );
-        assert_eq!(account_id_from_id_token("not-a-jwt"), None);
-        assert_eq!(account_id_from_id_token(""), None);
+        assert_eq!(account_id_from_jwt(&id_token).as_deref(), Some("acc-123"));
+        assert_eq!(account_id_from_jwt("not-a-jwt"), None);
+        assert_eq!(account_id_from_jwt(""), None);
         let without = jwt(&serde_json::json!({ "email": "dev@example.com" }));
-        assert_eq!(account_id_from_id_token(&without), None);
+        assert_eq!(account_id_from_jwt(&without), None);
     }
 
     #[test]
@@ -844,17 +886,17 @@ mod tests {
         assert!(matches!(err, ChatGptError::Response(_)), "{err}");
     }
 
-    /// The callback server hands over the code for the right state,
-    /// ignores other paths, and ends the wait on a forged state or a
-    /// provider error.
-    /// The callback tests share the fixed Codex ports, so they take
-    /// turns; a real login never overlaps another.
-    static CALLBACK_PORTS: Mutex<()> = Mutex::new(());
+    /// A listener on a port the system picks, so parallel test
+    /// processes never fight over the fixed Codex ports.
+    fn ephemeral() -> Callback {
+        Callback::bind_on(&[0]).unwrap()
+    }
 
+    /// The callback server hands over the code for the right state and
+    /// ignores other paths.
     #[test]
     fn the_callback_checks_state_and_hands_over_the_code() {
-        let _ports = CALLBACK_PORTS.lock().unwrap();
-        let callback = Callback::bind().unwrap();
+        let callback = ephemeral();
         let port = callback.port;
         assert_eq!(callback.redirect_uri(), redirect_uri_for(port));
         let browser = std::thread::spawn(move || {
@@ -883,10 +925,10 @@ mod tests {
         assert!(ok.contains("200"), "{ok}");
     }
 
+    /// A forged state or a provider error ends the wait.
     #[test]
     fn the_callback_refuses_a_forged_state_and_a_provider_error() {
-        let _ports = CALLBACK_PORTS.lock().unwrap();
-        let callback = Callback::bind().unwrap();
+        let callback = ephemeral();
         let port = callback.port;
         let browser = std::thread::spawn(move || {
             let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
@@ -905,7 +947,7 @@ mod tests {
         assert!(matches!(err, ChatGptError::State), "{err}");
         assert!(browser.join().unwrap().contains("400"));
 
-        let callback = Callback::bind().unwrap();
+        let callback = ephemeral();
         let port = callback.port;
         let browser = std::thread::spawn(move || {
             let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
@@ -930,17 +972,102 @@ mod tests {
 
     #[test]
     fn the_callback_times_out_and_cancels() {
-        let _ports = CALLBACK_PORTS.lock().unwrap();
-        let err = Callback::bind()
-            .unwrap()
+        let err = ephemeral()
             .wait("s1", Duration::from_millis(80), &AtomicBool::new(false))
             .unwrap_err();
         assert!(matches!(err, ChatGptError::Timeout), "{err}");
-        let err = Callback::bind()
-            .unwrap()
+        let err = ephemeral()
             .wait("s1", Duration::from_secs(30), &AtomicBool::new(true))
             .unwrap_err();
         assert!(matches!(err, ChatGptError::Cancelled), "{err}");
+    }
+
+    /// A pasted redirect ends the wait while the listener still runs,
+    /// and blank lines are skipped.
+    #[test]
+    fn a_pasted_redirect_wins_over_the_browser() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(String::new()).unwrap();
+        tx.send(format!(
+            "{}?code=pasted&state=s1\n",
+            redirect_uri_for(CALLBACK_PORT)
+        ))
+        .unwrap();
+        let code = wait_for_code(
+            ephemeral(),
+            "s1",
+            Duration::from_secs(30),
+            &rx,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(code, "pasted");
+
+        let err = parse_redirect("not a url", "s1").unwrap_err();
+        assert!(matches!(err, ChatGptError::Response(_)), "{err}");
+        let err =
+            parse_redirect("http://127.0.0.1/auth/callback?code=c&state=s2", "s1").unwrap_err();
+        assert!(matches!(err, ChatGptError::State), "{err}");
+    }
+
+    /// Ctrl+C ends the wait even with nothing typed.
+    #[test]
+    fn the_wait_for_a_code_is_cancellable() {
+        let (_tx, rx) = mpsc::channel();
+        let err = wait_for_code(
+            ephemeral(),
+            "s1",
+            Duration::from_secs(30),
+            &rx,
+            &AtomicBool::new(true),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ChatGptError::Cancelled), "{err}");
+    }
+
+    #[test]
+    fn the_account_id_falls_back_to_the_access_token() {
+        let answer = TokenAnswer {
+            access_token: jwt(&serde_json::json!({
+                "https://api.openai.com/auth": { "chatgpt_account_id": "acc-at" },
+            })),
+            ..TokenAnswer::default()
+        };
+        assert_eq!(
+            credential_from(&answer, None).account_id.as_deref(),
+            Some("acc-at")
+        );
+    }
+
+    /// A rejection of a token another request already replaced adopts
+    /// the stored token instead of rotating the refresh token again.
+    #[test]
+    fn a_stale_rejection_adopts_the_stored_token_without_renewing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = AuthStore::empty();
+        store.set_oauth(
+            PROVIDER_ID,
+            OAuthCredential {
+                access_token: "renewed-elsewhere".to_owned(),
+                refresh_token: Some("rotated".to_owned()),
+                ..OAuthCredential::default()
+            },
+        );
+        store.save_to(&path).unwrap();
+        let bearer = ChatGptBearer::new(
+            &OAuthCredential {
+                access_token: "stale".to_owned(),
+                ..OAuthCredential::default()
+            },
+            path,
+        );
+        let token = kage_provider::BearerSource::refresh(&bearer, "stale").unwrap();
+        assert_eq!(token, "renewed-elsewhere");
+        assert_eq!(
+            kage_provider::BearerSource::token(&bearer),
+            "renewed-elsewhere"
+        );
     }
 
     #[test]
@@ -971,7 +1098,7 @@ mod tests {
             access_token: "at-1".to_owned(),
             ..OAuthCredential::default()
         };
-        let bearer = ChatGptBearer::new(&credential);
+        let bearer = ChatGptBearer::new(&credential, PathBuf::from("auth.json"));
         assert_eq!(kage_provider::BearerSource::token(&bearer), "at-1");
         assert!(format!("{bearer:?}").contains(REDACTED));
         assert!(!format!("{bearer:?}").contains("at-1"));

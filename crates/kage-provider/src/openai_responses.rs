@@ -43,18 +43,22 @@ pub struct OpenAiResponsesProvider {
     /// Renewable credential (an OAuth login). When set, `api_key` is
     /// ignored and a 401 refreshes once and retries.
     bearer: Option<SharedBearer>,
+    /// Whether requests carry `max_output_tokens`. The `ChatGPT`
+    /// backend refuses the parameter.
+    output_limit: bool,
 }
 
 impl fmt::Debug for OpenAiResponsesProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OpenAiResponsesProvider")
-            .field("api_key", &self.api_key)
+            .field("api_key", &(!self.api_key.is_empty()).then_some("<set>"))
             .field("base_url", &self.base_url)
             .field("metadata", &self.metadata)
             .field("extra_headers", &self.extra_headers)
             .field("models", &self.models.len())
             .field("image_generation", &self.image_generation)
             .field("bearer", &self.bearer.as_ref().map(|_| "<set>"))
+            .field("output_limit", &self.output_limit)
             .finish()
     }
 }
@@ -83,22 +87,31 @@ impl OpenAiResponsesProvider {
             models: Vec::new(),
             image_generation: false,
             bearer: None,
+            output_limit: true,
         }
     }
 
     /// The streaming body for `req`, with the hosted image tool offered
-    /// when the provider switch is on.
+    /// when the provider switch is on and the output limit dropped when
+    /// it is off.
     fn request_body(&self, req: &StreamRequest) -> Value {
-        if !self.image_generation {
-            return build_request_body(req, true);
+        let mut body = if self.image_generation {
+            let mut req = req.clone();
+            req.produces = req
+                .produces
+                .iter()
+                .chain([kage_core::Modality::Text, kage_core::Modality::Image])
+                .collect();
+            build_request_body(&req, true)
+        } else {
+            build_request_body(req, true)
+        };
+        if !self.output_limit
+            && let Some(body) = body.as_object_mut()
+        {
+            body.remove("max_output_tokens");
         }
-        let mut req = req.clone();
-        req.produces = req
-            .produces
-            .iter()
-            .chain([kage_core::Modality::Text, kage_core::Modality::Image])
-            .collect();
-        build_request_body(&req, true)
+        body
     }
 
     /// Offer `OpenAI`'s hosted image tool to every model, as if each said
@@ -134,16 +147,21 @@ impl OpenAiResponsesProvider {
         self
     }
 
+    /// Send requests without `max_output_tokens`, for backends that
+    /// refuse it (the `ChatGPT` backend answers it with a 400).
+    #[must_use]
+    pub fn without_output_limit(mut self) -> Self {
+        self.output_limit = false;
+        self
+    }
+
     /// Headers every request carries: content type, the bearer
-    /// credential (skipped when no key is configured), then the
-    /// configured extras in key order. A [`crate::bearer::BearerSource`]
-    /// supplies the credential; a refresh updates it in place, so the
-    /// retry picks up the fresh token on its own.
-    fn request_headers(&self) -> Vec<(String, String)> {
-        let credential = self
-            .bearer
-            .as_ref()
-            .map(|source| source.token())
+    /// credential (`token` from a [`crate::bearer::BearerSource`], else
+    /// the API key, skipped when neither is set), then the configured
+    /// extras in key order.
+    fn request_headers(&self, token: Option<&str>) -> Vec<(String, String)> {
+        let credential = token
+            .map(str::to_owned)
             .or_else(|| (!self.api_key.is_empty()).then(|| self.api_key.clone()))
             .map(|key| ("authorization", format!("Bearer {key}")));
         crate::headers::request_headers(
@@ -181,32 +199,36 @@ impl Provider for OpenAiResponsesProvider {
         }
         let body = self.request_body(&req);
         let url = format!("{}/responses", self.base_url);
-        let session = req.session.clone();
-        // A renewable credential that came back rejected gets exactly
-        // one refresh-and-retry: the source updates its token in place,
-        // so the replay picks up the fresh one; a still-rejected token
-        // then fails as the auth error it is.
-        let first = self.dispatch(&body, &url, session.as_deref(), cancel);
-        match (&self.bearer, first) {
-            (Some(source), Err(ProviderError::Auth(_))) => {
-                source.refresh()?;
-                self.dispatch(&body, &url, session.as_deref(), cancel)
+        let session = req.session.as_deref();
+        let Some(source) = &self.bearer else {
+            return self.dispatch(&body, &url, None, session, cancel);
+        };
+        // A rejected renewable credential gets exactly one
+        // refresh-and-retry; a still-rejected token then fails as the
+        // auth error it is.
+        let sent = source.token();
+        match self.dispatch(&body, &url, Some(&sent), session, cancel) {
+            Err(ProviderError::Auth(_)) => {
+                let fresh = source.refresh(&sent)?;
+                self.dispatch(&body, &url, Some(&fresh), session, cancel)
             }
-            (_, other) => other,
+            other => other,
         }
     }
 }
 
 impl OpenAiResponsesProvider {
-    /// Send one request and turn a non-2xx status into its error.
+    /// Send one request with bearer `token` (else the API key) and turn
+    /// a non-2xx status into its error.
     fn dispatch(
         &self,
         body: &Value,
         url: &str,
+        token: Option<&str>,
         session: Option<&str>,
         cancel: &CancelFlag,
     ) -> Result<EventStream, ProviderError> {
-        let mut headers = self.request_headers();
+        let mut headers = self.request_headers(token);
         headers.extend(crate::headers::opencode_headers(
             &self.base_url,
             session,
@@ -1383,7 +1405,7 @@ mod tests {
         extras.insert("X-A".to_owned(), "1".to_owned());
         let provider = OpenAiResponsesProvider::new("k").with_extra_headers(extras);
         assert_eq!(
-            provider.request_headers(),
+            provider.request_headers(None),
             vec![
                 ("content-type".to_owned(), "application/json".to_owned()),
                 ("authorization".to_owned(), "Bearer k".to_owned()),
@@ -1398,7 +1420,7 @@ mod tests {
         let mut extras = BTreeMap::new();
         extras.insert("X-A".to_owned(), "1".to_owned());
         let provider = OpenAiResponsesProvider::new("").with_extra_headers(extras);
-        let headers = provider.request_headers();
+        let headers = provider.request_headers(None);
         assert!(
             headers.iter().all(|(name, _)| name != "authorization"),
             "no credential header without a key: {headers:?}"
@@ -1422,17 +1444,15 @@ mod tests {
 
     struct FixedBearer {
         token: std::sync::Mutex<String>,
+        rejected: std::sync::Mutex<Vec<String>>,
     }
 
     impl FixedBearer {
         fn new(token: &str) -> Self {
             Self {
                 token: std::sync::Mutex::new(token.to_owned()),
+                rejected: std::sync::Mutex::default(),
             }
-        }
-
-        fn set(&self, token: &str) {
-            *self.token.lock().unwrap() = token.to_owned();
         }
     }
 
@@ -1441,16 +1461,16 @@ mod tests {
             self.token.lock().unwrap().clone()
         }
 
-        fn refresh(&self) -> Result<String, ProviderError> {
-            self.set("refreshed");
+        fn refresh(&self, rejected: &str) -> Result<String, ProviderError> {
+            self.rejected.lock().unwrap().push(rejected.to_owned());
+            "refreshed".clone_into(&mut self.token.lock().unwrap());
             Ok(self.token())
         }
     }
 
     #[test]
     fn request_headers_prefer_the_bearer_token_over_the_stored_key() {
-        let bearer = Arc::new(FixedBearer::new("oauth"));
-        let provider = OpenAiResponsesProvider::new("static").with_bearer(Arc::clone(&bearer) as _);
+        let provider = OpenAiResponsesProvider::new("static");
         let find = |headers: &[(String, String)]| {
             headers
                 .iter()
@@ -1458,13 +1478,30 @@ mod tests {
                 .map(|(_, v)| v.clone())
                 .unwrap_or_default()
         };
-        assert_eq!(find(&provider.request_headers()), "Bearer oauth");
-        crate::bearer::BearerSource::refresh(bearer.as_ref()).unwrap();
         assert_eq!(
-            find(&provider.request_headers()),
-            "Bearer refreshed",
-            "the retry sees the refreshed token"
+            find(&provider.request_headers(Some("oauth"))),
+            "Bearer oauth"
         );
+        assert_eq!(find(&provider.request_headers(None)), "Bearer static");
+    }
+
+    #[test]
+    fn the_output_limit_can_be_left_out_of_the_body() {
+        let req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
+        let limited = OpenAiResponsesProvider::new("k").request_body(&req);
+        assert!(limited.get("max_output_tokens").is_some());
+        let open = OpenAiResponsesProvider::new("k")
+            .without_output_limit()
+            .request_body(&req);
+        assert!(open.get("max_output_tokens").is_none(), "{open}");
+        assert_eq!(open["store"], false);
+    }
+
+    #[test]
+    fn debug_redacts_the_api_key() {
+        let debug = format!("{:?}", OpenAiResponsesProvider::new("sk-secret"));
+        assert!(!debug.contains("sk-secret"), "{debug}");
+        assert!(debug.contains("<set>"), "{debug}");
     }
 
     /// A 401 on a renewable credential refreshes once and replays the
@@ -1533,10 +1570,7 @@ mod tests {
             *tokens.lock().unwrap(),
             ["Bearer stale", "Bearer refreshed"]
         );
-        assert_eq!(
-            crate::bearer::BearerSource::token(bearer.as_ref()),
-            "refreshed"
-        );
+        assert_eq!(*bearer.rejected.lock().unwrap(), ["stale"]);
     }
 
     /// When refresh itself fails, the 401 surfaces as the auth error.
@@ -1548,7 +1582,7 @@ mod tests {
                 "stale".to_owned()
             }
 
-            fn refresh(&self) -> Result<String, ProviderError> {
+            fn refresh(&self, _rejected: &str) -> Result<String, ProviderError> {
                 Err(ProviderError::Auth("login expired".to_owned()))
             }
         }

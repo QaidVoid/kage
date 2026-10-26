@@ -500,6 +500,8 @@ fn run_login_api_key(provider: &str) -> ExitCode {
 }
 
 /// `kage auth logout <provider>`: remove the saved key for `provider`.
+/// `openai-responses` logs out of `openai` as well, where its login is
+/// stored.
 pub fn run_logout(provider: &str) -> ExitCode {
     let mut store = match AuthStore::load() {
         Ok(s) => s,
@@ -508,7 +510,7 @@ pub fn run_logout(provider: &str) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    if !store.remove(provider) {
+    if !remove_login(&mut store, provider) {
         eprintln!("kage: no saved key for {provider}");
         return ExitCode::SUCCESS;
     }
@@ -518,6 +520,15 @@ pub fn run_logout(provider: &str) -> ExitCode {
     }
     eprintln!("kage: removed {provider} credentials");
     ExitCode::SUCCESS
+}
+
+/// Remove `provider`'s credential, and for `openai-responses` the
+/// `openai` one its login is stored under. Returns whether any was
+/// there.
+fn remove_login(store: &mut AuthStore, provider: &str) -> bool {
+    let own = store.remove(provider);
+    let shared = provider == "openai-responses" && store.remove("openai");
+    own || shared
 }
 
 /// Where one provider's credential can come from.
@@ -879,6 +890,19 @@ mod tests {
         assert!(raw.contains("\"version\": 2"));
         assert!(raw.contains("\"type\": \"api_key\""));
         assert!(raw.contains("\"key\": \"sk-ant-old\""));
+    }
+
+    #[test]
+    fn logging_out_of_openai_responses_removes_the_shared_openai_login() {
+        let mut store = AuthStore::empty();
+        store.set_oauth("openai", OAuthCredential::default());
+        assert!(remove_login(&mut store, "openai-responses"));
+        assert!(store.credential("openai").is_none());
+        assert!(!remove_login(&mut store, "openai-responses"));
+
+        store.set_api_key("openai", "sk-1");
+        assert!(!remove_login(&mut store, "anthropic"));
+        assert!(store.credential("openai").is_some());
     }
 
     #[test]

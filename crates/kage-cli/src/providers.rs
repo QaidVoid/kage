@@ -459,7 +459,8 @@ mod tests {
     use super::*;
 
     /// A server that answers one streaming request and hands back its
-    /// request head.
+    /// request head. The body is read in full before the answer, since
+    /// Windows resets a connection closed with unread data.
     fn capture_one() -> (std::net::SocketAddr, std::thread::JoinHandle<String>) {
         use std::io::{Read as _, Write as _};
 
@@ -469,7 +470,19 @@ mod tests {
             let (mut conn, _) = listener.accept().unwrap();
             let mut raw = Vec::new();
             let mut buf = [0u8; 8192];
-            while !raw.windows(4).any(|w| w == b"\r\n\r\n") {
+            let head_end = loop {
+                if let Some(at) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break at + 4;
+                }
+                let n = conn.read(&mut buf).unwrap();
+                raw.extend_from_slice(&buf[..n]);
+            };
+            let head = String::from_utf8_lossy(&raw[..head_end]).to_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .map_or(0, |value| value.trim().parse().unwrap());
+            while raw.len() < head_end + length {
                 let n = conn.read(&mut buf).unwrap();
                 raw.extend_from_slice(&buf[..n]);
             }
@@ -547,6 +560,7 @@ mod tests {
             assert!(request.contains(&format!("\r\n{header}\r\n")), "{request}");
         }
         assert!(!request.contains("content-encoding"), "{request}");
+        assert!(request.ends_with('}'), "the whole body was read: {request}");
     }
 
     /// Key lookups (the image tool's among them) never hand a `ChatGPT`

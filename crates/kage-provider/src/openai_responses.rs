@@ -7,9 +7,9 @@
 //! a richer SSE event vocabulary. The Codex (`gpt-5-codex`,
 //! `gpt-5.1-codex-*`) models are first-class here.
 //!
-//! Provider id: `openai-responses`. Users address models as
-//! `openai-responses:gpt-5-codex`. The host shares its `OPENAI_API_KEY`
-//! with this provider; nothing in the credential store is duplicated.
+//! Provider id: `openai`, kage's built-in `OpenAI` provider. Chat
+//! Completions stays in [`crate::openai`] for the providers that speak
+//! that protocol.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -84,8 +84,8 @@ impl OpenAiResponsesProvider {
             api_key: api_key.into(),
             base_url: base_url.into(),
             metadata: ProviderMetadata {
-                id: "openai-responses".into(),
-                display_name: "OpenAI Responses".into(),
+                id: "openai".into(),
+                display_name: "OpenAI".into(),
                 supports_caching: false,
                 supports_thinking: true,
                 supports_tool_use: true,

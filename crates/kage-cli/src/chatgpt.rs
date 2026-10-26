@@ -7,8 +7,8 @@
 //! `127.0.0.1:1455` (paste the redirect URL when no browser can reach
 //! this machine), and the tokens land in `auth.json` as an OAuth
 //! credential carrying the `chatgpt_account_id` parsed from the
-//! `id_token`. The provider registry then routes `openai-responses`
-//! models through the `ChatGPT` backend at
+//! `id_token`. The provider registry then routes `openai` models
+//! through the `ChatGPT` backend at
 //! `https://chatgpt.com/backend-api/codex`. PKCE, the state check, the
 //! listener and the paste prompt are the ones MCP logins use.
 //!

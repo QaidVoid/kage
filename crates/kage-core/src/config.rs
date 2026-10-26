@@ -782,7 +782,7 @@ pub struct BuiltinProviderOverride {
     /// Extra HTTP headers sent on every request to this provider.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
-    /// `openai-responses` only: offer `OpenAI`'s hosted image tool to
+    /// `openai` only: offer `OpenAI`'s hosted image tool to
     /// every model, so a model can answer with images. The tool runs at
     /// `OpenAI` and is billed on its own, so it is off unless set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2240,14 +2240,8 @@ default = "ask"   # keep asking
         };
         providers
             .validate(
-                &["acp", "anthropic", "openai", "openai-responses", "google"],
-                &[
-                    "anthropic",
-                    "openai",
-                    "openai-responses",
-                    "google",
-                    "deepseek",
-                ],
+                &["acp", "anthropic", "openai", "google"],
+                &["anthropic", "openai", "google", "deepseek"],
             )
             .expect("well-formed providers validate");
     }

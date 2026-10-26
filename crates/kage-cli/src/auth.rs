@@ -269,20 +269,13 @@ impl AuthStore {
         })
     }
 
-    /// The stored credential that serves `provider` the way the
-    /// registry wires it: [`Self::credential`], except that
-    /// `openai-responses` also falls back to the `openai` entry the two
-    /// share, and a `ChatGPT` login (an OAuth record under `openai`)
-    /// serves only `openai-responses`, never chat completions.
+    /// The stored credential `provider`'s public API accepts:
+    /// [`Self::credential`], except a `ChatGPT` login (an OAuth record
+    /// under `openai`), which only the `ChatGPT` backend takes.
     #[must_use]
-    pub fn credential_serving(&self, provider: &str) -> Option<&Credential> {
-        match provider {
-            "openai" => self.credential("openai").filter(|c| !c.is_oauth()),
-            "openai-responses" => self
-                .credential("openai-responses")
-                .or_else(|| self.credential("openai")),
-            _ => self.credential(provider),
-        }
+    pub fn api_credential(&self, provider: &str) -> Option<&Credential> {
+        self.credential(provider)
+            .filter(|c| provider != "openai" || !c.is_oauth())
     }
 
     /// Look up a single bearer token for `provider`, regardless of
@@ -389,13 +382,11 @@ pub const KNOWN_PROVIDERS: &[&str] = &[
 ];
 
 /// Env-var name that, when set, supersedes any saved key for `provider`.
-/// `openai-responses` shares `OPENAI_API_KEY`: both providers are
-/// registered from the same credential at runtime.
 #[must_use]
 pub fn env_var_for(provider: &str) -> &'static str {
     match provider {
         "anthropic" => "ANTHROPIC_API_KEY",
-        "openai" | "openai-responses" => "OPENAI_API_KEY",
+        "openai" => "OPENAI_API_KEY",
         "google" => "GEMINI_API_KEY",
         "zai" => "ZAI_API_KEY",
         "zai-coding-plan" | "zhipuai-coding-plan" => "ZAI_CODING_API_KEY",
@@ -435,15 +426,14 @@ pub fn run_login(provider: Option<&str>, config: &kage_core::config::Config) -> 
             return ExitCode::from(2);
         }
     };
-    if matches!(provider.as_str(), "openai" | "openai-responses") {
+    if provider == "openai" {
         return run_openai_login();
     }
     run_login_api_key(&provider)
 }
 
 /// The `OpenAI` login: pick `ChatGPT` sign-in or an API key, then store
-/// the result under `openai` so both `openai` and `openai-responses`
-/// resolve it.
+/// the result under `openai`.
 fn run_openai_login() -> ExitCode {
     let items = [
         kage_tui::PickItem::simple("chatgpt")
@@ -481,7 +471,7 @@ fn run_openai_login() -> ExitCode {
         eprintln!("kage: {e}");
         return ExitCode::from(1);
     }
-    eprintln!("kage: signed in with ChatGPT; `openai-responses:` models now use your plan");
+    eprintln!("kage: signed in with ChatGPT; `openai` models now use your plan");
     ExitCode::SUCCESS
 }
 
@@ -516,8 +506,6 @@ fn run_login_api_key(provider: &str) -> ExitCode {
 }
 
 /// `kage auth logout <provider>`: remove the saved key for `provider`.
-/// `openai-responses` logs out of `openai` as well, where its login is
-/// stored.
 pub fn run_logout(provider: &str) -> ExitCode {
     let mut store = match AuthStore::load() {
         Ok(s) => s,
@@ -526,7 +514,7 @@ pub fn run_logout(provider: &str) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    if !remove_login(&mut store, provider) {
+    if !store.remove(provider) {
         eprintln!("kage: no saved key for {provider}");
         return ExitCode::SUCCESS;
     }
@@ -536,15 +524,6 @@ pub fn run_logout(provider: &str) -> ExitCode {
     }
     eprintln!("kage: removed {provider} credentials");
     ExitCode::SUCCESS
-}
-
-/// Remove `provider`'s credential, and for `openai-responses` the
-/// `openai` one its login is stored under. Returns whether any was
-/// there.
-fn remove_login(store: &mut AuthStore, provider: &str) -> bool {
-    let own = store.remove(provider);
-    let shared = provider == "openai-responses" && store.remove("openai");
-    own || shared
 }
 
 /// Where one provider's credential can come from.
@@ -572,8 +551,7 @@ impl ProviderKey {
     /// [`Self::source`] against an injected env check and clock, so
     /// callers can rate providers without touching the process env or
     /// the wall clock. An OAuth row carries its expiry label, and the
-    /// `openai` row names a `ChatGPT` login as one for
-    /// `openai-responses`, the only provider it serves.
+    /// `openai` row names a `ChatGPT` login as one.
     pub(crate) fn source_with(
         &self,
         store: &AuthStore,
@@ -585,7 +563,7 @@ impl ProviderKey {
         }
         let env = (!self.env.is_empty() && env_set(&self.env)).then_some(self.env.as_str());
         let kind = if self.id == "openai" {
-            "ChatGPT login, openai-responses only"
+            "ChatGPT login"
         } else {
             "oauth"
         };
@@ -915,15 +893,13 @@ mod tests {
         assert!(raw.contains("\"key\": \"sk-ant-old\""));
     }
 
-    /// A `ChatGPT` login serves `openai-responses` only, and `auth
-    /// list` says so on the `openai` row it was saved under, which
-    /// still counts as ready.
+    /// A `ChatGPT` login is no key for `OpenAI`'s public API, and
+    /// `auth list` names it on the `openai` row, which counts as ready.
     #[test]
-    fn a_chatgpt_login_serves_only_openai_responses() {
+    fn a_chatgpt_login_is_no_public_api_credential() {
         let mut store = AuthStore::empty();
         store.set_oauth("openai", OAuthCredential::default());
-        assert!(store.credential_serving("openai").is_none());
-        assert!(store.credential_serving("openai-responses").is_some());
+        assert!(store.api_credential("openai").is_none());
         let row = ProviderKey {
             id: "openai".to_owned(),
             env: String::new(),
@@ -931,25 +907,11 @@ mod tests {
         };
         assert_eq!(
             row.source_with(&store, |_| false, fixed_now()).as_deref(),
-            Some("auth.json (ChatGPT login, openai-responses only)")
+            Some("auth.json (ChatGPT login)")
         );
 
         store.set_api_key("openai", "sk-1");
-        assert!(store.credential_serving("openai").is_some());
-        assert!(store.credential_serving("openai-responses").is_some());
-    }
-
-    #[test]
-    fn logging_out_of_openai_responses_removes_the_shared_openai_login() {
-        let mut store = AuthStore::empty();
-        store.set_oauth("openai", OAuthCredential::default());
-        assert!(remove_login(&mut store, "openai-responses"));
-        assert!(store.credential("openai").is_none());
-        assert!(!remove_login(&mut store, "openai-responses"));
-
-        store.set_api_key("openai", "sk-1");
-        assert!(!remove_login(&mut store, "anthropic"));
-        assert!(store.credential("openai").is_some());
+        assert!(store.api_credential("openai").is_some());
     }
 
     #[test]
@@ -1101,8 +1063,8 @@ mod tests {
     }
 
     /// The one credential list behind `auth list`, doctor and init:
-    /// custom env names, synthesized env names, and the
-    /// `openai-responses` alias must all resolve here.
+    /// custom env names and synthesized env names must both resolve
+    /// here.
     #[test]
     fn provider_keys_resolve_every_credential_shape() {
         let config: kage_core::config::Config = toml::from_str(
@@ -1121,8 +1083,6 @@ mod tests {
         let synth = keys.iter().find(|k| k.id == "synth").unwrap();
         assert_eq!(synth.env, "SYNTH_API_KEY", "the env name is synthesized");
         assert!(!synth.keyless);
-
-        assert_eq!(env_var_for("openai-responses"), "OPENAI_API_KEY");
     }
 
     #[test]

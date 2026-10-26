@@ -56,8 +56,8 @@ pub(crate) fn probe(probe: &ProviderProbe, config: &Config, store: &AuthStore) -
 }
 
 /// The target `probe` names: its own fields, then the saved entry for
-/// its id, then the provider's defaults. `openai-responses` with no key
-/// typed or exported and a `ChatGPT` login stored lists the backend's
+/// its id, then the provider's defaults. `openai` with no key typed or
+/// exported and a `ChatGPT` login stored lists the backend's
 /// models with that login, the way the registry would route it.
 fn resolve(probe: &ProviderProbe, config: &Config, store: &AuthStore) -> Result<Target, String> {
     let id = probe.id.as_str();
@@ -74,14 +74,14 @@ fn resolve(probe: &ProviderProbe, config: &Config, store: &AuthStore) -> Result<
         .flatten()
         .filter(|value| !value.is_empty());
     let chatgpt = match (id, typed, &exported) {
-        ("openai-responses", None, None) => chatgpt_login(store),
+        ("openai", None, None) => chatgpt_login(store),
         _ => None,
     };
     let custom = config.providers.custom.get(id);
     let builtin = config.providers.overrides.get(id);
     let compat = COMPAT_PROVIDERS.iter().find(|entry| entry.id == id);
     let kind = match probe.kind.as_deref() {
-        Some("openai" | "openai-responses") => Kind::OpenAi,
+        Some("openai") => Kind::OpenAi,
         Some("anthropic") => Kind::Anthropic,
         Some("gemini") => Kind::Gemini,
         Some(other) => return Err(format!("unknown protocol `{other}`")),
@@ -97,7 +97,7 @@ fn resolve(probe: &ProviderProbe, config: &Config, store: &AuthStore) -> Result<
         _ if chatgpt.is_some() => Some(chatgpt::BACKEND_BASE_URL),
         "anthropic" => Some("https://api.anthropic.com"),
         "google" => Some("https://generativelanguage.googleapis.com"),
-        "openai" | "openai-responses" => Some("https://api.openai.com/v1"),
+        "openai" => Some("https://api.openai.com/v1"),
         _ => compat.map(|entry| entry.base_url),
     };
     let base = probe
@@ -161,28 +161,17 @@ fn resolve(probe: &ProviderProbe, config: &Config, store: &AuthStore) -> Result<
 
 /// The key saved for `id`, or why there is none to read from `env`.
 fn saved_key(id: &str, env: &str, store: &AuthStore) -> Result<String, String> {
-    if let Some(credential) = store.credential_serving(id) {
-        return Ok(credential.raw_token().to_owned());
-    }
-    let only_chatgpt = id == "openai"
-        && store
-            .credential("openai")
-            .is_some_and(auth::Credential::is_oauth);
-    let hint = if only_chatgpt {
-        " (the ChatGPT login serves openai-responses only)"
-    } else {
-        ""
-    };
-    Err(format!(
-        "no key: {env} is not set and no key is saved for {id}{hint}"
-    ))
+    store
+        .api_credential(id)
+        .map(|credential| credential.raw_token().to_owned())
+        .ok_or_else(|| format!("no key: {env} is not set and no key is saved for {id}"))
 }
 
 /// The stored `ChatGPT` login, renewed first when it is about to expire
 /// (the renewal is saved, so the registry sees it too).
 fn chatgpt_login(store: &AuthStore) -> Option<auth::OAuthCredential> {
     store
-        .credential_serving("openai-responses")?
+        .credential(chatgpt::PROVIDER_ID)?
         .is_oauth()
         .then_some(())?;
     let mut store = store.clone();
@@ -196,7 +185,7 @@ fn chatgpt_login(store: &AuthStore) -> Option<auth::OAuthCredential> {
 }
 
 /// The ids of the providers kage registers itself.
-const BUILTIN: [&str; 4] = ["anthropic", "google", "openai", "openai-responses"];
+const BUILTIN: [&str; 3] = ["anthropic", "google", "openai"];
 
 /// The environment variable provider `id` reads its key from: the
 /// config's, else the one kage knows for a registered provider, else
@@ -236,7 +225,7 @@ pub(super) fn provider_keys(config: &Config, store: &AuthStore) -> BTreeMap<Stri
                 KeySource::Unneeded
             } else if std::env::var(&env).is_ok_and(|value| !value.is_empty()) {
                 KeySource::Env
-            } else if store.credential_serving(id).is_some() {
+            } else if store.credential(id).is_some() {
                 KeySource::Auth
             } else {
                 KeySource::Missing
@@ -1058,13 +1047,12 @@ mod tests {
         store
     }
 
-    /// With no key typed or exported, `openai-responses` lists the
-    /// backend's models with the `ChatGPT` login and its headers, while
-    /// `openai` says the login does not serve it.
+    /// With no key typed or exported, `openai` lists the backend's
+    /// models with the `ChatGPT` login and its headers.
     #[test]
     fn a_chatgpt_login_probes_the_backend_model_list() {
         let probe = ProviderProbe {
-            id: "openai-responses".to_owned(),
+            id: "openai".to_owned(),
             api_key_env: Some("KAGE_TEST_UNSET_OPENAI_KEY".to_owned()),
             ..ProviderProbe::default()
         };
@@ -1080,21 +1068,14 @@ mod tests {
 
         let typed = ProviderProbe {
             api_key: Some("sk-typed".to_owned()),
-            ..probe.clone()
+            ..probe
         };
         let target = resolve(&typed, &Config::default(), &chatgpt_store()).unwrap();
         assert_eq!(target.base, "https://api.openai.com/v1", "a typed key wins");
 
-        let openai = ProviderProbe {
-            id: "openai".to_owned(),
-            ..probe
-        };
-        let err = resolve(&openai, &Config::default(), &chatgpt_store()).unwrap_err();
-        assert!(err.contains("serves openai-responses only"), "{err}");
-
         let keys = provider_keys(&Config::default(), &chatgpt_store());
         assert!(matches!(
-            keys["openai-responses"].source,
+            keys["openai"].source,
             KeySource::Auth | KeySource::Env
         ));
     }

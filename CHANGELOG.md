@@ -1,5 +1,5 @@
 # Changelog
-## [0.5.2](https://github.com/QaidVoid/kage/compare/v0.5.1...v0.5.2) - 2026-10-29
+## [0.6.0](https://github.com/QaidVoid/kage/compare/v0.5.1...v0.6.0) - 2026-10-29
 
 ### Features
 

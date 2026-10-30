@@ -308,6 +308,8 @@ pub(crate) enum Command {
     /// keys apply; every other key is ignored.
     /// Trust covers the ignored values as they are now, so editing
     /// one of them asks again. Editing a safe key never asks.
+    /// The `[trust]` table of the user config trusts whole
+    /// directories up front, so projects under them never prompt.
     Trust {
         /// Forget the trust recorded for this directory.
         #[arg(long)]
@@ -1360,8 +1362,9 @@ pub(crate) fn load_skills(
         search.push(p.join("skills"));
     }
     // Project skills are instructions headed for the system prompt, so
-    // they wait for the same first-run trust decision as project agents.
-    if kage_core::trust::project_extensions_trusted(workdir) {
+    // they wait for the same first-run trust decision as project
+    // agents, each for its own part.
+    if kage_core::trust::project_part_trusted(workdir, kage_core::config::TrustPart::Skills) {
         search.push(workdir.join(".kage").join("skills"));
         search.push(workdir.join(".agents").join("skills"));
     }

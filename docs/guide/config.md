@@ -361,6 +361,46 @@ untrusted project file.
 Trusted projects are recorded in `~/.local/state/kage/trust.json`,
 keyed by the project directory.
 
+## trusting directories
+
+You can trust whole directories up front from your user config, so
+projects under them never prompt:
+
+```toml
+[trust]
+paths = ["~/dev/personal", "~/work/kage"]
+
+[trust.parts]
+"~/work/client" = ["instructions", "skills"]
+```
+
+A path in `paths` fully trusts every project under it: the gated
+tables, project agents, skills and AGENTS.md all load, and edits never
+ask again. Be careful what you list: a path trusts every repository
+you later clone under it, not just the projects there today.
+
+A `[trust.parts]` entry trusts only the named parts under a directory.
+The parts are `instructions` (the project AGENTS.md), `agents` (the
+project agent files), `skills` (the project skills), and one per gated
+table: `mcp`, `permissions`, `tools`, `shell` and `plugins`. Every
+other part still prompts as usual, and an unknown part name is a
+config error. A directory covered by several entries gets the union of
+them all.
+
+Config trust is standing trust. It never expires when the project's
+files change, and it is never written to `trust.json`. It is read from
+the user config only, so a project's own `[trust]` table never
+applies. Entries must name an absolute path, with `~` for the home
+directory: a relative entry is a config error, because it would
+resolve against the directory kage was started from. Matching expands
+`~` and compares path components, so `~/dev`
+does not match `~/devil`, and a listed path that does not exist
+matches nothing. A `"/"` key in `[trust.parts]` trusts those parts in
+every project, and `paths = ["~"]` trusts everything.
+
+`kage trust` in a path-trusted project reports the entry that matched,
+and `kage doctor` lists the trusted parts.
+
 ## image generation
 
 The `generate_image` tool lets any model make an image from a prompt,

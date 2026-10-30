@@ -4,10 +4,12 @@
 use std::path::{Path, PathBuf};
 
 use kage_core::agents::{self, AgentDefs, AgentSource};
+use kage_core::config::TrustPart;
 
 /// Load the agent definitions for `workdir`: the built-ins, then
 /// `<config dir>/agents`, then the project agent directories when the
-/// project is trusted. A later definition replaces an earlier one of
+/// project's agents are trusted, by a stored record or by the user
+/// config's `[trust]`. A later definition replaces an earlier one of
 /// the same name. Returns the definitions and one message per file
 /// that failed to load.
 pub(crate) fn load(workdir: &Path) -> (AgentDefs, Vec<String>) {
@@ -15,7 +17,7 @@ pub(crate) fn load(workdir: &Path) -> (AgentDefs, Vec<String>) {
     if let Ok(dir) = crate::config_dir() {
         dirs.push((dir.join("agents"), AgentSource::User));
     }
-    if kage_core::trust::project_extensions_trusted(workdir) {
+    if kage_core::trust::project_part_trusted(workdir, TrustPart::Agents) {
         dirs.extend(
             agents::project_dirs(workdir)
                 .into_iter()

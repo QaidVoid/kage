@@ -353,7 +353,7 @@ fn skip_lines<R: BufRead>(
 enum Gather {
     /// A newline was read into the buffer.
     Newline,
-    /// The cap was reached with no newline in sight.
+    /// The cap was reached without a newline, and more bytes remain.
     Capped,
     /// The file ended. The buffer holds a trailing line without a
     /// newline, or nothing at all.

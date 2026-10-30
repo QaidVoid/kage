@@ -501,6 +501,9 @@ mod tests {
         assert!(is_agent_result(
             "  completed: 1, failed: 0, cancelled: 0\n<swarm description=\"d\" item=\"a\">"
         ));
+        assert!(is_agent_result(
+            "\n\n  completed: 1, failed: 0, cancelled: 0\n<swarm description=\"d\" item=\"a\">"
+        ));
         // A marker that does not start a line is ordinary output.
         assert!(!is_agent_result(
             "the log said <swarm description=\"d\" item=\"a\"> mid-sentence"

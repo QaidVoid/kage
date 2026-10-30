@@ -283,7 +283,8 @@ pub enum HostEvent {
     },
     /// A [`CommandKind::WithdrawPrompt`] was answered: `content` is the
     /// prompt taken back out of the `delivery` queue, or `None` when
-    /// that queue was empty. Never recorded. Live.
+    /// that queue was empty. Also sent, newest first, for each steer
+    /// still pending when a run is cancelled. Never recorded. Live.
     PromptWithdrawn {
         /// Which queue the prompt came from.
         delivery: Delivery,

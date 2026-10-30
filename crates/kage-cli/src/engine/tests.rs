@@ -544,6 +544,44 @@ fn cancel_ends_the_run_as_cancelled() {
 }
 
 #[test]
+fn cancel_hands_pending_steers_back_instead_of_running_them() {
+    let h = harness(MockProvider::replaying(tool_turn("gate")));
+    let id = SessionId::new();
+    h.open(id, None);
+    prompt(&h.engine, id, "go", Delivery::Steer);
+    wait_for(&h.events, is_tool_start);
+    prompt(&h.engine, id, "first", Delivery::Steer);
+    prompt(&h.engine, id, "second", Delivery::Steer);
+    std::thread::sleep(Duration::from_millis(50));
+    h.engine.send(Command::to(id, CommandKind::Cancel));
+    let mut events = until_runs_end(&h.events, 1);
+    while let Ok(envelope) = h.events.recv_timeout(Duration::from_millis(300)) {
+        events.push(envelope);
+    }
+
+    assert_eq!(outcomes(&events), [RunOutcome::Cancelled]);
+    let withdrawn: Vec<Option<Vec<Content>>> = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            Event::Host(HostEvent::PromptWithdrawn {
+                delivery: Delivery::Steer,
+                content,
+            }) => Some(content.clone()),
+            _ => None,
+        })
+        .collect();
+    let text = |text: &str| {
+        Some(vec![Content::Text {
+            text: text.to_owned(),
+        }])
+    };
+    assert_eq!(withdrawn, [text("second"), text("first")], "newest first");
+    let texts = appended_texts(&events);
+    assert!(!texts.contains(&"first".to_owned()), "{texts:?}");
+    assert!(!texts.contains(&"second".to_owned()), "{texts:?}");
+}
+
+#[test]
 fn shutdown_stops_a_running_session() {
     let h = harness(MockProvider::replaying(tool_turn("gate")));
     let id = SessionId::new();

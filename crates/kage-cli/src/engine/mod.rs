@@ -1530,10 +1530,7 @@ impl Dispatcher {
         // A set flag on an idle session would cancel any run its agents
         // start, through the tree.
         session.cancel.reset();
-        let leftover: Vec<Vec<Content>> = lock(&session.steering).drain(..).collect();
-        for content in leftover.into_iter().rev() {
-            session.queued.push_front(content);
-        }
+        let withdrawn = settle_steering(session, outcome == RunOutcome::Cancelled);
         session.sync_state();
         let state = session.state.clone();
         let next = if self.shutting_down {
@@ -1542,6 +1539,7 @@ impl Dispatcher {
             session.queued.pop_front()
         };
         self.bus.publish(id, HostEvent::RunEnded { outcome });
+        hand_back_steers(&self.bus, id, withdrawn);
         self.deny_asks_of(id);
         self.bus.publish(id, HostEvent::StateChanged { state });
         if let Some(taken) = reply {
@@ -2178,6 +2176,34 @@ fn title_entry(title: String) -> kage_session::SessionEntry {
         ts: chrono::Utc::now(),
         title,
     })
+}
+
+/// Move the steers `session`'s run never took to the front of its
+/// queue, or, when the run was `cancelled`, take them out and return
+/// them, oldest first.
+///
+/// A steer was meant for the run it arrived during. Running it after a
+/// cancel would undo the cancel, and over RPC its prompt has already
+/// been answered, so nobody would be waiting on that run.
+fn settle_steering(session: &mut Session, cancelled: bool) -> Vec<Vec<Content>> {
+    let leftover: Vec<Vec<Content>> = lock(&session.steering).drain(..).collect();
+    if cancelled {
+        return leftover;
+    }
+    for content in leftover.into_iter().rev() {
+        session.queued.push_front(content);
+    }
+    Vec::new()
+}
+
+/// Report each of `steers` as withdrawn, newest first, so a client can
+/// put them back where they were typed.
+fn hand_back_steers(bus: &Bus, id: SessionId, steers: Vec<Vec<Content>>) {
+    for content in steers.into_iter().rev() {
+        let content = Some(content);
+        let delivery = Delivery::Steer;
+        bus.publish(id, HostEvent::PromptWithdrawn { delivery, content });
+    }
 }
 
 /// Write the title that arrived while `session` was busy, now that its

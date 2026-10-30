@@ -54,8 +54,8 @@ fn warning(workdir: &Path, summary: &TrustSummary) -> String {
     let settings: Vec<&str> = summary
         .keys
         .iter()
-        .copied()
-        .filter(|key| *key != "agents" && *key != "skills")
+        .filter(|key| !matches!(key.as_str(), "agents" | "skills"))
+        .map(String::as_str)
         .collect();
     let mut parts = Vec::new();
     if !settings.is_empty() {
@@ -99,7 +99,7 @@ pub(crate) fn run(revoke: bool) -> ExitCode {
     }
     let Some(presented) = trust::untrusted_project(&workdir) else {
         eprintln!(
-            "kage: {} has no mcp, permissions, plugins.capabilities or tools settings and no agents to trust",
+            "kage: {} has no settings waiting for trust and no agents or skills to trust",
             workdir.join(".kage").display()
         );
         return ExitCode::SUCCESS;
@@ -127,10 +127,10 @@ pub(crate) fn run(revoke: bool) -> ExitCode {
 mod tests {
     use super::*;
 
-    fn summary(keys: Vec<&'static str>, agents: &[&str], skills: &[&str]) -> TrustSummary {
+    fn summary(keys: &[&str], agents: &[&str], skills: &[&str]) -> TrustSummary {
         TrustSummary {
             path: PathBuf::from("/p/.kage"),
-            keys,
+            keys: keys.iter().map(|key| (*key).to_owned()).collect(),
             items: Vec::new(),
             agents: agents.iter().map(|a| (*a).to_owned()).collect(),
             skills: skills.iter().map(|s| (*s).to_owned()).collect(),
@@ -143,18 +143,18 @@ mod tests {
         assert_eq!(
             warning(
                 dir,
-                &summary(vec!["mcp", "agents"], &["reviewer", "auditor"], &[])
+                &summary(&["mcp", "agents"], &["reviewer", "auditor"], &[])
             ),
             "kage: ignoring untrusted .kage/config.toml settings (mcp) and project agents \
              (reviewer, auditor) in /p. Run `kage trust` in that directory to allow them."
         );
         assert_eq!(
-            warning(dir, &summary(vec!["agents"], &["reviewer"], &[])),
+            warning(dir, &summary(&["agents"], &["reviewer"], &[])),
             "kage: ignoring untrusted project agents (reviewer) in /p. \
              Run `kage trust` in that directory to allow them."
         );
         assert_eq!(
-            warning(dir, &summary(vec!["skills"], &[], &["helper"])),
+            warning(dir, &summary(&["skills"], &[], &["helper"])),
             "kage: ignoring untrusted project skills (helper) in /p. \
              Run `kage trust` in that directory to allow them."
         );

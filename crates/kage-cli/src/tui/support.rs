@@ -537,8 +537,8 @@ fn untrusted_notice(summary: &kage_core::trust::TrustSummary) -> String {
     let mut ignored: Vec<String> = summary
         .keys
         .iter()
-        .filter(|key| **key != "agents" && **key != "skills")
-        .map(|key| (*key).to_owned())
+        .filter(|key| !matches!(key.as_str(), "agents" | "skills"))
+        .cloned()
         .collect();
     if !summary.agents.is_empty() {
         ignored.push(format!("agents ({})", summary.agents.join(", ")));
@@ -784,7 +784,9 @@ mod tests {
     fn untrusted_notice_names_what_is_ignored_and_the_fix() {
         let summary = kage_core::trust::TrustSummary {
             path: PathBuf::from("/p/.kage"),
-            keys: vec!["mcp", "permissions", "agents", "skills"],
+            keys: ["mcp", "permissions", "agents", "skills"]
+                .map(String::from)
+                .to_vec(),
             items: Vec::new(),
             agents: vec!["reviewer".to_owned()],
             skills: vec!["helper".to_owned()],

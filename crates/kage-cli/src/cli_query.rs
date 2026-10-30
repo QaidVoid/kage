@@ -8,13 +8,12 @@ use std::sync::Arc;
 use kage_core::{Content, Message, Role};
 use kage_loop::AgentContext;
 use kage_session::{SessionId, SessionWriter};
-use kage_tools::builtin_registry;
 
 use crate::cli_loop_run::execute_print_run;
 use crate::plugins::setup_runtime;
 use crate::{
     DEFAULT_SYSTEM, NO_CREDENTIALS_MESSAGE, acp_glue, build_provider_registry, has_usable_provider,
-    mcp, plugins, plugins_dir, runtime_env, sessions_dir, state, truncate_one_line, tui,
+    plugins, plugins_dir, runtime_env, sessions_dir, state, truncate_one_line, tui,
 };
 
 /// Implement `kage resume`: open an existing session in the TUI, or with
@@ -112,13 +111,10 @@ pub(crate) fn run_resume(
             return ExitCode::from(1);
         }
     };
-    let layered = kage_core::config::Config::load_layered(&workdir).unwrap_or_default();
-    let mut tools = builtin_registry().with_renames(&layered.tools.rename);
-    let (mcp_manager, mcp_errors) =
-        mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
-    for (server, err) in mcp_errors {
-        eprintln!("kage: mcp `{server}`: {err}");
-    }
+    let Ok((_layered, tools, mcp_manager)) = crate::run_tools(&workdir, plugin_runtime.as_deref())
+    else {
+        return ExitCode::from(1);
+    };
     let mut cx = AgentContext::new(resolved.model.clone(), &replay.header.system_prompt)
         .with_workdir(&workdir);
     if let Some(window) = runtime_env::context_window_for(&registry, &model) {

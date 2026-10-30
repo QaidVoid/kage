@@ -30,7 +30,7 @@ mod speech_tool;
 mod swarm_tool;
 mod worktree;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -42,8 +42,8 @@ use kage_core::agents::AgentDefs;
 use kage_core::config::Config;
 use kage_core::options::{OptionStore, OptionValue};
 use kage_core::protocol::{
-    Command, CommandKind, Delivery, HostEvent, NoticeLevel, PermissionDecision, RequestId,
-    RunOutcome, SessionState, Usage,
+    ASK_USER_QUESTION_TOOL, Command, CommandKind, Delivery, EXIT_PLAN_TOOL, HostEvent, NoticeLevel,
+    PermissionDecision, RequestId, RunOutcome, SessionState, Usage,
 };
 use kage_core::sync::lock;
 use kage_core::{
@@ -78,6 +78,16 @@ use swarm_tool::{SWARM_TOOL, SwarmTool};
 use crate::permissions::{Asker, PermissionGate, PermissionPrompt};
 
 pub(crate) use edit_image_tool::EDIT_IMAGE_TOOL;
+
+/// Tools built per run into a copy of the session registry rather than
+/// into it, so a `[tools.<name>]` table for one is not a typo.
+const PER_RUN_TOOLS: [&str; 5] = [
+    AGENT_TOOL,
+    SWARM_TOOL,
+    MAILBOX_TOOL,
+    ASK_USER_QUESTION_TOOL,
+    EXIT_PLAN_TOOL,
+];
 pub(crate) use image_tool::GENERATE_IMAGE_TOOL;
 pub(crate) use music_tool::GENERATE_MUSIC_TOOL;
 pub(crate) use speech_tool::GENERATE_SPEECH_TOOL;
@@ -784,9 +794,34 @@ impl Dispatcher {
         );
         self.active.get_or_insert(id);
         self.apply_plugin_tools(id);
+        self.warn_unmatched_tools(id);
         if starting_mcp {
             self.start_mcp(id);
         }
+    }
+
+    /// Report `[tools.<name>]` tables that name no tool this session can
+    /// hold: a typo, the wrong case, or a `[tools.rename]` target would
+    /// otherwise sit in the config doing nothing, and a disable meant for
+    /// safety would silently not apply.
+    ///
+    /// The delegation, question and plan tools are built per run into a
+    /// copy of the registry, so they never reach `register` here; seeding
+    /// them stops every table for one from looking like a typo. So does
+    /// seeding `mcp_resource`, which MCP registers only once a server is
+    /// up. A sub-agent's registry is a copy of its parent's, so only a
+    /// root session reports, once.
+    fn warn_unmatched_tools(&mut self, id: SessionId) {
+        let bus = Arc::clone(&self.bus);
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        if session.link.is_some() {
+            return;
+        }
+        session.tools.note_known(&PER_RUN_TOOLS);
+        session.tools.note_known(&[kage_mcp::RESOURCE_TOOL]);
+        warn_unmatched(&bus, id, session.tools.unmatched_overrides());
     }
 
     /// Register the session's plugin tools, replacing earlier ones.
@@ -797,15 +832,18 @@ impl Dispatcher {
         let Some(rt) = session.plugins.clone() else {
             return;
         };
-        for name in session.plugin_tools.apply(&mut session.tools, &rt) {
-            notice(
-                &self.bus,
-                id,
-                NoticeLevel::Warning,
+        for miss in session.plugin_tools.apply(&mut session.tools, &rt) {
+            let name = &miss.name;
+            let text = if miss.disabled {
+                format!(
+                    "override_tool: `{name}` is disabled by [tools.{name}] enabled = false; the override is ignored"
+                )
+            } else {
                 format!(
                     "override_tool: no tool named `{name}` to override; treating as new registration"
-                ),
-            );
+                )
+            };
+            notice(&self.bus, id, NoticeLevel::Warning, text);
         }
     }
 
@@ -2055,6 +2093,21 @@ fn unresolvable_model_message(
         "no provider credentials found; add one with `kage auth login`, \
          an API-key env var, or the provider settings"
             .to_owned()
+    }
+}
+
+/// Warn once a session's registry is built about `[tools.<name>]`
+/// tables that name no tool: a typo or the wrong case would otherwise
+/// sit in the config doing nothing, and a disable meant for safety would
+/// silently not apply.
+fn warn_unmatched(bus: &Bus, id: SessionId, names: BTreeSet<String>) {
+    for name in names {
+        notice(
+            bus,
+            id,
+            NoticeLevel::Warning,
+            format!("[tools.{name}] matches no tool; ignoring it (check the name and its case)"),
+        );
     }
 }
 

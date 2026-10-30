@@ -665,7 +665,12 @@ fn reload_connection(
 }
 
 /// Register discovered tools, skipping the `disabled` ones, and track
-/// the registered names.
+/// the names the registry actually took.
+///
+/// `[tools.<server>__<tool>] enabled = false` makes `register` drop a
+/// tool, so a name is only tracked once the registry holds it. Tracking
+/// a dropped one would make the next reload unregister a tool that was
+/// never there and leave the manager believing a disabled tool is live.
 fn register_tools(
     tools: &[Arc<dyn kage_tools::Tool>],
     conn: &Arc<McpConnection>,
@@ -674,14 +679,20 @@ fn register_tools(
     reg: &mut ToolRegistry,
 ) {
     for tool in tools {
+        let name = tool.name();
         if disabled
             .iter()
-            .any(|name| tool.name() == format!("{}__{name}", conn.name()))
+            .any(|dropped| name == format!("{}__{dropped}", conn.name()))
         {
             continue;
         }
-        registered.push(tool.name().to_owned());
+        // `register` records the name even when the overrides drop it,
+        // so a `[tools.<server>__<tool>]` table is not later reported as
+        // naming no tool. Only a name the registry holds is tracked.
         reg.register(Arc::clone(tool));
+        if reg.get(name).is_some() {
+            registered.push(name.to_owned());
+        }
     }
 }
 
@@ -738,6 +749,28 @@ mod tests {
         reload_connection(&conn, &["old".to_owned()], &mut registered, &mut reg).unwrap();
         assert!(registered.is_empty());
         assert!(reg.get("x__old").is_none());
+    }
+
+    /// `[tools.<server>__<tool>] enabled = false` drops the tool inside
+    /// `register`, so the manager must not track it as live: the next
+    /// reload would unregister a tool that was never there.
+    #[test]
+    fn a_tool_the_tool_table_disables_is_not_tracked() {
+        let conn = flipping_server();
+        let mut overrides = kage_tools::ToolOverrides::default();
+        overrides.disabled.insert("x__old".to_owned());
+        let mut reg = ToolRegistry::new().with_overrides(overrides);
+        let mut registered = Vec::new();
+        // The first listing offers only `old`, which the table disables.
+        reload_connection(&conn, &[], &mut registered, &mut reg).unwrap();
+        assert!(registered.is_empty(), "a dropped tool is not tracked");
+        assert!(reg.get("x__old").is_none());
+        // The name was still seen, so the table is not reported as a typo.
+        assert!(reg.was_registered("x__old"));
+        // The second listing offers `new`, which is tracked.
+        reload_connection(&conn, &[], &mut registered, &mut reg).unwrap();
+        assert_eq!(registered, vec!["x__new".to_owned()]);
+        assert!(reg.get("x__new").is_some());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Lookup of [`Tool`] implementations by name.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use kage_core::ToolSpec;
@@ -26,6 +26,38 @@ pub struct ToolRegistry {
     /// model sees only the advertised name, while lookups under either
     /// name run the same tool.
     renamed: BTreeMap<String, String>,
+    /// `[tools.<name>]` overrides: which tools stay out, and which get
+    /// another description. They apply to every tool, whenever it is
+    /// registered, so a tool added later (MCP, plugin, delegation)
+    /// follows them too.
+    overrides: ToolOverrides,
+    /// Every name `register` was handed, dropped ones included. A tool
+    /// the overrides disabled is absent from `tools` but present here,
+    /// so a name that matches no tool at all can be told apart from one
+    /// that was disabled on purpose.
+    seen: BTreeSet<String>,
+}
+
+/// Per-tool overrides a registry applies to everything registered in
+/// it, keyed by the tool's real name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ToolOverrides {
+    /// Tools never registered: the model does not see them and a call
+    /// resolves as unknown.
+    pub disabled: BTreeSet<String>,
+    /// Descriptions advertised in place of the tool's own.
+    pub descriptions: BTreeMap<String, String>,
+}
+
+impl ToolOverrides {
+    /// The overrides `[tools]` configures.
+    #[must_use]
+    pub fn from_config(cfg: &kage_core::config::ToolsConfig) -> Self {
+        Self {
+            disabled: cfg.disabled(),
+            descriptions: cfg.descriptions(),
+        }
+    }
 }
 
 impl ToolRegistry {
@@ -45,8 +77,118 @@ impl ToolRegistry {
     }
 
     /// Register a tool. Replaces any prior entry with the same name.
+    /// A tool the overrides disable is dropped instead.
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
-        self.tools.insert(tool.name().to_owned(), tool);
+        let name = tool.name().to_owned();
+        self.seen.insert(name.clone());
+        if self.overrides.disabled.contains(&name) {
+            return;
+        }
+        self.tools.insert(name, tool);
+    }
+
+    /// Apply `overrides` to this registry and to every tool registered
+    /// in it from now on: disabled tools already present are removed.
+    ///
+    /// Returns `self` for chaining.
+    #[must_use]
+    pub fn with_overrides(mut self, overrides: ToolOverrides) -> Self {
+        self.set_overrides(overrides);
+        self
+    }
+
+    /// In-place variant of [`Self::with_overrides`].
+    pub fn set_overrides(&mut self, overrides: ToolOverrides) {
+        for name in &overrides.disabled {
+            self.tools.remove(name);
+        }
+        self.overrides = overrides;
+    }
+
+    /// Whether the overrides keep `name` out of this registry.
+    ///
+    /// `name` may be an advertised name: `[tools.rename] shell =
+    /// "run_command"` with `[tools.shell] enabled = false` must report
+    /// `run_command` as disabled, not unknown.
+    #[must_use]
+    pub fn is_disabled(&self, name: &str) -> bool {
+        self.overrides.disabled.contains(self.real_name(name))
+    }
+
+    /// The registered name `name` resolves to through renames, whether
+    /// or not that tool is present. `name` itself when it is not an
+    /// advertised name.
+    #[must_use]
+    pub fn real_name<'a>(&'a self, name: &'a str) -> &'a str {
+        let mut current = name;
+        // Bounded like `get`: a hand-written cycle must not hang.
+        for _ in 0..8 {
+            match self.aliases.get(current) {
+                Some(target) => current = target,
+                None => return current,
+            }
+        }
+        current
+    }
+
+    /// Whether `name` was ever handed to [`Self::register`], even if the
+    /// overrides then dropped it. A name that is absent from the
+    /// registry but was seen here was disabled, not misspelled.
+    #[must_use]
+    pub fn was_registered(&self, name: &str) -> bool {
+        self.seen.contains(self.real_name(name))
+    }
+
+    /// Record `names` as tools this session can hold, without
+    /// registering anything.
+    ///
+    /// The delegation, question and plan tools are built per run into a
+    /// copy of this registry, so `[tools.agent] enabled = false` is
+    /// honoured without the name ever reaching [`Self::register`] here.
+    /// Seeding them keeps [`Self::unmatched_overrides`] from calling
+    /// those tables typos.
+    pub fn note_known(&mut self, names: &[&str]) {
+        self.seen
+            .extend(names.iter().map(|name| (*name).to_owned()));
+    }
+
+    /// `[tools.<name>]` overrides naming a tool this registry never saw:
+    /// a typo (`[tools.web-search]`), the wrong case (`[tools.Shell]`),
+    /// or a `[tools.rename]` target (`[tools.run_command]`), all of
+    /// which would otherwise sit in the config doing nothing. Disabled
+    /// tools are not reported, since dropping them is the point.
+    ///
+    /// The name is compared as written, never resolved through a rename:
+    /// keys are real names, so a target is a mistake worth reporting.
+    ///
+    /// An MCP tool (`<server>__<tool>`) is never reported: its server may
+    /// simply not be up, and the name cannot be checked without it.
+    #[must_use]
+    pub fn unmatched_overrides(&self) -> BTreeSet<String> {
+        self.overrides
+            .disabled
+            .iter()
+            .chain(self.overrides.descriptions.keys())
+            .filter(|name| !name.contains("__") && !self.seen.contains(*name))
+            .cloned()
+            .collect()
+    }
+
+    /// Drop the configured description for `name`, returning it so the
+    /// caller can put it back. A plugin that replaces a tool with
+    /// `kage.override_tool` calls this: its description is the one that
+    /// matches the code now running, not the `[tools.<name>]` override
+    /// written for the tool it replaced.
+    pub fn clear_description(&mut self, name: &str) -> Option<String> {
+        let real = self.real_name(name).to_owned();
+        self.overrides.descriptions.remove(&real)
+    }
+
+    /// Put back a description [`Self::clear_description`] removed, for a
+    /// plugin reload that no longer overrides the tool.
+    pub fn restore_description(&mut self, name: &str, description: String) {
+        let real = self.real_name(name).to_owned();
+        self.overrides.descriptions.insert(real, description);
     }
 
     /// Remove a tool by name, returning it if it was registered.
@@ -181,7 +323,7 @@ impl ToolRegistry {
     /// `bash` calls its model asked for.
     #[must_use]
     pub fn retain_named(&self, keep: &[String]) -> (Self, Vec<String>) {
-        let mut out = Self::new();
+        let mut out = Self::new().with_overrides(self.overrides.clone());
         let mut missing = Vec::new();
         for name in keep {
             match self.get(name) {
@@ -201,6 +343,9 @@ impl ToolRegistry {
             .filter(|(real, _)| out.tools.contains_key(*real))
             .map(|(real, to)| (real.clone(), to.clone()))
             .collect();
+        // A narrowed registry knows the same names, so a disabled tool
+        // still reads as disabled rather than as a typo.
+        out.seen.clone_from(&self.seen);
         (out, missing)
     }
 
@@ -223,7 +368,7 @@ impl ToolRegistry {
 
     /// Snapshot of all registered tools as [`ToolSpec`]s for the
     /// provider. A renamed tool is listed only under its advertised
-    /// name.
+    /// name, and a configured description replaces the tool's own.
     #[must_use]
     pub fn list_for_provider(&self) -> Vec<ToolSpec> {
         self.tools
@@ -233,9 +378,14 @@ impl ToolRegistry {
                     .renamed
                     .get(t.name())
                     .map_or_else(|| t.name(), String::as_str);
+                let description = self
+                    .overrides
+                    .descriptions
+                    .get(t.name())
+                    .map_or_else(|| t.description(), String::as_str);
                 ToolSpec {
                     name: name.to_owned(),
-                    description: t.description().to_owned(),
+                    description: description.to_owned(),
                     schema: t.schema(),
                 }
             })
@@ -292,6 +442,156 @@ mod tests {
 
     fn echo(name: &'static str) -> Arc<dyn Tool> {
         Arc::new(EchoTool { name })
+    }
+
+    fn overrides(disabled: &[&str], descriptions: &[(&str, &str)]) -> ToolOverrides {
+        ToolOverrides {
+            disabled: disabled.iter().map(|s| (*s).to_owned()).collect(),
+            descriptions: descriptions
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn disabled_tools_are_dropped_now_and_later() {
+        let mut r = ToolRegistry::new()
+            .with(echo("greet"))
+            .with(echo("farewell"))
+            .alias("hi", "greet")
+            .with_overrides(overrides(&["greet", "late"], &[]));
+        assert!(r.get("greet").is_none());
+        assert!(
+            r.get("hi").is_none(),
+            "an alias of a disabled tool resolves to nothing"
+        );
+        assert!(r.get("farewell").is_some());
+        r.register(echo("late"));
+        assert!(r.get("late").is_none(), "registered after the overrides");
+        r.register(echo("greet"));
+        assert!(
+            r.get("greet").is_none(),
+            "re-registering does not bring it back"
+        );
+        assert!(r.is_disabled("greet"));
+        let names: Vec<String> = r.list_for_provider().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["farewell"]);
+    }
+
+    #[test]
+    fn description_overrides_follow_renames_and_narrowing() {
+        let r = ToolRegistry::new()
+            .with(echo("greet"))
+            .with(echo("farewell"))
+            .rename("greet", "hello")
+            .with_overrides(overrides(&["gone"], &[("greet", "say hi")]));
+        let specs = r.list_for_provider();
+        let hello = specs
+            .iter()
+            .find(|s| s.name == "hello")
+            .expect("advertised");
+        assert_eq!(hello.description, "say hi");
+        let farewell = specs.iter().find(|s| s.name == "farewell").expect("listed");
+        assert_eq!(farewell.description, "echo input back");
+
+        let (mut narrow, _) = r.retain_named(&["greet".to_owned()]);
+        assert_eq!(narrow.list_for_provider()[0].description, "say hi");
+        narrow.register(echo("gone"));
+        assert!(
+            narrow.get("gone").is_none(),
+            "narrowed registry keeps the overrides"
+        );
+    }
+
+    /// A disabled tool must be reported as disabled under its advertised
+    /// name too, or `mcp serve --tools run_command` says the tool does
+    /// not exist instead of saying it was turned off.
+    #[test]
+    fn a_renamed_disabled_tool_is_still_disabled() {
+        let r = ToolRegistry::new()
+            .with(echo("shell"))
+            .rename("shell", "run_command")
+            .with_overrides(overrides(&["shell"], &[]));
+        assert!(r.is_disabled("run_command"));
+        assert!(r.is_disabled("shell"));
+        assert_eq!(r.real_name("run_command"), "shell");
+        assert!(r.was_registered("run_command"));
+    }
+
+    /// A `[tools.<name>]` table naming no tool is reported, while one
+    /// that disables a real tool is not, and an MCP name is left alone
+    /// because its server may simply be down.
+    #[test]
+    fn overrides_naming_no_tool_are_reported() {
+        let r = ToolRegistry::new()
+            .with(echo("shell"))
+            .with(echo("read"))
+            .with_overrides(overrides(
+                &["shell", "web-search", "github__delete_repository"],
+                &[("Shell", "nope")],
+            ));
+        assert_eq!(
+            r.unmatched_overrides().into_iter().collect::<Vec<_>>(),
+            vec!["Shell", "web-search"]
+        );
+    }
+
+    /// Keys are real names, so a `[tools.rename]` target is a mistake:
+    /// `[tools.run_command] enabled = false` must be reported rather than
+    /// silently doing nothing.
+    #[test]
+    fn a_rename_target_is_reported_as_no_tool() {
+        let r = ToolRegistry::new()
+            .with(echo("shell"))
+            .rename("shell", "run_command")
+            .with_overrides(overrides(&["run_command"], &[]));
+        assert_eq!(
+            r.unmatched_overrides().into_iter().collect::<Vec<_>>(),
+            vec!["run_command"]
+        );
+    }
+
+    /// The delegation, question and plan tools are built per run, so a
+    /// table for one must not be called a typo.
+    #[test]
+    fn noted_names_are_not_reported() {
+        let mut r = ToolRegistry::new()
+            .with(echo("shell"))
+            .with_overrides(overrides(&["agent", "ask_user_question"], &[]));
+        assert_eq!(r.unmatched_overrides().len(), 2);
+        r.note_known(&["agent", "ask_user_question"]);
+        assert!(r.unmatched_overrides().is_empty());
+    }
+
+    /// A narrowed registry still knows the names the full one did, so a
+    /// disabled tool does not read as a typo there.
+    #[test]
+    fn narrowing_keeps_the_known_names() {
+        let r = ToolRegistry::new()
+            .with(echo("shell"))
+            .with(echo("read"))
+            .with_overrides(overrides(&["shell"], &[]));
+        let (narrow, _) = r.retain_named(&["read".to_owned()]);
+        assert!(narrow.unmatched_overrides().is_empty());
+        assert!(narrow.was_registered("shell"));
+    }
+
+    /// A plugin that replaces a tool with `kage.override_tool` owns its
+    /// description from then on: a `[tools.<name>] description` written
+    /// for the tool it displaced must not mask it. The cleared one comes
+    /// back when the plugin stops overriding the tool.
+    #[test]
+    fn clearing_a_description_restores_the_tools_own() {
+        let mut r = ToolRegistry::new()
+            .with(echo("shell"))
+            .with_overrides(overrides(&[], &[("shell", "configured")]));
+        assert_eq!(r.list_for_provider()[0].description, "configured");
+        let cleared = r.clear_description("shell");
+        assert_eq!(cleared.as_deref(), Some("configured"));
+        assert_eq!(r.list_for_provider()[0].description, "echo input back");
+        r.restore_description("shell", cleared.expect("cleared"));
+        assert_eq!(r.list_for_provider()[0].description, "configured");
     }
 
     #[test]

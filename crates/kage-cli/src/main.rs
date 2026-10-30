@@ -66,7 +66,6 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use kage_loop::AgentContext;
 use kage_session::{EntryId, FORMAT_VERSION, Header, SessionId, SessionSummary, SessionWriter};
-use kage_tools::builtin_registry;
 
 pub(crate) use paths::{
     cache_root, config_dir, data_root, models_cache_path, plugins_dir, sessions_dir, state_root,
@@ -304,8 +303,8 @@ pub(crate) enum Command {
         fetch_web: bool,
     },
     /// Trust the current directory's `.kage/config.toml`. Until a
-    /// project is trusted, its `mcp`, `permissions` and
-    /// `plugins.capabilities` settings are ignored. Trust covers the
+    /// project is trusted, its `mcp`, `permissions`,
+    /// `plugins.capabilities` and `tools` settings are ignored. Trust covers the
     /// values as they are now, so editing any of them asks again.
     Trust {
         /// Forget the trust recorded for this directory.
@@ -938,7 +937,7 @@ const MANPAGE_FILES: &[(&str, &str)] = &[
     ),
     (
         "<workdir>/.kage/config.toml",
-        "Project config, merged over the user config. Its mcp, permissions and plugins.capabilities tables apply only after kage trust.",
+        "Project config, merged over the user config. Its mcp, permissions, plugins.capabilities and tools tables apply only after kage trust.",
     ),
     (
         "~/.config/kage/{plugins,themes,agents,skills,templates}/",
@@ -1273,13 +1272,9 @@ fn run_print_mode(cli: Cli) -> ExitCode {
     let system_prompt =
         runtime_env::build_system_prompt(&cli.system, &workdir, &model, &skills, shell.as_deref());
 
-    let layered = kage_core::config::Config::load_layered(&workdir).unwrap_or_default();
-    let mut tools = builtin_registry().with_renames(&layered.tools.rename);
-    let (mcp_manager, mcp_errors) =
-        mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
-    for (server, err) in mcp_errors {
-        eprintln!("kage: mcp `{server}`: {err}");
-    }
+    let Ok((layered, tools, mcp_manager)) = run_tools(&workdir, plugin_runtime.as_deref()) else {
+        return ExitCode::from(1);
+    };
     let cx = print_context(
         AgentContext::new(resolved.model.clone(), &system_prompt).with_workdir(&workdir),
         &registry,
@@ -1498,6 +1493,40 @@ fn model_arg(value: &str) -> Result<String, String> {
 
 pub(crate) fn build_session_path(dir: &std::path::Path, session: SessionId) -> PathBuf {
     dir.join(format!("{session}.jsonl"))
+}
+
+/// The config and the tool registry a host runs with: `[tools]` and
+/// `[shell]` applied and MCP servers registered. The engine session the
+/// run opens reports `[tools.<name>]` tables that name no tool, once the
+/// media tools are in too.
+///
+/// A config that does not load exits rather than falling back to the
+/// defaults: a broken `[tools.*]` key would otherwise silently drop
+/// `[permissions]` and `[shell]` too.
+fn run_tools(
+    workdir: &Path,
+    plugin_runtime: Option<&kage_plugin::PluginRuntime>,
+) -> Result<
+    (
+        kage_core::config::Config,
+        kage_tools::ToolRegistry,
+        kage_mcp::McpManager,
+    ),
+    ExitCode,
+> {
+    let layered = match kage_core::config::Config::load_layered(workdir) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("kage: {e}");
+            return Err(ExitCode::from(1));
+        }
+    };
+    let mut tools = kage_tools::configured_registry(&layered.tools, &layered.shell);
+    let (mcp_manager, mcp_errors) = mcp::spawn_and_register(&mut tools, workdir, plugin_runtime);
+    for (server, err) in mcp_errors {
+        eprintln!("kage: mcp `{server}`: {err}");
+    }
+    Ok((layered, tools, mcp_manager))
 }
 
 #[cfg(test)]

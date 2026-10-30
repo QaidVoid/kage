@@ -24,6 +24,24 @@ pub fn schema_for<T: JsonSchema>() -> serde_json::Value {
     value
 }
 
+/// Replace the doc text of property `key` with `text`. A tool whose limit
+/// is set in `[tools.<name>]` uses this so the schema the model reads
+/// states the value actually in effect.
+///
+/// The whole description is written, never a number inside the derived
+/// doc comment: a reworded comment would otherwise turn the rewrite into
+/// a silent no-op and leave the model reading the old default. Unchanged
+/// when the property is missing.
+pub(crate) fn set_property_doc(schema: &mut serde_json::Value, key: &str, text: &str) {
+    if let Some(serde_json::Value::String(description)) = schema
+        .get_mut("properties")
+        .and_then(|p| p.get_mut(key))
+        .and_then(|p| p.get_mut("description"))
+    {
+        text.clone_into(description);
+    }
+}
+
 /// Serialize a derived schema, falling back to a permissive
 /// `{"type": "object"}` when serialization fails.
 fn serialize_schema(schema: impl serde::Serialize) -> serde_json::Value {

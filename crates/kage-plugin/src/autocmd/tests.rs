@@ -307,11 +307,13 @@ fn tool_events_need_the_context_capability() {
         "b",
         r"
         kage.api.autocmd_create('tool_call', { callback = function() end })
+        kage.api.autocmd_create('tool_update', { callback = function() end })
         kage.api.autocmd_create('tool_result', { callback = function() end })
         ",
     )
     .unwrap();
     assert_eq!(rt.handler_count("tool_call"), 0);
+    assert_eq!(rt.handler_count("tool_update"), 0);
     assert_eq!(rt.handler_count("tool_result"), 0);
     let warnings = rec
         .snapshot()
@@ -319,18 +321,23 @@ fn tool_events_need_the_context_capability() {
         .into_iter()
         .filter(|(level, msg)| {
             *level == LogLevel::Warn
-                && (msg.contains("'tool_call'") || msg.contains("'tool_result'"))
+                && (msg.contains("'tool_call'")
+                    || msg.contains("'tool_update'")
+                    || msg.contains("'tool_result'"))
                 && msg.contains("context")
         })
         .count();
-    assert_eq!(warnings, 2);
+    assert_eq!(warnings, 3);
 
     rt.eval_plugin(
         "a",
         r"
-        calls, results = {}, {}
+        calls, updates, results = {}, {}, {}
         kage.api.autocmd_create('tool_call', {
             callback = function(ev) calls[#calls + 1] = ev end,
+        })
+        kage.api.autocmd_create('tool_update', {
+            callback = function(ev) updates[#updates + 1] = ev end,
         })
         kage.api.autocmd_create('tool_result', {
             callback = function(ev) results[#results + 1] = ev end,
@@ -339,10 +346,16 @@ fn tool_events_need_the_context_capability() {
     )
     .unwrap();
     assert_eq!(rt.handler_count("tool_call"), 1);
+    assert_eq!(rt.handler_count("tool_update"), 1);
     assert_eq!(rt.handler_count("tool_result"), 1);
     rt.dispatch_event(
         "tool_call",
         &json!({ "id": "t1", "name": "write", "input": { "path": "notes.md" } }),
+    )
+    .unwrap();
+    rt.dispatch_event(
+        "tool_update",
+        &json!({ "id": "t1", "content": "wrote notes.md" }),
     )
     .unwrap();
     rt.dispatch_event(
@@ -355,12 +368,12 @@ fn tool_events_need_the_context_capability() {
     let summary = rt
         .eval_plugin(
             "a",
-            "return calls[1].data.input.path .. ':' .. results[1].data.text",
+            "return calls[1].data.input.path .. ':' .. updates[1].data.content .. ':' .. results[1].data.text",
         )
         .unwrap();
     assert_eq!(
         summary.as_string().unwrap().to_str().unwrap(),
-        "notes.md:wrote notes.md"
+        "notes.md:wrote notes.md:wrote notes.md"
     );
 }
 

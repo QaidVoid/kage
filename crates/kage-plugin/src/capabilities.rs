@@ -54,9 +54,10 @@ pub(crate) enum Capability {
     Crypto,
     /// See conversation and prompt text, and rewrite what the model
     /// sees: the `transform_context`, `before_provider_request`,
-    /// `compact_prepare`, and text-bearing notification events, plus
-    /// `kage.config().system_prompt`. Coarse: granting it hands over
-    /// the whole transcript.
+    /// `compact_prepare`, and text-bearing notification events
+    /// (including the `tool_call`, `tool_update` and `tool_result`
+    /// payloads), plus `kage.config().system_prompt`. Coarse:
+    /// granting it hands over the whole transcript.
     Context,
     /// Register an LLM provider via `kage.register_provider`, whose
     /// handler sees the full outgoing request and fabricates the

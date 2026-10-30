@@ -662,11 +662,11 @@ one warning and subscribes to nothing. `kage.on` is an alias over
 [`kage.api.autocmd_create`](#autocmds): the handler receives the
 payload alone.
 
-Eleven events carry conversation text or tool payloads
+The events a plugin could reassemble the conversation from
 (`transform_context`, `before_provider_request`, `compact_prepare`,
 `before_agent_start`, `message_start`, `message_update`,
-`message_end`, `after_provider_response`, `tool_call`, `tool_result`
-and `user`) and need the `context`
+`message_end`, `after_provider_response`, `tool_call`,
+`tool_update`, `tool_result` and `user`) need the `context`
 [capability](/plugins/capabilities#context). Registering one without
 the grant logs a warning naming it and subscribes to nothing. The
 rest of the table below is open to every plugin.

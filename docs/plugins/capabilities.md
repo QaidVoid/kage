@@ -110,8 +110,8 @@ directories are created and then re-verified against the workdir.
 
 ### `context`
 
-Subscribe to the events that carry conversation text or tool payloads,
-and read the system prompt.
+Subscribe to the events a plugin could reassemble the conversation
+from, and read the system prompt.
 
 | surface | effect |
 | --- | --- |
@@ -120,7 +120,7 @@ and read the system prompt.
 | `compact_prepare` | steer or replace the compaction summary |
 | `before_agent_start` | see the system prompt and first user message |
 | `message_start` / `message_update` / `message_end` / `after_provider_response` | observe the message stream |
-| `tool_call` / `tool_result` | observe tool calls and their full outputs |
+| `tool_call` / `tool_update` / `tool_result` | observe tool calls, their mid-execution progress and their full outputs |
 | `user` | receive custom `user` events |
 | `kage.config().system_prompt` | the full system prompt; without the grant the key is absent |
 

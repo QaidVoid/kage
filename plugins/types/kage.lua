@@ -86,12 +86,13 @@
 --- accept. Notification events ignore the handler return;
 --- transform events chain it; predicate and session-op events
 --- interpret it. `user` fires only through
---- `kage.api.autocmd_exec`. The nine text-bearing events
+--- `kage.api.autocmd_exec`. The text-bearing events require
+--- the `context` capability: the transforms
 --- (`transform_context`, `before_provider_request`,
---- `compact_prepare`, `before_agent_start`, `message_start`,
---- `message_update`, `message_end`,
---- `after_provider_response`, `user`) require the `context`
---- capability.
+--- `compact_prepare`), `before_agent_start`, the stream
+--- events (`message_start`, `message_update`, `message_end`,
+--- `after_provider_response`), `user`, and the tool events
+--- (`tool_call`, `tool_update`, `tool_result`).
 ---@alias kage.Event
 ---| "before_agent_start"
 ---| "agent_start"
@@ -904,9 +905,9 @@ function kage.clear_status(key) end
 --- Returns `off`, which removes this subscription. Calling
 --- it again, or from inside a handler, is safe. An unknown
 --- event name logs one warning and subscribes to nothing.
---- The nine text-bearing events (see `kage.Event`) require
---- the `context` capability; registering one without the
---- grant logs a warning and subscribes to nothing.
+--- The text-bearing events (see `kage.Event`) require the
+--- `context` capability; registering one without the grant
+--- logs a warning and subscribes to nothing.
 --- An alias over `kage.api.autocmd_create`.
 --- Since API 1.
 ---@param event kage.Event

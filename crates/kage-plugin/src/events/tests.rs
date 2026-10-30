@@ -489,3 +489,15 @@ fn payload_arrives_as_lua_table() {
     assert_eq!(name, "echo");
     assert_eq!(k, 1);
 }
+
+#[test]
+fn tool_event_group_needs_the_context_capability() {
+    use crate::capabilities::Capability;
+    for event in ["tool_call", "tool_update", "tool_result"] {
+        assert_eq!(
+            required_capability(event),
+            Some(Capability::Context),
+            "`{event}` must be gated behind the context capability"
+        );
+    }
+}

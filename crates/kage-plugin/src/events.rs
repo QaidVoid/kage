@@ -216,6 +216,7 @@ pub(crate) fn required_capability(event: &str) -> Option<Capability> {
         | "after_provider_response"
         | "user"
         | "tool_call"
+        | "tool_update"
         | "tool_result" => Some(Capability::Context),
         _ => None,
     }

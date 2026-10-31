@@ -5,18 +5,27 @@
 //! keys [`UNTRUSTED_SAFE_KEYS`] lists while the project is untrusted.
 //! Every other key in it waits for trust, and so do its agent
 //! definitions (`agents/*.md`, which can set tools and models) and
-//! skills. Trust is recorded in `$XDG_STATE_HOME/kage/trust.json` as
-//! the exact values that were approved, keyed by the canonical
-//! project directory. Any later edit to a gated value makes the
-//! project untrusted again. `providers`, `acp`, `trust`,
-//! `plugins.registry` and the media tables under `[tools]` never
-//! apply from a project, trusted or not.
+//! skills. Trust is recorded in `$XDG_STATE_HOME/kage/trust.json`
+//! as the exact values that were approved, keyed by the canonical
+//! project directory: the gated config subset as JSON plus, for each
+//! agent and skill file, a SHA-256 of its text. The approved texts
+//! live once in `$XDG_STATE_HOME/kage/trust/blobs/<sha256>`, shared
+//! by every project that approved them, so the store stays small
+//! while a later diff still has the old text to show. Any later edit
+//! to a gated value makes the project untrusted again, and the
+//! summary then carries what changed since the approval.
+//! `providers`, `acp`, `trust`, `plugins.registry` and the media
+//! tables under `[tools]` never apply from a project, trusted or
+//! not.
 //!
 //! The user config's `[trust]` table is a second, standing source:
 //! `paths` fully trusts every project at or under a listed
 //! directory, `parts` trusts only the named [`TrustPart`]s under
 //! one. Unlike a stored record it never expires when the project's
-//! files change, and it is never written to the store.
+//! files change, and it is never written to the store. A stored
+//! record is compared and diffed with the parts it covers removed,
+//! so granting standing trust never invalidates the approval of
+//! the rest.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -25,11 +34,17 @@ use figment::Figment;
 use figment::providers::{Env, Format, Toml};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
+use similar::TextDiff;
 
 use crate::config::{Config, TrustConfig, TrustPart};
 use crate::error::{Error, Result};
 
-const STORE_VERSION: u32 = 1;
+const STORE_VERSION: u32 = 2;
+
+/// The most diff lines one changed file contributes to a prompt or
+/// warning.
+const MAX_DIFF_LINES: usize = 40;
 
 /// The project config keys that apply without trust: each entry is a
 /// top-level key and the sub-keys allowed under it, with an empty
@@ -44,6 +59,21 @@ const UNTRUSTED_SAFE_KEYS: &[(&str, &[&str])] = &[
     ("provider", &["default_model"]),
     ("plugins", &["disabled"]),
 ];
+
+/// One way the project's gated settings differ from what the user
+/// approved: a line naming the change, and for a changed agent or
+/// skill file whose approved text is still stored, a unified diff
+/// between the two texts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrustChange {
+    /// One line naming the change: a config key added, removed or
+    /// changed with its old and new values, or an agent or skill
+    /// file added, removed or changed. Names and values are escaped.
+    pub line: String,
+    /// An escaped unified diff, capped to a sane length, for a
+    /// changed agent or skill file whose approved blob exists.
+    pub diff: Option<String>,
+}
 
 /// What an untrusted project asks for, for prompts and warnings.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -60,11 +90,26 @@ pub struct TrustSummary {
     pub agents: Vec<String>,
     /// Names of the project skills.
     pub skills: Vec<String>,
+    /// SHA-256 of the exact gated settings this summary was built
+    /// from. An approval is bound to it rather than to the prompt
+    /// lines, which render some values only lossily, so a value the
+    /// prompt cannot show cannot slip through the approval either.
+    pub digest: String,
+    /// How the gated settings differ from the approved record, when
+    /// the project was trusted before and has changed since. Empty
+    /// for a project never trusted.
+    pub changes: Vec<TrustChange>,
 }
 
+/// The trust store: per project, the approved gated config subset as
+/// JSON plus, under `agents` and `skills`, the SHA-256 of each
+/// approved file text instead of the text. Version 1 records held
+/// the full texts; [`load_store`] migrates them on first read.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Store {
+    #[serde(default)]
     version: u32,
+    #[serde(default)]
     projects: BTreeMap<String, Value>,
 }
 
@@ -184,14 +229,31 @@ fn part_for_key(key: &str) -> Option<TrustPart> {
 /// no agents or skills, everything is covered by the user config's
 /// `[trust]`, or the current gated values are trusted. Only the
 /// parts no `[trust]` entry covers reach the summary, so a prompt
-/// asks for those alone.
+/// asks for those alone. A project whose stored record differs from
+/// the current gated settings additionally carries, in `changes`,
+/// what changed since the approval. The record is compared and
+/// diffed with the parts standing trust covers removed, so widening
+/// the user config's `[trust]` never re-asks about parts already
+/// approved.
 #[must_use]
 pub fn untrusted_project(workdir: &Path) -> Option<TrustSummary> {
-    let (subset, _) = untrusted_subset(workdir)?;
-    if is_trusted(workdir, &subset) {
+    let (subset, standing) = untrusted_subset(workdir)?;
+    let store = load_store().ok();
+    let stored = store
+        .as_ref()
+        .and_then(|s| s.projects.get(&store_key(workdir)))
+        .map(|record| standing_view(record, &standing));
+    if stored
+        .as_ref()
+        .is_some_and(|record| *record == record_view(&subset))
+    {
         return None;
     }
-    Some(summarize(workdir, &subset))
+    let mut summary = summarize(workdir, &subset);
+    if let Some(record) = stored {
+        summary.changes = diff_record(&record, &subset);
+    }
+    Some(summary)
 }
 
 /// Whether `workdir`'s project may load `part`: the user config's
@@ -201,7 +263,9 @@ pub fn untrusted_project(workdir: &Path) -> Option<TrustSummary> {
 pub fn project_part_trusted(workdir: &Path, part: TrustPart) -> bool {
     match untrusted_subset(workdir) {
         None => true,
-        Some((subset, standing)) => standing.parts.contains(&part) || is_trusted(workdir, &subset),
+        Some((subset, standing)) => {
+            standing.parts.contains(&part) || is_trusted(workdir, &subset, &standing)
+        }
     }
 }
 
@@ -219,9 +283,12 @@ fn untrusted_subset(workdir: &Path) -> Option<(Value, StandingTrust)> {
 /// still match `presented`, the summary the user approved. Only the
 /// parts no `[trust]` entry covers are stored, so a later `kage
 /// trust` approves just those. The settings are re-derived from disk
-/// and compared before anything is stored, so a project edited
-/// between the prompt and the approval is refused instead of being
-/// trusted unseen. Returns what was trusted, or `None` when there was
+/// and compared by the digest of the exact record before anything is
+/// stored, so a project edited between the prompt and the approval
+/// is refused instead of being trusted unseen, whatever the prompt
+/// lines did or did not show. The approved agent and skill texts are
+/// written to the blob directory, and blobs no record references
+/// are deleted. Returns what was trusted, or `None` when there was
 /// nothing left to trust.
 ///
 /// # Errors
@@ -233,19 +300,22 @@ pub fn trust_project(workdir: &Path, presented: &TrustSummary) -> Result<Option<
     let Some((subset, _)) = untrusted_subset(workdir) else {
         return Ok(None);
     };
-    if &summarize(workdir, &subset) != presented {
+    if digest_value(&subset) != presented.digest {
         return Err(Error::ConfigWrite(
             "project changed since it was shown for trust; review and approve it again".to_owned(),
         ));
     }
     let mut store = load_store()?;
-    store.projects.insert(store_key(workdir), subset.clone());
+    let record = record_from_subset(&subset)?;
+    store.projects.insert(store_key(workdir), record);
     save_store(&store)?;
+    let _ = gc_blobs(&store);
     Ok(Some(summarize(workdir, &subset)))
 }
 
-/// Forget the trust recorded for `workdir`. Returns whether an entry
-/// was removed.
+/// Forget the trust recorded for `workdir`, and delete blobs no
+/// remaining record references. Returns whether an entry was
+/// removed.
 ///
 /// # Errors
 ///
@@ -255,6 +325,7 @@ pub fn revoke_project(workdir: &Path) -> Result<bool> {
     let removed = store.projects.remove(&store_key(workdir)).is_some();
     if removed {
         save_store(&store)?;
+        let _ = gc_blobs(&store);
     }
     Ok(removed)
 }
@@ -269,7 +340,7 @@ pub(crate) fn filtered_project(workdir: &Path) -> Option<String> {
     if !config_subset(&table).is_empty() {
         let mut subset = risky_subset(workdir, Some(&table))?;
         let standing = standing_trust(workdir);
-        if subtract_standing(&mut subset, &standing) && !is_trusted(workdir, &subset) {
+        if subtract_standing(&mut subset, &standing) && !is_trusted(workdir, &subset, &standing) {
             retain_trusted(&mut table, &standing);
             changed = true;
         }
@@ -480,11 +551,23 @@ fn skill_files(workdir: &Path) -> serde_json::Map<String, Value> {
     out
 }
 
-fn is_trusted(workdir: &Path, subset: &Value) -> bool {
+fn is_trusted(workdir: &Path, subset: &Value, standing: &StandingTrust) -> bool {
     load_store()
         .ok()
-        .and_then(|mut s| s.projects.remove(&store_key(workdir)))
-        .is_some_and(|stored| &stored == subset)
+        .and_then(|store| store.projects.get(&store_key(workdir)).cloned())
+        .is_some_and(|stored| standing_view(&stored, standing) == record_view(subset))
+}
+
+/// The stored record with everything `standing` covers removed: the
+/// same lens [`untrusted_subset`] already applies to the current
+/// gated settings. Standing trust may have grown or shrunk since the
+/// approval, and a part the config now covers is trusted either way,
+/// so it neither invalidates the record nor shows up in a diff as a
+/// change.
+fn standing_view(record: &Value, standing: &StandingTrust) -> Value {
+    let mut view = record.clone();
+    subtract_standing(&mut view, standing);
+    view
 }
 
 fn summarize(workdir: &Path, subset: &Value) -> TrustSummary {
@@ -575,6 +658,8 @@ fn summarize(workdir: &Path, subset: &Value) -> TrustSummary {
         items,
         agents,
         skills,
+        digest: digest_value(subset),
+        changes: Vec::new(),
     }
 }
 
@@ -583,9 +668,14 @@ fn summarize(workdir: &Path, subset: &Value) -> TrustSummary {
 /// `"` and `\`, so DEL, the C1 controls and the bidirectional
 /// overrides would otherwise reach the prompt raw.
 fn shown_value(value: &Value) -> String {
-    value
-        .to_string()
-        .chars()
+    shown_text(&value.to_string())
+}
+
+/// `text` with the same escaping [`shown_value`] applies to values.
+/// Diff bodies run through this too: their text comes from a
+/// repository the user has not approved yet.
+fn shown_text(text: &str) -> String {
+    text.chars()
         .flat_map(|c| {
             let hidden = c.is_control()
                 || matches!(
@@ -793,12 +883,360 @@ fn store_path() -> Result<PathBuf> {
         .ok_or_else(|| std::io::Error::other("no home directory for the trust store").into())
 }
 
-fn load_store() -> Result<Store> {
-    match std::fs::read_to_string(store_path()?) {
-        Ok(text) => Ok(serde_json::from_str(&text)?),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Store::default()),
-        Err(e) => Err(e.into()),
+/// The directory holding the approved agent and skill texts, one
+/// file per distinct SHA-256, deduplicated across projects.
+fn blobs_dir() -> Result<PathBuf> {
+    Config::state_dir()
+        .map(|d| d.join("trust").join("blobs"))
+        .ok_or_else(|| std::io::Error::other("no home directory for the trust store").into())
+}
+
+/// The SHA-256 of `text` as hex: both the value a record stores in
+/// place of a file's text and the name of its blob.
+fn sha256_hex(text: &str) -> String {
+    use std::fmt::Write as _;
+    let mut hex = String::with_capacity(64);
+    for byte in Sha256::digest(text.as_bytes()) {
+        let _ = write!(hex, "{byte:02x}");
     }
+    hex
+}
+
+/// Write `text` to the blob directory under its hash, unless that
+/// blob is already there, and return the hash. Approval and the v1
+/// migration are the only writers, so nothing is stored before the
+/// user says yes.
+///
+/// # Errors
+///
+/// When the blob directory cannot be created or the blob written.
+fn write_blob(text: &str) -> Result<String> {
+    let hash = sha256_hex(text);
+    let path = blobs_dir()?.join(&hash);
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        crate::fsutil::atomic_write(&path, text.as_bytes())?;
+    }
+    Ok(hash)
+}
+
+/// The approved text stored for `hash`, or `None` when its blob is
+/// missing or `hash` is not a SHA-256 in hex. The value comes from
+/// the store file, so a hand-edited record cannot aim the read at a
+/// path outside the blob directory; the diff then says only that the
+/// content changed.
+fn read_blob(hash: &str) -> Option<String> {
+    let shape = hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit());
+    if !shape {
+        return None;
+    }
+    std::fs::read_to_string(blobs_dir().ok()?.join(hash)).ok()
+}
+
+/// Delete every blob no record in `store` references. Runs after
+/// [`trust_project`] and [`revoke_project`]; a blob another project
+/// still references survives. Best effort: the record has already
+/// been saved by then, so a blob that cannot be removed is left for
+/// a later pass rather than failing the user-facing operation.
+fn gc_blobs(store: &Store) -> Result<()> {
+    let referenced: BTreeSet<String> = store.projects.values().flat_map(record_hashes).collect();
+    let Ok(entries) = std::fs::read_dir(blobs_dir()?) else {
+        return Ok(());
+    };
+    for path in entries.flatten().map(|entry| entry.path()) {
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        if !referenced.contains(&name) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    Ok(())
+}
+
+/// Every hash a record references: the values of its `agents` and
+/// `skills` maps.
+fn record_hashes(record: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    for key in ["agents", "skills"] {
+        out.extend(
+            record
+                .get(key)
+                .and_then(Value::as_object)
+                .into_iter()
+                .flat_map(|texts| texts.values())
+                .filter_map(Value::as_str)
+                .map(str::to_owned),
+        );
+    }
+    out
+}
+
+/// The stored form of `subset`: the gated config keys unchanged and
+/// each agent and skill file text reduced to its SHA-256, the shape a
+/// record has on disk. No blobs are written; hashing alone decides
+/// trust, so this comparison never touches the blob directory.
+fn record_view(subset: &Value) -> Value {
+    let mut record = subset.clone();
+    for key in ["agents", "skills"] {
+        let Some(texts) = record.get_mut(key).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        for value in texts.values_mut() {
+            if let Value::String(text) = value {
+                let hash = sha256_hex(text);
+                *value = Value::String(hash);
+            }
+        }
+    }
+    record
+}
+
+/// Build the stored record for `subset`, writing each agent and
+/// skill file text to the blob directory once.
+///
+/// # Errors
+///
+/// When a blob cannot be written.
+fn record_from_subset(subset: &Value) -> Result<Value> {
+    for key in ["agents", "skills"] {
+        for text in subset
+            .get(key)
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|texts| texts.values())
+            .filter_map(Value::as_str)
+        {
+            write_blob(text)?;
+        }
+    }
+    Ok(record_view(subset))
+}
+
+/// SHA-256 of `value` in canonical form. Binds an approval to the
+/// exact record it was taken from, so [`trust_project`] refuses any
+/// edit, including values the prompt lines render only lossily.
+fn digest_value(value: &Value) -> String {
+    sha256_hex(&canonical_json(value))
+}
+
+/// The canonical JSON text of `value`: object keys sorted at every
+/// level, so the text never depends on insertion order. The
+/// workspace builds `serde_json` with `preserve_order`, so its own
+/// serializer cannot be used for this.
+fn canonical_json(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let sorted: BTreeMap<&String, &Value> = map.iter().collect();
+            let body: Vec<String> = sorted
+                .iter()
+                .map(|(key, value)| {
+                    format!(
+                        "{}:{}",
+                        Value::String((*key).clone()),
+                        canonical_json(value)
+                    )
+                })
+                .collect();
+            format!("{{{}}}", body.join(","))
+        }
+        Value::Array(items) => {
+            let body: Vec<String> = items.iter().map(canonical_json).collect();
+            format!("[{}]", body.join(","))
+        }
+        _ => value.to_string(),
+    }
+}
+
+/// What changed in `subset` since the approved `record`: one
+/// [`TrustChange`] per added, removed or changed config key and per
+/// added, removed or changed agent or skill file.
+fn diff_record(record: &Value, subset: &Value) -> Vec<TrustChange> {
+    let mut out = Vec::new();
+    let mut keys: BTreeSet<&String> = record
+        .as_object()
+        .into_iter()
+        .flat_map(|map| map.keys())
+        .collect();
+    keys.extend(subset.as_object().into_iter().flat_map(|map| map.keys()));
+    for key in keys {
+        let path = key.escape_debug().to_string();
+        match key.as_str() {
+            "agents" | "skills" => {
+                let kind = if key == "agents" { "agent" } else { "skill" };
+                diff_files(kind, record.get(key), subset.get(key), &mut out);
+            }
+            _ => diff_values(&path, record.get(key), subset.get(key), &mut out),
+        }
+    }
+    out
+}
+
+/// One [`TrustChange`] per file in the symmetric difference of two
+/// name maps. `old` values are hashes into the blob directory, `new`
+/// values are the current texts.
+fn diff_files(kind: &str, old: Option<&Value>, new: Option<&Value>, out: &mut Vec<TrustChange>) {
+    let mut names: BTreeSet<&String> = old
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|texts| texts.keys())
+        .collect();
+    names.extend(
+        new.and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|texts| texts.keys()),
+    );
+    for name in names {
+        let old_hash = old
+            .and_then(Value::as_object)
+            .and_then(|texts| texts.get(name))
+            .and_then(Value::as_str);
+        let new_text = new
+            .and_then(Value::as_object)
+            .and_then(|texts| texts.get(name))
+            .and_then(Value::as_str);
+        let shown = name.escape_debug();
+        let change = match (old_hash, new_text) {
+            (Some(_), None) => TrustChange {
+                line: format!("project {kind} `{shown}` removed"),
+                diff: None,
+            },
+            (None, Some(_)) => TrustChange {
+                line: format!("project {kind} `{shown}` added"),
+                diff: None,
+            },
+            (Some(hash), Some(text)) => {
+                if sha256_hex(text) == hash {
+                    continue;
+                }
+                TrustChange {
+                    line: format!("project {kind} `{shown}` content changed"),
+                    diff: read_blob(hash).map(|old| unified_diff(&old, text)),
+                }
+            }
+            (None, None) => continue,
+        };
+        out.push(change);
+    }
+}
+
+/// One [`TrustChange`] per leaf difference between the approved `old`
+/// and current `new` value of the config key at `path`, walking into
+/// objects so an added, removed or changed table reports its leaves,
+/// and treating arrays and scalars as leaves.
+fn diff_values(path: &str, old: Option<&Value>, new: Option<&Value>, out: &mut Vec<TrustChange>) {
+    if old == new {
+        return;
+    }
+    let old_map = old
+        .filter(|value| value.is_object())
+        .and_then(Value::as_object);
+    let new_map = new
+        .filter(|value| value.is_object())
+        .and_then(Value::as_object);
+    // Walk when both sides are objects, or when one side is missing
+    // and the other is an object, so an added or removed table lists
+    // its keys instead of one opaque value.
+    let walk = match (old_map, new_map) {
+        (Some(_), Some(_)) => true,
+        (Some(_), None) => new.is_none(),
+        (None, Some(_)) => old.is_none(),
+        (None, None) => false,
+    };
+    if walk {
+        let mut keys: BTreeSet<&String> = old_map.into_iter().flat_map(|map| map.keys()).collect();
+        keys.extend(new_map.into_iter().flat_map(|map| map.keys()));
+        for key in keys {
+            let sub = format!("{path}.{}", key.escape_debug());
+            diff_values(
+                &sub,
+                old_map.and_then(|map| map.get(key)),
+                new_map.and_then(|map| map.get(key)),
+                out,
+            );
+        }
+        return;
+    }
+    let line = match (old, new) {
+        (Some(old), Some(new)) => format!(
+            "{path} changed: {} -> {}",
+            shown_value(old),
+            shown_value(new)
+        ),
+        (Some(old), None) => format!("{path} removed (was {})", shown_value(old)),
+        (None, Some(new)) => format!("{path} added: {}", shown_value(new)),
+        (None, None) => return,
+    };
+    out.push(TrustChange { line, diff: None });
+}
+
+/// An escaped unified diff of the approved `old` text and the
+/// current `new` text, capped to [`MAX_DIFF_LINES`] lines.
+fn unified_diff(old: &str, new: &str) -> String {
+    let diff = TextDiff::from_lines(old, new);
+    let mut lines = vec!["--- approved".to_owned(), "+++ current".to_owned()];
+    for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
+        lines.extend(hunk.to_string().lines().map(shown_text));
+    }
+    if lines.len() > MAX_DIFF_LINES {
+        lines.truncate(MAX_DIFF_LINES);
+        lines.push("... (diff truncated)".to_owned());
+    }
+    lines.join("\n")
+}
+
+fn load_store() -> Result<Store> {
+    let text = match std::fs::read_to_string(store_path()?) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Store {
+                version: STORE_VERSION,
+                ..Store::default()
+            });
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let mut store: Store = serde_json::from_str(&text)?;
+    if store.version > STORE_VERSION {
+        return Err(Error::ConfigWrite(format!(
+            "trust store version {} is newer than this kage understands; upgrade kage",
+            store.version
+        )));
+    }
+    if store.version < STORE_VERSION {
+        migrate_v1(&mut store)?;
+    }
+    Ok(store)
+}
+
+/// Convert a version 1 store, whose records held the full agent and
+/// skill file texts, to version 2: each text becomes its SHA-256 and
+/// is written to the blob directory once, the config subset stays,
+/// and the store is saved. A project trusted before the upgrade
+/// stays trusted, with no prompt. The conversion is idempotent, so a
+/// crash partway through is finished on the next load.
+///
+/// # Errors
+///
+/// When a blob or the store cannot be written.
+fn migrate_v1(store: &mut Store) -> Result<()> {
+    for record in store.projects.values_mut() {
+        for key in ["agents", "skills"] {
+            let Some(texts) = record.get_mut(key).and_then(Value::as_object_mut) else {
+                continue;
+            };
+            for value in texts.values_mut() {
+                if let Value::String(text) = value {
+                    let hash = write_blob(text)?;
+                    *value = Value::String(hash);
+                }
+            }
+        }
+    }
+    store.version = STORE_VERSION;
+    save_store(store)
 }
 
 fn save_store(store: &Store) -> Result<()> {
@@ -806,10 +1244,7 @@ fn save_store(store: &Store) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let body = serde_json::to_string_pretty(&Store {
-        version: STORE_VERSION,
-        projects: store.projects.clone(),
-    })?;
+    let body = serde_json::to_string_pretty(store)?;
     crate::fsutil::atomic_write(&path, body.as_bytes())?;
     Ok(())
 }
@@ -986,6 +1421,410 @@ mod tests {
             assert!(trust_project(&project, &presented).is_err());
             assert!(untrusted_project(&project).is_some());
             assert!(!project_part_trusted(&project, TrustPart::Agents));
+            Ok(())
+        });
+    }
+
+    /// The approval binds to a digest of the exact record, not to the
+    /// prompt lines: an agent edit under the same name leaves every
+    /// rendered line identical, and is still refused (#82).
+    #[test]
+    fn trust_refuses_an_agent_edited_since_it_was_shown() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, "")?;
+            std::fs::remove_file(Config::project_path(&project)).map_err(io)?;
+            write_agent(&project, "reviewer", REVIEWER)?;
+            let presented = untrusted_project(&project).expect("something to trust");
+            write_agent(
+                &project,
+                "reviewer",
+                &REVIEWER.replace("Review.", "Rewrite everything."),
+            )?;
+            assert!(trust_project(&project, &presented).is_err());
+            assert!(untrusted_project(&project).is_some());
+            Ok(())
+        });
+    }
+
+    /// A permission default flipped between the prompt and the
+    /// approval is refused (#82).
+    #[test]
+    fn trust_refuses_a_permission_default_changed_since_it_was_shown() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, "[permissions.tools.shell]\ndefault = \"deny\"\n")?;
+            let presented = untrusted_project(&project).expect("something to trust");
+            write_project(&project, "[permissions.tools.shell]\ndefault = \"allow\"\n")?;
+            assert!(trust_project(&project, &presented).is_err());
+            assert!(untrusted_project(&project).is_some());
+            Ok(())
+        });
+    }
+
+    /// An MCP `env` value changed between the prompt and the approval
+    /// is refused (#82).
+    #[test]
+    fn trust_refuses_mcp_env_changed_since_it_was_shown() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(
+                jail,
+                "[mcp.servers.evil]\ncommand = \"sh\"\nenv = { A = \"1\" }\n",
+            )?;
+            let presented = untrusted_project(&project).expect("something to trust");
+            write_project(
+                &project,
+                "[mcp.servers.evil]\ncommand = \"sh\"\nenv = { A = \"2\" }\n",
+            )?;
+            assert!(trust_project(&project, &presented).is_err());
+            assert!(untrusted_project(&project).is_some());
+            Ok(())
+        });
+    }
+
+    /// A version 1 store, whose records held the full agent and skill
+    /// texts, migrates on first read: each text moves to the blob
+    /// directory, the record keeps its hash, and a project trusted
+    /// before the upgrade stays trusted with no prompt.
+    #[test]
+    fn a_v1_store_migrates_to_v2_and_keeps_trust() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, RISKY)?;
+            write_agent(&project, "reviewer", REVIEWER)?;
+            let stored = serde_json::json!({
+                "mcp": { "servers": { "evil": { "command": "sh", "args": ["-c", "true"] } } },
+                "permissions": { "tools": { "shell": { "default": "allow" } } },
+                "plugins": { "capabilities": { "helper": ["exec", "net"] } },
+                "agents": { "reviewer": REVIEWER }
+            });
+            let mut projects = serde_json::Map::new();
+            projects.insert(project.to_string_lossy().into_owned(), stored);
+            let state = jail.directory().join("state/kage");
+            std::fs::create_dir_all(&state).map_err(io)?;
+            std::fs::write(
+                state.join("trust.json"),
+                serde_json::json!({
+                    "version": 1,
+                    "projects": projects
+                })
+                .to_string(),
+            )
+            .map_err(io)?;
+
+            assert!(untrusted_project(&project).is_none());
+            assert!(project_part_trusted(&project, TrustPart::Agents));
+            assert_applied(&load(&project)?);
+
+            let migrated = std::fs::read_to_string(state.join("trust.json")).map_err(io)?;
+            assert!(migrated.contains("\"version\": 2"), "{migrated}");
+            assert!(!migrated.contains("Reviews a diff."), "{migrated}");
+            assert_eq!(
+                std::fs::read_to_string(state.join("trust/blobs").join(sha256_hex(REVIEWER)))
+                    .map_err(io)?,
+                REVIEWER
+            );
+
+            // The hashed record still invalidates on a later edit.
+            write_agent(&project, "reviewer", &REVIEWER.replace("diff", "branch"))?;
+            assert!(untrusted_project(&project).is_some());
+            Ok(())
+        });
+    }
+
+    /// Two projects sharing one skill share a single blob, and a
+    /// revoke deletes only the blobs no remaining record references.
+    #[test]
+    fn projects_sharing_a_skill_share_one_blob_and_revoke_cleans_up() {
+        const SHARED: &str = "---\ndescription: Shared.\n---\nShared text.\n";
+        const SOLO: &str = "---\ndescription: Solo.\n---\nSolo text.\n";
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let root = env(jail);
+            let one = project_at(&root, "one", "")?;
+            let two = project_at(&root, "two", "")?;
+            for (project, skills) in [
+                (&one, vec![("helper", SHARED), ("extra", SOLO)]),
+                (&two, vec![("helper", SHARED)]),
+            ] {
+                for (name, text) in skills {
+                    let dir = project.join(".kage").join("skills").join(name);
+                    std::fs::create_dir_all(&dir).map_err(io)?;
+                    std::fs::write(dir.join("SKILL.md"), text).map_err(io)?;
+                }
+                let presented = untrusted_project(project).expect("skills wait for trust");
+                trust_project(project, &presented)
+                    .map_err(io)?
+                    .expect("something to trust");
+            }
+            let blobs = jail.directory().join("state/kage/trust/blobs");
+            let names = |dir: &Path| -> figment::error::Result<Vec<String>> {
+                let mut names: Vec<String> = std::fs::read_dir(dir)
+                    .map_err(io)?
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                Ok(names)
+            };
+            assert_eq!(names(&blobs)?, vec![sha256_hex(SHARED), sha256_hex(SOLO)]);
+
+            assert!(revoke_project(&one).map_err(io)?);
+            assert_eq!(names(&blobs)?, vec![sha256_hex(SHARED)]);
+            assert!(untrusted_project(&two).is_none());
+            Ok(())
+        });
+    }
+
+    /// A changed config value reaches the summary's diff with its
+    /// old and new values, at the leaf key path.
+    #[test]
+    fn the_summary_diffs_a_changed_config_value() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, RISKY)?;
+            let presented = untrusted_project(&project).expect("untrusted");
+            trust_project(&project, &presented)
+                .map_err(io)?
+                .expect("something to trust");
+
+            write_project(&project, &RISKY.replace("\"sh\"", "\"bash\""))?;
+            let summary = untrusted_project(&project).expect("changed since trust");
+            let lines: Vec<&str> = summary
+                .changes
+                .iter()
+                .map(|change| change.line.as_str())
+                .collect();
+            assert!(
+                lines.contains(&"mcp.servers.evil.command changed: \"sh\" -> \"bash\""),
+                "{lines:?}"
+            );
+            assert!(summary.changes.iter().all(|change| change.diff.is_none()));
+            Ok(())
+        });
+    }
+
+    /// Added and removed config keys and files reach the summary's
+    /// diff too, with the old or new value spelled out for keys.
+    #[test]
+    fn the_summary_lists_added_and_removed_keys_and_files() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, RISKY)?;
+            write_agent(&project, "reviewer", REVIEWER)?;
+            let presented = untrusted_project(&project).expect("untrusted");
+            trust_project(&project, &presented)
+                .map_err(io)?
+                .expect("something to trust");
+
+            write_project(
+                &project,
+                "[mcp.servers.evil]\ncommand = \"sh\"\nargs = [\"-c\", \"true\"]\n\
+                 \n[permissions.tools.shell]\ndefault = \"allow\"\n\
+                 \n[shell]\nprogram = \"/tmp/evil.sh\"\n",
+            )?;
+            write_agent(&project, "scout", REVIEWER)?;
+            std::fs::remove_file(crate::agents::project_dirs(&project)[0].join("reviewer.md"))
+                .map_err(io)?;
+
+            let summary = untrusted_project(&project).expect("changed since trust");
+            let lines: Vec<&str> = summary
+                .changes
+                .iter()
+                .map(|change| change.line.as_str())
+                .collect();
+            assert!(
+                lines.contains(&"shell.program added: \"/tmp/evil.sh\""),
+                "{lines:?}"
+            );
+            assert!(
+                lines.contains(&"plugins.capabilities.helper removed (was [\"exec\",\"net\"])"),
+                "{lines:?}"
+            );
+            assert!(
+                lines.contains(&"project agent `reviewer` removed"),
+                "{lines:?}"
+            );
+            assert!(lines.contains(&"project agent `scout` added"), "{lines:?}");
+            Ok(())
+        });
+    }
+
+    /// Standing trust gained after an approval covers only its own
+    /// parts: the record still holds for the rest, so nothing
+    /// re-asks, and a later change to an uncovered part asks with
+    /// that part alone in the diff (#274 review, finding 3).
+    #[test]
+    fn standing_parts_added_after_trust_cover_only_their_parts() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let root = env(jail);
+            let project = project_at(&root, "work/client", RISKY)?;
+            let presented = untrusted_project(&project).expect("untrusted");
+            trust_project(&project, &presented)
+                .map_err(io)?
+                .expect("something to trust");
+            assert!(untrusted_project(&project).is_none());
+
+            write_user_config(jail, "[trust.parts]\n\"~/work/client\" = [\"mcp\"]\n")?;
+            assert!(untrusted_project(&project).is_none());
+            assert!(project_part_trusted(&project, TrustPart::Permissions));
+            assert_applied(&load(&project)?);
+
+            write_project(&project, &RISKY.replace("\"allow\"", "\"deny\""))?;
+            let summary = untrusted_project(&project).expect("asks again");
+            let lines: Vec<&str> = summary
+                .changes
+                .iter()
+                .map(|change| change.line.as_str())
+                .collect();
+            assert_eq!(
+                lines,
+                ["permissions.tools.shell.default changed: \"allow\" -> \"deny\""]
+            );
+            Ok(())
+        });
+    }
+
+    /// A hand-edited record cannot aim the diff at a file outside the
+    /// blob directory: only a SHA-256 in hex is ever joined into a
+    /// path, so a crafted value degrades to "content changed".
+    #[test]
+    fn a_crafted_hash_cannot_read_outside_the_blob_dir() {
+        const HELPER: &str = "---\ndescription: Helps.\n---\nDo the thing.\n";
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, "")?;
+            std::fs::remove_file(Config::project_path(&project)).map_err(io)?;
+            let dir = project.join(".kage").join("skills").join("helper");
+            std::fs::create_dir_all(&dir).map_err(io)?;
+            std::fs::write(dir.join("SKILL.md"), HELPER).map_err(io)?;
+            let presented = untrusted_project(&project).expect("untrusted");
+            trust_project(&project, &presented)
+                .map_err(io)?
+                .expect("something to trust");
+
+            let root = jail.directory().to_path_buf();
+            std::fs::write(root.join("secret.txt"), "TOP-SECRET-VICTIM").map_err(io)?;
+            let state = root.join("state/kage");
+            let mut store: Value = serde_json::from_str(
+                &std::fs::read_to_string(state.join("trust.json")).map_err(io)?,
+            )
+            .map_err(io)?;
+            let key = project.to_string_lossy().into_owned();
+            store["projects"][&key]["skills"]["helper"] =
+                Value::String("../../../../secret.txt".to_owned());
+            std::fs::write(
+                state.join("trust.json"),
+                serde_json::to_string(&store).map_err(io)?,
+            )
+            .map_err(io)?;
+
+            std::fs::write(dir.join("SKILL.md"), HELPER.replace("thing", "task")).map_err(io)?;
+            let summary = untrusted_project(&project).expect("changed since trust");
+            assert_eq!(summary.changes.len(), 1);
+            assert_eq!(
+                summary.changes[0].line,
+                "project skill `helper` content changed"
+            );
+            assert!(summary.changes[0].diff.is_none());
+            assert!(!summary.changes[0].line.contains("TOP-SECRET"));
+            Ok(())
+        });
+    }
+
+    /// A changed skill whose approved blob is still on disk gets a
+    /// capped, escaped unified diff next to its change line.
+    #[test]
+    fn the_summary_diffs_a_changed_skill_with_a_unified_diff() {
+        const HELPER: &str = "---\ndescription: Helps.\n---\nDo the thing.\n";
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, "")?;
+            std::fs::remove_file(Config::project_path(&project)).map_err(io)?;
+            let dir = project.join(".kage").join("skills").join("helper");
+            std::fs::create_dir_all(&dir).map_err(io)?;
+            std::fs::write(dir.join("SKILL.md"), HELPER).map_err(io)?;
+            let presented = untrusted_project(&project).expect("untrusted");
+            trust_project(&project, &presented)
+                .map_err(io)?
+                .expect("something to trust");
+
+            std::fs::write(dir.join("SKILL.md"), HELPER.replace("thing", "task")).map_err(io)?;
+            let summary = untrusted_project(&project).expect("changed since trust");
+            assert_eq!(summary.changes.len(), 1);
+            let change = &summary.changes[0];
+            assert_eq!(change.line, "project skill `helper` content changed");
+            let diff = change.diff.as_deref().expect("the approved blob");
+            assert!(diff.contains("--- approved\n"), "{diff}");
+            assert!(diff.contains("+++ current\n"), "{diff}");
+            assert!(diff.contains("-Do the thing."), "{diff}");
+            assert!(diff.contains("+Do the task."), "{diff}");
+            Ok(())
+        });
+    }
+
+    /// A changed file whose approved blob is gone says its content
+    /// changed and shows no half diff.
+    #[test]
+    fn the_summary_handles_a_missing_blob() {
+        const HELPER: &str = "---\ndescription: Helps.\n---\nDo the thing.\n";
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, "")?;
+            std::fs::remove_file(Config::project_path(&project)).map_err(io)?;
+            let dir = project.join(".kage").join("skills").join("helper");
+            std::fs::create_dir_all(&dir).map_err(io)?;
+            std::fs::write(dir.join("SKILL.md"), HELPER).map_err(io)?;
+            let presented = untrusted_project(&project).expect("untrusted");
+            trust_project(&project, &presented)
+                .map_err(io)?
+                .expect("something to trust");
+
+            std::fs::remove_file(
+                jail.directory()
+                    .join("state/kage/trust/blobs")
+                    .join(sha256_hex(HELPER)),
+            )
+            .map_err(io)?;
+            std::fs::write(dir.join("SKILL.md"), HELPER.replace("thing", "task")).map_err(io)?;
+            let summary = untrusted_project(&project).expect("changed since trust");
+            assert_eq!(summary.changes.len(), 1);
+            assert_eq!(
+                summary.changes[0].line,
+                "project skill `helper` content changed"
+            );
+            assert!(summary.changes[0].diff.is_none());
+            Ok(())
+        });
+    }
+
+    /// Control characters in a changed file never reach the diff raw:
+    /// every diff body line is escaped the way values are.
+    #[test]
+    fn diff_content_with_control_characters_renders_escaped() {
+        const HELPER: &str = "---\ndescription: Helps.\n---\nBe \u{1b}[31mred\u{1b}[0m.\n";
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, "")?;
+            std::fs::remove_file(Config::project_path(&project)).map_err(io)?;
+            let dir = project.join(".kage").join("skills").join("helper");
+            std::fs::create_dir_all(&dir).map_err(io)?;
+            std::fs::write(dir.join("SKILL.md"), HELPER).map_err(io)?;
+            let presented = untrusted_project(&project).expect("untrusted");
+            trust_project(&project, &presented)
+                .map_err(io)?
+                .expect("something to trust");
+
+            std::fs::write(dir.join("SKILL.md"), HELPER.replace("red", "green")).map_err(io)?;
+            let summary = untrusted_project(&project).expect("changed since trust");
+            let diff = summary.changes[0]
+                .diff
+                .as_deref()
+                .expect("the approved blob");
+            assert!(!diff.contains('\u{1b}'), "{diff}");
+            assert!(diff.contains("\\u{1b}[31m"), "{diff}");
             Ok(())
         });
     }

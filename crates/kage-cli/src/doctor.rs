@@ -290,14 +290,28 @@ fn check_config(workdir: &Path) -> Check {
     match Config::load_layered(workdir) {
         Ok(_) => {
             if let Some(summary) = kage_core::trust::untrusted_project(workdir) {
+                let mut body = format!(
+                    "ignoring untrusted {} settings in {}",
+                    summary.keys.join(", "),
+                    summary.path.display()
+                );
+                // Only the changed items: the full diff with old texts
+                // belongs to `kage trust`.
+                if !summary.changes.is_empty() {
+                    let changed: Vec<&str> = summary
+                        .changes
+                        .iter()
+                        .map(|change| change.line.as_str())
+                        .collect();
+                    body = format!(
+                        "{body}; changed since you trusted it: {}",
+                        changed.join(", ")
+                    );
+                }
                 return Check {
                     name: "config",
                     status: Status::Warn,
-                    body: format!(
-                        "ignoring untrusted {} settings in {}",
-                        summary.keys.join(", "),
-                        summary.path.display()
-                    ),
+                    body,
                     hint: Some("run `kage trust` in this directory to allow them".into()),
                 };
             }

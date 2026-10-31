@@ -532,7 +532,10 @@ pub(crate) fn start_notices(
 }
 
 /// Notice naming the project settings and agents this run ignores
-/// because the project is not trusted, and how to allow them.
+/// because the project is not trusted, and how to allow them. A
+/// project that changed since its approval lists the changes; the
+/// full diff with old texts stays in `kage trust`, so the notice
+/// stays one line.
 fn untrusted_notice(summary: &kage_core::trust::TrustSummary) -> String {
     let mut ignored: Vec<String> = summary
         .keys
@@ -546,10 +549,22 @@ fn untrusted_notice(summary: &kage_core::trust::TrustSummary) -> String {
     if !summary.skills.is_empty() {
         ignored.push(format!("skills ({})", summary.skills.join(", ")));
     }
-    format!(
-        "project settings ignored because the project is not trusted: {}. \
-         Run `kage trust` here and restart to use them.",
+    let head = format!(
+        "project settings ignored because the project is not trusted: {}",
         ignored.join(", ")
+    );
+    if summary.changes.is_empty() {
+        return format!("{head}. Run `kage trust` here and restart to use them.");
+    }
+    let changed: Vec<&str> = summary
+        .changes
+        .iter()
+        .map(|change| change.line.as_str())
+        .collect();
+    format!(
+        "{head}, changed since you trusted it: {}. \
+         Run `kage trust` here and restart to see the diff and use them.",
+        changed.join(", ")
     )
 }
 
@@ -790,11 +805,35 @@ mod tests {
             items: Vec::new(),
             agents: vec!["reviewer".to_owned()],
             skills: vec!["helper".to_owned()],
+            digest: String::new(),
+            changes: Vec::new(),
         };
         assert_eq!(
             untrusted_notice(&summary),
             "project settings ignored because the project is not trusted: mcp, permissions, \
              agents (reviewer), skills (helper). Run `kage trust` here and restart to use them."
+        );
+    }
+
+    #[test]
+    fn untrusted_notice_lists_changes_and_points_at_the_full_diff() {
+        let summary = kage_core::trust::TrustSummary {
+            path: PathBuf::from("/p/.kage"),
+            keys: vec!["skills".to_owned()],
+            items: Vec::new(),
+            agents: Vec::new(),
+            skills: vec!["helper".to_owned()],
+            digest: String::new(),
+            changes: vec![kage_core::trust::TrustChange {
+                line: "project skill `helper` content changed".to_owned(),
+                diff: Some("--- approved\n+++ current".to_owned()),
+            }],
+        };
+        assert_eq!(
+            untrusted_notice(&summary),
+            "project settings ignored because the project is not trusted: skills (helper), \
+             changed since you trusted it: project skill `helper` content changed. \
+             Run `kage trust` here and restart to see the diff and use them."
         );
     }
 

@@ -5,7 +5,24 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use kage_core::trust::{self, StandingTrust, TrustSummary};
+use kage_core::trust::{self, StandingTrust, TrustChange, TrustSummary};
+
+/// The change lines of a summary that differs from the approved
+/// record, each followed by its unified diff, indented for the
+/// prompt and the warning.
+fn changes_text(changes: &[TrustChange]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for change in changes {
+        let _ = writeln!(out, "  - {}", change.line);
+        if let Some(diff) = &change.diff {
+            for line in diff.lines() {
+                let _ = writeln!(out, "    {line}");
+            }
+        }
+    }
+    out
+}
 
 /// The line `kage trust` prints for a project a `[trust] paths` entry
 /// already fully trusts: which entry matched. Nothing is written.
@@ -59,13 +76,22 @@ pub(crate) fn confirm_project_trust(workdir: &Path) {
         return;
     }
     let mut err = std::io::stderr().lock();
-    let _ = writeln!(
-        err,
-        "kage: {} wants to enable settings you have not trusted:",
-        summary.path.display()
-    );
-    for item in &summary.items {
-        let _ = writeln!(err, "  - {item}");
+    if summary.changes.is_empty() {
+        let _ = writeln!(
+            err,
+            "kage: {} wants to enable settings you have not trusted:",
+            summary.path.display()
+        );
+        for item in &summary.items {
+            let _ = writeln!(err, "  - {item}");
+        }
+    } else {
+        let _ = writeln!(
+            err,
+            "kage: {} has settings that changed since you trusted it:",
+            summary.path.display()
+        );
+        let _ = write!(err, "{}", changes_text(&summary.changes));
     }
     let _ = write!(err, "Trust this project? [y/N] ");
     let _ = err.flush();
@@ -109,11 +135,18 @@ fn warning(workdir: &Path, summary: &TrustSummary) -> String {
     if !summary.skills.is_empty() {
         parts.push(format!("project skills ({})", summary.skills.join(", ")));
     }
-    format!(
-        "kage: ignoring untrusted {} in {}. \
-         Run `kage trust` in that directory to allow them.",
+    let head = format!(
+        "kage: ignoring untrusted {} in {}",
         parts.join(" and "),
         workdir.display()
+    );
+    if summary.changes.is_empty() {
+        return format!("{head}. Run `kage trust` in that directory to allow them.");
+    }
+    format!(
+        "{head}, changed since you trusted it:\n{}Run `kage trust` in that directory \
+         to review the diff and allow them.",
+        changes_text(&summary.changes)
     )
 }
 
@@ -158,6 +191,13 @@ pub(crate) fn run(revoke: bool) -> ExitCode {
         );
         return ExitCode::SUCCESS;
     };
+    if !presented.changes.is_empty() {
+        eprintln!(
+            "kage: {} changed since you trusted it:",
+            presented.path.display()
+        );
+        eprint!("{}", changes_text(&presented.changes));
+    }
     match trust::trust_project(&workdir, &presented) {
         Ok(Some(summary)) => {
             eprintln!("kage: trusted {}:", summary.path.display());
@@ -188,6 +228,8 @@ mod tests {
             items: Vec::new(),
             agents: agents.iter().map(|a| (*a).to_owned()).collect(),
             skills: skills.iter().map(|s| (*s).to_owned()).collect(),
+            digest: String::new(),
+            changes: Vec::new(),
         }
     }
 
@@ -266,6 +308,46 @@ mod tests {
             warning(dir, &summary(&["skills"], &[], &["helper"])),
             "kage: ignoring untrusted project skills (helper) in /p. \
              Run `kage trust` in that directory to allow them."
+        );
+    }
+
+    /// A summary whose project was trusted before and has changed,
+    /// with one config change and one file change with a diff.
+    fn changed_summary() -> TrustSummary {
+        TrustSummary {
+            path: PathBuf::from("/p/.kage"),
+            keys: vec!["mcp".to_owned(), "skills".to_owned()],
+            items: Vec::new(),
+            agents: Vec::new(),
+            skills: vec!["helper".to_owned()],
+            digest: String::new(),
+            changes: vec![
+                TrustChange {
+                    line: "mcp.servers.evil.command changed: \"sh\" -> \"curl\"".to_owned(),
+                    diff: None,
+                },
+                TrustChange {
+                    line: "project skill `helper` content changed".to_owned(),
+                    diff: Some(
+                        "--- approved\n+++ current\n@@ -1,1 +1,1 @@\n-Do the thing.\n+Do the task."
+                            .to_owned(),
+                    ),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn warning_lists_what_changed_since_trust_with_the_diff() {
+        let dir = Path::new("/p");
+        assert_eq!(
+            warning(dir, &changed_summary()),
+            "kage: ignoring untrusted .kage/config.toml settings (mcp) and project skills \
+             (helper) in /p, changed since you trusted it:\n  \
+             - mcp.servers.evil.command changed: \"sh\" -> \"curl\"\n  \
+             - project skill `helper` content changed\n    --- approved\n    +++ current\n    \
+             @@ -1,1 +1,1 @@\n    -Do the thing.\n    +Do the task.\n\
+             Run `kage trust` in that directory to review the diff and allow them."
         );
     }
 }

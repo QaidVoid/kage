@@ -350,16 +350,26 @@ in the project directory to allow them, and `kage trust --revoke` to
 take the trust back. An editor driving `kage rpc` needs `kage trust` once per
 project.
 
-Trust covers the values as they are when you approve them. Editing a
-server command, a permission rule or a capability grant, or adding,
-removing or editing a project agent file, makes kage ask again.
-Reordering keys does not. The whole table is ignored while untrusted,
-even settings that only tighten your rules, such as a
-project that only adds `deny` patterns. `kage doctor` reports an
-untrusted project file.
+Trust covers the values as they are when you approve them. Your
+answer is bound to a digest of the whole gated set, so a file edited
+between the prompt and your answer is refused rather than trusted
+unseen, even when the prompt lines alone cannot tell the difference.
+Editing a server command, a permission rule or a capability grant,
+or adding, removing or editing a project agent or skill file, makes
+kage ask again, and the prompt then also shows what changed since
+you approved it: old and new values for config keys, and a diff for
+changed agent and skill files. Reordering keys does not. The whole
+table is ignored while untrusted, even settings that only tighten
+your rules, such as a project that only adds `deny` patterns. `kage
+doctor` reports an untrusted project file and lists what changed.
 
 Trusted projects are recorded in `~/.local/state/kage/trust.json`,
-keyed by the project directory.
+keyed by the project directory: the gated config values as JSON
+plus, for each project agent and skill file, a SHA-256 of its text.
+The approved texts are stored once under
+`~/.local/state/kage/trust/blobs/`, one file per distinct content,
+shared by every project that approved the same file. Kage converts
+an older store to this shape the first time it reads it.
 
 ## trusting directories
 
@@ -388,7 +398,10 @@ config error. A directory covered by several entries gets the union of
 them all.
 
 Config trust is standing trust. It never expires when the project's
-files change, and it is never written to `trust.json`. It is read from
+files change, and it is never written to `trust.json`. A stored
+`kage trust` record is read with the parts your entries cover
+removed, so covering another part later never makes kage ask again
+about the parts the record already approved. It is read from
 the user config only, so a project's own `[trust]` table never
 applies. Entries must name an absolute path, with `~` for the home
 directory: a relative entry is a config error, because it would
@@ -662,7 +675,8 @@ endpoints, and per-provider overrides (base URL, headers, key env var).
 | `~/.local/share/kage/mcp-auth.json` | OAuth tokens for remote MCP servers (`0600`)                   |
 | `~/.local/share/kage/plugin-state/` | per-plugin `kage.store` JSON files                             |
 | `~/.local/state/kage/`              | session state (`state.json`) and input history (`history.txt`) |
-| `~/.local/state/kage/trust.json`    | trusted project configs                                        |
+| `~/.local/state/kage/trust.json`    | trusted project records: gated values plus file hashes          |
+| `~/.local/state/kage/trust/blobs/`  | approved agent and skill texts, one file per SHA-256            |
 | `~/.cache/kage/models.json`         | model catalog written by `kage models refresh`                 |
 | `~/.cache/kage/chatgpt-models.json` | ChatGPT plan models, written at sign-in and by `kage models refresh` |
 

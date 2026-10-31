@@ -957,7 +957,7 @@ const MANPAGE_FILES: &[(&str, &str)] = &[
     ),
     (
         "~/.local/state/kage/",
-        "Session state, input history and trusted projects (trust.json).",
+        "Session state, input history and trusted projects (trust.json, trust/blobs/).",
     ),
     (
         "~/.cache/kage/models.json",

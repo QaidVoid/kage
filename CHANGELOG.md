@@ -1,4 +1,20 @@
 # Changelog
+## [0.6.1](https://github.com/QaidVoid/kage/compare/v0.6.0...v0.6.1) - 2026-10-31
+
+### Features
+
+- *(config)* Trust project dirs from [trust] config ([#275](https://github.com/QaidVoid/kage/pull/275)) - ([f168185](https://github.com/QaidVoid/kage/commit/f16818594430b51f8e36a58048fbbecb8c9eafaa))
+- *(tools)* Configure every tool under [tools.<name>] ([#184](https://github.com/QaidVoid/kage/pull/184)) - ([e705cfe](https://github.com/QaidVoid/kage/commit/e705cfe0560e68215ff70ac303ac1a2b5dc57616))
+- *(trust)* Store hashes and show what changed since trust ([#276](https://github.com/QaidVoid/kage/pull/276)) - ([82fca9c](https://github.com/QaidVoid/kage/commit/82fca9c82beb583e6acee63cc41e66392351ab2c))
+
+### Bug Fixes
+
+- *(config)* Gate every untrusted project table but a safe list ([#274](https://github.com/QaidVoid/kage/pull/274)) - ([70fe305](https://github.com/QaidVoid/kage/commit/70fe30531f33823bba9ace5dd8797e5206efc6bb))
+- *(engine)* Hand back pending steers when a run is cancelled - ([7d8b96f](https://github.com/QaidVoid/kage/commit/7d8b96fe16eb323f16e6d9c92dc523da8410f9c5))
+- *(plugin)* Gate tool_update behind the context capability - ([7778bf2](https://github.com/QaidVoid/kage/commit/7778bf28278251431e8b5b2a64d7afb31676303f))
+- *(provider)* Shut down sockets registered after shutdown_all ([#278](https://github.com/QaidVoid/kage/pull/278)) - ([3f3e510](https://github.com/QaidVoid/kage/commit/3f3e51064be86685ee4867aa02818276fd1800c9))
+- Preserve agent text and truncate UTF-8 reads safely ([#272](https://github.com/QaidVoid/kage/pull/272)) - ([553f7a6](https://github.com/QaidVoid/kage/commit/553f7a6b97f7228cef2921e240ae640bc6559ef0))
+
 ## [0.6.0](https://github.com/QaidVoid/kage/compare/v0.5.1...v0.6.0) - 2026-10-29
 
 ### Features

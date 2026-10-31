@@ -69,17 +69,32 @@ impl KillRegistry {
     /// Keep a handle that can shut `stream` down from another thread.
     ///
     /// A `try_clone` failure only means cancel degrades to the idle
-    /// timeout for this socket, so it is ignored.
+    /// timeout for this socket, so it is ignored. A dial that lands
+    /// after [`Self::shutdown_all`] is shut down here instead of
+    /// queued, so its reads fail at once instead of waiting out the
+    /// idle deadline for a drain that already ran.
     fn register(&self, stream: &TcpStream) {
         if let Ok(dup) = stream.try_clone() {
-            lock(&self.sockets).push(dup);
+            let mut sockets = lock(&self.sockets);
+            // Read `killed` under the sockets lock: `shutdown_all`
+            // stores it before taking that lock, so a register that
+            // locks after the drain observes it, and one that locks
+            // before is covered by the drain itself.
+            if self.killed.load(Ordering::Acquire) {
+                let _ = dup.shutdown(Shutdown::Both);
+            } else {
+                sockets.push(dup);
+            }
         }
     }
 
     /// Shut every registered socket down, in both directions.
     ///
     /// Idempotent; a socket that already served its request shuts down
-    /// harmlessly.
+    /// harmlessly. The `killed` store must stay ahead of taking the
+    /// lock: `register` reads the flag under that lock, so a store
+    /// that lagged behind it would let a late dial queue a socket
+    /// nothing ever drains.
     pub(crate) fn shutdown_all(&self) {
         self.killed.store(true, Ordering::Release);
         let mut sockets = lock(&self.sockets);
@@ -398,6 +413,45 @@ mod tests {
         let outcome = rx
             .recv_timeout(Duration::from_secs(5))
             .expect("reader must not stay blocked after shutdown");
+        assert!(
+            matches!(outcome, Ok("eof" | "error")),
+            "unexpected reader outcome: {outcome:?}"
+        );
+    }
+
+    /// A socket registered after `shutdown_all` already ran must be
+    /// shut down on the spot: the drain has passed, so queuing the
+    /// handle would leave the caller's read blocked until the idle
+    /// deadline. The listener stays open and never answers, so only
+    /// the register-time shutdown can end the read. Windows reads
+    /// poll for the cancel instead, so the premise does not apply
+    /// there; on that platform the killed-register path rests on the
+    /// 200ms poll loop in `await_input` alone.
+    #[cfg(not(windows))]
+    #[test]
+    fn register_after_shutdown_all_shuts_the_socket_down() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("addr");
+        let registry = Arc::new(KillRegistry::new());
+
+        registry.shutdown_all();
+
+        let reader = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).expect("connect");
+            registry.register(&stream);
+            let mut buf = [0u8; 64];
+            match stream.read(&mut buf) {
+                Ok(0) => "eof",
+                Ok(_) => "data",
+                Err(_) => "error",
+            }
+        });
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || tx.send(reader.join()).expect("send"));
+        let outcome = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a read on a socket registered after shutdown must not block");
         assert!(
             matches!(outcome, Ok("eof" | "error")),
             "unexpected reader outcome: {outcome:?}"

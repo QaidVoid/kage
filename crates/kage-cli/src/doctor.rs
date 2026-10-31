@@ -308,6 +308,21 @@ fn check_config(workdir: &Path) -> Check {
             if project_exists {
                 parts.push(format!("project={}", project.display()));
             }
+            // Standing trust from the config prints here, not at
+            // startup, so a silently trusted project stays visible.
+            let standing = kage_core::trust::standing_trust(workdir);
+            if standing.full {
+                parts.push(format!(
+                    "trusted by [trust] paths ({})",
+                    standing.entries.join(", ")
+                ));
+            } else if !standing.parts.is_empty() {
+                parts.push(format!(
+                    "[trust] parts trusted: {} ({})",
+                    standing.part_list(),
+                    standing.entries.join(", ")
+                ));
+            }
             let body = if parts.is_empty() {
                 "using built-in defaults (no config files found)".to_owned()
             } else {

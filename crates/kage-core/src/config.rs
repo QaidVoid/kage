@@ -57,6 +57,11 @@ pub struct Config {
     /// `enabled` / `description` overrides and limits.
     #[serde(default, skip_serializing_if = "ToolsConfig::is_default")]
     pub tools: ToolsConfig,
+    /// Standing trust for project directories (`[trust]`), read from
+    /// the user config and env only: a project's own `[trust]` table
+    /// never applies.
+    #[serde(default, skip_serializing_if = "TrustConfig::is_default")]
+    pub trust: TrustConfig,
 }
 
 /// The longest a media tool call may take, matching the ceiling the
@@ -256,7 +261,8 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         self.permissions.validate()?;
         self.shell.validate()?;
-        self.tools.validate()
+        self.tools.validate()?;
+        self.trust.validate()
     }
 
     /// Load configuration from `path`, merging with defaults and env overrides.
@@ -332,11 +338,13 @@ impl Config {
     /// The project file passes only its safe keys while the project
     /// is untrusted (see [`crate::trust`]): `ui`, `keybindings`,
     /// `[loop]`, `[agents]`, `provider.default_model` and
-    /// `plugins.disabled`. Everything else in it waits for trust. The
-    /// project file's `providers`, `acp`, `plugins.registry` and the
-    /// media tables `tools.generate_image`, `tools.edit_image`,
-    /// `tools.generate_speech` and `tools.generate_music` never apply:
-    /// those are only read from the user config.
+    /// `plugins.disabled`. Everything else in it waits for trust,
+    /// except what the user config's `[trust]` table already trusts
+    /// by path. The project file's `providers`, `acp`, `trust`,
+    /// `plugins.registry` and the media tables `tools.generate_image`,
+    /// `tools.edit_image`, `tools.generate_speech` and
+    /// `tools.generate_music` never apply: those are only read from
+    /// the user config.
     /// `plugins.disabled` is the union of the user's list and the
     /// winning layer's, so a project can disable a plugin but never
     /// enable one the user disabled.
@@ -985,6 +993,109 @@ impl ShellConfig {
             if let Err(e) = globset::Glob::new(pattern) {
                 return Err(config_error(format!(
                     "[shell] scrub_env pattern `{pattern}` does not compile: {e}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One part of a project that `[trust] parts` can trust on its own.
+/// The set is closed: a project key kage does not know about is
+/// covered only by full `paths` trust or a stored `kage trust`
+/// record, never by a part.
+#[derive(Clone, Copy, Debug, Ord, PartialEq, Eq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrustPart {
+    /// The project's AGENTS.md instruction files.
+    Instructions,
+    /// The project's agent definitions in `.kage/agents` and
+    /// `.agents/agents`.
+    Agents,
+    /// The project's skills in `.kage/skills` and `.agents/skills`.
+    Skills,
+    /// The project's `[mcp]` table.
+    Mcp,
+    /// The project's `[permissions]` table.
+    Permissions,
+    /// The project's `[tools]` table.
+    Tools,
+    /// The project's `[shell]` table.
+    Shell,
+    /// The gated keys of the project's `[plugins]` table
+    /// (`capabilities`, `dir`, `enabled`).
+    Plugins,
+}
+
+impl TrustPart {
+    /// The name as written in `[trust] parts`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Instructions => "instructions",
+            Self::Agents => "agents",
+            Self::Skills => "skills",
+            Self::Mcp => "mcp",
+            Self::Permissions => "permissions",
+            Self::Tools => "tools",
+            Self::Shell => "shell",
+            Self::Plugins => "plugins",
+        }
+    }
+}
+
+/// Standing trust for project directories from the user-level
+/// `[trust]` table. It is the user's own trust, so it never expires
+/// when a project's files change, unlike a stored `kage trust`
+/// record. See `crate::trust` for how entries match a project.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrustConfig {
+    /// Directories whose projects are fully trusted, `~` expanding to
+    /// the home directory: a project at or under a listed path loads
+    /// every gated part without a prompt, so `"~"` or `"/"` trusts
+    /// every project.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<PathBuf>,
+    /// Directories trusted only for the named parts, keyed by
+    /// directory: `"~/work/client" = ["instructions", "skills"]`.
+    /// Every other part of a project at or under the key still prompts
+    /// as usual. The key `"/"` trusts the listed parts for every
+    /// project.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub parts: BTreeMap<String, Vec<TrustPart>>,
+}
+
+impl TrustConfig {
+    /// Whether nothing is configured, so serializing skips the table.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self.paths.is_empty() && self.parts.is_empty()
+    }
+
+    /// Reject entries that do not name an absolute path. A relative
+    /// entry would resolve against whatever directory kage was
+    /// started in, which for the trust check is always the project
+    /// itself, so `"."` would quietly trust every project.
+    ///
+    /// # Errors
+    ///
+    /// A [`crate::error::Error`] naming the first relative entry.
+    pub fn validate(&self) -> Result<()> {
+        for entry in &self.paths {
+            if !crate::fsutil::expand_tilde(entry).has_root() {
+                return Err(config_error(format!(
+                    "[trust] paths entry \"{}\" is not an absolute path; \
+                     a relative entry would depend on where kage starts",
+                    entry.display()
+                )));
+            }
+        }
+        for key in self.parts.keys() {
+            if !crate::fsutil::expand_tilde(Path::new(key)).has_root() {
+                return Err(config_error(format!(
+                    "[trust.parts] key \"{key}\" is not an absolute path; \
+                     a relative entry would depend on where kage starts"
                 )));
             }
         }

@@ -154,7 +154,7 @@ Directory with the web client bundle to serve at `/` (built from `crates/kage\-d
 Download the web client bundle matching this kage into the web directory, replacing what is there, then serve
 .TP
 \fBkage trust\fR
-Trust the current directory\*(Aqs `.kage/config.toml`. Until a project is trusted, only its `ui`, `keybindings`, `loop`, `agents`, `provider.default_model` and `plugins.disabled` keys apply; every other key is ignored. Trust covers the ignored values as they are now, so editing one of them asks again. Editing a safe key never asks
+Trust the current directory\*(Aqs `.kage/config.toml`. Until a project is trusted, only its `ui`, `keybindings`, `loop`, `agents`, `provider.default_model` and `plugins.disabled` keys apply; every other key is ignored. Trust covers the ignored values as they are now, so editing one of them asks again. Editing a safe key never asks. The `[trust]` table of the user config trusts whole directories up front, so projects under them never prompt
 .TP
 \fB\-\-revoke\fR
 Forget the trust recorded for this directory

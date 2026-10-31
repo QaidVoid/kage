@@ -5,7 +5,46 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use kage_core::trust::{self, TrustSummary};
+use kage_core::trust::{self, StandingTrust, TrustSummary};
+
+/// The line `kage trust` prints for a project a `[trust] paths` entry
+/// already fully trusts: which entry matched. Nothing is written.
+fn paths_trust_message(workdir: &Path, standing: &StandingTrust) -> String {
+    format!(
+        "kage: {} is already trusted by [trust] paths ({})",
+        workdir.display(),
+        standing.entries.join(", ")
+    )
+}
+
+/// The line `kage trust` prints when `[trust] parts` entries cover
+/// some parts of the project: which parts and which entries matched.
+/// The parts still waiting for trust follow in the normal flow.
+fn parts_trust_message(standing: &StandingTrust) -> String {
+    format!(
+        "kage: [trust] parts already cover {} here ({})",
+        standing.part_list(),
+        standing.entries.join(", ")
+    )
+}
+
+/// The line `kage trust --revoke` prints when the trust comes from
+/// the user config, which no command can revoke.
+fn revoke_from_config_message(workdir: &Path, standing: &StandingTrust) -> String {
+    if standing.full {
+        format!(
+            "kage: {} is trusted by [trust] paths ({}); edit your user config to change it",
+            workdir.display(),
+            standing.entries.join(", ")
+        )
+    } else {
+        format!(
+            "kage: [trust] parts cover {} here ({}); edit your user config to change it",
+            standing.part_list(),
+            standing.entries.join(", ")
+        )
+    }
+}
 
 /// Before the TUI starts, ask whether to trust `workdir`'s project
 /// when it has untrusted risky settings or agents. Yes records trust,
@@ -81,14 +120,22 @@ fn warning(workdir: &Path, summary: &TrustSummary) -> String {
 /// `kage trust [--revoke]` for the current directory.
 pub(crate) fn run(revoke: bool) -> ExitCode {
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let standing = trust::standing_trust(&workdir);
     if revoke {
         return match trust::revoke_project(&workdir) {
-            Ok(true) => {
-                eprintln!("kage: revoked trust for {}", workdir.display());
-                ExitCode::SUCCESS
-            }
-            Ok(false) => {
-                eprintln!("kage: {} was not trusted", workdir.display());
+            Ok(removed) => {
+                if standing.full || !standing.parts.is_empty() {
+                    eprintln!("{}", revoke_from_config_message(&workdir, &standing));
+                    if removed {
+                        eprintln!("kage: removed the trust recorded for {}", workdir.display());
+                    }
+                    return ExitCode::SUCCESS;
+                }
+                if removed {
+                    eprintln!("kage: revoked trust for {}", workdir.display());
+                } else {
+                    eprintln!("kage: {} was not trusted", workdir.display());
+                }
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -96,6 +143,13 @@ pub(crate) fn run(revoke: bool) -> ExitCode {
                 ExitCode::from(1)
             }
         };
+    }
+    if standing.full {
+        eprintln!("{}", paths_trust_message(&workdir, &standing));
+        return ExitCode::SUCCESS;
+    }
+    if !standing.parts.is_empty() {
+        eprintln!("{}", parts_trust_message(&standing));
     }
     let Some(presented) = trust::untrusted_project(&workdir) else {
         eprintln!(
@@ -135,6 +189,61 @@ mod tests {
             agents: agents.iter().map(|a| (*a).to_owned()).collect(),
             skills: skills.iter().map(|s| (*s).to_owned()).collect(),
         }
+    }
+
+    fn standing(
+        full: bool,
+        parts: &[kage_core::config::TrustPart],
+        entries: &[&str],
+    ) -> StandingTrust {
+        StandingTrust {
+            full,
+            parts: parts.iter().copied().collect(),
+            entries: entries.iter().map(|e| (*e).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn trust_in_a_path_trusted_project_says_so_without_writing() {
+        let dir = Path::new("/dev/project");
+        let standing = standing(true, &[], &["~/dev", "~/other"]);
+        assert_eq!(
+            paths_trust_message(dir, &standing),
+            "kage: /dev/project is already trusted by [trust] paths (~/dev, ~/other)"
+        );
+    }
+
+    #[test]
+    fn trust_lists_the_parts_the_config_covers() {
+        let standing = standing(
+            false,
+            &[
+                kage_core::config::TrustPart::Instructions,
+                kage_core::config::TrustPart::Skills,
+            ],
+            &["~/work/client"],
+        );
+        assert_eq!(
+            parts_trust_message(&standing),
+            "kage: [trust] parts already cover instructions, skills here (~/work/client)"
+        );
+    }
+
+    #[test]
+    fn revoke_in_a_config_trusted_project_points_at_the_config() {
+        let dir = Path::new("/dev/project");
+        let full = standing(true, &[], &["~/dev"]);
+        assert_eq!(
+            revoke_from_config_message(dir, &full),
+            "kage: /dev/project is trusted by [trust] paths (~/dev); \
+             edit your user config to change it"
+        );
+        let parts = standing(false, &[kage_core::config::TrustPart::Instructions], &["/"]);
+        assert_eq!(
+            revoke_from_config_message(dir, &parts),
+            "kage: [trust] parts cover instructions here (/); \
+             edit your user config to change it"
+        );
     }
 
     #[test]

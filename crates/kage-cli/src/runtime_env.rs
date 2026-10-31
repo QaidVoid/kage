@@ -151,17 +151,19 @@ pub(crate) fn update_model(system_prompt: &mut String, model: &str) {
 /// Instruction files that apply to `workdir`, user level first.
 ///
 /// `<config dir>/AGENTS.md` always applies. The project files apply
-/// only once the project is trusted: a cloned repo's instructions are
-/// third-party input, so they wait for `kage trust` exactly like the
-/// project's agent files. `.kage/AGENTS.md` is kage's own project home;
-/// `.agents/AGENTS.md` is the cross-tool standard location and loads
-/// alongside it, after it. Every file is optional.
+/// only once the project's instructions are trusted, by a stored
+/// record or by the user config's `[trust]`: a cloned repo's
+/// instructions are third-party input, so they wait for `kage trust`
+/// exactly like the project's agent files. `.kage/AGENTS.md` is
+/// kage's own project home; `.agents/AGENTS.md` is the cross-tool
+/// standard location and loads alongside it, after it. Every file is
+/// optional.
 fn instruction_files(workdir: &Path) -> Vec<(std::path::PathBuf, &'static str)> {
     let mut files = Vec::new();
     if let Ok(dir) = crate::config_dir() {
         files.push((dir.join("AGENTS.md"), "user_instructions"));
     }
-    if kage_core::trust::project_extensions_trusted(workdir) {
+    if kage_core::trust::project_part_trusted(workdir, kage_core::config::TrustPart::Instructions) {
         files.push((
             workdir.join(".kage").join("AGENTS.md"),
             "project_instructions",

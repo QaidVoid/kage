@@ -310,32 +310,35 @@ as `kage.opt.theme`, wins over every layer above.
 
 ## project config and trust
 
-A project can start processes, loosen your tool rules and reshape the
-tools the model sees, so these parts of it only apply once you trust
-the project:
+A cloned repository should not gain power just because you opened it,
+so a project's `.kage/config.toml` passes only the keys that are safe
+on their own while the project is untrusted:
 
-- `[mcp]` in `.kage/config.toml` (servers, their `oauth` tables and
-  `allow_sampling`)
-- `[permissions]` in `.kage/config.toml` (including
-  `[permissions.mcp]`)
-- `[plugins.capabilities]` in `.kage/config.toml`
-- `[tools]` in `.kage/config.toml` (`enabled`, `description`, limits,
-  `rename` and `[tools.web_search]`)
-- the agent definitions in `.kage/agents/` (see
-  [agents](/guide/agents#project-agents-and-trust))
+- `[ui]`, `[keybindings]`, `[loop]` and `[agents]` in full
+- `provider.default_model`
+- `plugins.disabled`, which a project can add to but never shorten
 
-All of them share one trust decision. Every other project key, such
-as `[ui]`, `[loop]` or `[agents]`, applies without trust. Provider
-settings, `[acp.agents]`, `[tools.generate_image]`,
-`[tools.edit_image]`, `[tools.generate_speech]`,
-`[tools.generate_music]`, `provider.default_model` and `plugins.dir`
-are only read from your user config.
+Every other project key waits for trust. That includes `[mcp]`
+(servers, their `oauth` tables and `allow_sampling`),
+`[permissions]` (including `[permissions.mcp]`), all of `[shell]`
+(both `program` and `scrub_env`), `[tools]` (`enabled`,
+`description`, limits, `rename` and `[tools.web_search]`),
+`plugins.capabilities`, `plugins.dir`, `plugins.enabled`, any key
+kage does not know, the agent definitions in `.kage/agents/` (see
+[agents](/guide/agents#project-agents-and-trust)) and the skills in
+`.kage/skills/`. All of them share one trust decision.
+
+The `[providers]` table, `[acp.agents]`, `plugins.registry` and the media
+tables `[tools.generate_image]`, `[tools.edit_image]`,
+`[tools.generate_speech]` and `[tools.generate_music]` are never read
+from a project, trusted or not.
 
 When the TUI starts in a project that sets any of these, it lists what
-the project asks for (server commands and URLs, sampling, capability
-grants, permission changes, tool settings, project agents) and asks
-`Trust this project? [y/N]`. Answering yes records the trust. Any other
-answer starts kage with those tables and agents ignored.
+the project asks for (server commands and URLs with every other
+server field such as `env`, sampling, capability grants, permission
+rules, tool settings, shell settings, project agents) and asks `Trust this project? [y/N]`. Answering yes records
+the trust. Any other answer starts kage with those tables and agents
+ignored.
 
 A trusted project's `[tools.<name>] enabled = true` turns on a tool
 your own config disables, so a tool can stay off everywhere but in one

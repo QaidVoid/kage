@@ -330,6 +330,9 @@ fn accept_until(
         match listener.accept() {
             Ok((stream, peer)) => {
                 log(&format!("connect {peer}"));
+                // BSD and macOS hand the listener's nonblocking flag
+                // to the accepted socket.
+                let _ = stream.set_nonblocking(false);
                 if active.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
                     log(&format!("refuse {peer} (503)"));
                     // The rejection drains up to REJECT_DRAIN, so it

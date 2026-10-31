@@ -1,14 +1,16 @@
 //! Trust for project-local settings under `<workdir>/.kage`.
 //!
-//! A project can start processes, loosen tool rules and reshape the
-//! tools the model sees, so the risky tables of its `config.toml`
-//! (`mcp`, `permissions`, `plugins.capabilities` and `tools`) and its
-//! agent definitions (`agents/*.md`,
-//! which can set tools and models) only apply once the user trusts the
-//! project. Trust is recorded in `$XDG_STATE_HOME/kage/trust.json` as
-//! the exact values that were approved, keyed by the canonical project
-//! directory. Any later edit to those tables or agent files makes the
-//! project untrusted again. Other project keys always apply.
+//! A project can start processes, run other binaries and reshape
+//! the tools the model sees, so its `config.toml` passes only the
+//! keys [`UNTRUSTED_SAFE_KEYS`] lists while the project is untrusted.
+//! Every other key in it waits for trust, and so do its agent
+//! definitions (`agents/*.md`, which can set tools and models) and
+//! skills. Trust is recorded in `$XDG_STATE_HOME/kage/trust.json` as
+//! the exact values that were approved, keyed by the canonical
+//! project directory. Any later edit to a gated value makes the
+//! project untrusted again. `providers`, `acp`, `plugins.registry`
+//! and the media tables under `[tools]` never apply from a project,
+//! trusted or not.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,14 +23,29 @@ use crate::error::{Error, Result};
 
 const STORE_VERSION: u32 = 1;
 
+/// The project config keys that apply without trust: each entry is a
+/// top-level key and the sub-keys allowed under it, with an empty
+/// sub-list meaning the whole table. Everything else in the project
+/// config waits for trust, so a table kage grows later is gated
+/// without a change here.
+const UNTRUSTED_SAFE_KEYS: &[(&str, &[&str])] = &[
+    ("ui", &[]),
+    ("keybindings", &[]),
+    ("loop", &[]),
+    ("agents", &[]),
+    ("provider", &["default_model"]),
+    ("plugins", &["disabled"]),
+];
+
 /// What an untrusted project asks for, for prompts and warnings.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TrustSummary {
     /// The project's `.kage` directory.
     pub path: PathBuf,
-    /// The risky parts the project sets, in the order `mcp`,
-    /// `permissions`, `plugins.capabilities`, `tools`, `agents`, `skills`.
-    pub keys: Vec<&'static str>,
+    /// The gated parts the project sets, by key path: `mcp`,
+    /// `permissions`, `plugins.capabilities`, `tools`, `shell`,
+    /// `agents`, `skills`, and any other gated key by its name.
+    pub keys: Vec<String>,
     /// One human-readable line per server, grant, rule, agent or skill.
     pub items: Vec<String>,
     /// Names of the project agents.
@@ -43,9 +60,9 @@ struct Store {
     projects: BTreeMap<String, Value>,
 }
 
-/// Summary of the project's risky settings when they are present and
-/// not trusted. `None` when the project has no risky config tables and
-/// no agents, or the current values are trusted.
+/// Summary of the project's gated settings when they are present and
+/// not trusted. `None` when the project sets only safe keys and has
+/// no agents or skills, or its current gated values are trusted.
 #[must_use]
 pub fn untrusted_project(workdir: &Path) -> Option<TrustSummary> {
     let subset = risky_subset(workdir, project_table(workdir).map(|(t, _)| t).as_ref())?;
@@ -56,14 +73,14 @@ pub fn untrusted_project(workdir: &Path) -> Option<TrustSummary> {
 }
 
 /// Whether `workdir`'s project extensions (agents and skills) may load:
-/// the project has nothing that needs trust, or its current risky
+/// the project has nothing that needs trust, or its current gated
 /// settings are trusted.
 #[must_use]
 pub fn project_extensions_trusted(workdir: &Path) -> bool {
     untrusted_project(workdir).is_none()
 }
 
-/// Trust the current risky settings of `workdir`'s project when they
+/// Trust the current gated settings of `workdir`'s project when they
 /// still match `presented`, the summary the user approved. The
 /// settings are re-derived from disk and compared before anything is
 /// stored, so a project edited between the prompt and the approval is
@@ -106,20 +123,16 @@ pub fn revoke_project(workdir: &Path) -> Result<bool> {
     Ok(removed)
 }
 
-/// The project TOML without the tables it may not set: `providers` and
-/// `acp` always, and the risky tables while untrusted. `None` means the
-/// file applies as is.
+/// The project TOML an untrusted project may set: the tables it may
+/// never set removed by [`project_table`], and, while untrusted,
+/// everything outside [`UNTRUSTED_SAFE_KEYS`]. `None` means the file
+/// applies as is.
 pub(crate) fn filtered_project(workdir: &Path) -> Option<String> {
     let (mut table, mut changed) = project_table(workdir)?;
-    if !config_subset(&table)?.is_empty()
+    if !config_subset(&table).is_empty()
         && !is_trusted(workdir, &risky_subset(workdir, Some(&table))?)
     {
-        table.remove("mcp");
-        table.remove("permissions");
-        table.remove("tools");
-        if let Some(plugins) = table.get_mut("plugins").and_then(toml::Value::as_table_mut) {
-            plugins.remove("capabilities");
-        }
+        retain_safe(&mut table);
         changed = true;
     }
     changed.then(|| toml::to_string(&table).ok()).flatten()
@@ -158,11 +171,11 @@ fn project_table(workdir: &Path) -> Option<(toml::Table, bool)> {
     Some((table, changed))
 }
 
-/// The risky config tables of `table` plus the project agent and skill
+/// The gated config keys of `table` plus the project agent and skill
 /// files, or `None` when there are none.
 fn risky_subset(workdir: &Path, table: Option<&toml::Table>) -> Option<Value> {
     let mut out = match table {
-        Some(table) => config_subset(table)?,
+        Some(table) => config_subset(table),
         None => serde_json::Map::new(),
     };
     let agents = agent_files(workdir);
@@ -176,25 +189,71 @@ fn risky_subset(workdir: &Path, table: Option<&toml::Table>) -> Option<Value> {
     (!out.is_empty()).then_some(Value::Object(out))
 }
 
-fn config_subset(table: &toml::Table) -> Option<serde_json::Map<String, Value>> {
-    let caps = table.get("plugins").and_then(|p| p.get("capabilities"));
+/// The gated parts of the project `table`: every key outside
+/// [`UNTRUSTED_SAFE_KEYS`] in full, and for the partially safe tables
+/// the sub-keys the safe sub-list does not name.
+fn config_subset(table: &toml::Table) -> serde_json::Map<String, Value> {
     let mut out = serde_json::Map::new();
-    for (key, value) in [
-        ("mcp", table.get("mcp")),
-        ("permissions", table.get("permissions")),
-        ("plugins", caps),
-        ("tools", table.get("tools")),
-    ] {
-        let Some(value) = value.filter(|v| !v.as_table().is_some_and(toml::Table::is_empty)) else {
+    for (key, value) in table {
+        let Some(gated) = gated_part(key, value) else {
             continue;
         };
-        let mut json = serde_json::to_value(value).ok()?;
-        if key == "plugins" {
-            json = serde_json::json!({ "capabilities": json });
+        if gated.as_table().is_some_and(toml::Table::is_empty) {
+            continue;
         }
-        out.insert(key.to_owned(), json);
+        // A value JSON cannot carry (`nan`) still gates: its TOML
+        // text stands in, so the fingerprint never bails out open.
+        let json =
+            serde_json::to_value(&gated).unwrap_or_else(|_| Value::String(gated.to_string()));
+        out.insert(key.clone(), json);
     }
-    Some(out)
+    out
+}
+
+/// The sub-keys of top-level `key` an untrusted project may set, or
+/// `None` when the whole key waits for trust. An empty list means
+/// every sub-key is allowed.
+fn safe_subkeys(key: &str) -> Option<&'static [&'static str]> {
+    UNTRUSTED_SAFE_KEYS
+        .iter()
+        .find(|(name, _)| name == &key)
+        .map(|(_, subkeys)| *subkeys)
+}
+
+/// The part of `value` at `key` that waits for trust: the whole value
+/// when the key is not safe, and the sub-keys outside the safe
+/// sub-list of a partially safe table. `None` when nothing is gated.
+fn gated_part(key: &str, value: &toml::Value) -> Option<toml::Value> {
+    let Some(subkeys) = safe_subkeys(key) else {
+        return Some(value.clone());
+    };
+    if subkeys.is_empty() {
+        return None;
+    }
+    let gated: toml::Table = value
+        .as_table()?
+        .iter()
+        .filter(|(sub, _)| !subkeys.contains(&sub.as_str()))
+        .map(|(sub, value)| (sub.clone(), value.clone()))
+        .collect();
+    (!gated.is_empty()).then_some(toml::Value::Table(gated))
+}
+
+/// Keep in `table` only what [`UNTRUSTED_SAFE_KEYS`] allows: gated
+/// keys out, and under the partially safe tables their gated
+/// sub-keys.
+fn retain_safe(table: &mut toml::Table) {
+    table.retain(|key, value| {
+        let Some(subkeys) = safe_subkeys(key) else {
+            return false;
+        };
+        if !subkeys.is_empty()
+            && let Some(sub) = value.as_table_mut()
+        {
+            sub.retain(|name, _| subkeys.contains(&name));
+        }
+        true
+    });
 }
 
 /// Name to full text of each markdown file directly under the project
@@ -263,83 +322,85 @@ fn is_trusted(workdir: &Path, subset: &Value) -> bool {
 }
 
 fn summarize(workdir: &Path, subset: &Value) -> TrustSummary {
-    let mut keys = Vec::new();
+    let mut keys: Vec<String> = Vec::new();
     let mut items = Vec::new();
-    if let Some(mcp) = subset.get("mcp") {
-        keys.push("mcp");
-        if let Some(servers) = mcp.get("servers").and_then(Value::as_object) {
-            for (name, spec) in servers {
-                items.push(format!("MCP server `{name}`: {}", server_target(spec)));
+    let mut agents: Vec<String> = Vec::new();
+    let mut skills: Vec<String> = Vec::new();
+    for (key, value) in subset.as_object().into_iter().flatten() {
+        let items_before = items.len();
+        let keys_before = keys.len();
+        match key.as_str() {
+            "mcp" => {
+                keys.push("mcp".to_owned());
+                items.extend(mcp_items(value));
             }
-        }
-        if mcp.get("allow_sampling").and_then(Value::as_bool) == Some(true) {
-            items.push("MCP servers may run completions on your model (allow_sampling)".into());
-        }
-    }
-    if let Some(perms) = subset.get("permissions").and_then(Value::as_object) {
-        keys.push("permissions");
-        for (key, value) in perms {
-            match (key.as_str(), value.as_object()) {
-                ("tools", Some(tools)) => {
-                    for tool in tools.keys() {
-                        items.push(format!("permission rules for tool `{tool}`"));
+            "permissions" => {
+                keys.push("permissions".to_owned());
+                items.extend(permission_items(value));
+            }
+            "plugins" => {
+                for (sub, value) in value.as_object().into_iter().flatten() {
+                    if sub == "capabilities" {
+                        keys.push("plugins.capabilities".to_owned());
+                        for (plugin, grants) in value.as_object().into_iter().flatten() {
+                            let grants: Vec<String> = grants
+                                .as_array()
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(Value::as_str)
+                                        .map(|g| g.escape_debug().to_string())
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            items.push(format!(
+                                "plugin `{}` capabilities: {}",
+                                plugin.escape_debug(),
+                                grants.join(", ")
+                            ));
+                        }
+                    } else {
+                        let name = format!("plugins.{}", sub.escape_debug());
+                        keys.push(name.clone());
+                        items.push(format!("{name} = {}", shown_value(value)));
                     }
                 }
-                ("mcp", Some(servers)) => {
-                    for (server, action) in servers {
-                        let action = action.as_str().unwrap_or("?");
-                        items.push(format!("MCP server `{server}` tools: {action}"));
+            }
+            "tools" => {
+                keys.push("tools".to_owned());
+                items.extend(tool_items(value));
+            }
+            "agents" | "skills" => {
+                for (name, _) in value.as_object().into_iter().flatten() {
+                    let shown = name.escape_debug();
+                    if key.as_str() == "agents" {
+                        let home = extension_home(workdir, &format!("agents/{name}.md"));
+                        agents.push(shown.to_string());
+                        items.push(format!("project agent {shown} ({home}/agents/{shown}.md)"));
+                    } else {
+                        let home = extension_home(workdir, &format!("skills/{name}/SKILL.md"));
+                        skills.push(shown.to_string());
+                        items.push(format!(
+                            "project skill {shown} ({home}/skills/{shown}/SKILL.md)"
+                        ));
                     }
                 }
-                _ => items.push(format!("permissions.{key} = {value}")),
+                keys.push(key.clone());
+            }
+            _ => {
+                for (name, line) in generic_pairs(key, value) {
+                    keys.push(name);
+                    items.push(line);
+                }
             }
         }
-    }
-    if let Some(caps) = subset
-        .get("plugins")
-        .and_then(|p| p.get("capabilities"))
-        .and_then(Value::as_object)
-    {
-        keys.push("plugins.capabilities");
-        for (plugin, grants) in caps {
-            let grants: Vec<&str> = grants
-                .as_array()
-                .map(|a| a.iter().filter_map(Value::as_str).collect())
-                .unwrap_or_default();
-            items.push(format!(
-                "plugin `{plugin}` capabilities: {}",
-                grants.join(", ")
-            ));
-        }
-    }
-    if let Some(tools) = subset.get("tools") {
-        keys.push("tools");
-        items.extend(tool_items(tools));
-    }
-    let agents: Vec<String> = subset
-        .get("agents")
-        .and_then(Value::as_object)
-        .map(|files| files.keys().cloned().collect())
-        .unwrap_or_default();
-    if !agents.is_empty() {
-        keys.push("agents");
-        for name in &agents {
-            let home = extension_home(workdir, &format!("agents/{name}.md"));
-            items.push(format!("project agent {name} ({home}/agents/{name}.md)"));
-        }
-    }
-    let skills: Vec<String> = subset
-        .get("skills")
-        .and_then(Value::as_object)
-        .map(|files| files.keys().cloned().collect())
-        .unwrap_or_default();
-    if !skills.is_empty() {
-        keys.push("skills");
-        for name in &skills {
-            let home = extension_home(workdir, &format!("skills/{name}/SKILL.md"));
-            items.push(format!(
-                "project skill {name} ({home}/skills/{name}/SKILL.md)"
-            ));
+        // A gated key the branches above render nothing for still has
+        // to reach the prompt, with its value in full.
+        if items.len() == items_before {
+            let shown = key.escape_debug();
+            if keys.len() == keys_before {
+                keys.push(shown.to_string());
+            }
+            items.push(format!("{shown} = {}", shown_value(value)));
         }
     }
     TrustSummary {
@@ -349,6 +410,120 @@ fn summarize(workdir: &Path, subset: &Value) -> TrustSummary {
         agents,
         skills,
     }
+}
+
+/// JSON text of `value` with every character a terminal might act on
+/// made visible. `serde_json` escapes only the characters below U+0020,
+/// `"` and `\`, so DEL, the C1 controls and the bidirectional
+/// overrides would otherwise reach the prompt raw.
+fn shown_value(value: &Value) -> String {
+    value
+        .to_string()
+        .chars()
+        .flat_map(|c| {
+            let hidden = c.is_control()
+                || matches!(
+                    c,
+                    '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+                );
+            if hidden {
+                c.escape_unicode().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
+/// One prompt line per MCP server, per server field its target line
+/// leaves out, and per gated `[mcp]` setting. Names and endpoint
+/// values are escaped the way [`tool_items`] escapes.
+fn mcp_items(value: &Value) -> Vec<String> {
+    let mut items = Vec::new();
+    for (sub, value) in value.as_object().into_iter().flatten() {
+        match (sub.as_str(), value) {
+            ("servers", Value::Object(servers)) => {
+                for (name, spec) in servers {
+                    let name = name.escape_debug();
+                    items.push(format!("MCP server `{name}`: {}", server_target(spec)));
+                    for (field, v) in spec.as_object().into_iter().flatten() {
+                        if !in_server_target(spec, field, v) {
+                            items.push(format!(
+                                "MCP server `{name}` {} = {}",
+                                field.escape_debug(),
+                                shown_value(v)
+                            ));
+                        }
+                    }
+                }
+            }
+            ("allow_sampling", Value::Bool(true)) => items
+                .push("MCP servers may run completions on your model (allow_sampling)".to_owned()),
+            _ => items.push(format!(
+                "mcp.{} = {}",
+                sub.escape_debug(),
+                shown_value(value)
+            )),
+        }
+    }
+    items
+}
+
+/// One prompt line per permission rule or gated `[permissions]`
+/// setting.
+fn permission_items(value: &Value) -> Vec<String> {
+    let mut items = Vec::new();
+    for (sub, value) in value.as_object().into_iter().flatten() {
+        match (sub.as_str(), value.as_object()) {
+            ("tools", Some(tools)) => {
+                for (tool, rules) in tools {
+                    items.push(format!(
+                        "permission rules for tool `{}`: {}",
+                        tool.escape_debug(),
+                        shown_value(rules)
+                    ));
+                }
+            }
+            ("mcp", Some(servers)) => {
+                for (server, action) in servers {
+                    let action = match action.as_str() {
+                        Some(action) => action.escape_debug().to_string(),
+                        None => shown_value(action),
+                    };
+                    items.push(format!(
+                        "MCP server `{}` tools: {action}",
+                        server.escape_debug()
+                    ));
+                }
+            }
+            _ => items.push(format!(
+                "permissions.{} = {}",
+                sub.escape_debug(),
+                shown_value(value)
+            )),
+        }
+    }
+    items
+}
+
+/// One `(keys entry, prompt line)` pair per gated setting of a key
+/// kage renders generically, which covers `shell`, the gated
+/// sub-keys of the partially safe tables and any key kage does not
+/// know. Names are escaped and values shown in full JSON, the way
+/// [`tool_items`] escapes, because the approval compares this text.
+fn generic_pairs(key: &str, value: &Value) -> Vec<(String, String)> {
+    let key = key.escape_debug();
+    let Some(table) = value.as_object().filter(|table| !table.is_empty()) else {
+        let line = format!("{key} = {}", shown_value(value));
+        return vec![(key.to_string(), line)];
+    };
+    table
+        .iter()
+        .map(|(sub, value)| {
+            let name = format!("{key}.{}", sub.escape_debug());
+            (name.clone(), format!("{name} = {}", shown_value(value)))
+        })
+        .collect()
 }
 
 /// Whether `.agents` or `.kage` provides one extension file, matching the
@@ -366,43 +541,63 @@ fn extension_home(workdir: &Path, relative: &str) -> &'static str {
 /// would otherwise redraw the prompt.
 fn tool_items(tools: &Value) -> Vec<String> {
     let Some(tools) = tools.as_object() else {
-        return vec![format!("tools = {tools}")];
+        return vec![format!("tools = {}", shown_value(tools))];
     };
     let mut items = Vec::new();
     for (name, value) in tools {
         let shown = name.escape_debug();
         match (name.as_str(), value.as_object()) {
             ("rename", Some(renames)) => {
-                items.extend(
-                    renames.iter().map(|(from, to)| {
-                        format!("tool `{}` renamed to {to}", from.escape_debug())
-                    }),
-                );
+                items.extend(renames.iter().map(|(from, to)| {
+                    format!(
+                        "tool `{}` renamed to {}",
+                        from.escape_debug(),
+                        shown_value(to)
+                    )
+                }));
             }
             (_, Some(settings)) => {
                 let settings: Vec<String> = settings
                     .iter()
-                    .map(|(key, value)| format!("{} = {value}", key.escape_debug()))
+                    .map(|(key, value)| format!("{} = {}", key.escape_debug(), shown_value(value)))
                     .collect();
                 items.push(format!("tool `{shown}`: {}", settings.join(", ")));
             }
-            _ => items.push(format!("tools.{shown} = {value}")),
+            _ => items.push(format!("tools.{shown} = {}", shown_value(value))),
         }
     }
     items
 }
 
+/// Whether [`server_target`] already shows `field` of `spec` in full.
+/// `command` and `args` are shown separately even though the target
+/// line joins them, because the join hides where one ends and the
+/// other begins, so two different servers can render alike.
+fn in_server_target(spec: &Value, field: &str, value: &Value) -> bool {
+    let remote = spec.get("url").is_some_and(Value::is_string);
+    match field {
+        "url" => remote,
+        "disabled" => value.is_boolean(),
+        _ => false,
+    }
+}
+
 fn server_target(spec: &Value) -> String {
     let mut target = if let Some(url) = spec.get("url").and_then(Value::as_str) {
-        url.to_owned()
+        url.escape_debug().to_string()
     } else {
-        let mut parts: Vec<&str> = spec
+        let mut parts: Vec<String> = spec
             .get("command")
             .and_then(Value::as_str)
             .into_iter()
+            .map(|command| command.escape_debug().to_string())
             .collect();
         if let Some(args) = spec.get("args").and_then(Value::as_array) {
-            parts.extend(args.iter().filter_map(Value::as_str));
+            parts.extend(
+                args.iter()
+                    .filter_map(Value::as_str)
+                    .map(|arg| arg.escape_debug().to_string()),
+            );
         }
         parts.join(" ")
     };
@@ -599,6 +794,42 @@ mod tests {
             assert!(trust_project(&project, &presented).is_err());
             assert!(untrusted_project(&project).is_some());
             assert!(!project_extensions_trusted(&project));
+            Ok(())
+        });
+    }
+
+    /// Trust recorded by the denylist-era code still covers the same
+    /// tables: a trusted project with no newly gated keys stays
+    /// trusted, and adding `[shell]` asks once.
+    #[test]
+    fn trust_recorded_before_the_allowlist_still_holds() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, RISKY)?;
+            let stored = serde_json::json!({
+                "mcp": { "servers": { "evil": { "command": "sh", "args": ["-c", "true"] } } },
+                "permissions": { "tools": { "shell": { "default": "allow" } } },
+                "plugins": { "capabilities": { "helper": ["exec", "net"] } }
+            });
+            let mut projects = serde_json::Map::new();
+            projects.insert(project.to_string_lossy().into_owned(), stored);
+            let store = serde_json::json!({
+                "version": 1,
+                "projects": Value::Object(projects)
+            });
+            let state = jail.directory().join("state/kage");
+            std::fs::create_dir_all(&state).map_err(io)?;
+            std::fs::write(state.join("trust.json"), store.to_string()).map_err(io)?;
+
+            assert!(untrusted_project(&project).is_none());
+            assert_applied(&load(&project)?);
+
+            write_project(
+                &project,
+                &format!("{RISKY}\n[shell]\nprogram = \"/tmp/evil.sh\"\n"),
+            )?;
+            assert!(untrusted_project(&project).is_some());
+            assert_eq!(load(&project)?.shell.program, None);
             Ok(())
         });
     }
@@ -842,12 +1073,13 @@ mod tests {
     }
 
     #[test]
-    fn project_without_risky_keys_is_never_untrusted() {
+    fn project_with_only_safe_keys_is_never_untrusted() {
         let _globals = process_globals();
         figment::Jail::expect_with(|jail| {
             let project = setup(
                 jail,
-                "[ui]\ntheme = \"project-theme\"\n[plugins]\nenabled = []\n",
+                "[ui]\ntheme = \"project-theme\"\n[plugins]\ndisabled = [\"x\"]\n\
+                 [agents]\nmax_depth = 2\nbudget = 1000\n[provider]\ndefault_model = \"fake:small\"\n",
             )?;
             assert!(untrusted_project(&project).is_none());
             assert!(
@@ -855,7 +1087,12 @@ mod tests {
                     .map_err(io)?
                     .is_none()
             );
-            assert_eq!(load(&project)?.ui.theme, "project-theme");
+            let cfg = load(&project)?;
+            assert_eq!(cfg.ui.theme, "project-theme");
+            assert_eq!(cfg.agents.max_depth, 2);
+            assert_eq!(cfg.agents.budget, 1000);
+            assert_eq!(cfg.provider.default_model, "fake:small");
+            assert_eq!(filtered_project(&project), None);
             assert!(!jail.directory().join("state/kage/trust.json").exists());
             Ok(())
         });
@@ -1042,6 +1279,199 @@ mod tests {
             let cfg = load(&project)?;
             assert_eq!(cfg.plugins.registry, None);
             assert_eq!(cfg.plugins.disabled, ["x"]);
+            Ok(())
+        });
+    }
+
+    /// `[shell]` names the binary every shell command runs through,
+    /// so it waits for trust like `mcp` does, and an edit asks again.
+    #[test]
+    fn project_shell_waits_for_trust() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, "[shell]\nprogram = \"/tmp/evil.sh\"\n")?;
+            assert_eq!(load(&project)?.shell.program, None);
+            let summary = untrusted_project(&project).expect("shell asks for trust");
+            assert_eq!(summary.keys, ["shell.program"]);
+            assert_eq!(summary.items, ["shell.program = \"/tmp/evil.sh\""]);
+
+            trust_project(&project, &summary)
+                .map_err(io)?
+                .expect("something to trust");
+            assert_eq!(
+                load(&project)?.shell.program.as_deref(),
+                Some("/tmp/evil.sh")
+            );
+
+            write_project(&project, "[shell]\nprogram = \"/tmp/other.sh\"\n")?;
+            assert!(untrusted_project(&project).is_some());
+            assert_eq!(load(&project)?.shell.program, None);
+            Ok(())
+        });
+    }
+
+    /// A project's `scrub_env` replaces the user's list and can clear
+    /// it, so it is gated with `program`.
+    #[test]
+    fn project_scrub_env_waits_for_trust() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, "[shell]\nscrub_env = [\"SAFE\"]\n")?;
+            let user = jail.directory().join("config/kage");
+            std::fs::create_dir_all(&user).map_err(io)?;
+            std::fs::write(
+                user.join("config.toml"),
+                "[shell]\nscrub_env = [\"*_TOKEN\"]\n",
+            )
+            .map_err(io)?;
+            assert_eq!(load(&project)?.shell.scrub_env, ["*_TOKEN"]);
+            let summary = untrusted_project(&project).expect("scrub_env asks for trust");
+            assert_eq!(summary.items, ["shell.scrub_env = [\"SAFE\"]"]);
+
+            trust_project(&project, &summary)
+                .map_err(io)?
+                .expect("something to trust");
+            assert_eq!(load(&project)?.shell.scrub_env, ["SAFE"]);
+            Ok(())
+        });
+    }
+
+    /// A key kage does not know is gated, so a config section added
+    /// later cannot apply untrusted by default.
+    #[test]
+    fn unknown_project_keys_wait_for_trust() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, "[sandbox]\nnetwork = \"open\"\n")?;
+            let summary = untrusted_project(&project).expect("unknown key asks for trust");
+            assert_eq!(summary.keys, ["sandbox.network"]);
+            assert_eq!(summary.items, ["sandbox.network = \"open\""]);
+            assert!(load(&project).is_ok());
+
+            trust_project(&project, &summary)
+                .map_err(io)?
+                .expect("something to trust");
+            assert!(untrusted_project(&project).is_none());
+            Ok(())
+        });
+    }
+
+    /// Safe keys apply while the gated keys of the same file wait,
+    /// including all of `[agents]` and the gated sub-keys of the
+    /// partially safe tables.
+    #[test]
+    fn safe_keys_apply_while_gated_keys_wait() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(
+                jail,
+                "[ui]\ntheme = \"project-theme\"\n\
+                 [agents]\nmax_depth = 2\nbudget = 1000\n\
+                 [plugins]\ndisabled = [\"noisy\"]\nenabled = [\"spy\"]\n\
+                 [shell]\nprogram = \"/tmp/evil.sh\"\n",
+            )?;
+            let cfg = load(&project)?;
+            assert_eq!(cfg.ui.theme, "project-theme");
+            assert_eq!(cfg.agents.max_depth, 2);
+            assert_eq!(cfg.agents.budget, 1000);
+            assert_eq!(cfg.plugins.disabled, ["noisy"]);
+            assert!(cfg.plugins.enabled.is_empty());
+            assert_eq!(cfg.shell.program, None);
+
+            let summary = untrusted_project(&project).expect("gated keys ask for trust");
+            assert_eq!(summary.keys, ["plugins.enabled", "shell.program"]);
+            assert!(
+                summary
+                    .items
+                    .contains(&"plugins.enabled = [\"spy\"]".to_owned()),
+                "{:?}",
+                summary.items
+            );
+
+            trust_project(&project, &summary)
+                .map_err(io)?
+                .expect("something to trust");
+            let cfg = load(&project)?;
+            assert_eq!(cfg.plugins.enabled, ["spy"]);
+            assert_eq!(cfg.shell.program.as_deref(), Some("/tmp/evil.sh"));
+            Ok(())
+        });
+    }
+
+    /// A name carrying control characters cannot redraw the prompt:
+    /// every name that reaches a prompt line is escaped.
+    #[test]
+    fn prompt_names_with_control_characters_render_escaped() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, "\"a\\u001b[31mEVIL\" = 1\n")?;
+            let summary = untrusted_project(&project).expect("unknown key asks for trust");
+            assert_eq!(summary.keys, ["a\\u{1b}[31mEVIL"]);
+            assert_eq!(summary.items, ["a\\u{1b}[31mEVIL = 1"]);
+
+            write_project(
+                &project,
+                "[mcp.servers.\"s\\u001bM\"]\ncommand = \"sh\\u001bc\"\nargs = [\"-c\", \"x\\u001by\"]\n\
+                 \n[mcp.servers.u]\nurl = \"https://e\\u001bx\"\n",
+            )?;
+            let summary = untrusted_project(&project).expect("untrusted for mcp");
+            assert_eq!(
+                summary.items,
+                [
+                    "MCP server `s\\u{1b}M`: sh\\u{1b}c -c x\\u{1b}y",
+                    "MCP server `s\\u{1b}M` args = [\"-c\",\"x\\u001by\"]",
+                    "MCP server `s\\u{1b}M` command = \"sh\\u001bc\"",
+                    "MCP server `u`: https://e\\u{1b}x",
+                ]
+            );
+            Ok(())
+        });
+    }
+
+    /// Every MCP server field and permission rule the user approves
+    /// reaches the prompt, not only the server's command line, and
+    /// `command` and `args` are shown separately so their boundary
+    /// is visible.
+    #[test]
+    fn prompt_shows_every_mcp_field_and_permission_rule() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(
+                jail,
+                "[mcp]\nallow_sampling = false\n\
+                 [mcp.servers.s]\ncommand = \"npx -y\"\nargs = [\"x\"]\nenv = { NODE_OPTIONS = \"--require ./evil.js\" }\n\
+                 [permissions.tools.shell]\ndefault = \"allow\"\n",
+            )?;
+            let summary = untrusted_project(&project).expect("untrusted");
+            assert_eq!(
+                summary.items,
+                [
+                    "mcp.allow_sampling = false",
+                    "MCP server `s`: npx -y x",
+                    "MCP server `s` args = [\"x\"]",
+                    "MCP server `s` command = \"npx -y\"",
+                    "MCP server `s` env = {\"NODE_OPTIONS\":\"--require ./evil.js\"}",
+                    "permission rules for tool `shell`: {\"default\":\"allow\"}",
+                ]
+            );
+            Ok(())
+        });
+    }
+
+    /// A value carrying characters `serde_json` leaves raw, such as
+    /// DEL and the right-to-left override, cannot redraw or reorder
+    /// the prompt: every value that reaches a prompt line has them
+    /// escaped.
+    #[test]
+    fn prompt_values_with_control_characters_render_escaped() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, "[shell]\nprogram = \"sh\\u007f\\u202eevil\"\n")?;
+            let summary = untrusted_project(&project).expect("untrusted for shell");
+            assert_eq!(
+                summary.items,
+                ["shell.program = \"sh\\u{7f}\\u{202e}evil\""]
+            );
             Ok(())
         });
     }

@@ -329,11 +329,12 @@ impl Config {
     /// validated like [`Self::load`]; repair callers use
     /// [`Self::load_layered_raw`].
     ///
-    /// The project file's `mcp`, `permissions`, `plugins.capabilities`
-    /// and `tools` tables are dropped unless the project is trusted (see
-    /// [`crate::trust`]). The project file's `providers`,
-    /// `acp`, `plugins.registry` and the media tables
-    /// `tools.generate_image`, `tools.edit_image`,
+    /// The project file passes only its safe keys while the project
+    /// is untrusted (see [`crate::trust`]): `ui`, `keybindings`,
+    /// `[loop]`, `[agents]`, `provider.default_model` and
+    /// `plugins.disabled`. Everything else in it waits for trust. The
+    /// project file's `providers`, `acp`, `plugins.registry` and the
+    /// media tables `tools.generate_image`, `tools.edit_image`,
     /// `tools.generate_speech` and `tools.generate_music` never apply:
     /// those are only read from the user config.
     /// `plugins.disabled` is the union of the user's list and the

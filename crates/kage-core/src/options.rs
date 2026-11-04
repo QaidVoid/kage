@@ -885,6 +885,11 @@ mod tests {
                 .set("mouse", OptionValue::Int(1), OptionSource::Lua)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn set_validates_compaction_and_retry_ranges() {
+        let mut store = OptionStore::default();
         for bad in [-0.5, 1.5, f64::NAN] {
             assert!(
                 store
@@ -910,17 +915,30 @@ mod tests {
         for bad in [-1, 11] {
             assert!(
                 store
-                    .set("max_provider_retries", OptionValue::Int(bad), OptionSource::Lua)
+                    .set(
+                        "max_provider_retries",
+                        OptionValue::Int(bad),
+                        OptionSource::Lua
+                    )
                     .is_err()
             );
         }
         assert_eq!(
             store
-                .set("max_provider_retries", OptionValue::Int(10), OptionSource::Lua)
+                .set(
+                    "max_provider_retries",
+                    OptionValue::Int(10),
+                    OptionSource::Lua
+                )
                 .unwrap()
                 .new,
             OptionValue::Int(10)
         );
+    }
+
+    #[test]
+    fn set_validates_string_and_unknown_options() {
+        let mut store = OptionStore::default();
         assert!(
             store
                 .set("leader", OptionValue::Str("ab".into()), OptionSource::Lua)

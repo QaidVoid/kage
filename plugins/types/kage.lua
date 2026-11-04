@@ -551,7 +551,7 @@
 ---@field transcript_on_exit "full"|"last"|"none" What prints after exit: the whole transcript, from the last prompt on, or only the session path and a resume hint.
 ---@field thinking_level ""|"off"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max"|"ultra" Thinking level for new sessions, or empty for auto (high, or the nearest level the model accepts).
 ---@field compaction_threshold number Fraction of the context window that triggers compaction. 0 turns compaction off.
----@field max_provider_retries integer How many times a turn whose provider request failed transiently is retried before giving up. 0 turns auto-retry off.
+---@field max_provider_retries integer How many times to re-issue a turn whose provider request failed transiently before giving up. 0 disables auto-retry.
 ---@field leader string The key `<leader>` expands to when a mapping is set.
 ---@field timeoutlen integer Milliseconds a mapping that is also a prefix waits for more keys.
 ---@field agent_max_depth integer How deep agents may nest. 0 turns the agent tool off, and 1 lets only the main session start agents.

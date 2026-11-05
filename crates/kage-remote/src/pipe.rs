@@ -3,7 +3,7 @@
 //! [`upgrade`] writes the `101` response and hands back the
 //! newline-delimited reader and writer pair the agent serving loop
 //! consumes. Two threads share one socket. The reader turns text
-//! frames into lines on an in-process pipe, replacing raw newlines so
+//! frames into lines on a bounded in-process stream, replacing raw newlines so
 //! a frame always arrives as one message, dropping binary frames, and
 //! closing on a message past the inbound cap. The writer drains a
 //! byte-capped outgoing queue into text frames, pings on an interval,
@@ -11,12 +11,12 @@
 //! never blocks: once the cap is passed, the flush fails and the
 //! socket closes.
 
-use std::io::{self, BufReader, PipeReader, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Select, Sender, TryRecvError, TrySendError, bounded};
@@ -48,6 +48,10 @@ const OUTGOING_MESSAGES: usize = 1024;
 /// queue for the writer thread.
 const WIRE_BLOBS: usize = 64;
 
+const INBOUND_MESSAGES: usize = 4;
+
+const DRAIN_BATCH: usize = 16;
+
 /// How long the reader waits after a peer close for the writer to
 /// push the echo.
 const CLOSE_ECHO_GRACE: Duration = Duration::from_millis(50);
@@ -60,6 +64,8 @@ const CLOSE_ECHO_GRACE: Duration = Duration::from_millis(50);
 /// replaced. The writer buffers bytes through [`Write`] and publishes
 /// each [`Write::flush`] as one text frame. `subprotocol` is the
 /// accepted `Sec-WebSocket-Protocol` entry, echoed when present.
+/// Dropping the reader aborts the connection, shuts down the socket, and joins
+/// the transport workers. Queued outgoing messages may be discarded.
 /// `connection_id` goes out as `Acp-Connection-Id`. The frame bytes
 /// read past the request head, [`Head::leftover`], seed the decoder so
 /// an early frame is never lost.
@@ -74,7 +80,120 @@ pub fn upgrade(
     head: Head,
     connection_id: &str,
     subprotocol: Option<&str>,
-) -> io::Result<(BufReader<PipeReader>, Outgoing)> {
+) -> io::Result<(BufReader<Incoming>, Outgoing)> {
+    send_upgrade_response(stream, &head, connection_id, subprotocol)?;
+
+    stream.set_read_timeout(Some(READER_TICK))?;
+    stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+
+    let sock = Arc::new(stream.try_clone()?);
+    let (blob_tx, blob_rx) = bounded::<Vec<u8>>(WIRE_BLOBS);
+    let (cancel_tx, cancel_rx) = bounded::<()>(0);
+    let stop = Arc::new(Stop {
+        sock: Arc::clone(&sock),
+        cancel: Mutex::new(Some(cancel_tx)),
+    });
+    let mut ws_read = WebSocket::from_partially_read(
+        ReaderWire {
+            sock: Arc::clone(&sock),
+            blobs: blob_tx,
+            cancel: cancel_rx.clone(),
+        },
+        head.leftover,
+        Role::Server,
+        Some(config()),
+    );
+    let ws_write = WebSocket::from_raw_socket(
+        WriterWire {
+            sock: Arc::clone(&sock),
+        },
+        Role::Server,
+        Some(config()),
+    );
+
+    let (inbound_tx, inbound_rx) = bounded(INBOUND_MESSAGES);
+    let (tx, rx) = bounded::<Vec<u8>>(OUTGOING_MESSAGES);
+    let bytes = Arc::new(Mutex::new(0));
+    let queue = Queue {
+        tx,
+        bytes: Arc::clone(&bytes),
+    };
+    let epoch = Instant::now();
+    let last_inbound = Arc::new(AtomicU64::new(0));
+
+    let reader = {
+        let worker_stop = Arc::clone(&stop);
+        let cancel = cancel_rx.clone();
+        let last_inbound = Arc::clone(&last_inbound);
+        match thread::Builder::new()
+            .name("kage-remote-read".to_owned())
+            .spawn(move || {
+                read_loop(
+                    &mut ws_read,
+                    &inbound_tx,
+                    &worker_stop,
+                    &cancel,
+                    epoch,
+                    &last_inbound,
+                );
+            }) {
+            Ok(handle) => handle,
+            Err(error) => {
+                stop.shutdown();
+                return Err(error);
+            }
+        }
+    };
+    let writer = {
+        let worker_stop = Arc::clone(&stop);
+        let cancel = cancel_rx.clone();
+        let last_inbound = Arc::clone(&last_inbound);
+        match thread::Builder::new()
+            .name("kage-remote-write".to_owned())
+            .spawn(move || {
+                write_loop(
+                    ws_write,
+                    &blob_rx,
+                    &rx,
+                    &bytes,
+                    &worker_stop,
+                    &cancel,
+                    (epoch, &last_inbound),
+                );
+            }) {
+            Ok(handle) => handle,
+            Err(error) => {
+                stop.shutdown();
+                let _ = reader.join();
+                return Err(error);
+            }
+        }
+    };
+
+    let outgoing = Outgoing {
+        buffer: Vec::new(),
+        queue,
+        stop: Arc::clone(&stop),
+        failed: false,
+    };
+    Ok((
+        BufReader::new(Incoming {
+            rx: inbound_rx,
+            current: Vec::new(),
+            offset: 0,
+            stop,
+            workers: vec![reader, writer],
+        }),
+        outgoing,
+    ))
+}
+
+fn send_upgrade_response(
+    stream: &mut TcpStream,
+    head: &Head,
+    connection_id: &str,
+    subprotocol: Option<&str>,
+) -> io::Result<()> {
     let key = head.header("sec-websocket-key").ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -100,63 +219,65 @@ pub fn upgrade(
     response.push_str(connection_id);
     response.push_str("\r\n\r\n");
     stream.write_all(response.as_bytes())?;
-    stream.flush()?;
+    stream.flush()
+}
 
-    stream.set_read_timeout(Some(READER_TICK))?;
-    stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+struct Stop {
+    sock: Arc<TcpStream>,
+    cancel: Mutex<Option<Sender<()>>>,
+}
 
-    let sock = Arc::new(stream.try_clone()?);
-    let (blob_tx, blob_rx) = bounded::<Vec<u8>>(WIRE_BLOBS);
-    let mut ws_read = WebSocket::from_partially_read(
-        ReaderWire {
-            sock: Arc::clone(&sock),
-            blobs: blob_tx,
-        },
-        head.leftover,
-        Role::Server,
-        Some(config()),
-    );
-    let ws_write = WebSocket::from_raw_socket(
-        WriterWire {
-            sock: Arc::clone(&sock),
-        },
-        Role::Server,
-        Some(config()),
-    );
-
-    let (pipe_read, pipe_write) = io::pipe()?;
-    let (tx, rx) = bounded::<Vec<u8>>(OUTGOING_MESSAGES);
-    let bytes = Arc::new(Mutex::new(0));
-    let queue = Queue {
-        tx,
-        bytes: Arc::clone(&bytes),
-    };
-    let epoch = Instant::now();
-    let last_inbound = Arc::new(AtomicU64::new(0));
-
-    {
-        let sock = Arc::clone(&sock);
-        let last_inbound = Arc::clone(&last_inbound);
-        thread::Builder::new()
-            .name("kage-remote-read".to_owned())
-            .spawn(move || read_loop(&mut ws_read, pipe_write, &sock, epoch, &last_inbound))?;
+impl Stop {
+    fn shutdown(&self) {
+        self.cancel
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let _ = self.sock.shutdown(Shutdown::Both);
     }
-    {
-        let sock = Arc::clone(&sock);
-        let last_inbound = Arc::clone(&last_inbound);
-        thread::Builder::new()
-            .name("kage-remote-write".to_owned())
-            .spawn(move || {
-                write_loop(ws_write, &blob_rx, &rx, &bytes, &sock, epoch, &last_inbound);
-            })?;
-    }
+}
 
-    let outgoing = Outgoing {
-        buffer: Vec::new(),
-        queue,
-        sock,
-    };
-    Ok((BufReader::new(pipe_read), outgoing))
+/// A bounded stream of newline-delimited messages that owns the transport workers.
+///
+/// Dropping this reader aborts the transport and joins both worker threads.
+/// Queued outgoing messages may be discarded, including messages whose writer
+/// has already been flushed or dropped.
+pub struct Incoming {
+    rx: Receiver<Vec<u8>>,
+    current: Vec<u8>,
+    offset: usize,
+    stop: Arc<Stop>,
+    workers: Vec<JoinHandle<()>>,
+}
+
+impl Read for Incoming {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.offset == self.current.len() {
+            match self.rx.recv() {
+                Ok(bytes) => {
+                    self.current = bytes;
+                    self.offset = 0;
+                }
+                Err(_) => return Ok(0),
+            }
+        }
+        let count = buf.len().min(self.current.len() - self.offset);
+        buf[..count].copy_from_slice(&self.current[self.offset..self.offset + count]);
+        self.offset += count;
+        Ok(count)
+    }
+}
+
+impl Drop for Incoming {
+    fn drop(&mut self) {
+        self.stop.shutdown();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
 }
 
 /// The write half handed to the agent: bytes buffer in memory and each
@@ -164,20 +285,45 @@ pub fn upgrade(
 ///
 /// Feeding the queue never blocks. When the byte cap is passed or the
 /// connection is gone, the flush fails and the socket closes, so a
-/// stalled reader is cut off instead of wedging the agent.
+/// stalled reader is cut off instead of wedging the agent. A successful flush
+/// means the message entered the queue, not that it reached the peer. Dropping
+/// this writer lets the transport drain queued messages before shutting down,
+/// unless the reader is dropped or another transport failure aborts it first.
 pub struct Outgoing {
     buffer: Vec<u8>,
     queue: Queue,
-    sock: Arc<TcpStream>,
+    stop: Arc<Stop>,
+    failed: bool,
 }
 
 impl Write for Outgoing {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.failed {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "connection is closed",
+            ));
+        }
+        let current = u64::try_from(self.buffer.len()).unwrap_or(u64::MAX);
+        let added = u64::try_from(buf.len()).unwrap_or(u64::MAX);
+        if current
+            .checked_add(added)
+            .is_none_or(|total| total > OUTGOING_CAP)
+        {
+            self.buffer.clear();
+            return Err(self.cut(io::ErrorKind::WriteZero, "outgoing frame is too large"));
+        }
         self.buffer.extend_from_slice(buf);
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        if self.failed {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "connection is closed",
+            ));
+        }
         if self.buffer.is_empty() {
             return Ok(());
         }
@@ -195,8 +341,9 @@ impl Write for Outgoing {
 }
 
 impl Outgoing {
-    fn cut(&self, kind: io::ErrorKind, message: &str) -> io::Error {
-        let _ = self.sock.shutdown(Shutdown::Both);
+    fn cut(&mut self, kind: io::ErrorKind, message: &str) -> io::Error {
+        self.failed = true;
+        self.stop.shutdown();
         io::Error::new(kind, message)
     }
 }
@@ -238,6 +385,7 @@ impl Queue {
 struct ReaderWire {
     sock: Arc<TcpStream>,
     blobs: Sender<Vec<u8>>,
+    cancel: Receiver<()>,
 }
 
 impl Read for ReaderWire {
@@ -248,9 +396,10 @@ impl Read for ReaderWire {
 
 impl Write for ReaderWire {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.blobs
-            .send(buf.to_vec())
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "writer thread is gone"))?;
+        crossbeam_channel::select! {
+            send(self.blobs, buf.to_vec()) -> result => result.map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "writer thread is gone"))?,
+            recv(self.cancel) -> _ => return Err(io::Error::new(io::ErrorKind::BrokenPipe, "connection is closed")),
+        }
         Ok(buf.len())
     }
 
@@ -289,8 +438,9 @@ fn config() -> WebSocketConfig {
 
 fn read_loop(
     ws: &mut WebSocket<ReaderWire>,
-    mut pipe: io::PipeWriter,
-    sock: &TcpStream,
+    inbound: &Sender<Vec<u8>>,
+    stop: &Stop,
+    cancel: &Receiver<()>,
     epoch: Instant,
     last_inbound: &AtomicU64,
 ) {
@@ -299,6 +449,10 @@ fn read_loop(
         match received {
             Ok(Message::Text(text)) => {
                 last_inbound.store(millis_since(epoch), Ordering::Release);
+                // The JSON-RPC line limit includes the appended newline.
+                if text.len() >= MAX_MESSAGE {
+                    break;
+                }
                 if text.contains('\n') {
                     eprintln!(
                         "kage-remote: frame carried a raw newline; replaced so the frame stays \
@@ -307,8 +461,9 @@ fn read_loop(
                 }
                 let mut line = text.as_str().replace('\n', " ");
                 line.push('\n');
-                if pipe.write_all(line.as_bytes()).is_err() {
-                    break;
+                crossbeam_channel::select! {
+                    send(inbound, line.into_bytes()) -> result => if result.is_err() { break; },
+                    recv(cancel) -> _ => break,
                 }
             }
             Ok(Message::Binary(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => {
@@ -327,7 +482,7 @@ fn read_loop(
             Err(_) => break,
         }
     }
-    let _ = sock.shutdown(Shutdown::Both);
+    stop.shutdown();
 }
 
 fn write_loop(
@@ -335,25 +490,36 @@ fn write_loop(
     blobs: &Receiver<Vec<u8>>,
     rx: &Receiver<Vec<u8>>,
     bytes: &Mutex<u64>,
-    sock: &TcpStream,
-    epoch: Instant,
-    last_inbound: &AtomicU64,
+    stop: &Stop,
+    cancel: &Receiver<()>,
+    clock: (Instant, &AtomicU64),
 ) {
+    let (epoch, last_inbound) = clock;
     let mut last_ping = Instant::now();
     let mut select = Select::new();
+    let cancel_op = select.recv(cancel);
     let blobs_op = select.recv(blobs);
     let queue_op = select.recv(rx);
     loop {
-        // Bytes the reader thread produced, pong and close echoes,
-        // always go out first.
+        if cancel
+            .try_recv()
+            .is_err_and(|e| e == TryRecvError::Disconnected)
+        {
+            break;
+        }
+        // Give control frames priority without starving messages or cancellation.
         let mut blobs_dead = false;
-        while let Ok(blob) = blobs.try_recv() {
-            if (&*sock).write_all(&blob).is_err() {
+        for _ in 0..DRAIN_BATCH {
+            let Ok(blob) = blobs.try_recv() else { break };
+            if (&*stop.sock).write_all(&blob).is_err() {
                 blobs_dead = true;
                 break;
             }
         }
-        if blobs_dead || drain(&mut ws, rx, bytes) {
+        if blobs_dead
+            || cancel.try_recv() == Err(TryRecvError::Disconnected)
+            || drain(&mut ws, rx, bytes)
+        {
             break;
         }
         let quiet = millis_since(epoch).saturating_sub(last_inbound.load(Ordering::Acquire));
@@ -372,9 +538,13 @@ fn write_loop(
             .saturating_sub(last_ping.elapsed())
             .max(Duration::from_millis(1));
         match select.select_timeout(wait) {
+            Ok(op) if op.index() == cancel_op => {
+                let _ = op.recv(cancel);
+                break;
+            }
             Ok(op) if op.index() == blobs_op => {
                 if let Ok(blob) = op.recv(blobs)
-                    && (&*sock).write_all(&blob).is_err()
+                    && (&*stop.sock).write_all(&blob).is_err()
                 {
                     break;
                 }
@@ -390,13 +560,13 @@ fn write_loop(
             Ok(_) | Err(_) => {}
         }
     }
-    let _ = sock.shutdown(Shutdown::Both);
+    stop.shutdown();
 }
 
-/// Sends every queued message. Returns true when the loop must stop:
-/// either the agent dropped the connection or a send failed.
+/// Sends a bounded batch of queued messages. Returns true when the loop
+/// must stop because the agent disconnected or a send failed.
 fn drain(ws: &mut WebSocket<WriterWire>, rx: &Receiver<Vec<u8>>, bytes: &Mutex<u64>) -> bool {
-    loop {
+    for _ in 0..DRAIN_BATCH {
         match rx.try_recv() {
             Ok(message) => {
                 release(bytes, message.len());
@@ -408,6 +578,7 @@ fn drain(ws: &mut WebSocket<WriterWire>, rx: &Receiver<Vec<u8>>, bytes: &Mutex<u
             Err(TryRecvError::Disconnected) => return true,
         }
     }
+    false
 }
 
 /// Sends every queued line as one text frame. A message that is not
@@ -436,7 +607,6 @@ fn millis_since(epoch: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::io::BufRead as _;
     use std::net::TcpListener;
 
     use super::*;
@@ -469,7 +639,12 @@ mod tests {
         let bytes = Arc::new(Mutex::new(0));
         let last_inbound = Arc::new(AtomicU64::new(0));
         let sock = Arc::new(server);
-        let loop_sock = Arc::clone(&sock);
+        let (cancel_tx, cancel_rx) = bounded(0);
+        let stop = Arc::new(Stop {
+            sock: Arc::clone(&sock),
+            cancel: Mutex::new(Some(cancel_tx)),
+        });
+        let loop_stop = Arc::clone(&stop);
         let wire_sock = Arc::clone(&sock);
         let thread = thread::spawn(move || {
             let ws = WebSocket::from_raw_socket(
@@ -482,9 +657,9 @@ mod tests {
                 &blob_rx,
                 &rx,
                 &bytes,
-                &loop_sock,
-                Instant::now(),
-                &last_inbound,
+                &loop_stop,
+                &cancel_rx,
+                (Instant::now(), &last_inbound),
             );
         });
         (
@@ -496,6 +671,232 @@ mod tests {
             },
             client,
         )
+    }
+
+    #[test]
+    fn final_flush_survives_writer_drop_and_reader_wakes() {
+        let (client, server) = socket_pair();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let sock = Arc::new(server);
+        let (cancel_tx, cancel_rx) = bounded(0);
+        let stop = Arc::new(Stop {
+            sock: Arc::clone(&sock),
+            cancel: Mutex::new(Some(cancel_tx)),
+        });
+        let (inbound_tx, inbound_rx) = bounded(1);
+        let inbound_cancel = cancel_rx.clone();
+        let reader = thread::spawn(move || {
+            let _inbound_tx = inbound_tx;
+            let _ = inbound_cancel.recv();
+        });
+        let (queue_tx, queue_rx) = bounded(1);
+        let (_blob_tx, blob_rx) = bounded(1);
+        let bytes = Arc::new(Mutex::new(0));
+        let mut outgoing = Outgoing {
+            buffer: Vec::new(),
+            queue: Queue {
+                tx: queue_tx,
+                bytes: Arc::clone(&bytes),
+            },
+            stop: Arc::clone(&stop),
+            failed: false,
+        };
+        let (start_tx, start_rx) = bounded::<()>(0);
+        let worker_stop = Arc::clone(&stop);
+        let writer = thread::spawn(move || {
+            start_rx.recv().unwrap();
+            let ws = WebSocket::from_raw_socket(WriterWire { sock }, Role::Server, Some(config()));
+            write_loop(
+                ws,
+                &blob_rx,
+                &queue_rx,
+                &bytes,
+                &worker_stop,
+                &cancel_rx,
+                (Instant::now(), &AtomicU64::new(0)),
+            );
+        });
+        let incoming = Incoming {
+            rx: inbound_rx,
+            current: Vec::new(),
+            offset: 0,
+            stop,
+            workers: vec![reader, writer],
+        };
+        let (done_tx, done_rx) = bounded(0);
+        thread::spawn(move || {
+            let mut reader = incoming;
+            done_tx.send(reader.read(&mut [0; 1])).unwrap();
+        });
+        outgoing.write_all(b"final response").unwrap();
+        outgoing.flush().unwrap();
+        drop(outgoing);
+        start_tx.send(()).unwrap();
+        let mut peer = WebSocket::from_raw_socket(client, Role::Client, None);
+        assert_eq!(peer.read().unwrap(), Message::text("final response"));
+        assert_eq!(
+            done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn drain_yields_with_messages_still_queued() {
+        let (_client, server) = socket_pair();
+        let (tx, rx) = bounded(DRAIN_BATCH * 2);
+        for _ in 0..DRAIN_BATCH * 2 {
+            tx.send(b"x".to_vec()).unwrap();
+        }
+        let bytes = Mutex::new((DRAIN_BATCH * 2) as u64);
+        let mut ws = WebSocket::from_raw_socket(
+            WriterWire {
+                sock: Arc::new(server),
+            },
+            Role::Server,
+            Some(config()),
+        );
+        assert!(!drain(&mut ws, &rx, &bytes));
+        assert_eq!(rx.len(), DRAIN_BATCH);
+        assert_eq!(*bytes.lock().unwrap(), DRAIN_BATCH as u64);
+    }
+
+    #[test]
+    fn shutdown_interrupts_full_control_channel() {
+        let (_client, server) = socket_pair();
+        let sock = Arc::new(server);
+        let (cancel_tx, cancel_rx) = bounded(0);
+        let stop = Stop {
+            sock: Arc::clone(&sock),
+            cancel: Mutex::new(Some(cancel_tx)),
+        };
+        let (blobs, _rx) = bounded(1);
+        blobs.send(vec![1]).unwrap();
+        let (started_tx, started_rx) = bounded(0);
+        let (done_tx, done_rx) = bounded(0);
+        let worker = thread::spawn(move || {
+            let mut wire = ReaderWire {
+                sock,
+                blobs,
+                cancel: cancel_rx,
+            };
+            started_tx.send(()).unwrap();
+            done_tx.send(wire.write(b"pong")).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        stop.shutdown();
+        assert_eq!(
+            done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn dropping_incoming_interrupts_full_inbound_channel() {
+        let (client, server) = socket_pair();
+        let sock = Arc::new(server);
+        let (cancel_tx, cancel_rx) = bounded(0);
+        let stop = Arc::new(Stop {
+            sock: Arc::clone(&sock),
+            cancel: Mutex::new(Some(cancel_tx)),
+        });
+        let (blobs, _blob_rx) = bounded(1);
+        let (tx, rx) = bounded(1);
+        let (ready_tx, ready_rx) = bounded(0);
+        let worker_stop = Arc::clone(&stop);
+        let processed = Arc::new(AtomicU64::new(0));
+        let worker_processed = Arc::clone(&processed);
+        let worker = thread::spawn(move || {
+            let mut ws = WebSocket::from_raw_socket(
+                ReaderWire {
+                    sock,
+                    blobs,
+                    cancel: cancel_rx.clone(),
+                },
+                Role::Server,
+                Some(config()),
+            );
+            tx.send(b"occupied".to_vec()).unwrap();
+            ready_tx.send(()).unwrap();
+            read_loop(
+                &mut ws,
+                &tx,
+                &worker_stop,
+                &cancel_rx,
+                Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
+                &worker_processed,
+            );
+        });
+        ready_rx.recv().unwrap();
+        let mut peer = WebSocket::from_raw_socket(client, Role::Client, None);
+        peer.send(Message::text("blocked")).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while processed.load(Ordering::Acquire) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "reader did not process the frame"
+            );
+            thread::yield_now();
+        }
+        let incoming = Incoming {
+            rx,
+            current: Vec::new(),
+            offset: 0,
+            stop,
+            workers: vec![worker],
+        };
+        let (done_tx, done_rx) = bounded(0);
+        thread::spawn(move || {
+            drop(incoming);
+            done_tx.send(()).unwrap();
+        });
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    }
+
+    #[test]
+    fn oversized_unflushed_frame_closes_connection() {
+        let (mut client, server) = socket_pair();
+        let (tx, _rx) = bounded(1);
+        let mut outgoing = Outgoing {
+            buffer: vec![0; usize::try_from(OUTGOING_CAP).unwrap() - 1],
+            queue: Queue {
+                tx,
+                bytes: Arc::new(Mutex::new(0)),
+            },
+            stop: Arc::new(Stop {
+                sock: Arc::new(server),
+                cancel: Mutex::new(None),
+            }),
+            failed: false,
+        };
+        assert_eq!(outgoing.write(b"x").unwrap(), 1);
+        assert_eq!(
+            outgoing.write(b"x").unwrap_err().kind(),
+            io::ErrorKind::WriteZero
+        );
+        assert!(outgoing.buffer.is_empty());
+        assert_eq!(
+            outgoing.write(b"y").unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(
+            outgoing.flush().unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(client.read(&mut [0; 1]).unwrap(), 0);
     }
 
     #[test]
@@ -536,27 +937,39 @@ mod tests {
         let (client, server) = socket_pair();
         server.set_read_timeout(Some(READER_TICK)).unwrap();
         let (blobs, blob_rx) = bounded::<Vec<u8>>(8);
-        let (pipe_read, pipe_write) = io::pipe().unwrap();
+        let (pipe_write, pipe_read) = bounded(4);
+        let (cancel_tx, cancel_rx) = bounded(0);
         let sock = Arc::new(server);
         let epoch = Instant::now();
         let last_inbound = Arc::new(AtomicU64::new(0));
-        let reader_sock = Arc::clone(&sock);
+        let stop = Arc::new(Stop {
+            sock: Arc::clone(&sock),
+            cancel: Mutex::new(Some(cancel_tx)),
+        });
+        let reader_stop = Arc::clone(&stop);
         let wire_sock = Arc::clone(&sock);
         let reader = thread::spawn(move || {
             let mut ws = WebSocket::from_raw_socket(
                 ReaderWire {
                     sock: wire_sock,
                     blobs,
+                    cancel: cancel_rx.clone(),
                 },
                 Role::Server,
                 Some(config()),
             );
-            read_loop(&mut ws, pipe_write, &reader_sock, epoch, &last_inbound);
+            read_loop(
+                &mut ws,
+                &pipe_write,
+                &reader_stop,
+                &cancel_rx,
+                epoch,
+                &last_inbound,
+            );
         });
         let mut peer = WebSocket::from_raw_socket(client, Role::Client, None);
         peer.send(Message::text("line one\nline two")).unwrap();
-        let mut line = String::new();
-        BufReader::new(pipe_read).read_line(&mut line).unwrap();
+        let line = String::from_utf8(pipe_read.recv().unwrap()).unwrap();
         assert_eq!(line, "line one line two\n");
         let _ = peer.close(None);
         reader.join().unwrap();

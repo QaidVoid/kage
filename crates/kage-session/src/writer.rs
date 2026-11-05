@@ -15,11 +15,8 @@
 //! and fork, clone, export, and replay all read while the writer is
 //! open. On filesystems where the lock is unsupported it is skipped.
 //!
-//! Crash safety is "newline-only": entries are always terminated by a single
-//! `\n`. A process killed mid-append leaves a partial trailing line which
-//! [`SessionWriter::open`] truncates away before its first append. A file
-//! that never received a `\n` at all, such as a crash mid-header, is
-//! refused instead: there is nothing safe to repair into.
+//! A valid unterminated final entry is preserved and terminated on reopen.
+//! An incomplete final fragment is removed; an invalid unterminated tail is rejected.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufWriter, Seek, Write};
@@ -99,18 +96,10 @@ impl SessionWriter {
 
     /// Reopen an existing session file for further appends.
     ///
-    /// The file is opened in append mode so writes always land at the end
-    /// regardless of what other process may have written in between. A torn
-    /// trailing line left by a crashed appender is truncated away first:
-    /// appending after it would glue the next entry onto the fragment and
-    /// turn a skippable partial write into a permanent decode error. The
-    /// advisory lock is taken before that repair so a second appender never
-    /// truncates a concurrent writer's in-flight entry.
-    ///
-    /// The file must be appendable as it stands: an empty file, a file
-    /// whose first line is not a parseable header, and a file holding
-    /// a single line that never received its `\n` are all refused
-    /// rather than repaired into a headerless file.
+    /// The file is opened in append mode. Under the advisory lock, a valid
+    /// unterminated final entry is terminated and an incomplete fragment is
+    /// removed. A complete, invalid unterminated tail is reported unchanged.
+    /// This operation does not validate newline-terminated entries.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, SessionError> {
         let path = path.into();
         let mut file = OpenOptions::new()
@@ -238,52 +227,56 @@ fn check_version(file: &File, path: &Path) -> Result<(), SessionError> {
     }
 }
 
-/// Drop an unterminated trailing line from `file`.
-///
-/// Scans for the final `\n`; if the file does not end with one, the bytes
-/// after it are a torn write from a crashed appender and are truncated
-/// away. Those bytes are exactly the ones the reader skips as torn, so
-/// truncation removes nothing the reader would keep or report. A file
-/// with no `\n` at all is refused instead of truncated: its only line
-/// never completed, so there is nothing to repair into and truncating
-/// would erase even the header fragment.
+/// Repair only an incomplete unterminated fragment, or terminate a valid line.
 fn repair_torn_tail(file: &mut File, path: &Path) -> Result<(), SessionError> {
-    let io = |err: std::io::Error| SessionError::Io {
+    use crate::reader::{Line, classify_line};
+    let io = |source| SessionError::Io {
         path: path.to_path_buf(),
-        source: err,
+        source,
     };
     file.rewind().map_err(io)?;
-    let len = file.metadata().map_err(io)?;
-    if len.len() == 0 {
-        return Ok(());
-    }
-    let mut last_newline: Option<u64> = None;
-    let mut offset = 0u64;
     let mut reader = std::io::BufReader::new(&mut *file);
+    let mut offset = 0u64;
+    let mut line = 0usize;
+    let mut chunk = Vec::new();
     loop {
-        let mut chunk = Vec::new();
+        chunk.clear();
         let n = reader.read_until(b'\n', &mut chunk).map_err(io)?;
         if n == 0 {
+            return Ok(());
+        }
+        line += 1;
+        if chunk.last() != Some(&b'\n') {
             break;
         }
-        if chunk.last() == Some(&b'\n') {
-            last_newline = Some(offset + u64::try_from(n).unwrap_or(u64::MAX) - 1);
+        offset += n as u64;
+    }
+    match classify_line(&chunk, false) {
+        Line::Entry(_) | Line::Blank => {
+            file.write_all(b"\n").map_err(io)?;
+            file.sync_all().map_err(io)
         }
-        offset += u64::try_from(n).unwrap_or(u64::MAX);
-    }
-    let ends_with_newline = last_newline.is_some_and(|pos| pos + 1 == offset);
-    if ends_with_newline {
-        return Ok(());
-    }
-    let Some(last_newline) = last_newline else {
-        return Err(SessionError::TornHeader {
+        Line::Torn => {
+            if offset == 0 {
+                return Err(SessionError::TornHeader {
+                    path: path.to_path_buf(),
+                });
+            }
+            // Windows refuses to truncate through an append-only handle.
+            let writer = OpenOptions::new().write(true).open(path).map_err(io)?;
+            writer.set_len(offset).map_err(io)?;
+            writer.sync_all().map_err(io)
+        }
+        Line::Decode(source) => Err(SessionError::Decode {
             path: path.to_path_buf(),
-        });
-    };
-    // Windows refuses to truncate through an append-only handle.
-    let writer = OpenOptions::new().write(true).open(path).map_err(io)?;
-    writer.set_len(last_newline + 1).map_err(io)?;
-    writer.sync_all().map_err(io)
+            line,
+            source,
+        }),
+        Line::InvalidUtf8(source) => Err(io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            source,
+        ))),
+    }
 }
 
 /// Whether another writer holds the advisory lock on the session file
@@ -688,16 +681,105 @@ mod tests {
     }
 
     #[test]
-    fn open_refuses_a_header_that_never_ended() {
+    fn open_preserves_a_header_that_never_ended() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("sess.jsonl");
-        // A valid header line with no `\n`: nothing to repair into,
-        // and truncating would erase the header itself.
         let header = serde_json::to_string(&SessionEntry::Header(fresh_header())).unwrap();
         std::fs::write(&path, &header).unwrap();
-        let err = SessionWriter::open(&path).unwrap_err();
-        assert!(matches!(err, SessionError::TornHeader { .. }), "{err:?}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), header);
+        drop(SessionWriter::open(&path).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{header}\n")
+        );
+    }
+
+    #[test]
+    fn reader_and_writer_agree_on_unterminated_tails() {
+        use crate::reader::SessionReader;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tails.jsonl");
+        let header = serde_json::to_string(&SessionEntry::Header(fresh_header())).unwrap();
+        let entry = SessionEntry::Label(Label {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            text: "kept".into(),
+            anchor: EntryId::new(),
+        });
+        let valid = serde_json::to_vec(&entry).unwrap();
+        let cases: Vec<(&[u8], u8)> = vec![
+            (&valid, 0),
+            (b" \t\r", 0),
+            (b"{\"type\":\"label\"", 1),
+            (b"{\"type\":\"unknown\",\"partial\":", 1),
+            (b"{\"text\":\"\xe2\x82", 1),
+            (b"{\"type\":\"unknown\"}", 2),
+            (b"{\"type\":\"label\"}", 2),
+            (b"{\"type\":]", 2),
+            (b"{\"type\":\"label\",}", 2),
+            (b"null", 2),
+            (b"{\"text\":\"\xff", 3),
+            (b"{}\xe2\x82", 3),
+            (b"{]\"\xe2\x82", 3),
+        ];
+        for (tail, expected) in cases {
+            let mut before = format!("{header}\n").into_bytes();
+            before.extend_from_slice(tail);
+            std::fs::write(&path, &before).unwrap();
+            let mut reader = SessionReader::iter(&path).unwrap();
+            assert!(reader.next().unwrap().is_ok());
+            let next = reader.next();
+            match expected {
+                0 if tail == valid => assert!(matches!(next, Some(Ok(SessionEntry::Label(_))))),
+                0 | 1 => assert!(next.is_none(), "{tail:?}"),
+                2 => assert!(
+                    matches!(next, Some(Err(SessionError::Decode { line: 2, .. }))),
+                    "{tail:?}"
+                ),
+                3 => assert!(
+                    matches!(next, Some(Err(SessionError::Io { source, .. })) if source.kind() == std::io::ErrorKind::InvalidData),
+                    "{tail:?}"
+                ),
+                _ => unreachable!(),
+            }
+            assert_eq!(reader.torn_trailing(), expected == 1, "{tail:?}");
+            let opened = SessionWriter::open(&path);
+            match expected {
+                0 => {
+                    drop(opened.unwrap());
+                    before.push(b'\n');
+                }
+                1 => {
+                    drop(opened.unwrap());
+                    before.truncate(header.len() + 1);
+                }
+                2 => assert!(
+                    matches!(opened, Err(SessionError::Decode { line: 2, .. })),
+                    "{tail:?}"
+                ),
+                3 => assert!(
+                    matches!(opened, Err(SessionError::Io { source, .. }) if source.kind() == std::io::ErrorKind::InvalidData),
+                    "{tail:?}"
+                ),
+                _ => unreachable!(),
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), before, "{tail:?}");
+        }
+    }
+
+    #[test]
+    fn terminated_invalid_utf8_is_reported_and_reading_continues() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let header = serde_json::to_string(&SessionEntry::Header(fresh_header())).unwrap();
+        let bytes = [b"\xe2\x82\r\n".as_slice(), header.as_bytes(), b"\n"].concat();
+        std::fs::write(&path, &bytes).unwrap();
+        let mut reader = crate::reader::SessionReader::iter(&path).unwrap();
+        assert!(
+            matches!(reader.next(), Some(Err(SessionError::Io { source, .. })) if source.kind() == std::io::ErrorKind::InvalidData)
+        );
+        assert!(matches!(reader.next(), Some(Ok(SessionEntry::Header(_)))));
+        assert!(reader.next().is_none());
+        assert!(!reader.torn_trailing());
     }
 
     #[test]

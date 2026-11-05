@@ -2,16 +2,11 @@
 //!
 //! [`SessionReader::iter`] opens a session file and yields one
 //! [`SessionEntry`] per line that is not empty or whitespace-only. A
-//! non-final line that fails to parse
-//! is yielded as `Err` and iteration continues. The trailing line is
-//! forgiven only when it is unterminated: the tail of a torn write from
-//! a crashed appender ends iteration silently with
-//! [`SessionReader::torn_trailing`] true. A corrupt line that does end
-//! with `\n` is a real [`SessionError::Decode`] failure, not a silent
-//! loss.
+//! Non-final corrupt lines are reported and iteration continues. An
+//! unterminated final fragment is forgiven only if it is incomplete.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Lines};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use std::sync::Arc;
@@ -24,8 +19,8 @@ use crate::error::SessionError;
 #[derive(Debug)]
 pub struct SessionReader {
     path: PathBuf,
-    inner: Lines<BufReader<File>>,
-    next_line: Option<std::io::Result<String>>,
+    inner: BufReader<File>,
+    done: bool,
     line_no: usize,
     torn_trailing: bool,
 }
@@ -38,24 +33,17 @@ impl SessionReader {
             path: path.clone(),
             source: err,
         })?;
-        let mut inner = BufReader::new(file).lines();
-        let next_line = inner.next();
+        let inner = BufReader::new(file);
         Ok(Self {
             path,
             inner,
-            next_line,
+            done: false,
             line_no: 0,
             torn_trailing: false,
         })
     }
 
-    /// True if iteration ended on an unterminated trailing line that
-    /// failed to parse.
-    ///
-    /// Indicates a crashed appender: the last write made it to disk only
-    /// partially. The session up to that point is still valid. A
-    /// trailing line that fails to parse while ending in `\n` is
-    /// reported as [`SessionError::Decode`] instead.
+    /// True if iteration ended on an incomplete unterminated fragment.
     #[must_use]
     pub fn torn_trailing(&self) -> bool {
         self.torn_trailing
@@ -87,69 +75,88 @@ impl Iterator for SessionReader {
     type Item = Result<SessionEntry, SessionError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let current = self.next_line.take()?;
-            self.line_no += 1;
-            let line_no = self.line_no;
-            self.next_line = self.inner.next();
-            let is_trailing = self.next_line.is_none();
-
-            let line = match current {
-                Ok(s) => s,
-                Err(err) => {
-                    return Some(Err(SessionError::Io {
-                        path: self.path.clone(),
-                        source: err,
-                    }));
-                }
-            };
-
-            if line.trim_ascii().is_empty() {
-                if is_trailing {
+        while !self.done {
+            let mut bytes = Vec::new();
+            match self.inner.read_until(b'\n', &mut bytes) {
+                Ok(0) => {
+                    self.done = true;
                     return None;
                 }
-                continue;
-            }
-
-            return match serde_json::from_str::<SessionEntry>(&line) {
-                Ok(entry) => Some(Ok(self.hydrated(entry))),
-                Err(err) => {
-                    if is_trailing && !ends_with_newline(&self.path) {
-                        self.torn_trailing = true;
-                        None
-                    } else {
-                        Some(Err(SessionError::Decode {
-                            path: self.path.clone(),
-                            line: line_no,
-                            source: err,
-                        }))
-                    }
+                Ok(_) => {}
+                Err(source) => {
+                    self.done = true;
+                    return Some(Err(SessionError::Io {
+                        path: self.path.clone(),
+                        source,
+                    }));
                 }
-            };
+            }
+            self.line_no += 1;
+            let terminated = bytes.last() == Some(&b'\n');
+            match classify_line(&bytes, terminated) {
+                Line::Blank => {}
+                Line::Entry(entry) => return Some(Ok(self.hydrated(entry))),
+                Line::Torn => {
+                    self.done = true;
+                    self.torn_trailing = true;
+                    return None;
+                }
+                Line::Decode(source) => {
+                    return Some(Err(SessionError::Decode {
+                        path: self.path.clone(),
+                        line: self.line_no,
+                        source,
+                    }));
+                }
+                Line::InvalidUtf8(source) => {
+                    return Some(Err(SessionError::Io {
+                        path: self.path.clone(),
+                        source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+                    }));
+                }
+            }
         }
+        None
     }
 }
 
-/// Whether the file at `path` ends with a `\n` byte, i.e. whether its
-/// trailing line is complete. A file that cannot be reopened reads as
-/// unterminated, keeping the torn-tail tolerance for infrastructure
-/// failures.
-fn ends_with_newline(path: &Path) -> bool {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut file) = File::open(path) else {
-        return false;
+pub(crate) enum Line {
+    Blank,
+    Entry(SessionEntry),
+    Torn,
+    Decode(serde_json::Error),
+    InvalidUtf8(std::str::Utf8Error),
+}
+
+pub(crate) fn classify_line(bytes: &[u8], terminated: bool) -> Line {
+    let text = match std::str::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(err) => {
+            if !terminated && err.error_len().is_none() {
+                let mut prefix = String::from_utf8(bytes[..err.valid_up_to()].to_vec())
+                    .expect("valid UTF-8 prefix");
+                prefix.push('x');
+                if matches!(serde_json::from_str::<serde_json::Value>(&prefix), Err(ref e) if e.is_eof())
+                {
+                    return Line::Torn;
+                }
+            }
+            return Line::InvalidUtf8(err);
+        }
     };
-    let Ok(len) = file.metadata().map(|meta| meta.len()) else {
-        return false;
-    };
-    if len == 0 {
-        return false;
+    if text.trim_ascii().is_empty() {
+        return Line::Blank;
     }
-    let Ok(_) = file.seek(SeekFrom::End(-1)) else {
-        return false;
-    };
-    let mut last = [0u8];
-    file.read_exact(&mut last).is_ok_and(|()| last[0] == b'\n')
+    match serde_json::from_str::<SessionEntry>(text) {
+        Ok(entry) => Line::Entry(entry),
+        Err(_err)
+            if !terminated
+                && matches!(serde_json::from_str::<serde_json::Value>(text), Err(ref e) if e.is_eof()) =>
+        {
+            Line::Torn
+        }
+        Err(err) => Line::Decode(err),
+    }
 }
 
 #[cfg(test)]

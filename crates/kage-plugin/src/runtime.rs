@@ -20,7 +20,12 @@
 //! module).
 //!
 //! See `crates/kage-plugin/src/runtime.rs` source for the exact list of
-//! removed bindings.
+//! removed bindings. Lua `print` logs tab-separated values at info level
+//! through the host sink, including during plugin startup and trusted user
+//! config loading. Output is limited to 1 MiB before UTF-8 conversion.
+//! Invalid UTF-8 bytes are replaced in the logged text.
+//! The default sink writes to stderr, keeping stdout available for transports
+//! such as JSON-RPC.
 //!
 //! # Sandbox scope
 //!
@@ -484,7 +489,9 @@ fn protected_index(lua: &Lua, index: Table) -> mlua::Result<Table> {
     Ok(mt)
 }
 
-fn apply_sandbox(lua: &Lua) -> Result<(), PluginError> {
+const PRINT_MAX_BYTES: usize = 1024 * 1024;
+
+fn apply_sandbox(lua: &Lua, sink: SharedHostLog) -> Result<(), PluginError> {
     let globals = lua.globals();
     for (path, key) in SANDBOX_REMOVALS {
         if path.is_empty() {
@@ -496,6 +503,29 @@ fn apply_sandbox(lua: &Lua) -> Result<(), PluginError> {
             t.set(*key, mlua::Value::Nil)?;
         }
     }
+    let tostring: mlua::Function = globals.get("tostring")?;
+    globals.set(
+        "print",
+        lua.create_function(move |_, args: mlua::MultiValue| {
+            let mut bytes = Vec::new();
+            for (index, value) in args.into_iter().enumerate() {
+                let text: mlua::LuaString = tostring.call(value)?;
+                let text = text.as_bytes();
+                let separator = usize::from(index > 0);
+                if separator > PRINT_MAX_BYTES - bytes.len()
+                    || text.len() > PRINT_MAX_BYTES - bytes.len() - separator
+                {
+                    return Err(mlua::Error::runtime("print output exceeds 1048576 bytes"));
+                }
+                if separator != 0 {
+                    bytes.push(b'\t');
+                }
+                bytes.extend_from_slice(&text);
+            }
+            lock(&sink).log(api::LogLevel::Info, &String::from_utf8_lossy(&bytes));
+            Ok(())
+        })?,
+    )?;
     guard_coroutines(lua)
 }
 

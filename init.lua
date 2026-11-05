@@ -1,5 +1,0 @@
--- kage.opt = {
---   theme = "default",
---   compaction_threshold = 0.85,
---   max_provider_retries = 10
--- }

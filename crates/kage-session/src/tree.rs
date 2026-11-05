@@ -14,7 +14,8 @@
 //! last node in the file; replay, fork and the session list follow it
 //! and ignore the abandoned branches.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io;
 use std::path::Path;
 
 use crate::entry::{EntryId, FORMAT_VERSION, Header, SessionEntry};
@@ -74,8 +75,8 @@ impl SessionTree {
     ///
     /// Errors like [`crate::replay`] does on a file this build cannot
     /// read: empty, headerless, a second header, an unsupported format
-    /// version, a decode failure, or a `Branch` marker naming an entry
-    /// the file does not hold at or before the marker.
+    /// version, a decode failure, duplicate entry IDs, or a `Branch`
+    /// marker naming an entry the file does not hold at or before the marker.
     pub fn read(path: &Path) -> Result<Self, SessionError> {
         let mut reader = SessionReader::iter(path)?;
         let Some(first) = reader.next() else {
@@ -105,8 +106,18 @@ impl SessionTree {
         let mut prev: Option<EntryId> = None;
         let mut nodes: Vec<(TreeNode, SessionEntry)> = Vec::new();
         let mut index: HashMap<EntryId, usize> = HashMap::new();
+        let mut ids = HashSet::from([header_id]);
         for item in reader.by_ref() {
             let entry = item?;
+            if matches!(entry, SessionEntry::Header(_)) {
+                return Err(SessionError::SecondHeader {
+                    path: path.to_path_buf(),
+                });
+            }
+            let id = entry.id();
+            if !ids.insert(id) {
+                return Err(invalid_tree(path, format!("duplicate entry id {id}")));
+            }
             match entry {
                 SessionEntry::Header(_) => {
                     return Err(SessionError::SecondHeader {
@@ -281,6 +292,13 @@ impl SessionTree {
     }
 }
 
+fn invalid_tree(path: &Path, message: String) -> SessionError {
+    SessionError::Io {
+        path: path.to_path_buf(),
+        source: io::Error::new(io::ErrorKind::InvalidData, message),
+    }
+}
+
 /// Reject a header whose schema version this build cannot interpret.
 fn ensure_supported_version(path: &Path, version: u32) -> Result<(), SessionError> {
     if version > 0 && version <= FORMAT_VERSION {
@@ -364,6 +382,66 @@ mod tests {
         ];
         write(path, header.clone(), &entries);
         (header, entries)
+    }
+
+    #[test]
+    fn duplicate_header_node_and_marker_ids_are_rejected() {
+        let dir = tempdir().unwrap();
+        let header = fresh_header();
+        let mut root_collision = message_entry(Role::User, "root collision");
+        if let SessionEntry::Message(message) = &mut root_collision {
+            message.id = header.id;
+        }
+        let message = message_entry(Role::User, "duplicate");
+        let marker = branch(header.id);
+        let mut marker_collision = branch(header.id);
+        if let SessionEntry::Branch(branch) = &mut marker_collision {
+            branch.id = message.id();
+        }
+        let cases = [
+            ("header", vec![root_collision, branch(header.id)], header.id),
+            (
+                "node",
+                vec![message.clone(), message.clone(), branch(header.id)],
+                message.id(),
+            ),
+            ("marker", vec![marker.clone(), marker.clone()], marker.id()),
+            (
+                "node-marker",
+                vec![message.clone(), marker_collision],
+                message.id(),
+            ),
+        ];
+        for (name, entries, duplicate) in cases {
+            let path = dir.path().join(format!("{name}.jsonl"));
+            write(&path, header.clone(), &entries);
+            match SessionTree::read(&path).unwrap_err() {
+                SessionError::Io {
+                    path: error_path,
+                    source,
+                } => {
+                    assert_eq!(error_path, path);
+                    assert_eq!(source.kind(), io::ErrorKind::InvalidData);
+                    assert_eq!(
+                        source.to_string(),
+                        format!("duplicate entry id {duplicate}")
+                    );
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn second_header_takes_precedence_over_duplicate_id() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("header.jsonl");
+        let header = fresh_header();
+        write(&path, header.clone(), &[SessionEntry::Header(header)]);
+        assert!(matches!(
+            SessionTree::read(&path),
+            Err(SessionError::SecondHeader { .. })
+        ));
     }
 
     #[test]

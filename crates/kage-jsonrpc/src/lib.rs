@@ -47,6 +47,10 @@ pub mod testing;
 #[cfg(unix)]
 pub mod unix_pipe;
 
+/// Ordered JSON-RPC peer over an interruptible Unix pipe writer.
+#[cfg(unix)]
+pub mod unix_peer;
+
 /// Cap on a single inbound line, mirroring the HTTP transport's body
 /// cap: one newline-delimited message cannot exhaust memory. A longer
 /// line is answered with a -32700 error and the connection closes.
@@ -507,6 +511,29 @@ fn response_message(
 /// work only while the owner's [`Peer`] is alive.
 struct ReaderPeer {
     writer: Weak<Mutex<dyn Write + Send>>,
+    max_frame: Option<usize>,
+}
+
+struct LimitedFrame {
+    bytes: Vec<u8>,
+    cap: usize,
+}
+
+impl Write for LimitedFrame {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.cap.saturating_sub(self.bytes.len()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "outbound frame exceeds size cap",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl ReaderPeer {
@@ -516,8 +543,36 @@ impl ReaderPeer {
         outcome: Result<serde_json::Value, RpcError>,
     ) -> Result<(), RpcError> {
         let writer = self.writer.upgrade().ok_or_else(closed)?;
-        let mut line = serde_json::to_vec(&response_message(id, outcome))
-            .map_err(|e| RpcError::internal(format!("encode: {e}")))?;
+        let mut line = if let Some(cap) = self.max_frame {
+            let mut line = LimitedFrame {
+                bytes: Vec::new(),
+                cap: cap - 1,
+            };
+            let encode = (|| -> Result<(), Box<dyn std::error::Error>> {
+                line.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":")?;
+                serde_json::to_writer(&mut line, id)?;
+                match outcome {
+                    Ok(value) => {
+                        line.write_all(b",\"result\":")?;
+                        serde_json::to_writer(&mut line, &value)?;
+                    }
+                    Err(error) => {
+                        line.write_all(b",\"error\":{\"code\":")?;
+                        serde_json::to_writer(&mut line, &error.code)?;
+                        line.write_all(b",\"message\":")?;
+                        serde_json::to_writer(&mut line, &error.message)?;
+                        line.write_all(b"}")?;
+                    }
+                }
+                line.write_all(b"}")?;
+                Ok(())
+            })();
+            encode.map_err(|e| RpcError::internal(format!("encode: {e}")))?;
+            line.bytes
+        } else {
+            serde_json::to_vec(&response_message(id, outcome))
+                .map_err(|e| RpcError::internal(format!("encode: {e}")))?
+        };
         line.push(b'\n');
         let mut guard = lock(&writer);
         guard
@@ -563,6 +618,9 @@ where
         cancel_notice,
         InboundSender::Plain(tx),
         false,
+        MAX_LINE,
+        None,
+        None,
     );
     (peer, rx, handle)
 }
@@ -583,16 +641,29 @@ where
     W: Write + Send + 'static,
 {
     let (tx, rx) = mpsc::sync_channel(INBOUND_CAP);
-    let (peer, handle) = connect_inner(reader, writer, None, InboundSender::Ordered(tx), true);
+    let (peer, handle) = connect_inner(
+        reader,
+        writer,
+        None,
+        InboundSender::Ordered(tx),
+        true,
+        MAX_LINE,
+        None,
+        None,
+    );
     (peer, rx, handle)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn connect_inner<R, W>(
     reader: R,
     writer: W,
     cancel_notice: Option<CancelNotice>,
     in_tx: InboundSender,
     ordered: bool,
+    max_line: u64,
+    max_frame: Option<usize>,
+    on_reader_close: Option<Box<dyn FnOnce(bool) + Send>>,
 ) -> (Peer, JoinHandle<()>)
 where
     R: BufRead + Send + 'static,
@@ -609,12 +680,14 @@ where
     };
     let reader_peer = ReaderPeer {
         writer: Arc::downgrade(&writer),
+        max_frame,
     };
     let handle = thread::spawn(move || {
         let mut reader = reader;
+        let mut clean_eof = false;
         loop {
             let mut line = String::new();
-            let n = match reader.by_ref().take(MAX_LINE + 1).read_line(&mut line) {
+            let n = match reader.by_ref().take(max_line + 1).read_line(&mut line) {
                 // A line that is not valid UTF-8 can never parse, so
                 // it gets the over-cap treatment: report once, then
                 // drop the connection. Clean EOF and genuine I/O
@@ -628,10 +701,14 @@ where
                     );
                     break;
                 }
-                Ok(0) | Err(_) => break,
+                Ok(0) => {
+                    clean_eof = true;
+                    break;
+                }
+                Err(_) => break,
                 Ok(n) => n,
             };
-            if u64::try_from(n).unwrap_or(u64::MAX) > MAX_LINE {
+            if u64::try_from(n).unwrap_or(u64::MAX) > max_line {
                 // Same policy as the HTTP transport on an over-cap
                 // body: report once, then drop the connection.
                 let _ = reply_error(
@@ -652,6 +729,9 @@ where
             if !route_line(&reader_peer, &pending, &in_tx, trimmed) {
                 break;
             }
+        }
+        if let Some(on_reader_close) = on_reader_close {
+            on_reader_close(clean_eof);
         }
         close_pending(&pending);
     });

@@ -23,6 +23,8 @@ const CHECK_INTERVAL: Duration = Duration::from_millis(10);
 struct Shared {
     fd: Mutex<Option<OwnedFd>>,
     closed: AtomicBool,
+    #[cfg(test)]
+    after_request_write: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// Cloneable, frame-serializing pipe writer with cooperative shutdown.
@@ -64,6 +66,8 @@ impl PipeWriter {
         Ok(Self(Arc::new(Shared {
             fd: Mutex::new(Some(fd)),
             closed: AtomicBool::new(false),
+            #[cfg(test)]
+            after_request_write: Mutex::new(None),
         })))
     }
 
@@ -103,6 +107,16 @@ impl PipeWriter {
         deadline: Option<Instant>,
         cancel: Option<&CancelFlag>,
     ) -> io::Result<()> {
+        self.write_frame_guarded(frame, deadline, cancel, None)
+    }
+
+    pub(crate) fn write_frame_guarded(
+        &self,
+        frame: &[u8],
+        deadline: Option<Instant>,
+        cancel: Option<&CancelFlag>,
+        eof: Option<&Mutex<bool>>,
+    ) -> io::Result<()> {
         let mut guard = loop {
             self.check(deadline, cancel)?;
             match self.0.fd.try_lock() {
@@ -127,7 +141,30 @@ impl PipeWriter {
             let Some(fd) = guard.as_ref() else {
                 return Err(closed());
             };
-            match write(fd, &frame[written..]) {
+            let result = if let Some(eof) = eof {
+                let eof = eof
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if *eof {
+                    drop(eof);
+                    if written > 0 {
+                        self.0.closed.store(true, Ordering::Release);
+                        guard.take();
+                    }
+                    return Err(closed());
+                }
+                write(fd, &frame[written..])
+            } else {
+                write(fd, &frame[written..])
+            };
+            #[cfg(test)]
+            if eof.is_some() && matches!(result, Ok(n) if n == frame.len() - written) {
+                let hook = self.0.after_request_write.lock().unwrap().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            match result {
                 Ok(0) => {
                     self.0.closed.store(true, Ordering::Release);
                     guard.take();
@@ -158,6 +195,11 @@ impl PipeWriter {
                 }
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn after_request_write(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.0.after_request_write.lock().unwrap() = Some(Box::new(hook));
     }
 
     fn check(&self, deadline: Option<Instant>, cancel: Option<&CancelFlag>) -> io::Result<()> {

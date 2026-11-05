@@ -50,16 +50,17 @@ const MAX_LINE: u64 = 8 * 1024 * 1024;
 
 /// Inbound messages the reader thread may queue for the owner before
 /// `send` blocks it, so a chatty peer cannot grow the queue without
-/// bound. Response routing bypasses this channel and answers the
-/// waiting caller directly, so a blocked reader cannot deadlock a
-/// request the owner is waiting on.
+/// bound. A full queue blocks the reader before it can read and route
+/// later responses. The owner must drain it concurrently, including while
+/// waiting for requests. Deadline and cancellation APIs bound the wait for a
+/// reply, but cannot interrupt a blocked writer.
 const INBOUND_CAP: usize = 256;
 
 /// A JSON-RPC error object (`code` / `message`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("jsonrpc error {code}: {message}")]
 pub struct RpcError {
-    /// JSON-RPC error code.
+    /// JSON-RPC error code. Remote codes outside `i64` map to `-32603`.
     pub code: i64,
     /// Human-readable message.
     pub message: String,
@@ -130,8 +131,113 @@ pub enum Inbound {
 }
 
 type Reply = Result<serde_json::Value, RpcError>;
+type OrderedReply = (Reply, Option<ResponseBarrier>);
 
-type Pending = Arc<Mutex<HashMap<i64, Sender<Reply>>>>;
+struct PendingRequest {
+    tx: Sender<OrderedReply>,
+    ordered: bool,
+}
+
+#[derive(Default)]
+struct PendingState {
+    requests: HashMap<i64, PendingRequest>,
+    closed: bool,
+}
+
+type Pending = Arc<Mutex<PendingState>>;
+
+/// A response ordering acknowledgement. Wait on a different thread from the
+/// inbound consumer, which must keep draining its queue.
+pub struct ResponseBarrier(mpsc::Receiver<()>);
+
+impl ResponseBarrier {
+    /// Wait until the consumer acknowledges all preceding inbound messages.
+    /// This can block indefinitely, including after disconnect if the marker
+    /// is still held by the consumer. Use [`Self::wait_timeout`] to bound it.
+    ///
+    /// # Errors
+    /// Returns an error if the marker was dropped without acknowledgement.
+    pub fn wait(self) -> Result<(), mpsc::RecvError> {
+        self.0.recv()
+    }
+
+    /// Wait for acknowledgement or local cancellation.
+    ///
+    /// Returns `Ok(true)` on acknowledgement and `Ok(false)` on cancellation.
+    /// Cancellation does not acknowledge the marker or affect the connection.
+    ///
+    /// # Errors
+    /// Returns an error if the marker was dropped without acknowledgement.
+    pub fn wait_cancellable(self, cancel: &CancelFlag) -> Result<bool, mpsc::RecvError> {
+        self.wait_cancellable_until(cancel, || false)
+    }
+
+    /// Wait for acknowledgement, cancellation, or the stop predicate.
+    ///
+    /// Returns `Ok(false)` if cancelled or stopped. The predicate is checked
+    /// at least once per 10 ms, subject to scheduling. Neither condition
+    /// acknowledges the marker. The caller can distinguish them by checking
+    /// its cancellation flag and stop state.
+    ///
+    /// # Errors
+    /// Returns an error if the marker was dropped without acknowledgement.
+    pub fn wait_cancellable_until(
+        self,
+        cancel: &CancelFlag,
+        stopped: impl Fn() -> bool,
+    ) -> Result<bool, mpsc::RecvError> {
+        loop {
+            if cancel.is_cancelled() || stopped() {
+                return Ok(false);
+            }
+            match self.0.recv_timeout(Duration::from_millis(10)) {
+                Ok(()) => return Ok(!cancel.is_cancelled() && !stopped()),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Err(mpsc::RecvError),
+            }
+        }
+    }
+
+    /// Wait at most `timeout` for acknowledgement.
+    ///
+    /// # Errors
+    /// Returns a timeout or disconnection error.
+    pub fn wait_timeout(self, timeout: Duration) -> Result<(), mpsc::RecvTimeoutError> {
+        self.0.recv_timeout(timeout)
+    }
+}
+
+/// An item in an ordering-aware inbound stream.
+pub enum OrderedInbound {
+    /// A peer request or notification.
+    Message(Inbound),
+    /// A marker after all messages preceding a response on the wire.
+    Barrier(BarrierMarker),
+}
+
+/// A marker that the consumer acknowledges after handling preceding messages.
+pub struct BarrierMarker(mpsc::Sender<()>);
+
+impl BarrierMarker {
+    /// Acknowledge this marker. Dropping it instead causes the waiter to fail.
+    pub fn acknowledge(self) {
+        let _ = self.0.send(());
+    }
+}
+
+enum InboundSender {
+    Plain(mpsc::SyncSender<Inbound>),
+    Ordered(mpsc::SyncSender<OrderedInbound>),
+}
+
+impl InboundSender {
+    fn send(&self, message: Inbound) -> bool {
+        match self {
+            Self::Plain(tx) => tx.send(message).is_ok(),
+            Self::Ordered(tx) => tx.send(OrderedInbound::Message(message)).is_ok(),
+        }
+    }
+}
 
 /// Builds the notification a [`Peer`] sends when one of its requests is
 /// abandoned on a cancel or at its deadline. It receives the request id and
@@ -147,6 +253,7 @@ pub struct Peer {
     pending: Pending,
     next_id: Arc<AtomicI64>,
     cancel_notice: Option<CancelNotice>,
+    ordered: bool,
 }
 
 impl Peer {
@@ -206,11 +313,11 @@ impl Peer {
         params: serde_json::Value,
         cancel: &CancelFlag,
     ) -> Result<serde_json::Value, RpcError> {
-        let (id, rx) = self.start(method, params)?;
+        let (id, rx) = self.start(method, params, false)?;
         let watch = cancel.watch();
         select_biased! {
             recv(watch.receiver()) -> _ => Err(self.abandon(id, method)),
-            recv(rx) -> reply => reply.unwrap_or_else(|_| Err(closed())),
+            recv(rx) -> reply => reply.map_or_else(|_| Err(closed()), |(reply, _)| reply),
         }
     }
 
@@ -226,8 +333,8 @@ impl Peer {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, RpcError> {
-        let (_, rx) = self.start(method, params)?;
-        rx.recv().unwrap_or_else(|_| Err(closed()))
+        let (_, rx) = self.start(method, params, false)?;
+        rx.recv().map_or_else(|_| Err(closed()), |(reply, _)| reply)
     }
 
     /// Send a request and give up after `timeout` without an answer.
@@ -248,14 +355,68 @@ impl Peer {
         params: serde_json::Value,
         timeout: Duration,
     ) -> Result<serde_json::Value, RpcError> {
-        let (id, rx) = self.start(method, params)?;
+        let (id, rx) = self.start(method, params, false)?;
         match rx.recv_timeout(timeout) {
-            Ok(reply) => reply,
+            Ok((reply, _)) => reply,
             Err(RecvTimeoutError::Timeout) => {
                 self.abandon(id, method);
                 Err(RpcError::timed_out(method))
             }
             Err(RecvTimeoutError::Disconnected) => Err(closed()),
+        }
+    }
+
+    /// Send a request whose response carries an ordering barrier.
+    ///
+    /// This requires a peer created by [`connect_ordered`]. The response,
+    /// including a JSON-RPC error response, is returned separately from its
+    /// barrier so the caller can decide where to wait. If the inbound receiver
+    /// is dropped before the marker is queued, the response is returned without
+    /// a barrier. A missing barrier also occurs when no response was delivered.
+    pub fn request_ordered(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> (Result<serde_json::Value, RpcError>, Option<ResponseBarrier>) {
+        if !self.ordered {
+            return (
+                Err(RpcError::internal("ordered inbound stream required")),
+                None,
+            );
+        }
+        match self.start(method, params, true) {
+            Ok((_, rx)) => rx.recv().unwrap_or_else(|_| (Err(closed()), None)),
+            Err(error) => (Err(error), None),
+        }
+    }
+
+    /// Send an ordered request and wait at most `timeout` for its response.
+    ///
+    /// The timeout does not interrupt writes or bound a subsequent barrier wait.
+    /// If the request times out, a late response is discarded. Use
+    /// [`ResponseBarrier::wait_timeout`] to bound acknowledgement separately.
+    pub fn request_ordered_timeout(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: Duration,
+    ) -> (Result<serde_json::Value, RpcError>, Option<ResponseBarrier>) {
+        if !self.ordered {
+            return (
+                Err(RpcError::internal("ordered inbound stream required")),
+                None,
+            );
+        }
+        match self.start(method, params, true) {
+            Ok((id, rx)) => match rx.recv_timeout(timeout) {
+                Ok(reply) => reply,
+                Err(RecvTimeoutError::Timeout) => {
+                    self.abandon(id, method);
+                    (Err(RpcError::timed_out(method)), None)
+                }
+                Err(RecvTimeoutError::Disconnected) => (Err(closed()), None),
+            },
+            Err(error) => (Err(error), None),
         }
     }
 
@@ -265,17 +426,24 @@ impl Peer {
         &self,
         method: &str,
         params: serde_json::Value,
-    ) -> Result<(i64, Receiver<Reply>), RpcError> {
+        ordered: bool,
+    ) -> Result<(i64, Receiver<OrderedReply>), RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = crossbeam_channel::bounded(1);
-        lock(&self.pending).insert(id, tx);
+        {
+            let mut pending = lock(&self.pending);
+            if pending.closed {
+                return Err(closed());
+            }
+            pending.requests.insert(id, PendingRequest { tx, ordered });
+        }
         let mut obj = serde_json::Map::with_capacity(4);
         obj.insert("jsonrpc".to_owned(), serde_json::Value::from("2.0"));
         obj.insert("id".to_owned(), serde_json::Value::from(id));
         obj.insert("method".to_owned(), serde_json::Value::from(method));
         obj.insert("params".to_owned(), params);
         if let Err(e) = self.write(&serde_json::Value::Object(obj)) {
-            lock(&self.pending).remove(&id);
+            lock(&self.pending).requests.remove(&id);
             return Err(e);
         }
         Ok((id, rx))
@@ -285,7 +453,7 @@ impl Peer {
     /// [`CancelNotice`] goes out only when the entry was still pending: a
     /// missing one means the reader already answered or closed it.
     fn abandon(&self, id: i64, method: &str) -> RpcError {
-        let pending = lock(&self.pending).remove(&id).is_some();
+        let pending = lock(&self.pending).requests.remove(&id).is_some();
         if pending
             && let Some((notice, params)) = self
                 .cancel_notice
@@ -295,6 +463,14 @@ impl Peer {
             let _ = self.notify(&notice, params);
         }
         RpcError::new(-32800, "request cancelled")
+    }
+}
+
+fn close_pending(pending: &Pending) {
+    let mut pending = lock(pending);
+    pending.closed = true;
+    for (_, entry) in pending.requests.drain() {
+        let _ = entry.tx.send((Err(closed()), None));
     }
 }
 
@@ -376,15 +552,57 @@ where
     R: BufRead + Send + 'static,
     W: Write + Send + 'static,
 {
+    let (tx, rx) = mpsc::sync_channel(INBOUND_CAP);
+    let (peer, handle) = connect_inner(
+        reader,
+        writer,
+        cancel_notice,
+        InboundSender::Plain(tx),
+        false,
+    );
+    (peer, rx, handle)
+}
+
+/// Start a connection with an ordering-aware inbound stream. The consumer must
+/// acknowledge barriers only after handling every preceding message, and must
+/// continuously drain the stream while requests are outstanding. A full
+/// stream blocks the reader and prevents routing later responses. Ordered
+/// request and barrier waits can otherwise block indefinitely. This constructor
+/// does not send cancellation notices for abandoned requests.
+#[must_use]
+pub fn connect_ordered<R, W>(
+    reader: R,
+    writer: W,
+) -> (Peer, mpsc::Receiver<OrderedInbound>, JoinHandle<()>)
+where
+    R: BufRead + Send + 'static,
+    W: Write + Send + 'static,
+{
+    let (tx, rx) = mpsc::sync_channel(INBOUND_CAP);
+    let (peer, handle) = connect_inner(reader, writer, None, InboundSender::Ordered(tx), true);
+    (peer, rx, handle)
+}
+
+fn connect_inner<R, W>(
+    reader: R,
+    writer: W,
+    cancel_notice: Option<CancelNotice>,
+    in_tx: InboundSender,
+    ordered: bool,
+) -> (Peer, JoinHandle<()>)
+where
+    R: BufRead + Send + 'static,
+    W: Write + Send + 'static,
+{
     let writer: Arc<Mutex<dyn Write + Send>> = Arc::new(Mutex::new(writer));
-    let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+    let pending: Pending = Arc::new(Mutex::new(PendingState::default()));
     let peer = Peer {
         writer: Arc::clone(&writer),
         pending: Arc::clone(&pending),
         next_id: Arc::new(AtomicI64::new(1)),
         cancel_notice,
+        ordered,
     };
-    let (in_tx, in_rx) = mpsc::sync_channel::<Inbound>(INBOUND_CAP);
     let reader_peer = ReaderPeer {
         writer: Arc::downgrade(&writer),
     };
@@ -420,6 +638,9 @@ where
                 );
                 break;
             }
+            if !line.ends_with('\n') {
+                break;
+            }
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -428,11 +649,9 @@ where
                 break;
             }
         }
-        for (_, tx) in lock(&pending).drain() {
-            let _ = tx.send(Err(closed()));
-        }
+        close_pending(&pending);
     });
-    (peer, in_rx, handle)
+    (peer, handle)
 }
 
 /// Best-effort error reply for a malformed inbound line.
@@ -449,12 +668,7 @@ fn reply_error(
 /// the pending table, a request/notification to the owner, or a spec
 /// error reply. Returns false when the reader loop must stop because
 /// the writer or the owner is gone.
-fn route_line(
-    peer: &ReaderPeer,
-    pending: &Pending,
-    in_tx: &mpsc::SyncSender<Inbound>,
-    line: &str,
-) -> bool {
+fn route_line(peer: &ReaderPeer, pending: &Pending, in_tx: &InboundSender, line: &str) -> bool {
     let value = match serde_json::from_str::<serde_json::Value>(line) {
         Ok(value) => value,
         Err(e) => {
@@ -495,7 +709,7 @@ fn route_line(
                     params,
                 }
             };
-            in_tx.send(inbound).is_ok()
+            in_tx.send(inbound)
         }
         Some(_) => reply_error(
             peer,
@@ -511,7 +725,7 @@ fn route_line(
             // `i64` range stays silent.
             Some(id) => {
                 if let Some(id) = id.as_i64() {
-                    route_response(pending, id, obj);
+                    return route_response(pending, in_tx, id, obj);
                 }
                 true
             }
@@ -528,20 +742,68 @@ fn route_line(
 
 /// Route a response-shaped object by i64 id. Unknown or late ids are
 /// dropped: the spec forbids replying to a response.
-fn route_response(pending: &Pending, id: i64, obj: &serde_json::Map<String, serde_json::Value>) {
-    if let Some(tx) = lock(pending).remove(&id) {
+fn route_response(
+    pending: &Pending,
+    in_tx: &InboundSender,
+    id: i64,
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    let ordered = lock(pending).requests.get(&id).map(|entry| entry.ordered);
+    if let Some(ordered) = ordered {
         let outcome = match (obj.get("error"), obj.get("result")) {
-            (Some(err), _) => Err(RpcError::from_value(err)),
+            (Some(err), None)
+                if err.get("code").is_some_and(|code| {
+                    code.as_i64().is_some()
+                        || code.as_u64().is_some()
+                        || code.as_f64().is_some_and(|number| number.fract() == 0.0)
+                }) && err
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some() =>
+            {
+                Err(RpcError::from_value(err))
+            }
             (None, Some(result)) => Ok(result.clone()),
-            // A memberless response must not reach the caller as a
-            // successful null: the spec wants exactly one of the two.
-            (None, None) => Err(RpcError::new(
-                -32600,
-                "invalid response: expected result or error",
-            )),
+            _ => return reject_invalid_response(pending, id),
         };
-        let _ = tx.send(outcome);
+        let barrier = if ordered {
+            let (tx, rx) = mpsc::channel();
+            if let InboundSender::Ordered(in_tx) = in_tx {
+                if in_tx
+                    .send(OrderedInbound::Barrier(BarrierMarker(tx)))
+                    .is_err()
+                {
+                    if let Some(entry) = lock(pending).requests.remove(&id) {
+                        let _ = entry.tx.send((outcome, None));
+                    }
+                    return false;
+                }
+                Some(ResponseBarrier(rx))
+            } else {
+                return false;
+            }
+        } else {
+            None
+        };
+        if let Some(entry) = lock(pending).requests.remove(&id) {
+            let _ = entry.tx.send((outcome, barrier));
+        }
     }
+    true
+}
+
+fn reject_invalid_response(pending: &Pending, id: i64) -> bool {
+    let Some(entry) = lock(pending).requests.remove(&id) else {
+        return true;
+    };
+    let _ = entry.tx.send((
+        Err(RpcError::new(
+            -32600,
+            "invalid response: expected result or error",
+        )),
+        None,
+    ));
+    false
 }
 
 #[cfg(test)]
@@ -550,6 +812,282 @@ mod tests {
 
     use super::*;
     use crate::testing::pair;
+
+    #[test]
+    fn invalid_response_does_not_close_on_concurrent_abandonment() {
+        let pending: Pending = Arc::new(Mutex::new(PendingState::default()));
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        lock(&pending)
+            .requests
+            .insert(7, PendingRequest { tx, ordered: true });
+        assert!(lock(&pending).requests.contains_key(&7));
+        lock(&pending).requests.remove(&7);
+        assert!(reject_invalid_response(&pending, 7));
+        assert!(rx.recv().is_err());
+
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        lock(&pending)
+            .requests
+            .insert(8, PendingRequest { tx, ordered: true });
+        assert!(!reject_invalid_response(&pending, 8));
+        let (result, barrier) = rx.recv().unwrap();
+        assert_eq!(result.unwrap_err().code, -32600);
+        assert!(barrier.is_none());
+    }
+
+    #[test]
+    fn unsigned_error_code_outside_i64_does_not_close_other_requests() {
+        let pending: Pending = Arc::new(Mutex::new(PendingState::default()));
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let (other, _other_rx) = crossbeam_channel::bounded(1);
+        lock(&pending)
+            .requests
+            .insert(1, PendingRequest { tx, ordered: false });
+        lock(&pending).requests.insert(
+            2,
+            PendingRequest {
+                tx: other,
+                ordered: false,
+            },
+        );
+        let (in_tx, _in_rx) = mpsc::sync_channel(1);
+        let response = serde_json::json!({"error": {"code": u64::MAX, "message": "failure"}});
+        assert!(route_response(
+            &pending,
+            &InboundSender::Plain(in_tx),
+            1,
+            response.as_object().unwrap()
+        ));
+        let (result, barrier) = rx.recv().unwrap();
+        assert_eq!(result.unwrap_err(), RpcError::internal("failure"));
+        assert!(barrier.is_none());
+        assert!(lock(&pending).requests.contains_key(&2));
+    }
+
+    #[test]
+    fn ordered_peer_error_survives_dropped_inbound_receiver() {
+        let pending: Pending = Arc::new(Mutex::new(PendingState::default()));
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        lock(&pending)
+            .requests
+            .insert(1, PendingRequest { tx, ordered: true });
+        let (in_tx, in_rx) = mpsc::sync_channel(1);
+        drop(in_rx);
+        let value = serde_json::json!({"error": {"code": -32042, "message": "peer failure"}});
+        assert!(!route_response(
+            &pending,
+            &InboundSender::Ordered(in_tx),
+            1,
+            value.as_object().unwrap()
+        ));
+        let (result, barrier) = rx.recv().unwrap();
+        assert_eq!(result.unwrap_err(), RpcError::new(-32042, "peer failure"));
+        assert!(barrier.is_none());
+    }
+
+    #[test]
+    fn requests_after_reader_exit_are_rejected() {
+        let (peer, _incoming, reader) =
+            connect(std::io::Cursor::new(Vec::<u8>::new()), Vec::<u8>::new());
+        reader.join().unwrap();
+        assert_eq!(
+            peer.request("late", serde_json::Value::Null).unwrap_err(),
+            closed()
+        );
+        assert_eq!(
+            peer.request_timeout("late", serde_json::Value::Null, Duration::from_secs(1))
+                .unwrap_err(),
+            closed()
+        );
+        assert_eq!(
+            peer.request_ordered("late", serde_json::Value::Null)
+                .0
+                .unwrap_err(),
+            RpcError::internal("ordered inbound stream required")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn barrier_wait_can_time_out_after_disconnect_with_marker_queued() {
+        use std::os::unix::net::UnixStream;
+        let (client, server) = UnixStream::pair().unwrap();
+        let (peer, incoming, reader) =
+            connect_ordered(BufReader::new(client.try_clone().unwrap()), client);
+        let requester =
+            thread::spawn(move || peer.request_ordered("test", serde_json::Value::Null));
+        let mut input = BufReader::new(server.try_clone().unwrap());
+        let mut line = String::new();
+        input.read_line(&mut line).unwrap();
+        let id = serde_json::from_str::<serde_json::Value>(&line).unwrap()["id"].clone();
+        let mut output = server;
+        writeln!(output, "{}", serde_json::json!({"id": id, "result": 1})).unwrap();
+        let (result, barrier) = requester.join().unwrap();
+        assert_eq!(result.unwrap(), 1);
+        drop(output);
+        drop(input);
+        reader.join().unwrap();
+        assert_eq!(
+            barrier.unwrap().wait_timeout(Duration::from_millis(10)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        drop(incoming);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_inbound_queue_can_delay_response_but_ordered_request_times_out() {
+        use std::os::unix::net::UnixStream;
+        let (client, server) = UnixStream::pair().unwrap();
+        let (peer, incoming, reader) =
+            connect_ordered(BufReader::new(client.try_clone().unwrap()), client);
+        let requester = thread::spawn(move || {
+            peer.request_ordered_timeout(
+                "test",
+                serde_json::Value::Null,
+                Duration::from_millis(200),
+            )
+        });
+        let mut input = BufReader::new(server.try_clone().unwrap());
+        let mut line = String::new();
+        input.read_line(&mut line).unwrap();
+        let id = serde_json::from_str::<serde_json::Value>(&line).unwrap()["id"].clone();
+        let mut output = server;
+        for _ in 0..=INBOUND_CAP {
+            writeln!(output, "{}", serde_json::json!({"method": "update"})).unwrap();
+        }
+        writeln!(output, "{}", serde_json::json!({"id": id, "result": 1})).unwrap();
+        let (result, barrier) = requester.join().unwrap();
+        assert_eq!(result.unwrap_err(), RpcError::timed_out("test"));
+        assert!(barrier.is_none());
+        drop(incoming);
+        drop(output);
+        drop(input);
+        reader.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordered_responses_follow_messages_and_match_concurrent_ids() {
+        use std::os::unix::net::UnixStream;
+        let (client, server) = UnixStream::pair().unwrap();
+        let (peer, incoming, reader) =
+            connect_ordered(BufReader::new(client.try_clone().unwrap()), client);
+        let mut input = BufReader::new(server.try_clone().unwrap());
+        let mut output = server;
+        let (tx, rx) = mpsc::channel();
+        for method in ["first", "second"] {
+            let peer = peer.clone();
+            let tx = tx.clone();
+            thread::spawn(move || {
+                tx.send((
+                    method,
+                    peer.request_ordered(method, serde_json::Value::Null),
+                ))
+                .unwrap();
+            });
+        }
+        let mut ids = HashMap::new();
+        for _ in 0..2 {
+            let mut line = String::new();
+            input.read_line(&mut line).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+            ids.insert(
+                value["method"].as_str().unwrap().to_owned(),
+                value["id"].clone(),
+            );
+        }
+        writeln!(
+            output,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0", "method":"update", "params": 1})
+        )
+        .unwrap();
+        writeln!(output, "{}", serde_json::json!({"jsonrpc":"2.0", "id":ids["second"], "error":{"code": -1, "message":"bad"}})).unwrap();
+        writeln!(
+            output,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0", "method":"update", "params": 2})
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0", "id":ids["first"], "result":42})
+        )
+        .unwrap();
+        let mut replies = HashMap::new();
+        for _ in 0..2 {
+            let (name, reply) = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            replies.insert(name, reply);
+        }
+        let (result, barrier) = replies.remove("second").unwrap();
+        assert_eq!(result.unwrap_err().code, -1);
+        let second = barrier.unwrap();
+        let (result, barrier) = replies.remove("first").unwrap();
+        assert_eq!(result.unwrap(), 42);
+        let first = barrier.unwrap();
+        assert!(
+            matches!(incoming.recv().unwrap(), OrderedInbound::Message(Inbound::Notification { params, .. }) if params == 1)
+        );
+        let OrderedInbound::Barrier(marker) = incoming.recv().unwrap() else {
+            panic!("expected marker")
+        };
+        marker.acknowledge();
+        second.wait().unwrap();
+        assert!(
+            matches!(incoming.recv().unwrap(), OrderedInbound::Message(Inbound::Notification { params, .. }) if params == 2)
+        );
+        let OrderedInbound::Barrier(marker) = incoming.recv().unwrap() else {
+            panic!("expected marker")
+        };
+        drop(marker);
+        assert!(first.wait().is_err());
+        drop(output);
+        drop(input);
+        reader.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordered_request_disconnects_and_dropped_consumer_fails_barrier() {
+        use std::os::unix::net::UnixStream;
+        let (client, server) = UnixStream::pair().unwrap();
+        let (peer, incoming, reader) =
+            connect_ordered(BufReader::new(client.try_clone().unwrap()), client);
+        let mut input = BufReader::new(server.try_clone().unwrap());
+        let mut output = server;
+        let request = thread::spawn(move || peer.request_ordered("x", serde_json::Value::Null));
+        let mut line = String::new();
+        input.read_line(&mut line).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        writeln!(
+            output,
+            "{}",
+            serde_json::json!({"id":value["id"], "result":true})
+        )
+        .unwrap();
+        let (result, barrier) = request.join().unwrap();
+        assert_eq!(result.unwrap(), true);
+        drop(incoming);
+        assert!(barrier.unwrap().wait().is_err());
+        drop(output);
+        drop(input);
+        reader.join().unwrap();
+
+        let (client, server) = UnixStream::pair().unwrap();
+        let (peer, _incoming, reader) =
+            connect_ordered(BufReader::new(client.try_clone().unwrap()), client);
+        let mut input = BufReader::new(server);
+        let request = thread::spawn(move || peer.request_ordered("x", serde_json::Value::Null));
+        line.clear();
+        input.read_line(&mut line).unwrap();
+        drop(input);
+        let (result, barrier) = request.join().unwrap();
+        assert!(result.is_err());
+        assert!(barrier.is_none());
+        reader.join().unwrap();
+    }
 
     #[test]
     fn request_gets_routed_response() {
@@ -845,13 +1383,16 @@ mod tests {
     /// waiting caller as an error, not as a successful `null`.
     #[test]
     fn a_response_with_neither_result_nor_error_is_an_error() {
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Pending = Arc::new(Mutex::new(PendingState::default()));
         let (tx, rx) = crossbeam_channel::bounded(1);
-        lock(&pending).insert(7, tx);
+        lock(&pending)
+            .requests
+            .insert(7, PendingRequest { tx, ordered: false });
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"jsonrpc":"2.0","id":7}"#).unwrap();
-        route_response(&pending, 7, &obj);
-        let err = rx.recv().unwrap().unwrap_err();
+        let (in_tx, _in_rx) = mpsc::sync_channel(1);
+        route_response(&pending, &InboundSender::Plain(in_tx), 7, &obj);
+        let err = rx.recv().unwrap().0.unwrap_err();
         assert_eq!(err.code, -32600);
         assert!(err.message.contains("result or error"), "{err}");
     }
@@ -860,13 +1401,16 @@ mod tests {
     /// still succeeds, so the fix does not turn nulls into errors.
     #[test]
     fn an_explicit_null_result_still_succeeds() {
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Pending = Arc::new(Mutex::new(PendingState::default()));
         let (tx, rx) = crossbeam_channel::bounded(1);
-        lock(&pending).insert(7, tx);
+        lock(&pending)
+            .requests
+            .insert(7, PendingRequest { tx, ordered: false });
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"jsonrpc":"2.0","id":7,"result":null}"#).unwrap();
-        route_response(&pending, 7, &obj);
-        assert_eq!(rx.recv().unwrap().unwrap(), serde_json::Value::Null);
+        let (in_tx, _in_rx) = mpsc::sync_channel(1);
+        route_response(&pending, &InboundSender::Plain(in_tx), 7, &obj);
+        assert_eq!(rx.recv().unwrap().0.unwrap(), serde_json::Value::Null);
     }
 
     /// A near-cap inbound line must survive: the reader must not

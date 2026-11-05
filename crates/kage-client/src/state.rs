@@ -14,7 +14,7 @@ use kage_acp_wire::{
     AgentCapabilities, ContentBlock, Cost, Implementation, McpServerStatus, PermissionOption,
     PermissionOptionKind, PromptRef, SessionConfigOption, SessionInfo, StopReason,
     SubagentSessionCapabilities, SubagentState, SubagentSwarm, SwarmMeta, ToolCallContent,
-    ToolCallStatus, ToolCallUpdate, ToolKind, TurnReason, UsageTokens,
+    ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolKind, TurnReason, UsageTokens,
 };
 
 use crate::frame::RequestId;
@@ -502,6 +502,10 @@ pub struct ToolCallItem {
     pub tool_call_id: String,
     /// Human title, usually the tool name.
     pub title: String,
+    /// Programmatic tool name, when provided.
+    pub name: Option<String>,
+    /// Affected file locations, when provided.
+    pub locations: Option<Vec<ToolCallLocation>>,
     /// Tool kind hint.
     pub kind: ToolKind,
     /// Lifecycle status.
@@ -541,6 +545,12 @@ impl ToolCallItem {
     pub(crate) fn merge(&mut self, update: &ToolCallUpdate) {
         if let Some(title) = &update.title {
             self.title.clone_from(title);
+        }
+        if update.name.is_some() {
+            self.name.clone_from(&update.name);
+        }
+        if update.locations.is_some() {
+            self.locations.clone_from(&update.locations);
         }
         if let Some(kind) = update.kind {
             self.kind = kind;
@@ -686,6 +696,8 @@ mod tests {
         let mut call = ToolCallItem {
             tool_call_id: "c1".into(),
             title: "shell".into(),
+            name: None,
+            locations: None,
             kind: ToolKind::Execute,
             status: ToolCallStatus::InProgress,
             input: None,

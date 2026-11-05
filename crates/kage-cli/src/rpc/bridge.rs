@@ -1344,10 +1344,13 @@ fn streamed_call(
         SessionUpdate::ToolCall(ToolCall {
             tool_call_id: id.to_string(),
             title: tool_title(name),
+            name: Some(name.to_owned()),
+            locations: None,
             kind: tool_kind(name),
             status: ToolCallStatus::Pending,
             content: Vec::new(),
             raw_input: Some(input_partial.clone()),
+            raw_output: None,
             meta,
         })
     } else {

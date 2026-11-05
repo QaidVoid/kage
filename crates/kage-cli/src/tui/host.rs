@@ -418,6 +418,11 @@ impl Host {
             model: model.to_owned(),
         });
         self.notify(format!("switched to {model}"));
+        if matches!(&self.link, Link::Local(_))
+            && let Some(warning) = support::legacy_acp_warning(model)
+        {
+            self.error(warning.to_owned());
+        }
         self.update_ui(|ui| model.clone_into(&mut ui.state.model));
         self.plugin_event(
             "model_select",

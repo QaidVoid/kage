@@ -1340,6 +1340,8 @@ mod tests {
     ) -> TranscriptItem {
         TranscriptItem::ToolCall(ToolCallItem {
             tool_call_id: id.into(),
+            name: None,
+            locations: None,
             title: title.into(),
             kind,
             status,

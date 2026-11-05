@@ -39,10 +39,11 @@ Then select it as the model:
 kage -m acp:upstream -p "explain this file"
 ```
 
-`acp:<name>` resolves to the configured agent. kage spawns it, speaks
-ACP, forwards your turn as `session/prompt`, and streams its reply
-back. kage ships **no presets**. You declare the command yourself,
-the same way you would an MCP server or an LSP.
+`acp:<name>` resolves to the configured agent. In the CLI provider path,
+kage spawns it, forwards your turn as `session/prompt`, and streams its
+reply back. The desktop agent settings offer launch templates, including
+the maintained Claude Agent ACP adapter. You can also configure an
+agent's command yourself, as with an MCP server.
 
 ## configure from a plugin
 
@@ -78,8 +79,10 @@ kage.on_acp_permission(function(req)
 end)
 ```
 
-Return `true` to allow, `false` (or no handler at all) to deny. A
-handler that errors or returns a non-boolean also denies.
+Return `true` to allow once, `false` (or no handler at all) to deny.
+A handler that errors or returns a non-boolean also denies. If the agent
+does not offer an option with the requested scope, kage cancels the
+request instead of choosing an option that remembers the decision.
 
 ## v1 limitations
 
@@ -97,6 +100,7 @@ handler that errors or returns a non-boolean also denies.
 - Every turn starts a **fresh agent process and session**, and only
   the latest user message is forwarded. The upstream has no memory
   of the conversation beyond that message.
-- The upstream's stop reason is collapsed to a normal end: a
-  `max_tokens` cutoff or a refusal is not distinguished, and token
-  usage is not reported for ACP turns.
+- A `max_tokens` stop is reported as a token limit, and cancellation
+  as a cancelled turn. Refusals and `max_turn_requests` both map to
+  the generic `Other` stop reason, so they cannot be distinguished.
+  Token usage is not reported for ACP turns.

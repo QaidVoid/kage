@@ -144,8 +144,22 @@ pub enum Inbound {
 type Reply = Result<serde_json::Value, RpcError>;
 type OrderedReply = (Reply, Option<ResponseBarrier>);
 
+enum PendingReply {
+    Delivered(OrderedReply),
+    LocalError(RpcError),
+}
+
+impl PendingReply {
+    fn into_legacy(self) -> OrderedReply {
+        match self {
+            Self::Delivered(reply) => reply,
+            Self::LocalError(error) => (Err(error), None),
+        }
+    }
+}
+
 struct PendingRequest {
-    tx: Sender<OrderedReply>,
+    tx: Sender<PendingReply>,
     ordered: bool,
 }
 
@@ -334,7 +348,7 @@ impl Peer {
         let watch = cancel.watch();
         select_biased! {
             recv(watch.receiver()) -> _ => Err(self.abandon(id, method)),
-            recv(rx) -> reply => reply.map_or_else(|_| Err(closed()), |(reply, _)| reply),
+            recv(rx) -> reply => reply.map_or_else(|_| Err(closed()), |reply| reply.into_legacy().0),
         }
     }
 
@@ -351,7 +365,8 @@ impl Peer {
         params: serde_json::Value,
     ) -> Result<serde_json::Value, RpcError> {
         let (_, rx) = self.start(method, params, false)?;
-        rx.recv().map_or_else(|_| Err(closed()), |(reply, _)| reply)
+        rx.recv()
+            .map_or_else(|_| Err(closed()), |reply| reply.into_legacy().0)
     }
 
     /// Send a request and give up after `timeout` without an answer.
@@ -374,7 +389,7 @@ impl Peer {
     ) -> Result<serde_json::Value, RpcError> {
         let (id, rx) = self.start(method, params, false)?;
         match rx.recv_timeout(timeout) {
-            Ok((reply, _)) => reply,
+            Ok(reply) => reply.into_legacy().0,
             Err(RecvTimeoutError::Timeout) => {
                 self.abandon(id, method);
                 Err(RpcError::timed_out(method))
@@ -402,7 +417,9 @@ impl Peer {
             );
         }
         match self.start(method, params, true) {
-            Ok((_, rx)) => rx.recv().unwrap_or_else(|_| (Err(closed()), None)),
+            Ok((_, rx)) => rx
+                .recv()
+                .map_or_else(|_| (Err(closed()), None), PendingReply::into_legacy),
             Err(error) => (Err(error), None),
         }
     }
@@ -426,7 +443,7 @@ impl Peer {
         }
         match self.start(method, params, true) {
             Ok((id, rx)) => match rx.recv_timeout(timeout) {
-                Ok(reply) => reply,
+                Ok(reply) => reply.into_legacy(),
                 Err(RecvTimeoutError::Timeout) => {
                     self.abandon(id, method);
                     (Err(RpcError::timed_out(method)), None)
@@ -444,7 +461,7 @@ impl Peer {
         method: &str,
         params: serde_json::Value,
         ordered: bool,
-    ) -> Result<(i64, Receiver<OrderedReply>), RpcError> {
+    ) -> Result<(i64, Receiver<PendingReply>), RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = crossbeam_channel::bounded(1);
         {
@@ -489,7 +506,7 @@ fn close_pending(pending: &Pending) {
     let mut pending = lock(pending);
     pending.closed = true;
     for (_, entry) in pending.requests.drain() {
-        let _ = entry.tx.send((Err(closed()), None));
+        let _ = entry.tx.send(PendingReply::LocalError(closed()));
     }
 }
 
@@ -882,7 +899,7 @@ fn route_response(
                     .is_err()
                 {
                     if let Some(entry) = lock(pending).requests.remove(&id) {
-                        let _ = entry.tx.send((outcome, None));
+                        let _ = entry.tx.send(PendingReply::Delivered((outcome, None)));
                     }
                     return false;
                 }
@@ -894,7 +911,7 @@ fn route_response(
             None
         };
         if let Some(entry) = lock(pending).requests.remove(&id) {
-            let _ = entry.tx.send((outcome, barrier));
+            let _ = entry.tx.send(PendingReply::Delivered((outcome, barrier)));
         }
     }
     true
@@ -904,7 +921,9 @@ fn reject_invalid_response(pending: &Pending, id: i64, message: &str) -> bool {
     let Some(entry) = lock(pending).requests.remove(&id) else {
         return true;
     };
-    let _ = entry.tx.send((Err(RpcError::new(-32600, message)), None));
+    let _ = entry
+        .tx
+        .send(PendingReply::LocalError(RpcError::new(-32600, message)));
     false
 }
 
@@ -936,14 +955,17 @@ mod tests {
                 response["jsonrpc"] = version;
             }
             writeln!(input, "{response}").unwrap();
-            let (result, barrier) = reply.recv_timeout(Duration::from_secs(2)).unwrap();
+            let (result, barrier) = reply
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .into_legacy();
             assert_eq!(
                 result.unwrap_err(),
                 RpcError::new(-32600, "invalid response: jsonrpc must be \"2.0\"")
             );
             assert!(barrier.is_none());
             reader.join().unwrap();
-            assert_eq!(other.recv().unwrap().0.unwrap_err(), closed());
+            assert_eq!(other.recv().unwrap().into_legacy().0.unwrap_err(), closed());
             drop(peer);
             assert!(written(output).is_empty());
         }
@@ -974,6 +996,7 @@ mod tests {
             reply
                 .recv_timeout(Duration::from_secs(2))
                 .unwrap()
+                .into_legacy()
                 .0
                 .unwrap(),
             42
@@ -1001,7 +1024,7 @@ mod tests {
             .requests
             .insert(8, PendingRequest { tx, ordered: true });
         assert!(!reject_invalid_response(&pending, 8, "invalid"));
-        let (result, barrier) = rx.recv().unwrap();
+        let (result, barrier) = rx.recv().unwrap().into_legacy();
         assert_eq!(result.unwrap_err().code, -32600);
         assert!(barrier.is_none());
     }
@@ -1029,7 +1052,7 @@ mod tests {
             1,
             response.as_object().unwrap()
         ));
-        let (result, barrier) = rx.recv().unwrap();
+        let (result, barrier) = rx.recv().unwrap().into_legacy();
         assert_eq!(result.unwrap_err(), RpcError::internal("failure"));
         assert!(barrier.is_none());
         assert!(lock(&pending).requests.contains_key(&2));
@@ -1051,7 +1074,7 @@ mod tests {
             1,
             value.as_object().unwrap()
         ));
-        let (result, barrier) = rx.recv().unwrap();
+        let (result, barrier) = rx.recv().unwrap().into_legacy();
         assert_eq!(result.unwrap_err(), RpcError::new(-32042, "peer failure"));
         assert!(barrier.is_none());
     }
@@ -1618,7 +1641,7 @@ mod tests {
             serde_json::from_str(r#"{"jsonrpc":"2.0","id":7}"#).unwrap();
         let (in_tx, _in_rx) = mpsc::sync_channel(1);
         route_response(&pending, &InboundSender::Plain(in_tx), 7, &obj);
-        let err = rx.recv().unwrap().0.unwrap_err();
+        let err = rx.recv().unwrap().into_legacy().0.unwrap_err();
         assert_eq!(err.code, -32600);
         assert!(err.message.contains("result or error"), "{err}");
     }
@@ -1636,7 +1659,10 @@ mod tests {
             serde_json::from_str(r#"{"jsonrpc":"2.0","id":7,"result":null}"#).unwrap();
         let (in_tx, _in_rx) = mpsc::sync_channel(1);
         route_response(&pending, &InboundSender::Plain(in_tx), 7, &obj);
-        assert_eq!(rx.recv().unwrap().0.unwrap(), serde_json::Value::Null);
+        assert_eq!(
+            rx.recv().unwrap().into_legacy().0.unwrap(),
+            serde_json::Value::Null
+        );
     }
 
     /// A near-cap inbound line must survive: the reader must not

@@ -46,6 +46,7 @@ pub(crate) fn install(lua: &Lua) {
 /// job returns.
 pub(crate) fn spawn(lua: &Lua, task: impl Future<Output = ()> + Send + 'static) {
     if let Some(registry) = lua.app_data_ref::<Registry>() {
+        let task = crate::invocation::InContext::new(task);
         registry.spawned.borrow_mut().push(Box::pin(task));
     }
 }

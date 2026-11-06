@@ -363,3 +363,25 @@ fn failed_plugin_eval_leaves_no_stale_current_plugin() {
         .unwrap();
     assert_eq!(granted.as_boolean(), Some(true));
 }
+
+/// Queued repeats coalesce only within one session: another session's
+/// notification of the same event keeps its own payload.
+#[test]
+fn queued_notifications_of_two_sessions_both_run() {
+    use crate::Invocation;
+    use kage_core::SessionId;
+
+    let rt = PluginRuntime::new().unwrap();
+    rt.eval("hits = 0; kage.on('user_shell', function(p) hits = hits + p.n end)")
+        .unwrap();
+    let busy = occupy(&rt.host);
+    Invocation::session(SessionId::new())
+        .scope(|| rt.notify_event("user_shell", &json!({ "n": 1 })))
+        .unwrap();
+    Invocation::session(SessionId::new())
+        .scope(|| rt.notify_event("user_shell", &json!({ "n": 10 })))
+        .unwrap();
+    busy.assert_held();
+    busy.open();
+    assert_eq!(rt.eval("return hits").unwrap().as_integer(), Some(11));
+}

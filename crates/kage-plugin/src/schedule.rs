@@ -37,6 +37,7 @@ use mlua::{Function, Lua, Table, Value};
 use crate::api::{LogLevel, SharedHostLog};
 use crate::capabilities::CurrentPlugin;
 use crate::error::PluginError;
+use crate::invocation::Invocation;
 use crate::watchdog;
 
 /// Lua-registry key of the `id -> callback` table.
@@ -60,6 +61,10 @@ struct Timer {
     kind: &'static str,
     every: Option<Duration>,
     origin: Arc<str>,
+    /// Who the callback runs for: whoever was in effect when it was set. A
+    /// repeating timer keeps that session after it closes, and then reads
+    /// the runtime's own environment.
+    invocation: Invocation,
 }
 
 /// Install `kage.schedule`, `kage.defer` and `kage.timer`. Callbacks run
@@ -139,6 +144,7 @@ fn add(
                 kind,
                 every,
                 origin,
+                invocation: Invocation::current(),
             },
         );
         id
@@ -255,7 +261,9 @@ fn call(lua: &Lua, id: i64, timer: &Timer, budget: u64) -> Result<(), PluginErro
         callbacks.raw_set(id, Value::Nil)?;
     }
     match callback {
-        Some(callback) => watchdog::run(lua, budget, || callback.call::<()>(())),
+        Some(callback) => timer
+            .invocation
+            .scope(|| watchdog::run(lua, budget, || callback.call::<()>(()))),
         None => Ok(()),
     }
 }

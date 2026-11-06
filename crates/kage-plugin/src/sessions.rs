@@ -66,9 +66,10 @@ pub enum PendingSessionOp {
     },
 }
 
-/// Shared queue of plugin-requested session writes. The host drains
-/// this between turns and applies each entry to its session writer.
-pub type SharedSessionOps = Arc<Mutex<Vec<PendingSessionOp>>>;
+/// Shared queue of plugin-requested session writes, each with the session
+/// whose work queued it. The host drains this between turns and applies
+/// each entry to its session writer.
+pub type SharedSessionOps = Arc<Mutex<Vec<(Option<kage_core::SessionId>, PendingSessionOp)>>>;
 
 /// Construct an empty session-op queue.
 #[must_use]
@@ -151,7 +152,10 @@ pub fn install_sessions(
             let mut q = label_ops
                 .lock()
                 .map_err(|_| mlua::Error::external("plugin session ops mutex poisoned"))?;
-            q.push(PendingSessionOp::SetLabel { anchor, text });
+            q.push((
+                crate::Invocation::current().session,
+                PendingSessionOp::SetLabel { anchor, text },
+            ));
             Ok(mlua::Value::Nil)
         })?,
     )?;
@@ -183,10 +187,13 @@ pub(crate) fn append_entry_function(
         let mut q = ops
             .lock()
             .map_err(|_| mlua::Error::external("plugin session ops mutex poisoned"))?;
-        q.push(PendingSessionOp::AppendCustom {
-            kind,
-            data: data_json,
-        });
+        q.push((
+            crate::Invocation::current().session,
+            PendingSessionOp::AppendCustom {
+                kind,
+                data: data_json,
+            },
+        ));
         Ok(mlua::Value::Nil)
     })
 }
@@ -375,6 +382,42 @@ mod tests {
         let rt = PluginRuntime::new().unwrap();
         let err = rt.eval("kage.session.set_label('', 'oops')").unwrap_err();
         assert!(err.to_string().contains("anchor"));
+    }
+
+    #[test]
+    fn each_session_drains_only_the_ops_its_work_queued() {
+        use crate::Invocation;
+        use crate::sessions::PendingSessionOp;
+        use kage_core::SessionId;
+
+        let rt = granted_session_write();
+        let (a, b) = (SessionId::new(), SessionId::new());
+        let append = |kind: &str| {
+            rt.eval_plugin(
+                "t",
+                &format!(
+                    "kage.request_capabilities({{'session_write'}}); \
+                     kage.session.append_entry('{kind}')"
+                ),
+            )
+            .unwrap();
+        };
+        Invocation::session(a).scope(|| append("plugin:a"));
+        Invocation::session(b).scope(|| append("plugin:b"));
+        append("plugin:any");
+        let kinds = |ops: Vec<PendingSessionOp>| -> Vec<String> {
+            ops.into_iter()
+                .map(|op| match op {
+                    PendingSessionOp::AppendCustom { kind, .. } => kind,
+                    PendingSessionOp::SetLabel { .. } => panic!("expected an entry"),
+                })
+                .collect()
+        };
+        assert_eq!(
+            kinds(rt.take_pending_session_ops_for(a)),
+            ["plugin:a", "plugin:any"]
+        );
+        assert_eq!(kinds(rt.take_pending_session_ops()), ["plugin:b"]);
     }
 
     #[test]

@@ -26,7 +26,10 @@
 //! Malformed inbound lines get spec error replies (`-32700` for
 //! unparseable or oversized input, `-32600` for a structurally invalid
 //! request) instead of being dropped silently, and a single line may
-//! not exceed `MAX_LINE` bytes.
+//! not exceed `MAX_LINE` bytes. A response matching a pending request must
+//! contain `"jsonrpc": "2.0"`. An invalid matched response fails that request
+//! and ends the reader, while unknown and late responses remain silent. Objects
+//! containing a `method` are classified as requests or notifications first.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
@@ -255,6 +258,10 @@ pub type CancelNotice = Arc<dyn Fn(i64, &str) -> Option<(String, serde_json::Val
 
 /// The outgoing half of a JSON-RPC connection. Cloneable; every clone
 /// shares the same writer and pending-response table.
+///
+/// Outgoing requests and notifications omit `params` when passed
+/// [`serde_json::Value::Null`]. Other values are sent unchanged without
+/// validation, including nulls nested inside objects or arrays.
 #[derive(Clone)]
 pub struct Peer {
     writer: Arc<Mutex<dyn Write + Send>>,
@@ -286,7 +293,9 @@ impl Peer {
         let mut obj = serde_json::Map::with_capacity(3);
         obj.insert("jsonrpc".to_owned(), serde_json::Value::from("2.0"));
         obj.insert("method".to_owned(), serde_json::Value::from(method));
-        obj.insert("params".to_owned(), params);
+        if !params.is_null() {
+            obj.insert("params".to_owned(), params);
+        }
         self.write(&serde_json::Value::Object(obj))
     }
 
@@ -449,7 +458,9 @@ impl Peer {
         obj.insert("jsonrpc".to_owned(), serde_json::Value::from("2.0"));
         obj.insert("id".to_owned(), serde_json::Value::from(id));
         obj.insert("method".to_owned(), serde_json::Value::from(method));
-        obj.insert("params".to_owned(), params);
+        if !params.is_null() {
+            obj.insert("params".to_owned(), params);
+        }
         if let Err(e) = self.write(&serde_json::Value::Object(obj)) {
             lock(&self.pending).requests.remove(&id);
             return Err(e);
@@ -834,6 +845,13 @@ fn route_response(
 ) -> bool {
     let ordered = lock(pending).requests.get(&id).map(|entry| entry.ordered);
     if let Some(ordered) = ordered {
+        if obj.get("jsonrpc").and_then(serde_json::Value::as_str) != Some("2.0") {
+            return reject_invalid_response(
+                pending,
+                id,
+                "invalid response: jsonrpc must be \"2.0\"",
+            );
+        }
         let outcome = match (obj.get("error"), obj.get("result")) {
             (Some(err), None)
                 if err.get("code").is_some_and(|code| {
@@ -848,7 +866,13 @@ fn route_response(
                 Err(RpcError::from_value(err))
             }
             (None, Some(result)) => Ok(result.clone()),
-            _ => return reject_invalid_response(pending, id),
+            _ => {
+                return reject_invalid_response(
+                    pending,
+                    id,
+                    "invalid response: expected result or error",
+                );
+            }
         };
         let barrier = if ordered {
             let (tx, rx) = mpsc::channel();
@@ -876,17 +900,11 @@ fn route_response(
     true
 }
 
-fn reject_invalid_response(pending: &Pending, id: i64) -> bool {
+fn reject_invalid_response(pending: &Pending, id: i64, message: &str) -> bool {
     let Some(entry) = lock(pending).requests.remove(&id) else {
         return true;
     };
-    let _ = entry.tx.send((
-        Err(RpcError::new(
-            -32600,
-            "invalid response: expected result or error",
-        )),
-        None,
-    ));
+    let _ = entry.tx.send((Err(RpcError::new(-32600, message)), None));
     false
 }
 
@@ -898,6 +916,75 @@ mod tests {
     use crate::testing::pair;
 
     #[test]
+    fn response_versions_are_checked_only_for_pending_ids() {
+        for version in [
+            None,
+            Some(serde_json::json!(null)),
+            Some(serde_json::json!(2)),
+            Some(serde_json::json!("1.0")),
+            Some(serde_json::json!({})),
+        ] {
+            let (peer, mut input, mut output, reader) = recorded(None);
+            let (id, reply) = peer
+                .start("matched", serde_json::Value::Null, false)
+                .unwrap();
+            let (_, other) = peer.start("other", serde_json::Value::Null, false).unwrap();
+            next_line(&mut output);
+            next_line(&mut output);
+            let mut response = serde_json::json!({"id": id, "result": true});
+            if let Some(version) = version {
+                response["jsonrpc"] = version;
+            }
+            writeln!(input, "{response}").unwrap();
+            let (result, barrier) = reply.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!(
+                result.unwrap_err(),
+                RpcError::new(-32600, "invalid response: jsonrpc must be \"2.0\"")
+            );
+            assert!(barrier.is_none());
+            reader.join().unwrap();
+            assert_eq!(other.recv().unwrap().0.unwrap_err(), closed());
+            drop(peer);
+            assert!(written(output).is_empty());
+        }
+    }
+
+    #[test]
+    fn unknown_and_abandoned_bad_versions_are_silent_and_do_not_close() {
+        let (peer, mut input, mut output, reader) = recorded(None);
+        let (late, _) = peer.start("late", serde_json::Value::Null, false).unwrap();
+        next_line(&mut output);
+        peer.abandon(late, "late");
+        let (id, reply) = peer.start("live", serde_json::Value::Null, false).unwrap();
+        next_line(&mut output);
+        writeln!(input, "{}", serde_json::json!({"id":late,"result":0})).unwrap();
+        writeln!(
+            input,
+            "{}",
+            serde_json::json!({"jsonrpc":false,"id":999,"result":0})
+        )
+        .unwrap();
+        writeln!(
+            input,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","id":id,"result":42})
+        )
+        .unwrap();
+        assert_eq!(
+            reply
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .0
+                .unwrap(),
+            42
+        );
+        drop(input);
+        reader.join().unwrap();
+        drop(peer);
+        assert!(written(output).is_empty());
+    }
+
+    #[test]
     fn invalid_response_does_not_close_on_concurrent_abandonment() {
         let pending: Pending = Arc::new(Mutex::new(PendingState::default()));
         let (tx, rx) = crossbeam_channel::bounded(1);
@@ -906,14 +993,14 @@ mod tests {
             .insert(7, PendingRequest { tx, ordered: true });
         assert!(lock(&pending).requests.contains_key(&7));
         lock(&pending).requests.remove(&7);
-        assert!(reject_invalid_response(&pending, 7));
+        assert!(reject_invalid_response(&pending, 7, "invalid"));
         assert!(rx.recv().is_err());
 
         let (tx, rx) = crossbeam_channel::bounded(1);
         lock(&pending)
             .requests
             .insert(8, PendingRequest { tx, ordered: true });
-        assert!(!reject_invalid_response(&pending, 8));
+        assert!(!reject_invalid_response(&pending, 8, "invalid"));
         let (result, barrier) = rx.recv().unwrap();
         assert_eq!(result.unwrap_err().code, -32600);
         assert!(barrier.is_none());
@@ -935,7 +1022,7 @@ mod tests {
             },
         );
         let (in_tx, _in_rx) = mpsc::sync_channel(1);
-        let response = serde_json::json!({"error": {"code": u64::MAX, "message": "failure"}});
+        let response = serde_json::json!({"jsonrpc": "2.0", "error": {"code": u64::MAX, "message": "failure"}});
         assert!(route_response(
             &pending,
             &InboundSender::Plain(in_tx),
@@ -957,7 +1044,7 @@ mod tests {
             .insert(1, PendingRequest { tx, ordered: true });
         let (in_tx, in_rx) = mpsc::sync_channel(1);
         drop(in_rx);
-        let value = serde_json::json!({"error": {"code": -32042, "message": "peer failure"}});
+        let value = serde_json::json!({"jsonrpc": "2.0", "error": {"code": -32042, "message": "peer failure"}});
         assert!(!route_response(
             &pending,
             &InboundSender::Ordered(in_tx),
@@ -1005,7 +1092,12 @@ mod tests {
         input.read_line(&mut line).unwrap();
         let id = serde_json::from_str::<serde_json::Value>(&line).unwrap()["id"].clone();
         let mut output = server;
-        writeln!(output, "{}", serde_json::json!({"id": id, "result": 1})).unwrap();
+        writeln!(
+            output,
+            "{}",
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "result": 1})
+        )
+        .unwrap();
         let (result, barrier) = requester.join().unwrap();
         assert_eq!(result.unwrap(), 1);
         drop(output);
@@ -1040,7 +1132,12 @@ mod tests {
         for _ in 0..=INBOUND_CAP {
             writeln!(output, "{}", serde_json::json!({"method": "update"})).unwrap();
         }
-        writeln!(output, "{}", serde_json::json!({"id": id, "result": 1})).unwrap();
+        writeln!(
+            output,
+            "{}",
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "result": 1})
+        )
+        .unwrap();
         let (result, barrier) = requester.join().unwrap();
         assert_eq!(result.unwrap_err(), RpcError::timed_out("test"));
         assert!(barrier.is_none());
@@ -1148,7 +1245,7 @@ mod tests {
         writeln!(
             output,
             "{}",
-            serde_json::json!({"id":value["id"], "result":true})
+            serde_json::json!({"jsonrpc":"2.0", "id":value["id"], "result":true})
         )
         .unwrap();
         let (result, barrier) = request.join().unwrap();
@@ -1300,6 +1397,51 @@ mod tests {
         out.lines()
             .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn outbound_params_and_null_result_wire_frames() {
+        let (peer, mut input, mut output, reader) = recorded(None);
+        for params in [
+            serde_json::Value::Null,
+            serde_json::json!({"nested": null}),
+            serde_json::json!([null, {"nested": null}]),
+            serde_json::json!(42),
+        ] {
+            peer.notify("notice", params.clone()).unwrap();
+            let notice = next_line(&mut output);
+            let mut expected = serde_json::json!({"jsonrpc": "2.0", "method": "notice"});
+            if !params.is_null() {
+                expected["params"] = params.clone();
+            }
+            assert_eq!(notice, expected);
+
+            let caller = peer.clone();
+            let request_params = params.clone();
+            let request = thread::spawn(move || caller.request("call", request_params));
+            let frame = next_line(&mut output);
+            let id = frame["id"].clone();
+            let mut expected = serde_json::json!({"jsonrpc": "2.0", "method": "call", "id": id});
+            if !params.is_null() {
+                expected["params"] = params;
+            }
+            assert_eq!(frame, expected);
+            writeln!(
+                input,
+                "{}",
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": null})
+            )
+            .unwrap();
+            assert_eq!(request.join().unwrap().unwrap(), serde_json::Value::Null);
+        }
+        peer.respond(&serde_json::json!(7), Ok(serde_json::Value::Null))
+            .unwrap();
+        assert_eq!(
+            next_line(&mut output),
+            serde_json::json!({"jsonrpc": "2.0", "id": 7, "result": null})
+        );
+        drop(input);
+        reader.join().unwrap();
     }
 
     #[test]
@@ -1522,8 +1664,14 @@ mod tests {
         };
         let request = next_line(&mut out);
         assert_eq!(request["method"], "reply");
-        in_w.write_all(format!("{{\"id\":{},\"result\":42}}\n", request["id"]).as_bytes())
-            .unwrap();
+        in_w.write_all(
+            format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{},\"result\":42}}\n",
+                request["id"]
+            )
+            .as_bytes(),
+        )
+        .unwrap();
         assert_eq!(call.join().unwrap().unwrap(), serde_json::json!(42));
 
         match inbound.recv_timeout(Duration::from_secs(5)) {

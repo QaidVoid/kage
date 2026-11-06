@@ -194,14 +194,14 @@ impl Snapshot {
 }
 
 /// Read `src` once and keep its entries up to the last one `keep`
-/// accepts. A trailing line that does not parse is a torn write and
-/// ends the file, as it does for [`SessionReader`]; the snapshot's
-/// `truncated` flag reports it.
+/// accepts. An incomplete trailing fragment is treated as a torn write,
+/// as it is for [`SessionReader`]; the snapshot's `truncated` flag reports it.
+/// Complete corrupt entries are reported as errors.
 ///
 /// # Errors
 ///
 /// Errors if `src` cannot be read, if its first entry is not a header,
-/// or if a line before the last does not parse.
+/// or if an entry is corrupt rather than an incomplete trailing fragment.
 pub fn snapshot(
     src: &Path,
     keep: impl Fn(&SessionEntry) -> bool,
@@ -210,8 +210,9 @@ pub fn snapshot(
         path: src.to_path_buf(),
         source: err,
     })?;
-    let mut lines = data.split_inclusive(|byte| *byte == b'\n').peekable();
+    let mut lines = data.split_inclusive(|byte| *byte == b'\n');
     let mut offset = 0;
+    let mut header_line = 0;
     let header_id = loop {
         let Some(line) = lines.next() else {
             return Err(SessionError::Empty {
@@ -219,6 +220,7 @@ pub fn snapshot(
             });
         };
         offset += line.len();
+        header_line += 1;
         if line.trim_ascii().is_empty() {
             continue;
         }
@@ -235,28 +237,33 @@ pub fn snapshot(
     let mut kept = (header_id, start);
     let mut refs: Vec<(usize, String)> = Vec::new();
     let mut truncated = false;
-    let mut line_no = 1;
-    while let Some(line) = lines.next() {
-        line_no += 1;
+    for (index, line) in lines.enumerate() {
+        let line_no = header_line + index + 1;
         offset += line.len();
         if line.trim_ascii().is_empty() {
             continue;
         }
-        match serde_json::from_slice::<SessionEntry>(line) {
-            Ok(entry) if keep(&entry) => {
+        match crate::reader::classify_line(line, line.ends_with(b"\n")) {
+            crate::reader::Line::Entry(entry) if keep(&entry) => {
                 kept = (entry.id(), offset);
                 refs.extend(blob_refs(&entry).into_iter().map(|sha| (offset, sha)));
             }
-            Ok(_) => {}
-            Err(_) if lines.peek().is_none() => {
+            crate::reader::Line::Entry(_) | crate::reader::Line::Blank => {}
+            crate::reader::Line::Torn => {
                 truncated = true;
                 break;
             }
-            Err(err) => {
+            crate::reader::Line::Decode(source) => {
                 return Err(SessionError::Decode {
                     path: src.to_path_buf(),
                     line: line_no,
-                    source: err,
+                    source,
+                });
+            }
+            crate::reader::Line::InvalidUtf8(source) => {
+                return Err(SessionError::Io {
+                    path: src.to_path_buf(),
+                    source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
                 });
             }
         }
@@ -426,6 +433,32 @@ mod tests {
             Err(SessionError::Io { source, .. }) if source.kind() == std::io::ErrorKind::InvalidInput
         ));
         assert!(!dst.exists());
+    }
+
+    #[test]
+    fn snapshot_reports_corrupt_tails_and_preserves_incomplete_tails() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.jsonl");
+        let header = serde_json::to_vec(&SessionEntry::Header(fresh_header("x:y"))).unwrap();
+        for tail in [b"{bad}".as_slice(), b"{bad}\n", b"{}", b"{}\n", b"\xff"] {
+            let mut data = header.clone();
+            data.push(b'\n');
+            data.extend_from_slice(tail);
+            std::fs::write(&src, data).unwrap();
+            assert!(snapshot(&src, |_| true).is_err(), "tail {tail:?}");
+        }
+        let mut data = b"\n".to_vec();
+        data.extend_from_slice(&header);
+        data.extend_from_slice(b"\n{bad}\n");
+        std::fs::write(&src, &data).unwrap();
+        assert!(matches!(
+            snapshot(&src, |_| true),
+            Err(SessionError::Decode { line: 3, .. })
+        ));
+        data = header;
+        data.extend_from_slice(b"\n{\"type\":");
+        std::fs::write(&src, data).unwrap();
+        assert!(snapshot(&src, |_| true).unwrap().truncated);
     }
 
     #[test]

@@ -74,6 +74,7 @@ struct State {
     eof_gate: Arc<Mutex<bool>>,
     read_status: Arc<AtomicU8>,
     shutting_down: AtomicBool,
+    shutdown_complete: AtomicBool,
     #[cfg(test)]
     admission_blocked: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -88,9 +89,12 @@ impl Drop for Admission<'_> {
 
 impl Drop for State {
     fn drop(&mut self) {
-        self.shutting_down.store(true, Ordering::Release);
-        close_pending(&self.peer.pending);
-        self.pipe.shutdown();
+        if !self.shutdown_complete.load(Ordering::Acquire) {
+            self.shutting_down.store(true, Ordering::Release);
+            self.pipe.signal_shutdown();
+            close_pending(&self.peer.pending);
+            self.pipe.shutdown();
+        }
     }
 }
 
@@ -380,6 +384,7 @@ fn connect_with_mode<R: BufRead + Send + 'static>(
             eof_gate,
             read_status,
             shutting_down: AtomicBool::new(false),
+            shutdown_complete: AtomicBool::new(false),
             #[cfg(test)]
             admission_blocked: Mutex::new(None),
         })),
@@ -405,12 +410,26 @@ impl UnixPeer {
         !self.0.shutting_down.load(Ordering::Acquire) && !self.0.pipe.is_closed()
     }
 
+    /// Signal terminal shutdown using only atomic operations, without waiting
+    /// for the writer or pending request locks.
+    ///
+    /// Writes stop cooperatively, but an in-flight final write may succeed.
+    /// This signal alone does not settle pending responses, close an idle
+    /// descriptor, or interrupt the reader or inbound queue. An active write
+    /// may independently close the descriptor and settle pending requests.
+    /// Call [`Self::shutdown`] to complete cleanup.
+    pub fn signal_shutdown(&self) {
+        self.0.shutting_down.store(true, Ordering::Release);
+        self.0.pipe.signal_shutdown();
+    }
+
     /// Permanently shut down the write side and settle all pending requests.
     /// This does not interrupt the separately owned reader or inbound queue.
     pub fn shutdown(&self) {
-        self.0.shutting_down.store(true, Ordering::Release);
+        self.signal_shutdown();
         close_pending(&self.0.peer.pending);
         self.0.pipe.shutdown();
+        self.0.shutdown_complete.store(true, Ordering::Release);
     }
 
     fn ensure_writable(&self, allow_after_eof: bool) -> Result<(), DispatchError> {
@@ -703,6 +722,121 @@ mod tests {
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
         serde_json::from_str(&line).unwrap()
+    }
+
+    #[test]
+    fn signal_is_lock_free_and_shutdown_completes_cleanup() {
+        let (peer, _incoming, reader, mut agent_in, agent_out) = fixture();
+        let pending = peer
+            .dispatch("pending", serde_json::Value::Null, None, None)
+            .unwrap();
+        read_message(&mut agent_in);
+        let writer_guard = peer.0.pipe.lock_for_test();
+        let pending_guard = lock(&peer.0.peer.pending);
+        let signal_peer = peer.clone();
+        let (tx, rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            signal_peer.signal_shutdown();
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("signal waited for a lock");
+        assert!(!peer.is_write_open());
+        assert!(writer_guard.is_some());
+        assert!(!pending_guard.closed);
+        assert!(pending.receiver.is_empty());
+        drop(pending_guard);
+        drop(writer_guard);
+        worker.join().unwrap();
+        assert!(
+            peer.notify("after", serde_json::Value::Null, None, None)
+                .is_err()
+        );
+        peer.shutdown();
+        assert_eq!(pending.wait(None, None).0.unwrap_err(), closed());
+        let mut rest = Vec::new();
+        agent_in.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty());
+        drop(agent_out);
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn last_drop_after_signal_still_cleans_up() {
+        let (peer, incoming, reader, mut agent_in, agent_out) = fixture();
+        let pending = peer
+            .dispatch("pending", serde_json::Value::Null, None, None)
+            .unwrap();
+        read_message(&mut agent_in);
+        peer.signal_shutdown();
+        assert!(!peer.0.shutdown_complete.load(Ordering::Acquire));
+        drop(peer);
+        assert_eq!(pending.wait(None, None).0.unwrap_err(), closed());
+        let mut rest = Vec::new();
+        agent_in.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty());
+        drop(incoming);
+        drop(agent_out);
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn completed_shutdown_last_drop_avoids_transport_locks() {
+        let (peer, incoming, reader, _agent_in, agent_out) = fixture();
+        peer.shutdown();
+        let pending = Arc::clone(&peer.0.peer.pending);
+        let pipe = Arc::clone(&peer.0.pipe);
+        let pending_guard = lock(&pending);
+        let writer_guard = pipe.lock_for_test();
+        let (tx, rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            drop(peer);
+            tx.send(()).unwrap();
+        });
+        let result = rx.recv_timeout(Duration::from_secs(2));
+        drop(writer_guard);
+        drop(pending_guard);
+        worker.join().unwrap();
+        result.expect("last drop waited for a transport lock");
+        drop(incoming);
+        drop(agent_out);
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn concurrent_shutdown_waits_for_full_cleanup() {
+        let (peer, incoming, reader, _agent_in, agent_out) = fixture();
+        let pipe = Arc::clone(&peer.0.pipe);
+        let guard = pipe.lock_for_test();
+        let first = peer.clone();
+        let (tx, rx) = mpsc::channel();
+        let tx2 = tx.clone();
+        let one = thread::spawn(move || {
+            first.shutdown();
+            tx.send(()).unwrap();
+        });
+        let limit = Instant::now() + Duration::from_secs(2);
+        while !lock(&peer.0.peer.pending).closed {
+            assert!(Instant::now() < limit);
+            thread::yield_now();
+        }
+        assert!(!peer.0.shutdown_complete.load(Ordering::Acquire));
+        let second = peer.clone();
+        let two = thread::spawn(move || {
+            second.shutdown();
+            tx2.send(()).unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+        assert!(!peer.0.shutdown_complete.load(Ordering::Acquire));
+        drop(guard);
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        one.join().unwrap();
+        two.join().unwrap();
+        assert!(peer.0.shutdown_complete.load(Ordering::Acquire));
+        drop(incoming);
+        drop(agent_out);
+        reader.join().unwrap();
     }
 
     #[test]
@@ -1513,6 +1647,93 @@ mod eof_race_tests {
         let handle = dispatch.join().unwrap().unwrap();
         assert_eq!(handle.wait(None, None).0.unwrap(), 42);
         peer.shutdown();
+    }
+
+    #[test]
+    fn signal_after_server_eof_stops_preserved_output() {
+        let (peer, _rx, reader, mut output, input) = server();
+        drop(input);
+        reader.join().unwrap();
+        assert_eq!(peer.read_status(), ReadStatus::CleanEof);
+        assert!(matches!(
+            peer.dispatch_typed("before", serde_json::Value::Null, None, None),
+            Err(DispatchError::CleanEof(_))
+        ));
+        peer.signal_shutdown();
+        assert!(matches!(
+            peer.dispatch_typed("after", serde_json::Value::Null, None, None),
+            Err(DispatchError::Other(_))
+        ));
+        assert!(
+            peer.notify("after", serde_json::Value::Null, None, None)
+                .is_err()
+        );
+        peer.shutdown();
+        let mut rest = Vec::new();
+        output.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn signal_stops_admission_waiter() {
+        let (peer, _rx, reader, mut output, input) = server();
+        let permits: Vec<_> = (0..MAX_ADMITTED)
+            .map(|_| peer.admit(None, None, false).unwrap())
+            .collect();
+        let (entered, waiting) = mpsc::channel();
+        *lock(&peer.0.admission_blocked) = Some(Box::new(move || {
+            entered.send(()).unwrap();
+        }));
+        let worker_peer = peer.clone();
+        let (done, result) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            done.send(worker_peer.dispatch_typed("blocked", serde_json::Value::Null, None, None))
+                .unwrap();
+        });
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        peer.signal_shutdown();
+        assert!(matches!(
+            result.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Err(DispatchError::Other(_))
+        ));
+        worker.join().unwrap();
+        drop(permits);
+        peer.shutdown();
+        let mut rest = Vec::new();
+        output.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty());
+        drop(input);
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn completed_final_write_can_commit_after_signal() {
+        let (peer, _rx, reader, mut output, input) = server();
+        let (reached, waiting) = mpsc::channel();
+        let (resume, proceed) = mpsc::channel();
+        peer.0.pipe.after_request_write(move || {
+            reached.send(()).unwrap();
+            proceed.recv().unwrap();
+        });
+        let worker_peer = peer.clone();
+        let worker = thread::spawn(move || {
+            worker_peer.dispatch_typed("test", serde_json::Value::Null, None, None)
+        });
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        peer.signal_shutdown();
+        resume.send(()).unwrap();
+        let request = worker.join().unwrap().unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut BufReader::new(&mut output), &mut line).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap()["method"],
+            "test"
+        );
+        assert!(request.receiver.is_empty());
+        peer.shutdown();
+        assert_eq!(request.wait(None, None).0.unwrap_err(), closed());
+        drop(input);
+        reader.join().unwrap();
     }
 
     #[test]

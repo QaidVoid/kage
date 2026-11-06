@@ -1176,7 +1176,7 @@ fn spawn_prompt<A: Agent>(
 /// Answer request `id` with `op`, which opens the session it returns
 /// the id of, on its own thread, then tell the agent the client has the
 /// response.
-fn spawn_open<A, F>(
+fn spawn_open<A, F, T>(
     peer: &AgentPeer,
     agent: &Arc<A>,
     id: serde_json::Value,
@@ -1184,13 +1184,12 @@ fn spawn_open<A, F>(
 ) -> thread::JoinHandle<()>
 where
     A: Agent,
-    F: FnOnce(&A) -> Result<(String, serde_json::Value, Option<OpenReceipt>), RpcError>
-        + Send
-        + 'static,
+    F: FnOnce(&A) -> Result<(String, T, Option<OpenReceipt>), RpcError> + Send + 'static,
+    T: serde::Serialize,
 {
     let agent = Arc::clone(agent);
     let peer = peer.clone();
-    thread::spawn(move || match op(&agent) {
+    thread::spawn(move || match op(&agent).and_then(encode_open) {
         Ok((session, response, receipt)) => {
             if peer.respond(&id, Ok(response)).is_ok() {
                 if let Some(receipt) = receipt {
@@ -1204,6 +1203,14 @@ where
             let _ = peer.respond(&id, Err(e));
         }
     })
+}
+
+fn encode_open<T: serde::Serialize>(
+    (session, response, receipt): (String, T, Option<OpenReceipt>),
+) -> Result<(String, serde_json::Value, Option<OpenReceipt>), RpcError> {
+    let response = serde_json::to_value(response)
+        .map_err(|e| RpcError::internal(format!("encode open response: {e}")))?;
+    Ok((session, response, receipt))
 }
 
 /// Answers `id` with the params parse error `e`.
@@ -1238,7 +1245,7 @@ fn handle_request<A: Agent>(
             Err(e) => return parse_failed(peer, &id, e),
             Ok(req) => spawn_open(peer, agent, id, move |a| {
                 a.new_session_with_receipt(req)
-                    .map(|(resp, receipt)| (resp.session_id.clone(), jval(resp), receipt))
+                    .map(|(resp, receipt)| (resp.session_id.clone(), resp, receipt))
             }),
         },
         "session/prompt" => match parse::<PromptRequest>(params) {
@@ -1280,7 +1287,7 @@ fn handle_request<A: Agent>(
                 spawn_open(peer, agent, id, move |a| {
                     let session = req.session_id.clone();
                     a.load_session_with_receipt(req, &ctx)
-                        .map(|(resp, receipt)| (session, jval(resp), receipt))
+                        .map(|(resp, receipt)| (session, resp, receipt))
                 })
             }
         },
@@ -1302,7 +1309,7 @@ fn handle_request<A: Agent>(
                 spawn_open(peer, agent, id, move |a| {
                     let session = req.session_id.clone();
                     a.resume_session_with_receipt(req, &ctx)
-                        .map(|(resp, receipt)| (session, jval(resp), receipt))
+                        .map(|(resp, receipt)| (session, resp, receipt))
                 })
             }
         },
@@ -2095,6 +2102,53 @@ mod tests {
             .unwrap();
         let response = messages.iter().position(|m| m["id"] == 2).unwrap();
         assert!(history < response);
+    }
+
+    #[test]
+    fn open_encoding_failure_returns_error_without_announcement() {
+        struct FailingSerialize;
+        impl serde::Serialize for FailingSerialize {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("deliberate failure"))
+            }
+        }
+
+        for with_receipt in [true, false] {
+            let writer = ReceiptWriter {
+                bytes: Arc::default(),
+                fail: false,
+            };
+            let (events, received) = std::sync::mpsc::channel();
+            let (drops, dropped) = std::sync::mpsc::channel();
+            let agent = Arc::new(ReceiptAgent {
+                writer: writer.clone(),
+                events,
+                drops,
+                receipts: with_receipt,
+                barrier: None,
+            });
+            let (peer, _inbound, reader) = connect(
+                BufReader::new(std::io::Cursor::new(Vec::new())),
+                writer.clone(),
+            );
+            let peer = AgentPeer::from(peer);
+            let worker = spawn_open(&peer, &agent, serde_json::json!(9), |a| {
+                Ok(("session".into(), FailingSerialize, a.receipt("9".into())))
+            });
+            worker.join().unwrap();
+            reader.join().unwrap();
+            assert!(received.try_iter().next().is_none());
+            assert_eq!(dropped.try_iter().count(), usize::from(with_receipt));
+            let bytes = writer.bytes.lock().unwrap();
+            let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(response["id"], 9);
+            assert_eq!(response["error"]["code"], -32603);
+            assert_eq!(
+                response["error"]["message"],
+                "encode open response: deliberate failure"
+            );
+            assert!(response.get("result").is_none());
+        }
     }
 
     #[test]

@@ -25,6 +25,8 @@ struct Shared {
     closed: AtomicBool,
     #[cfg(test)]
     after_request_write: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    writer_blocked: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// Cloneable, frame-serializing pipe writer with cooperative shutdown.
@@ -92,14 +94,26 @@ impl PipeWriter {
             closed: AtomicBool::new(false),
             #[cfg(test)]
             after_request_write: Mutex::new(None),
+            #[cfg(test)]
+            writer_blocked: Mutex::new(None),
         })))
     }
 
-    /// Close the transport. An active write detects shutdown within one poll
-    /// interval and drops the descriptor; other writers stop without waiting for
-    /// that write. Shutdown does not interrupt an independently owned reader.
-    pub fn shutdown(&self) {
+    /// Signal terminal shutdown without acquiring a lock or closing the descriptor.
+    ///
+    /// Active and queued writes observe the signal cooperatively. An in-flight
+    /// final write may still succeed, and an active write may close the descriptor
+    /// while stopping. This alone does not close an idle descriptor, settle
+    /// pending responses, or interrupt a reader. Call [`Self::shutdown`] to
+    /// complete descriptor cleanup.
+    pub fn signal_shutdown(&self) {
         self.0.closed.store(true, Ordering::Release);
+    }
+
+    /// Signal shutdown and close the descriptor, waiting for any active writer.
+    /// Shutdown does not interrupt an independently owned reader.
+    pub fn shutdown(&self) {
+        self.signal_shutdown();
         let mut guard = self
             .0
             .fd
@@ -148,7 +162,13 @@ impl PipeWriter {
             match self.0.fd.try_lock() {
                 Ok(guard) => break guard,
                 Err(TryLockError::Poisoned(err)) => break err.into_inner(),
-                Err(TryLockError::WouldBlock) => std::thread::sleep(wait_interval(deadline)),
+                Err(TryLockError::WouldBlock) => {
+                    #[cfg(test)]
+                    if let Some(hook) = self.0.writer_blocked.lock().unwrap().take() {
+                        hook();
+                    }
+                    std::thread::sleep(wait_interval(deadline));
+                }
             }
         };
         self.check(deadline, cancel)
@@ -275,6 +295,39 @@ mod tests {
     use std::io::Read;
     use std::sync::mpsc;
     use std::thread;
+
+    #[test]
+    fn signal_stops_active_and_queued_writes() {
+        let (read_fd, write_fd) = nix::unistd::pipe().unwrap();
+        let writer = PipeWriter::new(write_fd).unwrap();
+        let active_writer = writer.clone();
+        let active = thread::spawn(move || {
+            active_writer.write_frame(&vec![b'x'; 4 * 1024 * 1024], None, None)
+        });
+        let mut reader = std::fs::File::from(read_fd);
+        let mut byte = [0];
+        reader.read_exact(&mut byte).unwrap();
+        let (entered, waiting) = mpsc::channel();
+        *writer.0.writer_blocked.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+        }));
+        let queued_writer = writer.clone();
+        let queued = thread::spawn(move || queued_writer.write_frame(b"queued", None, None));
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        writer.signal_shutdown();
+        assert_eq!(
+            active.join().unwrap().unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(
+            queued.join().unwrap().unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        writer.shutdown();
+        let mut rest = Vec::new();
+        reader.read_to_end(&mut rest).unwrap();
+        assert!(rest.len() < 4 * 1024 * 1024 - 1);
+    }
 
     #[test]
     fn empty_frame_respects_shutdown_and_cancellation() {

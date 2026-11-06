@@ -7747,7 +7747,7 @@ fn run_external_host_test_in_child() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn external_race_fixture() -> (
     tempfile::TempDir,
     Arc<Host>,
@@ -7774,7 +7774,7 @@ fn external_race_fixture() -> (
     (dir, host, owner, other)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn external_race_session(dir: &Path, owner: &CliAcpAgent) -> Arc<external::External> {
     let config = kage_core::config::AcpAgent {
         command: "python3".into(),
@@ -7797,7 +7797,7 @@ fn external_race_session(dir: &Path, owner: &CliAcpAgent) -> Arc<external::Exter
     .unwrap()
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn wait_until_external_locked(host: &Host) -> bool {
     let deadline = Instant::now() + WAIT;
     while host.external.try_lock().is_ok() {
@@ -7809,7 +7809,7 @@ fn wait_until_external_locked(host: &Host) -> bool {
     true
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn external_attach_before_last_close_keeps_session_alive() {
     let (_dir, host, owner, other) = external_race_fixture();
@@ -7837,7 +7837,7 @@ fn external_attach_before_last_close_keeps_session_alive() {
     other.detach();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn external_attach_blocked_by_disconnect_does_not_leak_attachment() {
     let (_dir, host, owner, other) = external_race_fixture();
@@ -7873,7 +7873,7 @@ fn external_attach_blocked_by_disconnect_does_not_leak_attachment() {
     other.detach();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn external_last_close_before_attach_removes_session() {
     let (_dir, host, owner, other) = external_race_fixture();
@@ -7889,7 +7889,7 @@ fn external_last_close_before_attach_removes_session() {
     other.detach();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn external_close_and_reattach_same_connection_are_ordered() {
     let (_dir, host, owner, other) = external_race_fixture();
@@ -7916,14 +7916,14 @@ fn external_close_and_reattach_same_connection_are_ordered() {
     other.detach();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 struct DelayedPromptAgent {
     inner: Arc<CliAcpAgent>,
     entered: mpsc::Sender<bool>,
     release: Mutex<Option<mpsc::Receiver<()>>>,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl Agent for DelayedPromptAgent {
     fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
         self.inner.initialize(req)
@@ -7963,7 +7963,70 @@ impl Agent for DelayedPromptAgent {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+#[test]
+fn saturated_external_session_leaves_workers_for_another_session() {
+    let (dir, host, owner, other) = external_race_fixture();
+    let session = owner.external_session("external").unwrap();
+    session.open_receipt(owner.connection).unwrap()();
+    let independent = external_race_session(dir.path(), &owner);
+    independent.open_receipt(owner.connection).unwrap()();
+    lock(&host.external).insert("independent".into(), independent);
+    lock(&owner.ids).external.insert("independent".into());
+
+    let (srv_r, cli_w) = std::io::pipe().unwrap();
+    let (cli_r, srv_w) = std::io::pipe().unwrap();
+    let agent = Arc::clone(&owner);
+    let (entered, _entered_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        kage_acp::agent::serve_agent(BufReader::new(srv_r), srv_w, |_| DelayedPromptAgent {
+            inner: agent,
+            entered,
+            release: Mutex::new(None),
+        })
+        .unwrap();
+    });
+    let (client, _inbox, _reader) = kage_jsonrpc::connect(BufReader::new(cli_r), cli_w);
+    let pending: Vec<_> = (0..16)
+        .map(|_| prompt_async(&client, "external", "wait"))
+        .collect();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match session.register_prompt(owner.connection) {
+            Ok(ticket) => drop(ticket),
+            Err(_) => break,
+        }
+        assert!(Instant::now() < deadline, "external admission did not fill");
+        std::thread::yield_now();
+    }
+    let rejected = client.request(
+        "session/prompt",
+        serde_json::json!({"sessionId":"external", "prompt":[{"type":"text", "text":"extra"}]}),
+    );
+    assert!(
+        rejected
+            .unwrap_err()
+            .message
+            .contains("too many external prompts")
+    );
+    let result = prompt_async(&client, "independent", "hello")
+        .recv_timeout(WAIT)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result["stopReason"], "end_turn");
+
+    owner.cancel("external");
+    for response in pending {
+        assert_eq!(
+            response.recv_timeout(WAIT).unwrap().unwrap()["stopReason"],
+            "cancelled"
+        );
+    }
+    owner.detach();
+    other.detach();
+}
+
+#[cfg(target_os = "linux")]
 fn delayed_external_prompt_test(reattach: bool) {
     let (_dir, _host, owner, other) = external_race_fixture();
     owner
@@ -8020,13 +8083,13 @@ fn delayed_external_prompt_test(reattach: bool) {
     other.detach();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn dispatch_prepared_external_prompt_does_not_cross_reattachment() {
     delayed_external_prompt_test(true);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn dispatch_prepared_external_prompt_is_cancelled_before_worker_runs() {
     delayed_external_prompt_test(false);
@@ -8053,7 +8116,7 @@ fn native_prompt_preparation_defaults_to_normal_dispatch() {
     assert_eq!(result["stopReason"], "end_turn");
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn external_receipt_prompt(
     session: &external::External,
     owner: u64,
@@ -8066,7 +8129,7 @@ fn external_receipt_prompt(
     session.prompt(session.register_prompt(owner).unwrap(), req)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn pending_external_receipt_prompt(
     session: &Arc<external::External>,
     owner: u64,
@@ -8085,7 +8148,7 @@ fn pending_external_receipt_prompt(
     rx
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn prepared_external_prompt_waits_for_receipt_and_cancellation_prevents_dispatch() {
     let dir = tempfile::tempdir().unwrap();
@@ -8175,7 +8238,7 @@ for line in sys.stdin:
     other.detach();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn external_concurrent_open_receipts_survive_reverse_response_order() {
     let (_dir, _host, owner, other) = external_race_fixture();
@@ -8212,7 +8275,7 @@ fn external_concurrent_open_receipts_survive_reverse_response_order() {
     other.detach();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn external_dropped_and_stale_receipts_do_not_announce_replacement() {
     let (_dir, _host, owner, other) = external_race_fixture();
@@ -8257,7 +8320,7 @@ fn external_dropped_and_stale_receipts_do_not_announce_replacement() {
     other.detach();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn external_stale_receipt_does_not_announce_replaced_session() {
     let (dir, host, owner, other) = external_race_fixture();

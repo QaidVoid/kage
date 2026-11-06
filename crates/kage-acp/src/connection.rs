@@ -48,6 +48,7 @@ use crate::acp::{
 pub struct Connection {
     peer: Peer,
     initialized: bool,
+    initialize_attempted: bool,
     active_prompts: Mutex<HashSet<String>>,
 }
 
@@ -243,6 +244,7 @@ impl Connection {
             Self {
                 peer: peer.clone(),
                 initialized: false,
+                initialize_attempted: false,
                 active_prompts: Mutex::new(HashSet::new()),
             },
             Incoming {
@@ -255,6 +257,8 @@ impl Connection {
     /// Initialize the connection with protocol version 1. Advertise only
     /// capabilities the caller can handle. Discard the connection on failure,
     /// including a missing or failed barrier, because the agent may have initialized.
+    /// Only one valid-version attempt is allowed, even if a local failure occurs
+    /// before the request is written. An invalid local version does not count.
     ///
     /// The result and barrier are returned separately, including for a valid
     /// agent error response or a result decode error. A malformed JSON-RPC
@@ -279,7 +283,10 @@ impl Connection {
         Result<InitializeResponse, RpcError>,
         Option<ResponseBarrier>,
     ) {
-        if self.initialized || request.protocol_version != PROTOCOL_VERSION {
+        if self.initialize_attempted
+            || self.initialized
+            || request.protocol_version != PROTOCOL_VERSION
+        {
             return (
                 Err(RpcError::internal(
                     "invalid initialize state or protocol version",
@@ -287,6 +294,7 @@ impl Connection {
                 None,
             );
         }
+        self.initialize_attempted = true;
         let (result, barrier) = self.call_ordered_timeout("initialize", request, timeout);
         let result = result
             .and_then(decode)
@@ -545,61 +553,105 @@ mod tests {
     }
 
     #[test]
-    fn ordered_handshake_errors_retain_barriers_and_timeouts_do_not() {
-        for method in ["initialize", "session/new"] {
+    fn ordered_session_errors_retain_barriers_and_timeouts_do_not() {
+        let (mut conn, incoming, mut reader, mut writer) = pair();
+        conn.initialized = true;
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let server = thread::spawn(move || {
+            let req = read(&mut reader);
+            send(
+                &mut writer,
+                json!({"jsonrpc":"2.0","id":req["id"],"error":{"code":-32001,"message":"failed"}}),
+            );
+            let req = read(&mut reader);
+            released.recv().unwrap();
+            send(
+                &mut writer,
+                json!({"jsonrpc":"2.0","id":req["id"],"result":{}}),
+            );
+        });
+        let request = NewSessionRequest {
+            cwd: "/tmp".into(),
+            mcp_servers: vec![],
+            meta: None,
+        };
+        let (result, barrier) = conn.new_session(&request, Duration::from_secs(2));
+        assert_eq!(result.unwrap_err().code, -32001);
+        assert!(matches!(
+            incoming.recv_timeout(Duration::from_millis(10)),
+            Err(RecvTimeoutError::Timeout)
+        ));
+        barrier
+            .unwrap()
+            .wait_timeout(Duration::from_secs(2))
+            .unwrap();
+        let (result, barrier) = conn.new_session(&request, Duration::from_millis(20));
+        assert!(result.unwrap_err().message.contains("timed out"));
+        assert!(barrier.is_none());
+        release.send(()).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn initialize_is_single_attempt_after_valid_version() {
+        use std::io::Read;
+
+        for outcome in ["timeout", "error", "decode", "malformed", "success"] {
             let (mut conn, incoming, mut reader, mut writer) = pair();
-            conn.initialized = method == "session/new";
-            let (release, released) = std::sync::mpsc::channel::<()>();
+            let (done, wait) = std::sync::mpsc::channel();
             let server = thread::spawn(move || {
-                let req = read(&mut reader);
-                send(
-                    &mut writer,
-                    json!({"jsonrpc":"2.0","id":req["id"],"error":{"code":-32001,"message":"failed"}}),
-                );
-                let req = read(&mut reader);
-                released.recv().unwrap();
-                send(
-                    &mut writer,
-                    json!({"jsonrpc":"2.0","id":req["id"],"result":{}}),
-                );
-            });
-            let call = |conn: &mut Connection, timeout| {
-                if method == "initialize" {
-                    let (r, b) = conn.initialize(
-                        &InitializeRequest {
-                            protocol_version: PROTOCOL_VERSION,
-                            client_capabilities: ClientCapabilities::default(),
-                            client_info: None,
-                        },
-                        timeout,
-                    );
-                    (r.map(|_| ()), b)
-                } else {
-                    let (r, b) = conn.new_session(
-                        &NewSessionRequest {
-                            cwd: "/tmp".into(),
-                            mcp_servers: vec![],
-                            meta: None,
-                        },
-                        timeout,
-                    );
-                    (r.map(|_| ()), b)
+                let request = read(&mut reader);
+                assert_eq!(request["method"], "initialize");
+                assert_eq!(request["params"]["protocolVersion"], PROTOCOL_VERSION);
+                let response = match outcome {
+                    "timeout" => None,
+                    "error" => Some(
+                        json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32001,"message":"failed"}}),
+                    ),
+                    "decode" => Some(json!({"jsonrpc":"2.0","id":request["id"],"result":{}})),
+                    "malformed" => Some(json!({"jsonrpc":"2.0","id":request["id"]})),
+                    _ => Some(
+                        json!({"jsonrpc":"2.0","id":request["id"],"result":{"protocolVersion":1,"agentCapabilities":{}}}),
+                    ),
+                };
+                if let Some(response) = response {
+                    send(&mut writer, response);
                 }
+                wait.recv_timeout(Duration::from_secs(3)).unwrap();
+                reader.get_ref().set_nonblocking(true).unwrap();
+                let mut extra = [0];
+                match reader.read(&mut extra) {
+                    Ok(0) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    result => panic!("unexpected second request: {result:?}"),
+                }
+            });
+            let mut request = InitializeRequest {
+                protocol_version: PROTOCOL_VERSION + 1,
+                client_capabilities: ClientCapabilities::default(),
+                client_info: None,
             };
-            let (result, barrier) = call(&mut conn, Duration::from_secs(2));
-            assert_eq!(result.unwrap_err().code, -32001);
-            assert!(matches!(
-                incoming.recv_timeout(Duration::from_millis(10)),
-                Err(RecvTimeoutError::Timeout)
-            ));
-            barrier
-                .unwrap()
-                .wait_timeout(Duration::from_secs(2))
-                .unwrap();
-            let (result, barrier) = call(&mut conn, Duration::from_millis(20));
-            assert!(result.unwrap_err().message.contains("timed out"));
+            let (result, barrier) = conn.initialize(&request, Duration::from_millis(100));
+            assert!(result.is_err());
             assert!(barrier.is_none());
-            release.send(()).unwrap();
+            request.protocol_version = PROTOCOL_VERSION;
+            let (result, barrier) = conn.initialize(&request, Duration::from_millis(500));
+            assert_eq!(result.is_ok(), outcome == "success", "{outcome}");
+            assert_eq!(
+                barrier.is_some(),
+                matches!(outcome, "error" | "decode" | "success")
+            );
+            let (result, barrier) = conn.initialize(&request, Duration::from_millis(100));
+            assert!(
+                result
+                    .unwrap_err()
+                    .message
+                    .contains("invalid initialize state")
+            );
+            assert!(barrier.is_none());
+            drop(incoming);
+            drop(conn);
+            done.send(()).unwrap();
             server.join().unwrap();
         }
     }
@@ -971,9 +1023,11 @@ mod tests {
 /// 256 active or permanently reserved sessions are tracked on one connection,
 /// with session IDs limited to 4096 bytes.
 #[cfg(unix)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct UnixConnection {
     peer: UnixPeer,
     initialized: bool,
+    initialize_attempted: bool,
     can_load: bool,
     can_resume: bool,
     active_prompts: Arc<Mutex<HashSet<String>>>,
@@ -990,6 +1044,14 @@ pub struct UnixShutdown {
 
 #[cfg(unix)]
 impl UnixShutdown {
+    /// Signal pending writes to stop without waiting for descriptor cleanup.
+    ///
+    /// This does not settle pending requests or interrupt the reader. Call
+    /// [`Self::shutdown`] to settle requests and complete descriptor cleanup.
+    pub fn signal_shutdown(&self) {
+        self.peer.signal_shutdown();
+    }
+
     /// Interrupt writes and settle pending requests without joining the reader.
     pub fn shutdown(&self) {
         self.peer.shutdown();
@@ -1191,6 +1253,8 @@ impl UnixConnection {
     /// The descriptor's open file description must not be used elsewhere.
     /// Shutdown does not interrupt the reader. The owner must arrange EOF or
     /// otherwise interrupt it, and keep draining incoming to unblock the queue.
+    /// This constructor detaches the reader thread. Use [`Self::new_managed`]
+    /// to retain its join handle.
     /// See `kage_jsonrpc::unix_pipe::PipeWriter` for SIGPIPE and ownership rules.
     ///
     /// # Errors
@@ -1199,12 +1263,31 @@ impl UnixConnection {
         reader: R,
         writer: std::os::fd::OwnedFd,
     ) -> std::io::Result<(Self, Incoming)> {
-        let (peer, receiver, _reader_thread) =
+        let (connection, incoming, _reader_thread) = Self::new_managed(reader, writer)?;
+        Ok((connection, incoming))
+    }
+
+    /// Start a connection and return its reader thread for explicit joining.
+    ///
+    /// Shutdown does not interrupt an arbitrary reader or a full inbound queue.
+    /// The owner must arrange EOF or interrupt the supplied reader independently,
+    /// and drain or drop incoming before joining. Joining can otherwise block
+    /// indefinitely. The writer has the same ownership and SIGPIPE requirements
+    /// as [`Self::new`]. Dropping the join handle detaches the thread.
+    ///
+    /// # Errors
+    /// Returns an error if the descriptor is unsuitable or cannot be configured.
+    pub fn new_managed<R: BufRead + Send + 'static>(
+        reader: R,
+        writer: std::os::fd::OwnedFd,
+    ) -> std::io::Result<(Self, Incoming, std::thread::JoinHandle<()>)> {
+        let (peer, receiver, reader_thread) =
             kage_jsonrpc::unix_peer::connect_ordered(reader, writer)?;
         Ok((
             Self {
                 peer: peer.clone(),
                 initialized: false,
+                initialize_attempted: false,
                 can_load: false,
                 can_resume: false,
                 active_prompts: Arc::new(Mutex::new(HashSet::new())),
@@ -1213,6 +1296,7 @@ impl UnixConnection {
                 peer: IncomingPeer::Unix(peer),
                 receiver,
             },
+            reader_thread,
         ))
     }
 
@@ -1231,7 +1315,9 @@ impl UnixConnection {
 
     /// Initialize with one absolute deadline covering dispatch and response.
     /// Discard the connection on failure since the agent may have initialized.
-    /// A returned barrier must be handled before publishing completion.
+    /// A returned barrier must be handled before publishing completion. Only one
+    /// valid-version attempt is allowed, even if dispatch fails before writing.
+    /// An invalid local version does not count as an attempt.
     pub fn initialize(
         &mut self,
         request: &InitializeRequest,
@@ -1241,7 +1327,10 @@ impl UnixConnection {
         Result<InitializeResponse, RpcError>,
         Option<ResponseBarrier>,
     ) {
-        if self.initialized || request.protocol_version != PROTOCOL_VERSION {
+        if self.initialize_attempted
+            || self.initialized
+            || request.protocol_version != PROTOCOL_VERSION
+        {
             return (
                 Err(RpcError::internal(
                     "invalid initialize state or protocol version",
@@ -1249,6 +1338,7 @@ impl UnixConnection {
                 None,
             );
         }
+        self.initialize_attempted = true;
         let (result, barrier) = self.call("initialize", request, deadline, cancel);
         let result: Result<InitializeResponse, RpcError> =
             result
@@ -1434,6 +1524,68 @@ mod unix_tests {
         (conn, incoming, BufReader::new(agent_reader), agent_writer)
     }
 
+    #[test]
+    fn managed_reader_needs_queue_release_and_independent_eof() {
+        let (_agent_reader, client_writer) = std::io::pipe().unwrap();
+        let (client_reader, mut agent_writer) = std::io::pipe().unwrap();
+        let (conn, incoming, reader) =
+            UnixConnection::new_managed(BufReader::new(client_reader), client_writer.into())
+                .unwrap();
+        for n in 0..9 {
+            writeln!(
+                agent_writer,
+                "{}",
+                json!({"jsonrpc":"2.0", "method":"event", "params":n})
+            )
+            .unwrap();
+        }
+        conn.shutdown();
+        let (done, result) = mpsc::channel();
+        let joiner = thread::spawn(move || done.send(reader.join()).unwrap());
+        assert!(result.recv_timeout(Duration::from_millis(50)).is_err());
+        for _ in 0..9 {
+            assert!(matches!(
+                incoming.recv_timeout(Duration::from_secs(2)).unwrap(),
+                Message::Notification { .. }
+            ));
+        }
+        assert!(result.recv_timeout(Duration::from_millis(50)).is_err());
+        drop(agent_writer);
+        result
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        joiner.join().unwrap();
+    }
+
+    #[test]
+    fn managed_reader_joins_when_full_queue_receiver_is_dropped() {
+        let (_agent_reader, client_writer) = std::io::pipe().unwrap();
+        let (client_reader, mut agent_writer) = std::io::pipe().unwrap();
+        let (conn, incoming, reader) =
+            UnixConnection::new_managed(BufReader::new(client_reader), client_writer.into())
+                .unwrap();
+        for _ in 0..9 {
+            writeln!(
+                agent_writer,
+                "{}",
+                json!({"jsonrpc":"2.0", "method":"event"})
+            )
+            .unwrap();
+        }
+        drop(agent_writer);
+        conn.shutdown();
+        let (done, result) = mpsc::channel();
+        let joiner = thread::spawn(move || done.send(reader.join()).unwrap());
+        assert!(result.recv_timeout(Duration::from_millis(50)).is_err());
+        drop(incoming);
+        result
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        joiner.join().unwrap();
+    }
+
     fn read(reader: &mut BufReader<std::io::PipeReader>) -> Value {
         let mut line = String::new();
         assert_ne!(reader.read_line(&mut line).unwrap(), 0);
@@ -1451,6 +1603,96 @@ mod unix_tests {
             prompt: vec![ContentBlock::text(text)],
             delivery: None,
         }
+    }
+
+    #[test]
+    fn initialize_is_single_attempt_after_valid_version() {
+        for outcome in ["timeout", "error", "decode", "malformed", "success"] {
+            let (mut conn, incoming, mut reader, mut writer) = fixture();
+            let (done, wait) = mpsc::channel();
+            let server = thread::spawn(move || {
+                let request = read(&mut reader);
+                assert_eq!(request["method"], "initialize");
+                assert_eq!(request["params"]["protocolVersion"], PROTOCOL_VERSION);
+                let response = match outcome {
+                    "timeout" => None,
+                    "error" => Some(
+                        json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32001,"message":"failed"}}),
+                    ),
+                    "decode" => Some(json!({"jsonrpc":"2.0","id":request["id"],"result":{}})),
+                    "malformed" => Some(json!({"jsonrpc":"2.0","id":request["id"]})),
+                    _ => Some(
+                        json!({"jsonrpc":"2.0","id":request["id"],"result":{"protocolVersion":1,"agentCapabilities":{}}}),
+                    ),
+                };
+                if let Some(response) = response {
+                    writeln!(writer, "{response}").unwrap();
+                }
+                wait.recv_timeout(Duration::from_secs(3)).unwrap();
+                let mut extra = String::new();
+                reader.read_to_string(&mut extra).unwrap();
+                assert!(extra.is_empty(), "unexpected second request: {extra}");
+            });
+            let mut request = InitializeRequest {
+                protocol_version: PROTOCOL_VERSION + 1,
+                client_capabilities: ClientCapabilities::default(),
+                client_info: None,
+            };
+            let (result, barrier) = conn.initialize(&request, deadline(), None);
+            assert!(result.is_err());
+            assert!(barrier.is_none());
+            request.protocol_version = PROTOCOL_VERSION;
+            let (result, barrier) = conn.initialize(
+                &request,
+                Some(Instant::now() + Duration::from_millis(500)),
+                None,
+            );
+            assert_eq!(result.is_ok(), outcome == "success", "{outcome}");
+            assert_eq!(
+                barrier.is_some(),
+                matches!(outcome, "error" | "decode" | "success")
+            );
+            let (result, barrier) = conn.initialize(&request, deadline(), None);
+            assert!(
+                result
+                    .unwrap_err()
+                    .message
+                    .contains("invalid initialize state")
+            );
+            assert!(barrier.is_none());
+            conn.shutdown();
+            drop(incoming);
+            drop(conn);
+            done.send(()).unwrap();
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn cancelled_before_initialize_write_still_consumes_attempt() {
+        let (mut conn, _incoming, mut reader, _writer) = fixture();
+        let request = InitializeRequest {
+            protocol_version: PROTOCOL_VERSION,
+            client_capabilities: ClientCapabilities::default(),
+            client_info: None,
+        };
+        let flag = CancelFlag::default();
+        flag.cancel();
+        let (result, barrier) = conn.initialize(&request, deadline(), Some(&flag));
+        assert_eq!(result.unwrap_err().code, -32800);
+        assert!(barrier.is_none());
+        let (result, barrier) = conn.initialize(&request, deadline(), None);
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("invalid initialize state")
+        );
+        assert!(barrier.is_none());
+        conn.shutdown();
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        assert!(bytes.is_empty());
     }
 
     #[test]

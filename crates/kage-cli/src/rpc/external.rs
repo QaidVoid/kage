@@ -1,12 +1,13 @@
 //! Host-owned external ACP sessions.
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod unix {
 
     use std::collections::HashMap;
     use std::io::{self, BufReader, Read};
-    use std::os::unix::process::CommandExt;
-    use std::process::{Child, Command, Stdio};
+    use std::process::{Command, Stdio};
+
+    use kage_core::reaper::{ProtectedChild, spawn_protected};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
     use std::thread;
@@ -27,7 +28,9 @@ mod unix {
     const ATTACHMENT_BUDGET: usize = 2 * 1024 * 1024;
     const MAX_ATTACHMENTS: usize = 32;
     // Includes the active prompt and all registered tickets, until each is dropped.
-    const MAX_PROMPTS: usize = 32;
+    // Stay below the 32 ACP workers per connection so one session cannot occupy all
+    // of them. Multiple external sessions can still exhaust the shared workers.
+    const MAX_PROMPTS: usize = 16;
 
     // Account for value nodes and string storage, not just wire bytes.
     fn value_size(value: &Value) -> usize {
@@ -338,7 +341,7 @@ mod unix {
         prompt_gate: Mutex<()>,
         admitted: Arc<AtomicUsize>,
         unannounced: Arc<AtomicUsize>,
-        child: Arc<Mutex<Option<Child>>>,
+        child: Arc<Mutex<Option<ProtectedChild>>>,
         capabilities: PromptCapabilities,
         state: Arc<Mutex<State>>,
     }
@@ -353,25 +356,23 @@ mod unix {
             peer: AgentPeer,
         ) -> Result<Arc<Self>, RpcError> {
             let mut command = Command::new(&config.command);
-            command.process_group(0);
-            let mut child = command
+            command
                 .args(&config.args)
                 .envs(&config.env)
                 .current_dir(cwd)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .map_err(|e| {
-                    RpcError::internal(format!("cannot start external agent {name:?}: {e}"))
-                })?;
-            let stdout = child.stdout.take().expect("piped stdout");
-            let stdin = child.stdin.take().expect("piped stdin");
+                .stderr(Stdio::null());
+            let mut child = spawn_protected(&mut command).map_err(|e| {
+                RpcError::internal(format!("cannot start external agent {name:?}: {e}"))
+            })?;
+            let stdout = child.take_stdout().expect("piped stdout");
+            let stdin = child.take_stdin().expect("piped stdin");
             if let Err(error) = nix::fcntl::fcntl(
                 &stdout,
                 nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
             ) {
-                kill_group(&mut child);
+                let _ = child.finish(nix::libc::SIGKILL);
                 return Err(RpcError::internal(format!(
                     "cannot configure external reader: {error}"
                 )));
@@ -385,11 +386,11 @@ mod unix {
                 #[cfg(test)]
                 done: Some(reader_done_tx),
             };
-            let (mut connection, incoming) =
-                match UnixConnection::new(BufReader::new(reader), stdin.into()) {
+            let (mut connection, incoming, reader_thread) =
+                match UnixConnection::new_managed(BufReader::new(reader), stdin.into()) {
                     Ok(connection) => connection,
                     Err(error) => {
-                        kill_group(&mut child);
+                        let _ = child.finish(nix::libc::SIGKILL);
                         return Err(RpcError::internal(format!(
                             "cannot connect external agent: {error}"
                         )));
@@ -417,6 +418,7 @@ mod unix {
                 process,
                 Arc::clone(&reader_stopped),
                 connection.shutdown_handle(),
+                reader_thread,
             );
             let result = initialize(&mut connection, &state, cwd, &session_id);
             let capabilities = match result {
@@ -908,9 +910,10 @@ mod unix {
         incoming: kage_acp::connection::Incoming,
         sink: Arc<Mutex<State>>,
         external_id: String,
-        process: Arc<Mutex<Option<Child>>>,
+        process: Arc<Mutex<Option<ProtectedChild>>>,
         reader_stopped: Arc<AtomicBool>,
         shutdown: UnixShutdown,
+        reader_thread: thread::JoinHandle<()>,
     ) {
         thread::spawn(move || {
             while let Ok(message) = incoming.recv() {
@@ -949,35 +952,39 @@ mod unix {
                     Message::Notification { .. } => {}
                 }
             }
+            drop(incoming);
             let abort = {
                 let mut state = lock(&sink);
                 state.close();
-                #[cfg(test)]
-                {
-                    state.reader_done = true;
-                }
                 state.active.as_ref().map(|active| active.abort.clone())
             };
             reader_stopped.store(true, Ordering::Release);
+            shutdown.signal_shutdown();
             if let Some(abort) = abort {
                 abort.cancel();
             }
             shutdown.shutdown();
             cleanup(&process);
+            let _ = reader_thread.join();
+            #[cfg(test)]
+            {
+                lock(&sink).reader_done = true;
+            }
         });
     }
 
-    fn kill_group(child: &mut Child) {
-        let pgid = nix::unistd::Pid::from_raw(child.id().cast_signed());
-        if nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL).is_err() {
-            let _ = child.kill();
-        }
-        let _ = child.wait();
+    // This synchronous cleanup is retained only for dormant external sessions.
+    // It must move to bounded workers before the feature can be enabled.
+    fn cleanup(child: &Mutex<Option<ProtectedChild>>) {
+        cleanup_with_signal(child, nix::libc::SIGKILL);
     }
 
-    fn cleanup(child: &Mutex<Option<Child>>) {
-        if let Some(mut child) = lock(child).take() {
-            kill_group(&mut child);
+    fn cleanup_with_signal(child: &Mutex<Option<ProtectedChild>>, signal: i32) {
+        let mut child = lock(child);
+        if let Some(process) = child.as_mut()
+            && process.finish(signal).is_ok()
+        {
+            *child = None;
         }
     }
 
@@ -1138,6 +1145,37 @@ mod unix {
         use std::collections::BTreeMap;
         use std::io::{BufRead, BufReader};
         use std::os::unix::net::UnixStream;
+
+        #[test]
+        fn failed_cleanup_and_unwind_retain_process_ownership() {
+            let process = spawn_protected(Command::new("sleep").arg("30")).unwrap();
+            let pid = process.id();
+            let child = Mutex::new(Some(process));
+            cleanup_with_signal(&child, 0);
+            assert_eq!(lock(&child).as_ref().unwrap().id(), pid);
+            let result = std::panic::catch_unwind(|| {
+                let _guard = lock(&child);
+                panic!("injected cleanup panic");
+            });
+            assert!(result.is_err());
+            assert_eq!(lock(&child).as_ref().unwrap().id(), pid);
+            cleanup(&child);
+            assert!(lock(&child).is_none());
+        }
+
+        #[test]
+        fn startup_unwind_quarantines_the_process() {
+            let pid = std::sync::atomic::AtomicU32::new(0);
+            let result = std::panic::catch_unwind(|| {
+                let child = spawn_protected(Command::new("sleep").arg("30")).unwrap();
+                pid.store(child.id(), Ordering::Relaxed);
+                panic!("injected startup panic");
+            });
+            assert!(result.is_err());
+            let mut child =
+                kage_core::reaper::recover_protected(pid.load(Ordering::Relaxed)).unwrap();
+            child.finish(nix::libc::SIGKILL).unwrap();
+        }
 
         fn response_barrier() -> (ResponseBarrier, kage_jsonrpc::BarrierMarker) {
             use std::io::Write;
@@ -2757,6 +2795,110 @@ for line in sys.stdin:
         }
 
         #[test]
+        fn receive_exit_drops_full_queue_and_joins_reader() {
+            struct QueuedReader {
+                count: usize,
+                queued: mpsc::Sender<()>,
+            }
+            impl Read for QueuedReader {
+                fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                    if self.count == 9 {
+                        return Ok(0);
+                    }
+                    let line =
+                        b"{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{}}\n";
+                    buffer[..line.len()].copy_from_slice(line);
+                    self.count += 1;
+                    if self.count == 9 {
+                        self.queued.send(()).unwrap();
+                    }
+                    Ok(line.len())
+                }
+            }
+
+            let (queued_tx, queued_rx) = mpsc::channel();
+            let (read_end, write_end) = std::io::pipe().unwrap();
+            let (connection, incoming, reader_thread) = UnixConnection::new_managed(
+                BufReader::new(QueuedReader {
+                    count: 0,
+                    queued: queued_tx,
+                }),
+                write_end.into(),
+            )
+            .unwrap();
+            queued_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            let state = Arc::new(Mutex::new(State {
+                upstream: None,
+                early: Vec::new(),
+                bytes: Arc::new(AtomicUsize::new(0)),
+                attachments: HashMap::new(),
+                active: None,
+                closed: true,
+                reader_done: false,
+            }));
+            receive_updates(
+                incoming,
+                Arc::clone(&state),
+                String::new(),
+                Arc::new(Mutex::new(None)),
+                Arc::new(AtomicBool::new(false)),
+                connection.shutdown_handle(),
+                reader_thread,
+            );
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !lock(&state).reader_done {
+                assert!(Instant::now() < deadline, "reader was not joined");
+                thread::sleep(Duration::from_millis(2));
+            }
+            drop(read_end);
+        }
+
+        #[test]
+        fn receive_exit_joins_panicked_reader() {
+            struct PanickingReader;
+            impl Read for PanickingReader {
+                fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                    panic!("reader failure");
+                }
+            }
+
+            let (read_end, write_end) = std::io::pipe().unwrap();
+            let (connection, incoming, reader_thread) =
+                UnixConnection::new_managed(BufReader::new(PanickingReader), write_end.into())
+                    .unwrap();
+            let state = Arc::new(Mutex::new(State {
+                upstream: None,
+                early: Vec::new(),
+                bytes: Arc::new(AtomicUsize::new(0)),
+                attachments: HashMap::new(),
+                active: None,
+                closed: false,
+                reader_done: false,
+            }));
+            receive_updates(
+                incoming,
+                Arc::clone(&state),
+                String::new(),
+                Arc::new(Mutex::new(None)),
+                Arc::new(AtomicBool::new(false)),
+                connection.shutdown_handle(),
+                reader_thread,
+            );
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let state = lock(&state);
+                if state.reader_done {
+                    assert!(state.closed);
+                    break;
+                }
+                drop(state);
+                assert!(Instant::now() < deadline, "panicked reader was not joined");
+                thread::sleep(Duration::from_millis(2));
+            }
+            drop(read_end);
+        }
+
+        #[test]
         fn reader_shutdown_does_not_require_writer_eof() {
             let (reader, writer) = std::io::pipe().unwrap();
             nix::fcntl::fcntl(
@@ -3090,10 +3232,10 @@ for line in sys.stdin:
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub(super) use unix::{External, PromptTicket};
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 mod unsupported {
     use kage_acp::acp::{PromptRequest, PromptResponse};
     use kage_acp::agent::{AgentPeer, OpenReceipt};
@@ -3112,10 +3254,10 @@ mod unsupported {
             _: u64,
             _: AgentPeer,
         ) -> Result<Arc<Self>, RpcError> {
-            Err(RpcError::internal("external ACP requires Unix"))
+            Err(RpcError::internal("external ACP requires Linux"))
         }
         pub(crate) fn attach(&self, _: u64, _: AgentPeer) -> Result<(), RpcError> {
-            Err(RpcError::internal("external ACP requires Unix"))
+            Err(RpcError::internal("external ACP requires Linux"))
         }
         /// Attach and create a receipt for the attachment.
         pub(crate) fn attach_with_receipt(
@@ -3123,11 +3265,11 @@ mod unsupported {
             _: u64,
             _: AgentPeer,
         ) -> Result<OpenReceipt, RpcError> {
-            Err(RpcError::internal("external ACP requires Unix"))
+            Err(RpcError::internal("external ACP requires Linux"))
         }
         /// Create a receipt for an existing attachment.
         pub(crate) fn open_receipt(self: &Arc<Self>, _: u64) -> Result<OpenReceipt, RpcError> {
-            Err(RpcError::internal("external ACP requires Unix"))
+            Err(RpcError::internal("external ACP requires Linux"))
         }
         pub(crate) fn announce(&self, _: u64) {}
         pub(crate) fn detach(&self, _: u64) -> bool {
@@ -3138,17 +3280,17 @@ mod unsupported {
         }
         pub(crate) fn finish_detach(&self, _: bool, _: Option<CancelAction>) {}
         pub(crate) fn register_prompt(&self, _: u64) -> Result<PromptTicket, RpcError> {
-            Err(RpcError::internal("external ACP requires Unix"))
+            Err(RpcError::internal("external ACP requires Linux"))
         }
         pub(crate) fn prompt(
             &self,
             _: PromptTicket,
             _: PromptRequest,
         ) -> Result<PromptResponse, RpcError> {
-            Err(RpcError::internal("external ACP requires Unix"))
+            Err(RpcError::internal("external ACP requires Linux"))
         }
         pub(crate) fn cancel(&self, _: u64) {}
     }
 }
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 pub(super) use unsupported::{External, PromptTicket};

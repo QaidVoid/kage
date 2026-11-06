@@ -187,10 +187,16 @@ fn translate(update: &SessionUpdate) -> Option<ProviderEvent> {
 }
 
 fn option_id(req: &RequestPermissionRequest, kind: PermissionOptionKind) -> Option<String> {
-    req.options
+    let selected = req
+        .options
         .iter()
-        .find(|option: &&PermissionOption| option.kind == kind)
-        .map(|option| option.option_id.clone())
+        .find(|option: &&PermissionOption| option.kind == kind)?;
+    (req.options
+        .iter()
+        .filter(|option| option.option_id == selected.option_id)
+        .count()
+        == 1)
+        .then(|| selected.option_id.clone())
 }
 
 /// Resolve an upstream `session/request_permission` into the JSON-RPC
@@ -670,6 +676,35 @@ mod tests {
                 permission_result(Some(&allow), &req),
                 serde_json::json!({"outcome": {"outcome": "cancelled"}})
             );
+        }
+    }
+
+    #[test]
+    fn ambiguous_permission_ids_are_cancelled() {
+        let allow: PermissionResolver = Arc::new(|_| PermissionDecision::Allow);
+        let session: PermissionResolver = Arc::new(|_| PermissionDecision::AllowSession);
+        let deny: PermissionResolver = Arc::new(|_| PermissionDecision::Deny(None));
+        for (kind, resolvers) in [
+            ("allow_once", vec![Some(&allow), Some(&session)]),
+            ("reject_once", vec![None, Some(&deny)]),
+        ] {
+            for other_kind in ["allow_always", "future_kind"] {
+                let req: RequestPermissionRequest = serde_json::from_value(serde_json::json!({
+                    "sessionId": "s1",
+                    "toolCall": {"toolCallId": "call-1"},
+                    "options": [
+                        {"optionId": "duplicate", "name": "Once", "kind": kind},
+                        {"optionId": "duplicate", "name": "Other", "kind": other_kind}
+                    ]
+                }))
+                .unwrap();
+                for resolver in &resolvers {
+                    assert_eq!(
+                        permission_result(*resolver, &req),
+                        serde_json::json!({"outcome": {"outcome": "cancelled"}})
+                    );
+                }
+            }
         }
     }
 

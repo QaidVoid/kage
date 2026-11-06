@@ -37,6 +37,7 @@ use kage_core::CancelFlag;
 use mlua::Lua;
 
 use crate::error::PluginError;
+use crate::invocation::{Entered, Invocation};
 use crate::tasks::Task;
 use crate::{schedule, tasks, watchdog};
 
@@ -185,7 +186,13 @@ impl LuaHost {
         Ok((rx, abandoned))
     }
 
+    /// Queue `job` to run with the invocation in effect on this thread.
     fn enqueue(&self, job: Job) -> Result<(), PluginError> {
+        let invocation = Invocation::current();
+        let job: Job = Box::new(move |lua, state| {
+            let _entered = Entered::new(invocation);
+            job(lua, state);
+        });
         let state = &self.inner.state;
         state.in_flight.fetch_add(1, Ordering::SeqCst);
         if self.inner.tx.send(Msg::Job(job)).is_err() {

@@ -68,6 +68,7 @@ pub(crate) fn run_resume(
             &workdir,
             &provisional_model,
             &replay.header.system_prompt,
+            &kage_core::environment::Environment::inherit(),
         ) {
             Ok(rt) => rt,
             Err(e) => {

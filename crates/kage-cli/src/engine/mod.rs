@@ -40,6 +40,7 @@ use std::time::{Duration, Instant};
 use kage_core::agent_report::AgentLimit;
 use kage_core::agents::AgentDefs;
 use kage_core::config::Config;
+use kage_core::environment::Environment;
 use kage_core::options::{OptionStore, OptionValue};
 use kage_core::protocol::{
     ASK_USER_QUESTION_TOOL, Command, CommandKind, Delivery, EXIT_PLAN_TOOL, HostEvent, NoticeLevel,
@@ -556,6 +557,9 @@ struct Session {
     note: Option<String>,
     /// Read at spawn, while the context is out with a run.
     confine_paths: bool,
+    /// The environment the session's processes start with, read at
+    /// spawn like `confine_paths`.
+    env: Environment,
     /// Whether the session delegates repeated work through `swarm`.
     /// Drives the workflow block injected once per state change.
     swarm_mode: bool,
@@ -744,6 +748,7 @@ impl Dispatcher {
         let path = recorder.as_ref().map(|r| r.path().to_path_buf());
         let workdir = cx.workdir.clone();
         let confine_paths = cx.confine_paths;
+        let env = cx.env.clone();
         let title_pending = title && !has_reply(&cx);
         let starting_mcp = mcp
             .as_ref()
@@ -789,6 +794,7 @@ impl Dispatcher {
                 limit: None,
                 note: None,
                 confine_paths,
+                env,
                 swarm_mode: false,
             },
         );
@@ -1856,6 +1862,8 @@ impl Dispatcher {
             .resolve(model)
             .map(|resolved| (Arc::clone(resolved.provider), resolved.model.clone()));
         let history = cx.history.clone();
+        let workdir = cx.workdir.clone();
+        let env = cx.env.clone();
         thread::spawn(move || {
             let verdict = match resolved {
                 Ok((provider, bare_model)) => crate::goal::judge(
@@ -1863,6 +1871,8 @@ impl Dispatcher {
                     &bare_model,
                     &goal,
                     &history,
+                    &workdir,
+                    &env,
                     &CancelFlag::new(),
                 ),
                 Err(e) => crate::goal::Verdict::Unknown(e.to_string()),
@@ -1889,6 +1899,8 @@ impl Dispatcher {
                 .unwrap_or_default()
         };
         let (user, reply) = (first_text(Role::User), first_text(Role::Assistant));
+        let workdir = cx.workdir.clone();
+        let env = cx.env.clone();
         let tx = self.tx.clone();
         thread::spawn(move || {
             let title = crate::title::generate(
@@ -1896,6 +1908,8 @@ impl Dispatcher {
                 &bare_model,
                 &user,
                 &reply,
+                &workdir,
+                &env,
                 &CancelFlag::new(),
             );
             let _ = tx.send(Input::Title { session: id, title });
@@ -2165,6 +2179,7 @@ fn clone_shallow(cx: &AgentContext) -> AgentContext {
         produces: cx.produces,
         accepts: cx.accepts,
         confine_paths: cx.confine_paths,
+        env: cx.env.clone(),
         budget: cx.budget,
         session: None,
     }

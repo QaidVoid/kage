@@ -11,6 +11,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use kage_core::environment::Environment;
 use kage_core::{CancelFlag, Content, Message, Role};
 use kage_provider::{Provider, ProviderEvent, StreamRequest};
 
@@ -27,19 +28,30 @@ const TITLE_SYSTEM: &str = "You write terse conversation titles. Reply with ONLY
 /// `user_text` -> `assistant_text`. A blank `assistant_text`, as when the
 /// first reply only calls tools, is left out of the request. Tries the
 /// model; on any failure returns the heuristic. Never returns an empty
-/// string.
+/// string. The request carries `workdir` and `env` like a normal turn,
+/// since the ACP client launches the model subprocess with them.
 #[must_use]
 pub(crate) fn generate(
     provider: &dyn Provider,
     model: &str,
     user_text: &str,
     assistant_text: &str,
+    workdir: &std::path::Path,
+    env: &Environment,
     cancel: &CancelFlag,
 ) -> String {
-    model_title(provider, model, user_text, assistant_text, cancel)
-        .map(|t| sanitize(&t))
-        .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| heuristic(user_text))
+    model_title(
+        provider,
+        model,
+        user_text,
+        assistant_text,
+        workdir,
+        env,
+        cancel,
+    )
+    .map(|t| sanitize(&t))
+    .filter(|t| !t.is_empty())
+    .unwrap_or_else(|| heuristic(user_text))
 }
 
 /// Heuristic fallback: the first non-empty line of the user's first
@@ -76,6 +88,8 @@ fn model_title(
     model: &str,
     user_text: &str,
     assistant_text: &str,
+    workdir: &std::path::Path,
+    env: &Environment,
     cancel: &CancelFlag,
 ) -> Option<String> {
     let mut prompt = format!("User asked:\n{}\n\n", clip(user_text, 800));
@@ -96,6 +110,8 @@ fn model_title(
         ))],
     );
     req.system = Some(TITLE_SYSTEM.to_owned());
+    req.workdir = Some(workdir.to_path_buf());
+    req.env = env.clone();
     let stream = provider.stream(req, cancel).ok()?;
     let mut text = String::new();
     for event in stream {
@@ -160,6 +176,8 @@ mod tests {
             "mock:model",
             "Add a retry to the HTTP client",
             "Sure, here is the patch...",
+            std::path::Path::new("."),
+            &Environment::inherit(),
             &cancel,
         );
         assert_eq!(title, "Add a retry to the HTTP client");
@@ -178,12 +196,57 @@ mod tests {
                 usage: TokenUsage::default(),
             }),
         ]);
-        let title = generate(&provider, "m", "fix it", " \n", &CancelFlag::new());
+        let title = generate(
+            &provider,
+            "m",
+            "fix it",
+            " \n",
+            std::path::Path::new("."),
+            &Environment::inherit(),
+            &CancelFlag::new(),
+        );
         assert_eq!(title, "Fix the parser");
         let requests = provider.requests();
         let Content::Text { text } = &requests[0].messages[0].content[0] else {
             panic!("text prompt expected");
         };
         assert_eq!(text, "User asked:\nfix it\n\nTitle:");
+    }
+
+    /// The title request reaches the ACP client with the session's
+    /// workdir and environment, which its subprocess launches with.
+    #[test]
+    fn the_title_request_carries_the_session_context() {
+        use kage_core::environment::Environment;
+        use kage_core::{StopReason, TokenUsage};
+        use kage_provider::testing::MockProvider;
+        let provider = MockProvider::replaying(vec![
+            Ok(ProviderEvent::TextDelta {
+                delta: "Fix the parser".into(),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        ]);
+        let title = generate(
+            &provider,
+            "m",
+            "fix it",
+            "done",
+            std::path::Path::new("/work/project"),
+            &Environment::captured(vec![("CLIENT".into(), "editor".into())]),
+            &CancelFlag::new(),
+        );
+        assert_eq!(title, "Fix the parser");
+        let req = provider.last_request().unwrap();
+        assert_eq!(
+            req.workdir.as_deref(),
+            Some(std::path::Path::new("/work/project"))
+        );
+        assert_eq!(
+            req.env.var("CLIENT").as_deref(),
+            Some(std::ffi::OsStr::new("editor"))
+        );
     }
 }

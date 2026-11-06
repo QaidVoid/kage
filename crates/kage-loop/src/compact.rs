@@ -34,6 +34,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use kage_core::environment::Environment;
 use kage_core::{CancelFlag, Content, LoopError, LoopEvent, Message, MessageId, Role};
 use kage_provider::{Provider, ProviderEvent, StreamRequest};
 
@@ -215,6 +216,8 @@ fn run_compaction<F: FnMut(LoopEvent)>(
             &prep.model,
             std::mem::take(&mut prep.prompt),
             &prep.instruction,
+            &cx.workdir,
+            &cx.env,
             cancel,
         )
         .map_err(wrap_compaction_error)?
@@ -561,11 +564,21 @@ fn summarize_with_retry(
     model: &str,
     prompt: String,
     instruction: &str,
+    workdir: &std::path::Path,
+    env: &Environment,
     cancel: &CancelFlag,
 ) -> Result<String, LoopError> {
     let mut prompt = prompt;
     for attempt in 0..SUMMARIZE_ATTEMPTS {
-        match summarize(provider, model, prompt.clone(), instruction, cancel) {
+        match summarize(
+            provider,
+            model,
+            prompt.clone(),
+            instruction,
+            workdir,
+            env,
+            cancel,
+        ) {
             Ok(text) => return Ok(text),
             Err(err) => {
                 if attempt + 1 == SUMMARIZE_ATTEMPTS {
@@ -623,12 +636,16 @@ fn shrink_transcript_prompt(prompt: &str) -> Option<String> {
 }
 
 /// One summarizer model call: the framed transcript as the single user
-/// message, the instruction as the system prompt.
+/// message, the instruction as the system prompt. The request carries
+/// `workdir` and `env` like a normal turn, since the ACP client
+/// launches the model subprocess with them.
 fn summarize(
     provider: &dyn Provider,
     model: &str,
     prompt: String,
     instruction: &str,
+    workdir: &std::path::Path,
+    env: &Environment,
     cancel: &CancelFlag,
 ) -> Result<String, LoopError> {
     let payload = vec![Arc::new(Message::new(
@@ -638,6 +655,8 @@ fn summarize(
     ))];
     let mut req = StreamRequest::new(model, payload);
     req.system = Some(instruction.to_owned());
+    req.workdir = Some(workdir.to_path_buf());
+    req.env = env.clone();
     let stream = provider
         .stream(req, cancel)
         .map_err(|e| LoopError::Provider {
@@ -1655,6 +1674,41 @@ mod tests {
             second.contains("[the oldest part of the transcript was dropped to fit the request]")
         );
         assert!(second.contains("</conversation>"), "the frame must survive");
+    }
+
+    /// Every summarizer attempt, including each retry after an
+    /// overflow rejection, reaches the ACP client with the session's
+    /// workdir and environment, which its subprocess launches with.
+    #[test]
+    fn every_summarizer_attempt_carries_the_session_context() {
+        let provider = MockProvider::sequence(vec![
+            vec![Err(overflow_rejection())],
+            vec![Err(overflow_rejection())],
+            summary_script(),
+        ]);
+        let cancel = CancelFlag::new();
+        let mut hooks = NoopHooks;
+        let mut cx = loaded_context(150_000, 40);
+        cx.context_window = 200_000;
+        cx.workdir = std::path::PathBuf::from("/work/project");
+        cx.env =
+            kage_core::environment::Environment::captured(vec![("CLIENT".into(), "editor".into())]);
+
+        force_compact(&mut cx, &provider, &cancel, &mut hooks, &mut |_| {}).unwrap();
+        let reqs = provider.requests();
+        assert_eq!(reqs.len(), 3, "two overflow attempts, one success");
+        for (attempt, req) in reqs.iter().enumerate() {
+            assert_eq!(
+                req.workdir.as_deref(),
+                Some(std::path::Path::new("/work/project")),
+                "attempt {attempt} carries the workdir"
+            );
+            assert_eq!(
+                req.env.var("CLIENT").as_deref(),
+                Some(std::ffi::OsStr::new("editor")),
+                "attempt {attempt} carries the environment"
+            );
+        }
     }
 
     /// A quarter that lands inside a multi-byte character must back up

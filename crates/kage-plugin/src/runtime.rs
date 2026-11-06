@@ -321,6 +321,7 @@ pub struct PluginRuntimeBuilder {
     sink: SharedHostLog,
     config: serde_json::Value,
     workdir: PathBuf,
+    env: kage_core::environment::Environment,
     capabilities: BTreeMap<String, Vec<String>>,
     credential_lookup: env::CredentialLookup,
     enabled: Vec<String>,

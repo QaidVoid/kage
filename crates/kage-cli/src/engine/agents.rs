@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use crate::permissions::PermissionGate;
 use kage_core::agents::{AgentDef, Isolation};
+use kage_core::environment::Environment;
 use kage_core::protocol::{HostEvent, NoticeLevel, RunOutcome, SwarmMember, Usage};
 use kage_core::sync::lock;
 use kage_core::{CancelFlag, Content, Message, MessageId, Role, SessionId, ToolCallId, ToolOutput};
@@ -159,6 +160,7 @@ impl super::Dispatcher {
             .as_ref()
             .map_or_else(SessionId::new, |info| info.id);
         let parent_workdir = from.workdir.clone();
+        let env = from.env.clone();
         let cancel = from.cancel.child();
         let label = format!("{}: {}", spawn.agent, spawn.description);
         let tx = self.tx.clone();
@@ -170,7 +172,14 @@ impl super::Dispatcher {
             .name("kage-worktree-create".to_owned())
             .spawn(move || {
                 let worktree = crate::paths::state_root().and_then(|root| {
-                    Worktree::create(&parent_workdir, &root.join("worktrees"), id, label, &flag)
+                    Worktree::create(
+                        &parent_workdir,
+                        &root.join("worktrees"),
+                        id,
+                        label,
+                        &flag,
+                        &env,
+                    )
                 });
                 let Some(spawn) = lock(&pending).take() else {
                     return;
@@ -1239,6 +1248,7 @@ fn fork_snapshot<'a>(
 /// same values.
 struct SpawnParent<'a> {
     confine_paths: bool,
+    env: Environment,
     tools: &'a ToolRegistry,
     gate: PermissionGate,
     loop_cfg: LoopConfig,
@@ -1249,6 +1259,7 @@ struct SpawnParent<'a> {
 fn spawn_parent(session: &Session) -> SpawnParent<'_> {
     SpawnParent {
         confine_paths: session.confine_paths,
+        env: session.env.clone(),
         tools: &session.tools,
         gate: session.gate.clone(),
         loop_cfg: session.loop_cfg,
@@ -1303,6 +1314,7 @@ fn child_spec(
     } = model;
     let mut cx = AgentContext::new(model.clone(), system_prompt).with_workdir(workdir);
     cx.confine_paths = parent.confine_paths;
+    cx.env = parent.env.clone();
     cx.thinking_level = thinking;
     let (tools, missing) = agent_tools(parent.tools, def.tools.as_deref());
     let spec = SessionSpec {
@@ -1545,6 +1557,7 @@ mod tests {
         let tools = ToolRegistry::new();
         let parent = SpawnParent {
             confine_paths: true,
+            env: Environment::captured(vec![("CLIENT".into(), "editor".into())]),
             tools: &tools,
             gate: PermissionGate::new(PermissionsConfig::default()),
             loop_cfg: LoopConfig::default(),
@@ -1580,6 +1593,8 @@ mod tests {
         );
         assert!(planned.cx.confine_paths);
         assert!(live.cx.confine_paths);
+        assert_eq!(planned.cx.env, parent.env);
+        assert_eq!(live.cx.env, parent.env);
         assert_eq!(planned.tools.len(), live.tools.len());
         assert_eq!(
             planned.tools.names().collect::<Vec<_>>(),

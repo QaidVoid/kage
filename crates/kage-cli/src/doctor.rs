@@ -252,6 +252,7 @@ fn probe_mcp_server(name: &str, spec: &kage_core::config::McpServer) -> Result<u
             None,
             None,
             startup,
+            &kage_core::environment::Environment::inherit(),
         )
         .map_err(|e| e.to_string())
         .and_then(|handle| {

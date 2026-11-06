@@ -14,6 +14,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use kage_core::config::{KeybindingsConfig, PluginsConfig};
+use kage_core::environment::Environment;
 use kage_core::{Content, LoopEvent, Message, ToolOutput, sync::lock};
 use kage_loop::{CompactionPrep, Hooks, StreamRequest, TurnSummary};
 use kage_plugin::{
@@ -25,12 +26,14 @@ use serde_json::json;
 /// Construct a plugin runtime, load `*.lua` files from `plugins_dir`, and
 /// return the runtime if at least one plugin loaded successfully. Returns
 /// `Ok(None)` when the directory is missing or empty. Uses the default
-/// stderr-backed sink and never loads `init.lua`.
+/// stderr-backed sink and never loads `init.lua`. `kage.exec` starts
+/// processes with `env`.
 pub fn setup_runtime(
     plugins_dir: &Path,
     workdir: &Path,
     model: &str,
     system_prompt: &str,
+    env: &Environment,
 ) -> Result<Option<Arc<PluginRuntime>>, String> {
     // Capability grants and the load allowlist come from the same
     // layered config the rest of the host reads. Fail closed: if the
@@ -46,6 +49,7 @@ pub fn setup_runtime(
     };
     migrate_plugin_store_dir();
     let runtime = runtime_builder(plugins_cfg, workdir, model, system_prompt)
+        .env(env.clone())
         .state_dir(crate::data_root().ok().map(|r| r.join("plugin-state")))
         .build()
         .map_err(|e| format!("plugin runtime: {e}"))?;
@@ -465,9 +469,11 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
             .runtime
             .dispatch_transform("before_provider_request", payload)
             .map_err(|e| format!("before_provider_request: lua dispatch: {e}"))?;
-        let next: StreamRequest = serde_json::from_value(result).map_err(|e| {
+        let mut next: StreamRequest = serde_json::from_value(result).map_err(|e| {
             format!("before_provider_request: plugin returned invalid request: {e}")
         })?;
+        next.workdir = req.workdir.take();
+        next.env = std::mem::take(&mut req.env);
         *req = next;
         Ok(())
     }

@@ -25,6 +25,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use kage_core::config::{Config, McpConfig, McpServer, ShellConfig, ToolsConfig};
+use kage_core::environment::Environment;
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
 use kage_mcp::{McpError, McpManager};
 use kage_plugin::PluginRuntime;
@@ -171,26 +172,35 @@ pub(crate) fn spawn_and_register(
     workdir: &Path,
     runtime: Option<&PluginRuntime>,
 ) -> (McpManager, Vec<(String, McpError)>) {
-    spawn_and_register_with(tools, workdir, runtime, BTreeMap::new())
+    spawn_and_register_with(
+        tools,
+        workdir,
+        runtime,
+        BTreeMap::new(),
+        Environment::inherit(),
+    )
 }
 
 /// [`spawn_and_register`] plus `extra`, the servers an editor passed
 /// for this session. They are user level, so no trust prompt applies,
 /// and each replaces a configured or plugin server of the same name.
+/// Stdio servers start with `env`.
 pub(crate) fn spawn_and_register_with(
     tools: &mut ToolRegistry,
     workdir: &Path,
     runtime: Option<&PluginRuntime>,
     extra: BTreeMap<String, McpServer>,
+    env: Environment,
 ) -> (McpManager, Vec<(String, McpError)>) {
     let mut cfg = merged_config(workdir, runtime);
     merge_extra(&mut cfg, extra);
-    let handler = sampling_handler(&cfg);
+    let handler = sampling_handler(&cfg, workdir, &env);
     let (mut manager, mut errors) = McpManager::spawn_all_with(
         &cfg,
         vec![workdir.to_path_buf()],
         handler,
         crate::mcp_auth::token_source(),
+        env,
     );
     errors.extend(manager.register_into(tools));
     (manager, errors)
@@ -203,7 +213,7 @@ pub(crate) fn spawn_and_register_with(
 /// start surfaces as an error notice instead of a startup error.
 pub(crate) fn deferred_manager(workdir: &Path, runtime: Option<&PluginRuntime>) -> McpManager {
     let cfg = merged_config(workdir, runtime);
-    let handler = sampling_handler(&cfg);
+    let handler = sampling_handler(&cfg, workdir, &Environment::inherit());
     McpManager::unstarted(
         &cfg,
         vec![workdir.to_path_buf()],
@@ -224,8 +234,14 @@ fn merge_extra(cfg: &mut McpConfig, extra: BTreeMap<String, McpServer>) {
 
 /// Build the server-request handler when `[mcp] allow_sampling` is set,
 /// backed by the host's default model. Returns `None` when sampling is
-/// off, so servers never see a `sampling` capability advertised.
-fn sampling_handler(cfg: &McpConfig) -> Option<std::sync::Arc<dyn kage_mcp::ServerRequestHandler>> {
+/// off, so servers never see a `sampling` capability advertised. The
+/// handler answers with the session's `workdir` and `env`, since the
+/// ACP client launches the model subprocess with them.
+fn sampling_handler(
+    cfg: &McpConfig,
+    workdir: &Path,
+    env: &Environment,
+) -> Option<std::sync::Arc<dyn kage_mcp::ServerRequestHandler>> {
     if !cfg.allow_sampling {
         return None;
     }
@@ -237,7 +253,12 @@ fn sampling_handler(cfg: &McpConfig) -> Option<std::sync::Arc<dyn kage_mcp::Serv
         }
     };
     let model = crate::default_model(&registry);
-    Some(std::sync::Arc::new(SamplingHandler { registry, model }))
+    Some(std::sync::Arc::new(SamplingHandler {
+        registry,
+        model,
+        workdir: workdir.to_path_buf(),
+        env: env.clone(),
+    }))
 }
 
 /// Answers `sampling/createMessage` by running the request through the
@@ -245,6 +266,8 @@ fn sampling_handler(cfg: &McpConfig) -> Option<std::sync::Arc<dyn kage_mcp::Serv
 struct SamplingHandler {
     registry: kage_provider::ProviderRegistry,
     model: String,
+    workdir: PathBuf,
+    env: Environment,
 }
 
 impl kage_mcp::ServerRequestHandler for SamplingHandler {
@@ -306,6 +329,8 @@ impl SamplingHandler {
             .get("maxTokens")
             .and_then(serde_json::Value::as_u64)
             .and_then(|n| u32::try_from(n).ok());
+        req.workdir = Some(self.workdir.clone());
+        req.env = self.env.clone();
 
         let cancel = CancelFlag::new();
         let stream = resolved
@@ -336,8 +361,10 @@ impl SamplingHandler {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
     use std::sync::Arc;
 
+    use kage_core::environment::Environment;
     use kage_mcp::ServerRequestHandler;
     use kage_provider::testing::MockProvider;
     use kage_provider::{ProviderEvent, ProviderRegistry, StopReason};
@@ -508,10 +535,12 @@ mod tests {
                 usage: kage_core::TokenUsage::default(),
             }),
         ]);
-        let registry = ProviderRegistry::new().with(Arc::new(mock));
+        let registry = ProviderRegistry::new().with(Arc::new(mock.clone()));
         let handler = SamplingHandler {
             registry,
             model: "mock:m".to_owned(),
+            workdir: PathBuf::from("/work/project"),
+            env: Environment::captured(vec![("CLIENT".into(), "editor".into())]),
         };
 
         let params = serde_json::json!({
@@ -528,6 +557,15 @@ mod tests {
         assert_eq!(result["role"], "assistant");
         assert_eq!(result["content"]["text"], "pong");
         assert_eq!(result["model"], "mock:m");
+        let req = mock.last_request().unwrap();
+        assert_eq!(
+            req.workdir.as_deref(),
+            Some(std::path::Path::new("/work/project"))
+        );
+        assert_eq!(
+            req.env.var("CLIENT").as_deref(),
+            Some(std::ffi::OsStr::new("editor"))
+        );
     }
 
     #[test]
@@ -536,6 +574,8 @@ mod tests {
         let handler = SamplingHandler {
             registry,
             model: "mock:m".to_owned(),
+            workdir: PathBuf::from("."),
+            env: Environment::inherit(),
         };
         assert!(
             handler

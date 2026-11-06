@@ -1325,7 +1325,13 @@ fn run_print_mode(cli: Cli) -> ExitCode {
         shell.as_deref(),
     );
     let plugin_runtime = match plugins_dir() {
-        Ok(dir) => match setup_runtime(&dir, &workdir, &provisional_model, &bare_prompt) {
+        Ok(dir) => match setup_runtime(
+            &dir,
+            &workdir,
+            &provisional_model,
+            &bare_prompt,
+            &kage_core::environment::Environment::inherit(),
+        ) {
             Ok(rt) => rt,
             Err(e) => {
                 eprintln!("kage: {e}");

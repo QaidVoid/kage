@@ -25,6 +25,9 @@ use crate::shared_host::{RECORD, Record, SOCKET};
 const START_WAIT: Duration = Duration::from_secs(10);
 // The host log is moved aside at this size when a client starts a host.
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
+// A larger environment is not sent, and the client's sessions use the
+// host's own.
+const MAX_ENVIRONMENT_BYTES: usize = 1024 * 1024;
 
 /// Why a client cannot use the shared host.
 #[derive(Debug)]
@@ -174,8 +177,32 @@ fn hung_up(stream: &UnixStream) -> bool {
     )
 }
 
-/// Copies stdin to the host and the host's output to stdout until the
-/// client closes stdin and the host has answered, or the host goes away.
+/// The `_kage/environment` notification carrying this process's
+/// environment, so the client's sessions run tools with its `PATH` and
+/// variables rather than those of whichever client started the host.
+/// Variables that are not UTF-8 are left out.
+fn environment_notification() -> Option<Vec<u8>> {
+    let vars: serde_json::Map<String, serde_json::Value> = std::env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .map(|(name, value)| (name, value.into()))
+        .collect();
+    let message = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "_kage/environment",
+        "params": {"vars": vars},
+    });
+    let mut line = serde_json::to_vec(&message).ok()?;
+    if line.len() > MAX_ENVIRONMENT_BYTES {
+        eprintln!("kage: rpc: the environment is too large to send; tools use the shared host's");
+        return None;
+    }
+    line.push(b'\n');
+    Some(line)
+}
+
+/// Sends this process's environment to the host, then copies stdin to the
+/// host and the host's output to stdout until the client closes stdin and
+/// the host has answered, or the host goes away.
 pub(crate) fn relay(stream: &UnixStream) -> ExitCode {
     let upstream = match stream.try_clone() {
         Ok(upstream) => upstream,
@@ -184,6 +211,12 @@ pub(crate) fn relay(stream: &UnixStream) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if let Some(line) = environment_notification()
+        && let Err(e) = (&upstream).write_all(&line)
+    {
+        eprintln!("kage: rpc: {e}");
+        return ExitCode::from(1);
+    }
     let ended = Arc::new(AtomicBool::new(false));
     let input_ended = Arc::clone(&ended);
     thread::spawn(move || {

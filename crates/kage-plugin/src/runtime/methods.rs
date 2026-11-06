@@ -22,6 +22,7 @@ impl PluginRuntime {
             sink: default_host_log(),
             config: serde_json::Value::Object(serde_json::Map::new()),
             workdir: PathBuf::from("."),
+            env: kage_core::environment::Environment::inherit(),
             capabilities: BTreeMap::new(),
             credential_lookup: std::sync::Arc::new(|_: &str| -> Option<String> { None }),
             enabled: Vec::new(),

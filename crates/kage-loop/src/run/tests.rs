@@ -2724,3 +2724,16 @@ fn provider_retry_uses_a_fresh_message_id_and_replays_no_deltas() {
         "the retry streams the full turn, no dropped-attempt deltas replay"
     );
 }
+
+/// A provider that runs a process for the turn gets the session's
+/// directory and environment with the request.
+#[test]
+fn the_request_carries_the_session_directory_and_environment() {
+    let env = kage_core::environment::Environment::captured(vec![("CLIENT".into(), "x".into())]);
+    let mut cx = AgentContext::new("mock/m", "").with_workdir("/work");
+    cx.env = env.clone();
+    let provider = MockProvider::sequence(vec![]);
+    let req = build_request(&cx, &ToolRegistry::new(), &provider);
+    assert_eq!(req.workdir.as_deref(), Some(std::path::Path::new("/work")));
+    assert_eq!(req.env, env);
+}

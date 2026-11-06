@@ -1831,6 +1831,71 @@ fn first_exchange_records_a_title() {
     assert!(file.contains("\"type\":\"title\""), "{file}");
 }
 
+/// The engine's title call reaches the provider with the session's
+/// workdir and environment, which the ACP client's subprocess uses.
+#[test]
+fn the_title_call_carries_the_sessions_workdir_and_env() {
+    let mock = MockProvider::sequence(vec![text_turn("hello"), text_turn("tiny")]);
+    let h = harness(mock.clone());
+    let id = SessionId::new();
+    let mut spec = h.spec(id);
+    spec.title = true;
+    spec.cx.workdir = std::path::PathBuf::from("/kage-title-cwd");
+    spec.cx.env = Environment::captured(vec![("CLIENT".into(), "editor".into())]);
+    h.engine.open(spec);
+    prompt(&h.engine, id, "hi", Delivery::Steer);
+    wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::TitleChanged { .. }))
+    });
+    h.engine.shutdown();
+    let requests = mock.requests();
+    let req = requests.last().unwrap();
+    assert_eq!(
+        req.workdir.as_deref(),
+        Some(std::path::Path::new("/kage-title-cwd"))
+    );
+    assert_eq!(
+        req.env.var("CLIENT").as_deref(),
+        Some(std::ffi::OsStr::new("editor"))
+    );
+}
+
+/// The engine's goal check reaches the provider with the session's
+/// workdir and environment, which the ACP client's subprocess uses.
+#[test]
+fn the_goal_check_carries_the_sessions_workdir_and_env() {
+    let mock = MockProvider::sequence(vec![text_turn("working"), text_turn("YES")]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let id = SessionId::new();
+    let mut spec = h.spec(id);
+    spec.cx.workdir = std::path::PathBuf::from("/kage-goal-cwd");
+    spec.cx.env = Environment::captured(vec![("CLIENT".into(), "editor".into())]);
+    h.engine.open(spec);
+    h.engine.send(Command::to(
+        id,
+        CommandKind::SetGoal {
+            goal: Some("ship it".into()),
+        },
+    ));
+    prompt(&h.engine, id, "go", Delivery::Steer);
+    wait_for(&h.events, |e| {
+        notices(std::slice::from_ref(e))
+            .iter()
+            .any(|n| n.starts_with("goal met"))
+    });
+    h.engine.shutdown();
+    let requests = mock.requests();
+    let req = requests.last().unwrap();
+    assert_eq!(
+        req.workdir.as_deref(),
+        Some(std::path::Path::new("/kage-goal-cwd"))
+    );
+    assert_eq!(
+        req.env.var("CLIENT").as_deref(),
+        Some(std::ffi::OsStr::new("editor"))
+    );
+}
+
 #[test]
 fn a_named_session_keeps_its_name_over_a_generated_title() {
     let dir = tempfile::tempdir().unwrap();

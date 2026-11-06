@@ -71,6 +71,13 @@ pub struct StreamRequest {
     /// requests outside a session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+    /// The session's working directory, for a provider that runs a
+    /// process for the turn. `None` uses this process's own.
+    #[serde(skip)]
+    pub workdir: Option<std::path::PathBuf>,
+    /// The environment such a process starts with.
+    #[serde(skip)]
+    pub env: kage_core::environment::Environment,
 }
 
 fn is_unknown(reasoning: &Reasoning) -> bool {
@@ -93,6 +100,8 @@ impl StreamRequest {
             produces: Modalities::default(),
             accepts: Modalities::default(),
             session: None,
+            workdir: None,
+            env: kage_core::environment::Environment::inherit(),
         }
     }
 }

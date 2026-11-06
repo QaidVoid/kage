@@ -109,6 +109,7 @@ pub struct ToolContext<'a> {
     confine: bool,
     call_id: Option<&'a ToolCallId>,
     history: &'a [Arc<Message>],
+    env: kage_core::environment::Environment,
 }
 
 impl std::fmt::Debug for ToolContext<'_> {
@@ -135,7 +136,22 @@ impl<'a> ToolContext<'a> {
             confine: false,
             call_id: None,
             history: &[],
+            env: kage_core::environment::Environment::inherit(),
         }
+    }
+
+    /// Start the processes a tool runs with `env` instead of this process's
+    /// own environment.
+    #[must_use]
+    pub fn with_env(mut self, env: kage_core::environment::Environment) -> Self {
+        self.env = env;
+        self
+    }
+
+    /// The environment processes a tool runs start with.
+    #[must_use]
+    pub fn env(&self) -> &kage_core::environment::Environment {
+        &self.env
     }
 
     /// Name the tool call this context serves, so [`Self::call_id`]

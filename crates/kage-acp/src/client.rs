@@ -532,7 +532,17 @@ impl Provider for AcpProvider {
         let agent = self
             .resolve_agent(&req.model)
             .ok_or_else(|| ProviderError::UnknownModel(format!("acp:{}", req.model)))?;
-        let mut child = Command::new(&agent.command)
+        let cwd = req
+            .workdir
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        let mut command = Command::new(&agent.command);
+        req.env.apply(&mut command);
+        if !cwd.as_os_str().is_empty() {
+            command.current_dir(&cwd);
+        }
+        let mut child = command
             .args(&agent.args)
             .envs(&agent.env)
             .stdin(Stdio::piped())
@@ -552,9 +562,7 @@ impl Provider for AcpProvider {
             .take()
             .ok_or_else(|| ProviderError::Transport("acp: no child stdout".to_owned()))?;
         let stderr = child.stderr.take().map(StderrTail::capture);
-        let cwd = std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
+        let cwd = cwd.display().to_string();
 
         let mut stream = match run_turn(
             BufReader::new(stdout),

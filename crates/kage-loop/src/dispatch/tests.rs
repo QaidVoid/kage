@@ -254,6 +254,7 @@ fn a_tool_that_runs_alone_is_refused_beside_others() {
         workdir,
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         MessageId::new(),
         &mut NoopHooks,
@@ -272,6 +273,7 @@ fn a_tool_that_runs_alone_is_refused_beside_others() {
         workdir,
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         MessageId::new(),
         &mut NoopHooks,
@@ -293,6 +295,7 @@ fn a_tool_that_runs_alone_runs_by_itself() {
         std::path::Path::new("/tmp"),
         &CancelFlag::new(),
         false,
+        &Environment::inherit(),
         &[],
         MessageId::new(),
         &mut NoopHooks,
@@ -350,6 +353,7 @@ fn tools_see_their_own_call_id() {
         workdir,
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         MessageId::new(),
         &mut NoopHooks,
@@ -363,6 +367,7 @@ fn tools_see_their_own_call_id() {
         workdir,
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         MessageId::new(),
         &mut NoopHooks,
@@ -385,6 +390,7 @@ fn tool_updates_are_emitted_before_tool_call_end() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         parent,
         &mut hooks,
@@ -429,6 +435,7 @@ fn unknown_tool_error_names_the_registered_tools() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         parent,
         &mut hooks,
@@ -467,6 +474,7 @@ fn tool_updates_are_emitted_while_the_tool_runs() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         MessageId::new(),
         &mut hooks,
@@ -503,6 +511,7 @@ fn parallel_dispatch_emits_tool_updates_per_call() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         parent,
         &mut hooks,
@@ -535,6 +544,7 @@ fn dispatches_in_input_order_and_appends_results() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         parent,
         &mut hooks,
@@ -571,6 +581,7 @@ fn unknown_tool_yields_error_output_not_loop_failure() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         parent,
         &mut hooks,
@@ -602,6 +613,7 @@ fn tool_error_converts_to_error_output() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         parent,
         &mut hooks,
@@ -653,6 +665,7 @@ fn before_tool_call_can_short_circuit_execution() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         parent,
         &mut hooks,
@@ -692,6 +705,7 @@ fn after_tool_call_can_rewrite_output() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         parent,
         &mut hooks,
@@ -761,6 +775,7 @@ fn parallel_dispatch_preserves_input_order() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         parent,
         &mut hooks,
@@ -807,6 +822,7 @@ fn parallel_dispatch_actually_runs_concurrently() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         parent,
         &mut hooks,
@@ -867,6 +883,7 @@ fn parallel_dispatch_honors_before_tool_call_short_circuit() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         parent,
         &mut hooks,
@@ -898,6 +915,7 @@ fn cancelled_batch_synthesizes_error_results() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         parent,
         &mut hooks,
@@ -970,6 +988,7 @@ fn mid_batch_cancel_synthesizes_remaining_results() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         parent,
         &mut hooks,
@@ -1047,6 +1066,7 @@ fn parallel_batch_keeps_successful_outputs_when_one_panics() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         parent,
         &mut hooks,
@@ -1093,6 +1113,7 @@ fn sequential_batch_reports_the_panic_not_a_synthetic_cancel() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         parent,
         &mut hooks,
@@ -1141,6 +1162,7 @@ fn parallel_cancelled_call_synthesizes_and_keeps_others() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         parent,
         &mut hooks,
@@ -1206,6 +1228,7 @@ fn dispatch_propagates_confine_flag_to_tool_context() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         parent,
         &mut hooks,
@@ -1223,6 +1246,7 @@ fn dispatch_propagates_confine_flag_to_tool_context() {
         std::path::Path::new("/tmp"),
         &cancel,
         true,
+        &Environment::inherit(),
         &[],
         parent,
         &mut hooks,
@@ -1281,6 +1305,7 @@ fn execution_start_marks_each_call_right_before_it_runs() {
         std::path::Path::new("/tmp"),
         &CancelFlag::new(),
         false,
+        &Environment::inherit(),
         &[],
         MessageId::new(),
         &mut BlockErr,
@@ -1311,6 +1336,7 @@ fn parallel_execution_start_skips_short_circuited_calls() {
         std::path::Path::new("/tmp"),
         &CancelFlag::new(),
         false,
+        &Environment::inherit(),
         &[],
         MessageId::new(),
         &mut BlockErr,
@@ -1341,6 +1367,7 @@ fn parallel_dispatch_ends_each_call_when_it_finishes() {
         std::path::Path::new("/tmp"),
         &CancelFlag::new(),
         false,
+        &Environment::inherit(),
         &[],
         MessageId::new(),
         &mut NoopHooks,
@@ -1400,6 +1427,7 @@ fn parallel_panic_yields_an_error_for_its_own_call() {
         std::path::Path::new("/tmp"),
         &CancelFlag::new(),
         false,
+        &Environment::inherit(),
         &[],
         MessageId::new(),
         &mut BlockErr,
@@ -1484,6 +1512,7 @@ fn confined_dispatch_rejects_workdir_escape() {
         cx.workdir.as_path(),
         &CancelFlag::new(),
         cx.confine_paths,
+        &Environment::inherit(),
         &[],
         MessageId::new(),
         &mut NoopHooks,
@@ -1506,6 +1535,7 @@ fn confined_dispatch_rejects_workdir_escape() {
         cx.workdir.as_path(),
         &CancelFlag::new(),
         cx.confine_paths,
+        &Environment::inherit(),
         &[],
         MessageId::new(),
         &mut NoopHooks,
@@ -1569,6 +1599,7 @@ fn both_dispatchers_hand_the_conversation_to_a_tool() {
             Path::new("/tmp"),
             &CancelFlag::new(),
             false,
+            &Environment::inherit(),
             &history,
             MessageId::new(),
             &mut NoopHooks,
@@ -1639,6 +1670,7 @@ fn cancelable_wait_aborts_a_parallel_batch_that_ignores_cancel() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         MessageId::new(),
         &mut hooks,
@@ -1686,6 +1718,7 @@ fn cancelable_wait_aborts_a_sequential_batch_that_ignores_cancel() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &Environment::inherit(),
         &[],
         MessageId::new(),
         &mut hooks,
@@ -1770,6 +1803,7 @@ fn worker_pool_bounds_concurrent_tool_threads() {
         std::path::Path::new("/tmp"),
         &CancelFlag::new(),
         false,
+        &Environment::inherit(),
         &[],
         MessageId::new(),
         &mut NoopHooks,
@@ -1848,6 +1882,7 @@ fn bounded_progress_channel_delivers_every_update_under_a_slow_host() {
         std::path::Path::new("/tmp"),
         &CancelFlag::new(),
         false,
+        &Environment::inherit(),
         &[],
         MessageId::new(),
         &mut NoopHooks,
@@ -1914,6 +1949,7 @@ fn oversized_structured_output_is_dropped_from_the_end_event() {
         std::path::Path::new("/tmp"),
         &CancelFlag::new(),
         false,
+        &Environment::inherit(),
         &[],
         MessageId::new(),
         &mut NoopHooks,
@@ -1926,6 +1962,7 @@ fn oversized_structured_output_is_dropped_from_the_end_event() {
         std::path::Path::new("/tmp"),
         &CancelFlag::new(),
         false,
+        &Environment::inherit(),
         &[],
         MessageId::new(),
         &mut NoopHooks,
@@ -2053,4 +2090,58 @@ fn a_tool_s_video_is_named_in_the_text_and_not_kept() {
             if output == "filmed\n[video/mp4 output is not kept]"
     ));
     assert_eq!(message.content.len(), 1);
+}
+
+/// Answers with the `CLIENT` variable of the environment it runs in.
+#[derive(Debug)]
+struct EnvTool;
+
+impl Tool for EnvTool {
+    fn name(&self) -> &'static str {
+        "client"
+    }
+    fn description(&self) -> &'static str {
+        "read CLIENT"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        cx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        let client = cx.env().var("CLIENT").unwrap_or_default();
+        Ok(ToolOutput {
+            is_error: false,
+            text: client.to_string_lossy().into_owned(),
+            structured: None,
+            terminate: false,
+            media: Vec::new(),
+        })
+    }
+}
+
+#[test]
+fn tools_run_in_the_session_environment() {
+    let tools = ToolRegistry::new().with(Arc::new(EnvTool));
+    let env = Environment::captured(vec![("CLIENT".into(), "editor".into())]);
+    for dispatch in [dispatch_tool_calls, dispatch_tool_calls_parallel] {
+        let outcome = dispatch(
+            vec![pending("client", serde_json::json!({}))],
+            &tools,
+            std::path::Path::new("/tmp"),
+            &CancelFlag::new(),
+            false,
+            &env,
+            &[],
+            MessageId::new(),
+            &mut NoopHooks,
+            &mut |_| {},
+        );
+        assert_eq!(outputs_of(&outcome), ["editor"]);
+    }
 }

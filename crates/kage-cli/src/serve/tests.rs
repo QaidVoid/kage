@@ -92,7 +92,8 @@ fn test_host(scripts: Vec<Script>, workdir: &Path) -> Arc<Host> {
               id,
               _cwd: &str,
               model: &str,
-              _servers: BTreeMap<String, McpSpec>| {
+              _servers: BTreeMap<String, McpSpec>,
+              _env: &kage_core::environment::Environment| {
             Ok(SessionSpec {
                 id,
                 model: model.to_owned(),

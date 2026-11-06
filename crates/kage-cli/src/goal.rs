@@ -15,6 +15,7 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use kage_core::environment::Environment;
 use kage_core::{CancelFlag, Content, Message, Role};
 use kage_provider::{Provider, ProviderEvent, StreamRequest};
 
@@ -44,13 +45,17 @@ pub(crate) enum Verdict {
     Unknown(String),
 }
 
-/// Judges whether the work in `history` met `goal`.
+/// Judges whether the work in `history` met `goal`. The request
+/// carries `workdir` and `env` like a normal turn, since the ACP
+/// client launches the model subprocess with them.
 #[must_use]
 pub(crate) fn judge(
     provider: &dyn Provider,
     model: &str,
     goal: &str,
     history: &[Arc<Message>],
+    workdir: &std::path::Path,
+    env: &Environment,
     cancel: &CancelFlag,
 ) -> Verdict {
     let mut prompt = format!("Goal:\n{}\n\nWork so far:\n", clip(goal, 800));
@@ -65,6 +70,8 @@ pub(crate) fn judge(
         ))],
     );
     req.system = Some(GOAL_SYSTEM.to_owned());
+    req.workdir = Some(workdir.to_path_buf());
+    req.env = env.clone();
     match answer(provider, req, cancel) {
         Ok(text) => verdict(&text),
         Err(why) => Verdict::Unknown(why),
@@ -218,8 +225,42 @@ mod tests {
     #[test]
     fn a_failed_check_gives_no_verdict() {
         let mock = MockProvider::replaying(vec![Err(ProviderError::Auth("boom".into()))]);
-        let verdict = judge(&mock, "mock:m", "ship", &[], &CancelFlag::new());
+        let verdict = judge(
+            &mock,
+            "mock:m",
+            "ship",
+            &[],
+            std::path::Path::new("."),
+            &Environment::inherit(),
+            &CancelFlag::new(),
+        );
         assert!(matches!(verdict, Verdict::Unknown(_)), "{verdict:?}");
+    }
+
+    /// The judge's request reaches the ACP client with the session's
+    /// workdir and environment, which its subprocess launches with.
+    #[test]
+    fn the_goal_request_carries_the_session_context() {
+        let mock = MockProvider::replaying(verdict_script("YES"));
+        let verdict = judge(
+            &mock,
+            "mock:m",
+            "ship",
+            &[],
+            std::path::Path::new("/work/project"),
+            &Environment::captured(vec![("CLIENT".into(), "editor".into())]),
+            &CancelFlag::new(),
+        );
+        assert_eq!(verdict, Verdict::Met);
+        let req = mock.last_request().unwrap();
+        assert_eq!(
+            req.workdir.as_deref(),
+            Some(std::path::Path::new("/work/project"))
+        );
+        assert_eq!(
+            req.env.var("CLIENT").as_deref(),
+            Some(std::ffi::OsStr::new("editor"))
+        );
     }
 
     #[test]
@@ -252,7 +293,15 @@ mod tests {
             text(Role::Assistant, "All green now."),
         ];
         assert_eq!(
-            judge(&mock, "mock:m", "tests pass", &history, &CancelFlag::new()),
+            judge(
+                &mock,
+                "mock:m",
+                "tests pass",
+                &history,
+                std::path::Path::new("."),
+                &Environment::inherit(),
+                &CancelFlag::new(),
+            ),
             Verdict::Met
         );
         let req = mock.last_request().expect("one call");
@@ -288,7 +337,15 @@ mod tests {
             text(Role::Assistant, "part two is done"),
         ];
         assert_eq!(
-            judge(&mock, "mock:m", "ship it", &history, &CancelFlag::new()),
+            judge(
+                &mock,
+                "mock:m",
+                "ship it",
+                &history,
+                std::path::Path::new("."),
+                &Environment::inherit(),
+                &CancelFlag::new(),
+            ),
             Verdict::Met
         );
         let req = mock.last_request().expect("one call");

@@ -15,6 +15,7 @@
 pub mod blobs;
 pub mod entry;
 pub mod error;
+pub mod external_replay;
 pub mod fork;
 pub mod list;
 pub mod reader;
@@ -25,8 +26,9 @@ pub mod writer;
 
 pub use blobs::BlobStore;
 pub use entry::{
-    BranchEntry, Compaction, Custom, EntryId, FORMAT_VERSION, Header, Label, MessageEntry,
-    ModelChange, SessionEntry, SessionId, SessionTitle, ThinkingLevelChange,
+    BranchEntry, Compaction, Custom, EntryId, ExternalAcpSession, FORMAT_VERSION, Header, Label,
+    MessageEntry, ModelChange, SessionBackend, SessionEntry, SessionId, SessionTitle,
+    ThinkingLevelChange,
 };
 pub use error::SessionError;
 pub use fork::{Snapshot, fork, fork_as, resolve_entry_prefix, snapshot};
@@ -35,4 +37,4 @@ pub use reader::SessionReader;
 pub use resume::{ReplayResult, ReplayUsage, find_by_prefix, find_last, replay};
 pub use search::{SearchHit, search};
 pub use tree::{SessionTree, TreeNode, TreeWalk};
-pub use writer::{SessionWriter, is_locked};
+pub use writer::{SessionWriter, delete_locked, is_locked};

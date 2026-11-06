@@ -52,10 +52,14 @@ pub(crate) fn run_resume(
         );
     };
 
-    let replay = match kage_session::replay(&path) {
-        Ok(r) => r,
+    let (writer, replay) = match SessionWriter::open_native_replay(&path) {
+        Ok(Some(result)) => result,
+        Ok(None) => {
+            eprintln!("kage: external sessions cannot be resumed in print mode");
+            return ExitCode::from(1);
+        }
         Err(e) => {
-            eprintln!("kage: failed to replay session {}: {e}", path.display());
+            eprintln!("kage: failed to reopen session file: {e}");
             return ExitCode::from(1);
         }
     };
@@ -109,16 +113,7 @@ pub(crate) fn run_resume(
         }
     };
 
-    let writer = match SessionWriter::open(&path) {
-        Ok(w) => {
-            eprintln!("kage: appending to session {}", w.path().display());
-            w
-        }
-        Err(e) => {
-            eprintln!("kage: failed to reopen session file: {e}");
-            return ExitCode::from(1);
-        }
-    };
+    eprintln!("kage: appending to session {}", writer.path().display());
     let Ok((_layered, tools, mcp_manager)) = crate::run_tools(&workdir, plugin_runtime.as_deref())
     else {
         return ExitCode::from(1);

@@ -15,7 +15,7 @@ use kage_acp::acp::{
     UsageUpdate,
 };
 use kage_acp::agent::{
-    PermissionDecision, PlanReviewDecision, QuestionsAnswer, request_plan_review,
+    AgentPeer, PermissionDecision, PlanReviewDecision, QuestionsAnswer, request_plan_review,
     request_questions, send_update,
 };
 use kage_core::protocol::{
@@ -29,7 +29,6 @@ use kage_core::{
     CancelFlag, Content, LoopError, LoopEvent, Message, Role, SessionId,
     StopReason as CoreStopReason, TokenUsage, ToolCallId, ToolOutput,
 };
-use kage_jsonrpc::Peer;
 
 use super::content::source_block;
 use super::live::{Live, Seed};
@@ -61,7 +60,7 @@ pub(super) const HELD_CAP: usize = 4096;
 /// Turns engine events into ACP traffic for the sessions a client opened
 /// and the agents under them.
 pub(super) struct Bridge {
-    pub(super) peer: Peer,
+    pub(super) peer: AgentPeer,
     pub(super) commander: Commander,
     /// This connection's id on the host.
     pub(super) connection: u64,
@@ -245,7 +244,7 @@ pub(super) fn question_input(questions: &[Question]) -> serde_json::Value {
 /// the ask under `asks` so a withdraw can stop it. Used by the bridge
 /// for events and by an attach for asks already open.
 pub(super) fn spawn_ask(
-    peer: &Peer,
+    peer: &AgentPeer,
     commander: &Commander,
     asks: &AskSet,
     session: SessionId,
@@ -693,7 +692,7 @@ impl Bridge {
             return;
         }
         drop(held);
-        send_update(&self.peer, client_id, update);
+        let _ = send_update(&self.peer, client_id, update);
     }
 
     /// The session's conversation was replaced in place, by an undo or a
@@ -740,7 +739,7 @@ impl Bridge {
                     } else {
                         parent.to_string()
                     };
-                    send_update(&peer, &to, SessionUpdate::SubagentUpdate(update));
+                    let _ = send_update(&peer, &to, SessionUpdate::SubagentUpdate(update));
                 }
             });
     }
@@ -800,7 +799,7 @@ impl Bridge {
             model: agent_model(node),
             ..SubagentUpdate::default()
         };
-        send_update(
+        let _ = send_update(
             &self.peer,
             &parent_id,
             SessionUpdate::SubagentUpdate(update),
@@ -851,7 +850,7 @@ impl Bridge {
                 model: None,
                 background: *background,
             };
-            send_update(
+            let _ = send_update(
                 &self.peer,
                 &parent_id,
                 SessionUpdate::SubagentUpdate(update),
@@ -872,7 +871,7 @@ impl Bridge {
                 reason: Some(reason.clone()),
                 ..SubagentUpdate::default()
             };
-            send_update(
+            let _ = send_update(
                 &self.peer,
                 &parent_id,
                 SessionUpdate::SubagentUpdate(update),
@@ -890,7 +889,7 @@ impl Bridge {
                     state: Some(SubagentState::Running),
                     ..SubagentUpdate::default()
                 };
-                send_update(
+                let _ = send_update(
                     &self.peer,
                     &parent_id,
                     SessionUpdate::SubagentUpdate(update),
@@ -970,7 +969,7 @@ impl Bridge {
                 model,
                 ..SubagentUpdate::default()
             };
-            send_update(
+            let _ = send_update(
                 &self.peer,
                 &parent_id,
                 SessionUpdate::SubagentUpdate(update),
@@ -1021,7 +1020,7 @@ impl Bridge {
                 content: vec![text_content(format!("{agent}: {text}"))],
                 ..ToolCallUpdate::default()
             };
-            send_update(
+            let _ = send_update(
                 &self.peer,
                 &client_id,
                 SessionUpdate::ToolCallUpdate(update),
@@ -1246,9 +1245,9 @@ pub(super) fn hold(held: &mut HeldUpdates, update: SessionUpdate) {
 /// Sends the updates held for `client_id`, and when the cap dropped
 /// any, a marker saying how many, so a client that announces late
 /// knows the replay it missed.
-pub(super) fn flush_held(peer: &Peer, client_id: &str, held: HeldUpdates) {
+pub(super) fn flush_held(peer: &AgentPeer, client_id: &str, held: HeldUpdates) {
     for update in held.updates {
-        send_update(peer, client_id, update);
+        let _ = send_update(peer, client_id, update);
     }
     if held.dropped > 0 {
         let dropped = held.dropped;
@@ -1256,7 +1255,7 @@ pub(super) fn flush_held(peer: &Peer, client_id: &str, held: HeldUpdates) {
             "{dropped} updates were dropped while the session was opening, so the replay \
              above is incomplete"
         );
-        send_update(peer, client_id, user_chunk(ContentBlock::text(note)));
+        let _ = send_update(peer, client_id, user_chunk(ContentBlock::text(note)));
     }
 }
 

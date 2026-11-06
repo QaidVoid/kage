@@ -21,10 +21,11 @@ use kage_acp::acp::{
     PluginEventRequest, PluginHookKind, PluginHookRequest, PluginPendingMessage, PluginPendingRole,
     PluginSessionOp, PluginToolSpec, PluginToolsRequest, PluginToolsResult,
 };
+use kage_acp::agent::AgentPeer;
 use kage_core::environment::Environment;
 use kage_core::sync::lock;
 use kage_core::{Risk, SessionId, ToolOutput};
-use kage_jsonrpc::{Peer, RpcError};
+use kage_jsonrpc::RpcError;
 use kage_plugin::messages::{PendingMessage, PendingRole};
 use kage_plugin::session_plugins::SessionPlugins;
 use kage_plugin::sessions::PendingSessionOp;
@@ -47,7 +48,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// taken while the opening `session/new` is still in flight.
 pub(super) struct ClientPlugins {
     session_id: String,
-    peer: Peer,
+    peer: AgentPeer,
     timeout: Duration,
     snapshot: PluginToolsResult,
     tools: Vec<Arc<dyn Tool>>,
@@ -70,7 +71,7 @@ impl ClientPlugins {
     /// Ask the client that owns `session` what its plugins register.
     /// Fails the session open when the client does not answer, since it
     /// asked to host the plugins in the first place.
-    pub(super) fn open(session: SessionId, peer: Peer) -> Result<Self, RpcError> {
+    pub(super) fn open(session: SessionId, peer: AgentPeer) -> Result<Self, RpcError> {
         Self::open_with(session, peer, REQUEST_TIMEOUT)
     }
 
@@ -82,7 +83,7 @@ impl ClientPlugins {
     /// The owner's error, an internal error when it does not answer
     /// within `timeout` or sends a malformed snapshot, and `-32602`
     /// when a tool names a risk the host does not know.
-    fn open_with(session: SessionId, peer: Peer, timeout: Duration) -> Result<Self, RpcError> {
+    fn open_with(session: SessionId, peer: AgentPeer, timeout: Duration) -> Result<Self, RpcError> {
         let request = PluginToolsRequest {
             session_id: session.to_string(),
         };
@@ -318,7 +319,7 @@ impl SessionPlugins for ClientPlugins {
 /// client over `_kage/plugin/call`.
 struct ClientTool {
     session_id: String,
-    peer: Peer,
+    peer: AgentPeer,
     spec: PluginToolSpec,
     risk: Risk,
 }
@@ -327,7 +328,7 @@ impl ClientTool {
     /// Fails with `-32602` when the spec's risk is not one the host
     /// knows, so a tool never runs under a weaker class than it asked
     /// for.
-    fn new(session_id: &str, peer: &Peer, spec: &PluginToolSpec) -> Result<Self, RpcError> {
+    fn new(session_id: &str, peer: &AgentPeer, spec: &PluginToolSpec) -> Result<Self, RpcError> {
         let risk = match spec.risk.as_deref() {
             None => Risk::Read,
             Some(name) => serde_json::from_value::<Risk>(Value::from(name)).map_err(|_| {
@@ -349,7 +350,7 @@ impl ClientTool {
 /// The specs as registry tools whose calls run on the client.
 fn client_tools(
     session_id: &str,
-    peer: &Peer,
+    peer: &AgentPeer,
     specs: &[PluginToolSpec],
 ) -> Result<Vec<Arc<dyn Tool>>, RpcError> {
     specs

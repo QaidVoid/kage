@@ -201,6 +201,8 @@ pub struct Store {
     /// Only its session becomes active; a session that opens on its own
     /// leaves the welcome pane where it is.
     opening: Option<u64>,
+    /// Whether the pending creation selected an external backend.
+    opening_external: bool,
     /// A welcome prompt whose session failed to open, for the composer
     /// to take back.
     returned_prompt: Option<String>,
@@ -299,6 +301,7 @@ impl Store {
             active: None,
             pending_prompt: None,
             opening: None,
+            opening_external: false,
             returned_prompt: None,
             held_options: Vec::new(),
             held_plan: false,
@@ -580,6 +583,7 @@ impl Store {
         self.active = None;
         self.pending_prompt = None;
         self.opening = None;
+        self.opening_external = false;
         self.held_options.clear();
         self.held_plan = false;
     }
@@ -615,6 +619,9 @@ impl Store {
         if changes.contains(&Change::Connection) {
             self.gate = gate::check(self.client.state());
             self.gate_dismissed = false;
+            if self.state().external_sessions {
+                self.ask_config();
+            }
             if !self.booted {
                 self.booted = true;
                 if self.replay {
@@ -794,8 +801,18 @@ impl Store {
             Change::Session { id } => Some(id.clone()),
             _ => None,
         });
+        let external = std::mem::take(&mut self.opening_external);
         match opened {
             Some(id) => {
+                if external {
+                    self.held_options.clear();
+                    self.held_plan = false;
+                    if let Some(text) = self.pending_prompt.take() {
+                        let _ = self.client.prompt(&id, vec![ContentBlock::text(text)]);
+                    }
+                    self.active = Some(id);
+                    return;
+                }
                 let held_mode = self
                     .held_options
                     .iter()
@@ -907,7 +924,38 @@ impl Store {
     /// Opens a fresh session in the store's directory.
     pub fn new_session(&mut self) {
         let dir = self.project.clone().unwrap_or_else(|| self.cwd.clone());
-        self.opening = Some(self.client.new_session(&dir, &[], None));
+        let selected = self
+            .held_options
+            .iter()
+            .find(|(id, _)| id == "model")
+            .map(|(_, value)| value.clone());
+        let displayed = self
+            .composer_option("model")
+            .map(|option| option.current_value);
+        let external = selected
+            .as_deref()
+            .and_then(|value| value.strip_prefix("acp:"));
+        if external.is_none()
+            && displayed
+                .as_deref()
+                .is_some_and(|value| value.starts_with("acp:"))
+        {
+            self.note(NoticeTone::Warn, "Select the external agent explicitly for this new session. Backends cannot be changed after creation.");
+            self.returned_prompt = self.pending_prompt.take();
+            return;
+        }
+        if let Some(name) = external {
+            if name.is_empty() || !self.state().external_sessions {
+                self.note(NoticeTone::Warn, "This host has not advertised external session creation, or the agent name is empty. Select another model or connect to a supported host.");
+                self.returned_prompt = self.pending_prompt.take();
+                return;
+            }
+            self.opening_external = true;
+            self.opening = Some(self.client.new_session_with_external_agent(&dir, &[], name));
+        } else {
+            self.opening_external = false;
+            self.opening = Some(self.client.new_session(&dir, &[], None));
+        }
     }
 
     /// Opens a fresh session to carry `text`, the prompt a welcome
@@ -1401,6 +1449,22 @@ impl Store {
         self.config.as_ref()
     }
 
+    /// Configured external agent names from the host's settings snapshot.
+    #[must_use]
+    pub fn external_agent_names(&self) -> Vec<String> {
+        self.config
+            .as_ref()
+            .and_then(|config| config.get("acp"))
+            .and_then(|acp| acp.get("agents"))
+            .and_then(serde_json::Value::as_object)
+            .map(|agents| {
+                let mut names: Vec<_> = agents.keys().cloned().collect();
+                names.sort();
+                names
+            })
+            .unwrap_or_default()
+    }
+
     /// The user themes on the engine's machine.
     #[must_use]
     pub fn themes(&self) -> &[kage_client::wire::UserTheme] {
@@ -1451,6 +1515,14 @@ impl Store {
                 .iter()
                 .find(|option| option.id == id)
                 .cloned();
+        }
+        if id != "model"
+            && self
+                .held_options
+                .iter()
+                .any(|(option, value)| option == "model" && value.starts_with("acp:"))
+        {
+            return None;
         }
         let mut option = self
             .prefs
@@ -1635,6 +1707,10 @@ impl Store {
             self.hold_option(id, value);
             return true;
         };
+        if id == "model" && value.starts_with("acp:") {
+            self.note(NoticeTone::Warn, "An external agent must be selected on the new session screen. A session's backend cannot be changed.");
+            return false;
+        }
         if id == "mode" && value != PLAN_MODE {
             self.permissions.insert(session.clone(), value.to_owned());
         }
@@ -1944,6 +2020,77 @@ mod tests {
     fn run_commands(store: &mut Store) {
         let commands = store.take_commands();
         run(store, commands);
+    }
+
+    #[test]
+    fn configured_external_names_come_from_the_host_snapshot() {
+        let mut store = Store::new("/w", false);
+        assert!(store.external_agent_names().is_empty());
+        store.config = Some(
+            serde_json::json!({"acp": {"agents": {"reviewer": {"command": "agent"}, "claude": {"command": "claude"}}}}),
+        );
+        assert_eq!(store.external_agent_names(), ["claude", "reviewer"]);
+    }
+
+    #[test]
+    fn an_external_default_requires_explicit_reselection() {
+        let mut store = Store::new("/w", false);
+        store.handshake(false);
+        store.take_outgoing();
+        let mut answer = init_answer(Some("0.1.0"), false, false);
+        if let Frame::Success { result, .. } = &mut answer {
+            result["_meta"] = serde_json::json!({"kage": {"externalSessions": true, "configOptions": [{"id":"model", "name":"Model", "type":"select", "currentValue":"acp:claude", "options": []}]}});
+        }
+        store.absorb(answer);
+        store.take_outgoing();
+        store.open_with_prompt("draft");
+        assert!(store.take_outgoing().is_empty());
+        assert_eq!(store.take_returned_prompt().as_deref(), Some("draft"));
+        store.hold_option("model", "acp:claude");
+        store.open_with_prompt("draft");
+        assert_eq!(
+            store.take_outgoing()[0].to_value()["params"]["_meta"]["kage"]["externalAgent"],
+            "claude"
+        );
+    }
+
+    #[test]
+    fn external_selection_requires_advertisement_and_precedes_prompt() {
+        let mut store = Store::new("/w", false);
+        store.hold_option("model", "acp:claude");
+        store.open_with_prompt("hello");
+        assert!(store.take_outgoing().is_empty());
+        assert_eq!(store.take_returned_prompt().as_deref(), Some("hello"));
+        assert!(!store.take_notes().is_empty());
+
+        store.handshake(false);
+        store.take_outgoing();
+        let mut answer = init_answer(Some("0.1.0"), false, false);
+        if let Frame::Success { result, .. } = &mut answer {
+            result["_meta"] = serde_json::json!({"kage": {"externalSessions": true}});
+        }
+        store.absorb(answer);
+        store.take_outgoing();
+        store.hold_option("mode", "plan");
+        store.open_with_prompt("hello again");
+        let outgoing = store.take_outgoing();
+        let Frame::Request { id, method, params } = &outgoing[0] else {
+            panic!("expected creation")
+        };
+        assert_eq!(method, "session/new");
+        assert_eq!(params["_meta"]["kage"]["externalAgent"], "claude");
+        assert_eq!(params["cwd"], "/w");
+        store.absorb(Frame::Success {
+            id: id.clone(),
+            result: serde_json::json!({"sessionId": "external"}),
+        });
+        let outgoing = store.take_outgoing();
+        assert_eq!(outgoing.len(), 1);
+        assert!(
+            matches!(&outgoing[0], Frame::Request { method, .. } if method == "session/prompt")
+        );
+        assert!(!store.set_option("model", "acp:other"));
+        assert!(store.take_outgoing().is_empty());
     }
 
     #[test]

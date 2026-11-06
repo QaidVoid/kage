@@ -89,6 +89,12 @@ pub enum SessionError {
         /// Path of the offending file.
         path: PathBuf,
     },
+    /// Generic forks cannot create or copy an external session identity.
+    #[error("generic fork cannot use an external session identity at {path}")]
+    ExternalFork {
+        /// Source or destination whose identity is external.
+        path: PathBuf,
+    },
     /// A fork or rewind named an entry id the source session does not
     /// have.
     #[error("session {path} has no entry {at}")]

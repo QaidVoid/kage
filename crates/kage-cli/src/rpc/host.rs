@@ -70,6 +70,7 @@ pub(super) struct Open {
 /// connection served on the host.
 pub(crate) struct Host {
     pub(super) engine: Engine,
+    pub(super) external: Mutex<HashMap<String, Arc<super::external::External>>>,
     /// The providers in effect, replaced when the config's change.
     registry: RwLock<Arc<ProviderRegistry>>,
     pub(super) default_model: String,
@@ -204,6 +205,7 @@ impl Host {
         let live = Arc::new(Mutex::new(Live::new(engine.commander())));
         let host = Arc::new(Self {
             engine,
+            external: Mutex::default(),
             registry: RwLock::new(registry),
             default_model,
             sessions,

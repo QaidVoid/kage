@@ -33,6 +33,9 @@ pub(crate) mod client_plugins;
 pub(crate) mod config_set;
 mod content;
 mod directory;
+// Retained for future transport work, but external session creation is disabled.
+#[allow(dead_code)]
+mod external;
 mod folders;
 mod fs;
 pub(crate) mod host;
@@ -49,6 +52,9 @@ mod rewind;
 mod sessions;
 mod themes;
 mod ui;
+#[cfg(unix)]
+#[allow(dead_code)]
+mod unix_stdio;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufReader;
@@ -76,7 +82,7 @@ use kage_acp::acp::{
     WithdrawRequest,
 };
 use kage_acp::acp::{UiAttachRequest, UiCommandRequest, UiKeymapRequest, UiOutput, UiSnapshot};
-use kage_acp::agent::{Agent, PromptContext};
+use kage_acp::agent::{Agent, AgentPeer, PromptContext};
 use kage_core::config::{Config, McpServer as McpSpec, PluginsConfig};
 use kage_core::environment::Environment;
 use kage_core::options::OptionValue;
@@ -97,7 +103,7 @@ use kage_core::permissions::PermissionAction;
 use kage_core::protocol::{AgentTree, Command, CommandKind, Delivery, RunOutcome};
 use kage_core::sync::lock;
 use kage_core::{LoopError, SessionId, StopReason as CoreStopReason, ThinkingLevel};
-use kage_jsonrpc::{Peer, RpcError};
+use kage_jsonrpc::RpcError;
 use kage_plugin::PluginRuntime;
 use kage_plugin::session_plugins::SessionPlugins;
 
@@ -350,6 +356,7 @@ struct Ids {
     /// Agent sessions the client loaded to read. The engine never
     /// hosts them for the client, so they take no prompts.
     read_only: HashSet<String>,
+    external: HashSet<String>,
 }
 
 impl Ids {
@@ -401,6 +408,7 @@ struct CliAcpAgent {
     host: Arc<Host>,
     /// This connection's id on the host.
     connection: u64,
+    disconnecting: AtomicBool,
     ids: Arc<Mutex<Ids>>,
     waiters: Waiters,
     shown: ShownBySession,
@@ -424,7 +432,7 @@ struct CliAcpAgent {
     /// attachment id it accepted. A connection follows one watcher;
     /// attaching again stops the first.
     ui_watch: Mutex<UiWatch>,
-    peer: Peer,
+    peer: AgentPeer,
     held: Held,
     asks: AskSet,
     subscription: SubscriptionId,
@@ -434,7 +442,7 @@ struct CliAcpAgent {
 
 impl CliAcpAgent {
     /// The agent for one connection on `host`.
-    fn new(host: Arc<Host>, peer: Peer) -> Self {
+    fn new(host: Arc<Host>, peer: AgentPeer) -> Self {
         let connection = host.next_connection();
         let ids = Arc::new(Mutex::new(Ids::default()));
         let waiters = Waiters::default();
@@ -481,6 +489,7 @@ impl CliAcpAgent {
         Self {
             host,
             connection,
+            disconnecting: AtomicBool::new(false),
             ids,
             waiters,
             shown,
@@ -668,14 +677,77 @@ impl CliAcpAgent {
             .ok_or_else(|| RpcError::new(-32602, format!("unknown session {client_id}")))
     }
 
+    fn external_session(&self, id: &str) -> Option<Arc<external::External>> {
+        let sessions = lock(&self.host.external);
+        if !lock(&self.ids).external.contains(id) {
+            return None;
+        }
+        sessions.get(id).cloned()
+    }
+
+    fn release_external(&self, id: &str) -> bool {
+        let detached = {
+            // Always acquire the host map before the connection ids, as in attach.
+            let mut sessions = lock(&self.host.external);
+            let mut ids = lock(&self.ids);
+            if !ids.external.remove(id) {
+                return false;
+            }
+            sessions.get(id).cloned().map(|session| {
+                let (last, cancel) = session.detach_mark(self.connection);
+                if last {
+                    sessions.remove(id);
+                }
+                (session, last, cancel)
+            })
+        };
+        if let Some((session, last, cancel)) = detached {
+            session.finish_detach(last, cancel);
+        }
+        true
+    }
+
+    fn attach_external(
+        &self,
+        id: &str,
+        servers: &[kage_acp::acp::McpServer],
+    ) -> Result<bool, RpcError> {
+        let sessions = lock(&self.host.external);
+        let Some(session) = sessions.get(id) else {
+            return Ok(false);
+        };
+        if !servers.is_empty() {
+            return Err(RpcError::new(
+                -32602,
+                "external sessions do not support downstream MCP servers",
+            ));
+        }
+        let mut ids = lock(&self.ids);
+        if self.disconnecting.load(Ordering::SeqCst) {
+            return Err(RpcError::internal("client is disconnecting"));
+        }
+        session.attach(self.connection, self.peer.clone())?;
+        ids.external.insert(id.to_owned());
+        Ok(true)
+    }
+
     /// The connection ended: stop delivering engine events to it, free
     /// what its prompts wait on, withdraw its open asks, and release
     /// every session it held. An ask whose session no other connection
     /// holds is denied, so the run goes on instead of waiting for a
     /// client that may never come back. The engine and its runs keep
     /// going for the connections that stay.
+    fn disconnect_external(&self) {
+        self.disconnecting.store(true, Ordering::SeqCst);
+        let external: Vec<_> = lock(&self.ids).external.iter().cloned().collect();
+        for id in external {
+            self.release_external(&id);
+        }
+    }
+
     fn detach(&self) {
         lock(&self.ui_watch).stop.store(true, Ordering::SeqCst);
+        self.disconnect_external();
         self.host.engine.unsubscribe(self.subscription);
         self.host.release_prompts_of(self.connection);
         lock(&self.waiters).clear();
@@ -765,12 +837,25 @@ impl Agent for CliAcpAgent {
                         .ok()
                         .map(|dir| dir.display().to_string()),
                     config_options: self.default_options(),
+                    external_sessions: false,
                 }),
             }),
         }
     }
 
     fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+        if req
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.kage.as_ref())
+            .and_then(|kage| kage.external_agent.as_deref())
+            .is_some()
+        {
+            return Err(RpcError::new(
+                -32602,
+                "external agent sessions are temporarily unavailable",
+            ));
+        }
         let servers = editor_servers(&req.mcp_servers)?;
         let (path, mut header) =
             crate::plan_session_in(&self.host.sessions, &self.host.default_model, "");
@@ -801,6 +886,12 @@ impl Agent for CliAcpAgent {
         req: LoadSessionRequest,
         ctx: &PromptContext,
     ) -> Result<LoadSessionResponse, RpcError> {
+        if lock(&self.host.external).contains_key(&req.session_id) {
+            return Err(RpcError::new(
+                -32602,
+                "external session history replay is unavailable; use session/resume to attach to the live session",
+            ));
+        }
         let config_options = self.open_recorded(
             &req.session_id,
             &req.cwd,
@@ -821,6 +912,11 @@ impl Agent for CliAcpAgent {
         req: ResumeSessionRequest,
         ctx: &PromptContext,
     ) -> Result<ResumeSessionResponse, RpcError> {
+        if self.attach_external(&req.session_id, &req.mcp_servers)? {
+            return Ok(ResumeSessionResponse {
+                config_options: Vec::new(),
+            });
+        }
         let config_options = self.open_recorded(
             &req.session_id,
             &req.cwd,
@@ -837,6 +933,9 @@ impl Agent for CliAcpAgent {
     /// A subagent session is not attachable, so closing one answers
     /// invalid params.
     fn close_session(&self, req: CloseSessionRequest) -> Result<CloseSessionResponse, RpcError> {
+        if self.release_external(&req.session_id) {
+            return Ok(CloseSessionResponse {});
+        }
         let id = {
             let mut ids = lock(&self.ids);
             if ids.read_only.remove(&req.session_id) {
@@ -1233,7 +1332,18 @@ impl Agent for CliAcpAgent {
         fs::handle(&workdir, &permissions, &req)
     }
 
-    fn prompt(&self, req: PromptRequest, _ctx: &PromptContext) -> Result<PromptResponse, RpcError> {
+    fn prompt(&self, req: PromptRequest, ctx: &PromptContext) -> Result<PromptResponse, RpcError> {
+        if let Some(session) = self.external_session(&req.session_id) {
+            let ticket = match ctx.start(|| session.register_prompt(self.connection)) {
+                Some(result) => result?,
+                None => {
+                    return Ok(PromptResponse {
+                        stop_reason: StopReason::Cancelled,
+                    });
+                }
+            };
+            return session.prompt(ticket, req);
+        }
         if lock(&self.ids).read_only.contains(&req.session_id) {
             return Err(RpcError::new(
                 -32602,
@@ -1244,22 +1354,32 @@ impl Agent for CliAcpAgent {
             ));
         }
         let id = self.engine_id(&req.session_id)?;
-        if !self.host.claim_prompt(id, self.connection) {
-            return Err(RpcError::new(
-                -32603,
-                "session is busy; wait for the running prompt to finish",
-            ));
-        }
         let content = req.prompt.into_iter().map(prompt_content).collect();
         let delivery = match req.delivery {
             Some(PromptDelivery::Steer) => Delivery::Steer,
             _ => Delivery::Queue,
         };
-        let (done, end) = mpsc::channel();
-        lock(&self.waiters).entry(id).or_default().push(done);
-        self.host
-            .engine
-            .send(Command::to(id, CommandKind::Prompt { content, delivery }));
+        let end = match ctx.start(|| {
+            if !self.host.claim_prompt(id, self.connection) {
+                return Err(RpcError::new(
+                    -32603,
+                    "session is busy; wait for the running prompt to finish",
+                ));
+            }
+            let (done, end) = mpsc::channel();
+            lock(&self.waiters).entry(id).or_default().push(done);
+            self.host
+                .engine
+                .send(Command::to(id, CommandKind::Prompt { content, delivery }));
+            Ok(end)
+        }) {
+            Some(result) => result?,
+            None => {
+                return Ok(PromptResponse {
+                    stop_reason: StopReason::Cancelled,
+                });
+            }
+        };
         let end = end
             .recv()
             .map_err(|_| RpcError::internal("engine stopped"))?;
@@ -1278,6 +1398,10 @@ impl Agent for CliAcpAgent {
     }
 
     fn cancel(&self, session_id: &str) {
+        if let Some(session) = self.external_session(session_id) {
+            session.cancel(self.connection);
+            return;
+        }
         let id = {
             let ids = lock(&self.ids);
             ids.by_client
@@ -1291,11 +1415,19 @@ impl Agent for CliAcpAgent {
     }
 
     fn session_announced(&self, session_id: &str) {
+        if let Some(session) = self.external_session(session_id) {
+            session.announce(self.connection);
+            return;
+        }
         let Some(id) = lock(&self.ids).by_client.get(session_id).copied() else {
             return;
         };
         let held = lock(&self.held).remove(&id).unwrap_or_default();
         bridge::flush_held(&self.peer, session_id, held);
+    }
+
+    fn disconnecting(&self) {
+        self.disconnect_external();
     }
 
     fn detached(&self) {

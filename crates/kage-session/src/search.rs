@@ -139,6 +139,7 @@ mod tests {
             model: "anthropic:claude".into(),
             system_prompt: "be helpful".into(),
             parent_session: None,
+            backend: None,
             parent_entry: None,
         }
     }

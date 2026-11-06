@@ -12,4 +12,7 @@
 
 pub mod acp;
 pub mod agent;
+pub mod agent_peer;
 pub mod client;
+
+pub mod connection;

@@ -1334,11 +1334,16 @@ fn model_button(
                     .composer_option("model")
                     .map(|option| option.options)
                     .unwrap_or_default();
-                let sections = pickers::model_sections(
+                let mut sections = pickers::model_sections(
                     store.models(),
                     Some(fallback),
                     &starred,
                     &toolbar.model_query().clone(),
+                );
+                pickers::append_external_agents(
+                    &mut sections,
+                    &store.external_agent_names(),
+                    toolbar.model_query(),
                 );
                 let rows = pickers::flat_rows(&sections);
                 let total = rows.len();

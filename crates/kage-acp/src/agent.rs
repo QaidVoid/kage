@@ -16,13 +16,14 @@
 //! When the input ends, every request but a prompt that is still in
 //! flight is answered before [`serve_agent`] returns.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, Write};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
+pub use crate::agent_peer::AgentPeer;
 use kage_core::CancelFlag;
-use kage_jsonrpc::{CancelNotice, Inbound, Peer, RpcError, connect_with};
+use kage_jsonrpc::{CancelNotice, Inbound, RpcError, connect_with};
 
 use crate::acp::{UiAttachRequest, UiCommandRequest, UiKeymapRequest, UiOutput, UiSnapshot};
 
@@ -67,7 +68,7 @@ pub enum PermissionDecision {
 /// decision. Never auto-approves.
 #[must_use]
 pub fn request_permission(
-    peer: &Peer,
+    peer: &AgentPeer,
     session_id: &str,
     tool_call: ToolCallUpdate,
     title: &str,
@@ -149,7 +150,7 @@ pub enum PlanReviewDecision {
 /// auto-approves.
 #[must_use]
 pub fn request_plan_review(
-    peer: &Peer,
+    peer: &AgentPeer,
     session_id: &str,
     tool_call: ToolCallUpdate,
     plan: &str,
@@ -233,7 +234,7 @@ pub enum QuestionsAnswer {
 /// declines them all.
 #[must_use]
 pub fn request_questions(
-    peer: &Peer,
+    peer: &AgentPeer,
     session_id: &str,
     tool_call: &ToolCallUpdate,
     questions: &[QuestionPrompt],
@@ -310,19 +311,40 @@ pub fn request_questions(
 /// Handed to [`Agent::prompt`] and [`Agent::load_session`]: streams
 /// updates for one session.
 pub struct PromptContext {
-    peer: Peer,
+    peer: AgentPeer,
     session_id: String,
+    start: Option<Arc<Mutex<bool>>>,
 }
 
 impl PromptContext {
+    /// Start a prompt by registering it with the backend while ordered against
+    /// earlier and later `session/cancel` notifications. The closure must only
+    /// perform the short registration, not wait for the prompt to finish.
+    /// Returns `None` if cancellation arrived before registration. A later
+    /// cancellation is still forwarded to [`Agent::cancel`]. Call this once
+    /// per prompt. It does not coordinate prompts on other connections.
+    #[must_use]
+    pub fn start<T>(&self, register: impl FnOnce() -> T) -> Option<T> {
+        let Some(start) = &self.start else {
+            return Some(register());
+        };
+        let cancelled = start
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *cancelled { None } else { Some(register()) }
+    }
+
     /// Emit a `session/update` notification for this session.
-    pub fn update(&self, update: SessionUpdate) {
-        send_update(&self.peer, &self.session_id, update);
+    ///
+    /// # Errors
+    /// Returns an encoding or transport error.
+    pub fn update(&self, update: SessionUpdate) -> Result<(), RpcError> {
+        send_update(&self.peer, &self.session_id, update)
     }
 
     /// The underlying peer, for agent-initiated requests.
     #[must_use]
-    pub fn peer(&self) -> &Peer {
+    pub fn peer(&self) -> &AgentPeer {
         &self.peer
     }
 
@@ -335,14 +357,21 @@ impl PromptContext {
 
 /// Emit a `session/update` notification for `session_id` on `peer`.
 /// The update is converted into the wire union, its serde form.
-pub fn send_update(peer: &Peer, session_id: &str, update: SessionUpdate) {
+///
+/// # Errors
+/// Returns an encoding or transport error.
+pub fn send_update(
+    peer: &AgentPeer,
+    session_id: &str,
+    update: SessionUpdate,
+) -> Result<(), RpcError> {
     let note = SessionNotification {
         session_id: session_id.to_owned(),
         update: update.into(),
     };
-    if let Ok(params) = serde_json::to_value(&note) {
-        let _ = peer.notify("session/update", params);
-    }
+    let params = serde_json::to_value(&note)
+        .map_err(|e| RpcError::internal(format!("encode update: {e}")))?;
+    peer.notify("session/update", params)
 }
 
 /// The host-supplied agent the server drives. The server owns the
@@ -780,7 +809,9 @@ pub trait Agent: Send + Sync + 'static {
     }
 
     /// Run one prompt turn to completion, streaming `session/update`
-    /// notifications through `ctx`.
+    /// notifications through `ctx`. Implementations that register work before
+    /// cancellation can affect it must use [`PromptContext::start`] for that
+    /// registration and return a cancelled response if it returns `None`.
     ///
     /// # Errors
     ///
@@ -797,8 +828,17 @@ pub trait Agent: Send + Sync + 'static {
     /// nothing.
     fn session_announced(&self, _session_id: &str) {}
 
+    /// The input ended. Called before waiting for outstanding requests,
+    /// which may still be running concurrently, including session opens
+    /// and prompts. Implementations may interrupt connection-bound work
+    /// here, but must synchronize with those requests and prevent any
+    /// resources created by a concurrent open from escaping cleanup.
+    /// The default does nothing.
+    fn disconnecting(&self) {}
+
     /// The connection ended and every request but a prompt that is
-    /// still running is answered. The default does nothing.
+    /// still running is answered. Called after [`Agent::disconnecting`]
+    /// and after the other requests have finished. The default does nothing.
     fn detached(&self) {}
 
     /// The client sent its environment in a `_kage/environment`
@@ -835,17 +875,118 @@ where
     R: BufRead + Send + 'static,
     W: Write + Send + 'static,
     A: Agent,
-    F: FnOnce(Peer) -> A,
+    F: FnOnce(AgentPeer) -> A,
 {
     let (peer, inbound, _reader) = connect_with(reader, writer, Some(cancel_notice()));
+    let peer = AgentPeer::from(peer);
+    serve_inbound(&peer, inbound, make_agent)
+}
+
+/// Serve an ACP agent over an exclusively owned Unix pipe writer.
+///
+/// Every outgoing write has `write_timeout`. The inbound reader must be
+/// terminated by its owner. A write failure cannot interrupt a blocked reader.
+/// The reader must be drained even while agent requests are outstanding.
+///
+/// # Errors
+/// Returns an error if the pipe cannot be initialized or an outgoing write fails.
+#[cfg(unix)]
+pub fn serve_agent_unix<R, A, F>(
+    reader: R,
+    writer: std::os::fd::OwnedFd,
+    write_timeout: std::time::Duration,
+    make_agent: F,
+) -> Result<(), RpcError>
+where
+    R: BufRead + Send + 'static,
+    A: Agent,
+    F: FnOnce(AgentPeer) -> A,
+{
+    let (peer, inbound, _reader) = kage_jsonrpc::unix_peer::connect_ordered_server(reader, writer)
+        .map_err(|e| RpcError::internal(format!("initialize Unix transport: {e}")))?;
+    serve_agent_unix_connected(peer, &inbound, write_timeout, make_agent)
+}
+
+/// Serve an ACP agent over a preconnected Unix peer and its ordered inbound receiver.
+///
+/// The peer and receiver must come from the same ordered server connection. The
+/// receiver remains owned by the caller, as does the reader thread and its
+/// lifecycle. A generic reader cannot be interrupted by this function, even
+/// after a write failure, so its owner must arrange for it to terminate. Every
+/// outgoing write has `write_timeout`, but request execution, cleanup, and the
+/// overall serving operation are unbounded. Callbacks invoked on the inbound
+/// consumer thread, including `make_agent`, `initialize`, `cancel`,
+/// `disconnecting`, and `detached`, must not synchronously wait for outbound
+/// requests. Their response barriers can only be acknowledged by that same
+/// consumer, which is no longer draining during disconnect callbacks.
+///
+/// A clean input EOF finishes outstanding non-prompt requests before returning.
+/// Ordered barriers are acknowledged as inbound messages are drained.
+///
+/// # Errors
+///
+/// Returns an error if the Unix transport records a reader or writer failure.
+#[cfg(unix)]
+pub fn serve_agent_unix_connected<A, F>(
+    peer: kage_jsonrpc::unix_peer::UnixPeer,
+    inbound: &std::sync::mpsc::Receiver<kage_jsonrpc::OrderedInbound>,
+    write_timeout: std::time::Duration,
+    make_agent: F,
+) -> Result<(), RpcError>
+where
+    A: Agent,
+    F: FnOnce(AgentPeer) -> A,
+{
+    use kage_jsonrpc::OrderedInbound;
+    let peer = AgentPeer::unix(peer, write_timeout);
+    let monitor = peer.clone();
+    let messages = std::iter::from_fn(move || {
+        loop {
+            if monitor.failure().is_some() {
+                return None;
+            }
+            match inbound.recv_timeout(std::time::Duration::from_millis(25)) {
+                Ok(OrderedInbound::Message(message)) => return Some(message),
+                Ok(OrderedInbound::Barrier(marker)) => marker.acknowledge(),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+    });
+    serve_inbound(&peer, messages, make_agent)
+}
+
+fn serve_inbound<A, F>(
+    peer: &AgentPeer,
+    inbound: impl IntoIterator<Item = Inbound>,
+    make_agent: F,
+) -> Result<(), RpcError>
+where
+    A: Agent,
+    F: FnOnce(AgentPeer) -> A,
+{
     let agent = Arc::new(make_agent(peer.clone()));
 
     let mut ops = Vec::new();
+    let mut starts: HashMap<String, Vec<Weak<Mutex<bool>>>> = HashMap::new();
     for message in inbound {
+        starts.retain(|_, entries| {
+            entries.retain(|entry| entry.strong_count() > 0);
+            !entries.is_empty()
+        });
         match message {
             Inbound::Notification { method, params } => match method.as_str() {
                 "session/cancel" => {
                     if let Ok(c) = parse::<crate::acp::CancelNotification>(params) {
+                        if let Some(entries) = starts.get(&c.session_id) {
+                            for entry in entries {
+                                if let Some(entry) = entry.upgrade() {
+                                    *entry
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+                                }
+                            }
+                        }
                         agent.cancel(&c.session_id);
                     }
                 }
@@ -857,17 +998,22 @@ where
                 _ => {}
             },
             Inbound::Request { id, method, params } => {
-                if let Some(op) = handle_request(&peer, &agent, id, &method, params) {
+                if let Some(op) = handle_request(peer, &agent, &mut starts, id, &method, params) {
                     ops.retain(|op: &thread::JoinHandle<()>| !op.is_finished());
                     ops.push(op);
                 }
             }
         }
     }
+    agent.disconnecting();
     for op in ops {
         let _ = op.join();
     }
     agent.detached();
+    #[cfg(unix)]
+    if let Some(error) = peer.failure() {
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -877,7 +1023,7 @@ fn jval<T: serde::Serialize>(value: T) -> serde_json::Value {
 
 /// Answer request `id` with `op`, run on its own thread.
 fn spawn_op<A, F>(
-    peer: &Peer,
+    peer: &AgentPeer,
     agent: &Arc<A>,
     id: serde_json::Value,
     op: F,
@@ -898,7 +1044,7 @@ where
 /// the id of, on its own thread, then tell the agent the client has the
 /// response.
 fn spawn_open<A, F>(
-    peer: &Peer,
+    peer: &AgentPeer,
     agent: &Arc<A>,
     id: serde_json::Value,
     op: F,
@@ -911,8 +1057,9 @@ where
     let peer = peer.clone();
     thread::spawn(move || match op(&agent) {
         Ok((session, response)) => {
-            let _ = peer.respond(&id, Ok(response));
-            agent.session_announced(&session);
+            if peer.respond(&id, Ok(response)).is_ok() {
+                agent.session_announced(&session);
+            }
         }
         Err(e) => {
             let _ = peer.respond(&id, Err(e));
@@ -922,7 +1069,7 @@ where
 
 /// Answers `id` with the params parse error `e`.
 fn parse_failed(
-    peer: &Peer,
+    peer: &AgentPeer,
     id: &serde_json::Value,
     e: RpcError,
 ) -> Option<thread::JoinHandle<()>> {
@@ -934,8 +1081,9 @@ fn parse_failed(
 /// Returns the thread to wait for at the end of the input, which is
 /// every one but a prompt's.
 fn handle_request<A: Agent>(
-    peer: &Peer,
+    peer: &AgentPeer,
     agent: &Arc<A>,
+    starts: &mut HashMap<String, Vec<Weak<Mutex<bool>>>>,
     id: serde_json::Value,
     method: &str,
     params: serde_json::Value,
@@ -956,9 +1104,15 @@ fn handle_request<A: Agent>(
         "session/prompt" => match parse::<PromptRequest>(params) {
             Err(e) => return parse_failed(peer, &id, e),
             Ok(req) => {
+                let start = Arc::new(Mutex::new(false));
+                starts
+                    .entry(req.session_id.clone())
+                    .or_default()
+                    .push(Arc::downgrade(&start));
                 let ctx = PromptContext {
                     peer: peer.clone(),
                     session_id: req.session_id.clone(),
+                    start: Some(start),
                 };
                 spawn_op(peer, agent, id, move |a| a.prompt(req, &ctx).map(jval));
                 return None;
@@ -970,6 +1124,7 @@ fn handle_request<A: Agent>(
                 let ctx = PromptContext {
                     peer: peer.clone(),
                     session_id: req.session_id.clone(),
+                    start: None,
                 };
                 spawn_open(peer, agent, id, move |a| {
                     let session = req.session_id.clone();
@@ -990,6 +1145,7 @@ fn handle_request<A: Agent>(
                 let ctx = PromptContext {
                     peer: peer.clone(),
                     session_id: req.session_id.clone(),
+                    start: None,
                 };
                 spawn_open(peer, agent, id, move |a| {
                     let session = req.session_id.clone();
@@ -1020,7 +1176,7 @@ fn handle_request<A: Agent>(
 /// Answer one `_kage/*` extension request on its own thread. Returns
 /// the thread to wait for at the end of the input.
 fn handle_kage_request<A: Agent>(
-    peer: &Peer,
+    peer: &AgentPeer,
     agent: &Arc<A>,
     id: serde_json::Value,
     method: &str,
@@ -1119,7 +1275,7 @@ fn handle_kage_request<A: Agent>(
 /// deleting it, a user shell command, withdrawing a pending prompt and
 /// restarting an MCP server.
 fn handle_session_request<A: Agent>(
-    peer: &Peer,
+    peer: &AgentPeer,
     agent: &Arc<A>,
     id: serde_json::Value,
     method: &str,
@@ -1230,7 +1386,7 @@ mod tests {
             ctx.update(SessionUpdate::AgentMessageChunk(MessageChunk {
                 content: ContentBlock::text(format!("echo: {echoed}")),
                 meta: None,
-            }));
+            }))?;
             Ok(PromptResponse {
                 stop_reason: StopReason::EndTurn,
             })
@@ -1339,6 +1495,82 @@ mod tests {
         assert!(out.contains(r#""sessionId":"sess-1""#), "{out}");
     }
 
+    struct DisconnectAgent {
+        events: std::sync::mpsc::Sender<&'static str>,
+        unblock: std::sync::mpsc::Sender<()>,
+        blocked: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl Agent for DisconnectAgent {
+        fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
+            MockAgent.initialize(req)
+        }
+
+        fn new_session(&self, _req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+            self.events.send("started").unwrap();
+            kage_core::sync::lock(&self.blocked).recv().unwrap();
+            self.events.send("finished").unwrap();
+            Err(RpcError::new(-32000, "interrupted"))
+        }
+
+        fn prompt(
+            &self,
+            _req: PromptRequest,
+            _ctx: &PromptContext,
+        ) -> Result<PromptResponse, RpcError> {
+            unreachable!("no prompt is sent")
+        }
+
+        fn cancel(&self, _session_id: &str) {}
+
+        fn disconnecting(&self) {
+            self.events.send("disconnecting").unwrap();
+            self.unblock.send(()).unwrap();
+        }
+
+        fn detached(&self) {
+            self.events.send("detached").unwrap();
+        }
+    }
+
+    #[test]
+    fn disconnecting_unblocks_request_before_detached() {
+        use std::io::Read as _;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (srv_r, mut cli_w) = std::io::pipe().unwrap();
+        let (mut cli_r, srv_w) = std::io::pipe().unwrap();
+        let (events, observed) = mpsc::channel();
+        let (unblock, blocked) = mpsc::channel();
+        let agent = DisconnectAgent {
+            events,
+            unblock: unblock.clone(),
+            blocked: std::sync::Mutex::new(blocked),
+        };
+        let server = thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, |_| agent));
+        writeln!(
+            cli_w,
+            r#"{{"jsonrpc":"2.0","id":1,"method":"session/new","params":{{"cwd":"/tmp"}}}}"#
+        )
+        .unwrap();
+        let timeout = Duration::from_secs(5);
+        assert_eq!(observed.recv_timeout(timeout).unwrap(), "started");
+        drop(cli_w);
+        let first = observed.recv_timeout(timeout);
+        if first.is_err() {
+            let _ = unblock.send(());
+        }
+        assert_eq!(first.unwrap(), "disconnecting");
+        assert_eq!(observed.recv_timeout(timeout).unwrap(), "finished");
+        assert_eq!(observed.recv_timeout(timeout).unwrap(), "detached");
+        server.join().unwrap().unwrap();
+
+        let mut out = String::new();
+        cli_r.read_to_string(&mut out).unwrap();
+        assert!(out.contains("interrupted"), "{out}");
+    }
+
     struct LoadAgent;
 
     impl Agent for LoadAgent {
@@ -1383,7 +1615,7 @@ mod tests {
             ctx.update(SessionUpdate::AgentMessageChunk(MessageChunk {
                 content: ContentBlock::text(format!("history of {}", req.session_id)),
                 meta: None,
-            }));
+            }))?;
             Ok(LoadSessionResponse::default())
         }
 
@@ -1546,6 +1778,157 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, -32601);
         drop(client);
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn cancellation_before_registration_is_not_lost_or_inherited() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct DelayedAgent {
+            entered: mpsc::Sender<()>,
+            proceed: Mutex<mpsc::Receiver<()>>,
+            cancelled: mpsc::Sender<String>,
+        }
+        impl Agent for DelayedAgent {
+            fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
+                MockAgent.initialize(req)
+            }
+            fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+                MockAgent.new_session(req)
+            }
+            fn prompt(
+                &self,
+                _: PromptRequest,
+                ctx: &PromptContext,
+            ) -> Result<PromptResponse, RpcError> {
+                self.entered.send(()).unwrap();
+                self.proceed.lock().unwrap().recv().unwrap();
+                Ok(PromptResponse {
+                    stop_reason: if ctx.start(|| ()).is_some() {
+                        StopReason::EndTurn
+                    } else {
+                        StopReason::Cancelled
+                    },
+                })
+            }
+            fn cancel(&self, session: &str) {
+                self.cancelled.send(session.to_owned()).unwrap();
+            }
+        }
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (proceed_tx, proceed_rx) = mpsc::channel();
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let server = thread::spawn(move || {
+            serve_agent(BufReader::new(srv_r), srv_w, |_| DelayedAgent {
+                entered: entered_tx,
+                proceed: Mutex::new(proceed_rx),
+                cancelled: cancel_tx,
+            })
+        });
+        let (client, inbox, _) = connect(BufReader::new(cli_r), cli_w);
+        let timeout = Duration::from_secs(5);
+        let launch = |session: &'static str| {
+            let client = client.clone();
+            thread::spawn(move || {
+                client
+                    .request(
+                        "session/prompt",
+                        serde_json::json!({"sessionId": session, "prompt": []}),
+                    )
+                    .unwrap()
+            })
+        };
+        let first = launch("a");
+        entered_rx.recv_timeout(timeout).unwrap();
+        client
+            .notify("session/cancel", serde_json::json!({"sessionId": "a"}))
+            .unwrap();
+        assert_eq!(cancel_rx.recv_timeout(timeout).unwrap(), "a");
+        proceed_tx.send(()).unwrap();
+        assert_eq!(first.join().unwrap()["stopReason"], "cancelled");
+
+        let second = launch("a");
+        entered_rx.recv_timeout(timeout).unwrap();
+        client
+            .notify("session/cancel", serde_json::json!({"sessionId": "b"}))
+            .unwrap();
+        assert_eq!(cancel_rx.recv_timeout(timeout).unwrap(), "b");
+        proceed_tx.send(()).unwrap();
+        assert_eq!(second.join().unwrap()["stopReason"], "end_turn");
+        drop(client);
+        drop(inbox);
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn cancellation_after_registration_is_forwarded() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        struct RegisteredAgent {
+            registered: mpsc::Sender<()>,
+            cancelled: Mutex<mpsc::Receiver<()>>,
+            cancel: mpsc::Sender<()>,
+        }
+        impl Agent for RegisteredAgent {
+            fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
+                MockAgent.initialize(req)
+            }
+            fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+                MockAgent.new_session(req)
+            }
+            fn prompt(
+                &self,
+                _: PromptRequest,
+                ctx: &PromptContext,
+            ) -> Result<PromptResponse, RpcError> {
+                ctx.start(|| self.registered.send(()).unwrap()).unwrap();
+                self.cancelled
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+                Ok(PromptResponse {
+                    stop_reason: StopReason::Cancelled,
+                })
+            }
+            fn cancel(&self, _: &str) {
+                self.cancel.send(()).unwrap();
+            }
+        }
+        let (registered_tx, registered_rx) = mpsc::channel();
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let server = thread::spawn(move || {
+            serve_agent(BufReader::new(srv_r), srv_w, |_| RegisteredAgent {
+                registered: registered_tx,
+                cancelled: Mutex::new(cancel_rx),
+                cancel: cancel_tx,
+            })
+        });
+        let (client, inbox, _) = connect(BufReader::new(cli_r), cli_w);
+        let prompt = {
+            let client = client.clone();
+            thread::spawn(move || {
+                client
+                    .request(
+                        "session/prompt",
+                        serde_json::json!({"sessionId": "a", "prompt": []}),
+                    )
+                    .unwrap()
+            })
+        };
+        registered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        client
+            .notify("session/cancel", serde_json::json!({"sessionId": "a"}))
+            .unwrap();
+        assert_eq!(prompt.join().unwrap()["stopReason"], "cancelled");
+        drop(client);
+        drop(inbox);
         server.join().unwrap().unwrap();
     }
 
@@ -1843,5 +2226,348 @@ mod tests {
         assert_eq!(err.code, -32601);
         drop(client);
         server.join().unwrap().unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn unix_server_dispatches_requests() {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let server = thread::spawn(move || {
+            serve_agent_unix(
+                BufReader::new(srv_r),
+                srv_w.into(),
+                std::time::Duration::from_secs(1),
+                |_| MockAgent,
+            )
+        });
+        let (client, _inbox, _h) = connect(BufReader::new(cli_r), cli_w);
+        assert_eq!(
+            client
+                .request("bogus/method", serde_json::Value::Null)
+                .unwrap_err()
+                .code,
+            -32601
+        );
+        drop(client);
+        server.join().unwrap().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_connected_server_borrows_receiver_and_drains_eof() {
+        use std::io::Read as _;
+        let (srv_r, mut cli_w) = std::io::pipe().unwrap();
+        let (mut cli_r, srv_w) = std::io::pipe().unwrap();
+        let (peer, inbound, reader) =
+            kage_jsonrpc::unix_peer::connect_ordered_server(BufReader::new(srv_r), srv_w.into())
+                .unwrap();
+        writeln!(cli_w, r#"{{"jsonrpc":"2.0","id":1,"method":"unknown"}}"#).unwrap();
+        drop(cli_w);
+        serve_agent_unix_connected(peer, &inbound, std::time::Duration::from_secs(1), |_| {
+            MockAgent
+        })
+        .unwrap();
+        reader.join().unwrap();
+        assert!(matches!(
+            inbound.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
+        let mut response = String::new();
+        cli_r.read_to_string(&mut response).unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["error"]["code"], -32601);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_blocked_write_is_returned_and_recorded() {
+        let (reader, input) = std::io::pipe().unwrap();
+        let (_output, writer) = std::io::pipe().unwrap();
+        let (unix, _inbound, _reader) =
+            kage_jsonrpc::unix_peer::connect_ordered(BufReader::new(reader), writer.into())
+                .unwrap();
+        let peer = AgentPeer::unix(unix, std::time::Duration::from_millis(30));
+        let error = peer
+            .notify("large", serde_json::json!({"data": "x".repeat(128 * 1024)}))
+            .unwrap_err();
+        assert_eq!(error.code, -32000);
+        assert_eq!(peer.failure(), Some(error));
+        assert_eq!(
+            peer.notify("after-failure", serde_json::json!({}))
+                .unwrap_err()
+                .message,
+            "connection closed"
+        );
+        drop(input);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_cancelled_committed_request_sends_notice() {
+        let (reader, input) = std::io::pipe().unwrap();
+        let (output, writer) = std::io::pipe().unwrap();
+        let (unix, _inbound, _reader) =
+            kage_jsonrpc::unix_peer::connect_ordered(BufReader::new(reader), writer.into())
+                .unwrap();
+        let peer = AgentPeer::unix(unix, std::time::Duration::from_secs(1));
+        let (client, inbox, _reader) = connect(BufReader::new(output), input);
+        let cancel = CancelFlag::new();
+        let flag = cancel.clone();
+        let task =
+            thread::spawn(move || peer.request_cancellable("ask", serde_json::json!({}), &flag));
+        let Inbound::Request { id, .. } = inbox
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap()
+        else {
+            panic!("expected request")
+        };
+        cancel.cancel();
+        match inbox
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap()
+        {
+            Inbound::Notification { method, params } => {
+                assert_eq!(method, "$/cancel_request");
+                assert_eq!(params["requestId"], id);
+            }
+            Inbound::Request { .. } => panic!("expected cancellation"),
+        }
+        assert_eq!(task.join().unwrap().unwrap_err().code, -32800);
+        drop(client);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn unix_server_exits_after_write_failure_without_input_eof() {
+        use std::io::Write as _;
+        let (srv_r, mut cli_w) = std::io::pipe().unwrap();
+        let (_cli_r, srv_w) = std::io::pipe().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let result = serve_agent_unix(
+                BufReader::new(srv_r),
+                srv_w.into(),
+                std::time::Duration::ZERO,
+                |_| MockAgent,
+            );
+            done_tx.send(result).unwrap();
+        });
+        cli_w
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"unknown\"}\n")
+            .unwrap();
+        let error = done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code, -32000);
+        drop(cli_w);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn unix_half_closed_input_still_answers_outstanding_open() {
+        use std::io::Read as _;
+        struct AnnouncingAgent(AgentPeer);
+        impl Agent for AnnouncingAgent {
+            fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
+                MockAgent.initialize(req)
+            }
+            fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+                thread::sleep(std::time::Duration::from_millis(100));
+                MockAgent.new_session(req)
+            }
+            fn prompt(
+                &self,
+                _req: PromptRequest,
+                _ctx: &PromptContext,
+            ) -> Result<PromptResponse, RpcError> {
+                unreachable!()
+            }
+            fn cancel(&self, _session_id: &str) {}
+            fn session_announced(&self, session_id: &str) {
+                self.0
+                    .notify(
+                        "session/update",
+                        serde_json::json!({"sessionId": session_id}),
+                    )
+                    .unwrap();
+            }
+        }
+        let (srv_r, mut cli_w) = std::io::pipe().unwrap();
+        let (mut cli_r, srv_w) = std::io::pipe().unwrap();
+        writeln!(
+            cli_w,
+            r#"{{"jsonrpc":"2.0","id":1,"method":"session/new","params":{{"cwd":"/tmp"}}}}"#
+        )
+        .unwrap();
+        drop(cli_w);
+        serve_agent_unix(
+            BufReader::new(srv_r),
+            srv_w.into(),
+            std::time::Duration::from_secs(1),
+            AnnouncingAgent,
+        )
+        .unwrap();
+        let mut out = String::new();
+        cli_r.read_to_string(&mut out).unwrap();
+        let messages: Vec<serde_json::Value> = out
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["result"]["sessionId"], "sess-1");
+        assert_eq!(messages[1]["method"], "session/update");
+        assert_eq!(messages[1]["params"]["sessionId"], "sess-1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_approval_waits_for_prior_inbound_work() {
+        let (reader, input) = std::io::pipe().unwrap();
+        let (output, writer) = std::io::pipe().unwrap();
+        let (unix, inbound, _reader) =
+            kage_jsonrpc::unix_peer::connect_ordered_server(BufReader::new(reader), writer.into())
+                .unwrap();
+        let peer = AgentPeer::unix(unix, std::time::Duration::from_secs(1));
+        let (client, inbox, _reader) = connect(BufReader::new(output), input);
+        let cancel = CancelFlag::new();
+        let flag = cancel.clone();
+        let task =
+            thread::spawn(move || peer.request_cancellable("ask", serde_json::json!({}), &flag));
+        let Inbound::Request { id, .. } = inbox
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap()
+        else {
+            panic!("expected request")
+        };
+        client
+            .notify("session/cancel", serde_json::json!({}))
+            .unwrap();
+        client
+            .respond(&id, Ok(serde_json::json!({"approved": true})))
+            .unwrap();
+        assert!(matches!(
+            inbound
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+            kage_jsonrpc::OrderedInbound::Message(_)
+        ));
+        let kage_jsonrpc::OrderedInbound::Barrier(marker) = inbound
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap()
+        else {
+            panic!("expected barrier")
+        };
+        thread::sleep(std::time::Duration::from_millis(30));
+        assert!(!task.is_finished());
+        cancel.cancel();
+        marker.acknowledge();
+        assert_eq!(task.join().unwrap().unwrap_err().code, -32800);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_half_closed_request_does_not_close_output() {
+        let (reader, input) = std::io::pipe().unwrap();
+        let (output, writer) = std::io::pipe().unwrap();
+        let (unix, inbound, reader_task) =
+            kage_jsonrpc::unix_peer::connect_ordered_server(BufReader::new(reader), writer.into())
+                .unwrap();
+        let peer = AgentPeer::unix(unix, std::time::Duration::from_secs(1));
+        drop(input);
+        reader_task.join().unwrap();
+        drop(inbound);
+        assert!(
+            peer.request_cancellable("ask", serde_json::json!({}), &CancelFlag::new())
+                .is_err()
+        );
+        assert!(peer.failure().is_none());
+        peer.respond(&serde_json::json!(7), Ok(serde_json::json!(true)))
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut BufReader::new(output), &mut line).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap()["id"],
+            7
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_partial_request_cancellation_records_transport_failure() {
+        use std::io::Read as _;
+        let (reader, input) = std::io::pipe().unwrap();
+        let (mut output, writer) = std::io::pipe().unwrap();
+        let (unix, _inbound, _reader) =
+            kage_jsonrpc::unix_peer::connect_ordered_server(BufReader::new(reader), writer.into())
+                .unwrap();
+        let peer = AgentPeer::unix(unix, std::time::Duration::from_secs(2));
+        let worker_peer = peer.clone();
+        let cancel = CancelFlag::new();
+        let flag = cancel.clone();
+        let task = thread::spawn(move || {
+            worker_peer.request_cancellable(
+                "ask",
+                serde_json::json!({"data": "x".repeat(1024 * 1024)}),
+                &flag,
+            )
+        });
+        let mut byte = [0];
+        output.read_exact(&mut byte).unwrap();
+        cancel.cancel();
+        assert_eq!(task.join().unwrap().unwrap_err().code, -32800);
+        assert!(peer.failure().is_some());
+        drop(input);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_server_reports_truncated_input() {
+        let (srv_r, mut cli_w) = std::io::pipe().unwrap();
+        let (_cli_r, srv_w) = std::io::pipe().unwrap();
+        write!(cli_w, "{{\"jsonrpc\":").unwrap();
+        drop(cli_w);
+        let error = serve_agent_unix(
+            BufReader::new(srv_r),
+            srv_w.into(),
+            std::time::Duration::from_secs(1),
+            |_| MockAgent,
+        )
+        .unwrap_err();
+        assert_eq!(error.message, "Unix transport reader failed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_write_failure_settles_pending_requests() {
+        let (reader, input) = std::io::pipe().unwrap();
+        let (output, writer) = std::io::pipe().unwrap();
+        let (unix, _inbound, _reader) =
+            kage_jsonrpc::unix_peer::connect_ordered(BufReader::new(reader), writer.into())
+                .unwrap();
+        let peer = AgentPeer::unix(unix, std::time::Duration::from_millis(50));
+        let (client, inbox, _reader) = connect(BufReader::new(output), input);
+        let request_peer = peer.clone();
+        let task = thread::spawn(move || {
+            request_peer.request_cancellable("ask", serde_json::json!({}), &CancelFlag::new())
+        });
+        assert!(matches!(
+            inbox
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+            Inbound::Request { .. }
+        ));
+        // Stall the client reader with a notification larger than its inbound queue.
+        // The receiver is intentionally kept alive but is not drained.
+        for _ in 0..300 {
+            if peer
+                .notify("fill", serde_json::json!({"data": "x".repeat(8192)}))
+                .is_err()
+            {
+                break;
+            }
+        }
+        let err = task.join().unwrap().unwrap_err();
+        assert_eq!(err.message, "connection closed");
+        assert!(peer.failure().is_some());
+        drop(client);
     }
 }

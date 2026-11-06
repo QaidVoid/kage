@@ -38,7 +38,8 @@ use crate::writer::SessionWriter;
 /// # Errors
 ///
 /// Errors if `src` cannot be opened, if its first entry is not a header,
-/// if `dst` already exists, or if no entry in `src` has id `at`.
+/// if `dst` already exists, if an external backend is involved, or if no
+/// entry in `src` has id `at`.
 pub fn fork(
     src: &Path,
     dst: &Path,
@@ -65,6 +66,11 @@ pub fn fork(
         });
     };
 
+    if parent_header.backend.is_some() {
+        return Err(SessionError::ExternalFork {
+            path: src.to_path_buf(),
+        });
+    }
     let new_header = Header {
         version: FORMAT_VERSION,
         session: new_session,
@@ -74,19 +80,22 @@ pub fn fork(
         model: parent_header.model.clone(),
         system_prompt: parent_header.system_prompt.clone(),
         parent_session: Some(parent_header.session),
+        backend: None,
         parent_entry: Some(at),
     };
     fork_as(src, dst, new_header, at)
 }
 
-/// Fork `src` into a new session file at `dst` under the exact header
+/// Fork `src` into a new session file at `dst` under the header
 /// the caller supplies, copying the entries of `at`'s ancestry, in
 /// conversation order. On a source with branch markers the copy takes
 /// the path the conversation still reaches and is always linear. The
 /// header's `session` should be the id the caller used for `dst` (so
 /// the file name and the in-file id agree). Use this instead of
 /// [`fork`] when the new session needs its own model or system
-/// prompt, as forked agent children do.
+/// prompt, as forked agent children do. A supported older header version
+/// is upgraded to the current format version in the destination. Labels
+/// anchored to the source header are retargeted to the destination header.
 ///
 /// Returns whether the source's tail was torn: the copy then ends at
 /// the last whole entry of the source.
@@ -94,8 +103,10 @@ pub fn fork(
 /// # Errors
 ///
 /// Errors if `src` cannot be read, if its first entry is not a header,
-/// if `dst` already exists, if no entry in `src` has id `at`, or if
-/// the destination header ID collides with a copied entry.
+/// if `dst` already exists, if an external backend is involved, or if no
+/// entry in `src` has id `at`. An unsupported destination header version
+/// is rejected before creating the destination, as is a header ID that
+/// collides with a copied entry.
 pub fn fork_as(
     src: &Path,
     dst: &Path,
@@ -103,6 +114,17 @@ pub fn fork_as(
     at: EntryId,
 ) -> Result<bool, SessionError> {
     let tree = SessionTree::read(src)?;
+    if tree.header().backend.is_some() {
+        return Err(SessionError::ExternalFork {
+            path: src.to_path_buf(),
+        });
+    }
+    if new_header.backend.is_some() {
+        return Err(SessionError::ExternalFork {
+            path: dst.to_path_buf(),
+        });
+    }
+    ensure_supported_version(dst, new_header.version)?;
     if !tree.contains(at) {
         return Err(SessionError::EntryNotFound {
             path: src.to_path_buf(),
@@ -120,9 +142,15 @@ pub fn fork_as(
         });
     }
     let truncated = tree.truncated();
+    let source_root = tree.header().id;
+    let destination_root = new_header.id;
     let mut writer = SessionWriter::create(dst.to_path_buf(), new_header)?;
     for entry in ancestry {
-        writer.append(entry)?;
+        if let Some(remapped) = remap_root(entry, source_root, destination_root) {
+            writer.append(&remapped)?;
+        } else {
+            writer.append(entry)?;
+        }
     }
     Ok(truncated)
 }
@@ -140,8 +168,9 @@ pub struct Snapshot {
     pub truncated: bool,
     /// The blob store of the source's directory.
     pub blobs: BlobStore,
-    /// The blobs the kept entries name.
+    /// The blobs named by entries copied through the last kept entry.
     pub blob_refs: Vec<String>,
+    source_header: EntryId,
 }
 
 impl Snapshot {
@@ -154,17 +183,27 @@ impl Snapshot {
     /// Create the session file `dst` under `header` holding these
     /// entries, with one fsync for all of them, and keep it open for
     /// appending. When `dst` is in another directory, the blobs the
-    /// entries name are copied into its store.
+    /// entries name are copied into its store. A supported older header
+    /// version is upgraded to the current format version in the destination.
+    /// Branches and labels targeting the source header are retargeted to
+    /// `header`.
     ///
     /// # Errors
     ///
-    /// Errors if `dst` already exists, cannot be written, or the destination
-    /// header ID collides with a copied entry.
+    /// Errors if `dst` already exists or cannot be written, or if the
+    /// destination header names an external backend, has an unsupported version,
+    /// or has an ID that collides with a copied entry.
     pub fn write(&self, dst: &Path, header: Header) -> Result<SessionWriter, SessionError> {
-        for line in self.lines.split(|&byte| byte == b'\n') {
-            if let Ok(entry) = serde_json::from_slice::<SessionEntry>(line)
-                && entry.id() == header.id
-            {
+        if header.backend.is_some() {
+            return Err(SessionError::ExternalFork {
+                path: dst.to_path_buf(),
+            });
+        }
+        ensure_supported_version(dst, header.version)?;
+        let mut rewritten = Vec::new();
+        for line in self.lines.split_inclusive(|byte| *byte == b'\n') {
+            let entry = serde_json::from_slice::<SessionEntry>(line).ok();
+            if entry.as_ref().is_some_and(|entry| entry.id() == header.id) {
                 return Err(SessionError::Io {
                     path: dst.to_path_buf(),
                     source: std::io::Error::new(
@@ -172,6 +211,22 @@ impl Snapshot {
                         "destination header ID collides with a copied entry",
                     ),
                 });
+            }
+            let remapped = entry
+                .as_ref()
+                .and_then(|entry| remap_root(entry, self.source_header, header.id));
+            if let Some(entry) = remapped {
+                serde_json::to_writer(&mut rewritten, &entry).map_err(|source| {
+                    SessionError::Encode {
+                        path: dst.to_path_buf(),
+                        source,
+                    }
+                })?;
+                if line.ends_with(b"\n") {
+                    rewritten.push(b'\n');
+                }
+            } else {
+                rewritten.extend_from_slice(line);
             }
         }
         let target = BlobStore::beside(dst);
@@ -187,21 +242,24 @@ impl Snapshot {
         }
         let mut writer = SessionWriter::create(PathBuf::from(dst), header)?;
         if !self.is_empty() {
-            writer.append_lines(&self.lines)?;
+            writer.append_lines(&rewritten)?;
         }
         Ok(writer)
     }
 }
 
 /// Read `src` once and keep its entries up to the last one `keep`
-/// accepts. An incomplete trailing fragment is treated as a torn write,
-/// as it is for [`SessionReader`]; the snapshot's `truncated` flag reports it.
-/// Complete corrupt entries are reported as errors.
+/// accepts. An unterminated trailing fragment that ends prematurely is
+/// treated as a torn write, and the snapshot's `truncated` flag reports it.
+/// Malformed JSON and complete JSON that does not match the entry schema
+/// are errors.
 ///
 /// # Errors
 ///
 /// Errors if `src` cannot be read, if its first entry is not a header,
-/// or if an entry is corrupt rather than an incomplete trailing fragment.
+/// if the source has an unsupported version or an external backend, or
+/// if a second header appears, or if a complete JSON value or terminated
+/// line does not decode as an entry.
 pub fn snapshot(
     src: &Path,
     keep: impl Fn(&SessionEntry) -> bool,
@@ -212,7 +270,7 @@ pub fn snapshot(
     })?;
     let mut lines = data.split_inclusive(|byte| *byte == b'\n');
     let mut offset = 0;
-    let mut header_line = 0;
+    let mut line_no = 0;
     let header_id = loop {
         let Some(line) = lines.next() else {
             return Err(SessionError::Empty {
@@ -220,12 +278,20 @@ pub fn snapshot(
             });
         };
         offset += line.len();
-        header_line += 1;
+        line_no += 1;
         if line.trim_ascii().is_empty() {
             continue;
         }
         match serde_json::from_slice::<SessionEntry>(line) {
-            Ok(SessionEntry::Header(header)) => break header.id,
+            Ok(SessionEntry::Header(header)) => {
+                ensure_supported_version(src, header.version)?;
+                if header.backend.is_some() {
+                    return Err(SessionError::ExternalFork {
+                        path: src.to_path_buf(),
+                    });
+                }
+                break header.id;
+            }
             _ => {
                 return Err(SessionError::MissingHeader {
                     path: src.to_path_buf(),
@@ -237,18 +303,22 @@ pub fn snapshot(
     let mut kept = (header_id, start);
     let mut refs: Vec<(usize, String)> = Vec::new();
     let mut truncated = false;
-    for (index, line) in lines.enumerate() {
-        let line_no = header_line + index + 1;
+    for line in lines {
+        line_no += 1;
         offset += line.len();
-        if line.trim_ascii().is_empty() {
-            continue;
-        }
         match crate::reader::classify_line(line, line.ends_with(b"\n")) {
-            crate::reader::Line::Entry(entry) if keep(&entry) => {
-                kept = (entry.id(), offset);
+            crate::reader::Line::Entry(SessionEntry::Header(_)) => {
+                return Err(SessionError::SecondHeader {
+                    path: src.to_path_buf(),
+                });
+            }
+            crate::reader::Line::Entry(entry) => {
+                if keep(&entry) {
+                    kept = (entry.id(), offset);
+                }
                 refs.extend(blob_refs(&entry).into_iter().map(|sha| (offset, sha)));
             }
-            crate::reader::Line::Entry(_) | crate::reader::Line::Blank => {}
+            crate::reader::Line::Blank => {}
             crate::reader::Line::Torn => {
                 truncated = true;
                 break;
@@ -278,12 +348,40 @@ pub fn snapshot(
         lines,
         truncated,
         blobs: BlobStore::beside(src),
+        source_header: header_id,
         blob_refs: refs
             .into_iter()
             .filter(|(at, _)| *at <= end)
             .map(|(_, sha)| sha)
             .collect(),
     })
+}
+
+fn remap_root(entry: &SessionEntry, source: EntryId, destination: EntryId) -> Option<SessionEntry> {
+    match entry {
+        SessionEntry::Branch(branch) if branch.at == source => {
+            let mut branch = branch.clone();
+            branch.at = destination;
+            Some(SessionEntry::Branch(branch))
+        }
+        SessionEntry::Label(label) if label.anchor == source => {
+            let mut label = label.clone();
+            label.anchor = destination;
+            Some(SessionEntry::Label(label))
+        }
+        _ => None,
+    }
+}
+
+fn ensure_supported_version(path: &Path, version: u32) -> Result<(), SessionError> {
+    if version == 0 || version > FORMAT_VERSION {
+        return Err(SessionError::UnsupportedVersion {
+            path: path.to_path_buf(),
+            found: version,
+            supported: FORMAT_VERSION,
+        });
+    }
+    Ok(())
 }
 
 /// The blobs a message entry names.
@@ -371,6 +469,7 @@ mod tests {
             model: model.into(),
             system_prompt: "be helpful".into(),
             parent_session: None,
+            backend: None,
             parent_entry: None,
         }
     }
@@ -496,6 +595,388 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_rejects_complete_corrupt_lines_and_reports_physical_line() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.jsonl");
+        write(&src, fresh_header("x:y"), &[]);
+        let header = std::fs::read(&src).unwrap();
+        let mut data = b"\n".to_vec();
+        data.extend_from_slice(&header);
+        data.extend_from_slice(b"{broken}\n");
+        std::fs::write(&src, &data).unwrap();
+        assert!(matches!(
+            snapshot(&src, |_| true),
+            Err(SessionError::Decode { path, line: 3, .. }) if path == src
+        ));
+        data.pop();
+        std::fs::write(&src, data).unwrap();
+        assert!(matches!(
+            snapshot(&src, |_| true),
+            Err(SessionError::Decode { path, line: 3, .. }) if path == src
+        ));
+    }
+
+    #[test]
+    fn snapshot_rejects_second_headers_even_after_last_kept_entry() {
+        use crate::entry::{ExternalAcpSession, SessionBackend};
+
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.jsonl");
+        let mut external = fresh_header("external");
+        external.backend = Some(SessionBackend::ExternalAcp(ExternalAcpSession {
+            agent_name: "agent".into(),
+            protocol_version: 1,
+            upstream_session_id: "upstream".into(),
+        }));
+        for header in [fresh_header("native"), external] {
+            for terminated in [true, false] {
+                write(
+                    &src,
+                    fresh_header("native"),
+                    &[message_entry(Role::User, "hello")],
+                );
+                let mut data = std::fs::read(&src).unwrap();
+                data.extend_from_slice(
+                    &serde_json::to_vec(&SessionEntry::Header(header.clone())).unwrap(),
+                );
+                if terminated {
+                    data.push(b'\n');
+                }
+                std::fs::write(&src, data).unwrap();
+                assert!(
+                    matches!(snapshot(&src, |_| false), Err(SessionError::SecondHeader { path }) if path == src)
+                );
+                std::fs::remove_file(&src).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_rejects_malformed_unterminated_json_but_reports_incomplete_json() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.jsonl");
+        for (tail, torn) in [
+            (b"{\"type\":]".as_slice(), false),
+            (b"{\"type\":\"message\"", true),
+        ] {
+            write(&src, fresh_header("native"), &[]);
+            let mut data = std::fs::read(&src).unwrap();
+            data.extend_from_slice(tail);
+            std::fs::write(&src, data).unwrap();
+            if torn {
+                assert!(snapshot(&src, |_| true).unwrap().truncated);
+            } else {
+                assert!(
+                    matches!(snapshot(&src, |_| true), Err(SessionError::Decode { path, line: 2, .. }) if path == src)
+                );
+            }
+            std::fs::remove_file(&src).unwrap();
+        }
+    }
+
+    #[test]
+    fn snapshot_remaps_root_branches_to_destination_header() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.jsonl");
+        let header = fresh_header("native");
+        let first = message_entry(Role::User, "abandoned");
+        let root_branch = SessionEntry::Branch(BranchEntry {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            at: header.id,
+        });
+        let second = message_entry(Role::User, "active");
+        let normal_branch = SessionEntry::Branch(BranchEntry {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            at: second.id(),
+        });
+        let last = message_entry(Role::Assistant, "reply");
+        write(
+            &src,
+            header,
+            &[
+                first.clone(),
+                root_branch.clone(),
+                second.clone(),
+                normal_branch.clone(),
+                last.clone(),
+            ],
+        );
+        let snap = snapshot(&src, |_| true).unwrap();
+        let dst = dir.path().join("dst.jsonl");
+        let new_header = fresh_header("child");
+        let new_id = new_header.id;
+        drop(snap.write(&dst, new_header).unwrap());
+        let entries: Vec<_> = SessionReader::iter(&dst)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            matches!(&entries[2], SessionEntry::Branch(branch) if branch.at == new_id && branch.id == root_branch.id())
+        );
+        assert_eq!(entries[4], normal_branch);
+        assert_eq!(entries[1], first);
+        assert_eq!(entries[3], second);
+        assert_eq!(entries[5], last);
+        let tree = SessionTree::read(&dst).unwrap();
+        assert_eq!(
+            tree.ancestry(last.id())
+                .iter()
+                .map(|entry| entry.id())
+                .collect::<Vec<_>>(),
+            vec![second.id(), last.id()]
+        );
+    }
+
+    #[test]
+    fn fork_and_snapshot_remap_root_label_anchors_but_preserve_lineage() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.jsonl");
+        let header = fresh_header("native");
+        let source_root = header.id;
+        let source_session = header.session;
+        let message = message_entry(Role::User, "message");
+        let root_label = SessionEntry::Label(Label {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            text: "root".into(),
+            anchor: source_root,
+        });
+        let normal_label = SessionEntry::Label(Label {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            text: "message".into(),
+            anchor: message.id(),
+        });
+        write(
+            &src,
+            header,
+            &[message.clone(), root_label.clone(), normal_label.clone()],
+        );
+        let snap = snapshot(&src, |_| true).unwrap();
+        for use_snapshot in [false, true] {
+            let dst = dir.path().join(if use_snapshot {
+                "snapshot.jsonl"
+            } else {
+                "fork.jsonl"
+            });
+            let mut child = fresh_header("child");
+            child.parent_session = Some(source_session);
+            child.parent_entry = Some(source_root);
+            let child_root = child.id;
+            if use_snapshot {
+                drop(snap.write(&dst, child).unwrap());
+            } else {
+                fork_as(&src, &dst, child, normal_label.id()).unwrap();
+            }
+            let entries: Vec<_> = SessionReader::iter(&dst)
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert!(
+                matches!(&entries[0], SessionEntry::Header(h) if h.id == child_root && h.parent_session == Some(source_session) && h.parent_entry == Some(source_root))
+            );
+            assert!(
+                matches!(&entries[2], SessionEntry::Label(label) if label.id == root_label.id() && label.anchor == child_root)
+            );
+            assert_eq!(entries[3], normal_label);
+            assert!(SessionTree::read(&dst).is_ok());
+        }
+    }
+
+    #[test]
+    fn snapshot_rejects_complete_schema_invalid_unterminated_json() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.jsonl");
+        for tail in [b"{}".as_slice(), b"{\"type\":\"message\"}", b"null"] {
+            write(&src, fresh_header("native"), &[]);
+            let mut data = std::fs::read(&src).unwrap();
+            data.extend_from_slice(tail);
+            std::fs::write(&src, data).unwrap();
+            assert!(
+                matches!(snapshot(&src, |_| true), Err(SessionError::Decode { path, line: 2, .. }) if path == src)
+            );
+            std::fs::remove_file(&src).unwrap();
+        }
+    }
+
+    #[test]
+    fn invalid_destination_versions_create_no_files_or_blobs() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.jsonl");
+        let source_header = fresh_header("native");
+        let at = source_header.id;
+        write(&src, source_header, &[]);
+        let mut snap = snapshot(&src, |_| true).unwrap();
+        snap.blob_refs.push(snap.blobs.put(b"blob").unwrap());
+        for version in [0, FORMAT_VERSION + 1] {
+            let mut header = fresh_header("native");
+            header.version = version;
+            let dst = dir.path().join(format!("missing-{version}/dst.jsonl"));
+            assert!(
+                matches!(snap.write(&dst, header.clone()), Err(SessionError::UnsupportedVersion { path, found, supported }) if path == dst && found == version && supported == FORMAT_VERSION)
+            );
+            assert!(!dst.parent().unwrap().exists());
+            assert!(
+                matches!(fork_as(&src, &dst, header, at), Err(SessionError::UnsupportedVersion { path, found, supported }) if path == dst && found == version && supported == FORMAT_VERSION)
+            );
+            assert!(!dst.parent().unwrap().exists());
+        }
+    }
+
+    #[test]
+    fn older_destination_headers_are_upgraded_when_copying_entries() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.jsonl");
+        let entry = message_entry(Role::User, "copied content");
+        write(&src, fresh_header("native"), std::slice::from_ref(&entry));
+        let snap = snapshot(&src, |_| true).unwrap();
+
+        for use_snapshot in [false, true] {
+            let dst = dir.path().join(if use_snapshot {
+                "snapshot.jsonl"
+            } else {
+                "fork.jsonl"
+            });
+            let mut header = fresh_header("child");
+            header.version = 1;
+            let header_id = header.id;
+            if use_snapshot {
+                drop(snap.write(&dst, header).unwrap());
+            } else {
+                assert!(!fork_as(&src, &dst, header, entry.id()).unwrap());
+            }
+            let mut reader = SessionReader::iter(&dst).unwrap();
+            let SessionEntry::Header(copied_header) = reader.next().unwrap().unwrap() else {
+                panic!("expected header");
+            };
+            assert_eq!(copied_header.id, header_id);
+            assert_eq!(copied_header.version, FORMAT_VERSION);
+            let copied = reader.next().unwrap().unwrap();
+            assert_eq!(
+                serde_json::to_value(copied).unwrap(),
+                serde_json::to_value(&entry).unwrap()
+            );
+            assert!(reader.next().is_none());
+        }
+    }
+
+    #[test]
+    fn snapshot_rejects_unsupported_versions_before_filtering() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.jsonl");
+        for version in [0, FORMAT_VERSION + 1] {
+            let mut header = fresh_header("x:y");
+            header.version = version;
+            let mut data = serde_json::to_vec(&SessionEntry::Header(header)).unwrap();
+            data.push(b'\n');
+            data.extend(serde_json::to_vec(&message_entry(Role::User, "hello")).unwrap());
+            data.push(b'\n');
+            std::fs::write(&src, data).unwrap();
+            assert!(matches!(
+                snapshot(&src, |_| panic!("unsupported entries must not reach the filter")),
+                Err(SessionError::UnsupportedVersion { path, found, supported })
+                    if path == src && found == version && supported == FORMAT_VERSION
+            ));
+            std::fs::remove_file(&src).unwrap();
+        }
+    }
+
+    #[test]
+    fn snapshot_copies_blobs_of_rejected_entries_before_last_kept_entry() {
+        use kage_core::MediaSource;
+
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.jsonl");
+        let dst = dir.path().join("other/dst.jsonl");
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        let blobs = BlobStore::beside(&src);
+        let bytes = b"image contents";
+        let sha = blobs.put(bytes).unwrap();
+        let later_sha = blobs.put(b"not copied").unwrap();
+        let image = |sha256: String| {
+            SessionEntry::Message(MessageEntry {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                message: Arc::new(Message::new(
+                    Role::User,
+                    vec![Content::Image {
+                        mime: "image/png".into(),
+                        source: MediaSource::Blob {
+                            sha256,
+                            size: bytes.len() as u64,
+                        },
+                    }],
+                    None,
+                )),
+                usage: None,
+            })
+        };
+        let first = image(sha.clone());
+        let kept = message_entry(Role::Assistant, "keep");
+        let last = image(later_sha.clone());
+        write(
+            &src,
+            fresh_header("x:y"),
+            &[first.clone(), kept.clone(), last],
+        );
+        let snap = snapshot(&src, |entry| entry.id() == kept.id()).unwrap();
+        assert_eq!(snap.at, kept.id());
+        assert_eq!(snap.blob_refs, vec![sha.clone()]);
+        drop(snap.write(&dst, fresh_header("x:y")).unwrap());
+        let target = BlobStore::beside(&dst);
+        assert_eq!(target.get(&sha).as_deref(), Some(bytes.as_slice()));
+        assert!(target.get(&later_sha).is_none());
+        let copied: Vec<_> = SessionReader::iter(&dst)
+            .unwrap()
+            .skip(1)
+            .map(|entry| entry.unwrap().id())
+            .collect();
+        assert_eq!(copied, [first.id(), kept.id()]);
+    }
+
+    #[test]
+    fn snapshots_refuse_external_sources_and_destinations_before_writing() {
+        use crate::entry::{ExternalAcpSession, SessionBackend};
+
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("external.jsonl");
+        let mut external = fresh_header("external");
+        external.cwd = dir.path().to_path_buf();
+        external.backend = Some(SessionBackend::ExternalAcp(ExternalAcpSession {
+            agent_name: "agent".into(),
+            protocol_version: 1,
+            upstream_session_id: "upstream".into(),
+        }));
+        write(
+            &src,
+            external.clone(),
+            &[message_entry(Role::User, "secret")],
+        );
+        assert!(matches!(
+            snapshot(&src, |_| panic!("external entries must not reach the filter")),
+            Err(SessionError::ExternalFork { path }) if path == src
+        ));
+
+        let native = dir.path().join("native.jsonl");
+        write(
+            &native,
+            fresh_header("native"),
+            &[message_entry(Role::User, "hello")],
+        );
+        let mut snap = snapshot(&native, |_| true).unwrap();
+        let sha = snap.blobs.put(b"blob contents").unwrap();
+        snap.blob_refs.push(sha);
+        let dst = dir.path().join("missing/child.jsonl");
+        assert!(matches!(
+            snap.write(&dst, external),
+            Err(SessionError::ExternalFork { path }) if path == dst
+        ));
+        assert!(!dst.parent().unwrap().exists());
+    }
+
+    #[test]
     fn a_whole_snapshot_reports_no_truncation() {
         let dir = tempdir().unwrap();
         let src = dir.path().join("src.jsonl");
@@ -542,6 +1023,42 @@ mod tests {
             .unwrap(),
             "an intact source is not truncated"
         );
+    }
+
+    #[test]
+    fn generic_forks_refuse_external_identity_without_creating_destination() {
+        use crate::entry::{ExternalAcpSession, SessionBackend};
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("source.jsonl");
+        let mut external = fresh_header("external");
+        external.cwd = dir.path().to_path_buf();
+        external.backend = Some(SessionBackend::ExternalAcp(ExternalAcpSession {
+            agent_name: "agent".into(),
+            protocol_version: 1,
+            upstream_session_id: "upstream".into(),
+        }));
+        let at = external.id;
+        write(&src, external.clone(), &[]);
+        let dst = dir.path().join("missing/child.jsonl");
+        assert!(matches!(
+            fork(&src, &dst, SessionId::new(), at),
+            Err(SessionError::ExternalFork { .. })
+        ));
+        assert!(matches!(
+            fork_as(&src, &dst, fresh_header("native"), at),
+            Err(SessionError::ExternalFork { .. })
+        ));
+        assert!(!dst.parent().unwrap().exists());
+
+        let native = dir.path().join("native.jsonl");
+        let header = fresh_header("native");
+        let native_at = header.id;
+        write(&native, header, &[]);
+        assert!(matches!(
+            fork_as(&native, &dst, external, native_at),
+            Err(SessionError::ExternalFork { .. })
+        ));
+        assert!(!dst.parent().unwrap().exists());
     }
 
     #[test]

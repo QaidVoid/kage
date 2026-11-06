@@ -813,7 +813,7 @@ impl CliAcpAgent {
         let snap = lock(&self.host.live).snapshot(id);
         if replay_file && let Some(ctx) = ctx {
             for update in super::sessions::replay_updates(&replay.timeline) {
-                ctx.update(update);
+                let _ = ctx.update(update);
             }
             self.announce_restored(id, &replay, ctx);
         }
@@ -826,7 +826,7 @@ impl CliAcpAgent {
         {
             for event in &snap.flight {
                 if let Some(update) = to_update(&mut seen, event) {
-                    ctx.update(update);
+                    let _ = ctx.update(update);
                 }
             }
         }
@@ -836,7 +836,7 @@ impl CliAcpAgent {
         if let Some(ctx) = ctx {
             let file_title = replay_file.then(|| replay.title.clone()).flatten();
             if let Some(title) = snap.title.clone().or(file_title) {
-                ctx.update(SessionUpdate::SessionInfoUpdate(SessionInfoUpdate {
+                let _ = ctx.update(SessionUpdate::SessionInfoUpdate(SessionInfoUpdate {
                     title: Some(title),
                     updated_at: None,
                 }));
@@ -907,7 +907,7 @@ impl CliAcpAgent {
             } else {
                 seed.parent.to_string()
             };
-            send_update(
+            let _ = send_update(
                 &self.peer,
                 &parent,
                 SessionUpdate::SubagentUpdate(SubagentUpdate {

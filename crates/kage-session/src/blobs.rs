@@ -188,6 +188,7 @@ mod tests {
             model: "anthropic:claude".into(),
             system_prompt: "sys".into(),
             parent_session: None,
+            backend: None,
             parent_entry: None,
         }
     }

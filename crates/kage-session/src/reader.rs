@@ -1,12 +1,12 @@
 //! Streaming session reader.
 //!
 //! [`SessionReader::iter`] opens a session file and yields one
-//! [`SessionEntry`] per line that is not empty or whitespace-only. A
+//! [`SessionEntry`] per line that is not empty or whitespace-only.
 //! Non-final corrupt lines are reported and iteration continues. An
 //! unterminated final fragment is forgiven only if it is incomplete.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek};
 use std::path::{Path, PathBuf};
 
 use std::sync::Arc;
@@ -32,6 +32,15 @@ impl SessionReader {
         let file = File::open(&path).map_err(|err| SessionError::Io {
             path: path.clone(),
             source: err,
+        })?;
+        Self::from_file(path, file)
+    }
+
+    /// Prepare to stream entries from an already open file.
+    pub(crate) fn from_file(path: PathBuf, mut file: File) -> Result<Self, SessionError> {
+        file.rewind().map_err(|source| SessionError::Io {
+            path: path.clone(),
+            source,
         })?;
         let inner = BufReader::new(file);
         Ok(Self {
@@ -120,6 +129,10 @@ impl Iterator for SessionReader {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "avoid an allocation for every session entry"
+)]
 pub(crate) enum Line {
     Blank,
     Entry(SessionEntry),
@@ -185,6 +198,7 @@ mod tests {
             system_prompt: "sys".into(),
             parent_session: None,
             parent_entry: None,
+            backend: None,
         }
     }
 

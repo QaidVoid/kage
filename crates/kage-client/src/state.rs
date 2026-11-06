@@ -34,6 +34,8 @@ pub struct State {
     /// The config options a new session opens with, as a kage agent
     /// reported them at `initialize`.
     pub agent_defaults: Vec<kage_acp_wire::SessionConfigOption>,
+    /// Whether the current host advertised external session creation.
+    pub external_sessions: bool,
     /// The sessions this connection holds or hears updates for, by id.
     pub sessions: BTreeMap<String, Session>,
     /// The recorded sessions a `session/list` answered with, in page

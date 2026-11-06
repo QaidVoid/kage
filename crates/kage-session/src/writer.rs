@@ -6,17 +6,15 @@
 //! before returning, so a successful return implies the entry has reached
 //! disk.
 //!
-//! Writers hold an advisory exclusive lock for their lifetime (`flock`
-//! on Unix, `LockFileEx` on Windows), so a second appender (say, a
-//! `kage -r` in another terminal) fails instead of interleaving two
-//! JSONL streams into one file. The lock lives on a `<session>.lock`
-//! sidecar, not on the session file itself: a Windows byte-range lock
-//! on the data file would also refuse this process's own reads of it,
-//! and fork, clone, export, and replay all read while the writer is
-//! open. On filesystems where the lock is unsupported it is skipped.
+//! On Unix writers hold exclusive advisory locks on both the session inode
+//! and a sidecar. The inode lock prevents aliases from bypassing the lock.
+//! Windows currently uses only the sidecar, so aliased session paths do not
+//! share a lock there. Other unsupported platforms fail closed.
 //!
-//! A valid unterminated final entry is preserved and terminated on reopen.
-//! An incomplete final fragment is removed; an invalid unterminated tail is rejected.
+//! Entries written by this writer end with `\n`. On reopening, a valid
+//! unterminated final entry is preserved and terminated, while an invalid
+//! trailing fragment is truncated only when incomplete. Corrupt or incompatible
+//! tails and an invalid header are refused.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufWriter, Seek, Write};
@@ -26,6 +24,7 @@ use std::sync::Arc;
 use crate::blobs::BlobStore;
 use crate::entry::{FORMAT_VERSION, Header, MessageEntry, SessionEntry};
 use crate::error::SessionError;
+use crate::reader::{Line, classify_line};
 
 /// Writes one [`SessionEntry`] per line, fsyncing on every append.
 #[derive(Debug)]
@@ -39,7 +38,7 @@ pub struct SessionWriter {
         dead_code,
         reason = "held only so the lock lives as long as the writer"
     )]
-    lock: Option<nix::fcntl::Flock<File>>,
+    lock: Option<Lock>,
     /// The sidecar lock file's handle; the lock is released when the
     /// handle closes.
     #[cfg(windows)]
@@ -54,9 +53,29 @@ impl SessionWriter {
     /// Create a new session file at `path` and write the header line.
     ///
     /// Fails if the file already exists; callers that want to append to an
-    /// existing session should use [`Self::open`].
-    pub fn create(path: impl Into<PathBuf>, header: Header) -> Result<Self, SessionError> {
+    /// existing session should use [`Self::open`]. For an external backend,
+    /// canonicalizes the working directory before creating any destination
+    /// paths. The directory must exist and be accessible. Versions outside
+    /// the supported range are rejected before creating destination paths.
+    /// Supported headers are written with the current format version because
+    /// appended entries may use the current format. This also prevents older
+    /// readers from treating external sessions as native sessions.
+    pub fn create(path: impl Into<PathBuf>, mut header: Header) -> Result<Self, SessionError> {
         let path = path.into();
+        if header.version == 0 || header.version > FORMAT_VERSION {
+            return Err(SessionError::UnsupportedVersion {
+                path,
+                found: header.version,
+                supported: FORMAT_VERSION,
+            });
+        }
+        header.version = FORMAT_VERSION;
+        if header.backend.is_some() {
+            header.cwd = std::fs::canonicalize(&header.cwd).map_err(|source| SessionError::Io {
+                path: header.cwd.clone(),
+                source,
+            })?;
+        }
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -73,12 +92,19 @@ impl SessionWriter {
             // Session logs carry full conversations; keep them owner-only.
             opts.mode(0o600);
         }
+        let lock = acquire_lock(&path)?;
         let file = opts.open(&path).map_err(|err| SessionError::Io {
             path: path.clone(),
             source: err,
         })?;
-        #[cfg(any(unix, windows))]
-        let lock = acquire_lock(&path)?;
+        let lock = lock_inode(
+            file.try_clone().map_err(|source| SessionError::Io {
+                path: path.clone(),
+                source,
+            })?,
+            &path,
+            lock,
+        )?;
         let mut writer = Self {
             path,
             inner: BufWriter::new(file),
@@ -96,38 +122,69 @@ impl SessionWriter {
 
     /// Reopen an existing session file for further appends.
     ///
-    /// The file is opened in append mode. Under the advisory lock, a valid
-    /// unterminated final entry is terminated and an incomplete fragment is
-    /// removed. A complete, invalid unterminated tail is reported unchanged.
-    /// This operation does not validate newline-terminated entries.
+    /// Writes seek to the end while the exclusive lock is held. A valid
+    /// unterminated final entry is terminated first, while a torn trailing
+    /// line is truncated away. The advisory lock is taken before repair so
+    /// a second appender never truncates a concurrent writer's in-flight entry.
+    /// An empty file or a file whose first line is not a parseable header is
+    /// refused rather than repaired into a headerless file.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, SessionError> {
         let path = path.into();
-        let mut file = OpenOptions::new()
-            .read(true)
-            .append(true)
-            .open(&path)
-            .map_err(|err| SessionError::Io {
-                path: path.clone(),
-                source: err,
-            })?;
-        // The lock precedes the version check and the repair so a
-        // second opener that loses it never touches the file's bytes.
-        #[cfg(any(unix, windows))]
-        let lock = acquire_lock(&path)?;
-        check_version(&file, &path)?;
-        repair_torn_tail(&mut file, &path)?;
-        Ok(Self {
+        let (file, lock) = open_locked(&path, true)?;
+        let mut writer = Self {
             path,
             inner: BufWriter::new(file),
             #[cfg(any(unix, windows))]
             lock,
-        })
+        };
+        check_version(writer.inner.get_ref(), &writer.path)?;
+        repair_torn_tail(writer.inner.get_mut(), &writer.path)?;
+        Ok(writer)
+    }
+
+    /// Open and replay a native session under one exclusive lock.
+    ///
+    /// Returns `None` for an external session without modifying its file.
+    /// The returned writer appends to the same open file that was replayed.
+    pub fn open_native_replay(
+        path: impl Into<PathBuf>,
+    ) -> Result<Option<(Self, crate::resume::ReplayResult)>, SessionError> {
+        let path = path.into();
+        let (mut file, lock) = open_locked(&path, true)?;
+        let header = check_version(&file, &path)?;
+        if header.backend.is_some() {
+            return Ok(None);
+        }
+        file.rewind().map_err(|source| SessionError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let replay = crate::resume::replay_file(
+            &path,
+            file.try_clone().map_err(|source| SessionError::Io {
+                path: path.clone(),
+                source,
+            })?,
+        )?;
+        repair_torn_tail(&mut file, &path)?;
+        Ok(Some((
+            Self {
+                path,
+                inner: BufWriter::new(file),
+                #[cfg(any(unix, windows))]
+                lock,
+            },
+            replay,
+        )))
     }
 
     /// Append one entry: serialize, write `<json>\n`, flush, fsync. A
     /// message's large media go to the blob store first and the line
     /// names them (see [`crate::blobs`]).
     pub fn append(&mut self, entry: &SessionEntry) -> Result<(), SessionError> {
+        self.inner
+            .seek(std::io::SeekFrom::End(0))
+            .map_err(|err| self.io_err(err))?;
         let stored = match entry {
             SessionEntry::Message(message) => BlobStore::beside(&self.path)
                 .externalize(&message.message)
@@ -165,6 +222,9 @@ impl SessionWriter {
     /// them one by one.
     pub fn append_lines(&mut self, lines: &[u8]) -> Result<(), SessionError> {
         self.inner
+            .seek(std::io::SeekFrom::End(0))
+            .map_err(|err| self.io_err(err))?;
+        self.inner
             .write_all(lines)
             .map_err(|err| self.io_err(err))?;
         self.inner.flush().map_err(|err| self.io_err(err))?;
@@ -189,6 +249,99 @@ impl SessionWriter {
     }
 }
 
+#[cfg(any(unix, windows))]
+fn open_locked(path: &Path, writable: bool) -> Result<(File, Option<Lock>), SessionError> {
+    let lock = acquire_lock(path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(writable)
+        .open(path)
+        .map_err(|source| SessionError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let lock = lock_inode(
+        file.try_clone().map_err(|source| SessionError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?,
+        path,
+        lock,
+    )?;
+    Ok((file, lock))
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct Lock {
+    _sidecar: nix::fcntl::Flock<File>,
+    _inode: nix::fcntl::Flock<File>,
+}
+
+#[cfg(unix)]
+fn lock_inode(
+    file: File,
+    path: &Path,
+    sidecar: Option<nix::fcntl::Flock<File>>,
+) -> Result<Option<Lock>, SessionError> {
+    use nix::fcntl::{Flock, FlockArg};
+    let inode = Flock::lock(file, FlockArg::LockExclusiveNonblock).map_err(|(_, err)| {
+        if err == nix::errno::Errno::EWOULDBLOCK {
+            SessionError::Locked {
+                path: path.to_path_buf(),
+            }
+        } else {
+            SessionError::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::from_raw_os_error(err as i32),
+            }
+        }
+    })?;
+    Ok(Some(Lock {
+        _sidecar: sidecar.expect("Unix sidecar lock"),
+        _inode: inode,
+    }))
+}
+
+#[cfg(windows)]
+fn lock_inode(
+    _file: File,
+    _path: &Path,
+    sidecar: Option<File>,
+) -> Result<Option<Lock>, SessionError> {
+    Ok(sidecar)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn lock_inode(_file: File, path: &Path, _sidesidecar: ()) -> Result<(), SessionError> {
+    Err(SessionError::Io {
+        path: path.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "session locking is unsupported",
+        ),
+    })
+}
+
+#[cfg(windows)]
+type Lock = File;
+
+#[cfg(not(any(unix, windows)))]
+fn acquire_lock(path: &Path) -> Result<(), SessionError> {
+    Err(SessionError::Io {
+        path: path.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "session locking is unsupported",
+        ),
+    })
+}
+#[cfg(not(any(unix, windows)))]
+fn open_locked(path: &Path, _writable: bool) -> Result<(File, ()), SessionError> {
+    acquire_lock(path)?;
+    unreachable!()
+}
+
 /// Refuse to append to a file that is not a session this build can
 /// extend. An empty file has no header to append behind; a first line
 /// that does not parse as a header can only be a torn or foreign
@@ -196,7 +349,7 @@ impl SessionWriter {
 /// adds. A parseable header must declare a format version this build
 /// interprets: any version whose entries it all knows, so a version 1
 /// file stays appendable.
-fn check_version(file: &File, path: &Path) -> Result<(), SessionError> {
+fn check_version(file: &File, path: &Path) -> Result<Header, SessionError> {
     let mut reader = std::io::BufReader::new(file);
     let mut line = String::new();
     let read = reader
@@ -219,7 +372,7 @@ fn check_version(file: &File, path: &Path) -> Result<(), SessionError> {
                     supported: FORMAT_VERSION,
                 });
             }
-            Ok(())
+            Ok(header)
         }
         _ => Err(SessionError::MissingHeader {
             path: path.to_path_buf(),
@@ -227,73 +380,108 @@ fn check_version(file: &File, path: &Path) -> Result<(), SessionError> {
     }
 }
 
-/// Repair only an incomplete unterminated fragment, or terminate a valid line.
+/// Terminate a valid final line or remove an incomplete trailing fragment.
 fn repair_torn_tail(file: &mut File, path: &Path) -> Result<(), SessionError> {
-    use crate::reader::{Line, classify_line};
-    let io = |source| SessionError::Io {
+    let io = |err: std::io::Error| SessionError::Io {
         path: path.to_path_buf(),
-        source,
+        source: err,
     };
     file.rewind().map_err(io)?;
-    let mut reader = std::io::BufReader::new(&mut *file);
+    let len = file.metadata().map_err(io)?;
+    if len.len() == 0 {
+        return Ok(());
+    }
+    let mut last_newline: Option<u64> = None;
     let mut offset = 0u64;
     let mut line = 0usize;
+    let mut reader = std::io::BufReader::new(&mut *file);
     let mut chunk = Vec::new();
     loop {
         chunk.clear();
         let n = reader.read_until(b'\n', &mut chunk).map_err(io)?;
         if n == 0 {
-            return Ok(());
-        }
-        line += 1;
-        if chunk.last() != Some(&b'\n') {
             break;
         }
-        offset += n as u64;
+        offset += u64::try_from(n).unwrap_or(u64::MAX);
+        line += 1;
+        if chunk.last() == Some(&b'\n') {
+            last_newline = Some(offset - 1);
+        } else {
+            break;
+        }
+    }
+    let ends_with_newline = last_newline.is_some_and(|pos| pos + 1 == offset);
+    if ends_with_newline {
+        return Ok(());
     }
     match classify_line(&chunk, false) {
         Line::Entry(_) | Line::Blank => {
             file.write_all(b"\n").map_err(io)?;
-            file.sync_all().map_err(io)
+            return file.sync_all().map_err(io);
         }
-        Line::Torn => {
-            if offset == 0 {
-                return Err(SessionError::TornHeader {
-                    path: path.to_path_buf(),
-                });
-            }
-            // Windows refuses to truncate through an append-only handle.
-            let writer = OpenOptions::new().write(true).open(path).map_err(io)?;
-            writer.set_len(offset).map_err(io)?;
-            writer.sync_all().map_err(io)
+        Line::Torn => {}
+        Line::Decode(source) => {
+            return Err(SessionError::Decode {
+                path: path.to_path_buf(),
+                line,
+                source,
+            });
         }
-        Line::Decode(source) => Err(SessionError::Decode {
-            path: path.to_path_buf(),
-            line,
-            source,
-        }),
-        Line::InvalidUtf8(source) => Err(io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            source,
-        ))),
+        Line::InvalidUtf8(source) => {
+            return Err(io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                source,
+            )));
+        }
     }
+    let Some(last_newline) = last_newline else {
+        return Err(SessionError::TornHeader {
+            path: path.to_path_buf(),
+        });
+    };
+    file.set_len(last_newline + 1).map_err(io)?;
+    file.sync_all().map_err(io)
 }
 
-/// Whether another writer holds the advisory lock on the session file
-/// at `path`, such as a TUI or `kage serve` hosting the session. The
-/// probe locks the `<session>.lock` sidecar and releases it before
-/// returning. `false` when the sidecar cannot be opened or the
-/// filesystem does not support the lock.
+/// Delete a session while holding its exclusive locks.
+///
+/// The file is opened but not repaired. Lock acquisition failures prevent
+/// deletion, and the sidecar remains in place for future lock holders.
+/// On Windows aliases can bypass the sidecar lock.
+pub fn delete_locked(path: &Path) -> Result<(), SessionError> {
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("lock"))
+    {
+        return Err(SessionError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing to delete a lock sidecar",
+            ),
+        });
+    }
+    let (_file, _lock) = open_locked(path, false)?;
+    std::fs::remove_file(path).map_err(|source| SessionError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Whether a session appears to be locked by another writer.
+///
+/// Unix probes the inode, while Windows probes the sidecar. This is only a display hint. Errors return false, and callers must use
+/// [`delete_locked`] rather than relying on this probe for synchronization.
 #[must_use]
 pub fn is_locked(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use nix::fcntl::{Flock, FlockArg};
-        let Some(file) = lock_file(path) else {
+        let Ok(file) = File::open(path) else {
             return false;
         };
         matches!(
-            Flock::lock(file, FlockArg::LockSharedNonblock),
+            Flock::lock(file, FlockArg::LockExclusiveNonblock),
             Err((_, nix::errno::Errno::EWOULDBLOCK))
         )
     }
@@ -339,20 +527,23 @@ fn lock_file(path: &Path) -> Option<File> {
 ///
 /// `EWOULDBLOCK` means another appender holds the lock, reported as
 /// [`SessionError::Locked`]. Any other `flock` failure (filesystems
-/// without lock support) proceeds unlocked: the lock guards against a
-/// second kage process, not against the storage layer.
+/// without lock support) is returned as an I/O error.
 #[cfg(unix)]
 fn acquire_lock(path: &Path) -> Result<Option<nix::fcntl::Flock<File>>, SessionError> {
     use nix::fcntl::{Flock, FlockArg};
-    let Some(file) = lock_file(path) else {
-        return Ok(None);
-    };
+    let file = lock_file(path).ok_or_else(|| SessionError::Io {
+        path: path.to_path_buf(),
+        source: std::io::Error::other("cannot open session lock"),
+    })?;
     match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
         Ok(lock) => Ok(Some(lock)),
         Err((_, nix::errno::Errno::EWOULDBLOCK)) => Err(SessionError::Locked {
             path: path.to_path_buf(),
         }),
-        Err((_, _)) => Ok(None),
+        Err((_, err)) => Err(SessionError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::from_raw_os_error(err as i32),
+        }),
     }
 }
 
@@ -360,24 +551,26 @@ fn acquire_lock(path: &Path) -> Result<Option<nix::fcntl::Flock<File>>, SessionE
 /// the whole sidecar file, mirroring the Unix `flock` shape.
 ///
 /// A held lock is reported as [`SessionError::Locked`]. Any other lock
-/// failure (filesystems without lock support) proceeds unlocked: the
-/// lock guards against a second kage process, not against the storage
-/// layer. Unlike `flock`, Windows byte-range locks belong to the whole
+/// failure (including unsupported locks) is returned as an I/O error. Unlike `flock`, Windows byte-range locks belong to the whole
 /// process: closing any other handle to the sidecar in this process
 /// releases them, so the lock is only meaningful against other
 /// processes.
 #[cfg(windows)]
 fn acquire_lock(path: &Path) -> Result<Option<File>, SessionError> {
     use std::fs::TryLockError;
-    let Some(file) = lock_file(path) else {
-        return Ok(None);
-    };
+    let file = lock_file(path).ok_or_else(|| SessionError::Io {
+        path: path.to_path_buf(),
+        source: std::io::Error::other("cannot open session lock"),
+    })?;
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),
         Err(TryLockError::WouldBlock) => Err(SessionError::Locked {
             path: path.to_path_buf(),
         }),
-        Err(TryLockError::Error(_)) => Ok(None),
+        Err(TryLockError::Error(source)) => Err(SessionError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
     }
 }
 
@@ -405,8 +598,229 @@ mod tests {
             model: "anthropic:claude".into(),
             system_prompt: "sys".into(),
             parent_session: None,
+            backend: None,
             parent_entry: None,
         }
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn locked_delete_refuses_active_writer_and_preserves_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let writer = SessionWriter::create(&path, fresh_header()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            delete_locked(&path),
+            Err(SessionError::Locked { .. })
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        drop(writer);
+        delete_locked(&path).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn locked_delete_accepts_a_read_only_session() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, b"not a session").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        delete_locked(&path).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn locked_delete_does_not_open_or_repair_session() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, b"not a session").unwrap();
+        delete_locked(&path).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sidecar_and_inode_aliases_cannot_bypass_live_writer() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let writer = SessionWriter::create(&path, fresh_header()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let sidecar = dir.path().join("session.jsonl.lock");
+        assert!(delete_locked(&sidecar).is_err());
+        assert!(sidecar.exists());
+        let sidecar_alias = dir.path().join("sidecar-alias");
+        std::fs::hard_link(&sidecar, &sidecar_alias).unwrap();
+        assert!(delete_locked(&sidecar_alias).is_err());
+        for alias in [
+            dir.path().join("symlink.jsonl"),
+            dir.path().join("hardlink.jsonl"),
+        ] {
+            if alias.file_name().unwrap() == "symlink.jsonl" {
+                symlink(&path, &alias).unwrap();
+            } else {
+                std::fs::hard_link(&path, &alias).unwrap();
+            }
+            assert!(matches!(
+                SessionWriter::open(&alias),
+                Err(SessionError::Locked { .. })
+            ));
+            assert!(matches!(
+                SessionWriter::open_native_replay(&alias),
+                Err(SessionError::Locked { .. })
+            ));
+            assert!(matches!(
+                delete_locked(&alias),
+                Err(SessionError::Locked { .. })
+            ));
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert!(is_locked(&alias));
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        drop(writer);
+    }
+
+    #[test]
+    fn locked_delete_fails_closed_when_sidecar_cannot_open() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, b"contents").unwrap();
+        std::fs::create_dir(dir.path().join("s.jsonl.lock")).unwrap();
+        assert!(delete_locked(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"contents");
+    }
+
+    #[test]
+    fn native_replay_locks_and_includes_latest_history() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut first = SessionWriter::create(&path, fresh_header()).unwrap();
+        first
+            .append(&SessionEntry::Message(MessageEntry {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                message: Arc::new(Message::new(
+                    Role::User,
+                    vec![Content::Text {
+                        text: "latest".into(),
+                    }],
+                    None,
+                )),
+                usage: None,
+            }))
+            .unwrap();
+        assert!(matches!(
+            SessionWriter::open_native_replay(&path),
+            Err(SessionError::Locked { .. })
+        ));
+        drop(first);
+        let (mut writer, replay) = SessionWriter::open_native_replay(&path).unwrap().unwrap();
+        assert_eq!(replay.history.len(), 1);
+        assert!(
+            matches!(&replay.history[0].content[0], Content::Text { text } if text == "latest")
+        );
+        assert!(matches!(
+            SessionWriter::open(&path),
+            Err(SessionError::Locked { .. })
+        ));
+        writer
+            .append(&SessionEntry::Label(Label {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                text: "after".into(),
+                anchor: replay.header.id,
+            }))
+            .unwrap();
+        drop(writer);
+        assert!(std::fs::read_to_string(path).unwrap().contains("after"));
+    }
+
+    #[test]
+    fn native_replay_reads_multiple_entries_and_repairs_torn_tail() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut writer = SessionWriter::create(&path, fresh_header()).unwrap();
+        for text in ["one", "two", "three"] {
+            writer
+                .append(&SessionEntry::Message(MessageEntry {
+                    id: EntryId::new(),
+                    ts: Utc::now(),
+                    message: Arc::new(Message::new(
+                        Role::User,
+                        vec![Content::Text { text: text.into() }],
+                        None,
+                    )),
+                    usage: None,
+                }))
+                .unwrap();
+        }
+        drop(writer);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{\"broken");
+        std::fs::write(&path, &bytes).unwrap();
+        let (writer, replay) = SessionWriter::open_native_replay(&path).unwrap().unwrap();
+        assert_eq!(replay.history.len(), 3);
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("broken"));
+        drop(writer);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_replay_appends_to_replayed_inode_after_replacement() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let old = dir.path().join("old.jsonl");
+        drop(SessionWriter::create(&path, fresh_header()).unwrap());
+        let (mut writer, replay) = SessionWriter::open_native_replay(&path).unwrap().unwrap();
+        std::fs::rename(&path, &old).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        writer
+            .append(&SessionEntry::Label(Label {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                text: "original".into(),
+                anchor: replay.header.id,
+            }))
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+        assert!(std::fs::read_to_string(old).unwrap().contains("original"));
+    }
+
+    #[test]
+    fn native_replay_refuses_external_before_repair() {
+        use crate::entry::{ExternalAcpSession, SessionBackend};
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut header = fresh_header();
+        header.cwd = dir.path().into();
+        header.backend = Some(SessionBackend::ExternalAcp(ExternalAcpSession {
+            agent_name: "agent".into(),
+            protocol_version: 1,
+            upstream_session_id: "secret".into(),
+        }));
+        drop(SessionWriter::create(&path, header).unwrap());
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{broken");
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(SessionWriter::open_native_replay(&path).unwrap().is_none());
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn native_replay_fails_if_lock_cannot_open() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        drop(SessionWriter::create(&path, fresh_header()).unwrap());
+        let mut lock = path.as_os_str().to_os_string();
+        lock.push(".lock");
+        std::fs::remove_file(&lock).unwrap();
+        std::fs::create_dir(&lock).unwrap();
+        assert!(SessionWriter::open_native_replay(&path).is_err());
     }
 
     #[test]
@@ -434,6 +848,95 @@ mod tests {
         assert!(matches!(first, SessionEntry::Header(_)));
         let second: SessionEntry = serde_json::from_str(lines[1]).unwrap();
         assert!(matches!(second, SessionEntry::Message(_)));
+    }
+
+    #[test]
+    fn external_header_persists_canonical_cwd_and_minimal_identity() {
+        use crate::entry::{ExternalAcpSession, SessionBackend};
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut header = fresh_header();
+        header.cwd = dir.path().join(".");
+        header.version = 3;
+        header.model = String::new();
+        header.system_prompt = String::new();
+        header.backend = Some(SessionBackend::ExternalAcp(ExternalAcpSession {
+            agent_name: "configured".into(),
+            protocol_version: 1,
+            upstream_session_id: "id".into(),
+        }));
+        drop(SessionWriter::create(&path, header).unwrap());
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["version"], 4);
+        // A version 3 reader rejects this header before replay or fork.
+        assert!(value["version"].as_u64().unwrap() > 3);
+        assert_eq!(
+            value["cwd"],
+            std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap()
+        );
+        assert_eq!(
+            value["backend"],
+            serde_json::json!({"kind": "external_acp", "agent_name": "configured", "protocol_version": 1, "upstream_session_id": "id"})
+        );
+        assert!(!raw.contains("command") && !raw.contains("env") && !raw.contains("secret"));
+        drop(SessionWriter::open(&path).unwrap());
+        let header = crate::reader::SessionReader::iter(&path)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            header,
+            SessionEntry::Header(Header {
+                backend: Some(SessionBackend::ExternalAcp(_)),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn ambiguous_legacy_external_header_is_rejected_on_read_and_open() {
+        use crate::entry::{ExternalAcpSession, SessionBackend};
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut header = fresh_header();
+        header.version = 3;
+        header.backend = Some(SessionBackend::ExternalAcp(ExternalAcpSession {
+            agent_name: "agent".into(),
+            protocol_version: 1,
+            upstream_session_id: "id".into(),
+        }));
+        let bytes = format!(
+            "{}\n",
+            serde_json::to_string(&SessionEntry::Header(header)).unwrap()
+        );
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(
+            crate::reader::SessionReader::iter(&path)
+                .unwrap()
+                .next()
+                .unwrap()
+                .is_err()
+        );
+        assert!(SessionWriter::open(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn external_header_with_missing_cwd_creates_nothing() {
+        use crate::entry::{ExternalAcpSession, SessionBackend};
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("new/session.jsonl");
+        let mut header = fresh_header();
+        header.cwd = dir.path().join("missing");
+        header.backend = Some(SessionBackend::ExternalAcp(ExternalAcpSession {
+            agent_name: "agent".into(),
+            protocol_version: 1,
+            upstream_session_id: "id".into(),
+        }));
+        assert!(SessionWriter::create(&path, header).is_err());
+        assert!(!path.parent().unwrap().exists());
     }
 
     #[test]
@@ -503,7 +1006,14 @@ mod tests {
             version: FORMAT_VERSION + 1,
             ..fresh_header()
         };
-        SessionWriter::create(&path, header).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&SessionEntry::Header(header)).unwrap()
+            ),
+        )
+        .unwrap();
         match SessionWriter::open(&path) {
             Err(SessionError::UnsupportedVersion {
                 found, supported, ..
@@ -523,7 +1033,14 @@ mod tests {
             version: 1,
             ..fresh_header()
         };
-        SessionWriter::create(&path, header).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&SessionEntry::Header(header)).unwrap()
+            ),
+        )
+        .unwrap();
         let mut w = SessionWriter::open(&path).unwrap();
         w.append(&SessionEntry::Label(Label {
             id: EntryId::new(),
@@ -686,100 +1203,209 @@ mod tests {
         let path = dir.path().join("sess.jsonl");
         let header = serde_json::to_string(&SessionEntry::Header(fresh_header())).unwrap();
         std::fs::write(&path, &header).unwrap();
-        drop(SessionWriter::open(&path).unwrap());
+        let mut writer = SessionWriter::open(&path).unwrap();
+        writer.append_lines(b"\n").unwrap();
+        drop(writer);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            format!("{header}\n")
+            format!("{header}\n\n")
         );
     }
 
     #[test]
-    fn reader_and_writer_agree_on_unterminated_tails() {
-        use crate::reader::SessionReader;
+    fn open_preserves_valid_unterminated_entry_before_append() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("tails.jsonl");
+        let path = dir.path().join("sess.jsonl");
         let header = serde_json::to_string(&SessionEntry::Header(fresh_header())).unwrap();
         let entry = SessionEntry::Label(Label {
             id: EntryId::new(),
             ts: Utc::now(),
-            text: "kept".into(),
+            text: "preserved".into(),
             anchor: EntryId::new(),
         });
-        let valid = serde_json::to_vec(&entry).unwrap();
-        let cases: Vec<(&[u8], u8)> = vec![
-            (&valid, 0),
-            (b" \t\r", 0),
-            (b"{\"type\":\"label\"", 1),
-            (b"{\"type\":\"unknown\",\"partial\":", 1),
-            (b"{\"text\":\"\xe2\x82", 1),
-            (b"{\"type\":\"unknown\"}", 2),
-            (b"{\"type\":\"label\"}", 2),
-            (b"{\"type\":]", 2),
-            (b"{\"type\":\"label\",}", 2),
-            (b"null", 2),
-            (b"{\"text\":\"\xff", 3),
-            (b"{}\xe2\x82", 3),
-            (b"{]\"\xe2\x82", 3),
-        ];
-        for (tail, expected) in cases {
-            let mut before = format!("{header}\n").into_bytes();
-            before.extend_from_slice(tail);
-            std::fs::write(&path, &before).unwrap();
-            let mut reader = SessionReader::iter(&path).unwrap();
-            assert!(reader.next().unwrap().is_ok());
-            let next = reader.next();
-            match expected {
-                0 if tail == valid => assert!(matches!(next, Some(Ok(SessionEntry::Label(_))))),
-                0 | 1 => assert!(next.is_none(), "{tail:?}"),
-                2 => assert!(
-                    matches!(next, Some(Err(SessionError::Decode { line: 2, .. }))),
-                    "{tail:?}"
-                ),
-                3 => assert!(
-                    matches!(next, Some(Err(SessionError::Io { source, .. })) if source.kind() == std::io::ErrorKind::InvalidData),
-                    "{tail:?}"
-                ),
-                _ => unreachable!(),
-            }
-            assert_eq!(reader.torn_trailing(), expected == 1, "{tail:?}");
-            let opened = SessionWriter::open(&path);
-            match expected {
-                0 => {
-                    drop(opened.unwrap());
-                    before.push(b'\n');
-                }
-                1 => {
-                    drop(opened.unwrap());
-                    before.truncate(header.len() + 1);
-                }
-                2 => assert!(
-                    matches!(opened, Err(SessionError::Decode { line: 2, .. })),
-                    "{tail:?}"
-                ),
-                3 => assert!(
-                    matches!(opened, Err(SessionError::Io { source, .. }) if source.kind() == std::io::ErrorKind::InvalidData),
-                    "{tail:?}"
-                ),
-                _ => unreachable!(),
-            }
-            assert_eq!(std::fs::read(&path).unwrap(), before, "{tail:?}");
+        let tail = serde_json::to_string(&entry).unwrap();
+        std::fs::write(&path, format!("{header}\n{tail}")).unwrap();
+        assert_eq!(
+            crate::reader::SessionReader::iter(&path).unwrap().count(),
+            2
+        );
+        let mut writer = SessionWriter::open(&path).unwrap();
+        writer.append(&entry).unwrap();
+        drop(writer);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(raw, format!("{header}\n{tail}\n{tail}\n"));
+        assert_eq!(
+            crate::reader::SessionReader::iter(&path)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn open_repairs_invalid_tails_and_preserves_complete_lines() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        let header = serde_json::to_string(&SessionEntry::Header(fresh_header())).unwrap();
+        for tail in [&b"{\"type\":\"label\""[..], &b"{\"text\":\"\xe2\x82"[..]] {
+            let mut bytes = format!("{header}\n").into_bytes();
+            bytes.extend_from_slice(tail);
+            std::fs::write(&path, bytes).unwrap();
+            drop(SessionWriter::open(&path).unwrap());
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                format!("{header}\n").as_bytes()
+            );
+        }
+        let complete = format!("{header}\nnot json\n");
+        std::fs::write(&path, &complete).unwrap();
+        drop(SessionWriter::open(&path).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), complete);
+    }
+
+    #[test]
+    fn open_preserves_blank_tail_and_rejects_invalid_utf8() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        let header = serde_json::to_string(&SessionEntry::Header(fresh_header())).unwrap();
+        let blank = format!("{header}\n \t\r");
+        std::fs::write(&path, &blank).unwrap();
+        drop(SessionWriter::open(&path).unwrap());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            format!("{blank}\n").as_bytes()
+        );
+
+        for tail in [&b"\xff"[..], &b"{\"text\":\"\xff"[..], &b"null\xe2\x82"[..]] {
+            let mut bytes = format!("{header}\n").into_bytes();
+            bytes.extend_from_slice(tail);
+            std::fs::write(&path, &bytes).unwrap();
+            let err = SessionWriter::open(&path).unwrap_err();
+            assert!(
+                matches!(err, SessionError::Io { ref source, .. } if source.kind() == std::io::ErrorKind::InvalidData),
+                "{err:?}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
         }
     }
 
     #[test]
-    fn terminated_invalid_utf8_is_reported_and_reading_continues() {
+    fn open_rejects_complete_incompatible_unterminated_json_without_changes() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        let header = serde_json::to_string(&SessionEntry::Header(fresh_header())).unwrap();
+        for tail in [
+            r#"{"type":"future_entry","data":1}"#,
+            r#"{"type":"label","id":42}"#,
+            r#"{"type":]"#,
+            r#"{"type":"label",}"#,
+            "null",
+        ] {
+            let bytes = format!("{header}\n{tail}");
+            std::fs::write(&path, &bytes).unwrap();
+            let err = SessionWriter::open(&path).unwrap_err();
+            assert!(
+                matches!(err, SessionError::Decode { line: 2, .. }),
+                "{err:?}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes.as_bytes());
+        }
+    }
+
+    #[test]
+    fn create_checks_version_boundaries_before_touching_paths() {
+        use crate::entry::{ExternalAcpSession, SessionBackend};
+
+        let dir = tempdir().unwrap();
+        for external in [false, true] {
+            for version in [0, FORMAT_VERSION + 1] {
+                let path = dir
+                    .path()
+                    .join(format!("{external}-{version}/session.jsonl"));
+                let mut header = fresh_header();
+                header.version = version;
+                if external {
+                    header.backend = Some(SessionBackend::ExternalAcp(ExternalAcpSession {
+                        agent_name: "agent".into(),
+                        protocol_version: 1,
+                        upstream_session_id: "id".into(),
+                    }));
+                    header.cwd = dir.path().join("missing-cwd");
+                }
+                let err = SessionWriter::create(&path, header).unwrap_err();
+                assert!(
+                    matches!(err, SessionError::UnsupportedVersion { path: ref error_path, found, supported } if error_path == &path && found == version && supported == FORMAT_VERSION)
+                );
+                assert!(!path.parent().unwrap().exists());
+            }
+        }
+    }
+
+    #[test]
+    fn create_accepts_supported_version_boundaries() {
+        use crate::entry::{ExternalAcpSession, SessionBackend};
+
+        let dir = tempdir().unwrap();
+        for external in [false, true] {
+            for version in [1, FORMAT_VERSION] {
+                let path = dir.path().join(format!("{external}-{version}.jsonl"));
+                let mut header = fresh_header();
+                header.version = version;
+                header.cwd = dir.path().to_path_buf();
+                if external {
+                    header.backend = Some(SessionBackend::ExternalAcp(ExternalAcpSession {
+                        agent_name: "agent".into(),
+                        protocol_version: 1,
+                        upstream_session_id: "id".into(),
+                    }));
+                }
+                drop(SessionWriter::create(&path, header).unwrap());
+                let file = File::open(&path).unwrap();
+                let written = check_version(&file, &path).unwrap();
+                assert_eq!(written.version, FORMAT_VERSION);
+                drop(file);
+                drop(SessionWriter::open(&path).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn create_rejects_future_external_version_without_changes() {
+        use crate::entry::{ExternalAcpSession, SessionBackend};
         let dir = tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
-        let header = serde_json::to_string(&SessionEntry::Header(fresh_header())).unwrap();
-        let bytes = [b"\xe2\x82\r\n".as_slice(), header.as_bytes(), b"\n"].concat();
-        std::fs::write(&path, &bytes).unwrap();
-        let mut reader = crate::reader::SessionReader::iter(&path).unwrap();
+        let bytes = b"existing data";
+        std::fs::write(&path, bytes).unwrap();
+        let mut header = fresh_header();
+        header.version = FORMAT_VERSION + 1;
+        header.backend = Some(SessionBackend::ExternalAcp(ExternalAcpSession {
+            agent_name: "agent".into(),
+            protocol_version: 1,
+            upstream_session_id: "id".into(),
+        }));
+        let err = SessionWriter::create(&path, header).unwrap_err();
         assert!(
-            matches!(reader.next(), Some(Err(SessionError::Io { source, .. })) if source.kind() == std::io::ErrorKind::InvalidData)
+            matches!(err, SessionError::UnsupportedVersion { found, supported, .. } if found == FORMAT_VERSION + 1 && supported == FORMAT_VERSION)
         );
-        assert!(matches!(reader.next(), Some(Ok(SessionEntry::Header(_)))));
-        assert!(reader.next().is_none());
-        assert!(!reader.torn_trailing());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn append_lines_after_valid_unterminated_entry() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        let header = serde_json::to_string(&SessionEntry::Header(fresh_header())).unwrap();
+        let line = format!("{header}\n");
+        std::fs::write(&path, &header).unwrap();
+        let mut writer = SessionWriter::open(&path).unwrap();
+        writer.append_lines(line.as_bytes()).unwrap();
+        drop(writer);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{header}\n{line}")
+        );
     }
 
     #[test]

@@ -444,23 +444,24 @@ impl super::Dispatcher {
             self.info(id, "that session is already open".to_owned());
             return;
         }
-        let replay = match kage_session::replay(path) {
-            Ok(replay) => replay,
-            Err(err) => {
-                self.error(id, format!("resume {}: {err}", path.display()));
+        let (writer, replay) = match SessionWriter::open_native_replay(path) {
+            Ok(Some(opened)) => opened,
+            Ok(None) => {
+                self.error(
+                    id,
+                    "resume: external agent sessions cannot be loaded by the native engine"
+                        .to_owned(),
+                );
                 return;
             }
-        };
-        let writer = match SessionWriter::open(path) {
-            Ok(writer) => writer,
             Err(kage_session::SessionError::Locked { .. }) => {
-                let short = short_id(replay.header.session);
                 self.error(
                     id,
                     format!(
-                        "resume: session {short} is open in another kage process. Quit kage \
+                        "resume: session {} is open in another kage process. Quit kage \
                          there and resume it again. When a `kage serve` hosts it, \
-                         `kage resume {short}` attaches to it."
+                         `kage resume` can attach to it.",
+                        path.display()
                     ),
                 );
                 return;
@@ -834,7 +835,7 @@ impl super::Dispatcher {
             self.info(id, "cannot delete an open session".to_owned());
             return;
         }
-        match std::fs::remove_file(path) {
+        match kage_session::delete_locked(path) {
             Ok(()) => {
                 let short: String = path
                     .file_stem()
@@ -984,6 +985,7 @@ mod tests {
             ts: Utc::now(),
             cwd: PathBuf::from("/work"),
             model: "anthropic:claude".into(),
+            backend: None,
             system_prompt: String::new(),
             parent_session: None,
             parent_entry: None,
@@ -1049,6 +1051,7 @@ mod tests {
             ts: Utc::now(),
             cwd: PathBuf::from("/work"),
             model: "anthropic:claude".into(),
+            backend: None,
             system_prompt: String::new(),
             parent_session: None,
             parent_entry: None,

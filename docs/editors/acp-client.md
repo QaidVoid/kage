@@ -45,6 +45,12 @@ reply back. The desktop agent settings offer launch templates, including
 the maintained Claude Agent ACP adapter. You can also configure an
 agent's command yourself, as with an MCP server.
 
+## external sessions
+
+A persistent external-session backend is under development. It is not yet
+advertised or available for selection. Until it is ready, the CLI and
+standalone TUI use the one-shot provider path described below.
+
 ## configure from a plugin
 
 Plugins can declare agents at runtime. Plugins *configure* and core

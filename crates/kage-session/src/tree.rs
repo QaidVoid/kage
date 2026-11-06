@@ -78,7 +78,14 @@ impl SessionTree {
     /// version, a decode failure, duplicate entry IDs, or a `Branch`
     /// marker naming an entry the file does not hold at or before the marker.
     pub fn read(path: &Path) -> Result<Self, SessionError> {
-        let mut reader = SessionReader::iter(path)?;
+        Self::read_reader(path, SessionReader::iter(path)?)
+    }
+
+    /// Build a tree from an already opened session reader.
+    pub(crate) fn read_reader(
+        path: &Path,
+        mut reader: SessionReader,
+    ) -> Result<Self, SessionError> {
         let Some(first) = reader.next() else {
             if reader.torn_trailing() {
                 return Err(SessionError::MissingHeader {
@@ -332,6 +339,7 @@ mod tests {
             ts: Utc::now(),
             cwd: PathBuf::from("/work"),
             model: "x:y".into(),
+            backend: None,
             system_prompt: "be helpful".into(),
             parent_session: None,
             parent_entry: None,
@@ -696,7 +704,8 @@ mod tests {
         let future = dir.path().join("future.jsonl");
         let mut header = fresh_header();
         header.version = FORMAT_VERSION + 1;
-        write(&future, header, &[message_entry(Role::User, "a")]);
+        let line = serde_json::to_string(&SessionEntry::Header(header)).unwrap();
+        std::fs::write(&future, format!("{line}\n")).unwrap();
         assert!(matches!(
             SessionTree::read(&future),
             Err(SessionError::UnsupportedVersion { .. })

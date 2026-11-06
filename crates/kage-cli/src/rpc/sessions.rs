@@ -80,6 +80,7 @@ impl super::CliAcpAgent {
         SessionSettings::of(meta, self.kage_client.load(Ordering::SeqCst))?;
         let servers = editor_servers(servers)?;
         let path = self.recorded_path(client_id)?;
+        require_native_backend(&path)?;
         if kage_session::is_agent_session(&path) {
             return self.open_agent(client_id, &path, ctx, replay_file);
         }
@@ -88,14 +89,13 @@ impl super::CliAcpAgent {
         })?;
         if lock(&self.ids).by_engine.contains_key(&id) {
             if replay_file && let Some(ctx) = ctx {
-                let replay =
-                    kage_session::replay(&path).map_err(|e| RpcError::internal(e.to_string()))?;
+                let replay = replay_native(&path)?;
                 for update in replay_updates(&replay.timeline) {
-                    ctx.update(update);
+                    let _ = ctx.update(update);
                 }
                 self.announce_restored(id, &replay, ctx);
                 if let Some(title) = replay.title {
-                    ctx.update(SessionUpdate::SessionInfoUpdate(SessionInfoUpdate {
+                    let _ = ctx.update(SessionUpdate::SessionInfoUpdate(SessionInfoUpdate {
                         title: Some(title),
                         updated_at: None,
                     }));
@@ -111,7 +111,7 @@ impl super::CliAcpAgent {
         if let Some(settings) = self.host.open_settings(id) {
             return self.attach_live(id, client_id, &path, &settings, replay_file, ctx);
         }
-        let replay = kage_session::replay(&path).map_err(|e| RpcError::internal(e.to_string()))?;
+        let (writer, replay) = Self::open_hosted(&path)?;
         if replay_file && let Some(ctx) = ctx {
             // Nothing runs this session, so a call the file never closed
             // ended with the engine that made it.
@@ -119,20 +119,19 @@ impl super::CliAcpAgent {
                 .into_iter()
                 .chain(interrupted_calls(&replay.history))
             {
-                ctx.update(update);
+                let _ = ctx.update(update);
             }
             self.announce_restored(id, &replay, ctx);
             for update in orphaned_agents(&self.host.sessions, id, &replay.history) {
-                ctx.update(SessionUpdate::SubagentUpdate(update));
+                let _ = ctx.update(SessionUpdate::SubagentUpdate(update));
             }
             if let Some(title) = replay.title {
-                ctx.update(SessionUpdate::SessionInfoUpdate(SessionInfoUpdate {
+                let _ = ctx.update(SessionUpdate::SessionInfoUpdate(SessionInfoUpdate {
                     title: Some(title),
                     updated_at: None,
                 }));
             }
         }
-        let writer = Self::open_hosted(&path)?;
         let model = if self.host.registry().resolve(&replay.model).is_ok() {
             replay.model
         } else {
@@ -175,11 +174,12 @@ impl super::CliAcpAgent {
     /// writer: a load that lands there finds the file still locked by
     /// this very process. A session locked by a real second kage
     /// stays locked and the error surfaces after the wait.
-    fn open_hosted(path: &Path) -> Result<SessionWriter, RpcError> {
+    fn open_hosted(path: &Path) -> Result<(SessionWriter, ReplayResult), RpcError> {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            match SessionWriter::open(path) {
-                Ok(writer) => return Ok(writer),
+            match SessionWriter::open_native_replay(path) {
+                Ok(Some(opened)) => return Ok(opened),
+                Ok(None) => return Err(external_backend_error()),
                 Err(SessionError::Locked { .. }) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(25));
                 }
@@ -200,14 +200,13 @@ impl super::CliAcpAgent {
         replay_file: bool,
     ) -> Result<Vec<SessionConfigOption>, RpcError> {
         if replay_file && let Some(ctx) = ctx {
-            let replay =
-                kage_session::replay(path).map_err(|e| RpcError::internal(e.to_string()))?;
+            let replay = replay_native(path)?;
             for update in replay_updates(&replay.timeline) {
-                ctx.update(update);
+                let _ = ctx.update(update);
             }
             self.announce_restored(replay.header.session, &replay, ctx);
             if let Some(title) = replay.title {
-                ctx.update(SessionUpdate::SessionInfoUpdate(SessionInfoUpdate {
+                let _ = ctx.update(SessionUpdate::SessionInfoUpdate(SessionInfoUpdate {
                     title: Some(title),
                     updated_at: None,
                 }));
@@ -232,9 +231,9 @@ impl super::CliAcpAgent {
         for (parent, update) in restored_subagents(&self.host.sessions, root, replay, &live) {
             let update = SessionUpdate::SubagentUpdate(update);
             if parent == root {
-                ctx.update(update);
+                let _ = ctx.update(update);
             } else {
-                send_update(&self.peer, &parent.to_string(), update);
+                let _ = send_update(&self.peer, &parent.to_string(), update);
             }
         }
     }
@@ -253,6 +252,7 @@ impl super::CliAcpAgent {
         req: &SessionForkRequest,
     ) -> Result<SessionForkResponse, RpcError> {
         let path = self.recorded_path(&req.session_id)?;
+        require_native_backend(&path)?;
         let at = match (&req.before, &req.at) {
             (None, Some(at)) => kage_session::resolve_entry_prefix(&path, at)
                 .map_err(|e| RpcError::new(-32602, e.to_string()))?,
@@ -260,8 +260,10 @@ impl super::CliAcpAgent {
         };
         let id = SessionId::new();
         let dst = self.host.sessions.join(format!("{id}.jsonl"));
-        let truncated = kage_session::fork(&path, &dst, id, at)
-            .map_err(|e| RpcError::internal(e.to_string()))?;
+        let truncated = kage_session::fork(&path, &dst, id, at).map_err(|e| match e {
+            SessionError::ExternalFork { .. } => external_backend_error(),
+            other => RpcError::internal(other.to_string()),
+        })?;
         Ok(SessionForkResponse {
             session_id: id.to_string(),
             truncated,
@@ -278,6 +280,31 @@ impl super::CliAcpAgent {
         Ok(SessionExportResponse {
             markdown: render_session_markdown(&replay),
         })
+    }
+}
+
+fn external_backend_error() -> RpcError {
+    RpcError::new(
+        -32602,
+        "recorded external sessions cannot be opened or forked",
+    )
+}
+
+fn replay_native(path: &Path) -> Result<ReplayResult, RpcError> {
+    let replay = kage_session::replay(path).map_err(|e| RpcError::internal(e.to_string()))?;
+    if replay.header.backend.is_some() {
+        return Err(external_backend_error());
+    }
+    Ok(replay)
+}
+
+fn require_native_backend(path: &Path) -> Result<(), RpcError> {
+    let mut reader =
+        SessionReader::iter(path).map_err(|_| RpcError::internal("cannot read session header"))?;
+    match reader.next() {
+        Some(Ok(SessionEntry::Header(header))) if header.backend.is_none() => Ok(()),
+        Some(Ok(SessionEntry::Header(_))) => Err(external_backend_error()),
+        _ => Err(RpcError::internal("cannot read session header")),
     }
 }
 
@@ -872,6 +899,63 @@ mod tests {
     use kage_core::{Content, Message, Role, ToolCallId};
 
     use super::{SessionUpdate, interrupted_calls, replay_updates};
+
+    #[test]
+    fn recorded_backend_guard_rejects_external_and_invalid_headers_without_identity() {
+        use kage_session::{
+            EntryId, ExternalAcpSession, FORMAT_VERSION, Header, SessionBackend, SessionEntry,
+        };
+
+        let path = std::env::temp_dir().join(format!(
+            "kage-backend-{}.jsonl",
+            kage_core::SessionId::new()
+        ));
+        let mut header = Header {
+            version: FORMAT_VERSION,
+            session: kage_core::SessionId::new(),
+            id: EntryId::new(),
+            ts: chrono::Utc::now(),
+            cwd: std::path::PathBuf::from("/"),
+            model: "model".into(),
+            system_prompt: String::new(),
+            backend: None,
+            parent_session: None,
+            parent_entry: None,
+        };
+        let write_header = |header: &Header| {
+            std::fs::write(
+                &path,
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&SessionEntry::Header(header.clone())).unwrap()
+                ),
+            )
+            .unwrap();
+        };
+        write_header(&header);
+        assert!(super::require_native_backend(&path).is_ok());
+        let (writer, replay) = super::super::CliAcpAgent::open_hosted(&path).unwrap();
+        assert_eq!(replay.header.session, header.session);
+        drop(writer);
+        header.backend = Some(SessionBackend::ExternalAcp(ExternalAcpSession {
+            agent_name: "private-agent".into(),
+            protocol_version: 1,
+            upstream_session_id: "private-upstream".into(),
+        }));
+        write_header(&header);
+        let external_bytes = std::fs::read(&path).unwrap();
+        assert!(super::super::CliAcpAgent::open_hosted(&path).is_err());
+        assert!(super::replay_native(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), external_bytes);
+        let error = super::require_native_backend(&path)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("private-agent"));
+        assert!(!error.contains("private-upstream"));
+        std::fs::write(&path, "not a session\n").unwrap();
+        assert!(super::require_native_backend(&path).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
 
     fn call(id: &str) -> Content {
         Content::ToolCall {

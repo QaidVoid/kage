@@ -22,6 +22,7 @@ fn fresh_header() -> Header {
         model: "anthropic:claude-sonnet-4-6".into(),
         system_prompt: "You are kage.".into(),
         parent_session: None,
+        backend: None,
         parent_entry: None,
     }
 }

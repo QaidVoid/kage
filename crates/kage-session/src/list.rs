@@ -539,6 +539,7 @@ mod tests {
             model: "anthropic:claude".into(),
             system_prompt: "be helpful".into(),
             parent_session: None,
+            backend: None,
             parent_entry: None,
         };
         let mut writer = SessionWriter::create(&path, header).unwrap();
@@ -688,6 +689,7 @@ mod tests {
             model: "anthropic:claude".into(),
             system_prompt: "be helpful".into(),
             parent_session: Some(parent),
+            backend: None,
             parent_entry: Some(EntryId::new()),
         };
         SessionWriter::create(&child_path, header).unwrap();
@@ -745,6 +747,7 @@ mod tests {
             model: "anthropic:claude".into(),
             system_prompt: "be helpful".into(),
             parent_session: None,
+            backend: None,
             parent_entry: None,
         };
         SessionWriter::create(&path, header).unwrap();
@@ -804,6 +807,7 @@ mod tests {
             model: "anthropic:claude".into(),
             system_prompt: "explore".into(),
             parent_session: Some(SessionId::new()),
+            backend: None,
             parent_entry: None,
         };
         let marker = SessionEntry::Custom(Custom {
@@ -882,6 +886,7 @@ mod tests {
             model: "anthropic:claude".into(),
             system_prompt: "explore".into(),
             parent_session: Some(SessionId::new()),
+            backend: None,
             parent_entry: None,
         };
         let marker = SessionEntry::Custom(Custom {
@@ -1070,6 +1075,7 @@ mod tests {
             model: "anthropic:claude".into(),
             system_prompt: "explore".into(),
             parent_session: Some(SessionId::new()),
+            backend: None,
             parent_entry: None,
         };
         let ts = serde_json::to_string(&Utc::now()).unwrap();

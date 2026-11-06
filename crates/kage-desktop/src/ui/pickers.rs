@@ -131,6 +131,39 @@ pub fn model_sections(
     sections
 }
 
+/// Adds configured external agents not already present in the model catalog.
+pub fn append_external_agents(sections: &mut Vec<Section>, names: &[String], query: &str) {
+    let needle = query.trim().to_lowercase();
+    let rows: Vec<ModelRow> = names
+        .iter()
+        .filter_map(|name| {
+            let id = format!("acp:{name}");
+            if sections
+                .iter()
+                .any(|section| section.rows.iter().any(|row| row.id == id))
+            {
+                return None;
+            }
+            let row = ModelRow {
+                id,
+                name: name.clone(),
+                provider: "External ACP agents".to_owned(),
+                model: name.clone(),
+                context: None,
+                cost: None,
+                images: false,
+            };
+            row.matches(&needle, "External ACP agents").then_some(row)
+        })
+        .collect();
+    if !rows.is_empty() {
+        sections.push(Section {
+            label: "External ACP agents".to_owned(),
+            rows,
+        });
+    }
+}
+
 /// The rows `sections` holds, flattened in section order.
 #[must_use]
 pub fn flat_rows(sections: &[Section]) -> Vec<ModelRow> {
@@ -477,6 +510,17 @@ mod tests {
     use kage_client::Session;
     use kage_client::wire::{ModelEntry, ModelProvider, SessionConfigSelectOption};
     use serde_json::json;
+
+    #[test]
+    fn configured_external_agents_are_searchable_without_catalog_duplicates() {
+        let names = vec!["claude".to_owned(), "reviewer".to_owned()];
+        let mut sections = Vec::new();
+        super::append_external_agents(&mut sections, &names, "CLAUDE");
+        assert_eq!(flat_rows(&sections)[0].id, "acp:claude");
+        super::append_external_agents(&mut sections, &names, "");
+        let ids: Vec<_> = flat_rows(&sections).into_iter().map(|row| row.id).collect();
+        assert_eq!(ids, ["acp:claude", "acp:reviewer"]);
+    }
 
     fn entry(id: &str, name: &str, context: Option<u64>) -> ModelEntry {
         ModelEntry {

@@ -285,6 +285,7 @@ mod tests {
             ts: chrono::Utc::now(),
             cwd: cwd.to_path_buf(),
             model: "m".into(),
+            backend: None,
             system_prompt: String::new(),
             parent_session: None,
             parent_entry: None,

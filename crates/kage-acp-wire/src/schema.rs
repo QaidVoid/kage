@@ -255,6 +255,9 @@ pub struct KageAgentInfo {
     /// one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_options: Vec<SessionConfigOption>,
+    /// Whether the host accepts configured external agents at session creation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub external_sessions: bool,
 }
 
 /// `session/new` request params.
@@ -306,6 +309,9 @@ pub struct NewSessionKage {
     /// The most tokens one provider answer may carry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+    /// Name of a configured external agent, not an executable command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_agent: Option<String>,
 }
 
 /// Where a session's plugins run.
@@ -352,8 +358,13 @@ pub struct SessionOpt {
 pub struct NewSessionResponse {
     /// Opaque session id the client uses on later calls.
     pub session_id: String,
-    /// The session's config options, if the agent offers any.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The session's config options, if the agent offers any. Unfamiliar
+    /// control types are omitted and unfamiliar categories are treated as absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_session_config_options"
+    )]
     pub config_options: Vec<SessionConfigOption>,
 }
 
@@ -378,8 +389,13 @@ pub struct LoadSessionRequest {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadSessionResponse {
-    /// The session's config options, if the agent offers any.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The session's config options, if the agent offers any. Unfamiliar
+    /// control types are omitted and unfamiliar categories are treated as absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_session_config_options"
+    )]
     pub config_options: Vec<SessionConfigOption>,
 }
 
@@ -404,8 +420,13 @@ pub struct ResumeSessionRequest {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResumeSessionResponse {
-    /// The session's config options, if the agent offers any.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The session's config options, if the agent offers any. Unfamiliar
+    /// control types are omitted and unfamiliar categories are treated as absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_session_config_options"
+    )]
     pub config_options: Vec<SessionConfigOption>,
 }
 
@@ -496,7 +517,9 @@ pub struct SetSessionConfigOptionRequest {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetSessionConfigOptionResponse {
-    /// Every config option of the session, after the change.
+    /// Config options after the change. Unfamiliar control types are omitted
+    /// and unfamiliar categories are treated as absent.
+    #[serde(deserialize_with = "deserialize_session_config_options")]
     pub config_options: Vec<SessionConfigOption>,
 }
 
@@ -1922,6 +1945,36 @@ pub enum SessionConfigCategory {
     ThoughtLevel,
 }
 
+// Response options with unfamiliar controls cannot be represented by the
+// current API. Keep known controls, treating unfamiliar categories as absent.
+fn deserialize_session_config_options<'de, D>(
+    deserializer: D,
+) -> Result<Vec<SessionConfigOption>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    let values = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    let mut options = Vec::with_capacity(values.len());
+    for mut value in values {
+        if let Some(object) = value.as_object_mut() {
+            if let Some(kind) = object.get("type").and_then(serde_json::Value::as_str)
+                && !matches!(kind, "select" | "text")
+            {
+                continue;
+            }
+            if let Some(category) = object.get("category").and_then(serde_json::Value::as_str)
+                && !matches!(category, "mode" | "model" | "thought_level")
+            {
+                object.remove("category");
+            }
+        }
+        options.push(serde_json::from_value(value).map_err(D::Error::custom)?);
+    }
+    Ok(options)
+}
+
 /// One value of a select [`SessionConfigOption`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2463,7 +2516,9 @@ pub struct SessionInfoUpdate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigOptionUpdate {
-    /// Every config option of the session, as it is now.
+    /// Current config options. Unfamiliar control types are omitted and
+    /// unfamiliar categories are treated as absent.
+    #[serde(deserialize_with = "deserialize_session_config_options")]
     pub config_options: Vec<SessionConfigOption>,
 }
 
@@ -2894,6 +2949,21 @@ mod tests {
     }
 
     #[test]
+    fn external_session_capability_is_opt_in() {
+        let default: KageAgentInfo = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!default.external_sessions);
+        assert_eq!(
+            serde_json::to_value(default).unwrap(),
+            serde_json::json!({})
+        );
+        let supported = KageAgentInfo {
+            external_sessions: true,
+            ..KageAgentInfo::default()
+        };
+        roundtrip(&supported, serde_json::json!({"externalSessions": true}));
+    }
+
+    #[test]
     fn tool_call_metadata_decodes_nullable_and_typed_locations() {
         let call: ToolCall = serde_json::from_value(serde_json::json!({
             "toolCallId":"c", "title":"Read", "name":null, "locations":null,
@@ -2970,6 +3040,7 @@ mod tests {
                     thinking_level: Some("high".into()),
                 }),
                 max_output_tokens: Some(8_192),
+                external_agent: None,
             }),
             serde_json::json!({
                 "cwd": "/proj",
@@ -2987,6 +3058,39 @@ mod tests {
                 }},
             }),
         );
+    }
+
+    #[test]
+    fn new_session_selection_round_trips_and_is_optional() {
+        let mut request = NewSessionRequest {
+            cwd: "/project".into(),
+            mcp_servers: vec![],
+            meta: None,
+        };
+        roundtrip(
+            &request,
+            serde_json::json!({"cwd": "/project", "mcpServers": []}),
+        );
+        let legacy: NewSessionRequest = serde_json::from_value(serde_json::json!({
+            "cwd": "/project"
+        }))
+        .unwrap();
+        assert_eq!(legacy, request);
+
+        request.meta = Some(NewSessionMeta {
+            kage: Some(NewSessionKage {
+                external_agent: Some("reviewer".into()),
+                ..NewSessionKage::default()
+            }),
+        });
+        roundtrip(
+            &request,
+            serde_json::json!({
+                "cwd": "/project", "mcpServers": [],
+                "_meta": {"kage": {"externalAgent": "reviewer"}}
+            }),
+        );
+        roundtrip(&NewSessionKage::default(), serde_json::json!({}));
     }
 
     #[test]
@@ -3324,6 +3428,83 @@ mod tests {
                 config_options: vec![model_option()],
             },
             serde_json::json!({"configOptions": [model_option_json()]}),
+        );
+    }
+
+    #[test]
+    fn session_responses_ignore_unfamiliar_optional_config() {
+        let mut unfamiliar_category = model_option_json();
+        unfamiliar_category["category"] = serde_json::json!("vendor_category");
+        let options = serde_json::json!([
+            model_option_json(),
+            {"type": "vendor_control", "arbitrary": true},
+            unfamiliar_category
+        ]);
+        let new: NewSessionResponse = serde_json::from_value(serde_json::json!({
+            "sessionId": "upstream", "configOptions": options
+        }))
+        .unwrap();
+        assert_eq!(new.session_id, "upstream");
+        assert_eq!(new.config_options.len(), 2);
+        assert_eq!(new.config_options[0], model_option());
+        assert_eq!(new.config_options[1].category, None);
+        assert!(
+            serde_json::to_value(&new).unwrap()["configOptions"][1]
+                .get("category")
+                .is_none()
+        );
+        let response = serde_json::json!({"configOptions": options});
+        let load: LoadSessionResponse = serde_json::from_value(response.clone()).unwrap();
+        let resume: ResumeSessionResponse = serde_json::from_value(response.clone()).unwrap();
+        let set: SetSessionConfigOptionResponse = serde_json::from_value(response).unwrap();
+        let update: SessionUpdate = serde_json::from_value(serde_json::json!({
+            "sessionUpdate": "config_option_update", "configOptions": options
+        }))
+        .unwrap();
+        assert_eq!(load.config_options, new.config_options);
+        assert_eq!(resume.config_options, new.config_options);
+        assert_eq!(set.config_options, new.config_options);
+        assert_eq!(
+            update,
+            SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate {
+                config_options: new.config_options,
+            })
+        );
+
+        let mut invalid_category = model_option_json();
+        invalid_category["category"] = serde_json::json!(42);
+        for invalid in [
+            serde_json::json!({"type":"select"}),
+            serde_json::json!({"type":42}),
+            serde_json::json!({"id":"x"}),
+            invalid_category,
+        ] {
+            let result = serde_json::json!({"sessionId":"s", "configOptions":[invalid]});
+            assert!(serde_json::from_value::<NewSessionResponse>(result.clone()).is_err());
+            assert!(serde_json::from_value::<LoadSessionResponse>(result.clone()).is_err());
+            assert!(serde_json::from_value::<ResumeSessionResponse>(result.clone()).is_err());
+            assert!(
+                serde_json::from_value::<SetSessionConfigOptionResponse>(result.clone()).is_err()
+            );
+            let mut update = result;
+            update["sessionUpdate"] = serde_json::json!("config_option_update");
+            assert!(serde_json::from_value::<SessionUpdate>(update).is_err());
+        }
+        assert!(
+            serde_json::from_value::<SetSessionConfigOptionResponse>(serde_json::json!({}))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SessionUpdate>(serde_json::json!({
+                "sessionUpdate": "config_option_update"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<NewSessionResponse>(serde_json::json!({
+                "configOptions": []
+            }))
+            .is_err()
         );
     }
 

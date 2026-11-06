@@ -1642,6 +1642,7 @@ pub(crate) fn plan_session_in(dir: &Path, model: &str, system_prompt: &str) -> (
         ts: Utc::now(),
         cwd,
         model: model.to_owned(),
+        backend: None,
         system_prompt: system_prompt.to_owned(),
         parent_session: None,
         parent_entry: None,

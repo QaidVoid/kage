@@ -16,10 +16,10 @@ use std::thread;
 use std::time::Duration;
 
 use kage_acp::acp::{UiCommand, UiCommandArg, UiDialogRequest, UiOutput, UiSnapshot, UiUpdate};
+use kage_acp::agent::AgentPeer;
 use kage_core::environment::Environment;
 use kage_core::options::{OPTIONS, option_to_json};
 use kage_core::sync::lock;
-use kage_jsonrpc::Peer;
 use kage_jsonrpc::RpcError;
 use kage_plugin::{
     BridgePrep, BridgeStep, CommandOutput, LuaCommand, PluginArgSpec, PluginRuntime,
@@ -81,7 +81,7 @@ pub(super) struct Watch {
     pub(super) attach_id: u64,
     pub(super) marker: Marker,
     pub(super) sent: UiSnapshot,
-    pub(super) peer: Peer,
+    pub(super) peer: AgentPeer,
     pub(super) stop: Arc<AtomicBool>,
 }
 
@@ -216,7 +216,7 @@ pub(super) fn run_command(
     runtime: &PluginRuntime,
     name: &str,
     args: &str,
-    peer: &Peer,
+    peer: &AgentPeer,
 ) -> Result<UiOutput, RpcError> {
     let command = runtime
         .registered_command_overrides()
@@ -243,7 +243,7 @@ pub(super) fn run_command(
 pub(super) fn run_keymap(
     runtime: &PluginRuntime,
     id: u64,
-    peer: &Peer,
+    peer: &AgentPeer,
 ) -> Result<UiOutput, RpcError> {
     let failed = |e: &dyn std::fmt::Display| RpcError::internal(format!("key mapping: {e}"));
     let handler = runtime.keymap_handler(id).map_err(|e| failed(&e))?;
@@ -259,7 +259,7 @@ fn drive(
     runtime: &PluginRuntime,
     call: u64,
     mut step: BridgeStep,
-    peer: &Peer,
+    peer: &AgentPeer,
 ) -> Result<UiOutput, kage_plugin::PluginError> {
     loop {
         match step {

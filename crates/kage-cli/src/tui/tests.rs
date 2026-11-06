@@ -18,6 +18,7 @@ fn render_session_markdown_covers_roles_and_blocks() {
         ts: Utc::now(),
         cwd: PathBuf::from("/work"),
         model: "anthropic:claude".into(),
+        backend: None,
         system_prompt: "sp".into(),
         parent_session: None,
         parent_entry: None,

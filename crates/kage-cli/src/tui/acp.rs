@@ -498,6 +498,7 @@ fn session_meta(
             system_prompt: (!system.is_empty()).then(|| system.to_owned()),
             opt,
             max_output_tokens: crate::runtime_env::max_output_tokens_for(registry, model),
+            external_agent: None,
         }),
     }
 }

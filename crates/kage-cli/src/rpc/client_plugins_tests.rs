@@ -38,7 +38,7 @@ impl Owner {
     }
 }
 
-fn spawn_owner(handler: Handler) -> (Peer, Owner) {
+fn spawn_owner(handler: Handler) -> (AgentPeer, Owner) {
     let (host_r, owner_w) = std::io::pipe().unwrap();
     let (owner_r, host_w) = std::io::pipe().unwrap();
     let (host, host_inbox, _) = kage_jsonrpc::connect(BufReader::new(host_r), host_w);
@@ -60,7 +60,7 @@ fn spawn_owner(handler: Handler) -> (Peer, Owner) {
             }
         }
     });
-    (host, Owner { calls, stop })
+    (host.into(), Owner { calls, stop })
 }
 
 fn snapshot() -> Value {

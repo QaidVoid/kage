@@ -158,10 +158,30 @@ fn record_message(
     history.push(Arc::unwrap_or_clone(message));
 }
 
-/// Replay the active chain of `path`, returning the final history.
+/// Replay the active chain of a native session, returning the final history.
+///
+/// External sessions cannot be restored from their local presentation history
+/// and return an error instead.
 pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
-    let tree = SessionTree::read(path)?;
+    replay_tree(path, &SessionTree::read(path)?)
+}
+
+pub(crate) fn replay_file(path: &Path, file: std::fs::File) -> Result<ReplayResult, SessionError> {
+    let reader = crate::reader::SessionReader::from_file(path.to_path_buf(), file)?;
+    replay_tree(path, &SessionTree::read_reader(path, reader)?)
+}
+
+fn replay_tree(path: &Path, tree: &SessionTree) -> Result<ReplayResult, SessionError> {
     let header = tree.header().clone();
+    if header.backend.is_some() {
+        return Err(SessionError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "native replay cannot restore an external session",
+            ),
+        });
+    }
 
     let mut model = kage_core::canonical_model(&header.model);
     let mut thinking_level: Option<String> = None;
@@ -442,6 +462,7 @@ mod tests {
             model: "anthropic:claude".into(),
             system_prompt: "be helpful".into(),
             parent_session: None,
+            backend: None,
             parent_entry: None,
         }
     }
@@ -466,6 +487,38 @@ mod tests {
         for e in entries {
             w.append(e).unwrap();
         }
+    }
+
+    #[test]
+    fn native_replay_rejects_external_sessions() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("external.jsonl");
+        let mut header = fresh_header();
+        header.cwd = dir.path().to_path_buf();
+        header.backend = Some(crate::SessionBackend::ExternalAcp(
+            crate::ExternalAcpSession {
+                agent_name: "agent".into(),
+                protocol_version: 1,
+                upstream_session_id: "upstream".into(),
+            },
+        ));
+        write(
+            &path,
+            header,
+            &[message_entry(Role::User, "not native history")],
+        );
+        let original = std::fs::read(&path).unwrap();
+
+        for result in [
+            replay(&path),
+            replay_file(&path, std::fs::File::open(&path).unwrap()),
+        ] {
+            assert!(matches!(result, Err(SessionError::Io { path: p, source })
+                if p == path && source.kind() == std::io::ErrorKind::Unsupported
+                    && source.to_string().contains("external session")));
+        }
+        assert!(SessionWriter::open_native_replay(&path).unwrap().is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
     /// A tool result that only mentions a swarm marker on a later line
@@ -1063,7 +1116,8 @@ mod tests {
             version: FORMAT_VERSION + 1,
             ..fresh_header()
         };
-        write(&path, header, &[message_entry(Role::User, "hi")]);
+        let header_line = serde_json::to_string(&SessionEntry::Header(header)).unwrap();
+        std::fs::write(&path, format!("{header_line}\n")).unwrap();
         match replay(&path) {
             Err(SessionError::UnsupportedVersion { found, .. }) => {
                 assert_eq!(found, FORMAT_VERSION + 1);

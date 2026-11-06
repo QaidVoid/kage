@@ -254,6 +254,7 @@ fn recorder_in(dir: &std::path::Path, id: SessionId) -> (Recorder, std::path::Pa
             ts: chrono::Utc::now(),
             cwd: "/tmp".into(),
             model: "mock/m".into(),
+            backend: None,
             system_prompt: String::new(),
             parent_session: None,
             parent_entry: None,
@@ -1002,6 +1003,7 @@ fn undo_keeps_entries_older_than_the_last_prompt() {
         ts: chrono::Utc::now(),
         cwd: "/tmp".into(),
         model: "mock/m".into(),
+        backend: None,
         system_prompt: String::new(),
         parent_session: None,
         parent_entry: None,
@@ -1225,6 +1227,46 @@ fn load_session_switches_to_the_stored_conversation() {
     );
     until_runs_end(&h.events, 1);
     assert_eq!(kage_session::replay(&path).unwrap().history.len(), 4);
+}
+
+#[test]
+fn load_session_rejects_external_backend() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("external.jsonl");
+    let header = Header {
+        version: FORMAT_VERSION,
+        session: SessionId::new(),
+        id: EntryId::new(),
+        ts: chrono::Utc::now(),
+        cwd: dir.path().to_path_buf(),
+        model: "mock/m".into(),
+        backend: Some(kage_session::SessionBackend::ExternalAcp(
+            kage_session::ExternalAcpSession {
+                agent_name: "agent".into(),
+                protocol_version: 1,
+                upstream_session_id: "private-upstream-id".into(),
+            },
+        )),
+        system_prompt: String::new(),
+        parent_session: None,
+        parent_entry: None,
+    };
+    drop(SessionWriter::create(&path, header).unwrap());
+    let before = std::fs::read(&path).unwrap();
+    let h = harness(MockProvider::replaying(text_turn("hello")));
+    let id = SessionId::new();
+    h.open(id, None);
+    h.engine.send(Command::to(
+        id,
+        CommandKind::LoadSession { path: path.clone() },
+    ));
+    let seen = wait_for(
+        &h.events,
+        |e| matches!(&e.event, Event::Host(HostEvent::Notice { text, .. }) if text.contains("external agent sessions cannot be loaded")),
+    );
+    assert_eq!(seen.last().unwrap().session, id);
+    assert!(!seen.iter().any(is_session_changed));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 #[test]

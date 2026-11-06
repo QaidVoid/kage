@@ -208,6 +208,7 @@ mod tests {
             ts: Utc::now(),
             cwd: dir.to_path_buf(),
             model: "mock:m".into(),
+            backend: None,
             system_prompt: String::new(),
             parent_session: None,
             parent_entry: None,

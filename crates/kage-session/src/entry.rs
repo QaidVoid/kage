@@ -14,7 +14,8 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 pub use kage_core::SessionId;
 use kage_core::{Message, TokenUsage};
-use serde::{Deserialize, Serialize};
+use serde::de::{MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use ulid::Ulid;
 
 /// Current on-disk session format version.
@@ -23,8 +24,9 @@ use ulid::Ulid;
 /// accept the versions whose entries they all interpret: version 2 added
 /// the [`SessionEntry::Branch`] marker, which version 1 readers must not
 /// see, and version 3 added `Content::Audio`, which version 2 readers
-/// cannot decode.
-pub const FORMAT_VERSION: u32 = 3;
+/// cannot decode. Version 4 marks external backend identity so older readers
+/// cannot mistake an external session for a native session.
+pub const FORMAT_VERSION: u32 = 4;
 
 /// Stable identifier for a single entry within a session.
 ///
@@ -120,8 +122,33 @@ impl SessionEntry {
     }
 }
 
+/// Backend identity for sessions whose execution is owned outside kage.
+///
+/// The local session entries are presentation history, not the authority for
+/// restoring the upstream agent's state. Configuration, commands, environment
+/// variables and credentials must not be stored here.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SessionBackend {
+    /// A persistent session owned by an external ACP agent.
+    ExternalAcp(ExternalAcpSession),
+}
+
+/// The minimum identity needed to locate an external ACP session.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalAcpSession {
+    /// Name of the locally configured agent, not its launch command.
+    pub agent_name: String,
+    /// Negotiated ACP protocol version.
+    pub protocol_version: u32,
+    /// Session identifier assigned by the upstream agent.
+    pub upstream_session_id: String,
+}
+
 /// Identity and provenance of a session file. Always the first entry.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "UncheckedHeader")]
 pub struct Header {
     /// On-disk schema version. See [`FORMAT_VERSION`].
     pub version: u32,
@@ -131,12 +158,16 @@ pub struct Header {
     pub id: EntryId,
     /// Creation timestamp.
     pub ts: DateTime<Utc>,
-    /// Working directory at session creation.
+    /// Working directory at session creation. For external ACP sessions this
+    /// is canonicalized by [`crate::SessionWriter::create`].
     pub cwd: PathBuf,
     /// Provider-qualified model id (`provider/model`) at creation.
     pub model: String,
     /// System prompt at creation. Subsequent changes are not reflected here.
     pub system_prompt: String,
+    /// External execution identity, absent for native and legacy sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<SessionBackend>,
     /// The session this one was forked from or spawned by, if any. A
     /// spawned session marks itself with a `kage:agent` custom entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -144,6 +175,45 @@ pub struct Header {
     /// Entry id within `parent_session` that this fork branched from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_entry: Option<EntryId>,
+}
+
+#[derive(Deserialize)]
+struct UncheckedHeader {
+    version: u32,
+    session: SessionId,
+    id: EntryId,
+    ts: DateTime<Utc>,
+    cwd: PathBuf,
+    model: String,
+    system_prompt: String,
+    #[serde(default)]
+    backend: Option<SessionBackend>,
+    #[serde(default)]
+    parent_session: Option<SessionId>,
+    #[serde(default)]
+    parent_entry: Option<EntryId>,
+}
+
+impl TryFrom<UncheckedHeader> for Header {
+    type Error = &'static str;
+
+    fn try_from(header: UncheckedHeader) -> Result<Self, Self::Error> {
+        if header.backend.is_some() && header.version < 4 {
+            return Err("external session backend requires format version 4 or later");
+        }
+        Ok(Self {
+            version: header.version,
+            session: header.session,
+            id: header.id,
+            ts: header.ts,
+            cwd: header.cwd,
+            model: header.model,
+            system_prompt: header.system_prompt,
+            backend: header.backend,
+            parent_session: header.parent_session,
+            parent_entry: header.parent_entry,
+        })
+    }
 }
 
 /// A reassembled conversation message persisted as a session entry.
@@ -241,8 +311,165 @@ pub struct SessionTitle {
     pub title: String,
 }
 
-/// Plugin-defined entry. The core neither validates nor interprets `data`.
+/// Reserved custom kind for the external ACP presentation transcript.
+///
+/// These records are local display history, not upstream session state. Only
+/// write them to a session whose header identifies an external ACP backend.
+pub const EXTERNAL_ACP_PRESENTATION_KIND: &str = "kage:external_acp_presentation";
+
+/// Maximum UTF-8 byte length of any text field in a presentation record.
+pub const EXTERNAL_ACP_TEXT_LIMIT: usize = 64 * 1024;
+
+/// Bounded, display-only text. It may still contain sensitive user content.
+///
+/// The host must choose deliberately what to display and persist. This type
+/// bounds storage, but does not redact secrets in prompts or agent output.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct PresentationText(String);
+
+impl PresentationText {
+    /// Construct text if its UTF-8 representation fits the per-field limit.
+    pub fn new(text: String) -> Result<Self, &'static str> {
+        if text.len() > EXTERNAL_ACP_TEXT_LIMIT {
+            return Err("external ACP presentation text exceeds the byte limit");
+        }
+        Ok(Self(text))
+    }
+
+    /// The original text, without truncation.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for PresentationText {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::new(text).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A deliberately restricted external ACP presentation event.
+///
+/// Records are ordered by their JSONL position. A prompt is recorded only
+/// after acceptance. Tool updates are partial replacements, not executable
+/// requests. The host must omit unsupported content, raw input and output,
+/// metadata, permission requests and decisions, and authentication data.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExternalAcpPresentation {
+    /// An accepted text prompt starts a turn.
+    Prompt {
+        /// User-supplied prompt text.
+        text: PresentationText,
+    },
+    /// A streamed agent message fragment.
+    AgentMessage {
+        /// Host-assigned id grouping fragments of the same message.
+        item_id: PresentationText,
+        /// Display text.
+        text: PresentationText,
+    },
+    /// A streamed agent thought fragment.
+    AgentThought {
+        /// Host-assigned id grouping fragments of the same thought.
+        item_id: PresentationText,
+        /// Display text.
+        text: PresentationText,
+    },
+    /// A tool call announced for display only.
+    ToolCall {
+        /// Upstream correlation id.
+        tool_call_id: PresentationText,
+        /// Display title.
+        title: PresentationText,
+        /// Current display status.
+        status: PresentationToolStatus,
+    },
+    /// A partial update to an announced tool call.
+    ToolCallUpdate {
+        /// Upstream correlation id.
+        tool_call_id: PresentationText,
+        /// Replacement display title, if supplied.
+        title: Option<PresentationText>,
+        /// Replacement status, if supplied.
+        status: Option<PresentationToolStatus>,
+        /// Replacement display text, if supplied, never raw tool JSON.
+        text: Option<PresentationText>,
+    },
+    /// The terminal outcome of the current prompt.
+    TurnEnd {
+        /// Outcome observed by the host.
+        outcome: PresentationTurnOutcome,
+    },
+}
+
+/// Display status of an external tool call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresentationToolStatus {
+    /// The call has not started.
+    Pending,
+    /// The call is running.
+    InProgress,
+    /// The call completed successfully.
+    Completed,
+    /// The call failed.
+    Failed,
+    /// The upstream reported an unrecognized status.
+    Unknown,
+}
+
+/// A prompt's terminal result, including transport failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresentationTurnOutcome {
+    /// The agent finished its turn.
+    EndTurn,
+    /// The output token limit was reached.
+    MaxTokens,
+    /// The request limit was reached.
+    MaxTurnRequests,
+    /// The agent refused the prompt.
+    Refusal,
+    /// The turn was cancelled.
+    Cancelled,
+    /// The turn failed or the connection was lost.
+    Failed,
+}
+
+impl ExternalAcpPresentation {
+    /// Wrap a validated presentation event in an appendable session entry.
+    ///
+    /// The caller is responsible for backend identity, prompt acceptance,
+    /// ordering and pairing each prompt with its terminal outcome.
+    #[must_use]
+    pub fn into_entry(self, id: EntryId, ts: DateTime<Utc>) -> SessionEntry {
+        SessionEntry::Custom(Custom {
+            id,
+            ts,
+            kind: EXTERNAL_ACP_PRESENTATION_KIND.to_owned(),
+            data: serde_json::to_value(self).expect("presentation events serialize to JSON"),
+        })
+    }
+
+    /// Decode a reserved custom record. Other custom kinds return `None`.
+    ///
+    /// Returns an error for malformed or unsupported reserved records. Callers
+    /// must not silently discard such errors when reconstructing history.
+    pub fn from_custom(custom: &Custom) -> Result<Option<Self>, serde_json::Error> {
+        if custom.kind != EXTERNAL_ACP_PRESENTATION_KIND {
+            return Ok(None);
+        }
+        serde_json::from_value(custom.data.clone()).map(Some)
+    }
+}
+
+/// Plugin-defined entry. The reserved external presentation kind is validated.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(try_from = "UncheckedCustom")]
 pub struct Custom {
     /// Entry id.
     pub id: EntryId,
@@ -250,8 +477,152 @@ pub struct Custom {
     pub ts: DateTime<Utc>,
     /// Plugin-defined kind tag, namespaced like `plugin:tps`.
     pub kind: String,
-    /// Arbitrary JSON payload.
+    /// Plugin payload. The external presentation kind has a strict schema.
     pub data: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct UncheckedCustom {
+    id: EntryId,
+    ts: DateTime<Utc>,
+    kind: String,
+    data: CustomData,
+}
+
+struct CustomData {
+    value: serde_json::Value,
+    duplicate_field: bool,
+}
+
+impl<'de> Deserialize<'de> for CustomData {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct DataVisitor;
+
+        impl<'de> Visitor<'de> for DataVisitor {
+            type Value = CustomData;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a JSON value")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut value = serde_json::Map::new();
+                let mut duplicate_field = false;
+                while let Some((key, item)) = map.next_entry::<String, serde_json::Value>()? {
+                    duplicate_field |= value.insert(key, item).is_some();
+                }
+                Ok(CustomData {
+                    value: value.into(),
+                    duplicate_field,
+                })
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
+                let value = serde_json::Value::deserialize(
+                    serde::de::value::SeqAccessDeserializer::new(seq),
+                )?;
+                Ok(CustomData {
+                    value,
+                    duplicate_field: false,
+                })
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(CustomData {
+                    value: value.into(),
+                    duplicate_field: false,
+                })
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(CustomData {
+                    value: value.into(),
+                    duplicate_field: false,
+                })
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(CustomData {
+                    value: value.into(),
+                    duplicate_field: false,
+                })
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+                Ok(CustomData {
+                    value: serde_json::Value::from(value),
+                    duplicate_field: false,
+                })
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(CustomData {
+                    value: value.into(),
+                    duplicate_field: false,
+                })
+            }
+
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(CustomData {
+                    value: value.into(),
+                    duplicate_field: false,
+                })
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(CustomData {
+                    value: serde_json::Value::Null,
+                    duplicate_field: false,
+                })
+            }
+
+            fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                self.visit_unit()
+            }
+        }
+
+        deserializer.deserialize_any(DataVisitor)
+    }
+}
+
+impl TryFrom<UncheckedCustom> for Custom {
+    type Error = serde_json::Error;
+
+    fn try_from(value: UncheckedCustom) -> Result<Self, Self::Error> {
+        if value.kind == EXTERNAL_ACP_PRESENTATION_KIND && value.data.duplicate_field {
+            return Err(serde::de::Error::custom(
+                "duplicate field in external ACP presentation",
+            ));
+        }
+        let custom = Self {
+            id: value.id,
+            ts: value.ts,
+            kind: value.kind,
+            data: value.data.value,
+        };
+        ExternalAcpPresentation::from_custom(&custom)?;
+        Ok(custom)
+    }
+}
+
+impl Serialize for Custom {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct CustomRef<'a> {
+            id: EntryId,
+            ts: DateTime<Utc>,
+            kind: &'a str,
+            data: &'a serde_json::Value,
+        }
+        ExternalAcpPresentation::from_custom(self).map_err(serde::ser::Error::custom)?;
+        CustomRef {
+            id: self.id,
+            ts: self.ts,
+            kind: &self.kind,
+            data: &self.data,
+        }
+        .serialize(serializer)
+    }
 }
 
 /// Marks where the conversation continues after an undo or rewind.
@@ -288,6 +659,7 @@ mod tests {
             model: "anthropic:claude-sonnet-4-6".into(),
             system_prompt: "You are kage.".into(),
             parent_session: None,
+            backend: None,
             parent_entry: None,
         });
         let line = serde_json::to_string(&header).unwrap();
@@ -306,11 +678,61 @@ mod tests {
             model: "x:y".into(),
             system_prompt: String::new(),
             parent_session: None,
+            backend: None,
             parent_entry: None,
         });
         let json = serde_json::to_value(&header).unwrap();
         assert!(json.get("parent_session").is_none());
         assert!(json.get("parent_entry").is_none());
+    }
+
+    #[test]
+    fn legacy_header_without_backend_reads_as_native() {
+        let json = serde_json::json!({
+            "type": "header", "version": 1, "session": SessionId::new(),
+            "id": EntryId::new(), "ts": "2026-01-01T00:00:00Z",
+            "cwd": "/tmp", "model": "x:y", "system_prompt": ""
+        });
+        let SessionEntry::Header(header) = serde_json::from_value(json).unwrap() else {
+            panic!()
+        };
+        assert_eq!(header.backend, None);
+        assert!(
+            serde_json::to_value(SessionEntry::Header(header))
+                .unwrap()
+                .get("backend")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn external_backend_round_trips_only_identity_fields() {
+        let backend = SessionBackend::ExternalAcp(ExternalAcpSession {
+            agent_name: "configured-agent".into(),
+            protocol_version: 1,
+            upstream_session_id: "upstream-id".into(),
+        });
+        let value = serde_json::to_value(&backend).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind": "external_acp", "agent_name": "configured-agent",
+                "protocol_version": 1, "upstream_session_id": "upstream-id"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<SessionBackend>(value.clone()).unwrap(),
+            backend
+        );
+        for key in ["command", "args", "env", "secret"] {
+            let mut injected = value.clone();
+            injected[key] = serde_json::json!("sensitive-value");
+            assert!(serde_json::from_value::<SessionBackend>(injected).is_err());
+        }
+        assert!(
+            serde_json::from_value::<SessionBackend>(serde_json::json!({"kind": "future"}))
+                .is_err()
+        );
     }
 
     #[test]
@@ -415,7 +837,159 @@ mod tests {
     }
 
     #[test]
-    fn format_version_is_three() {
-        assert_eq!(FORMAT_VERSION, 3);
+    fn external_presentation_records_round_trip_in_order() {
+        let text = |s: &str| PresentationText::new(s.into()).unwrap();
+        let events = vec![
+            ExternalAcpPresentation::Prompt { text: text("hi") },
+            ExternalAcpPresentation::AgentMessage {
+                item_id: text("item-1"),
+                text: text("hello"),
+            },
+            ExternalAcpPresentation::AgentThought {
+                item_id: text("item-2"),
+                text: text("thinking"),
+            },
+            ExternalAcpPresentation::ToolCall {
+                tool_call_id: text("tool-1"),
+                title: text("read"),
+                status: PresentationToolStatus::Pending,
+            },
+            ExternalAcpPresentation::ToolCallUpdate {
+                tool_call_id: text("tool-1"),
+                title: None,
+                status: Some(PresentationToolStatus::Completed),
+                text: Some(text("done")),
+            },
+            ExternalAcpPresentation::TurnEnd {
+                outcome: PresentationTurnOutcome::EndTurn,
+            },
+        ];
+        let lines: Vec<_> = events
+            .iter()
+            .cloned()
+            .map(|event| {
+                serde_json::to_string(&event.into_entry(EntryId::new(), Utc::now())).unwrap()
+            })
+            .collect();
+        let decoded: Vec<_> = lines
+            .iter()
+            .map(|line| {
+                let SessionEntry::Custom(custom) = serde_json::from_str(line).unwrap() else {
+                    panic!()
+                };
+                ExternalAcpPresentation::from_custom(&custom)
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(decoded, events);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&lines[0]).unwrap()["kind"],
+            EXTERNAL_ACP_PRESENTATION_KIND
+        );
+    }
+
+    #[test]
+    fn external_presentation_rejects_unknown_and_sensitive_fields_on_both_paths() {
+        let valid = serde_json::json!({"event":"agent_message", "item_id":"1", "text":"hi"});
+        let mut custom = Custom {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            kind: EXTERNAL_ACP_PRESENTATION_KIND.into(),
+            data: valid.clone(),
+        };
+        for field in [
+            "_meta",
+            "raw_input",
+            "raw_output",
+            "permission",
+            "authentication",
+            "jsonrpc",
+        ] {
+            custom.data = valid.clone();
+            custom.data[field] = serde_json::json!({"secret":"value"});
+            assert!(ExternalAcpPresentation::from_custom(&custom).is_err());
+            assert!(serde_json::to_string(&custom).is_err());
+            let raw = serde_json::json!({"type":"custom", "id":custom.id, "ts":custom.ts, "kind":custom.kind, "data":custom.data});
+            assert!(serde_json::from_value::<SessionEntry>(raw).is_err());
+        }
+        for event in [
+            "permission_request",
+            "permission_response",
+            "authenticate",
+            "future",
+        ] {
+            custom.data = serde_json::json!({"event":event});
+            assert!(serde_json::to_string(&custom).is_err());
+        }
+        custom.data = serde_json::json!({"event":"tool_call", "tool_call_id":"1", "title":"x", "status":"invented"});
+        assert!(serde_json::to_string(&custom).is_err());
+        custom.kind = "plugin:notes".into();
+        assert!(
+            ExternalAcpPresentation::from_custom(&custom)
+                .unwrap()
+                .is_none()
+        );
+        assert!(serde_json::to_string(&custom).is_ok());
+    }
+
+    #[test]
+    fn external_presentation_rejects_duplicate_fields_in_raw_json() {
+        let id = EntryId::new();
+        let ts = Utc::now();
+        for data in [
+            r#"{"event":"prompt","text":"first","text":"second"}"#,
+            r#"{"event":"prompt","event":"prompt","text":"hi"}"#,
+            r#"{"event":"prompt","text":"first","t\u0065xt":"second"}"#,
+            r#"{"event":"tool_call_update","tool_call_id":"1","title":null,"title":"x"}"#,
+        ] {
+            for data_first in [true, false] {
+                let fields = if data_first {
+                    format!(r#""data":{data},"kind":"{EXTERNAL_ACP_PRESENTATION_KIND}""#)
+                } else {
+                    format!(r#""kind":"{EXTERNAL_ACP_PRESENTATION_KIND}","data":{data}"#)
+                };
+                let raw = format!(r#"{{"id":"{id}","ts":"{ts}",{fields}}}"#);
+                assert!(serde_json::from_str::<Custom>(&raw).is_err(), "{raw}");
+                let entry = format!(r#"{{"type":"custom","id":"{id}","ts":"{ts}",{fields}}}"#);
+                assert!(
+                    serde_json::from_str::<SessionEntry>(&entry).is_err(),
+                    "{entry}"
+                );
+            }
+        }
+
+        let raw = format!(
+            r#"{{"type":"custom","id":"{id}","ts":"{ts}","data":{{"event":"prompt","text":"ok"}},"kind":"{EXTERNAL_ACP_PRESENTATION_KIND}"}}"#
+        );
+        assert!(serde_json::from_str::<SessionEntry>(&raw).is_ok());
+
+        let raw = format!(
+            r#"{{"type":"custom","id":"{id}","ts":"{ts}","data":{{"key":1,"key":2}},"kind":"plugin:example"}}"#
+        );
+        let SessionEntry::Custom(custom) = serde_json::from_str(&raw).unwrap() else {
+            panic!()
+        };
+        assert_eq!(custom.data["key"], 2);
+    }
+
+    #[test]
+    fn external_presentation_text_is_bounded_in_bytes_on_read_and_write() {
+        assert!(PresentationText::new("x".repeat(EXTERNAL_ACP_TEXT_LIMIT)).is_ok());
+        assert!(PresentationText::new("\u{e9}".repeat(EXTERNAL_ACP_TEXT_LIMIT / 2 + 1)).is_err());
+        let custom = Custom {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            kind: EXTERNAL_ACP_PRESENTATION_KIND.into(),
+            data: serde_json::json!({"event":"prompt", "text":"x".repeat(EXTERNAL_ACP_TEXT_LIMIT + 1)}),
+        };
+        assert!(serde_json::to_string(&custom).is_err());
+        let raw = serde_json::json!({"type":"custom", "id":custom.id, "ts":custom.ts, "kind":custom.kind, "data":custom.data});
+        assert!(serde_json::from_value::<SessionEntry>(raw).is_err());
+    }
+
+    #[test]
+    fn format_version_is_four() {
+        assert_eq!(FORMAT_VERSION, 4);
     }
 }

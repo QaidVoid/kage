@@ -304,6 +304,7 @@ fn serve_on_host(
                         ts: chrono::Utc::now(),
                         cwd: spec.cx.workdir.clone(),
                         model: "mock/m".into(),
+                        backend: None,
                         system_prompt: spec.cx.system_prompt.clone(),
                         parent_session: None,
                         parent_entry: None,
@@ -1744,6 +1745,7 @@ fn record_as(
         ts: chrono::Utc::now() - chrono::Duration::minutes(age),
         cwd: cwd.into(),
         model: model.into(),
+        backend: None,
         system_prompt: String::new(),
         parent_session: None,
         parent_entry: None,
@@ -2390,6 +2392,28 @@ fn set_option(
 ) -> Result<serde_json::Value, kage_jsonrpc::RpcError> {
     let params = serde_json::json!({"sessionId": h.session, "configId": id, "value": value});
     h.client.request("session/set_config_option", params)
+}
+
+#[test]
+fn unknown_external_session_is_refused_instead_of_opening_an_engine_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(Vec::new(), dir.path(), dir.path());
+
+    for name in ["trusted-agent", ""] {
+        let params = serde_json::json!({
+            "cwd": dir.path(),
+            "mcpServers": [],
+            "_meta": {"kage": {"externalAgent": name}}
+        });
+        let err = h.client.request("session/new", params).unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("external agent"));
+        assert!(err.message.contains("temporarily unavailable"));
+    }
+
+    let params = serde_json::json!({"cwd": dir.path(), "mcpServers": []});
+    let created = h.client.request("session/new", params).unwrap();
+    assert!(created["sessionId"].as_str().is_some());
 }
 
 #[test]
@@ -3974,7 +3998,7 @@ fn a_flushed_held_buffer_reports_what_the_cap_dropped() {
     // The pipe plus the inbound channel hold far less than HELD_CAP
     // updates, so the flush must run while this thread drains.
     let flush_peer = peer.clone();
-    let flusher = std::thread::spawn(move || flush_held(&flush_peer, "c1", held));
+    let flusher = std::thread::spawn(move || flush_held(&flush_peer.into(), "c1", held));
 
     let mut seen = 0;
     let marker = loop {
@@ -4008,7 +4032,7 @@ fn an_under_cap_flush_sends_no_marker() {
         }),
     );
     let flush_peer = peer.clone();
-    let flusher = std::thread::spawn(move || flush_held(&flush_peer, "c1", held));
+    let flusher = std::thread::spawn(move || flush_held(&flush_peer.into(), "c1", held));
     flusher.join().unwrap();
 
     let mut texts = Vec::new();
@@ -7501,6 +7525,7 @@ fn session_meta_settings_reach_the_spec() {
                 thinking_level: Some("high".into()),
             }),
             max_output_tokens: Some(1_024),
+            external_agent: None,
         }),
     };
     let settings = SessionSettings::of(Some(&meta), false).unwrap();
@@ -7604,4 +7629,280 @@ fn in_range_session_opts_are_accepted() {
     ] {
         new_session_with_opt(&opt).unwrap_or_else(|e| panic!("{opt}: {e}"));
     }
+}
+#[test]
+fn external_host_refuses_configured_agents_in_isolated_process() {
+    use serde_json::{Value, json};
+
+    // The production config intentionally ignores project ACP settings. Run the
+    // server test in a child with its own user config and environment instead.
+    if std::env::var_os("KAGE_TEST_EXTERNAL_CHILD").is_none() {
+        run_external_host_test_in_child();
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let mock = MockProvider::sequence(vec![text_turn("engine answer"), text_turn("title")]);
+    let host = test_host(
+        Arc::new(Listed::of(mock.clone())),
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+        false,
+    );
+    let (srv_r, mut cli_w) = std::io::pipe().unwrap();
+    let (cli_r, srv_w) = std::io::pipe().unwrap();
+    let running = Arc::clone(&host);
+    std::thread::spawn(move || running.serve(BufReader::new(srv_r), srv_w).unwrap());
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(cli_r).lines() {
+            if tx
+                .send(serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let send = |writer: &mut std::io::PipeWriter, value: Value| {
+        writeln!(writer, "{value}").unwrap();
+        writer.flush().unwrap();
+    };
+    let recv = || rx.recv_timeout(WAIT).expect("no RPC message");
+    send(
+        &mut cli_w,
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}),
+    );
+    let init = recv();
+    assert_ne!(init["result"]["_meta"]["kage"]["externalSessions"], true);
+    let new = |id, name: &str| json!({"jsonrpc":"2.0","id":id,"method":"session/new","params":{"cwd":dir.path(),"mcpServers":[],"_meta":{"kage":{"externalAgent":name}}}});
+    for (id, name) in [(2, "missing"), (3, "broken"), (4, "fake")] {
+        send(&mut cli_w, new(id, name));
+        let error = recv();
+        assert_eq!(error["id"], id);
+        assert_eq!(error["error"]["code"], -32602);
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("temporarily unavailable")
+        );
+        assert!(mock.requests().is_empty());
+        assert!(lock(&host.external).is_empty());
+    }
+    send(
+        &mut cli_w,
+        json!({"jsonrpc":"2.0","id":10,"method":"session/new","params":{"cwd":dir.path(),"mcpServers":[]}}),
+    );
+    let ordinary = loop {
+        let msg = recv();
+        if msg["id"] == 10 {
+            break msg;
+        }
+    };
+    let ordinary_id = ordinary["result"]["sessionId"].as_str().unwrap();
+    send(
+        &mut cli_w,
+        json!({"jsonrpc":"2.0","id":11,"method":"session/prompt","params":{"sessionId":ordinary_id,"prompt":[{"type":"text","text":"engine"}]}}),
+    );
+    loop {
+        let msg = recv();
+        if msg["id"] == 11 {
+            assert_eq!(msg["result"]["stopReason"], "end_turn");
+            break;
+        }
+    }
+    assert!(!mock.requests().is_empty());
+}
+
+fn run_external_host_test_in_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config/kage");
+    std::fs::create_dir_all(&config).unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/external_acp.py");
+    let contents = format!(
+        "[acp.agents.fake]\ncommand = \"python3\"\nargs = [{}]\n\n[acp.agents.broken]\ncommand = \"/nonexistent/kage-fake-agent\"\n",
+        serde_json::to_string(script.to_str().unwrap()).unwrap()
+    );
+    std::fs::write(config.join("config.toml"), contents).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "rpc::tests::external_host_refuses_configured_agents_in_isolated_process",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .env("KAGE_TEST_EXTERNAL_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "child failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+#[cfg(unix)]
+fn external_race_fixture() -> (
+    tempfile::TempDir,
+    Arc<Host>,
+    Arc<CliAcpAgent>,
+    Arc<CliAcpAgent>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let mock = MockProvider::sequence(vec![]);
+    let host = test_host(
+        Arc::new(Listed::of(mock)),
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+        false,
+    );
+    let peer = || {
+        let (peer, _, _) = kage_jsonrpc::connect(std::io::empty(), std::io::sink());
+        peer.into()
+    };
+    let owner = Arc::new(CliAcpAgent::new(Arc::clone(&host), peer()));
+    let other = Arc::new(CliAcpAgent::new(Arc::clone(&host), peer()));
+    let config = kage_core::config::AcpAgent {
+        command: "python3".into(),
+        args: vec![
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/external_acp.py")
+                .to_string_lossy()
+                .into_owned(),
+        ],
+        env: BTreeMap::new(),
+    };
+    let session = external::External::start(
+        "external".into(),
+        "fake",
+        dir.path().to_str().unwrap(),
+        &config,
+        owner.connection,
+        owner.peer.clone(),
+    )
+    .unwrap();
+    lock(&host.external).insert("external".into(), session);
+    lock(&owner.ids).external.insert("external".into());
+    (dir, host, owner, other)
+}
+
+#[cfg(unix)]
+fn wait_until_external_locked(host: &Host) -> bool {
+    let deadline = Instant::now() + WAIT;
+    while host.external.try_lock().is_ok() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::yield_now();
+    }
+    true
+}
+
+#[cfg(unix)]
+#[test]
+fn external_attach_before_last_close_keeps_session_alive() {
+    let (_dir, host, owner, other) = external_race_fixture();
+    let ids = lock(&other.ids);
+    std::thread::scope(|scope| {
+        let attaching = scope.spawn(|| other.attach_external("external", &[]));
+        if !wait_until_external_locked(&host) {
+            drop(ids);
+            panic!("operation did not lock external sessions");
+        }
+        let closing = scope.spawn(|| {
+            owner.close_session(CloseSessionRequest {
+                session_id: "external".into(),
+            })
+        });
+        drop(ids);
+        assert!(attaching.join().unwrap().unwrap());
+        closing.join().unwrap().unwrap();
+    });
+    assert!(lock(&host.external).contains_key("external"));
+    assert!(other.external_session("external").is_some());
+    other.disconnect_external();
+    assert!(lock(&host.external).is_empty());
+    owner.detach();
+    other.detach();
+}
+
+#[cfg(unix)]
+#[test]
+fn external_attach_blocked_by_disconnect_does_not_leak_attachment() {
+    let (_dir, host, owner, other) = external_race_fixture();
+    let ids = lock(&other.ids);
+    std::thread::scope(|scope| {
+        let attaching = scope.spawn(|| other.attach_external("external", &[]));
+        if !wait_until_external_locked(&host) {
+            drop(ids);
+            panic!("operation did not lock external sessions");
+        }
+        let disconnecting = scope.spawn(|| other.disconnect_external());
+        let deadline = Instant::now() + WAIT;
+        while !other.disconnecting.load(Ordering::SeqCst) {
+            if Instant::now() >= deadline {
+                drop(ids);
+                panic!("disconnect did not start");
+            }
+            std::thread::yield_now();
+        }
+        drop(ids);
+        let error = attaching.join().unwrap().unwrap_err();
+        assert!(error.message.contains("disconnecting"));
+        disconnecting.join().unwrap();
+    });
+    assert!(lock(&other.ids).external.is_empty());
+    owner.disconnect_external();
+    assert!(lock(&host.external).is_empty());
+    owner.detach();
+    other.detach();
+}
+
+#[cfg(unix)]
+#[test]
+fn external_last_close_before_attach_removes_session() {
+    let (_dir, host, owner, other) = external_race_fixture();
+    owner
+        .close_session(CloseSessionRequest {
+            session_id: "external".into(),
+        })
+        .unwrap();
+    assert!(lock(&host.external).is_empty());
+    assert!(!other.attach_external("external", &[]).unwrap());
+    assert!(lock(&other.ids).external.is_empty());
+    owner.detach();
+    other.detach();
+}
+
+#[cfg(unix)]
+#[test]
+fn external_close_and_reattach_same_connection_are_ordered() {
+    let (_dir, host, owner, other) = external_race_fixture();
+    assert!(other.attach_external("external", &[]).unwrap());
+    let ids = lock(&owner.ids);
+    std::thread::scope(|scope| {
+        let closing = scope.spawn(|| {
+            owner.close_session(CloseSessionRequest {
+                session_id: "external".into(),
+            })
+        });
+        if !wait_until_external_locked(&host) {
+            drop(ids);
+            panic!("operation did not lock external sessions");
+        }
+        let attaching = scope.spawn(|| owner.attach_external("external", &[]));
+        drop(ids);
+        closing.join().unwrap().unwrap();
+        assert!(attaching.join().unwrap().unwrap());
+    });
+    let session = owner.external_session("external").unwrap();
+    assert!(session.register_prompt(owner.connection).is_ok());
+    owner.detach();
+    other.detach();
 }

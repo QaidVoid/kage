@@ -15,10 +15,10 @@ use serde_json::Value;
 use kage_acp_wire::{
     CancelNotification, ClientCapabilities, CloseSessionRequest, CompactionPhase, ConfigGetRequest,
     ContentBlock, FsOp, FsRequest, Implementation, InitializeRequest, KageMeta,
-    ListSessionsRequest, LoadSessionRequest, McpServer, ModelsResponse, NewSessionMeta,
-    NewSessionRequest, OptionSetRequest, OptionsResponse, PROTOCOL_VERSION, PermissionOptionKind,
-    PermissionOutcome, PlanReview, PromptDelivery, PromptRef, PromptRequest, PromptResponse,
-    QuestionMeta, RequestMeta, RequestPermissionRequest, RequestPermissionResult,
+    ListSessionsRequest, LoadSessionRequest, McpServer, ModelsResponse, NewSessionKage,
+    NewSessionMeta, NewSessionRequest, OptionSetRequest, OptionsResponse, PROTOCOL_VERSION,
+    PermissionOptionKind, PermissionOutcome, PlanReview, PromptDelivery, PromptRef, PromptRequest,
+    PromptResponse, QuestionMeta, RequestMeta, RequestPermissionRequest, RequestPermissionResult,
     ResumeSessionRequest, SelectedOption, SessionExportResponse, SessionForkRequest,
     SessionForkResponse, SessionNotification, SessionRenameRequest, SessionRequest, SessionUpdate,
     SetSessionConfigOptionRequest, SwarmResumeRequest, UiCommandRequest, UiDialogRequest,
@@ -251,6 +251,7 @@ impl Client {
         client_capabilities: ClientCapabilities,
         client_info: Option<Implementation>,
     ) -> u64 {
+        self.state.external_sessions = false;
         self.request(
             "initialize",
             params(&InitializeRequest {
@@ -260,6 +261,25 @@ impl Client {
             }),
             Pending::Initialize,
         )
+    }
+
+    /// Requests a new session using a configured external agent by name.
+    ///
+    /// This only sends the kage extension. The server must support it
+    /// for the selection to have an effect.
+    pub fn new_session_with_external_agent(
+        &mut self,
+        cwd: &str,
+        mcp_servers: &[McpServer],
+        agent_name: &str,
+    ) -> u64 {
+        let meta = NewSessionMeta {
+            kage: Some(NewSessionKage {
+                external_agent: Some(agent_name.to_owned()),
+                ..NewSessionKage::default()
+            }),
+        };
+        self.new_session(cwd, mcp_servers, Some(meta))
     }
 
     /// Opens a new session in `cwd`. `meta` carries what a kage client
@@ -1480,6 +1500,7 @@ impl Client {
                 let kage = response.meta.and_then(|meta| meta.kage).unwrap_or_default();
                 self.state.agent_cwd = kage.cwd;
                 self.state.agent_defaults = kage.config_options;
+                self.state.external_sessions = kage.external_sessions;
                 vec![Change::Connection]
             }
         }
@@ -2184,6 +2205,49 @@ mod tests {
         client.load_session("s1", "/project", &[], None);
         let params = client.take_outgoing()[0].to_value()["params"].clone();
         assert!(params.get("_meta").is_none(), "{params}");
+    }
+
+    #[test]
+    fn external_session_capability_requires_current_handshake() {
+        let mut client = Client::new();
+        assert!(!client.state().external_sessions);
+        for (advertised, expected) in [(Some(true), true), (Some(false), false), (None, false)] {
+            let id = client.initialize(ClientCapabilities::default(), None);
+            assert!(!client.state().external_sessions);
+            let mut result = json!({"protocolVersion": 1, "agentCapabilities": {}});
+            if let Some(value) = advertised {
+                result["_meta"] = json!({"kage": {"externalSessions": value}});
+            }
+            client.handle(Frame::Success {
+                id: RequestId::Number(id),
+                result,
+            });
+            assert_eq!(client.state().external_sessions, expected);
+        }
+    }
+
+    #[test]
+    fn new_session_can_request_a_configured_external_agent() {
+        let mut client = Client::new();
+        client.new_session("/project", &[], None);
+        client.new_session_with_external_agent("/project", &[], "reviewer");
+        let outgoing = client.take_outgoing();
+        assert_eq!(outgoing.len(), 2);
+        assert_eq!(outgoing[0].to_value()["method"], json!("session/new"));
+        assert_eq!(
+            outgoing[0].to_value()["params"],
+            json!({
+                "cwd": "/project", "mcpServers": []
+            })
+        );
+        assert_eq!(outgoing[1].to_value()["method"], json!("session/new"));
+        assert_eq!(
+            outgoing[1].to_value()["params"],
+            json!({
+                "cwd": "/project", "mcpServers": [],
+                "_meta": {"kage": {"externalAgent": "reviewer"}}
+            })
+        );
     }
 
     /// A permission ask whose request id is a string, as agents that

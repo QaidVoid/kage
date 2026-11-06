@@ -312,7 +312,7 @@ impl super::Dispatcher {
             background,
         };
         self.publish_agent_opened(opened);
-        self.open(spec, cancel, Some(link));
+        self.open(spec, cancel, Some(link), None);
         self.record_agent_entries(id, marker, description);
         self.warn_all(id, missing.iter().map(missing_tool).collect());
         let content = vec![Content::Text { text: prompt }];
@@ -587,7 +587,7 @@ impl super::Dispatcher {
             worktree: None,
         };
         let cancel = child_cancel(from, background);
-        self.open(spec, cancel, Some(link));
+        self.open(spec, cancel, Some(link), None);
         let mut warnings: Vec<String> = note.into_iter().collect();
         warnings.extend(missing.iter().map(missing_tool));
         Ok(warnings)

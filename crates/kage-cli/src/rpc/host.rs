@@ -13,7 +13,9 @@ use kage_acp::agent::serve_agent;
 use kage_core::config::{Config, McpServer as McpSpec};
 use kage_core::environment::Environment;
 use kage_core::permissions::PermissionAction;
-use kage_core::protocol::{Command, CommandKind, Event, HostEvent, PermissionDecision, SessionId};
+use kage_core::protocol::{
+    Command, CommandId, CommandKind, Event, HostEvent, PermissionDecision, SessionId,
+};
 use kage_core::sync::lock;
 use kage_jsonrpc::RpcError;
 use kage_loop::{AgentContext, LoopConfig};
@@ -79,6 +81,15 @@ pub(crate) struct Host {
     workdirs: Arc<Mutex<HashMap<SessionId, PathBuf>>>,
     /// The id the next connection gets.
     next_connection: AtomicU64,
+    /// The id the next command a request waits on gets.
+    next_command: AtomicU64,
+    /// The launch token of the session each id was last launched as,
+    /// so a close report names the exact launch whose bookkeeping it
+    /// may drop. Entries are removed when that close is consumed, so
+    /// the map only ever holds hosted sessions.
+    pub(super) instances: Arc<Mutex<HashMap<SessionId, u64>>>,
+    /// The launch token the next launch gets.
+    next_instance: AtomicU64,
 }
 
 impl Host {
@@ -160,6 +171,9 @@ impl Host {
             open: Arc::default(),
             workdirs: Arc::default(),
             next_connection: AtomicU64::new(0),
+            next_command: AtomicU64::new(0),
+            next_instance: AtomicU64::new(0),
+            instances: Arc::default(),
         });
         let open = Arc::clone(&host.open);
         host.engine.subscribe(Box::new(move |envelope| {
@@ -176,18 +190,35 @@ impl Host {
         host
     }
 
-    /// Drops the open-session and workdir bookkeeping of every session
-    /// the engine closed, so the maps cannot grow with the sessions a
-    /// long-lived host served. The stream ends when the engine stops.
+    /// Drops the bookkeeping of every hosted session the engine closed
+    /// and clears its close-in-flight record, so its file may be
+    /// deleted and the maps cannot grow with the sessions a long-lived
+    /// host served. A report names the launch token its open carried;
+    /// a report whose token no longer matches, or that names none, is
+    /// stale: a newer launch replaced it, or the engine opened the
+    /// session itself. The whole consumption happens under the
+    /// instances lock, which [`Host::launch`] holds across its whole
+    /// bookkeeping, so the two never interleave and a checked report
+    /// can only remove the records of the launch it names. The stream
+    /// ends when the engine stops.
     fn prune_closed_sessions(self: &Arc<Self>) {
         let closed = self.engine.closed_sessions();
         let host = Arc::clone(self);
         thread::Builder::new()
             .name("kage-host-prune".to_owned())
             .spawn(move || {
-                for id in closed {
+                for (id, instance) in closed {
+                    let Some(instance) = instance else {
+                        continue;
+                    };
+                    let mut instances = lock(&host.instances);
+                    if instances.get(&id) != Some(&instance) {
+                        continue;
+                    }
+                    instances.remove(&id);
                     lock(&host.open).remove(&id);
                     lock(&host.workdirs).remove(&id);
+                    lock(&host.live).closed(id);
                 }
             })
             .expect("the host prune thread");
@@ -280,11 +311,28 @@ impl Host {
     /// Hosts `spec` in the engine and records it open with `settings`,
     /// so a later load from another connection attaches to it. The
     /// opening connection counts as the session's first attachment.
+    ///
+    /// The launch hands the engine a fresh token and holds the
+    /// instances lock across every step, the same lock the prune
+    /// thread holds across a whole close-report consumption, so a
+    /// report of an instance this launch replaced can never remove
+    /// this launch's records, and a launch never installs into records
+    /// a consumption is still removing. The lock is taken first and
+    /// nothing else takes it while holding another, so the two
+    /// critical sections share one order.
     pub(super) fn launch(&self, spec: SessionSpec, settings: Settings) {
+        let instance = self.next_instance.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut instances = lock(&self.instances);
+        instances.insert(spec.id, instance);
         lock(&self.live).attach(spec.id, true);
         lock(&self.open).insert(spec.id, Open { settings });
         lock(&self.workdirs).insert(spec.id, spec.cx.workdir.clone());
-        self.engine.open(spec);
+        self.engine.open_with_instance(spec, instance);
+    }
+
+    /// A fresh id for a command a request waits on.
+    pub(super) fn command_id(&self) -> CommandId {
+        CommandId(self.next_command.fetch_add(1, Ordering::Relaxed))
     }
 
     /// The workdir a session was launched with, the root `_kage/fs`

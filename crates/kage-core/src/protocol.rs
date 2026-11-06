@@ -544,12 +544,22 @@ pub enum Delivery {
     Queue,
 }
 
+/// Names one command, so the events the engine publishes while handling
+/// it can be told from every other event, such as a refusal notice from
+/// a notice some other activity raised on the same session.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CommandId(pub u64);
+
 /// A request for the engine to act.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Command {
     /// Target session. `None` addresses the engine's active session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionId>,
+    /// Names the command for the caller waiting on its answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<CommandId>,
     /// What to do.
     #[serde(flatten)]
     pub kind: CommandKind,
@@ -561,6 +571,7 @@ impl Command {
     pub fn active(kind: CommandKind) -> Self {
         Self {
             session: None,
+            id: None,
             kind,
         }
     }
@@ -570,8 +581,16 @@ impl Command {
     pub fn to(session: SessionId, kind: CommandKind) -> Self {
         Self {
             session: Some(session),
+            id: None,
             kind,
         }
+    }
+
+    /// Name the command `id`.
+    #[must_use]
+    pub fn with_id(mut self, id: CommandId) -> Self {
+        self.id = Some(id);
+        self
     }
 }
 

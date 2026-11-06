@@ -756,6 +756,7 @@ impl Client {
             params(&SessionForkRequest {
                 session_id: session_id.to_owned(),
                 before,
+                at: None,
             }),
             Pending::Fork {
                 session_id: session_id.to_owned(),
@@ -1423,6 +1424,7 @@ impl Client {
                     id: session_id.into(),
                 }]
             }
+            SessionUpdate::SessionReplaced(replaced) => self.replace_session(session_id, replaced),
             SessionUpdate::Unknown => {
                 log::debug!("a session/update of an unknown kind arrived");
                 vec![Change::Unknown {
@@ -1431,6 +1433,37 @@ impl Client {
                 }]
             }
         }
+    }
+}
+
+impl Client {
+    /// An undo or rewind replaced the session's conversation: drop the
+    /// transcript and agents, which the replay that follows rebuilds.
+    fn replace_session(
+        &mut self,
+        session_id: &str,
+        replaced: kage_acp_wire::SessionReplacedUpdate,
+    ) -> Vec<Change> {
+        let session = self.session_mut(session_id);
+        session.items.clear();
+        session.agents.clear();
+        session.plan = None;
+        session.last_stop = None;
+        session.compacting = false;
+        if replaced.title.is_some() {
+            session.title = replaced.title;
+        }
+        vec![
+            Change::Transcript {
+                id: session_id.into(),
+            },
+            Change::Session {
+                id: session_id.into(),
+            },
+            Change::Agents {
+                id: session_id.into(),
+            },
+        ]
     }
 }
 
@@ -1869,6 +1902,30 @@ mod tests {
             }
             other => panic!("expected one compaction item, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_replaced_session_drops_its_transcript_and_takes_the_title() {
+        let mut client = Client::new();
+        let frame = |update: Value| {
+            Frame::parse(&json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {"sessionId": "s1", "update": update}
+            }))
+            .unwrap()
+        };
+        client.handle(frame(json!({
+            "sessionUpdate": "user_message_chunk",
+            "content": {"type": "text", "text": "gone"}
+        })));
+        client.handle(frame(json!({
+            "sessionUpdate": "_kage/session_replaced",
+            "title": "Kept"
+        })));
+        let session = client.state().session("s1").unwrap();
+        assert!(session.items.is_empty());
+        assert_eq!(session.title.as_deref(), Some("Kept"));
     }
 
     #[test]

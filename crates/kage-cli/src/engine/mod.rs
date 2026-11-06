@@ -59,7 +59,7 @@ use kage_tools::ToolRegistry;
 
 use self::swarm_tool::SwarmInfo;
 
-pub(crate) use bus::{Subscriber, SubscriptionId};
+pub(crate) use bus::{Subscriber, SubscriptionId, answering};
 pub(crate) use media_tool::WithMediaTools;
 pub(crate) use recorder::Recorder;
 pub(crate) use sessions::render_session_markdown;
@@ -216,8 +216,15 @@ pub(crate) struct Engine {
     commander: Commander,
     bus: Arc<Bus>,
     thread: Option<thread::JoinHandle<()>>,
-    /// The session ids the engine removed, its closes confirmed.
-    closed_sessions: crossbeam_channel::Receiver<SessionId>,
+    /// The session ids the engine removed, its closes confirmed, each
+    /// with the launch token its host gave it, `None` for sessions the
+    /// engine opened itself, so the host can drop the bookkeeping of
+    /// the exact instance it will never host again.
+    closed_sessions: crossbeam_channel::Receiver<(SessionId, Option<u64>)>,
+    /// Test-only clone of the close-report sender, so a test can
+    /// inject stale and fresh reports deterministically.
+    #[cfg(test)]
+    closed_for_test: crossbeam_channel::Sender<(SessionId, Option<u64>)>,
 }
 
 /// Cloneable handle for sending commands to an engine.
@@ -248,7 +255,13 @@ impl Commander {
 
 enum Input {
     Command(Command),
-    Open(Box<SessionSpec>),
+    Open {
+        spec: Box<SessionSpec>,
+        /// The host launch token this open carries, so its close
+        /// report names the exact instance. `None` for
+        /// engine-internal opens.
+        instance: Option<u64>,
+    },
     Spawn(Box<Spawn>),
     /// A worktree a spawn waited on is made, or failed to be. Sent by
     /// the checkout thread, so the spawn continues on the engine.
@@ -386,6 +399,11 @@ impl Engine {
             fork_snapshot: None,
             forks_handled: HashMap::new(),
             checkouts: HashMap::new(),
+            // Test-only clone: the dispatcher's own sender is the
+            // only one the move consumes.
+            #[cfg(test)]
+            closed: closed.clone(),
+            #[cfg(not(test))]
             closed,
         };
         let thread = thread::spawn(move || dispatcher.run(&rx));
@@ -394,6 +412,8 @@ impl Engine {
             bus,
             thread: Some(thread),
             closed_sessions,
+            #[cfg(test)]
+            closed_for_test: closed,
         }
     }
 
@@ -418,10 +438,13 @@ impl Engine {
         self.bus.hold(f)
     }
 
-    /// The session ids the engine removed, its closes confirmed, so
-    /// the host can drop the bookkeeping of sessions it will never
-    /// host again. The stream ends when the engine stops.
-    pub(crate) fn closed_sessions(&self) -> crossbeam_channel::Receiver<SessionId> {
+    /// The sessions the engine removed, its closes confirmed, each
+    /// with the launch token its host gave it and `None` for sessions
+    /// the engine opened itself, so the host can drop the bookkeeping
+    /// of sessions it will never host again and tell a stale
+    /// notification of a since-reopened id apart. The stream ends when
+    /// the engine stops.
+    pub(crate) fn closed_sessions(&self) -> crossbeam_channel::Receiver<(SessionId, Option<u64>)> {
         self.closed_sessions.clone()
     }
 
@@ -430,8 +453,30 @@ impl Engine {
     }
 
     /// Host `spec`. The first session opened becomes the active one.
+    /// The engine treats it as its own open: its close report carries
+    /// no launch token, so a host never prunes its bookkeeping for it.
     pub(crate) fn open(&self, spec: SessionSpec) {
-        let _ = self.commander.0.send(Input::Open(Box::new(spec)));
+        let _ = self.commander.0.send(Input::Open {
+            spec: Box::new(spec),
+            instance: None,
+        });
+    }
+
+    /// Host `spec` as the launch `token` names, so its close report
+    /// lets the host drop the bookkeeping of exactly this instance and
+    /// skip a report that arrives after a newer launch of the same id.
+    pub(crate) fn open_with_instance(&self, spec: SessionSpec, token: u64) {
+        let _ = self.commander.0.send(Input::Open {
+            spec: Box::new(spec),
+            instance: Some(token),
+        });
+    }
+
+    /// Test-only: inject a close report into the host prune stream the
+    /// way the engine would.
+    #[cfg(test)]
+    pub(crate) fn report_closed_for_test(&self, id: SessionId, instance: Option<u64>) {
+        let _ = self.closed_for_test.send((id, instance));
     }
 
     pub(crate) fn send(&self, command: Command) {
@@ -560,6 +605,11 @@ struct Session {
     /// The environment the session's processes start with, read at
     /// spawn like `confine_paths`.
     env: Environment,
+    /// The host launch token this open carried, which its close report
+    /// names, so the host prunes the bookkeeping of exactly this
+    /// instance. `None` for engine-internal opens, such as agent
+    /// children and reseated sessions.
+    instance: Option<u64>,
     /// Whether the session delegates repeated work through `swarm`.
     /// Drives the workflow block injected once per state change.
     swarm_mode: bool,
@@ -624,7 +674,7 @@ struct Dispatcher {
     checkouts: HashMap<SessionId, CancelFlag>,
     /// Reports every session the dispatcher removed, so the host can
     /// prune the bookkeeping of sessions it will never host again.
-    closed: crossbeam_channel::Sender<SessionId>,
+    closed: crossbeam_channel::Sender<(SessionId, Option<u64>)>,
 }
 
 impl Dispatcher {
@@ -632,7 +682,9 @@ impl Dispatcher {
         while let Ok(input) = rx.recv() {
             match input {
                 Input::Command(command) => self.command(command),
-                Input::Open(spec) => self.open(*spec, CancelFlag::new(), None),
+                Input::Open { spec, instance } => {
+                    self.open(*spec, CancelFlag::new(), None, instance);
+                }
                 Input::Spawn(spawn) => self.spawn(*spawn),
                 Input::CheckedOut(done) => self.checked_out(*done),
                 Input::VerifyResume { parent, ids, reply } => {
@@ -710,7 +762,13 @@ impl Dispatcher {
         }
     }
 
-    fn open(&mut self, spec: SessionSpec, cancel: CancelFlag, link: Option<AgentLink>) {
+    fn open(
+        &mut self,
+        spec: SessionSpec,
+        cancel: CancelFlag,
+        link: Option<AgentLink>,
+        instance: Option<u64>,
+    ) {
         let SessionSpec {
             id,
             model,
@@ -795,6 +853,7 @@ impl Dispatcher {
                 note: None,
                 confine_paths,
                 env,
+                instance,
                 swarm_mode: false,
             },
         );
@@ -858,6 +917,7 @@ impl Dispatcher {
         reason = "a flat dispatch over every engine command"
     )]
     fn command(&mut self, command: Command) {
+        let _answering = bus::Answering::enter(command.id);
         match command.kind {
             CommandKind::Shutdown => {
                 self.shutting_down = true;
@@ -1733,15 +1793,20 @@ impl Dispatcher {
         self.deny_asks_of(id);
         self.watchdogs.remove(&id);
         self.swarm_requeues.remove(&id);
+        let instance = session.instance;
         self.sessions.remove(&id);
         self.bus.forget(id);
-        self.report_closed(id);
+        self.report_closed(id, instance);
     }
 
     /// Report a session the dispatcher removed, so the host can prune
-    /// its bookkeeping. The engine outliving every listener is fine.
-    fn report_closed(&self, id: SessionId) {
-        let _ = self.closed.send(id);
+    /// its bookkeeping. The report names the launch token the open
+    /// carried, so the host drops the closed instance's records and
+    /// never those of a since-reopened one; engine-internal opens
+    /// carry none, and the host skips their reports. The engine
+    /// outliving every listener is fine.
+    fn report_closed(&self, id: SessionId, instance: Option<u64>) {
+        let _ = self.closed.send((id, instance));
     }
 
     /// Re-prompt a swarm child whose run failed on a rate limit, or

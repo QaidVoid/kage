@@ -341,10 +341,14 @@ impl super::Dispatcher {
             if self.waiting.contains(dropped) {
                 self.end_waiting(*dropped);
             }
+            let instance = self
+                .sessions
+                .get(dropped)
+                .and_then(|session| session.instance);
             self.sessions.remove(dropped);
             self.swarm_requeues.remove(dropped);
             self.bus.forget(*dropped);
-            self.report_closed(*dropped);
+            self.report_closed(*dropped, instance);
         }
         if self.active == Some(id) {
             self.active = None;
@@ -582,7 +586,7 @@ impl super::Dispatcher {
     /// prompt. The removed prompt goes back to the client in
     /// [`HostEvent::Undone`] so it can offer it for a retry.
     pub(super) fn undo(&mut self, id: SessionId) {
-        if self.refuse_for_agent(id, "undo") || !self.ensure_idle(id, "undo") {
+        if self.refuse_for_agent(id, "undo") || !self.ensure_tree_idle(id, "undo") {
             return;
         }
         let Some(src) = self.sessions[&id].path.clone() else {
@@ -608,7 +612,7 @@ impl super::Dispatcher {
     /// target. The picked prompt and its reply stay; what follows the
     /// turn is abandoned.
     pub(super) fn rewind(&mut self, id: SessionId, at: &str) {
-        if self.refuse_for_agent(id, "rewind") || !self.ensure_idle(id, "rewind") {
+        if self.refuse_for_agent(id, "rewind") || !self.ensure_tree_idle(id, "rewind") {
             return;
         }
         let Some(src) = self.sessions[&id].path.clone() else {
@@ -745,10 +749,14 @@ impl super::Dispatcher {
             .filter(|agent| self.descends_from(*agent, id))
             .collect();
         for agent in agents {
+            let instance = self
+                .sessions
+                .get(&agent)
+                .and_then(|session| session.instance);
             self.sessions.remove(&agent);
             self.swarm_requeues.remove(&agent);
             self.bus.forget(agent);
-            self.report_closed(agent);
+            self.report_closed(agent, instance);
         }
         let servers = self.sessions[&id]
             .mcp
@@ -867,9 +875,10 @@ impl super::Dispatcher {
     ) {
         let path = recorder.path().to_path_buf();
         let mut session = self.sessions.remove(&old).expect("session checked");
+        let instance = session.instance.take();
         self.swarm_requeues.remove(&old);
         self.bus.forget(old);
-        self.report_closed(old);
+        self.report_closed(old, instance);
         super::fit_context(&mut cx, &self.registry, &session.state.model);
         session.usage = super::usage_of(&cx);
         session.state.thinking = cx.thinking_level;
@@ -902,11 +911,16 @@ impl super::Dispatcher {
             .filter(|agent| self.descends_from(*agent, old))
             .collect();
         for agent in agents {
+            let instance = self
+                .sessions
+                .get(&agent)
+                .and_then(|session| session.instance);
             self.sessions.remove(&agent);
             self.swarm_requeues.remove(&agent);
             self.bus.forget(agent);
-            self.report_closed(agent);
+            self.report_closed(agent, instance);
         }
+        session.instance = None;
         self.sessions.insert(new, session);
         if self.active == Some(old) {
             self.active = Some(new);

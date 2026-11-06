@@ -33,7 +33,7 @@ pub use kage_acp_wire::schema::{
     LoadSessionResponse, McpCapabilities, McpProbe, McpServer, McpServerHttp, McpServerStdio,
     MessageChunk, ModelEntry, ModelProvider, ModelsResponse, NewSessionRequest, NewSessionResponse,
     NoticeTone, NoticeUpdate, OptionEntry, OptionSetRequest, OptionsResponse, PROTOCOL_VERSION,
-    PermissionOption, PermissionOptionKind, PermissionOutcome, Plan, PlanReview,
+    PastPrompt, PermissionOption, PermissionOptionKind, PermissionOutcome, Plan, PlanReview,
     PluginInstallRequest, PluginRemoveRequest, ProbeModel, ProbeTool, PromptCapabilities,
     PromptDelivery, PromptRef, PromptRequest, PromptResponse, ProviderProbe, QuestionChoice,
     QuestionMeta, QuestionPrompt, RegistryCapability, RegistryInstallRequest,
@@ -42,8 +42,9 @@ pub use kage_acp_wire::schema::{
     ResourceLink, ResumeSessionRequest, ResumeSessionResponse, SelectedOption, SessionCapabilities,
     SessionConfigCategory, SessionConfigKind, SessionConfigOption, SessionConfigSelectOption,
     SessionExportResponse, SessionForkRequest, SessionForkResponse, SessionInfo, SessionInfoKage,
-    SessionInfoMeta, SessionInfoUpdate, SessionNotification, SessionRenameRequest, SessionRequest,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
+    SessionInfoMeta, SessionInfoUpdate, SessionNotification, SessionPromptsResponse,
+    SessionRenameRequest, SessionReplacedUpdate, SessionRequest, SessionRewindRequest,
+    SessionUndoResponse, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
     SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate, SubagentUsage,
     Supported, SwarmMeta, SwarmResumeRequest, SwarmResumeResponse, TerminalRef, TextContent,
     ThemesRequest, ThemesResult, ToolCall, ToolCallContent, ToolCallMeta, ToolCallStatus,
@@ -176,6 +177,8 @@ pub enum SessionUpdate {
     Compaction(CompactionUpdate),
     /// An MCP server's reachability changed.
     McpStatus(McpStatusUpdate),
+    /// The conversation was replaced in place.
+    SessionReplaced(SessionReplacedUpdate),
     /// Any update kind kage does not know. Never sent.
     Unknown,
 }
@@ -199,6 +202,7 @@ impl From<SessionUpdate> for wire::SessionUpdate {
             SessionUpdate::Notice(update) => Self::Notice(update),
             SessionUpdate::Compaction(update) => Self::Compaction(update),
             SessionUpdate::McpStatus(update) => Self::McpStatus(update.into()),
+            SessionUpdate::SessionReplaced(update) => Self::SessionReplaced(update),
             SessionUpdate::Unknown => Self::Unknown,
         }
     }

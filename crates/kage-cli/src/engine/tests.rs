@@ -6729,3 +6729,24 @@ fn cancelling_a_child_in_checkout_stops_the_checkout() {
     assert!(!hosted.iter().any(|(id, _)| *id == child), "{hosted:?}");
     h.engine.shutdown();
 }
+
+/// What a named command publishes while the engine handles it reads its
+/// id; events of commands sent without one read none.
+#[test]
+fn events_a_named_command_publishes_carry_its_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::replaying(text_turn("reply")));
+    let (id, _) = recorded_exchanges(&h, dir.path(), 1);
+    let (tx, rx) = channel();
+    h.engine.subscribe(Box::new(move |envelope| {
+        if matches!(envelope.event, Event::Host(HostEvent::PromptList { .. })) {
+            let _ = tx.send(crate::engine::answering());
+        }
+    }));
+    let named = kage_core::protocol::CommandId(7);
+    h.engine
+        .send(Command::to(id, CommandKind::ListPrompts).with_id(named));
+    assert_eq!(rx.recv_timeout(WAIT).unwrap(), Some(named));
+    h.engine.send(Command::to(id, CommandKind::ListPrompts));
+    assert_eq!(rx.recv_timeout(WAIT).unwrap(), None);
+}

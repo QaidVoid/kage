@@ -494,6 +494,11 @@ pub struct SessionForkRequest {
     /// session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before: Option<PromptRef>,
+    /// Copy through the entry whose id starts with this, such as a
+    /// prompt's `at` from `_kage/session/prompts`. Ignored when `before`
+    /// is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
 }
 
 /// `_kage/session/fork` result.
@@ -508,7 +513,67 @@ pub struct SessionForkResponse {
     pub truncated: bool,
 }
 
-/// `_kage/session/export` and `_kage/session/compact` request params.
+/// `_kage/session/rewind` request params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRewindRequest {
+    /// The session to rewind.
+    pub session_id: String,
+    /// The entry id, or a prefix of it, of the prompt whose turn the
+    /// session continues from: an `at` from `_kage/session/prompts`.
+    pub at: String,
+}
+
+/// `_kage/session/undo` result.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionUndoResponse {
+    /// The prompt the undo dropped, for the client to put back into its
+    /// editor.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt: Vec<ContentBlock>,
+}
+
+/// `_kage/session/prompts` result.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPromptsResponse {
+    /// Every user prompt of the session's branch tree, depth-first,
+    /// oldest first.
+    pub prompts: Vec<PastPrompt>,
+}
+
+/// One past user prompt a session can be rewound to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PastPrompt {
+    /// The prompt's entry id, the `at` of `_kage/session/rewind` and
+    /// `_kage/session/fork`.
+    pub at: String,
+    /// The prompt as it was sent.
+    pub prompt: Vec<ContentBlock>,
+    /// How many branches sit above the prompt: `0` on the original
+    /// thread.
+    pub depth: u32,
+    /// Whether the conversation continues from this prompt's turn.
+    /// Exactly one prompt has it.
+    pub active: bool,
+}
+
+/// The `_kage/session_replaced` update: the session's conversation was
+/// replaced, by an undo or a rewind. A client drops what it shows for
+/// the session; the conversation as it now stands follows as ordinary
+/// updates, as after `session/load`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionReplacedUpdate {
+    /// The session's title, if it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+/// `_kage/session/export`, `_kage/session/compact`, `_kage/session/undo`,
+/// `_kage/session/prompts` and `_kage/session/delete` request params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionRequest {
@@ -1495,6 +1560,9 @@ pub enum SessionUpdate {
     /// An MCP server's reachability changed.
     #[serde(rename = "_kage/mcp_status")]
     McpStatus(McpStatusUpdate),
+    /// The conversation was replaced; see [`SessionReplacedUpdate`].
+    #[serde(rename = "_kage/session_replaced")]
+    SessionReplaced(SessionReplacedUpdate),
     /// Any update kind kage does not know. Never sent.
     #[serde(other)]
     Unknown,

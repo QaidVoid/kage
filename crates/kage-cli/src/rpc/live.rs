@@ -252,6 +252,16 @@ impl Live {
             || !self.asks.is_empty()
     }
 
+    /// Whether `id` is open, closing, running or part of a live agent tree
+    /// on the host, so its file must stay.
+    pub(super) fn in_use(&self, id: SessionId) -> bool {
+        self.attached.contains_key(&id)
+            || self.closing.contains(&id)
+            || self.working.contains(&id)
+            || self.running.contains(&id)
+            || self.tree.get(id).is_some()
+    }
+
     pub(super) fn new(commander: Commander) -> Self {
         Self {
             commander,
@@ -722,6 +732,14 @@ impl Live {
     /// reopens its file instead of attaching to a dropped session.
     pub(super) fn is_closing(&self, id: SessionId) -> bool {
         self.closing.contains(&id)
+    }
+
+    /// Clears the close-in-flight record of a session whose close the
+    /// engine confirmed: nothing holds the session open any more, so
+    /// its file may be deleted. A close a reopen superseded was
+    /// already dropped by that reopen's attach.
+    pub(super) fn closed(&mut self, id: SessionId) {
+        self.closing.remove(&id);
     }
 
     /// Whether the live state tracks `session` itself, so a recorded

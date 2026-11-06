@@ -251,9 +251,11 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
             &aliases,
         ));
     }));
+    let acp_warnings = engine.commander();
     engine.subscribe(Box::new(host::mirror(
         Arc::clone(&mirror),
         plugin_runtime.clone(),
+        move |event| acp_warnings.publish(event),
     )));
     engine.open(crate::engine::SessionSpec {
         id: session_id,

@@ -2263,6 +2263,8 @@ mod tests {
     fn call(id: &str, kind: ToolKind, title: &str) -> ToolCallItem {
         ToolCallItem {
             tool_call_id: id.to_owned(),
+            name: None,
+            locations: None,
             title: title.to_owned(),
             kind,
             status: ToolCallStatus::Completed,

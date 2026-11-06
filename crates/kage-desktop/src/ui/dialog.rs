@@ -1219,6 +1219,8 @@ mod tests {
     fn edit(path: &str) -> ToolCallItem {
         ToolCallItem {
             tool_call_id: "c9".to_owned(),
+            name: None,
+            locations: None,
             title: "edit".to_owned(),
             kind: ToolKind::Edit,
             status: ToolCallStatus::Completed,

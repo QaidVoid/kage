@@ -17,7 +17,7 @@ const PRESETS: [(&str, &str, &str, &[&str]); 3] = [
         "Claude Code",
         "claude",
         "npx",
-        &["-y", "@zed-industries/claude-code-acp"],
+        &["-y", "@agentclientprotocol/claude-agent-acp"],
     ),
     (
         "Codex",
@@ -212,7 +212,7 @@ impl AcpForm {
                     }
                     ui.label(
                         egui::RichText::new(
-                            "An external agent kage drives over ACP, picked as acp:<name> in the model picker.",
+                            "Configure an external ACP agent to use as acp:<name>.",
                         )
                         .size(FS_XS)
                         .color(palette.muted),
@@ -231,7 +231,8 @@ impl AcpForm {
                     }
                     forms::field(ui, "Command", true, None, |ui| {
                         let mut command = self.command.clone();
-                        let response = forms::text_field(ui, &mut command, "command", true, palette);
+                        let response =
+                            forms::text_field(ui, &mut command, "command", true, palette);
                         if response.changed() {
                             edit.command = command;
                             edit.command_set = true;
@@ -257,15 +258,9 @@ impl AcpForm {
                         },
                     );
                     self.env = env;
-                    let preview = self
-                        .entry()
-                        .ok()
-                        .and_then(|(name, value)| {
-                            forms::toml_preview(
-                                &["acp".to_owned(), "agents".to_owned(), name],
-                                &value,
-                            )
-                        });
+                    let preview = self.entry().ok().and_then(|(name, value)| {
+                        forms::toml_preview(&["acp".to_owned(), "agents".to_owned(), name], &value)
+                    });
                     let toggle = forms::preview_block(ui, self.preview, preview, palette);
                     if toggle.clicked() {
                         edit.preview = Some(!self.preview);
@@ -430,9 +425,34 @@ impl AcpEdit {
 mod tests {
     use serde_json::json;
 
-    use super::AcpForm;
+    use super::{AcpEdit, AcpForm, PRESETS};
     use crate::ui::forms::toml_preview;
     use crate::ui::settings_config::Snapshot;
+
+    #[test]
+    fn the_claude_preset_fills_the_current_command_line() {
+        let (_, name, command, args) = PRESETS
+            .iter()
+            .find(|(label, _, _, _)| *label == "Claude Code")
+            .copied()
+            .expect("Claude Code preset");
+        let mut form = AcpForm::new(None);
+        AcpEdit {
+            preset: Some((name, command, args)),
+            ..Default::default()
+        }
+        .apply(&mut form);
+
+        let (name, value) = form.entry().unwrap();
+        assert_eq!(name, "claude");
+        assert_eq!(
+            value,
+            json!({
+                "command": "npx",
+                "args": ["-y", "@agentclientprotocol/claude-agent-acp"],
+            })
+        );
+    }
 
     #[test]
     fn an_agent_entry_holds_its_command_line() {

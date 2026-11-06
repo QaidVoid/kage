@@ -1473,12 +1473,14 @@ fn apply_item(session: &mut Session, update: SessionUpdate) -> bool {
             session.items.push(TranscriptItem::ToolCall(ToolCallItem {
                 tool_call_id: call.tool_call_id,
                 title: call.title,
+                name: call.name,
+                locations: call.locations,
                 kind: call.kind,
                 status: call.status,
                 input: call.raw_input,
                 swarm: kage.swarm,
                 content: call.content,
-                raw_output: None,
+                raw_output: call.raw_output,
                 took_ms: kage.duration_ms,
             }));
             true
@@ -1700,6 +1702,75 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn tool_call_metadata_survives_initial_and_partial_updates() {
+        fn get_call(session: &Session) -> &ToolCallItem {
+            match &session.items[0] {
+                TranscriptItem::ToolCall(call) => call,
+                _ => panic!("expected tool call"),
+            }
+        }
+
+        let mut session = Session::new("s");
+        let initial = json!({
+            "sessionUpdate": "tool_call", "toolCallId": "c", "title": "Read",
+            "name": "read_file", "locations": [{"path": "/a", "line": 42}, {"path": "/b", "line": null}],
+            "rawInput": {"path": "/a"}, "rawOutput": {"result": true}
+        });
+        let update: SessionUpdate = serde_json::from_value(initial.clone()).unwrap();
+        let encoded = serde_json::to_value(&update).unwrap();
+        assert_eq!(encoded["name"], initial["name"]);
+        assert_eq!(encoded["rawOutput"], initial["rawOutput"]);
+        assert_eq!(encoded["locations"][0], initial["locations"][0]);
+        assert_eq!(encoded["locations"][1], json!({"path": "/b"}));
+        assert!(apply_item(&mut session, update));
+
+        let call = get_call(&session);
+        assert_eq!(call.name.as_deref(), Some("read_file"));
+        assert_eq!(call.locations.as_ref().unwrap()[0].line, Some(42));
+        assert_eq!(call.raw_output, Some(json!({"result": true})));
+
+        for update in [
+            json!({"sessionUpdate":"tool_call_update", "toolCallId":"c"}),
+            json!({"sessionUpdate":"tool_call_update", "toolCallId":"c", "name": null,
+                   "locations": null, "rawInput": null, "rawOutput": null}),
+        ] {
+            assert!(apply_item(
+                &mut session,
+                serde_json::from_value(update).unwrap()
+            ));
+        }
+        let call = get_call(&session);
+        assert_eq!(call.name.as_deref(), Some("read_file"));
+        assert_eq!(call.locations.as_ref().unwrap().len(), 2);
+        assert_eq!(call.input, Some(json!({"path": "/a"})));
+        assert_eq!(call.raw_output, Some(json!({"result": true})));
+
+        let update = json!({"sessionUpdate":"tool_call_update", "toolCallId":"c",
+            "name":"read", "locations":[], "rawOutput":[1, 2]});
+        assert!(apply_item(
+            &mut session,
+            serde_json::from_value(update).unwrap()
+        ));
+        let call = get_call(&session);
+        assert_eq!(call.name.as_deref(), Some("read"));
+        assert_eq!(call.locations, Some(vec![]));
+        assert_eq!(call.raw_output, Some(json!([1, 2])));
+    }
+
+    #[test]
+    fn new_session_sends_cwd_and_mcp_servers() {
+        let mut client = Client::new();
+        client.new_session("/project", &[]);
+        let outgoing = client.take_outgoing();
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].to_value()["method"], json!("session/new"));
+        assert_eq!(
+            outgoing[0].to_value()["params"],
+            json!({ "cwd": "/project", "mcpServers": [] })
+        );
+    }
 
     /// A permission ask whose request id is a string, as agents that
     /// assign string ids send.

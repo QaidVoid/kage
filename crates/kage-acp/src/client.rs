@@ -23,10 +23,9 @@
 //! ACP session are started per turn, and only the latest user turn's
 //! text is forwarded - kage's history is not replayed, so the
 //! upstream has no memory of earlier turns beyond that one message.
-//! The upstream's `stopReason` is collapsed to
-//! [`StopReason::EndTurn`]: `max_tokens` cutoffs and refusals are
-//! indistinguishable from a normal end, and token usage is not
-//! reported (always zero).
+//! ACP stop reasons are translated to provider outcomes. Refusals and
+//! turn request limits share [`StopReason::Other`], and token usage is
+//! not reported (always zero).
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
@@ -47,7 +46,7 @@ use kage_provider::{
 use crate::acp::{
     ClientCapabilities, ContentBlock, Implementation, InitializeRequest, NewSessionRequest,
     PROTOCOL_VERSION, PermissionOption, PermissionOptionKind, PermissionOutcome, PromptRequest,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedOption,
+    PromptResponse, RequestPermissionRequest, RequestPermissionResponse, SelectedOption,
 };
 use crate::agent::PermissionDecision;
 
@@ -187,29 +186,40 @@ fn translate(update: &SessionUpdate) -> Option<ProviderEvent> {
     })
 }
 
-fn option_id(req: &RequestPermissionRequest, allow: bool) -> Option<String> {
-    let want = |o: &&PermissionOption| {
-        let is_allow = matches!(
-            o.kind,
-            PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways
-        );
-        is_allow == allow
-    };
-    req.options.iter().find(want).map(|o| o.option_id.clone())
+fn option_id(req: &RequestPermissionRequest, kind: PermissionOptionKind) -> Option<String> {
+    req.options
+        .iter()
+        .find(|option: &&PermissionOption| option.kind == kind)
+        .map(|option| option.option_id.clone())
 }
 
 /// Resolve an upstream `session/request_permission` into the JSON-RPC
 /// result value. Without a resolver, or on `Deny`, a reject option is
-/// selected (kage never auto-approves an upstream agent's tools).
+/// selected (kage never auto-approves an upstream agent's tools). A plan
+/// review or a question is not a tool permission, so the tool policy
+/// never answers it and it is cancelled.
 fn permission_result(
     resolver: Option<&PermissionResolver>,
     req: &RequestPermissionRequest,
 ) -> serde_json::Value {
-    let allow = matches!(
-        resolver.map(|r| r(req)),
-        Some(PermissionDecision::Allow | PermissionDecision::AllowSession)
-    );
-    let outcome = match option_id(req, allow) {
+    let not_a_tool = req
+        .meta
+        .as_ref()
+        .is_some_and(|meta| meta.kage.plan_review.is_some() || meta.kage.question.is_some());
+    if not_a_tool {
+        return serde_json::to_value(RequestPermissionResponse {
+            outcome: PermissionOutcome::Cancelled,
+        })
+        .unwrap_or(serde_json::Value::Null);
+    }
+    let decision = resolver.map(|r| r(req));
+    let kind = match decision {
+        Some(PermissionDecision::Allow | PermissionDecision::AllowSession) => {
+            PermissionOptionKind::AllowOnce
+        }
+        _ => PermissionOptionKind::RejectOnce,
+    };
+    let outcome = match option_id(req, kind) {
         Some(option_id) => PermissionOutcome::Selected(SelectedOption { option_id }),
         None => PermissionOutcome::Cancelled,
     };
@@ -401,10 +411,21 @@ fn spawn_prompt(
     thread::spawn(move || {
         let outcome = peer.request_cancellable("session/prompt", params, &stop);
         let item = match outcome {
-            Ok(_) => Ok(ProviderEvent::MessageEnd {
-                stop_reason: StopReason::EndTurn,
-                usage: TokenUsage::default(),
-            }),
+            Ok(value) => serde_json::from_value::<PromptResponse>(value)
+                .map_err(|e| ProviderError::Decode(format!("session/prompt: {e}")))
+                .and_then(|response| {
+                    let stop_reason = match response.stop_reason {
+                        crate::acp::StopReason::EndTurn => StopReason::EndTurn,
+                        crate::acp::StopReason::MaxTokens => StopReason::MaxTokens,
+                        crate::acp::StopReason::MaxTurnRequests
+                        | crate::acp::StopReason::Refusal => StopReason::Other,
+                        crate::acp::StopReason::Cancelled => return Err(ProviderError::Cancelled),
+                    };
+                    Ok(ProviderEvent::MessageEnd {
+                        stop_reason,
+                        usage: TokenUsage::default(),
+                    })
+                }),
             Err(e) => Err(rpc_to_provider(e)),
         };
         *lock(&terminal) = Some(item);
@@ -568,6 +589,80 @@ mod tests {
         SessionUpdate,
     };
     use crate::agent::{Agent, PromptContext, serve_agent};
+
+    #[test]
+    fn denial_never_selects_an_unknown_permission_kind() {
+        let req: RequestPermissionRequest = serde_json::from_value(serde_json::json!({
+            "sessionId": "s1",
+            "toolCall": {"toolCallId": "call-1"},
+            "options": [{"optionId": "unknown", "name": "Unknown", "kind": "future_kind"}]
+        }))
+        .unwrap();
+        assert_eq!(
+            permission_result(None, &req),
+            serde_json::json!({"outcome": {"outcome": "cancelled"}})
+        );
+    }
+
+    #[test]
+    fn permission_policy_never_expands_the_requested_scope() {
+        let req: RequestPermissionRequest = serde_json::from_value(serde_json::json!({
+            "sessionId": "s1",
+            "toolCall": {"toolCallId": "call-1"},
+            "options": [
+                {"optionId": "always", "name": "Always", "kind": "allow_always"},
+                {"optionId": "once", "name": "Once", "kind": "allow_once"}
+            ]
+        }))
+        .unwrap();
+        let once: PermissionResolver = Arc::new(|_| PermissionDecision::Allow);
+        let session: PermissionResolver = Arc::new(|_| PermissionDecision::AllowSession);
+        assert_eq!(
+            permission_result(Some(&once), &req)["outcome"]["optionId"],
+            "once"
+        );
+        assert_eq!(
+            permission_result(Some(&session), &req)["outcome"]["optionId"],
+            "once"
+        );
+        let mut only_always = req;
+        only_always
+            .options
+            .retain(|option| option.option_id == "always");
+        for resolver in [&once, &session] {
+            assert_eq!(
+                permission_result(Some(resolver), &only_always),
+                serde_json::json!({"outcome": {"outcome": "cancelled"}})
+            );
+        }
+    }
+
+    #[test]
+    fn permission_policy_never_answers_plan_reviews_or_questions() {
+        let allow: PermissionResolver = Arc::new(|_| PermissionDecision::Allow);
+        for meta in [
+            serde_json::json!({"kage": {"planReview": {"plan": "# Plan"}}}),
+            serde_json::json!({"kage": {"question": {"prompt": {
+                "header": "Pick", "question": "Which?", "multiSelect": false,
+                "options": [{"label": "A", "description": ""}]
+            }}}}),
+        ] {
+            let req: RequestPermissionRequest = serde_json::from_value(serde_json::json!({
+                "sessionId": "s1",
+                "toolCall": {"toolCallId": "call-1"},
+                "options": [
+                    {"optionId": "approve", "name": "Approve", "kind": "allow_once"},
+                    {"optionId": "reject", "name": "Reject", "kind": "reject_once"}
+                ],
+                "_meta": meta
+            }))
+            .unwrap();
+            assert_eq!(
+                permission_result(Some(&allow), &req),
+                serde_json::json!({"outcome": {"outcome": "cancelled"}})
+            );
+        }
+    }
 
     struct EchoAgent;
 
@@ -810,6 +905,141 @@ mod tests {
             }
         ));
         server.join().unwrap().unwrap();
+    }
+
+    fn turn_with_prompt_reply(
+        reply: serde_json::Value,
+    ) -> Vec<Result<ProviderEvent, ProviderError>> {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, mut srv_w) = std::io::pipe().unwrap();
+        let server = thread::spawn(move || {
+            let mut reader = BufReader::new(srv_r);
+            let mut line = String::new();
+            for result in [
+                serde_json::json!({"protocolVersion": 1}),
+                serde_json::json!({"sessionId": "s1"}),
+            ] {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                writeln!(
+                    srv_w,
+                    "{}",
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "id": request["id"], "result": result
+                    })
+                )
+                .unwrap();
+            }
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            for (kind, text) in [
+                ("agent_thought_chunk", "thought"),
+                ("agent_message_chunk", "text"),
+            ] {
+                writeln!(
+                    srv_w,
+                    "{}",
+                    serde_json::json!({
+                        "jsonrpc": "2.0", "method": "session/update", "params": {
+                            "sessionId": "s1", "update": {
+                                "sessionUpdate": kind, "content": {"type": "text", "text": text}
+                            }
+                        }
+                    })
+                )
+                .unwrap();
+            }
+            let mut response = serde_json::json!({"jsonrpc": "2.0", "id": request["id"]});
+            response
+                .as_object_mut()
+                .unwrap()
+                .extend(reply.as_object().unwrap().clone());
+            writeln!(srv_w, "{response}").unwrap();
+            line.clear();
+            let _ = reader.read_line(&mut line);
+        });
+        let stream = run_turn(
+            BufReader::new(cli_r),
+            cli_w,
+            "hi".to_owned(),
+            "/tmp".to_owned(),
+            &CancelFlag::new(),
+            None,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        let events: Vec<_> = stream.collect();
+        server.join().unwrap();
+        events
+    }
+
+    #[test]
+    fn prompt_stop_reasons_follow_streamed_updates() {
+        for (wire, expected) in [
+            ("end_turn", Some(StopReason::EndTurn)),
+            ("max_tokens", Some(StopReason::MaxTokens)),
+            ("max_turn_requests", Some(StopReason::Other)),
+            ("refusal", Some(StopReason::Other)),
+            ("cancelled", None),
+        ] {
+            let events =
+                turn_with_prompt_reply(serde_json::json!({"result": {"stopReason": wire}}));
+            assert_eq!(events.len(), 3, "{wire}: {events:?}");
+            assert!(
+                matches!(&events[0], Ok(ProviderEvent::ThinkingDelta { delta }) if delta == "thought")
+            );
+            assert!(
+                matches!(&events[1], Ok(ProviderEvent::TextDelta { delta }) if delta == "text")
+            );
+            match expected {
+                Some(expected) => assert!(
+                    matches!(&events[2], Ok(ProviderEvent::MessageEnd { stop_reason, .. }) if *stop_reason == expected),
+                    "{wire}: {events:?}"
+                ),
+                None => assert!(
+                    matches!(&events[2], Err(ProviderError::Cancelled)),
+                    "{wire}: {events:?}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_prompt_responses_are_decode_errors_after_updates() {
+        for result in [
+            serde_json::json!(null),
+            serde_json::json!({}),
+            serde_json::json!({"stopReason": 1}),
+            serde_json::json!({"stopReason": "future_reason"}),
+        ] {
+            let events = turn_with_prompt_reply(serde_json::json!({"result": result}));
+            assert_eq!(events.len(), 3, "{result}: {events:?}");
+            assert!(matches!(
+                &events[0],
+                Ok(ProviderEvent::ThinkingDelta { .. })
+            ));
+            assert!(matches!(&events[1], Ok(ProviderEvent::TextDelta { .. })));
+            assert!(
+                matches!(&events[2], Err(ProviderError::Decode(message)) if message.contains("session/prompt")),
+                "{result}: {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_rpc_cancellation_follows_streamed_updates() {
+        let events = turn_with_prompt_reply(
+            serde_json::json!({"error": {"code": -32800, "message": "cancelled"}}),
+        );
+        assert_eq!(events.len(), 3);
+        assert!(matches!(
+            &events[0],
+            Ok(ProviderEvent::ThinkingDelta { .. })
+        ));
+        assert!(matches!(&events[1], Ok(ProviderEvent::TextDelta { .. })));
+        assert!(matches!(&events[2], Err(ProviderError::Cancelled)));
     }
 
     /// The agent asks for permission; the kage ACP client always

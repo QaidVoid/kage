@@ -102,10 +102,15 @@ impl Mirror {
 /// completed run, tracks per-provider auth failures for the start
 /// screen, and refreshes the plugin view of the session file. Sessions
 /// announced by `AgentSpawned` are agents and never reach any of it.
+/// When the session's model becomes a legacy ACP model, including
+/// after a resume restores one, `notify` gets the warning. It must not
+/// publish on the bus synchronously.
 pub(crate) fn mirror(
     mirror: Arc<Mutex<Mirror>>,
     plugins: Option<Arc<PluginRuntime>>,
+    notify: impl Fn(HostEvent) + Send,
 ) -> impl FnMut(&Envelope) + Send {
+    let mut warned: Option<String> = None;
     let ui = plugins.as_ref().map(|rt| rt.slots().ui_state());
     let update_ui = move |f: &dyn Fn(&mut kage_plugin::UiState)| {
         if let Some(ui) = &ui {
@@ -124,6 +129,16 @@ pub(crate) fn mirror(
             Event::Host(HostEvent::StateChanged { state }) => {
                 lock(&mirror).state = state.clone();
                 update_ui(&|ui| ui.state = state.clone());
+                if warned.as_deref() != Some(state.model.as_str()) {
+                    warned = Some(state.model.clone());
+                    if let Some(warning) = support::legacy_acp_warning(&state.model) {
+                        notify(HostEvent::Notice {
+                            level: NoticeLevel::Error,
+                            text: warning.to_owned(),
+                            transient: false,
+                        });
+                    }
+                }
             }
             Event::Host(HostEvent::UsageUpdated { usage }) => {
                 update_ui(&|ui| ui.usage = Some(*usage));
@@ -132,6 +147,8 @@ pub(crate) fn mirror(
                 update_ui(&|ui| ui.session_title = Some(title.clone()));
             }
             Event::Host(HostEvent::SessionChanged { path, title, .. }) => {
+                // The view was cleared, so warn again for the restored model.
+                warned = None;
                 agents.clear();
                 lock(&mirror).path = Some(path.clone());
                 update_ui(&|ui| {
@@ -641,7 +658,7 @@ mod tests {
     #[test]
     fn agent_sessions_never_reach_the_mirror() {
         let shared = Arc::new(Mutex::new(Mirror::new(None)));
-        let mut apply = mirror(Arc::clone(&shared), None);
+        let mut apply = mirror(Arc::clone(&shared), None, |_| {});
         let (main, child) = (SessionId::new(), SessionId::new());
         let envelope = |session, seq, event| Envelope {
             session,
@@ -660,6 +677,47 @@ mod tests {
         apply(&envelope(child, 1, spawned));
         apply(&envelope(child, 2, state("agent:m")));
         assert_eq!(lock(&shared).state.model, "main:m");
+    }
+
+    #[test]
+    fn legacy_acp_warning_follows_the_session_model_across_resume() {
+        let warnings = Arc::new(Mutex::new(0));
+        let counted = Arc::clone(&warnings);
+        let mut apply = mirror(
+            Arc::new(Mutex::new(Mirror::new(None))),
+            None,
+            move |event| {
+                assert!(matches!(
+                    event,
+                    HostEvent::Notice {
+                        level: NoticeLevel::Error,
+                        transient: false,
+                        ..
+                    }
+                ));
+                *lock(&counted) += 1;
+            },
+        );
+        let session = SessionId::new();
+        let envelope = |event| Envelope {
+            session,
+            seq: 0,
+            event,
+        };
+        apply(&envelope(state("acp:reviewer")));
+        apply(&envelope(state("acp:reviewer")));
+        assert_eq!(*lock(&warnings), 1);
+        apply(&envelope(Event::Host(HostEvent::SessionChanged {
+            path: "/tmp/s.jsonl".into(),
+            title: None,
+            timeline: Vec::new(),
+            compacted_agents: Vec::new(),
+        })));
+        apply(&envelope(state("acp:reviewer")));
+        assert_eq!(*lock(&warnings), 2);
+        apply(&envelope(state("anthropic/claude")));
+        apply(&envelope(state("acp/reviewer")));
+        assert_eq!(*lock(&warnings), 3);
     }
 
     #[test]

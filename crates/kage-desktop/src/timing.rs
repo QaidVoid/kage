@@ -244,6 +244,8 @@ mod tests {
     fn call(id: &str, status: ToolCallStatus) -> TranscriptItem {
         TranscriptItem::ToolCall(ToolCallItem {
             tool_call_id: id.to_owned(),
+            name: None,
+            locations: None,
             title: "read".to_owned(),
             kind: ToolKind::Read,
             status,

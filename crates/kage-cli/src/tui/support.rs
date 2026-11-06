@@ -8,6 +8,31 @@ use kage_core::protocol::NoticeLevel;
 use crate::auth::AuthStore;
 use crate::state::State;
 
+/// Warn when the local engine uses the legacy one-shot ACP provider.
+pub(crate) fn legacy_acp_warning(model: &str) -> Option<&'static str> {
+    kage_core::split_model(model)
+        .is_some_and(|(provider, _)| provider == "acp")
+        .then_some(
+            "This TUI uses the legacy one-shot ACP provider: each turn starts a new \
+         upstream session with only the latest message. Conversation context is not preserved.",
+        )
+}
+
+#[cfg(test)]
+mod legacy_acp_tests {
+    use super::legacy_acp_warning;
+
+    #[test]
+    fn warns_only_for_legacy_acp_models() {
+        let warning = legacy_acp_warning("acp:reviewer").unwrap();
+        assert!(warning.contains("each turn starts a new upstream session"));
+        assert!(warning.contains("context is not preserved"));
+        assert_eq!(legacy_acp_warning("acp/reviewer"), Some(warning));
+        assert_eq!(legacy_acp_warning("anthropic/claude"), None);
+        assert_eq!(legacy_acp_warning("other/acp:reviewer"), None);
+    }
+}
+
 /// Run a plugin command through the coroutine bridge so its handler
 /// may call blocking `kage.ui.*` dialogs. Drives the suspend/resume
 /// loop to completion and returns the command's output (an error

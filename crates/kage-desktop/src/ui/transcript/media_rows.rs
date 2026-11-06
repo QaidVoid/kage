@@ -200,6 +200,8 @@ mod tests {
     fn a_tool_calls_images_and_clips_are_its_media_in_order() {
         let call = kage_client::ToolCallItem {
             tool_call_id: "c1".to_owned(),
+            name: None,
+            locations: None,
             title: "generate_speech".to_owned(),
             kind: ToolKind::Other,
             status: ToolCallStatus::Completed,

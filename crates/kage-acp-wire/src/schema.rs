@@ -1537,10 +1537,11 @@ pub enum ToolKind {
 }
 
 /// Tool-call lifecycle status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCallStatus {
     /// Not started.
+    #[default]
     Pending,
     /// Running.
     InProgress,
@@ -1562,10 +1563,17 @@ pub struct ToolCall {
     pub tool_call_id: String,
     /// Human title (usually the tool name).
     pub title: String,
+    /// Programmatic tool name, when provided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Affected file locations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locations: Option<Vec<ToolCallLocation>>,
     /// Tool kind hint.
     #[serde(default)]
     pub kind: ToolKind,
-    /// Lifecycle status.
+    /// Lifecycle status, pending when omitted.
+    #[serde(default)]
     pub status: ToolCallStatus,
     /// Rich content (output, diffs, terminals).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1573,6 +1581,9 @@ pub struct ToolCall {
     /// Raw tool input echoed for the UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_input: Option<serde_json::Value>,
+    /// Raw tool output, when provided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_output: Option<serde_json::Value>,
     /// Kage extension fields. A `swarm` call names its members and
     /// template under `_meta.kage.swarm`.
     #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
@@ -1588,6 +1599,12 @@ pub struct ToolCallUpdate {
     /// New title, if changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Programmatic tool name, if changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Replacement file locations, if changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locations: Option<Vec<ToolCallLocation>>,
     /// New kind, if changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<ToolKind>,
@@ -1608,6 +1625,17 @@ pub struct ToolCallUpdate {
     /// has streamed whole.
     #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<ToolCallMeta>,
+}
+
+/// A file location associated with a tool call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallLocation {
+    /// Absolute file path.
+    pub path: String,
+    /// Optional 1-based line number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
 }
 
 /// Rich tool-call content (`type`-tagged).
@@ -2160,6 +2188,51 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_metadata_decodes_nullable_and_typed_locations() {
+        let call: ToolCall = serde_json::from_value(serde_json::json!({
+            "toolCallId":"c", "title":"Read", "name":null, "locations":null,
+            "rawInput":null, "rawOutput":null
+        }))
+        .unwrap();
+        assert_eq!(call.name, None);
+        assert_eq!(call.locations, None);
+        assert_eq!(call.raw_input, None);
+        assert_eq!(call.raw_output, None);
+        let update: ToolCallUpdate = serde_json::from_value(serde_json::json!({
+            "toolCallId":"c", "name":"read", "locations":[], "rawOutput": false
+        }))
+        .unwrap();
+        assert_eq!(update.locations, Some(vec![]));
+        assert_eq!(
+            serde_json::to_value(&update).unwrap()["locations"],
+            serde_json::json!([])
+        );
+        assert_eq!(update.raw_output, Some(serde_json::json!(false)));
+        for line in [
+            serde_json::json!(-1),
+            serde_json::json!(4_294_967_296_u64),
+            serde_json::json!(1.5),
+        ] {
+            assert!(
+                serde_json::from_value::<ToolCallLocation>(
+                    serde_json::json!({"path":"/a", "line":line})
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn tool_call_defaults_missing_status_to_pending() {
+        let call: ToolCall = serde_json::from_value(serde_json::json!({
+            "toolCallId": "call-1",
+            "title": "Read file"
+        }))
+        .unwrap();
+        assert_eq!(call.status, ToolCallStatus::Pending);
+    }
+
+    #[test]
     fn option_shapes_round_trip() {
         roundtrip(
             &OptionsResponse {
@@ -2694,6 +2767,9 @@ mod tests {
             &SessionUpdate::ToolCall(ToolCall {
                 tool_call_id: "t1".into(),
                 title: "shell".into(),
+                name: None,
+                locations: None,
+                raw_output: None,
                 kind: ToolKind::Execute,
                 status: ToolCallStatus::Pending,
                 content: vec![],

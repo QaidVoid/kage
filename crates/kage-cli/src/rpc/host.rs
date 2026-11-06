@@ -13,7 +13,9 @@ use kage_acp::agent::serve_agent;
 use kage_core::config::{Config, McpServer as McpSpec};
 use kage_core::environment::Environment;
 use kage_core::permissions::PermissionAction;
-use kage_core::protocol::{Command, CommandKind, Event, HostEvent, PermissionDecision, SessionId};
+use kage_core::protocol::{
+    Command, CommandId, CommandKind, Event, HostEvent, PermissionDecision, SessionId,
+};
 use kage_core::sync::lock;
 use kage_jsonrpc::RpcError;
 use kage_loop::{AgentContext, LoopConfig};
@@ -79,6 +81,8 @@ pub(crate) struct Host {
     workdirs: Arc<Mutex<HashMap<SessionId, PathBuf>>>,
     /// The id the next connection gets.
     next_connection: AtomicU64,
+    /// The id the next command a request waits on gets.
+    next_command: AtomicU64,
 }
 
 impl Host {
@@ -160,6 +164,7 @@ impl Host {
             open: Arc::default(),
             workdirs: Arc::default(),
             next_connection: AtomicU64::new(0),
+            next_command: AtomicU64::new(0),
         });
         let open = Arc::clone(&host.open);
         host.engine.subscribe(Box::new(move |envelope| {
@@ -285,6 +290,11 @@ impl Host {
         lock(&self.open).insert(spec.id, Open { settings });
         lock(&self.workdirs).insert(spec.id, spec.cx.workdir.clone());
         self.engine.open(spec);
+    }
+
+    /// A fresh id for a command a request waits on.
+    pub(super) fn command_id(&self) -> CommandId {
+        CommandId(self.next_command.fetch_add(1, Ordering::Relaxed))
     }
 
     /// The workdir a session was launched with, the root `_kage/fs`

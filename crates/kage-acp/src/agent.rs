@@ -35,9 +35,10 @@ use crate::acp::{
     QuestionPrompt, RegistryInstallRequest, RegistryInstallResult, RegistrySearchRequest,
     RegistrySearchResult, RequestMeta, RequestPermissionRequest, RequestPermissionResponse,
     RequestPermissionResult, ResumeSessionRequest, ResumeSessionResponse, SessionExportResponse,
-    SessionForkRequest, SessionForkResponse, SessionNotification, SessionRenameRequest,
-    SessionRequest, SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
-    SwarmResumeRequest, SwarmResumeResponse, ThemesRequest, ThemesResult, ToolCallUpdate,
+    SessionForkRequest, SessionForkResponse, SessionNotification, SessionPromptsResponse,
+    SessionRenameRequest, SessionRequest, SessionRewindRequest, SessionUndoResponse, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SwarmResumeRequest,
+    SwarmResumeResponse, ThemesRequest, ThemesResult, ToolCallUpdate,
 };
 
 /// The client's answer to a `session/request_permission`.
@@ -501,6 +502,51 @@ pub trait Agent: Send + Sync + 'static {
     /// Returns an [`RpcError`] if the session is unknown.
     fn session_rename(&self, _req: SessionRenameRequest) -> Result<serde_json::Value, RpcError> {
         Err(RpcError::method_not_found("_kage/session/rename"))
+    }
+
+    /// Drop the session's last prompt and what followed it
+    /// (`_kage/session/undo`), answering with the dropped prompt. Every
+    /// client showing the session gets `_kage/session_replaced`. The
+    /// default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session is unknown, running, or has
+    /// nothing to undo.
+    fn session_undo(&self, _req: SessionRequest) -> Result<SessionUndoResponse, RpcError> {
+        Err(RpcError::method_not_found("_kage/session/undo"))
+    }
+
+    /// Continue the session from the end of a past prompt's turn
+    /// (`_kage/session/rewind`). Every client showing the session gets
+    /// `_kage/session_replaced`. The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session is unknown, running, or has
+    /// no such prompt.
+    fn session_rewind(&self, _req: SessionRewindRequest) -> Result<serde_json::Value, RpcError> {
+        Err(RpcError::method_not_found("_kage/session/rewind"))
+    }
+
+    /// Every prompt the session can be rewound to
+    /// (`_kage/session/prompts`). The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session is unknown.
+    fn session_prompts(&self, _req: SessionRequest) -> Result<SessionPromptsResponse, RpcError> {
+        Err(RpcError::method_not_found("_kage/session/prompts"))
+    }
+
+    /// Delete a recorded session no client has open
+    /// (`_kage/session/delete`). The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session is unknown or open.
+    fn session_delete(&self, _req: SessionRequest) -> Result<serde_json::Value, RpcError> {
+        Err(RpcError::method_not_found("_kage/session/delete"))
     }
 
     /// Every model the engine can run now, with what the catalog knows
@@ -996,6 +1042,37 @@ fn handle_kage_request<A: Agent>(
         },
         "_kage/session/rename" => match parse::<SessionRenameRequest>(params) {
             Ok(req) => spawn_op(peer, agent, id, move |a| a.session_rename(req)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        other => return handle_history_request(peer, agent, id, other, params),
+    };
+    Some(op)
+}
+
+/// The `_kage/session/*` requests that rewrite or list a session's
+/// history: undo, rewind, its prompts, and deleting it.
+fn handle_history_request<A: Agent>(
+    peer: &Peer,
+    agent: &Arc<A>,
+    id: serde_json::Value,
+    method: &str,
+    params: serde_json::Value,
+) -> Option<thread::JoinHandle<()>> {
+    let op = match method {
+        "_kage/session/undo" => match parse::<SessionRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.session_undo(req).map(jval)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/session/rewind" => match parse::<SessionRewindRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.session_rewind(req)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/session/prompts" => match parse::<SessionRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.session_prompts(req).map(jval)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/session/delete" => match parse::<SessionRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.session_delete(req)),
             Err(e) => return parse_failed(peer, &id, e),
         },
         other => {

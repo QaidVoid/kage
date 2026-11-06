@@ -252,6 +252,16 @@ impl Live {
             || !self.asks.is_empty()
     }
 
+    /// Whether `id` is open, closing, running or part of a live agent tree
+    /// on the host, so its file must stay.
+    pub(super) fn in_use(&self, id: SessionId) -> bool {
+        self.attached.contains_key(&id)
+            || self.closing.contains(&id)
+            || self.working.contains(&id)
+            || self.running.contains(&id)
+            || self.tree.get(id).is_some()
+    }
+
     pub(super) fn new(commander: Commander) -> Self {
         Self {
             commander,

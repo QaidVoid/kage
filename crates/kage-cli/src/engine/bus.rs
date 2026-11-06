@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use kage_core::SessionId;
-use kage_core::protocol::{Envelope, Event};
+use kage_core::protocol::{CommandId, Envelope, Event};
 use kage_core::sync::lock;
 
 /// Receives every envelope the engine publishes, in order.
@@ -111,6 +111,30 @@ impl Bus {
 // entry point already holds.
 thread_local! {
     static IN_SUBSCRIBER: Cell<bool> = const { Cell::new(false) };
+    static ANSWERING: Cell<Option<CommandId>> = const { Cell::new(None) };
+}
+
+/// The command whose handling published the envelope a subscriber is
+/// looking at, when that command was named. Subscribers run on the
+/// publishing thread, and the engine handles a command on one thread, so
+/// every event it publishes while handling the command reads its id here.
+pub(crate) fn answering() -> Option<CommandId> {
+    ANSWERING.with(Cell::get)
+}
+
+/// Marks the thread as handling the command `id` until dropped.
+pub(super) struct Answering(Option<CommandId>);
+
+impl Answering {
+    pub(super) fn enter(id: Option<CommandId>) -> Self {
+        Self(ANSWERING.with(|answering| answering.replace(id)))
+    }
+}
+
+impl Drop for Answering {
+    fn drop(&mut self) {
+        ANSWERING.with(|answering| answering.set(self.0));
+    }
 }
 
 /// Marks the thread as running subscribers until dropped.

@@ -43,6 +43,10 @@ use kage_core::sync::lock;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
+/// Interruptible, deadline-aware writes to Unix pipes.
+#[cfg(unix)]
+pub mod unix_pipe;
+
 /// Cap on a single inbound line, mirroring the HTTP transport's body
 /// cap: one newline-delimited message cannot exhaust memory. A longer
 /// line is answered with a -32700 error and the connection closes.

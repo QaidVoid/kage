@@ -513,6 +513,222 @@ pub struct SessionForkResponse {
     pub truncated: bool,
 }
 
+/// `_kage/ui/attach` request params: a client that draws the plugin UI of
+/// the project at `cwd`, which keeps that project's plugins loaded while
+/// the client is attached.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiAttachRequest {
+    /// The project's working directory.
+    pub cwd: String,
+    /// The attachment's id, one per attach request. A connection
+    /// refuses an attach whose id is not newer than the newest one it
+    /// processed, so a watcher a newer attach replaced can never be
+    /// followed by a stale one.
+    pub attach_id: u64,
+    /// The session whose plugin runtime the UI draws, pinning the UI
+    /// to the runtime the session opened with. `None` follows the
+    /// project's latest loaded runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// The plugin UI a project declares, as `_kage/ui/attach` answers it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiSnapshot {
+    /// Counts this connection's snapshot and updates: an update applies
+    /// only on top of the snapshot or update one generation before it.
+    pub generation: u64,
+    /// Every key mapping, in table order: `{ mode, lhs, rhs, desc?, group?,
+    /// owner }`, where `rhs` is `{ kind: "action", name, arg? }`,
+    /// `{ kind: "command", line }`, `{ kind: "lua", id }` or
+    /// `{ kind: "nop" }`.
+    pub keymap: Vec<serde_json::Value>,
+    /// The highlight table: `{ base, overrides, theme, transparent }`,
+    /// each group `{ fg?, bg?, bold, italic, underline, dim, reverse,
+    /// link? }`.
+    pub highlights: serde_json::Value,
+    /// Every engine and UI option by name, with its current value.
+    pub options: BTreeMap<String, serde_json::Value>,
+    /// Where each option's value came from: `default`, `toml`, `lua` or
+    /// `runtime`.
+    pub option_sources: BTreeMap<String, String>,
+    /// The commands plugins registered or override.
+    pub commands: Vec<UiCommand>,
+    /// Status line entries plugins set, by key.
+    pub status: BTreeMap<String, String>,
+    /// The block kinds plugins render.
+    pub block_kinds: Vec<String>,
+    /// Whether a plugin completes input, so a client asks before showing
+    /// its own completions.
+    pub autocomplete: bool,
+    /// Whether a plugin watches terminal input, so a client asks before
+    /// acting on a key.
+    pub terminal_hooks: bool,
+}
+
+/// `_kage/ui/command` request params: run a plugin command for the
+/// client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiCommandRequest {
+    /// The project whose plugins run it.
+    pub cwd: String,
+    /// The client's session the command runs for, if it has one open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The command's name or one of its aliases.
+    pub name: String,
+    /// The rest of the command line, its arguments.
+    #[serde(default)]
+    pub args: String,
+}
+
+/// `_kage/ui/keymap` request params: run a key mapping's Lua handler for
+/// the client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiKeymapRequest {
+    /// The project whose plugins run it.
+    pub cwd: String,
+    /// The client's session the mapping runs for, if it has one open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The handler id of a mapping whose `rhs` is `{ kind: "lua", id }`.
+    pub id: u64,
+}
+
+/// What a plugin command or key mapping returned, for the client to show.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiOutput {
+    /// Text to show; empty when there is nothing to show.
+    pub text: String,
+    /// Whether the handler reported a failure.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_error: bool,
+    /// A structured payload the handler returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured: Option<serde_json::Value>,
+}
+
+/// `_kage/ui/dialog` params: a request the agent makes of the client that
+/// ran a plugin command or key mapping, to show a dialog. The answer is
+/// the dialog's value, or `null` when the user dismissed it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiDialogRequest {
+    /// `ui.select`, `ui.confirm`, `ui.input` or `ui.editor`.
+    pub kind: String,
+    /// The dialog's fields, as the plugin passed them.
+    pub payload: serde_json::Value,
+}
+
+/// `_kage/ui/update` params: what changed in the plugin UI of the project
+/// a client attached to. Absent fields did not change.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiUpdate {
+    /// The project.
+    pub cwd: String,
+    /// The attachment this update belongs to, the `attachId` of the
+    /// `_kage/ui/attach` that started its watcher. A client applies
+    /// only the updates of the attachment it holds or waits for.
+    pub attach_id: u64,
+    /// One more than the generation it applies on top of.
+    pub generation: u64,
+    /// The whole keymap, when it changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keymap: Option<Vec<serde_json::Value>>,
+    /// The highlight table, when it changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highlights: Option<serde_json::Value>,
+    /// Every option, when one changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<BTreeMap<String, serde_json::Value>>,
+    /// Every option's source, when one changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_sources: Option<BTreeMap<String, String>>,
+    /// Every command, when they changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commands: Option<Vec<UiCommand>>,
+    /// The whole status, when it changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<BTreeMap<String, String>>,
+    /// The rendered block kinds, when they changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_kinds: Option<Vec<String>>,
+    /// Whether a plugin completes input, when that changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autocomplete: Option<bool>,
+    /// Whether a plugin watches terminal input, when that changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_hooks: Option<bool>,
+}
+
+/// One command a plugin registered, or a built-in command it overrides.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiCommand {
+    /// The command's name, without the `/`.
+    pub name: String,
+    /// Other names that run it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    /// What it does.
+    pub description: String,
+    /// Its arguments, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<UiCommandArg>,
+    /// Whether it replaces a built-in command of the same name.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overrides: bool,
+}
+
+/// One argument of a [`UiCommand`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum UiCommandArg {
+    /// Free text to the end of the line.
+    Text {
+        /// Parameter name.
+        name: String,
+        /// Whether it may be left out.
+        optional: bool,
+        /// Placeholder for inline help.
+        hint: String,
+    },
+    /// One of fixed values.
+    Choice {
+        /// Parameter name.
+        name: String,
+        /// The values it accepts.
+        values: Vec<String>,
+        /// Whether it may be left out.
+        optional: bool,
+    },
+    /// A file path.
+    Path {
+        /// Parameter name.
+        name: String,
+        /// Whether it may be left out.
+        optional: bool,
+    },
+    /// A session id.
+    Session {
+        /// Parameter name.
+        name: String,
+        /// Whether it may be left out.
+        optional: bool,
+    },
+    /// A boolean flag.
+    Flag {
+        /// Parameter name.
+        name: String,
+    },
+}
+
 /// `_kage/shell` request params: a shell command the user typed, run in
 /// the session's directory and environment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

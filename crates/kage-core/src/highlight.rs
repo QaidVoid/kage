@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Links followed before resolution gives up with an empty style.
 const MAX_LINK_DEPTH: usize = 16;
@@ -66,7 +66,7 @@ pub fn parse_color(s: &str) -> Result<Color, HighlightError> {
 
 /// A highlight group spec. When `link` is set it wins over every other
 /// field.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -101,13 +101,15 @@ impl HlSpec {
     }
 }
 
-/// The highlight table: theme base groups plus overrides.
-#[derive(Clone, Debug, Default)]
+/// The highlight table: theme base groups plus overrides. Its serde form
+/// carries the groups, theme and transparency, not the generation.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Highlights {
     base: BTreeMap<String, HlSpec>,
     overrides: BTreeMap<String, HlSpec>,
     theme: String,
     transparent: bool,
+    #[serde(skip)]
     generation: u64,
 }
 
@@ -126,6 +128,16 @@ impl Highlights {
         self.theme = theme;
         self.transparent = transparent;
         self.generation += 1;
+    }
+
+    /// Take `other`'s groups, theme and transparency, keeping the
+    /// generation moving so readers notice.
+    pub fn replace_with(&mut self, other: Self) {
+        let generation = self.generation + 1;
+        *self = Self {
+            generation,
+            ..other
+        };
     }
 
     /// Set or replace the override for `name`.

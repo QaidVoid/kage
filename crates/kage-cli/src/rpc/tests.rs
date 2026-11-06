@@ -254,18 +254,29 @@ fn serve_on(
     agents: AgentSetup,
     record: bool,
 ) -> Harness {
-    let (srv_r, cli_w) = std::io::pipe().unwrap();
-    let (cli_r, srv_w) = std::io::pipe().unwrap();
-    let id = SessionId::new();
-    let sessions = sessions.to_path_buf();
     let host = test_host_agents(
         provider,
         workdir.to_path_buf(),
-        sessions.clone(),
+        sessions.to_path_buf(),
         mcp,
         agents,
         PermissionAction::Allow,
     );
+    serve_on_host(mock, host, SessionId::new(), sessions, record)
+}
+
+/// [`serve_on`] on a host the caller built, opening its standing
+/// session as the host's spec names it.
+fn serve_on_host(
+    mock: MockProvider,
+    host: Arc<Host>,
+    id: SessionId,
+    sessions: &Path,
+    record: bool,
+) -> Harness {
+    let sessions = sessions.to_path_buf();
+    let (srv_r, cli_w) = std::io::pipe().unwrap();
+    let (cli_r, srv_w) = std::io::pipe().unwrap();
     let commander = host.engine.commander();
     let standing = Arc::clone(&host);
     let (opened_tx, opened_rx) = mpsc::channel();
@@ -360,6 +371,20 @@ fn test_host_agents(
     agents: AgentSetup,
     fallback: PermissionAction,
 ) -> Arc<Host> {
+    test_host_with_plugins(provider, workdir, sessions, mcp, agents, fallback, None)
+}
+
+/// [`test_host_agents`] whose sessions run with `runtime` as their
+/// plugins, so a session-bound UI attach has a runtime to pin to.
+fn test_host_with_plugins(
+    provider: Arc<dyn kage_provider::Provider>,
+    workdir: PathBuf,
+    sessions: PathBuf,
+    mcp: bool,
+    agents: AgentSetup,
+    fallback: PermissionAction,
+    plugins: Option<Arc<kage_plugin::PluginRuntime>>,
+) -> Arc<Host> {
     let registry = Arc::new(ProviderRegistry::new().with(provider));
     let agents = Arc::new(agents);
     let spec = Box::new(
@@ -393,7 +418,7 @@ fn test_host_agents(
                 tools,
                 gate,
                 loop_cfg: LoopConfig::default(),
-                plugins: None,
+                plugins: plugins.clone(),
                 mcp,
                 interactive: true,
                 title: true,
@@ -6783,6 +6808,143 @@ fn a_launch_installs_only_after_a_report_is_consumed() {
     }
     host.engine.report_closed_for_test(id, Some(second));
     until(|| host.workdir(id).is_none());
+}
+
+/// An attach whose id is not newer than the newest one this
+/// connection processed is refused, and a failed attach still counts,
+/// so the bar never moves backwards.
+#[test]
+fn an_attach_id_that_is_not_newer_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(Vec::new(), dir.path(), dir.path());
+    let attach = |id: u64| {
+        h.client.request(
+            "_kage/ui/attach",
+            serde_json::json!({
+                "cwd": dir.path().display().to_string(),
+                "attachId": id,
+            }),
+        )
+    };
+    // No project runtime is configured, so the first attach counts its
+    // id and then fails to load. The failure must not lower the bar.
+    let spent = attach(2);
+    assert_eq!(spent.unwrap_err().code, -32603);
+    let older = attach(1);
+    assert_eq!(older.unwrap_err().code, -32602);
+    let repeat = attach(2);
+    assert_eq!(repeat.unwrap_err().code, -32602);
+}
+
+/// A session the host launched with plugins runs the commands and
+/// mappings its own runtime registered; the UI a client attaches to
+/// that session pins to it.
+#[test]
+fn a_session_bound_attach_pins_its_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut caps = std::collections::BTreeMap::new();
+    caps.insert("p".to_owned(), Vec::<String>::new());
+    let runtime = Arc::new(
+        kage_plugin::PluginRuntime::builder()
+            .capabilities(caps)
+            .build()
+            .unwrap(),
+    );
+    runtime
+        .eval_plugin(
+            "p",
+            "kage.register_command({ name = 'first', description = 'd', \
+               handler = function() return 'one' end }) \
+             kage.keymap.set('n', '<F1>', function() return 'k1' end)",
+        )
+        .unwrap();
+    let mock = MockProvider::sequence(vec![text_turn("ready")]);
+    let provider = Listed {
+        mock: mock.clone(),
+        input: Modalities::default(),
+    };
+    let host = test_host_with_plugins(
+        Arc::new(provider),
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+        false,
+        default_agents(),
+        PermissionAction::Allow,
+        Some(Arc::clone(&runtime)),
+    );
+    let h = serve_on_host(mock, host, SessionId::new(), dir.path(), false);
+    let cwd = dir.path().display().to_string();
+    let attach = h
+        .client
+        .request(
+            "_kage/ui/attach",
+            serde_json::json!({"cwd": cwd, "attachId": 1, "sessionId": h.session}),
+        )
+        .unwrap_or_else(|e| panic!("attach failed: {e}"));
+    let ui = &attach;
+    assert!(
+        ui["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["name"] == "first"),
+        "{ui}"
+    );
+    assert!(
+        ui["keymap"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["lhs"] == "<F1>"),
+        "{ui}"
+    );
+    let run = h
+        .client
+        .request(
+            "_kage/ui/command",
+            serde_json::json!({"cwd": cwd, "name": "first", "sessionId": h.session}),
+        )
+        .unwrap();
+    assert_eq!(run["text"], "one", "{run}");
+    let key = h
+        .client
+        .request(
+            "_kage/ui/keymap",
+            serde_json::json!({"cwd": cwd, "sessionId": h.session, "id":
+                ui["keymap"].as_array().unwrap().iter().find(|m| m["lhs"] == "<F1>").unwrap()["rhs"]["id"].clone()}),
+        )
+        .unwrap();
+    assert_eq!(key["text"], "k1", "{key}");
+    let missing = h
+        .client
+        .request(
+            "_kage/ui/command",
+            serde_json::json!({"cwd": cwd, "name": "nope", "sessionId": h.session}),
+        )
+        .unwrap_err();
+    assert_eq!(missing.code, -32602);
+}
+
+/// A session without plugins refuses a session-bound attach, and so
+/// does an unknown session id.
+#[test]
+fn an_attach_for_a_session_without_plugins_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(Vec::new(), dir.path(), dir.path());
+    let attach = |session: &str, id: u64| {
+        h.client.request(
+            "_kage/ui/attach",
+            serde_json::json!({
+                "cwd": dir.path().display().to_string(),
+                "attachId": id,
+                "sessionId": session,
+            }),
+        )
+    };
+    let refused = attach(&h.session, 1);
+    assert_eq!(refused.unwrap_err().code, -32602);
+    let unknown = attach("zz", 2);
+    assert_eq!(unknown.unwrap_err().code, -32602);
 }
 
 #[test]

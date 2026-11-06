@@ -17,13 +17,18 @@
 //! * resume the parked coroutine with a result, with `nil` (user
 //!   cancelled the dialog), or abandon it entirely.
 //!
-//! The bridge is single-slot: at most one suspended coroutine exists
-//! at a time. A second [`PluginRuntime::bridge_call`] while one is
-//! parked fails with [`PluginError::BridgeBusy`] rather than nesting
-//! host actions, which the overlay stack cannot represent anyway.
+//! [`PluginRuntime::bridge_call`] and its resume and cancel calls drive
+//! one call at a time: a second while one is parked fails with
+//! [`PluginError::BridgeBusy`] rather than nesting host actions, which a
+//! single overlay stack cannot represent anyway. A host serving several
+//! clients starts each call with [`PluginRuntime::bridge_start`] instead,
+//! which names it, so the calls of different clients park side by side.
+//!
+//! [`PluginRuntime::bridge_start`]: crate::PluginRuntime::bridge_start
 //!
 //! [`PluginRuntime::bridge_call`]: crate::PluginRuntime::bridge_call
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use mlua::thread::ThreadStatus;
@@ -66,14 +71,59 @@ pub enum BridgeStep {
     Suspended(SuspendRequest),
 }
 
-/// Single-slot park for the at-most-one suspended plugin coroutine.
-/// `None` means nothing is in flight.
-pub type SharedBridge = Arc<Mutex<Option<Thread>>>;
+/// The call [`crate::PluginRuntime::bridge_call`] and its resume, cancel
+/// and abort drive.
+pub(crate) const SINGLE_CALL: u64 = 0;
 
-/// Construct an empty bridge slot.
+/// The suspended plugin coroutines, by call.
+#[derive(Default)]
+pub struct Parked {
+    calls: HashMap<u64, Thread>,
+    next: u64,
+}
+
+impl Parked {
+    /// A fresh call id, never [`SINGLE_CALL`].
+    pub(crate) fn next_call(&mut self) -> u64 {
+        self.next += 1;
+        self.next
+    }
+
+    /// Whether `call` is parked.
+    pub(crate) fn contains(&self, call: u64) -> bool {
+        self.calls.contains_key(&call)
+    }
+
+    /// Take `call`'s coroutine out to resume it.
+    pub(crate) fn take(&mut self, call: u64) -> Option<Thread> {
+        self.calls.remove(&call)
+    }
+
+    /// Park `thread` as `call`, when it suspended again.
+    pub(crate) fn park(&mut self, call: u64, thread: Option<Thread>) {
+        if let Some(thread) = thread {
+            self.calls.insert(call, thread);
+        }
+    }
+
+    /// Whether any call is parked.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.calls.is_empty()
+    }
+
+    /// Drop every parked call, as a reload does.
+    pub(crate) fn clear(&mut self) {
+        self.calls.clear();
+    }
+}
+
+/// The parked plugin coroutines, shared with the owner thread.
+pub type SharedBridge = Arc<Mutex<Parked>>;
+
+/// Construct an empty bridge.
 #[must_use]
 pub fn shared_bridge() -> SharedBridge {
-    Arc::new(Mutex::new(None))
+    Arc::default()
 }
 
 /// Install the internal `kage._suspend(kind, payload)` primitive on the
@@ -236,6 +286,46 @@ mod tests {
         let step = rt.bridge_resume(&json!("banana")).unwrap();
         assert_eq!(step, BridgeStep::Done(json!("chose:banana")));
         assert!(!rt.bridge_is_suspended());
+    }
+
+    /// Named calls park side by side and resume independently, while the
+    /// single call keeps refusing a second one.
+    #[test]
+    fn named_calls_park_side_by_side() {
+        let rt = PluginRuntime::new().unwrap();
+        let func = function_from(
+            &rt,
+            "return function(tag)\n  \
+               local picked = kage._suspend('ui.select', {})\n  \
+               return tag .. ':' .. tostring(picked)\n\
+             end",
+        );
+        let (first, step) = rt.bridge_start(&func, &[json!("a")]).unwrap();
+        assert!(matches!(step, BridgeStep::Suspended(_)));
+        let (second, step) = rt.bridge_start(&func, &[json!("b")]).unwrap();
+        assert!(matches!(step, BridgeStep::Suspended(_)));
+        assert_ne!(first, second);
+        assert!(matches!(
+            rt.bridge_call(&func, &[json!("c")]).unwrap(),
+            BridgeStep::Suspended(_)
+        ));
+        assert!(matches!(
+            rt.bridge_call(&func, &[json!("d")]),
+            Err(PluginError::BridgeBusy)
+        ));
+
+        let done = rt.bridge_resume_call(second, &json!("y")).unwrap();
+        assert_eq!(done, BridgeStep::Done(json!("b:y")));
+        assert_eq!(
+            rt.bridge_cancel_call(first).unwrap(),
+            BridgeStep::Done(json!("a:nil"))
+        );
+        assert!(rt.bridge_abort());
+        assert!(!rt.bridge_is_suspended());
+        assert!(matches!(
+            rt.bridge_cancel_call(first),
+            Err(PluginError::BridgeIdle)
+        ));
     }
 
     #[test]

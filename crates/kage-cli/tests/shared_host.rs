@@ -149,6 +149,62 @@ impl Rpc {
         }
     }
 
+    /// Send a request and answer each `_kage/ui/dialog` the agent asks
+    /// meanwhile with `answer`, returning the reply and the dialogs seen.
+    fn request_answering(
+        &mut self,
+        method: &str,
+        params: &Value,
+        answer: &Value,
+    ) -> (Value, Vec<Value>) {
+        self.next += 1;
+        let id = self.next;
+        let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        writeln!(self.child.stdin.as_mut().unwrap(), "{message}").unwrap();
+        let mut dialogs = Vec::new();
+        loop {
+            let mut line = String::new();
+            assert!(self.output.read_line(&mut line).unwrap() > 0, "rpc ended");
+            let message: Value = serde_json::from_str(&line).unwrap();
+            if message["method"] == "_kage/ui/dialog" {
+                dialogs.push(message["params"].clone());
+                let reply = json!({"jsonrpc": "2.0", "id": message["id"], "result": answer});
+                writeln!(self.child.stdin.as_mut().unwrap(), "{reply}").unwrap();
+            } else if message["id"] == id {
+                return (message, dialogs);
+            }
+        }
+    }
+
+    /// Sends a request and returns the params of the first `_kage/ui/dialog`
+    /// it asks, leaving both open.
+    fn request_leaving_a_dialog(&mut self, method: &str, params: &Value) -> Value {
+        self.next += 1;
+        let id = self.next;
+        let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        writeln!(self.child.stdin.as_mut().unwrap(), "{message}").unwrap();
+        loop {
+            let mut line = String::new();
+            assert!(self.output.read_line(&mut line).unwrap() > 0, "rpc ended");
+            let message: Value = serde_json::from_str(&line).unwrap();
+            if message["method"] == "_kage/ui/dialog" {
+                return message["params"].clone();
+            }
+        }
+    }
+
+    /// The params of the next notification named `method`.
+    fn notification(&mut self, method: &str) -> Value {
+        loop {
+            let mut line = String::new();
+            assert!(self.output.read_line(&mut line).unwrap() > 0, "rpc ended");
+            let message: Value = serde_json::from_str(&line).unwrap();
+            if message["method"] == method {
+                return message["params"].clone();
+            }
+        }
+    }
+
     fn close(mut self) -> std::process::ExitStatus {
         drop(self.child.stdin.take());
         exit_within(&mut self.child, WAIT)
@@ -170,6 +226,14 @@ fn terminate(child: &mut Child) -> std::process::ExitStatus {
     let pid = nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap());
     nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).unwrap();
     exit_within(child, WAIT)
+}
+
+/// Replaces `path` through a sibling file, so a reload check that reads it
+/// meanwhile never sees a truncated file.
+fn replace(path: &std::path::Path, text: &str) {
+    let staged = path.with_extension("kage-new");
+    std::fs::write(&staged, text).unwrap();
+    std::fs::rename(staged, path).unwrap();
 }
 
 fn initialize(stream: &UnixStream) -> Value {
@@ -526,6 +590,443 @@ fn an_editor_session_runs_with_the_users_init_lua() {
         .unwrap_or_else(|e| panic!("{e}: {log}"));
     assert_eq!(loads, "1", "two sessions in one project share one load");
     assert!(rpc.close().success());
+}
+
+/// A client drawing the plugin UI attaches to its project and gets what
+/// the user's init.lua declared there.
+#[test]
+fn a_client_gets_the_plugin_ui_of_its_project() {
+    let env = Env::new();
+    let config = env.dir.path().join("config/kage");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("init.lua"),
+        "kage.keymap.set('n', '<F9>', ':hello', { desc = 'greet' })\n\
+         kage.set_status('mood', 'calm')\n\
+         kage.opt.thinking_level = 'low'\n\
+         kage.register_command({ name = 'hello', description = 'say hi', \
+           handler = function() return 'hi' end })\n\
+         kage.defer(function() kage.set_status('mood', 'busy') end, 1500)\n",
+    )
+    .unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut rpc = env.rpc(&[]);
+    rpc.request("initialize", json!({"protocolVersion": 1}));
+    let ui = rpc.request(
+        "_kage/ui/attach",
+        json!({"cwd": project.path(), "attachId": 1}),
+    );
+    let ui = &ui["result"];
+    let mapping = ui["keymap"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["lhs"] == "<F9>")
+        .unwrap_or_else(|| panic!("{ui}"));
+    assert_eq!(mapping["owner"], "init.lua");
+    assert_eq!(mapping["rhs"]["kind"], "command");
+    assert_eq!(ui["status"]["mood"], "calm");
+    assert_eq!(ui["options"]["thinking_level"], "low");
+    assert_eq!(ui["optionSources"]["thinking_level"], "lua");
+    assert!(ui["highlights"]["theme"].is_string(), "{ui}");
+    assert!(
+        ui["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["name"] == "hello" && c["description"] == "say hi"),
+        "{ui}"
+    );
+    let update = rpc.notification("_kage/ui/update");
+    assert_eq!(update["status"]["mood"], "busy", "{update}");
+    assert!(
+        update.get("keymap").is_none(),
+        "only the status changed: {update}"
+    );
+    assert!(update["generation"].as_u64() > ui["generation"].as_u64());
+
+    // An edited init.lua loads again, and the client hears of its keymap.
+    std::thread::sleep(Duration::from_millis(1100));
+    replace(
+        &config.join("init.lua"),
+        "kage.keymap.set('n', '<F10>', ':bye', { desc = 'part' })\n",
+    );
+    let reloaded = rpc.notification("_kage/ui/update");
+    let keymap = reloaded["keymap"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{reloaded}"));
+    assert!(keymap.iter().any(|m| m["lhs"] == "<F10>"), "{reloaded}");
+    assert!(!keymap.iter().any(|m| m["lhs"] == "<F9>"), "{reloaded}");
+    assert!(rpc.close().success());
+}
+
+/// A plugin command runs on the host for the client that asked, and the
+/// dialog it opens goes to that client.
+#[test]
+fn a_plugin_command_asks_its_client_through_a_dialog() {
+    let env = Env::new();
+    let config = env.dir.path().join("config/kage");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("init.lua"),
+        "kage.register_command({ name = 'pick', aliases = { 'pk' }, description = 'pick one', \
+           handler = function() \
+             local fruit = kage.ui.select('Fruit', { 'apple', 'pear' }) \
+             return 'picked:' .. tostring(fruit) \
+           end })\n\
+         kage.keymap.set('n', '<F8>', function() return 'mapped' end)\n",
+    )
+    .unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut rpc = env.rpc(&[]);
+    rpc.request("initialize", json!({"protocolVersion": 1}));
+    let (reply, dialogs) = rpc.request_answering(
+        "_kage/ui/command",
+        &json!({"cwd": project.path(), "name": "pk"}),
+        &json!("pear"),
+    );
+    assert_eq!(reply["result"]["text"], "picked:pear", "{reply}");
+    assert_eq!(dialogs.len(), 1);
+    assert_eq!(dialogs[0]["kind"], "ui.select");
+    assert_eq!(dialogs[0]["payload"]["title"], "Fruit");
+    let (dismissed, _) = rpc.request_answering(
+        "_kage/ui/command",
+        &json!({"cwd": project.path(), "name": "pick"}),
+        &Value::Null,
+    );
+    assert_eq!(dismissed["result"]["text"], "picked:nil", "{dismissed}");
+    let ui = rpc.request(
+        "_kage/ui/attach",
+        json!({"cwd": project.path(), "attachId": 1}),
+    );
+    let id = ui["result"]["keymap"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["lhs"] == "<F8>")
+        .map(|m| m["rhs"]["id"].clone())
+        .unwrap();
+    let mapped = rpc.request("_kage/ui/keymap", json!({"cwd": project.path(), "id": id}));
+    assert_eq!(mapped["result"]["text"], "mapped", "{mapped}");
+    let missing = rpc.request(
+        "_kage/ui/command",
+        json!({"cwd": project.path(), "name": "nope"}),
+    );
+    assert!(missing["error"].is_object());
+    assert!(rpc.close().success());
+}
+
+/// A plugin command the client runs for one of its sessions runs in that
+/// session's plugins, and an unknown session id is refused.
+#[test]
+fn a_command_runs_for_the_session_its_client_names() {
+    let env = Env::new();
+    let config = env.dir.path().join("config/kage");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("init.lua"),
+        "kage.register_command({ name = 'ask', description = 'ask me', \
+           handler = function() \
+             local fruit = kage.ui.select('Fruit', { 'apple', 'pear' }) \
+             return 'picked:' .. tostring(fruit) \
+           end })\n",
+    )
+    .unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut rpc = env.rpc(&[]);
+    rpc.request("initialize", json!({"protocolVersion": 1}));
+    let created = rpc.request(
+        "session/new",
+        json!({"cwd": env.dir.path(), "mcpServers": []}),
+    );
+    let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let (reply, dialogs) = rpc.request_answering(
+        "_kage/ui/command",
+        &json!({"cwd": project.path(), "name": "ask", "sessionId": session}),
+        &json!("apple"),
+    );
+    assert_eq!(reply["result"]["text"], "picked:apple", "{reply}");
+    assert_eq!(dialogs.len(), 1);
+    assert_eq!(dialogs[0]["kind"], "ui.select");
+    let unknown = rpc.request(
+        "_kage/ui/command",
+        json!({"cwd": project.path(), "name": "ask", "sessionId": "no-such-session"}),
+    );
+    assert_eq!(unknown["error"]["code"], -32602, "{unknown}");
+    assert!(rpc.close().success());
+}
+
+/// Two clients can each wait on a dialog at once, and each answer reaches
+/// the command that asked for it.
+#[test]
+fn dialogs_from_two_clients_wait_side_by_side() {
+    let env = Env::new();
+    let config = env.dir.path().join("config/kage");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("init.lua"),
+        "kage.register_command({ name = 'pick', description = 'pick one', \
+           handler = function() \
+             local fruit = kage.ui.select('Fruit', { 'apple', 'pear' }) \
+             return 'picked:' .. tostring(fruit) \
+           end })\n",
+    )
+    .unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let cwd = project.path().to_path_buf();
+    let asked = cwd.clone();
+    let mut first = env.rpc(&[]);
+    first.request("initialize", json!({"protocolVersion": 1}));
+    let mut second = env.rpc(&[]);
+    second.request("initialize", json!({"protocolVersion": 1}));
+    let asking = std::thread::spawn(move || {
+        let outcome = first.request_answering(
+            "_kage/ui/command",
+            &json!({"cwd": &asked, "name": "pick"}),
+            &json!("apple"),
+        );
+        (outcome, first)
+    });
+    let (second_reply, second_dialogs) = second.request_answering(
+        "_kage/ui/command",
+        &json!({"cwd": &cwd, "name": "pick"}),
+        &json!("pear"),
+    );
+    let ((first_reply, first_dialogs), first) = asking.join().unwrap();
+    assert_eq!(
+        first_reply["result"]["text"], "picked:apple",
+        "{first_reply}"
+    );
+    assert_eq!(
+        second_reply["result"]["text"], "picked:pear",
+        "{second_reply}"
+    );
+    assert_eq!(first_dialogs.len(), 1);
+    assert_eq!(second_dialogs.len(), 1);
+    assert!(first.close().success());
+    assert!(second.close().success());
+}
+
+/// A client that quits while a plugin waits on its dialog does not wedge
+/// the host: the abandoned command ends, the relay exits, and the next
+/// client still gets answers. The host leaves once its last client does.
+#[test]
+fn a_client_leaving_mid_dialog_does_not_wedge_the_host() {
+    let env = Env::new();
+    let config = env.dir.path().join("config/kage");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("init.lua"),
+        "kage.register_command({ name = 'chain', description = 'two asks', \
+           handler = function() \
+             local a = kage.ui.select('First', { 'a', 'b' }) \
+             local b = kage.ui.confirm('Second', 'sure?') \
+             return 'got:' .. tostring(a) .. tostring(b) \
+           end })\n\
+         kage.register_command({ name = 'pick', description = 'pick one', \
+           handler = function() \
+             local fruit = kage.ui.select('Fruit', { 'apple', 'pear' }) \
+             return 'picked:' .. tostring(fruit) \
+           end })\n",
+    )
+    .unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut leaving = env.rpc(&[]);
+    leaving.request("initialize", json!({"protocolVersion": 1}));
+    let dialog = leaving.request_leaving_a_dialog(
+        "_kage/ui/command",
+        &json!({"cwd": project.path(), "name": "chain"}),
+    );
+    assert_eq!(dialog["kind"], "ui.select", "{dialog}");
+    assert!(leaving.close().success());
+    let mut staying = env.rpc(&[]);
+    staying.request("initialize", json!({"protocolVersion": 1}));
+    let (reply, _) = staying.request_answering(
+        "_kage/ui/command",
+        &json!({"cwd": project.path(), "name": "pick"}),
+        &json!("pear"),
+    );
+    assert_eq!(reply["result"]["text"], "picked:pear", "{reply}");
+    assert!(staying.close().success());
+    let deadline = Instant::now() + WAIT;
+    while env.record().is_some() {
+        assert!(Instant::now() < deadline, "the idle host did not exit");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A key mapping whose handler opens a dialog asks it of the client that
+/// pressed the key.
+#[test]
+fn a_key_mapping_opens_a_dialog_on_its_client() {
+    let env = Env::new();
+    let config = env.dir.path().join("config/kage");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("init.lua"),
+        "kage.keymap.set('n', '<F7>', function() \
+           local fruit = kage.ui.select('Fruit', { 'apple', 'pear' }) \
+           return 'picked:' .. tostring(fruit) \
+         end)\n",
+    )
+    .unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut rpc = env.rpc(&[]);
+    rpc.request("initialize", json!({"protocolVersion": 1}));
+    let ui = rpc.request(
+        "_kage/ui/attach",
+        json!({"cwd": project.path(), "attachId": 1}),
+    );
+    let id = ui["result"]["keymap"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["lhs"] == "<F7>")
+        .map(|m| m["rhs"]["id"].clone())
+        .unwrap();
+    let (reply, dialogs) = rpc.request_answering(
+        "_kage/ui/keymap",
+        &json!({"cwd": project.path(), "id": id}),
+        &json!("pear"),
+    );
+    assert_eq!(reply["result"]["text"], "picked:pear", "{reply}");
+    assert_eq!(dialogs.len(), 1);
+    assert_eq!(dialogs[0]["kind"], "ui.select");
+    assert!(rpc.close().success());
+}
+
+/// A command a reloaded project registered runs, and the one it replaced
+/// is gone.
+#[test]
+fn a_command_runs_after_a_reload() {
+    let env = Env::new();
+    let config = env.dir.path().join("config/kage");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("init.lua"),
+        "kage.register_command({ name = 'first', description = 'old', \
+           handler = function() return 'one' end })\n",
+    )
+    .unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut rpc = env.rpc(&[]);
+    rpc.request("initialize", json!({"protocolVersion": 1}));
+    rpc.request(
+        "_kage/ui/attach",
+        json!({"cwd": project.path(), "attachId": 1}),
+    );
+    std::thread::sleep(Duration::from_millis(1100));
+    replace(
+        &config.join("init.lua"),
+        "kage.register_command({ name = 'second', description = 'new', \
+           handler = function() return 'two' end })\n",
+    );
+    rpc.notification("_kage/ui/update");
+    let second = rpc.request(
+        "_kage/ui/command",
+        json!({"cwd": project.path(), "name": "second"}),
+    );
+    assert_eq!(second["result"]["text"], "two", "{second}");
+    let first = rpc.request(
+        "_kage/ui/command",
+        json!({"cwd": project.path(), "name": "first"}),
+    );
+    assert!(first["error"].is_object(), "{first}");
+    assert!(rpc.close().success());
+}
+
+/// A session-bound watcher keeps its runtime after the project reloads,
+/// while a new session draws and invokes the replacement runtime.
+#[test]
+fn a_session_keeps_its_plugin_ui_after_a_project_reload() {
+    let env = Env::new();
+    let config = env.dir.path().join("config/kage");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("init.lua"),
+        "kage.register_command({ name = 'first', description = 'old', \
+           handler = function() return 'old' end })\n\
+         kage.keymap.set('n', '<F7>', function() return 'old-key' end)\n\
+         kage.set_status('version', 'old')\n\
+         kage.defer(function() kage.set_status('tick', 'old') end, 4000)\n",
+    )
+    .unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut pinned = env.rpc(&[]);
+    pinned.request("initialize", json!({"protocolVersion": 1}));
+    let opened = pinned.request("session/new", json!({"cwd": project.path()}));
+    let session = opened["result"]["sessionId"].clone();
+    let attached = pinned.request(
+        "_kage/ui/attach",
+        json!({"cwd": project.path(), "attachId": 1, "sessionId": session}),
+    );
+    let key = attached["result"]["keymap"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["lhs"] == "<F7>")
+        .unwrap()["rhs"]["id"]
+        .clone();
+
+    let mut observer = env.rpc(&[]);
+    observer.request("initialize", json!({"protocolVersion": 1}));
+    observer.request(
+        "_kage/ui/attach",
+        json!({"cwd": project.path(), "attachId": 1}),
+    );
+    std::thread::sleep(Duration::from_millis(1100));
+    replace(
+        &config.join("init.lua"),
+        "kage.register_command({ name = 'second', description = 'new', \
+           handler = function() return 'new' end })\n\
+         kage.keymap.set('n', '<F8>', function() return 'new-key' end)\n\
+         kage.set_status('version', 'new')\n",
+    );
+    let reloaded = observer.notification("_kage/ui/update");
+    assert_eq!(reloaded["status"]["version"], "new", "{reloaded}");
+    let opened = observer.request("session/new", json!({"cwd": project.path()}));
+    let new_session = opened["result"]["sessionId"].clone();
+    let fresh = observer.request(
+        "_kage/ui/attach",
+        json!({"cwd": project.path(), "attachId": 2, "sessionId": new_session}),
+    );
+    assert!(
+        fresh["result"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["name"] == "second")
+    );
+    assert!(
+        !fresh["result"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["name"] == "first")
+    );
+
+    let update = pinned.notification("_kage/ui/update");
+    assert_eq!(update["attachId"], 1);
+    assert_eq!(update["status"]["version"], "old", "{update}");
+    assert_eq!(update["status"]["tick"], "old", "{update}");
+    assert!(update.get("keymap").is_none(), "{update}");
+    let old_command = pinned.request(
+        "_kage/ui/command",
+        json!({"cwd": project.path(), "sessionId": session, "name": "first"}),
+    );
+    assert_eq!(old_command["result"]["text"], "old", "{old_command}");
+    let old_key = pinned.request(
+        "_kage/ui/keymap",
+        json!({"cwd": project.path(), "sessionId": session, "id": key}),
+    );
+    assert_eq!(old_key["result"]["text"], "old-key", "{old_key}");
+    let new_command = observer.request(
+        "_kage/ui/command",
+        json!({"cwd": project.path(), "sessionId": new_session, "name": "second"}),
+    );
+    assert_eq!(new_command["result"]["text"], "new", "{new_command}");
+    assert!(pinned.close().success());
+    assert!(observer.close().success());
 }
 
 /// A client whose `KAGE_*` configuration overrides the host cannot

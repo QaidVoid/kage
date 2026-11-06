@@ -80,6 +80,9 @@ pub(crate) struct Host {
     /// The workdir of every launched session, so `_kage/fs` can confine
     /// its paths per session.
     workdirs: Arc<Mutex<HashMap<SessionId, PathBuf>>>,
+    /// The plugin runtime of every launched session that has one, so a
+    /// client's plugin command runs where its session's hooks do.
+    runtimes: Arc<Mutex<HashMap<SessionId, Arc<kage_plugin::PluginRuntime>>>>,
     /// The id the next connection gets.
     next_connection: AtomicU64,
     /// The id the next command a request waits on gets.
@@ -93,6 +96,8 @@ pub(crate) struct Host {
     next_instance: AtomicU64,
     /// The plugin runtime of each project, when the host loads plugins.
     projects: OnceLock<Arc<Projects>>,
+    /// The system prompt role sessions start with.
+    system_role: Mutex<String>,
 }
 
 impl Host {
@@ -158,6 +163,7 @@ impl Host {
         let host = Self::new(registry, default_model, sessions, spec, aliases);
         *lock(&host.plugin_providers) = plugin_providers;
         let _ = host.projects.set(projects);
+        system_role.clone_into(&mut lock(&host.system_role));
         Ok(host)
     }
 
@@ -185,11 +191,13 @@ impl Host {
             live,
             open: Arc::default(),
             workdirs: Arc::default(),
+            runtimes: Arc::default(),
             next_connection: AtomicU64::new(0),
             next_command: AtomicU64::new(0),
             next_instance: AtomicU64::new(0),
             instances: Arc::default(),
             projects: OnceLock::new(),
+            system_role: Mutex::default(),
         });
         let open = Arc::clone(&host.open);
         host.engine.subscribe(Box::new(move |envelope| {
@@ -234,6 +242,7 @@ impl Host {
                     instances.remove(&id);
                     lock(&host.open).remove(&id);
                     lock(&host.workdirs).remove(&id);
+                    lock(&host.runtimes).remove(&id);
                     lock(&host.live).closed(id);
                 }
             })
@@ -343,7 +352,33 @@ impl Host {
         lock(&self.live).attach(spec.id, true);
         lock(&self.open).insert(spec.id, Open { settings });
         lock(&self.workdirs).insert(spec.id, spec.cx.workdir.clone());
+        if let Some(runtime) = &spec.plugins {
+            lock(&self.runtimes).insert(spec.id, Arc::clone(runtime));
+        }
         self.engine.open_with_instance(spec, instance);
+    }
+
+    /// The plugin runtime of the project at `workdir`, loading it with the
+    /// default model, the system prompt a session there would start with,
+    /// and `env`, when no session has.
+    pub(super) fn project(&self, workdir: &std::path::Path, env: &Environment) -> Option<Project> {
+        let prompt = || {
+            crate::runtime_env::build_system_prompt(
+                lock(&self.system_role).as_str(),
+                workdir,
+                &self.default_model,
+                &[],
+                None,
+            )
+        };
+        self.projects
+            .get()?
+            .get(workdir, &self.default_model, &prompt, env)
+    }
+
+    /// The plugin runtime the session `id` was launched with.
+    pub(super) fn session_runtime(&self, id: SessionId) -> Option<Arc<kage_plugin::PluginRuntime>> {
+        lock(&self.runtimes).get(&id).cloned()
     }
 
     /// Drop the plugin runtimes of projects no session has used for a
@@ -547,7 +582,7 @@ fn session_spec(
     let config = Config::load_layered(&workdir).map_err(|e| RpcError::internal(e.to_string()))?;
     let model = model.to_owned();
     let bare = crate::runtime_env::build_system_prompt(system_role, &workdir, &model, &[], None);
-    let project = projects.get(&workdir, &model, &bare, env);
+    let project = projects.get(&workdir, &model, &|| bare.clone(), env);
     let plugins = project.as_ref().map(|project| Arc::clone(&project.runtime));
     if let Some(runtime) = &plugins {
         runtime.set_session_env(id, env.clone());

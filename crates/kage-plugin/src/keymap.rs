@@ -43,6 +43,50 @@ use crate::capabilities::CurrentPlugin;
 use crate::error::PluginError;
 use crate::options::SharedOptions;
 
+/// Hands out handler ids unique across every runtime in the process, so a
+/// key a client resolved against a runtime that has since been replaced
+/// can never run another runtime's handler under the same id.
+static NEXT_HANDLER: AtomicU64 = AtomicU64::new(0);
+
+fn store_handler(lua: &Lua, handler: Function) -> mlua::Result<u64> {
+    let id = NEXT_HANDLER.fetch_add(1, Ordering::Relaxed) + 1;
+    handlers(lua)?.raw_set(id, handler)?;
+    Ok(id)
+}
+
+/// The rhs of `kage.keymap.set`: a `kage.action` value, a `":command"`
+/// string, a Lua function stored by id, or `"<Nop>"`.
+fn parse_rhs(lua: &Lua, value: Value) -> mlua::Result<Rhs> {
+    let bad = || {
+        fail(
+            "keymap_set: rhs must be a kage.action value, a \":command\" string, \
+             a function or \"<Nop>\""
+                .to_owned(),
+        )
+    };
+    match value {
+        Value::UserData(ud) => {
+            let action = ud.borrow::<KeyAction>().map_err(|_| bad())?;
+            Ok(Rhs::Action {
+                name: action.name,
+                arg: action.arg,
+            })
+        }
+        Value::String(s) => {
+            let s = s.to_str()?;
+            if s.eq_ignore_ascii_case("<Nop>") {
+                return Ok(Rhs::Nop);
+            }
+            match s.strip_prefix(':').map(str::trim) {
+                Some(command) if !command.is_empty() => Ok(Rhs::Command(command.to_owned())),
+                _ => Err(bad()),
+            }
+        }
+        Value::Function(f) => Ok(Rhs::Lua(store_handler(lua, f)?)),
+        _ => Err(bad()),
+    }
+}
+
 /// Keymap table shared by the host, the runtime and Lua.
 pub type SharedKeymap = Arc<Mutex<Keymap>>;
 
@@ -69,7 +113,6 @@ pub(crate) struct Keymaps {
     options: SharedOptions,
     current: CurrentPlugin,
     sink: SharedHostLog,
-    next_id: Arc<AtomicU64>,
 }
 
 impl Keymaps {
@@ -80,7 +123,6 @@ impl Keymaps {
             options,
             current,
             sink,
-            next_id: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -103,43 +145,6 @@ impl Keymaps {
 
     fn keys(&self, fname: &str, lhs: &str) -> mlua::Result<Vec<Key>> {
         parse_keys(lhs, &self.leader()).map_err(|e| fail(format!("{fname}: {e}")))
-    }
-
-    fn store_handler(&self, lua: &Lua, handler: Function) -> mlua::Result<u64> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        handlers(lua)?.raw_set(id, handler)?;
-        Ok(id)
-    }
-
-    fn rhs(&self, lua: &Lua, value: Value) -> mlua::Result<Rhs> {
-        let bad = || {
-            fail(
-                "keymap_set: rhs must be a kage.action value, a \":command\" string, \
-                 a function or \"<Nop>\""
-                    .to_owned(),
-            )
-        };
-        match value {
-            Value::UserData(ud) => {
-                let action = ud.borrow::<KeyAction>().map_err(|_| bad())?;
-                Ok(Rhs::Action {
-                    name: action.name,
-                    arg: action.arg,
-                })
-            }
-            Value::String(s) => {
-                let s = s.to_str()?;
-                if s.eq_ignore_ascii_case("<Nop>") {
-                    return Ok(Rhs::Nop);
-                }
-                match s.strip_prefix(':').map(str::trim) {
-                    Some(command) if !command.is_empty() => Ok(Rhs::Command(command.to_owned())),
-                    _ => Err(bad()),
-                }
-            }
-            Value::Function(f) => Ok(Rhs::Lua(self.store_handler(lua, f)?)),
-            _ => Err(bad()),
-        }
     }
 
     fn warn_hatch(&self, keys: &[Key], owner: &str) {
@@ -232,7 +237,7 @@ pub(crate) fn install(lua: &Lua, keymaps: &Keymaps) -> Result<(), PluginError> {
                     Some(opts) => (opts.get("desc")?, opts.get("group")?),
                     None => (None, None),
                 };
-                let rhs = this.rhs(lua, rhs)?;
+                let rhs = parse_rhs(lua, rhs)?;
                 let owner = this.owner();
                 this.warn_hatch(&keys, &owner);
                 let mapping = Mapping {
@@ -308,7 +313,7 @@ fn register_fn(lua: &Lua, this: Keymaps) -> mlua::Result<Function> {
         let keys = this.keys(NAME, &chord)?;
         let owner = this.owner();
         this.warn_hatch(&keys, &owner);
-        let id = this.store_handler(lua, handler)?;
+        let id = store_handler(lua, handler)?;
         let mapping = Mapping {
             rhs: Rhs::Lua(id),
             desc,

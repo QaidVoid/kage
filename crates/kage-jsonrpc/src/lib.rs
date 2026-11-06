@@ -93,6 +93,13 @@ impl RpcError {
         Self::new(-32603, message)
     }
 
+    /// Whether the request failed because the connection closed, before
+    /// or while it waited for an answer.
+    #[must_use]
+    pub fn is_connection_closed(&self) -> bool {
+        self.code == -32603 && self.message == CLOSED
+    }
+
     /// `-32601` method not found.
     #[must_use]
     pub fn method_not_found(method: &str) -> Self {
@@ -511,8 +518,10 @@ fn close_pending(pending: &Pending) {
 }
 
 /// The error a request gets when the connection closes under it.
+const CLOSED: &str = "connection closed";
+
 fn closed() -> RpcError {
-    RpcError::internal("connection closed")
+    RpcError::internal(CLOSED)
 }
 
 /// A JSON-RPC response message shared by both reply paths.
@@ -1570,6 +1579,17 @@ mod tests {
         assert_eq!(next_line(&mut out)["method"], "x");
         drop(in_w);
         assert_eq!(waiter.join().unwrap().unwrap_err().code, -32603);
+    }
+
+    /// A request made after the peer hung up fails at once, even though
+    /// writing to it still succeeds, instead of waiting for no one.
+    #[test]
+    fn a_request_after_the_connection_closed_fails_at_once() {
+        let (peer, in_w, _out, handle) = recorded(None);
+        drop(in_w);
+        handle.join().unwrap();
+        let err = peer.request("x", serde_json::Value::Null).unwrap_err();
+        assert_eq!(err.code, -32603);
     }
 
     #[test]

@@ -49,16 +49,26 @@ value but `false`) turns on `subagent_update` and child sessions.
 | `_kage/session/delete` | `sessionId` | `{}`: deletes a recorded session, named by its whole id. Refused while it is open, closing, running, an agent of a live session, or held by another kage process. |
 | `_kage/shell` | `sessionId`, `command` | `{}`: runs a command the user typed, in the session's directory and environment. Its progress arrives as `_kage/shell` updates, and its output joins the conversation for the model's next turn. |
 | `_kage/prompt/withdraw` | `sessionId`, `delivery` (`steer` or `queue`) | `{ delivery, content? }`: takes back the newest prompt still waiting in that queue, for the client's editor. `content` is absent when nothing was waiting. |
+| `_kage/ui/attach` | `cwd`, `attachId`, `sessionId?` | The plugin UI of the project at `cwd`, for a client that draws it: `{ generation, keymap, highlights, options, optionSources, commands, status, blockKinds, autocomplete, terminalHooks }`. `attachId` must be a number newer than any attach the connection made before; the host refuses an older one. With `sessionId`, the UI pins to the runtime that session opened with, so what it advertises is what handles that session's commands and mappings; without one it follows the project's latest loaded runtime. `keymap` lists `{ mode, lhs, rhs, desc?, group?, owner }` in table order, `rhs` being `{ kind: "action", name, arg? }`, `{ kind: "command", line }`, `{ kind: "lua", id }` or `{ kind: "nop" }`. `commands` lists `{ name, aliases?, description, args?, overrides? }`, each `args` entry `{ kind: "text", name, optional, hint }`, `{ kind: "choice", name, values, optional }`, `{ kind: "path", name, optional }`, `{ kind: "session", name, optional }` or `{ kind: "flag", name }`. `options` holds every option's current value by name, and `optionSources` where each came from (`default`, `toml`, `lua` or `runtime`). `highlights` is `{ base, overrides, theme, transparent }`, each group `{ fg, bg, bold, italic, underline, dim, reverse, link }` with unset colors and links `null`. The plugins stay loaded while the connection is attached, and an unbound attachment's project loads again when its files change. A connection follows one attachment at a time: attaching again stops the first one's updates. |
+| `_kage/ui/command` | `cwd`, `name`, `args?`, `sessionId?` | `{ text, isError?, structured? }`: runs the plugin command `name` (or an alias) of the project at `cwd` with the argument line `args`, for the client's session `sessionId` when it has one, loading the project's plugins first when needed. Each dialog the command opens reaches the client as a `_kage/ui/dialog` request. |
+| `_kage/ui/keymap` | `cwd`, `id`, `sessionId?` | `{ text, isError?, structured? }`: runs the Lua handler of a key mapping whose `rhs` is `{ kind: "lua", id }`, dialogs included. |
 | `_kage/mcp/restart` | `sessionId`, `server` | `{}`: restarts one of the session's MCP servers. The outcome arrives as `_kage/mcp_status` and `_kage/mcp_servers`. |
 | `_kage/session/export` | `sessionId` | `{ markdown }`: the transcript as Markdown. |
 | `_kage/session/compact` | `sessionId` | `{}`: summarizes older turns now. |
 | `_kage/session/rename` | `sessionId`, `title` | `{}`: a named session keeps its name over generated titles. |
 | `_kage/swarm/resume` | `sessionId`, `members` | `{ resumed }`: continues swarm children (child session id to a follow-up prompt; empty continues the task). It answers once every member is checked and attached, and refuses the whole request when one is not a swarm child of the session or is still working. Members report under the call that first spawned them. Once all have reported, the session gets a notice with the counts and its next turn reads their results. |
 
+## requests to the client
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `_kage/ui/dialog` | `kind` (`ui.select`, `ui.confirm`, `ui.input` or `ui.editor`), `payload` | The dialog's value, or `null` when the user dismissed it. Asked of the client whose `_kage/ui/command` or `_kage/ui/keymap` opened it; `payload` holds the fields the plugin passed, as in [`kage.ui`](/plugins/api). A client that cannot show it answers `null`, and an error reply cancels the dialog the way `null` does. |
+
 ## notifications
 
 | Method | Params | Meaning |
 | --- | --- | --- |
+| `_kage/ui/update` | `cwd`, `attachId`, `generation`, and any of the snapshot's fields | Sent by the agent to a client attached with `_kage/ui/attach`, at most every 200 ms, carrying the fields of the plugin UI that changed, each in full. `attachId` names the attachment the update belongs to, so a client applies only the updates of the attachment it holds or waits for. `generation` is one more than the snapshot's or the previous update's; an update that arrives before the attach answer applies on top of it once it arrives. |
 | `_kage/environment` | `vars` | The client's environment, variable name to value. Sessions the connection opens after it run their shell commands, stdio MCP servers, plugin processes, worktree VCS commands and `acp:` model agents with exactly these variables. `kage rpc` sends it when it relays to the [shared host](/guide/shared-host). Only the shared host's local socket accepts it; other connections ignore it. |
 
 ## session updates

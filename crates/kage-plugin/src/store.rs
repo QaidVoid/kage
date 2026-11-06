@@ -15,6 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use mlua::{Lua, MultiValue, Table, Value};
 
@@ -26,6 +27,15 @@ type StoreMap = BTreeMap<String, serde_json::Value>;
 
 const BASE_ERR: &str =
     "kage.store is available only to a loaded plugin when the host configures a store directory";
+
+/// How long a write waits for another process's lock. The wait blocks
+/// the Lua owner thread and the instruction watchdog cannot interrupt
+/// it, so it is bounded: a holder that never lets go raises instead of
+/// stalling the plugin.
+const LOCK_WAIT: Duration = Duration::from_secs(10);
+
+/// How often a waiting write retries [`std::fs::File::try_lock`].
+const LOCK_POLL: Duration = Duration::from_millis(50);
 
 /// Install a base `kage.store` whose operations raise [`BASE_ERR`].
 ///
@@ -50,7 +60,10 @@ pub(crate) fn install_base(lua: &Lua) -> Result<(), PluginError> {
 /// Attach a real `kage.store` onto a single plugin's `kage` proxy,
 /// backed by `path` (`<state_dir>/<stem>.json`). Each call loads and
 /// rewrites the file so state is durable across reloads; the parent
-/// directory is created lazily on first write.
+/// directory is created lazily on first write. A write holds a lock on
+/// `<stem>.json.lock`, so writes from several runtimes or processes never
+/// drop each other's keys, and the wait for that lock is bounded, so a
+/// stuck holder raises instead of stalling the plugin.
 pub(crate) fn install_for_plugin(lua: &Lua, pkage: &Table, path: PathBuf) -> mlua::Result<()> {
     let store = lua.create_table()?;
 
@@ -70,22 +83,18 @@ pub(crate) fn install_for_plugin(lua: &Lua, pkage: &Table, path: PathBuf) -> mlu
     store.set(
         "set",
         lua.create_function(move |_, (key, value): (String, Value)| {
-            let mut map = load(&set_path)?;
-            map.insert(key, lua_to_json(value)?);
-            save(&set_path, &map)
+            let value = lua_to_json(value)?;
+            update(&set_path, |map| {
+                map.insert(key, value);
+                true
+            })
         })?,
     )?;
 
     let delete_path = path.clone();
     store.set(
         "delete",
-        lua.create_function(move |_, key: String| {
-            let mut map = load(&delete_path)?;
-            if map.remove(&key).is_some() {
-                save(&delete_path, &map)?;
-            }
-            Ok(())
-        })?,
+        lua.create_function(move |_, key: String| delete(&delete_path, &key))?,
     )?;
 
     let keys_path = path;
@@ -120,13 +129,76 @@ fn load(path: &Path) -> mlua::Result<StoreMap> {
     }
 }
 
-/// Atomically persist the store map, creating the parent dir on demand.
-fn save(path: &Path, map: &StoreMap) -> mlua::Result<()> {
+/// Removes `key` from the store. A no-op when it is unset: nothing is
+/// created, nothing is written, and write-side setup cannot fail it.
+fn delete(path: &Path, key: &str) -> mlua::Result<()> {
+    if !load(path)?.contains_key(key) {
+        return Ok(());
+    }
+    update(path, |map| map.remove(key).is_some())
+}
+
+/// Applies `change` to the store with its lock held, saving when `change`
+/// reports a change. Reads take no lock: a save replaces the file
+/// atomically, so a reader sees the old map or the new one.
+fn update(path: &Path, change: impl FnOnce(&mut StoreMap) -> bool) -> mlua::Result<()> {
+    update_within(path, change, LOCK_WAIT)
+}
+
+/// [`update`] that waits at most `wait` for the lock, so tests can
+/// shorten the bound.
+fn update_within(
+    path: &Path,
+    change: impl FnOnce(&mut StoreMap) -> bool,
+    wait: Duration,
+) -> mlua::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             mlua::Error::external(format!("kage.store: mkdir {}: {e}", parent.display()))
         })?;
     }
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| {
+            mlua::Error::external(format!("kage.store: open {}: {e}", lock_path.display()))
+        })?;
+    let deadline = Instant::now() + wait;
+    loop {
+        match lock.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(mlua::Error::external(format!(
+                    "kage.store: lock {}: {e}",
+                    lock_path.display()
+                )));
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(mlua::Error::external(format!(
+                "kage.store: lock {}: another process holds it",
+                lock_path.display()
+            )));
+        }
+        std::thread::sleep(LOCK_POLL);
+    }
+    let mut map = load(path)?;
+    let saved = if change(&mut map) {
+        save(path, &map)
+    } else {
+        Ok(())
+    };
+    drop(lock);
+    saved
+}
+
+/// Atomically persist the store map.
+fn save(path: &Path, map: &StoreMap) -> mlua::Result<()> {
     let body = serde_json::to_vec_pretty(map)
         .map_err(|e| mlua::Error::external(format!("kage.store: encode: {e}")))?;
     kage_core::fsutil::atomic_write(path, &body)
@@ -137,4 +209,100 @@ fn save(path: &Path, map: &StoreMap) -> mlua::Result<()> {
 #[must_use]
 pub(crate) fn store_path(state_dir: &Path, stem: &str) -> PathBuf {
     state_dir.join(format!("{stem}.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writers in parallel, as several runtimes or processes sharing one
+    /// plugin's store are, keep every key.
+    #[test]
+    fn concurrent_writes_keep_every_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path(dir.path(), "plugin");
+        let writers: Vec<_> = (0..4)
+            .map(|writer| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for n in 0..25 {
+                        update(&path, |map| {
+                            map.insert(format!("{writer}-{n}"), n.into());
+                            true
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        assert_eq!(load(&path).unwrap().len(), 100);
+    }
+
+    /// Deleting an unset key touches nothing: no directories, no lock
+    /// file, no rewrite of the store.
+    #[test]
+    fn deleting_an_unset_key_is_a_pure_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("nested");
+        delete(&nested.join("plugin.json"), "gone").unwrap();
+        assert!(!nested.exists(), "no directory is created");
+
+        // An existing store is not locked either when the key is unset.
+        let existing = dir.path().join("plugin.json");
+        save(&existing, &StoreMap::from([("kept".to_owned(), 1.into())])).unwrap();
+        delete(&existing, "gone").unwrap();
+        assert_eq!(load(&existing).unwrap().len(), 1, "the store is untouched");
+        assert!(
+            !dir.path().join("plugin.json.lock").exists(),
+            "no lock file is created"
+        );
+
+        delete(&existing, "kept").unwrap();
+        assert!(load(&existing).unwrap().is_empty());
+    }
+
+    /// A write whose lock another process holds gives up within the
+    /// wait instead of blocking the Lua thread for good, and goes
+    /// through once the holder lets go.
+    #[test]
+    fn a_held_lock_times_out_instead_of_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path(dir.path(), "plugin");
+        let mut lock_path = path.as_os_str().to_owned();
+        lock_path.push(".lock");
+        let holder = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        holder.lock().unwrap();
+        let error = update_within(
+            &path,
+            |map| {
+                map.insert("x".to_owned(), 1.into());
+                true
+            },
+            Duration::from_millis(150),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("another process holds it"),
+            "{error}"
+        );
+        drop(holder);
+        update_within(
+            &path,
+            |map| {
+                map.insert("x".to_owned(), 1.into());
+                true
+            },
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(load(&path).unwrap().len(), 1);
+    }
 }

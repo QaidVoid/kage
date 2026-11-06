@@ -357,6 +357,9 @@ struct Ids {
     /// hosts them for the client, so they take no prompts.
     read_only: HashSet<String>,
     external: HashSet<String>,
+    /// Resumes dispatched and not yet finished, by session, so a later
+    /// close can stop them from attaching.
+    resuming: HashMap<String, Vec<Arc<AtomicBool>>>,
 }
 
 impl Ids {
@@ -420,6 +423,32 @@ impl Drop for ExternalOpen {
             }
         }
     }
+}
+
+/// A resume dispatched on this connection. A close dispatched after it
+/// marks it closed, so it cannot attach to an external session later.
+struct ResumeFence {
+    ids: Arc<Mutex<Ids>>,
+    id: String,
+    closed: Arc<AtomicBool>,
+}
+
+impl Drop for ResumeFence {
+    fn drop(&mut self) {
+        let mut ids = lock(&self.ids);
+        if let Some(fences) = ids.resuming.get_mut(&self.id) {
+            fences.retain(|fence| !Arc::ptr_eq(fence, &self.closed));
+            if fences.is_empty() {
+                ids.resuming.remove(&self.id);
+            }
+        }
+    }
+}
+
+/// Which close a fenced `session/close` already performed at dispatch.
+enum CloseFence {
+    External,
+    Native,
 }
 
 struct PreparedExternalPrompt {
@@ -751,6 +780,7 @@ impl CliAcpAgent {
         &self,
         id: &str,
         servers: &[kage_acp::acp::McpServer],
+        fence: Option<&ResumeFence>,
     ) -> Result<Option<OpenReceipt>, RpcError> {
         // Declared before the locks so an unwind releases them before the
         // open fails, since failing takes the same locks.
@@ -774,6 +804,12 @@ impl CliAcpAgent {
         if self.disconnecting.load(Ordering::SeqCst) {
             return Err(RpcError::internal("client is disconnecting"));
         }
+        if fence.is_some_and(|fence| fence.closed.load(Ordering::SeqCst)) {
+            return Err(RpcError::new(
+                -32602,
+                "the session was closed before the resume finished",
+            ));
+        }
         open.ticket = Some(session.attach_open(self.connection, self.peer.clone())?);
         ids.external.insert(id.to_owned());
         drop(ids);
@@ -793,6 +829,44 @@ impl CliAcpAgent {
         for id in external {
             self.release_external(&id);
         }
+    }
+
+    /// Releases the caller's native, read-only or unknown session.
+    fn close_native(&self, req: &CloseSessionRequest) -> Result<CloseSessionResponse, RpcError> {
+        let id = {
+            let mut ids = lock(&self.ids);
+            if ids.read_only.remove(&req.session_id) {
+                return Ok(CloseSessionResponse {});
+            }
+            if ids.subagents.contains_key(&req.session_id) {
+                return Err(RpcError::new(
+                    -32602,
+                    format!("{} is a subagent session", req.session_id),
+                ));
+            }
+            ids.by_client.get(&req.session_id).copied()
+        };
+        let Some(id) = id else {
+            return Err(RpcError::new(
+                -32602,
+                format!("unknown session {}", req.session_id),
+            ));
+        };
+        let asks = lock(&self.asks).remove(&id).unwrap_or_default();
+        for ask in asks {
+            ask.stop();
+        }
+        lock(&self.ids).remove_client(&req.session_id);
+        lock(&self.shown).remove(&id);
+        lock(&self.held).remove(&id);
+        self.host.release(id);
+        if !self.host.held(id) {
+            // No connection is left to answer the asks parked under the
+            // session, so they are declined and the session closes once
+            // idle.
+            self.host.decline_asks_under(id);
+        }
+        Ok(CloseSessionResponse {})
     }
 
     fn detach(&self) {
@@ -976,12 +1050,40 @@ impl Agent for CliAcpAgent {
         Ok(ResumeSessionResponse { config_options })
     }
 
+    /// Unfenced: closes dispatched earlier cannot stop this resume. The
+    /// dispatch loop uses [`Agent::resume_session_prepared`] instead.
     fn resume_session_with_receipt(
         &self,
         req: ResumeSessionRequest,
         ctx: &PromptContext,
     ) -> OpenResult<ResumeSessionResponse> {
-        if let Some(receipt) = self.attach_external(&req.session_id, &req.mcp_servers)? {
+        self.resume_session_prepared(req, ctx, None)
+    }
+
+    fn prepare_resume(&self, req: &ResumeSessionRequest) -> Option<Box<dyn std::any::Any + Send>> {
+        let closed = Arc::new(AtomicBool::new(false));
+        lock(&self.ids)
+            .resuming
+            .entry(req.session_id.clone())
+            .or_default()
+            .push(Arc::clone(&closed));
+        Some(Box::new(ResumeFence {
+            ids: Arc::clone(&self.ids),
+            id: req.session_id.clone(),
+            closed,
+        }))
+    }
+
+    fn resume_session_prepared(
+        &self,
+        req: ResumeSessionRequest,
+        ctx: &PromptContext,
+        prepared: Option<Box<dyn std::any::Any + Send>>,
+    ) -> OpenResult<ResumeSessionResponse> {
+        let fence = prepared.and_then(|prepared| prepared.downcast::<ResumeFence>().ok());
+        if let Some(receipt) =
+            self.attach_external(&req.session_id, &req.mcp_servers, fence.as_deref())?
+        {
             return Ok((
                 ResumeSessionResponse {
                     config_options: Vec::new(),
@@ -1001,40 +1103,46 @@ impl Agent for CliAcpAgent {
         if self.release_external(&req.session_id) {
             return Ok(CloseSessionResponse {});
         }
-        let id = {
-            let mut ids = lock(&self.ids);
-            if ids.read_only.remove(&req.session_id) {
-                return Ok(CloseSessionResponse {});
-            }
-            if ids.subagents.contains_key(&req.session_id) {
-                return Err(RpcError::new(
-                    -32602,
-                    format!("{} is a subagent session", req.session_id),
-                ));
-            }
-            ids.by_client.get(&req.session_id).copied()
+        self.close_native(&req)
+    }
+
+    /// Fences resumes dispatched earlier and releases an external
+    /// attachment before any later prompt or cancellation is dispatched.
+    /// Releasing never blocks. Native sessions still close on the worker.
+    fn fence_close(&self, req: &CloseSessionRequest) -> Option<Box<dyn std::any::Any + Send>> {
+        let fenced = lock(&self.ids)
+            .resuming
+            .get(&req.session_id)
+            .is_some_and(|fences| {
+                for fence in fences {
+                    fence.store(true, Ordering::SeqCst);
+                }
+                true
+            });
+        // A close that stopped a pending resume of an external session
+        // took effect, so it answers like a release.
+        let fence = if self.release_external(&req.session_id)
+            || (fenced && lock(&self.host.external).contains_key(&req.session_id))
+        {
+            CloseFence::External
+        } else {
+            CloseFence::Native
         };
-        let Some(id) = id else {
-            return Err(RpcError::new(
-                -32602,
-                format!("unknown session {}", req.session_id),
-            ));
-        };
-        let asks = lock(&self.asks).remove(&id).unwrap_or_default();
-        for ask in asks {
-            ask.stop();
+        Some(Box::new(fence))
+    }
+
+    fn close_session_fenced(
+        &self,
+        req: CloseSessionRequest,
+        fence: Option<Box<dyn std::any::Any + Send>>,
+    ) -> Result<CloseSessionResponse, RpcError> {
+        match fence.and_then(|fence| fence.downcast::<CloseFence>().ok()) {
+            Some(fence) => match *fence {
+                CloseFence::External => Ok(CloseSessionResponse {}),
+                CloseFence::Native => self.close_native(&req),
+            },
+            None => self.close_session(req),
         }
-        lock(&self.ids).remove_client(&req.session_id);
-        lock(&self.shown).remove(&id);
-        lock(&self.held).remove(&id);
-        self.host.release(id);
-        if !self.host.held(id) {
-            // No connection is left to answer the asks parked under the
-            // session, so they are declined and the session closes once
-            // idle.
-            self.host.decline_asks_under(id);
-        }
-        Ok(CloseSessionResponse {})
     }
 
     fn set_config_option(

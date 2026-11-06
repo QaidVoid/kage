@@ -481,6 +481,29 @@ pub trait Agent: Send + Sync + 'static {
             .map(|response| (response, None))
     }
 
+    /// Prepare a resume on the dispatch thread, so a later close can fence
+    /// it. Keep this short and nonblocking. The returned token is passed to
+    /// [`Agent::resume_session_prepared`] on the worker thread. The default
+    /// prepares nothing.
+    fn prepare_resume(&self, _req: &ResumeSessionRequest) -> Option<Box<dyn std::any::Any + Send>> {
+        None
+    }
+
+    /// Resume using the token returned by [`Agent::prepare_resume`]. The
+    /// default ignores the token and calls
+    /// [`Agent::resume_session_with_receipt`].
+    ///
+    /// # Errors
+    /// Returns an error if the session cannot be resumed.
+    fn resume_session_prepared(
+        &self,
+        req: ResumeSessionRequest,
+        ctx: &PromptContext,
+        _prepared: Option<Box<dyn std::any::Any + Send>>,
+    ) -> OpenResult<ResumeSessionResponse> {
+        self.resume_session_with_receipt(req, ctx)
+    }
+
     /// Release a session the connection loaded, created or resumed: it
     /// no longer watches it, and the agent may stop hosting it once no
     /// other connection does. The default rejects: only agents that
@@ -492,6 +515,29 @@ pub trait Agent: Send + Sync + 'static {
     /// be released.
     fn close_session(&self, _req: CloseSessionRequest) -> Result<CloseSessionResponse, RpcError> {
         Err(RpcError::method_not_found("session/close"))
+    }
+
+    /// Fence a close on the dispatch thread before any later message is
+    /// dispatched. Keep this short and nonblocking. The returned token is
+    /// passed to [`Agent::close_session_fenced`] on the worker thread. The
+    /// default fences nothing.
+    fn fence_close(&self, _req: &CloseSessionRequest) -> Option<Box<dyn std::any::Any + Send>> {
+        None
+    }
+
+    /// Finish a close using the token returned by [`Agent::fence_close`].
+    /// The default ignores the token and calls [`Agent::close_session`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session id is unknown or cannot
+    /// be released.
+    fn close_session_fenced(
+        &self,
+        req: CloseSessionRequest,
+        _fence: Option<Box<dyn std::any::Any + Send>>,
+    ) -> Result<CloseSessionResponse, RpcError> {
+        self.close_session(req)
     }
 
     /// Change one config option of a session. The default rejects:
@@ -1213,6 +1259,19 @@ fn encode_open<T: serde::Serialize>(
     Ok((session, response, receipt))
 }
 
+/// Fence a close on the dispatch thread, then finish it on its own thread.
+fn spawn_close<A: Agent>(
+    peer: &AgentPeer,
+    agent: &Arc<A>,
+    id: serde_json::Value,
+    req: CloseSessionRequest,
+) -> thread::JoinHandle<()> {
+    let fence = agent.fence_close(&req);
+    spawn_op(peer, agent, id, move |a| {
+        a.close_session_fenced(req, fence).map(jval)
+    })
+}
+
 /// Answers `id` with the params parse error `e`.
 fn parse_failed(
     peer: &AgentPeer,
@@ -1306,9 +1365,10 @@ fn handle_request<A: Agent>(
                     session_id: req.session_id.clone(),
                     start: None,
                 };
+                let prepared = agent.prepare_resume(&req);
                 spawn_open(peer, agent, id, move |a| {
                     let session = req.session_id.clone();
-                    a.resume_session_with_receipt(req, &ctx)
+                    a.resume_session_prepared(req, &ctx, prepared)
                         .map(|(resp, receipt)| (session, resp, receipt))
                 })
             }
@@ -1319,7 +1379,7 @@ fn handle_request<A: Agent>(
         },
         "session/close" => match parse::<CloseSessionRequest>(params) {
             Err(e) => return parse_failed(peer, &id, e),
-            Ok(req) => spawn_op(peer, agent, id, move |a| a.close_session(req).map(jval)),
+            Ok(req) => spawn_close(peer, agent, id, req),
         },
         other if other.starts_with("_kage/") => {
             return handle_kage_request(peer, agent, id, other, params);

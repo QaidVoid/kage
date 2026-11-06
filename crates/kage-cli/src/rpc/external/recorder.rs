@@ -43,10 +43,11 @@ pub(crate) struct Recorder {
     discard: Arc<AtomicBool>,
 }
 
-/// Whether to create the session file or append to an existing one.
+/// Whether to create the session file or append through a writer that
+/// already holds the existing file's lock.
 pub(crate) enum Target {
     Create(Box<Header>),
-    Append,
+    Append(Box<SessionWriter>),
 }
 
 impl Recorder {
@@ -70,7 +71,7 @@ impl Recorder {
             let created = matches!(target, Target::Create(_));
             let opened = match target {
                 Target::Create(header) => SessionWriter::create(&path, *header),
-                Target::Append => SessionWriter::open(&path),
+                Target::Append(writer) => Ok(*writer),
             };
             let writer = match opened {
                 Ok(writer) => writer,
@@ -486,12 +487,14 @@ mod tests {
             text: bounded("before"),
         });
         drop(first);
-        let reopened = loop {
-            match Recorder::start(&slot, path.clone(), Target::Append, WAIT) {
-                Ok(recorder) => break recorder,
+        let writer = loop {
+            match SessionWriter::open(&path) {
+                Ok(writer) => break writer,
                 Err(_) => std::thread::sleep(Duration::from_millis(5)),
             }
         };
+        let reopened =
+            Recorder::start(&slot, path.clone(), Target::Append(Box::new(writer)), WAIT).unwrap();
         reopened.record(ExternalAcpPresentation::Prompt {
             text: bounded("after"),
         });

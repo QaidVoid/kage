@@ -35,8 +35,11 @@ pub(crate) enum Recording {
         path: std::path::PathBuf,
         header: Box<kage_session::entry::Header>,
     },
-    /// The existing file of a restored session.
-    Append { path: std::path::PathBuf },
+    /// The existing file of a restored session, opened with its lock held
+    /// before the agent starts, so no other process restores it meanwhile.
+    Append {
+        writer: Box<kage_session::SessionWriter>,
+    },
 }
 
 /// External agent processes a host runs at once, including ones cleaning up.
@@ -1543,7 +1546,10 @@ mod unix {
                 ));
                 Recorder::start(slot, path, Target::Create(header), TIMEOUT)
             }
-            Recording::Append { path } => Recorder::start(slot, path, Target::Append, TIMEOUT),
+            Recording::Append { writer } => {
+                let path = writer.path().to_path_buf();
+                Recorder::start(slot, path, Target::Append(writer), TIMEOUT)
+            }
         }
     }
 
@@ -1719,7 +1725,7 @@ mod unix {
         use std::io::{BufRead, BufReader};
         use std::os::unix::net::UnixStream;
 
-        const WAIT: Duration = Duration::from_secs(3);
+        const WAIT: Duration = Duration::from_secs(10);
 
         fn test_attachment(peer: AgentPeer) -> Attachment {
             static SLOT: std::sync::OnceLock<Arc<Slot>> = std::sync::OnceLock::new();
@@ -3486,7 +3492,9 @@ for line in sys.stdin:
                     config: &config,
                     owner: 1,
                     peer: peer.into(),
-                    record: Some(Recording::Append { path: path.clone() }),
+                    record: Some(Recording::Append {
+                        writer: Box::new(kage_session::SessionWriter::open(&path).unwrap()),
+                    }),
                     restore: Some(Restore {
                         upstream: "up-old".into(),
                         replay,

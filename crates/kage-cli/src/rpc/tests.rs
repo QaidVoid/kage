@@ -8673,3 +8673,240 @@ fn external_close_fences_a_resume_dispatched_before_it() {
     owner.detach();
     other.detach();
 }
+
+/// Runs `test` again in a child with its own user config naming the
+/// external `fake` agent, whose history lives in `history`.
+#[cfg(target_os = "linux")]
+fn run_external_restore_test_in_child(test: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config/kage");
+    std::fs::create_dir_all(&config).unwrap();
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/external_acp_restore.py");
+    let contents = format!(
+        "[acp.agents.fake]\ncommand = \"python3\"\nargs = [{}]\n\n[acp.agents.fake.env]\nHISTORY_FILE = {}\n",
+        serde_json::to_string(script.to_str().unwrap()).unwrap(),
+        serde_json::to_string(dir.path().join("history.json").to_str().unwrap()).unwrap(),
+    );
+    std::fs::write(config.join("config.toml"), contents).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .env("KAGE_TEST_EXTERNAL_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "child failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+/// A client over the native transport, with responses by id and the texts
+/// of the updates it received, in order.
+#[cfg(target_os = "linux")]
+struct NativeClient {
+    wire: std::io::PipeWriter,
+    replies: mpsc::Receiver<serde_json::Value>,
+    texts: Arc<Mutex<Vec<String>>>,
+    next: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl NativeClient {
+    fn serve(host: &Arc<Host>) -> Self {
+        let (srv_r, wire) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let running = Arc::clone(host);
+        std::thread::spawn(move || {
+            let _ = running.serve_unix(BufReader::new(srv_r), srv_w.into());
+        });
+        let (tx, replies) = mpsc::channel();
+        let texts = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&texts);
+        std::thread::spawn(move || {
+            for line in BufReader::new(cli_r).lines() {
+                let Ok(line) = line else { break };
+                let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if value["method"] == "session/update"
+                    && let Some(text) = value["params"]["update"]["content"]["text"].as_str()
+                {
+                    lock(&seen).push(text.to_owned());
+                } else if value.get("id").is_some() && value.get("method").is_none() {
+                    let _ = tx.send(value);
+                }
+            }
+        });
+        Self {
+            wire,
+            replies,
+            texts,
+            next: 0,
+        }
+    }
+
+    fn request(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        self.next += 1;
+        let id = self.next;
+        let mut message = serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method});
+        message["params"] = params;
+        writeln!(self.wire, "{message}").unwrap();
+        loop {
+            let reply = self.replies.recv_timeout(WAIT).unwrap();
+            if reply["id"] == id {
+                return reply;
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn enabled_external_host(dir: &Path) -> Arc<Host> {
+    let host = test_host(
+        Arc::new(Listed::of(MockProvider::sequence(vec![]))),
+        dir.to_path_buf(),
+        dir.to_path_buf(),
+        false,
+    );
+    host.external_sessions.store(true, Ordering::SeqCst);
+    host
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn external_session_is_created_closed_and_restored_from_its_upstream() {
+    const NAME: &str =
+        "rpc::tests::external_session_is_created_closed_and_restored_from_its_upstream";
+    if std::env::var_os("KAGE_TEST_EXTERNAL_CHILD").is_none() {
+        run_external_restore_test_in_child(NAME);
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap().to_owned();
+    let first = enabled_external_host(dir.path());
+    let mut client = NativeClient::serve(&first);
+    let init = client.request("initialize", serde_json::json!({"protocolVersion": 1}));
+    assert_eq!(init["result"]["_meta"]["kage"]["externalSessions"], true);
+    let created = client.request(
+        "session/new",
+        serde_json::json!({"cwd": cwd, "mcpServers": [], "_meta": {"kage": {"externalAgent": "fake"}}}),
+    );
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let prompt = |text: &str| serde_json::json!({"sessionId": id, "prompt": [{"type": "text", "text": text}]});
+    let turn = client.request("session/prompt", prompt("one"));
+    assert_eq!(turn["result"]["stopReason"], "end_turn", "{turn}");
+    assert_eq!(lock(&client.texts).last().map(String::as_str), Some("one"));
+    let closed = client.request("session/close", serde_json::json!({"sessionId": id}));
+    assert_eq!(closed["result"], serde_json::json!({}));
+    assert!(lock(&first.external).is_empty());
+    let until = Instant::now() + WAIT;
+    while first.lifecycles.live() != 0 {
+        assert!(Instant::now() < until, "first process was not cleaned up");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let second = enabled_external_host(dir.path());
+    let mut client = NativeClient::serve(&second);
+    client.request("initialize", serde_json::json!({"protocolVersion": 1}));
+    // A session file still held elsewhere is refused before any process
+    // starts, so the upstream session is never restored twice.
+    let path = kage_session::find_by_prefix(dir.path(), &id)
+        .unwrap()
+        .unwrap();
+    let held = kage_session::SessionWriter::open(&path).unwrap();
+    let busy = client.request(
+        "session/resume",
+        serde_json::json!({"sessionId": id, "cwd": cwd, "mcpServers": []}),
+    );
+    assert!(
+        busy["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("still in use")),
+        "{busy}"
+    );
+    assert_eq!(second.lifecycles.live(), 0);
+    drop(held);
+    // The recorded directory is restored, not the one the client names.
+    let resumed = client.request(
+        "session/resume",
+        serde_json::json!({"sessionId": id, "cwd": "/", "mcpServers": []}),
+    );
+    assert!(resumed["result"].is_object(), "{resumed}");
+    let turn = client.request("session/prompt", prompt("two"));
+    assert_eq!(turn["result"]["stopReason"], "end_turn", "{turn}");
+    assert_eq!(
+        lock(&client.texts).last().map(String::as_str),
+        Some("one|two")
+    );
+    client.request("session/close", serde_json::json!({"sessionId": id}));
+    let until = Instant::now() + WAIT;
+    while second.lifecycles.live() != 0 {
+        assert!(Instant::now() < until, "second process was not cleaned up");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let path = dir.path().join(format!("{id}.jsonl"));
+    let path = if path.exists() {
+        path
+    } else {
+        kage_session::find_by_prefix(dir.path(), &id)
+            .unwrap()
+            .unwrap()
+    };
+    let replay = kage_session::external_replay::replay_external(&path).unwrap();
+    let shown: Vec<String> = replay
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            kage_session::entry::ExternalAcpPresentation::Prompt { text } => {
+                Some(format!("prompt {}", text.as_str()))
+            }
+            kage_session::entry::ExternalAcpPresentation::AgentMessage { text, .. } => {
+                Some(format!("message {}", text.as_str()))
+            }
+            kage_session::entry::ExternalAcpPresentation::TurnEnd { .. } => Some("end".into()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            "prompt one",
+            "message one",
+            "end",
+            "prompt two",
+            "message one|two",
+            "end"
+        ]
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn external_sessions_are_refused_on_the_generic_transport() {
+    const NAME: &str = "rpc::tests::external_sessions_are_refused_on_the_generic_transport";
+    if std::env::var_os("KAGE_TEST_EXTERNAL_CHILD").is_none() {
+        run_external_restore_test_in_child(NAME);
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let host = enabled_external_host(dir.path());
+    let (peer, _, _) = kage_jsonrpc::connect(std::io::empty(), std::io::sink());
+    let agent = CliAcpAgent::new(Arc::clone(&host), peer.into());
+    let Err(error) = agent.new_session_with_receipt(
+        serde_json::from_value(serde_json::json!({
+            "cwd": dir.path(), "mcpServers": [], "_meta": {"kage": {"externalAgent": "fake"}}
+        }))
+        .unwrap(),
+    ) else {
+        panic!("a generic transport must be refused");
+    };
+    assert!(error.message.contains("native transport"), "{error:?}");
+    assert_eq!(host.lifecycles.live(), 0);
+    agent.detach();
+}

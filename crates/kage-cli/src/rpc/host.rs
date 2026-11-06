@@ -72,11 +72,12 @@ pub(crate) struct Host {
     pub(super) engine: Engine,
     pub(super) external: Mutex<HashMap<String, Arc<super::external::External>>>,
     /// Capacity for external agent processes, held until cleanup finishes.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "external session creation is disabled")
-    )]
     pub(super) lifecycles: super::external::Lifecycles,
+    /// Whether clients may create and restore external sessions. Off until
+    /// the whole external session flow is complete.
+    pub(super) external_sessions: std::sync::atomic::AtomicBool,
+    /// External sessions being restored, so one starts only one process.
+    pub(super) restoring: Mutex<std::collections::HashSet<String>>,
     /// The providers in effect, replaced when the config's change.
     registry: RwLock<Arc<ProviderRegistry>>,
     pub(super) default_model: String,
@@ -213,6 +214,8 @@ impl Host {
             engine,
             external: Mutex::default(),
             lifecycles: super::external::Lifecycles::new(super::external::MAX_SESSIONS),
+            external_sessions: std::sync::atomic::AtomicBool::new(false),
+            restoring: Mutex::default(),
             registry: RwLock::new(registry),
             default_model,
             sessions,
@@ -342,6 +345,25 @@ impl Host {
         W: std::io::Write + Send + 'static,
     {
         self.serve_with(reader, writer, CliAcpAgent::take_environment)
+    }
+
+    /// Serves one connection over the native Unix transport, which external
+    /// sessions need. Production serving does not use it yet.
+    #[cfg(all(test, unix))]
+    pub(super) fn serve_unix<R>(
+        self: Arc<Self>,
+        reader: R,
+        writer: std::os::fd::OwnedFd,
+    ) -> Result<(), RpcError>
+    where
+        R: BufRead + Send + 'static,
+    {
+        kage_acp::agent::serve_agent_unix(
+            reader,
+            writer,
+            std::time::Duration::from_secs(10),
+            |peer| CliAcpAgent::new(Arc::clone(&self), peer),
+        )
     }
 
     /// [`Host::serve`] with `prepare` run on the connection's agent

@@ -36,6 +36,7 @@ mod directory;
 // Retained for future transport work, but external session creation is disabled.
 #[allow(dead_code)]
 mod external;
+mod external_host;
 mod folders;
 mod fs;
 pub(crate) mod host;
@@ -961,9 +962,23 @@ impl Agent for CliAcpAgent {
                         .ok()
                         .map(|dir| dir.display().to_string()),
                     config_options: self.default_options(),
-                    external_sessions: false,
+                    external_sessions: self.host.external_sessions.load(Ordering::SeqCst),
                 }),
             }),
+        }
+    }
+
+    fn new_session_with_receipt(&self, req: NewSessionRequest) -> OpenResult<NewSessionResponse> {
+        let external = req
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.kage.as_ref())
+            .and_then(|kage| kage.external_agent.clone());
+        match external {
+            Some(name) => self
+                .new_external(&name, &req.cwd, &req.mcp_servers)
+                .map(|(response, receipt)| (response, Some(receipt))),
+            None => self.new_session(req).map(|response| (response, None)),
         }
     }
 
@@ -975,7 +990,7 @@ impl Agent for CliAcpAgent {
             .and_then(|kage| kage.external_agent.as_deref())
             .is_some()
         {
-            // TODO: If external creation is enabled, return an identity-scoped open receipt.
+            // External creation needs the receipt-aware callback.
             return Err(RpcError::new(
                 -32602,
                 "external agent sessions are temporarily unavailable",
@@ -1081,9 +1096,14 @@ impl Agent for CliAcpAgent {
         prepared: Option<Box<dyn std::any::Any + Send>>,
     ) -> OpenResult<ResumeSessionResponse> {
         let fence = prepared.and_then(|prepared| prepared.downcast::<ResumeFence>().ok());
-        if let Some(receipt) =
-            self.attach_external(&req.session_id, &req.mcp_servers, fence.as_deref())?
-        {
+        let receipt =
+            match self.attach_external(&req.session_id, &req.mcp_servers, fence.as_deref())? {
+                Some(receipt) => Some(receipt),
+                None => {
+                    self.restore_external(&req.session_id, &req.mcp_servers, fence.as_deref())?
+                }
+            };
+        if let Some(receipt) = receipt {
             return Ok((
                 ResumeSessionResponse {
                     config_options: Vec::new(),
@@ -1122,7 +1142,9 @@ impl Agent for CliAcpAgent {
         // A close that stopped a pending resume of an external session
         // took effect, so it answers like a release.
         let fence = if self.release_external(&req.session_id)
-            || (fenced && lock(&self.host.external).contains_key(&req.session_id))
+            || (fenced
+                && (lock(&self.host.external).contains_key(&req.session_id)
+                    || lock(&self.host.restoring).contains(&req.session_id)))
         {
             CloseFence::External
         } else {

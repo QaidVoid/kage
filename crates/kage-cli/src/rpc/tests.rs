@@ -7826,7 +7826,7 @@ fn external_attach_before_last_close_keeps_session_alive() {
     let (_dir, host, owner, other, _created) = external_race_fixture();
     let ids = lock(&other.ids);
     std::thread::scope(|scope| {
-        let attaching = scope.spawn(|| other.attach_external("external", &[], None));
+        let attaching = scope.spawn(|| other.attach_external("external", &[], None, false));
         if !wait_until_external_locked(&host) {
             drop(ids);
             panic!("operation did not lock external sessions");
@@ -7854,7 +7854,7 @@ fn external_attach_blocked_by_disconnect_does_not_leak_attachment() {
     let (_dir, host, owner, other, _created) = external_race_fixture();
     let ids = lock(&other.ids);
     std::thread::scope(|scope| {
-        let attaching = scope.spawn(|| other.attach_external("external", &[], None));
+        let attaching = scope.spawn(|| other.attach_external("external", &[], None, false));
         if !wait_until_external_locked(&host) {
             drop(ids);
             panic!("operation did not lock external sessions");
@@ -7896,7 +7896,7 @@ fn external_last_close_before_attach_removes_session() {
     assert!(lock(&host.external).is_empty());
     assert!(
         other
-            .attach_external("external", &[], None)
+            .attach_external("external", &[], None, false)
             .unwrap()
             .is_none()
     );
@@ -7910,7 +7910,7 @@ fn external_last_close_before_attach_removes_session() {
 fn external_close_and_reattach_same_connection_are_ordered() {
     let (_dir, host, owner, other, _created) = external_race_fixture();
     other
-        .attach_external("external", &[], None)
+        .attach_external("external", &[], None, false)
         .unwrap()
         .unwrap()();
     let ids = lock(&owner.ids);
@@ -7924,7 +7924,7 @@ fn external_close_and_reattach_same_connection_are_ordered() {
             drop(ids);
             panic!("operation did not lock external sessions");
         }
-        let attaching = scope.spawn(|| owner.attach_external("external", &[], None));
+        let attaching = scope.spawn(|| owner.attach_external("external", &[], None, false));
         drop(ids);
         closing.join().unwrap().unwrap();
         attaching.join().unwrap().unwrap().unwrap()();
@@ -8062,7 +8062,7 @@ fn delayed_external_prompt_test(reattach: bool) {
         .announce();
     if reattach {
         other
-            .attach_external("external", &[], None)
+            .attach_external("external", &[], None, false)
             .unwrap()
             .unwrap()();
     }
@@ -8100,7 +8100,7 @@ fn delayed_external_prompt_test(reattach: bool) {
             })
             .unwrap();
         owner
-            .attach_external("external", &[], None)
+            .attach_external("external", &[], None, false)
             .unwrap()
             .unwrap()();
     } else {
@@ -8254,7 +8254,7 @@ for line in sys.stdin:
     let (peer, _, _) = kage_jsonrpc::connect(std::io::empty(), std::io::sink());
     let other = CliAcpAgent::new(Arc::clone(&host), peer.into());
     let receipt = other
-        .attach_external("external", &[], None)
+        .attach_external("external", &[], None, false)
         .unwrap()
         .unwrap();
     let pending = pending_external_receipt_prompt(&session, other.connection, "cancelled");
@@ -8290,7 +8290,7 @@ fn external_concurrent_open_receipts_survive_reverse_response_order() {
             first_tx
                 .send(
                     other
-                        .attach_external("external", &[], None)
+                        .attach_external("external", &[], None, false)
                         .unwrap()
                         .unwrap(),
                 )
@@ -8300,7 +8300,7 @@ fn external_concurrent_open_receipts_survive_reverse_response_order() {
             second_tx
                 .send(
                     other
-                        .attach_external("external", &[], None)
+                        .attach_external("external", &[], None, false)
                         .unwrap()
                         .unwrap(),
                 )
@@ -8331,7 +8331,7 @@ fn external_failed_open_releases_the_connection_claim_and_last_session() {
     let session = owner.external_session("external").unwrap();
     drop(
         other
-            .attach_external("external", &[], None)
+            .attach_external("external", &[], None, false)
             .unwrap()
             .unwrap(),
     );
@@ -8340,11 +8340,11 @@ fn external_failed_open_releases_the_connection_claim_and_last_session() {
     assert!(lock(&host.external).contains_key("external"));
 
     let first = other
-        .attach_external("external", &[], None)
+        .attach_external("external", &[], None, false)
         .unwrap()
         .unwrap();
     let second = other
-        .attach_external("external", &[], None)
+        .attach_external("external", &[], None, false)
         .unwrap()
         .unwrap();
     drop(first);
@@ -8396,7 +8396,7 @@ fn external_dropped_and_stale_receipts_do_not_announce_replacement() {
 
     // Keep the process alive while replacing the owner's attachment.
     let other_receipt = other
-        .attach_external("external", &[], None)
+        .attach_external("external", &[], None, false)
         .unwrap()
         .unwrap();
     other_receipt();
@@ -8406,7 +8406,7 @@ fn external_dropped_and_stale_receipts_do_not_announce_replacement() {
         })
         .unwrap();
     let replacement = owner
-        .attach_external("external", &[], None)
+        .attach_external("external", &[], None, false)
         .unwrap()
         .unwrap();
     stale.announce();
@@ -8428,7 +8428,7 @@ fn external_stale_receipt_does_not_announce_replaced_session() {
     let (dir, host, owner, other, _created) = external_race_fixture();
     let old = owner.external_session("external").unwrap();
     let stale = owner
-        .attach_external("external", &[], None)
+        .attach_external("external", &[], None, false)
         .unwrap()
         .unwrap();
     owner
@@ -8443,7 +8443,7 @@ fn external_stale_receipt_does_not_announce_replaced_session() {
             .is_none()
     );
     let receipt = owner
-        .attach_external("external", &[], None)
+        .attach_external("external", &[], None, false)
         .unwrap()
         .unwrap();
     stale();
@@ -8594,7 +8594,7 @@ fn serve_raw(
 fn external_close_fences_a_prompt_dispatched_after_it() {
     let (_dir, host, owner, other, _created) = external_race_fixture();
     other
-        .attach_external("external", &[], None)
+        .attach_external("external", &[], None, false)
         .unwrap()
         .unwrap()();
     let session = owner.external_session("external").unwrap();
@@ -8667,7 +8667,7 @@ fn external_close_fences_a_resume_dispatched_before_it() {
     assert_eq!(closed["result"], serde_json::json!({}), "{closed}");
     assert!(!session.owners().contains(&other.connection));
     assert!(lock(&other.ids).external.is_empty());
-    assert!(lock(&other.ids).resuming.is_empty());
+    assert!(lock(&other.ids).opening.is_empty());
     assert!(lock(&host.external).contains_key("external"));
     drop(wire);
     owner.detach();
@@ -8766,6 +8766,38 @@ impl NativeClient {
 }
 
 #[cfg(target_os = "linux")]
+impl NativeClient {
+    /// The update texts once at least `count` arrived.
+    fn texts_after(&self, count: usize) -> Vec<String> {
+        let until = Instant::now() + WAIT;
+        while lock(&self.texts).len() < count {
+            assert!(Instant::now() < until, "expected updates did not arrive");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        lock(&self.texts).clone()
+    }
+}
+
+/// Prompts, messages and turn ends recorded for display in `path`.
+#[cfg(target_os = "linux")]
+fn recorded_turns(path: &Path) -> Vec<String> {
+    use kage_session::entry::ExternalAcpPresentation;
+    kage_session::external_replay::replay_external(path)
+        .unwrap()
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ExternalAcpPresentation::Prompt { text } => Some(format!("prompt {}", text.as_str())),
+            ExternalAcpPresentation::AgentMessage { text, .. } => {
+                Some(format!("message {}", text.as_str()))
+            }
+            ExternalAcpPresentation::TurnEnd { .. } => Some("end".into()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
 fn enabled_external_host(dir: &Path) -> Arc<Host> {
     let host = test_host(
         Arc::new(Listed::of(MockProvider::sequence(vec![]))),
@@ -8801,6 +8833,16 @@ fn external_session_is_created_closed_and_restored_from_its_upstream() {
     let turn = client.request("session/prompt", prompt("one"));
     assert_eq!(turn["result"]["stopReason"], "end_turn", "{turn}");
     assert_eq!(lock(&client.texts).last().map(String::as_str), Some("one"));
+    // Another client loading the live session sees its history first.
+    let mut watcher = NativeClient::serve(&first);
+    watcher.request("initialize", serde_json::json!({"protocolVersion": 1}));
+    let loaded = watcher.request(
+        "session/load",
+        serde_json::json!({"sessionId": id, "cwd": cwd, "mcpServers": []}),
+    );
+    assert!(loaded["result"].is_object(), "{loaded}");
+    assert_eq!(watcher.texts_after(2), ["one", "one"]);
+    watcher.request("session/close", serde_json::json!({"sessionId": id}));
     let closed = client.request("session/close", serde_json::json!({"sessionId": id}));
     assert_eq!(closed["result"], serde_json::json!({}));
     assert!(lock(&first.external).is_empty());
@@ -8831,12 +8873,14 @@ fn external_session_is_created_closed_and_restored_from_its_upstream() {
     );
     assert_eq!(second.lifecycles.live(), 0);
     drop(held);
-    // The recorded directory is restored, not the one the client names.
+    // The recorded directory is restored, not the one the client names, and
+    // a load shows the recorded history.
     let resumed = client.request(
-        "session/resume",
+        "session/load",
         serde_json::json!({"sessionId": id, "cwd": "/", "mcpServers": []}),
     );
     assert!(resumed["result"].is_object(), "{resumed}");
+    assert_eq!(client.texts_after(2), ["one", "one"]);
     let turn = client.request("session/prompt", prompt("two"));
     assert_eq!(turn["result"]["stopReason"], "end_turn", "{turn}");
     assert_eq!(
@@ -8858,21 +8902,7 @@ fn external_session_is_created_closed_and_restored_from_its_upstream() {
             .unwrap()
             .unwrap()
     };
-    let replay = kage_session::external_replay::replay_external(&path).unwrap();
-    let shown: Vec<String> = replay
-        .events
-        .iter()
-        .filter_map(|event| match event {
-            kage_session::entry::ExternalAcpPresentation::Prompt { text } => {
-                Some(format!("prompt {}", text.as_str()))
-            }
-            kage_session::entry::ExternalAcpPresentation::AgentMessage { text, .. } => {
-                Some(format!("message {}", text.as_str()))
-            }
-            kage_session::entry::ExternalAcpPresentation::TurnEnd { .. } => Some("end".into()),
-            _ => None,
-        })
-        .collect();
+    let shown = recorded_turns(&path);
     assert_eq!(
         shown,
         [

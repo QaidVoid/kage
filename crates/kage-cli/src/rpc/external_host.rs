@@ -15,7 +15,7 @@ use kage_core::sync::lock;
 use kage_jsonrpc::RpcError;
 use kage_session::entry::{SessionBackend, SessionEntry};
 
-use super::{CliAcpAgent, ExternalOpen, ResumeFence, external};
+use super::{CliAcpAgent, ExternalOpen, OpenFence, external};
 
 impl CliAcpAgent {
     /// Create a session on the configured external agent `name`.
@@ -68,7 +68,8 @@ impl CliAcpAgent {
         &self,
         id: &str,
         servers: &[McpServer],
-        fence: Option<&ResumeFence>,
+        fence: Option<&OpenFence>,
+        history: bool,
     ) -> Result<Option<OpenReceipt>, RpcError> {
         let Some(path) = self.exact_session_path(id)? else {
             return Ok(None);
@@ -83,7 +84,7 @@ impl CliAcpAgent {
             .to_owned();
         let config = trusted_agent(&backend.agent_name, &cwd)?;
         let Some(_restoring) = Restoring::begin(&self.host, id)? else {
-            return self.attach_external(id, servers, fence);
+            return self.attach_external(id, servers, fence, history);
         };
         let writer = kage_session::SessionWriter::open(&path).map_err(|error| match error {
             kage_session::SessionError::Locked { .. } => {
@@ -105,7 +106,7 @@ impl CliAcpAgent {
                 }),
                 restore: Some(external::Restore {
                     upstream: backend.upstream_session_id,
-                    replay: false,
+                    history,
                 }),
             },
         )?;
@@ -151,7 +152,7 @@ impl CliAcpAgent {
         &self,
         id: &str,
         (session, created): (Arc<external::External>, external::OpenTicket),
-        fence: Option<&ResumeFence>,
+        fence: Option<&OpenFence>,
     ) -> Result<OpenReceipt, RpcError> {
         let mut open = ExternalOpen {
             host: Arc::clone(&self.host),
@@ -167,7 +168,7 @@ impl CliAcpAgent {
         if fence.is_some_and(|fence| fence.closed.load(Ordering::SeqCst)) {
             return Err(RpcError::new(
                 -32602,
-                "the session was closed before the resume finished",
+                "the session was closed before it finished opening",
             ));
         }
         if sessions.contains_key(id) {

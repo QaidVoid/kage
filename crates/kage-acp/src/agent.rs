@@ -481,6 +481,28 @@ pub trait Agent: Send + Sync + 'static {
             .map(|response| (response, None))
     }
 
+    /// Prepare a load on the dispatch thread, so a later close can fence it.
+    /// Keep this short and nonblocking. The returned token is passed to
+    /// [`Agent::load_session_prepared`] on the worker thread. The default
+    /// prepares nothing.
+    fn prepare_load(&self, _req: &LoadSessionRequest) -> Option<Box<dyn std::any::Any + Send>> {
+        None
+    }
+
+    /// Load using the token returned by [`Agent::prepare_load`]. The default
+    /// ignores the token and calls [`Agent::load_session_with_receipt`].
+    ///
+    /// # Errors
+    /// Returns an error if the session cannot be loaded.
+    fn load_session_prepared(
+        &self,
+        req: LoadSessionRequest,
+        ctx: &PromptContext,
+        _prepared: Option<Box<dyn std::any::Any + Send>>,
+    ) -> OpenResult<LoadSessionResponse> {
+        self.load_session_with_receipt(req, ctx)
+    }
+
     /// Prepare a resume on the dispatch thread, so a later close can fence
     /// it. Keep this short and nonblocking. The returned token is passed to
     /// [`Agent::resume_session_prepared`] on the worker thread. The default
@@ -1343,9 +1365,10 @@ fn handle_request<A: Agent>(
                     session_id: req.session_id.clone(),
                     start: None,
                 };
+                let prepared = agent.prepare_load(&req);
                 spawn_open(peer, agent, id, move |a| {
                     let session = req.session_id.clone();
-                    a.load_session_with_receipt(req, &ctx)
+                    a.load_session_prepared(req, &ctx, prepared)
                         .map(|(resp, receipt)| (session, resp, receipt))
                 })
             }

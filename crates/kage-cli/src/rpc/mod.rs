@@ -360,9 +360,9 @@ struct Ids {
     /// hosts them for the client, so they take no prompts.
     read_only: HashSet<String>,
     external: HashSet<String>,
-    /// Resumes dispatched and not yet finished, by session, so a later
-    /// close can stop them from attaching.
-    resuming: HashMap<String, Vec<Arc<AtomicBool>>>,
+    /// Loads and resumes dispatched and not yet finished, by session, so a
+    /// later close can stop them from attaching.
+    opening: HashMap<String, Vec<Arc<AtomicBool>>>,
 }
 
 impl Ids {
@@ -428,21 +428,21 @@ impl Drop for ExternalOpen {
     }
 }
 
-/// A resume dispatched on this connection. A close dispatched after it
-/// marks it closed, so it cannot attach to an external session later.
-struct ResumeFence {
+/// A load or resume dispatched on this connection. A close dispatched after
+/// it marks it closed, so it cannot attach to an external session later.
+struct OpenFence {
     ids: Arc<Mutex<Ids>>,
     id: String,
     closed: Arc<AtomicBool>,
 }
 
-impl Drop for ResumeFence {
+impl Drop for OpenFence {
     fn drop(&mut self) {
         let mut ids = lock(&self.ids);
-        if let Some(fences) = ids.resuming.get_mut(&self.id) {
+        if let Some(fences) = ids.opening.get_mut(&self.id) {
             fences.retain(|fence| !Arc::ptr_eq(fence, &self.closed));
             if fences.is_empty() {
-                ids.resuming.remove(&self.id);
+                ids.opening.remove(&self.id);
             }
         }
     }
@@ -762,6 +762,21 @@ impl CliAcpAgent {
         sessions.get(id).cloned()
     }
 
+    /// Registers a load or resume of `id` that a later close can fence.
+    fn open_fence(&self, id: &str) -> OpenFence {
+        let closed = Arc::new(AtomicBool::new(false));
+        lock(&self.ids)
+            .opening
+            .entry(id.to_owned())
+            .or_default()
+            .push(Arc::clone(&closed));
+        OpenFence {
+            ids: Arc::clone(&self.ids),
+            id: id.to_owned(),
+            closed,
+        }
+    }
+
     fn release_external(&self, id: &str) -> bool {
         // Always acquire the host map before the connection ids, as in attach.
         // Detaching never blocks, so it can run under both locks.
@@ -783,7 +798,8 @@ impl CliAcpAgent {
         &self,
         id: &str,
         servers: &[kage_acp::acp::McpServer],
-        fence: Option<&ResumeFence>,
+        fence: Option<&OpenFence>,
+        history: bool,
     ) -> Result<Option<OpenReceipt>, RpcError> {
         // Declared before the locks so an unwind releases them before the
         // open fails, since failing takes the same locks.
@@ -810,10 +826,14 @@ impl CliAcpAgent {
         if fence.is_some_and(|fence| fence.closed.load(Ordering::SeqCst)) {
             return Err(RpcError::new(
                 -32602,
-                "the session was closed before the resume finished",
+                "the session was closed before it finished opening",
             ));
         }
-        open.ticket = Some(session.attach_open(self.connection, self.peer.clone())?);
+        open.ticket = Some(if history {
+            session.attach_load(self.connection, self.peer.clone())?
+        } else {
+            session.attach_open(self.connection, self.peer.clone())?
+        });
         ids.external.insert(id.to_owned());
         drop(ids);
         drop(sessions);
@@ -1031,7 +1051,7 @@ impl Agent for CliAcpAgent {
         if lock(&self.host.external).contains_key(&req.session_id) {
             return Err(RpcError::new(
                 -32602,
-                "external session history replay is unavailable; use session/resume to attach to the live session",
+                "external sessions must be opened over the native transport",
             ));
         }
         let config_options = self.open_recorded(
@@ -1078,17 +1098,35 @@ impl Agent for CliAcpAgent {
     }
 
     fn prepare_resume(&self, req: &ResumeSessionRequest) -> Option<Box<dyn std::any::Any + Send>> {
-        let closed = Arc::new(AtomicBool::new(false));
-        lock(&self.ids)
-            .resuming
-            .entry(req.session_id.clone())
-            .or_default()
-            .push(Arc::clone(&closed));
-        Some(Box::new(ResumeFence {
-            ids: Arc::clone(&self.ids),
-            id: req.session_id.clone(),
-            closed,
-        }))
+        Some(Box::new(self.open_fence(&req.session_id)))
+    }
+
+    fn prepare_load(&self, req: &LoadSessionRequest) -> Option<Box<dyn std::any::Any + Send>> {
+        Some(Box::new(self.open_fence(&req.session_id)))
+    }
+
+    // An external session opened by a load shows its display history first.
+    fn load_session_prepared(
+        &self,
+        req: LoadSessionRequest,
+        ctx: &PromptContext,
+        prepared: Option<Box<dyn std::any::Any + Send>>,
+    ) -> OpenResult<LoadSessionResponse> {
+        let fence = prepared.and_then(|prepared| prepared.downcast::<OpenFence>().ok());
+        let (id, servers) = (&req.session_id, &req.mcp_servers);
+        let receipt = match self.attach_external(id, servers, fence.as_deref(), true)? {
+            Some(receipt) => Some(receipt),
+            None => self.restore_external(id, servers, fence.as_deref(), true)?,
+        };
+        if let Some(receipt) = receipt {
+            return Ok((
+                LoadSessionResponse {
+                    config_options: Vec::new(),
+                },
+                Some(receipt),
+            ));
+        }
+        self.load_session(req, ctx).map(|response| (response, None))
     }
 
     fn resume_session_prepared(
@@ -1097,14 +1135,12 @@ impl Agent for CliAcpAgent {
         ctx: &PromptContext,
         prepared: Option<Box<dyn std::any::Any + Send>>,
     ) -> OpenResult<ResumeSessionResponse> {
-        let fence = prepared.and_then(|prepared| prepared.downcast::<ResumeFence>().ok());
-        let receipt =
-            match self.attach_external(&req.session_id, &req.mcp_servers, fence.as_deref())? {
-                Some(receipt) => Some(receipt),
-                None => {
-                    self.restore_external(&req.session_id, &req.mcp_servers, fence.as_deref())?
-                }
-            };
+        let fence = prepared.and_then(|prepared| prepared.downcast::<OpenFence>().ok());
+        let (id, servers) = (&req.session_id, &req.mcp_servers);
+        let receipt = match self.attach_external(id, servers, fence.as_deref(), false)? {
+            Some(receipt) => Some(receipt),
+            None => self.restore_external(id, servers, fence.as_deref(), false)?,
+        };
         if let Some(receipt) = receipt {
             return Ok((
                 ResumeSessionResponse {
@@ -1133,7 +1169,7 @@ impl Agent for CliAcpAgent {
     /// Releasing never blocks. Native sessions still close on the worker.
     fn fence_close(&self, req: &CloseSessionRequest) -> Option<Box<dyn std::any::Any + Send>> {
         let fenced = lock(&self.ids)
-            .resuming
+            .opening
             .get(&req.session_id)
             .is_some_and(|fences| {
                 for fence in fences {

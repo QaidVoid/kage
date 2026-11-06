@@ -208,7 +208,8 @@ fn append(writer: &mut SessionWriter, events: Vec<ExternalAcpPresentation>) -> b
     writer.append_lines(&lines).is_ok()
 }
 
-fn event_size(event: &ExternalAcpPresentation) -> usize {
+/// Approximate memory and queue cost of `event`.
+pub(crate) fn event_size(event: &ExternalAcpPresentation) -> usize {
     let len = |text: &PresentationText| text.as_str().len();
     let optional = |text: &Option<PresentationText>| text.as_ref().map_or(0, len);
     256 + match event {

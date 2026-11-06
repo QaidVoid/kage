@@ -19,12 +19,14 @@ pub(crate) struct Launch<'a> {
 
 /// An upstream session to restore instead of creating one. It is restored
 /// only through a capability the fresh agent process advertises, never by
-/// creating a new session or sending local history as context.
+/// creating a new session or sending local history as context. Resume is
+/// preferred. History an upstream load replays is discarded, because clients
+/// are shown the local display history instead.
 pub(crate) struct Restore {
     /// The upstream session id recorded in the session header.
     pub(crate) upstream: String,
-    /// Prefer `session/load`, whose history replay reaches the attachment.
-    pub(crate) replay: bool,
+    /// Whether the restoring attachment first receives the display history.
+    pub(crate) history: bool,
 }
 
 /// Where to record presentation history.
@@ -53,10 +55,10 @@ mod unix {
     use std::process::{Command, Stdio};
 
     use super::lifecycle::{Lifecycles, Slot};
-    use super::recorder::{Recorder, Target, bounded, presentation};
+    use super::recorder::{Recorder, Target, bounded, event_size, presentation};
     use super::{Launch, Recording, Restore};
     use kage_core::reaper::spawn_protected;
-    use kage_session::entry::{ExternalAcpPresentation, PresentationTurnOutcome};
+    use kage_session::entry::{ExternalAcpPresentation, PresentationText, PresentationTurnOutcome};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
     use std::thread;
@@ -76,6 +78,9 @@ mod unix {
     const SESSION_BUDGET: usize = 8 * 1024 * 1024;
     const ATTACHMENT_BUDGET: usize = 2 * 1024 * 1024;
     const MAX_ATTACHMENTS: usize = 32;
+    // Display history kept in memory for loads, below the attachment budget
+    // so live updates still fit behind it.
+    const HISTORY_BYTES: usize = 1024 * 1024;
     // Outstanding upstream permission asks per session, one waiter each.
     const MAX_ASKS: usize = 4;
     // Unresolved opens of one attachment, so concurrent opens stay bounded.
@@ -186,6 +191,8 @@ mod unix {
         announced: bool,
         // Whether the downstream peer can take forwarded permission asks.
         asks: bool,
+        // Whether the display history was queued for this attachment.
+        shown_history: bool,
         receipts: u8,
         pending: Vec<Buffered>,
         bytes: Arc<AtomicUsize>,
@@ -194,6 +201,7 @@ mod unix {
 
     enum WriteItem {
         Update(Buffered),
+        Batch(Vec<Buffered>),
         Barrier(mpsc::Sender<()>),
         Ask {
             params: Buffered,
@@ -215,6 +223,10 @@ mod unix {
     // The upstream request handle, answered exactly once by whoever takes it.
     type Reply = Arc<Mutex<Option<kage_acp::connection::Request>>>;
 
+    #[allow(
+        clippy::struct_excessive_bools,
+        reason = "independent flags guarded by the session lock"
+    )]
     struct State {
         upstream: Option<String>,
         early: Vec<Buffered>,
@@ -226,11 +238,18 @@ mod unix {
         writers: Arc<AtomicUsize>,
         asks: Vec<Arc<Ask>>,
         recorder: Option<Recorder>,
+        // The newest display history, sent to an attachment opened by a load.
+        history: std::collections::VecDeque<(ExternalAcpPresentation, usize)>,
+        history_bytes: usize,
+        // Whether older history was dropped from memory.
+        history_cut: bool,
         // Unique to this process, so item ids differ from a restored record's.
         run: String,
         turn: u64,
         // A recorded prompt whose end is not recorded yet.
         turn_open: bool,
+        // An upstream load is replaying history that clients never see.
+        discard_replay: bool,
     }
 
     impl State {
@@ -241,9 +260,24 @@ mod unix {
             }
         }
 
-        fn record(&self, event: ExternalAcpPresentation) {
+        fn record(&mut self, event: ExternalAcpPresentation) {
+            self.remember(event.clone());
             if let Some(recorder) = &self.recorder {
                 recorder.record(event);
+            }
+        }
+
+        // Keep the newest display history within its budget.
+        fn remember(&mut self, event: ExternalAcpPresentation) {
+            let size = event_size(&event);
+            self.history_bytes += size;
+            self.history.push_back((event, size));
+            while self.history_bytes > HISTORY_BYTES {
+                let Some((_, size)) = self.history.pop_front() else {
+                    break;
+                };
+                self.history_bytes -= size;
+                self.history_cut = true;
             }
         }
 
@@ -442,8 +476,6 @@ mod unix {
         capabilities: PromptCapabilities,
         protocol_version: u32,
         upstream: String,
-        // Whether updates before the response replayed upstream history.
-        replayed: bool,
     }
 
     /// One unresolved open of an exact attachment, resolved exactly once.
@@ -483,6 +515,7 @@ mod unix {
 
     /// A single upstream process and session, shared by host attachments.
     pub(crate) struct External {
+        id: String,
         connection: UnixConnection,
         prompt_gate: Mutex<()>,
         admitted: Arc<AtomicUsize>,
@@ -529,18 +562,43 @@ mod unix {
                 writers,
                 asks: Vec::new(),
                 recorder: None,
+                history: std::collections::VecDeque::new(),
+                history_bytes: 0,
+                history_cut: false,
                 run: kage_session::entry::EntryId::new().to_string(),
                 turn: 0,
                 turn_open: false,
+                discard_replay: false,
             }));
             let session_id = id.clone();
             let started = receive_updates(incoming, Arc::clone(&state), id, slot)
-                .and_then(|()| initialize(&mut connection, cwd, restore.as_ref()))
+                .and_then(|()| initialize(&mut connection, &state, cwd, restore.as_ref()))
                 .and_then(|initialized| {
+                    let seed = match &record {
+                        Some(Recording::Append { writer }) => {
+                            let replay =
+                                kage_session::external_replay::replay_external(writer.path())
+                                    .map_err(|e| {
+                                        RpcError::internal(format!(
+                                            "cannot read the external session record: {e}"
+                                        ))
+                                    })?;
+                            let mut events = replay.events;
+                            if replay.truncated {
+                                events.push(ExternalAcpPresentation::Gap);
+                            }
+                            events
+                        }
+                        _ => Vec::new(),
+                    };
                     let recorder = record
                         .map(|record| start_recording(slot, record, name, &initialized))
                         .transpose()?;
-                    publish(&state, &session_id, &initialized, recorder)?;
+                    let history = restore
+                        .as_ref()
+                        .is_some_and(|restore| restore.history)
+                        .then_some(owner);
+                    publish(&state, &session_id, &initialized, recorder, seed, history)?;
                     Ok(initialized.capabilities)
                 });
             let capabilities = match started {
@@ -555,6 +613,7 @@ mod unix {
                 }
             };
             let session = Arc::new(Self {
+                id: session_id,
                 connection,
                 prompt_gate: Mutex::new(()),
                 admitted: Arc::new(AtomicUsize::new(0)),
@@ -605,8 +664,41 @@ mod unix {
             owner: u64,
             peer: AgentPeer,
         ) -> Result<OpenTicket, RpcError> {
+            self.open_attachment(owner, peer, false)
+        }
+
+        /// [`Self::attach_open`] for a load. A new attachment first receives
+        /// the display history, ahead of any live update.
+        pub(crate) fn attach_load(
+            self: &Arc<Self>,
+            owner: u64,
+            peer: AgentPeer,
+        ) -> Result<OpenTicket, RpcError> {
+            self.open_attachment(owner, peer, true)
+        }
+
+        fn open_attachment(
+            self: &Arc<Self>,
+            owner: u64,
+            peer: AgentPeer,
+            history: bool,
+        ) -> Result<OpenTicket, RpcError> {
             let mut state = lock(&self.state);
+            if history
+                && state
+                    .attachments
+                    .get(&owner)
+                    .is_some_and(|attachment| attachment.announced)
+            {
+                return Err(RpcError::new(
+                    -32602,
+                    "the session is already open on this connection; close it before loading it again",
+                ));
+            }
             self.attach_locked(&mut state, owner, peer)?;
+            if history && !state.attachments[&owner].shown_history {
+                queue_history(&mut state, owner, &self.id);
+            }
             let attachment = state.attachments.get_mut(&owner).expect("attached owner");
             if attachment.receipts >= MAX_OPEN_RECEIPTS {
                 return Err(RpcError::internal("too many pending external opens"));
@@ -660,18 +752,15 @@ mod unix {
                 && !attachment.announced
             {
                 attachment.announced = true;
-                for update in attachment.pending.drain(..) {
-                    if attachment
+                let pending = std::mem::take(&mut attachment.pending);
+                // One item, so a long history cannot fill the writer channel.
+                failed = !pending.is_empty()
+                    && attachment
                         .sender
                         .as_ref()
                         .expect("open attachment")
-                        .try_send(WriteItem::Update(update))
-                        .is_err()
-                    {
-                        failed = true;
-                        break;
-                    }
-                }
+                        .try_send(WriteItem::Batch(pending))
+                        .is_err();
             }
             if failed {
                 self.close(state);
@@ -1138,6 +1227,9 @@ mod unix {
                             break;
                         }
                         if state.upstream.is_none() {
+                            if state.discard_replay && replayed(&params) {
+                                continue;
+                            }
                             if let Some(update) = Buffered::new(params, &state.bytes, None) {
                                 state.early.push(update);
                             } else {
@@ -1170,6 +1262,139 @@ mod unix {
             drop(incoming);
         })
         .map_err(|e| RpcError::internal(format!("cannot start external receiver: {e}")))
+    }
+
+    // Queue the display history for an unannounced attachment. Fragments of
+    // one message are merged. The newest history is kept within half the
+    // attachment budget, and a notice marks where older history was cut.
+    fn queue_history(state: &mut State, owner: u64, id: &str) {
+        let mut updates: Vec<Value> = Vec::new();
+        let mut last_item: Option<(&'static str, String)> = None;
+        for (event, _) in &state.history {
+            let item = match event {
+                ExternalAcpPresentation::AgentMessage { item_id, .. } => {
+                    Some(("agent_message_chunk", item_id.as_str().to_owned()))
+                }
+                ExternalAcpPresentation::AgentThought { item_id, .. } => {
+                    Some(("agent_thought_chunk", item_id.as_str().to_owned()))
+                }
+                _ => None,
+            };
+            let Some(update) = history_update(event, id) else {
+                last_item = None;
+                continue;
+            };
+            if item.is_some()
+                && item == last_item
+                && let Some(previous) = updates.last_mut()
+                && let (Some(text), Some(more)) = (
+                    previous["update"]["content"]["text"]
+                        .as_str()
+                        .map(str::to_owned),
+                    update["update"]["content"]["text"].as_str(),
+                )
+            {
+                previous["update"]["content"]["text"] = Value::String(text + more);
+                continue;
+            }
+            last_item = item;
+            updates.push(update);
+        }
+        let mut cut = state.history_cut;
+        let State {
+            attachments, bytes, ..
+        } = state;
+        let attachment = attachments.get_mut(&owner).expect("attached owner");
+        let budget = ATTACHMENT_BUDGET / 2;
+        let mut used = 0;
+        let mut kept = Vec::new();
+        for update in updates.into_iter().rev() {
+            let size = value_size(&update);
+            let reserved = (used + size <= budget)
+                .then(|| Buffered::new(update, bytes, Some(&attachment.bytes)))
+                .flatten();
+            let Some(update) = reserved else {
+                cut = true;
+                break;
+            };
+            used += size;
+            kept.push(update);
+        }
+        if cut && let Some(gap) = Buffered::new(history_gap(id), bytes, Some(&attachment.bytes)) {
+            kept.push(gap);
+        }
+        attachment.pending.extend(kept.into_iter().rev());
+    }
+
+    // A recorded display event as the `session/update` it was shown as.
+    fn history_update(event: &ExternalAcpPresentation, id: &str) -> Option<Value> {
+        let text = |kind: &str, text: &PresentationText| json!({"sessionUpdate": kind, "content": {"type": "text", "text": text.as_str()}});
+        let update = match event {
+            ExternalAcpPresentation::Prompt { text: prompt } => text("user_message_chunk", prompt),
+            ExternalAcpPresentation::AgentMessage { text: body, .. } => {
+                text("agent_message_chunk", body)
+            }
+            ExternalAcpPresentation::AgentThought { text: body, .. } => {
+                text("agent_thought_chunk", body)
+            }
+            ExternalAcpPresentation::ToolCall {
+                tool_call_id,
+                title,
+                status,
+            } => json!({"sessionUpdate": "tool_call", "toolCallId": tool_call_id.as_str(),
+                "title": title.as_str(), "status": status_name(*status)}),
+            ExternalAcpPresentation::ToolCallUpdate {
+                tool_call_id,
+                title,
+                status,
+                ..
+            } => {
+                let mut update = json!({"sessionUpdate": "tool_call_update",
+                    "toolCallId": tool_call_id.as_str()});
+                if let Some(title) = title {
+                    update["title"] = json!(title.as_str());
+                }
+                if let Some(status) = status {
+                    update["status"] = json!(status_name(*status));
+                }
+                update
+            }
+            ExternalAcpPresentation::Gap => return Some(history_gap(id)),
+            ExternalAcpPresentation::TurnEnd { .. } => return None,
+        };
+        Some(json!({"sessionId": id, "update": update}))
+    }
+
+    // Marked as a kage notice, since it is not text the agent sent.
+    fn history_gap(id: &str) -> Value {
+        json!({"sessionId": id, "update": {"sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "(Part of this session's history was not recorded.)"},
+            "_meta": {"kage": {"historyGap": true}}}})
+    }
+
+    // Updates an upstream load replays as history, which clients never see.
+    fn replayed(params: &Value) -> bool {
+        matches!(
+            params["update"]["sessionUpdate"].as_str(),
+            Some(
+                "user_message_chunk"
+                    | "agent_message_chunk"
+                    | "agent_thought_chunk"
+                    | "tool_call"
+                    | "tool_call_update"
+                    | "plan"
+            )
+        )
+    }
+
+    fn status_name(status: kage_session::entry::PresentationToolStatus) -> &'static str {
+        use kage_session::entry::PresentationToolStatus;
+        match status {
+            PresentationToolStatus::Pending => "pending",
+            PresentationToolStatus::InProgress => "in_progress",
+            PresentationToolStatus::Completed => "completed",
+            PresentationToolStatus::Failed | PresentationToolStatus::Unknown => "failed",
+        }
     }
 
     // Start a turn and record its prompt text, before dispatch, so updates
@@ -1447,6 +1672,7 @@ mod unix {
 
     fn initialize(
         connection: &mut UnixConnection,
+        state: &Mutex<State>,
         cwd: &str,
         restore: Option<&Restore>,
     ) -> Result<Initialized, RpcError> {
@@ -1467,7 +1693,7 @@ mod unix {
         if let Some(restore) = restore {
             let can_load = capabilities.load_session;
             let can_resume = capabilities.session_capabilities.resume.is_some();
-            let load = can_load && (restore.replay || !can_resume);
+            let load = can_load && !can_resume;
             if !load && !can_resume {
                 return Err(RpcError::new(
                     -32602,
@@ -1475,6 +1701,7 @@ mod unix {
                 ));
             }
             let deadline = Instant::now() + TIMEOUT;
+            lock(state).discard_replay = load;
             let restored = if load {
                 let (response, barrier) = connection.load_session(
                     &kage_acp::acp::LoadSessionRequest {
@@ -1505,7 +1732,6 @@ mod unix {
                 capabilities: capabilities.prompt_capabilities,
                 protocol_version,
                 upstream: restore.upstream.clone(),
-                replayed: load,
             });
         }
         let deadline = Instant::now() + TIMEOUT;
@@ -1523,7 +1749,6 @@ mod unix {
             capabilities: capabilities.prompt_capabilities,
             protocol_version,
             upstream: response.session_id,
-            replayed: false,
         })
     }
 
@@ -1553,29 +1778,32 @@ mod unix {
         }
     }
 
-    // Updates that arrived before the upstream session id are published in
-    // arrival order once it is known. They are recorded too, unless they
-    // replayed upstream history that the local record already holds.
+    // Updates that arrived before the upstream session id are published and
+    // recorded in arrival order once it is known, after the display history
+    // of a restored session. Upstream history replay is discarded.
     fn publish(
         state: &Mutex<State>,
         id: &str,
         initialized: &Initialized,
         recorder: Option<Recorder>,
+        seed: Vec<ExternalAcpPresentation>,
+        history: Option<u64>,
     ) -> Result<(), RpcError> {
         let mut state = lock(state);
         state.upstream = Some(initialized.upstream.clone());
-        let mut recorder = Some(recorder);
-        if !initialized.replayed {
-            state.recorder = recorder.take().flatten();
+        state.discard_replay = false;
+        for event in seed {
+            state.remember(event);
         }
+        if let Some(owner) = history {
+            queue_history(&mut state, owner, id);
+        }
+        state.recorder = recorder;
         let early = std::mem::take(&mut state.early);
         for update in early {
             let value = update.value.clone();
             drop(update);
             forward(&mut state, id, value);
-        }
-        if let Some(recorder) = recorder {
-            state.recorder = recorder;
         }
         if state.closed {
             return Err(RpcError::internal(
@@ -1620,6 +1848,14 @@ mod unix {
                             break;
                         }
                     }
+                    WriteItem::Batch(updates) => {
+                        if updates.iter().any(|update| {
+                            stopped.load(Ordering::Acquire)
+                                || peer.notify("session/update", update.value.clone()).is_err()
+                        }) {
+                            break;
+                        }
+                    }
                     WriteItem::Barrier(done) => {
                         let _ = done.send(());
                     }
@@ -1658,6 +1894,7 @@ mod unix {
             epoch: 0,
             announced: false,
             asks,
+            shown_history: false,
             receipts: 0,
             pending: Vec::new(),
             bytes: Arc::new(AtomicUsize::new(0)),
@@ -3469,7 +3706,26 @@ for line in sys.stdin:
                     upstream_session_id: "up-old".into(),
                 },
             ));
-            drop(kage_session::SessionWriter::create(&path, header).unwrap());
+            let mut writer = kage_session::SessionWriter::create(&path, header).unwrap();
+            for event in [
+                ExternalAcpPresentation::Prompt {
+                    text: bounded("before"),
+                },
+                ExternalAcpPresentation::AgentMessage {
+                    item_id: bounded("old-1"),
+                    text: bounded("earlier"),
+                },
+                ExternalAcpPresentation::TurnEnd {
+                    outcome: PresentationTurnOutcome::EndTurn,
+                },
+            ] {
+                writer
+                    .append(
+                        &event.into_entry(kage_session::entry::EntryId::new(), chrono::Utc::now()),
+                    )
+                    .unwrap();
+            }
+            drop(writer);
             let config = kage_core::config::AcpAgent {
                 command: "python3".into(),
                 args: vec![
@@ -3497,7 +3753,7 @@ for line in sys.stdin:
                     }),
                     restore: Some(Restore {
                         upstream: "up-old".into(),
-                        replay,
+                        history: replay,
                     }),
                 },
             );
@@ -3516,10 +3772,11 @@ for line in sys.stdin:
         #[test]
         fn restoring_resumes_the_recorded_upstream_session_and_appends() {
             let dir = tempfile::tempdir().unwrap();
-            let (started, _lifecycles, path, _client) =
-                restored_session(dir.path(), "resume", true);
+            let (started, _lifecycles, path, client) =
+                restored_session(dir.path(), "resume", false);
             let (session, created) = started.unwrap();
             created.announce();
+            let texts = client_texts(client);
             assert_eq!(
                 session
                     .prompt_owned(1, request("again"))
@@ -3530,8 +3787,16 @@ for line in sys.stdin:
             assert!(session.detach(1));
             assert!(session.slot.wait_finished(WAIT));
             assert_eq!(
+                texts.recv_timeout(WAIT).unwrap().1,
+                "session/resume up-old",
+                "a resume must not send history"
+            );
+            assert_eq!(
                 recorded_texts(&path),
                 [
+                    "prompt before",
+                    "message earlier",
+                    "end EndTurn",
                     "prompt again",
                     "message session/resume up-old",
                     "end EndTurn"
@@ -3539,16 +3804,83 @@ for line in sys.stdin:
             );
         }
 
+        // Update texts the client receives, read without blocking the test.
+        fn client_texts(client: UnixStream) -> mpsc::Receiver<(String, String)> {
+            let (tx, rx) = mpsc::channel();
+            thread::spawn(move || {
+                for line in BufReader::new(client).lines() {
+                    let Ok(line) = line else { break };
+                    let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                        continue;
+                    };
+                    let update = &value["params"]["update"];
+                    if let (Some(kind), Some(text)) = (
+                        update["sessionUpdate"].as_str(),
+                        update["content"]["text"].as_str(),
+                    ) && tx.send((kind.to_owned(), text.to_owned())).is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            rx
+        }
+
         #[test]
-        fn restoring_by_load_forwards_history_without_recording_it() {
+        fn a_long_history_is_cut_to_its_newest_part_without_closing_the_session() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            {
+                let mut state = lock(&session.state);
+                for n in 0..5000 {
+                    state.remember(ExternalAcpPresentation::AgentMessage {
+                        item_id: bounded(&format!("item-{n}")),
+                        text: bounded(&format!("message {n}")),
+                    });
+                }
+            }
+            let (client, server) = UnixStream::pair().unwrap();
+            let (peer, _, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            session.attach_load(2, peer.into()).unwrap().announce();
+            let texts = client_texts(client);
+            let first = texts.recv_timeout(WAIT).unwrap();
+            assert!(first.1.contains("not recorded"), "{first:?}");
+            let mut last = first;
+            while let Ok(text) = texts.recv_timeout(Duration::from_millis(500)) {
+                last = text;
+            }
+            assert_eq!(last.1, "message 4999");
+            let mut state = lock(&session.state);
+            assert!(!state.closed);
+            forward(
+                &mut state,
+                "local",
+                json!({"sessionId": "up", "update": {"sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "live"}}}),
+            );
+            assert!(
+                !state.closed,
+                "a live update after the history must still fit"
+            );
+            drop(state);
+            assert_eq!(texts.recv_timeout(WAIT).unwrap().1, "live");
+            assert!(session.attach_load(2, peer_for_test()).is_err());
+        }
+
+        fn peer_for_test() -> AgentPeer {
+            let (_client, server) = UnixStream::pair().unwrap();
+            let (peer, _, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            peer.into()
+        }
+
+        #[test]
+        fn a_load_shows_local_history_and_discards_the_upstream_replay() {
             let dir = tempfile::tempdir().unwrap();
             let (started, _lifecycles, path, client) = restored_session(dir.path(), "load", true);
             let (session, created) = started.unwrap();
             created.announce();
-            let mut lines = BufReader::new(client).lines();
-            let history: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
-            assert_eq!(history["params"]["sessionId"], "local");
-            assert_eq!(history["params"]["update"]["content"]["text"], "history");
+            let texts = client_texts(client);
             assert_eq!(
                 session
                     .prompt_owned(1, request("again"))
@@ -3556,11 +3888,27 @@ for line in sys.stdin:
                     .stop_reason,
                 StopReason::EndTurn
             );
+            let seen: Vec<_> = (0..3).map(|_| texts.recv_timeout(WAIT).unwrap()).collect();
+            assert_eq!(
+                seen,
+                [
+                    ("user_message_chunk".into(), "before".into()),
+                    ("agent_message_chunk".into(), "earlier".into()),
+                    ("agent_message_chunk".into(), "session/load up-old".into()),
+                ]
+            );
             assert!(session.detach(1));
             assert!(session.slot.wait_finished(WAIT));
             assert_eq!(
                 recorded_texts(&path),
-                ["prompt again", "message session/load up-old", "end EndTurn"]
+                [
+                    "prompt before",
+                    "message earlier",
+                    "end EndTurn",
+                    "prompt again",
+                    "message session/load up-old",
+                    "end EndTurn"
+                ]
             );
         }
 
@@ -3577,7 +3925,7 @@ for line in sys.stdin:
                 assert!(Instant::now() < until, "slot was not released");
                 thread::sleep(Duration::from_millis(5));
             }
-            assert!(recorded_texts(&path).is_empty());
+            assert_eq!(recorded_texts(&path).len(), 3);
         }
 
         #[test]
@@ -3600,7 +3948,9 @@ for line in sys.stdin:
             }
             second.announce();
             first.announce();
-            assert!(matches!(receiver.try_recv(), Ok(WriteItem::Update(_))));
+            assert!(
+                matches!(receiver.try_recv(), Ok(WriteItem::Batch(updates)) if updates.len() == 1)
+            );
             assert!(matches!(
                 receiver.try_recv(),
                 Err(mpsc::TryRecvError::Empty)
@@ -3871,9 +4221,13 @@ for line in sys.stdin:
                 writers: Arc::new(AtomicUsize::new(0)),
                 asks: Vec::new(),
                 recorder: None,
+                history: std::collections::VecDeque::new(),
+                history_bytes: 0,
+                history_cut: false,
                 run: kage_session::entry::EntryId::new().to_string(),
                 turn: 0,
                 turn_open: false,
+                discard_replay: false,
             };
             forward(
                 &mut state,
@@ -3971,9 +4325,13 @@ for line in sys.stdin:
                 writers: Arc::new(AtomicUsize::new(0)),
                 asks: Vec::new(),
                 recorder: None,
+                history: std::collections::VecDeque::new(),
+                history_bytes: 0,
+                history_cut: false,
                 run: kage_session::entry::EntryId::new().to_string(),
                 turn: 0,
                 turn_open: false,
+                discard_replay: false,
             };
             state.close();
             assert!(state.attachments.contains_key(&1));
@@ -4052,9 +4410,13 @@ for line in sys.stdin:
                 writers: Arc::new(AtomicUsize::new(0)),
                 asks: Vec::new(),
                 recorder: None,
+                history: std::collections::VecDeque::new(),
+                history_bytes: 0,
+                history_cut: false,
                 run: kage_session::entry::EntryId::new().to_string(),
                 turn: 0,
                 turn_open: false,
+                discard_replay: false,
             }));
             let startup = Lifecycles::new(1).reserve().unwrap();
             startup.transport(
@@ -4092,9 +4454,13 @@ for line in sys.stdin:
                 writers: Arc::new(AtomicUsize::new(0)),
                 asks: Vec::new(),
                 recorder: None,
+                history: std::collections::VecDeque::new(),
+                history_bytes: 0,
+                history_cut: false,
                 run: kage_session::entry::EntryId::new().to_string(),
                 turn: 0,
                 turn_open: false,
+                discard_replay: false,
             }));
             let startup = Lifecycles::new(1).reserve().unwrap();
             startup.transport(
@@ -4493,6 +4859,13 @@ mod unsupported {
             Err(RpcError::internal("external ACP requires Linux"))
         }
         pub(crate) fn attach_open(
+            self: &Arc<Self>,
+            _: u64,
+            _: AgentPeer,
+        ) -> Result<OpenTicket, RpcError> {
+            Err(RpcError::internal("external ACP requires Linux"))
+        }
+        pub(crate) fn attach_load(
             self: &Arc<Self>,
             _: u64,
             _: AgentPeer,

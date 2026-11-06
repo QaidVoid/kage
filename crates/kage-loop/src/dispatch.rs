@@ -20,6 +20,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crossbeam_channel::Sender;
+use kage_core::environment::Environment;
 use kage_core::event::TOOL_CANCELLED_TEXT;
 use kage_core::{
     CancelFlag, Content, LoopError, LoopEvent, MediaSource, Message, MessageId, Modality, Role,
@@ -131,6 +132,7 @@ fn execute_live<F, D>(
     workdir: &Path,
     cancel: &CancelFlag,
     confine_paths: bool,
+    env: &Environment,
     history: &[Arc<Message>],
     emit: &mut F,
     mut done: D,
@@ -169,6 +171,7 @@ fn execute_live<F, D>(
         let tools = owned_tools.clone();
         let workdir = owned_workdir.clone();
         let cancel = owned_cancel.clone();
+        let env = env.clone();
         let history = Arc::clone(&owned_history);
         std::thread::spawn(move || {
             for job in job_rx {
@@ -195,6 +198,7 @@ fn execute_live<F, D>(
                         &workdir,
                         &cancel,
                         confine_paths,
+                        &env,
                         &history,
                         Some(sink),
                     )
@@ -457,6 +461,7 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
     workdir: &Path,
     cancel: &CancelFlag,
     confine_paths: bool,
+    env: &Environment,
     history: &[Arc<Message>],
     parent: MessageId,
     hooks: &mut dyn Hooks,
@@ -481,6 +486,7 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
                     workdir,
                     cancel,
                     confine_paths,
+                    env,
                     history,
                     emit,
                     |_, _, done| result = Some(done),
@@ -561,6 +567,7 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
     workdir: &Path,
     cancel: &CancelFlag,
     confine_paths: bool,
+    env: &Environment,
     history: &[Arc<Message>],
     parent: MessageId,
     hooks: &mut dyn Hooks,
@@ -625,6 +632,7 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
             workdir,
             cancel,
             confine_paths,
+            env,
             history,
             emit,
             |emit, index, raw| finish(emit, to_run[index], raw),
@@ -646,12 +654,17 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
 /// Cancellation surfaces as `Err(LoopError::Cancelled)`; every other tool
 /// error is converted to `Ok(ToolOutput { is_error: true, ... })` so the
 /// model can observe the failure and adapt rather than terminating the run.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the loop hands over its run state unbundled"
+)]
 fn execute(
     tools: &ToolRegistry,
     call: &PendingToolCall,
     workdir: &Path,
     cancel: &CancelFlag,
     confine_paths: bool,
+    env: &Environment,
     history: &[Arc<Message>],
     progress: Option<Arc<dyn ProgressSink>>,
 ) -> Result<ToolOutput, LoopError> {
@@ -674,7 +687,8 @@ fn execute(
 
     let mut cx = ToolContext::new(workdir, cancel)
         .with_call_id(&call.id)
-        .with_history(history);
+        .with_history(history)
+        .with_env(env.clone());
     if confine_paths {
         cx = cx.with_confine();
     }

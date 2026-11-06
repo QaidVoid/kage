@@ -318,6 +318,40 @@ fn rpc_relays_share_one_host_that_exits_after_they_leave() {
 }
 
 #[test]
+fn a_session_starts_its_servers_in_the_environment_of_its_client() {
+    let env = Env::new();
+    let out = env.dir.path().join("seen");
+    let server = |name: &str| {
+        json!({
+            "name": name,
+            "command": "sh",
+            "args": ["-c", format!("printf %s \"$KAGE_TEST_CLIENT\" > {}.{name}", out.display())],
+            "env": [],
+        })
+    };
+    // Started apart from either client, so neither value is the host's.
+    let mut host = env.host(60);
+    env.ready(host.id());
+    let mut first = env.rpc(&[("KAGE_TEST_CLIENT", "first")]);
+    first.request("initialize", json!({"protocolVersion": 1}));
+    let mut second = env.rpc(&[("KAGE_TEST_CLIENT", "second")]);
+    second.request("initialize", json!({"protocolVersion": 1}));
+    for (rpc, name) in [(&mut first, "a"), (&mut second, "b")] {
+        let created = rpc.request(
+            "session/new",
+            json!({"cwd": env.dir.path(), "mcpServers": [server(name)]}),
+        );
+        assert!(created["result"]["sessionId"].is_string(), "{created}");
+    }
+    let seen = |name: &str| std::fs::read_to_string(format!("{}.{name}", out.display())).unwrap();
+    assert_eq!(seen("a"), "first");
+    assert_eq!(seen("b"), "second");
+    assert!(first.close().success());
+    assert!(second.close().success());
+    assert!(terminate(&mut host).success());
+}
+
+#[test]
 fn a_standalone_rpc_starts_no_host() {
     let env = Env::new();
     let mut rpc = env.rpc(&[("KAGE_STANDALONE", "1")]);

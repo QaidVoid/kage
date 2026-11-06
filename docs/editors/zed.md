@@ -11,7 +11,14 @@ same way it drives its other external agents, with no shim or wrapper.
 kage rpc
 ```
 
-Optional flags:
+On Linux and other Unix systems, `kage rpc` connects to the
+[shared host](/guide/shared-host), one kage engine per user that it
+starts when none runs, so Zed, other editors and the desktop app share
+live sessions. Each session's tools run in the environment Zed started
+`kage rpc` with. `--standalone`, or `KAGE_STANDALONE=1`, keeps a
+private engine instead.
+
+Optional flags, each of which also keeps a private engine:
 
 - `-m, --model <provider/model>` pins the model for the connection.
 - `--system <text>` overrides the system-prompt role.

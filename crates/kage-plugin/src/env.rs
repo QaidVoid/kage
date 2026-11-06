@@ -2,14 +2,17 @@
 //!
 //! Attached only onto the `kage` proxy of a plugin that was granted
 //! `env` (see [`crate::capabilities`]); an ungranted plugin never sees
-//! it. Returns the value of a process environment variable or `nil`
-//! when it is unset. The capability grant itself is the access
+//! it. Returns the value of a variable in the session's environment, the
+//! one `kage.exec` starts processes with, or `nil` when it is unset. The capability grant itself is the access
 //! control: there is no allowlist of which variables can be read,
 //! matching the unrestricted-command shape of `exec`. A granted plugin
-//! can read every variable in the host process environment, including
+//! can read every variable in that environment, including
 //! secrets such as provider API keys, and the access is read-only
 //! (there is no setter). Grant it only to trusted plugins.
 
+use std::ffi::OsString;
+
+use kage_core::environment::Environment;
 use kage_core::sync::lock;
 
 use mlua::{Lua, Table};
@@ -28,19 +31,24 @@ pub type CredentialLookup = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send
 /// plugin's `kage` proxy and sets `env` and `credential` on it. A
 /// missing variable returns `nil`; an empty value returns the empty
 /// string. A provider id with no stored credential answers `nil`.
-pub(crate) fn register(registry: &CapabilityRegistry, lookup: CredentialLookup) {
+/// Variables are read from `env`, the one `kage.exec` starts processes
+/// with.
+pub(crate) fn register(registry: &CapabilityRegistry, lookup: CredentialLookup, env: Environment) {
     let mut reg = lock(registry);
     reg.entry(Capability::Env)
         .or_default()
         .push(Box::new(move |lua: &Lua, pkage: &Table| {
             pkage.set(
                 "env",
-                lua.create_function(|_, name: String| match std::env::var(&name) {
-                    Ok(value) => Ok(Some(value)),
-                    Err(std::env::VarError::NotPresent) => Ok(None),
-                    Err(std::env::VarError::NotUnicode(_)) => Err(mlua::Error::external(format!(
-                        "kage.env: {name} is not valid UTF-8"
-                    ))),
+                lua.create_function({
+                    let env = env.clone();
+                    move |_, name: String| match env.var(&name).map(OsString::into_string) {
+                        Some(Ok(value)) => Ok(Some(value)),
+                        None => Ok(None),
+                        Some(Err(_)) => Err(mlua::Error::external(format!(
+                            "kage.env: {name} is not valid UTF-8"
+                        ))),
+                    }
                 })?,
             )?;
             let lookup = lookup.clone();
@@ -87,6 +95,28 @@ mod tests {
                 "p",
                 "kage.request_capabilities({'env'}); \
                  return kage.env('KAGE_DEFINITELY_UNSET_VAR_xyz123') == nil",
+            )
+            .unwrap();
+        assert_eq!(v.as_boolean(), Some(true));
+    }
+
+    #[test]
+    fn env_reads_the_session_environment() {
+        let mut caps = std::collections::BTreeMap::new();
+        caps.insert("p".to_owned(), vec!["env".to_owned()]);
+        let rt = PluginRuntime::builder()
+            .capabilities(caps)
+            .env(kage_core::environment::Environment::captured(vec![(
+                "CLIENT".into(),
+                "editor".into(),
+            )]))
+            .build()
+            .unwrap();
+        let v = rt
+            .eval_plugin(
+                "p",
+                "kage.request_capabilities({'env'}); \
+                 return kage.env('CLIENT') == 'editor' and kage.env('PATH') == nil",
             )
             .unwrap();
         assert_eq!(v.as_boolean(), Some(true));

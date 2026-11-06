@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use kage_core::environment::Environment;
 use kage_core::reaper;
 use kage_core::sync::lock;
 use kage_tools::resolve_under;
@@ -69,17 +70,20 @@ fn drain(pipe: impl Read) -> (Vec<u8>, bool) {
 ///
 /// The installer runs (via `request_capabilities`) against a granted
 /// plugin's `kage` proxy and sets `exec` on it. `workdir` is the host
-/// workdir; a spec `cwd` is resolved under it and may not escape.
-pub(crate) fn register(registry: &CapabilityRegistry, workdir: PathBuf) {
+/// workdir; a spec `cwd` is resolved under it and may not escape. Every
+/// process starts with `env`.
+pub(crate) fn register(registry: &CapabilityRegistry, workdir: PathBuf, env: Environment) {
     let mut reg = lock(registry);
     reg.entry(Capability::Exec)
         .or_default()
         .push(Box::new(move |lua: &Lua, pkage: &Table| {
             let root = workdir.clone();
+            let env = env.clone();
             pkage.set(
                 "exec",
                 lua.create_async_function(move |lua, spec: Table| {
                     let root = root.clone();
+                    let env = env.clone();
                     async move {
                         let cmd: Option<String> = spec.get("cmd")?;
                         let cmd = cmd.filter(|c| !c.is_empty()).ok_or_else(|| {
@@ -109,7 +113,9 @@ pub(crate) fn register(registry: &CapabilityRegistry, workdir: PathBuf) {
                             Duration::from_secs(s).max(Duration::from_secs(1))
                         });
 
-                        let child = Command::new(&cmd)
+                        let mut command = Command::new(&cmd);
+                        env.apply(&mut command);
+                        let child = command
                             .args(&args)
                             .current_dir(&dir)
                             .stdin(Stdio::null())

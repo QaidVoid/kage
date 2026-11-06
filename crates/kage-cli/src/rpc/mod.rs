@@ -72,6 +72,7 @@ use kage_acp::acp::{
 };
 use kage_acp::agent::{Agent, PromptContext};
 use kage_core::config::{Config, McpServer as McpSpec, PluginsConfig};
+use kage_core::environment::Environment;
 use kage_core::permissions::PermissionAction;
 use kage_core::protocol::{AgentTree, Command, CommandKind, Delivery, RunOutcome};
 use kage_core::sync::lock;
@@ -253,6 +254,12 @@ struct CliAcpAgent {
     /// Whether the client is a kage client, which shows runs it did not
     /// prompt, so an idle session wakes for a background agent's result.
     kage_client: AtomicBool,
+    /// The environment the client sent, which sessions it opens from now
+    /// on start their processes with. The host's own until it sends one.
+    env: Mutex<Environment>,
+    /// Whether this connection may send its environment: only a local
+    /// client of this user, never a remote one.
+    takes_env: AtomicBool,
     peer: Peer,
     held: Held,
     asks: AskSet,
@@ -314,12 +321,19 @@ impl CliAcpAgent {
             subagents,
             unconfigured_run: AtomicBool::new(false),
             kage_client: AtomicBool::new(false),
+            env: Mutex::new(Environment::inherit()),
+            takes_env: AtomicBool::new(false),
             peer,
             held,
             asks,
             subscription,
             seeds,
         }
+    }
+
+    /// Accept the client's `_kage/environment` on this connection.
+    pub(super) fn take_environment(&self) {
+        self.takes_env.store(true, Ordering::SeqCst);
     }
 
     /// The config options a new session opens with: the default model,
@@ -340,7 +354,8 @@ impl CliAcpAgent {
         model: &str,
         servers: BTreeMap<String, McpSpec>,
     ) -> Result<SessionSpec, RpcError> {
-        let mut spec = (self.host.spec)(&self.host.registry(), id, cwd, model, servers)?;
+        let env = lock(&self.env).clone();
+        let mut spec = (self.host.spec)(&self.host.registry(), id, cwd, model, servers, &env)?;
         if self.unconfigured_run.load(Ordering::SeqCst) {
             spec.gate = spec.gate.with_fallback(PermissionAction::Allow);
         }
@@ -901,6 +916,17 @@ impl Agent for CliAcpAgent {
 
     fn detached(&self) {
         self.detach();
+    }
+
+    fn environment(&self, vars: BTreeMap<String, String>) {
+        if !self.takes_env.load(Ordering::SeqCst) {
+            return;
+        }
+        let vars = vars
+            .into_iter()
+            .map(|(name, value)| (name.into(), value.into()))
+            .collect();
+        *lock(&self.env) = Environment::captured(vars);
     }
 }
 

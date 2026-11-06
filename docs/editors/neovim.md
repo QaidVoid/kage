@@ -6,6 +6,11 @@ a job and a one-line-per-message parser, with no plugin required. See
 [zed](./zed) for the full method table, session loading, config
 options and the other features an editor can use.
 
+On Unix, `kage rpc` connects to the [shared host](/guide/shared-host),
+so Neovim's sessions are live in every other editor and the desktop
+app. Tools run in the environment of the Neovim that started
+`kage rpc`.
+
 ## a minimal client
 
 Each message is a single JSON object terminated by `\n`, without

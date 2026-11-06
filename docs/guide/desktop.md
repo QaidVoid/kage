@@ -6,6 +6,11 @@ attaches to the `kage serve` it was loaded from. Both read and write
 the same engine state, so a session started in one shows in the other
 and in the TUI.
 
+On Linux and macOS, the `kage rpc` the desktop app starts connects to
+the [shared host](/guide/shared-host), the engine your editors use
+too, so a session open in the app and in an editor is one live
+session.
+
 - To install the desktop app, see [desktop client](/guide/install#desktop-client).
 - To serve the browser client, see [web client](/editors/remote#web-client).
 

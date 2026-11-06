@@ -324,6 +324,7 @@ where
                 &workdir,
                 cancel,
                 cx.confine_paths,
+                &cx.env,
                 &cx.history,
                 assistant_id,
                 hooks,
@@ -591,6 +592,8 @@ fn build_request(
     req.produces = cx.produces;
     req.accepts = cx.accepts;
     req.session.clone_from(&cx.session);
+    req.workdir = Some(cx.workdir.clone());
+    req.env = cx.env.clone();
     req
 }
 

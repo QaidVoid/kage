@@ -301,7 +301,7 @@ fn accept(stream: UnixStream, host: &Arc<Host>, connections: &Arc<AtomicUsize>, 
         .name("kage-host-client".into())
         .spawn(move || {
             let _guard = guard;
-            let _ = host.serve(BufReader::new(reader), writer);
+            let _ = host.serve_local(BufReader::new(reader), writer);
         });
     if let Err(e) = spawned {
         log(&format!("cannot serve a client: {e}"));

@@ -48,6 +48,12 @@ value but `false`) turns on `subagent_update` and child sessions.
 | `_kage/session/rename` | `sessionId`, `title` | `{}`: a named session keeps its name over generated titles. |
 | `_kage/swarm/resume` | `sessionId`, `members` | `{ resumed }`: continues swarm children (child session id to a follow-up prompt; empty continues the task). It answers once every member is checked and attached, and refuses the whole request when one is not a swarm child of the session or is still working. Members report under the call that first spawned them. Once all have reported, the session gets a notice with the counts and its next turn reads their results. |
 
+## notifications
+
+| Method | Params | Meaning |
+| --- | --- | --- |
+| `_kage/environment` | `vars` | The client's environment, variable name to value. Sessions the connection opens after it run their shell commands, stdio MCP servers, plugin processes, worktree VCS commands and `acp:` model agents with exactly these variables. `kage rpc` sends it when it relays to the [shared host](/guide/shared-host). Only the shared host's local socket accepts it; other connections ignore it. |
+
 ## session updates
 
 | `sessionUpdate` | Fields | Meaning |

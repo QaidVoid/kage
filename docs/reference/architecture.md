@@ -347,6 +347,45 @@ token:
   exits at once. The connect URL printed at startup is the only place
   the token is ever rendered.
 
+## the shared host
+
+On Unix, `kage host run` serves the same `Host` on a local socket, so
+every `kage rpc` of one user shares one engine. See
+[shared host](/guide/shared-host) for what users see.
+
+- **One per user.** The host takes an exclusive `flock` on `host.lock`
+  in the runtime directory before anything else, then binds
+  `host.sock` (0600) and only afterwards starts its engine, so
+  clients queue while it warms up. `host.json` records it once it
+  accepts. A host that cannot take the lock connects to the socket:
+  when that answers, another host serves and this one exits 0; when it
+  does not, an old host is shutting down and the new one waits for the
+  lock for up to 10 seconds.
+- **Accept loop.** A `poll(2)` loop with a 250 ms tick accepts
+  connections, checks the stop flag and measures idleness: no
+  connection open and `Host::busy` false (no turn running or paused
+  and no ask open) for the idle timeout. On idle it unlinks the socket
+  first, then accepts what queued in the meantime, and binds again if
+  anything did, so a client never connects to a host that is leaving.
+- **Per-client output.** Each connection writes through a bounded
+  queue drained by its own thread. A client that stops reading is
+  disconnected once 16 MiB are queued for it, so it can never stall
+  the engine's bus for the others.
+- **Relay.** `kage rpc` connects, or starts `kage host run --detached`
+  (`setsid`, cwd `/`, stderr to `host.log`) and retries with backoff.
+  It waits for `host.json`, refuses a host of another version, then
+  sends `_kage/environment` and copies bytes both ways. Any failure
+  before relaying falls back to the in-process engine.
+- **Session environment.** A connection on the local socket may send
+  its environment. `AgentContext::env` carries it, never persisted, to
+  every `ToolContext`, the stdio MCP spawns and restarts of the
+  session's `McpManager`, its plugin runtime's `kage.exec` and
+  `kage.env`, worktree VCS commands, every agent the session spawns,
+  and each `StreamRequest`, whose `workdir` and `env` start the agent
+  behind an `acp:` model. A connection that
+  sends none, and every `kage serve` connection, runs with the host's
+  own environment.
+
 ## data flow per turn
 
 ```

@@ -110,6 +110,11 @@ pub struct AgentContext {
     /// restores the historical unconfined resolution when the config
     /// disables confinement.
     pub confine_paths: bool,
+    /// The environment the session's tools start processes with. Not
+    /// persisted: a reopened session takes the environment of the client
+    /// that reopens it.
+    #[serde(skip)]
+    pub env: kage_core::environment::Environment,
     /// Running token totals.
     pub budget: TokenBudget,
     /// Id of the session this conversation belongs to, forwarded on
@@ -141,6 +146,7 @@ impl AgentContext {
             produces: kage_core::Modalities::default(),
             accepts: kage_core::Modalities::default(),
             confine_paths: true,
+            env: kage_core::environment::Environment::inherit(),
             budget: TokenBudget::default(),
             session: None,
         }

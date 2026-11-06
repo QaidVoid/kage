@@ -41,6 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kage_core::config::{McpConfig, McpServer};
+use kage_core::environment::Environment;
 use kage_core::protocol::{
     McpPrompt, McpResource, McpResourceTemplate, McpServerInfo, McpServerStatus,
 };
@@ -229,6 +230,9 @@ pub struct McpManager {
     /// Bearer tokens for HTTP servers, retained so a `restart` (for
     /// example after a login) sends them.
     tokens: Option<Arc<dyn TokenSource>>,
+    /// The environment stdio servers start with, retained so a
+    /// `restart` uses it again.
+    env: Environment,
     /// Whether the manager registered [`McpResourceTool`], so it never
     /// unregisters a tool of the same name that it did not add.
     resource_tool: bool,
@@ -260,18 +264,20 @@ impl McpManager {
         roots: Vec<std::path::PathBuf>,
         handler: Option<Arc<dyn crate::ServerRequestHandler>>,
     ) -> (Self, Vec<(String, McpError)>) {
-        Self::spawn_all_with(cfg, roots, handler, None)
+        Self::spawn_all_with(cfg, roots, handler, None, Environment::inherit())
     }
 
-    /// [`Self::spawn_all`] with a bearer token source for HTTP servers,
-    /// kept for [`Self::restart`]. A server that refuses kage's token
-    /// stays in the manager as [`McpServerStatus::NeedsAuth`].
+    /// [`Self::spawn_all`] with a bearer token source for HTTP servers
+    /// and the environment stdio servers start with, both kept for
+    /// [`Self::restart`]. A server that refuses kage's token stays in the
+    /// manager as [`McpServerStatus::NeedsAuth`].
     #[must_use]
     pub fn spawn_all_with(
         cfg: &McpConfig,
         roots: Vec<std::path::PathBuf>,
         handler: Option<Arc<dyn crate::ServerRequestHandler>>,
         tokens: Option<Arc<dyn TokenSource>>,
+        env: Environment,
     ) -> (Self, Vec<(String, McpError)>) {
         let mut servers = Vec::new();
         let mut errors = Vec::new();
@@ -289,6 +295,7 @@ impl McpManager {
                 handler.clone(),
                 tokens.clone(),
                 timeout,
+                &env,
             );
             let managed = match spawned {
                 Ok(handle) => {
@@ -311,6 +318,7 @@ impl McpManager {
                 roots,
                 handler,
                 tokens,
+                env,
                 resource_tool: false,
             },
             errors,
@@ -347,6 +355,7 @@ impl McpManager {
             roots,
             handler,
             tokens,
+            env: Environment::inherit(),
             resource_tool: false,
         }
     }
@@ -559,6 +568,7 @@ impl McpManager {
             handler,
             tokens,
             timeout,
+            &self.env,
         );
         let fresh = match spawned {
             Ok(fresh) => fresh,
@@ -1321,6 +1331,7 @@ mod tests {
             vec![],
             None,
             Some(Arc::clone(&tokens) as Arc<dyn TokenSource>),
+            Environment::inherit(),
         );
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(
@@ -1353,6 +1364,7 @@ mod tests {
             vec![],
             None,
             Some(tokens),
+            Environment::inherit(),
         );
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(mgr.len(), 1);
@@ -1375,6 +1387,7 @@ mod tests {
             vec![],
             None,
             Some(Arc::clone(tokens) as Arc<dyn TokenSource>),
+            Environment::inherit(),
         );
         assert!(errors.is_empty(), "{errors:?}");
         let mut reg = ToolRegistry::new();

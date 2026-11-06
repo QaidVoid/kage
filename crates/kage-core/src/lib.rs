@@ -10,6 +10,7 @@ pub mod cancel;
 pub mod catalog_url;
 pub mod config;
 pub mod config_edit;
+pub mod environment;
 pub mod error;
 pub mod event;
 pub mod fsutil;

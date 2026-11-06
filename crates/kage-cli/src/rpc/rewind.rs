@@ -1,13 +1,15 @@
-//! Undo, rewind and the prompts they target, and deleting a recorded
-//! session: the session operations the engine answers with an event.
+//! Undo, rewind and the prompts they target, withdrawing a pending prompt,
+//! and deleting a recorded session: the session operations the engine
+//! answers with an event.
 
 use std::sync::mpsc;
 use std::time::Duration;
 
 use kage_acp::acp::{
-    ContentBlock, PastPrompt, SessionPromptsResponse, SessionRewindRequest, SessionUndoResponse,
+    ContentBlock, PastPrompt, PromptDelivery, PromptWithdrawn, SessionPromptsResponse,
+    SessionRewindRequest, SessionUndoResponse, WithdrawRequest,
 };
-use kage_core::protocol::{Command, CommandKind, Event, HostEvent, NoticeLevel};
+use kage_core::protocol::{Command, CommandKind, Delivery, Event, HostEvent, NoticeLevel};
 use kage_core::sync::lock;
 use kage_core::{Content, SessionId};
 use kage_jsonrpc::RpcError;
@@ -59,6 +61,30 @@ impl CliAcpAgent {
                     active: prompt.active,
                 })
                 .collect(),
+        })
+    }
+
+    /// Takes back the session's newest pending prompt of `req.delivery`.
+    pub(super) fn withdraw(&self, req: &WithdrawRequest) -> Result<PromptWithdrawn, RpcError> {
+        let id = self.engine_id(&req.session_id)?;
+        let delivery = match req.delivery {
+            PromptDelivery::Steer => Delivery::Steer,
+            PromptDelivery::Queue => Delivery::Queue,
+        };
+        let content = self.ask_engine(
+            id,
+            CommandKind::WithdrawPrompt { delivery },
+            move |event| match event {
+                HostEvent::PromptWithdrawn {
+                    delivery: from,
+                    content,
+                } if *from == delivery => Some(content.clone().unwrap_or_default()),
+                _ => None,
+            },
+        )?;
+        Ok(PromptWithdrawn {
+            delivery: req.delivery,
+            content: blocks(&content),
         })
     }
 
@@ -133,7 +159,7 @@ impl CliAcpAgent {
 }
 
 /// A prompt's text, images and clips as ACP blocks.
-fn blocks(content: &[Content]) -> Vec<ContentBlock> {
+pub(super) fn blocks(content: &[Content]) -> Vec<ContentBlock> {
     content
         .iter()
         .filter_map(|block| match block {

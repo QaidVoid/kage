@@ -382,6 +382,46 @@ struct PromptEnd {
     stop: Option<CoreStopReason>,
 }
 
+/// Host bookkeeping for one external open. Announcing resolves it after the
+/// response is written. Dropping it fails the open, which removes the
+/// connection's claim only if that exact attachment was detached.
+struct ExternalOpen {
+    host: Arc<Host>,
+    ids: Arc<Mutex<Ids>>,
+    id: String,
+    ticket: Option<external::OpenTicket>,
+}
+
+impl ExternalOpen {
+    fn announce(mut self) {
+        if let Some(ticket) = self.ticket.take() {
+            ticket.announce();
+        }
+    }
+}
+
+impl Drop for ExternalOpen {
+    fn drop(&mut self) {
+        let Some(ticket) = self.ticket.take() else {
+            return;
+        };
+        let mut sessions = lock(&self.host.external);
+        let mut ids = lock(&self.ids);
+        let current = sessions
+            .get(&self.id)
+            .is_some_and(|session| Arc::ptr_eq(session, ticket.session()));
+        let Some(last) = ticket.fail() else {
+            return;
+        };
+        if current {
+            ids.external.remove(&self.id);
+            if last {
+                sessions.remove(&self.id);
+            }
+        }
+    }
+}
+
 struct PreparedExternalPrompt {
     session: Arc<external::External>,
     ticket: external::PromptTicket,
@@ -712,6 +752,14 @@ impl CliAcpAgent {
         id: &str,
         servers: &[kage_acp::acp::McpServer],
     ) -> Result<Option<OpenReceipt>, RpcError> {
+        // Declared before the locks so an unwind releases them before the
+        // open fails, since failing takes the same locks.
+        let mut open = ExternalOpen {
+            host: Arc::clone(&self.host),
+            ids: Arc::clone(&self.ids),
+            id: id.to_owned(),
+            ticket: None,
+        };
         let sessions = lock(&self.host.external);
         let Some(session) = sessions.get(id) else {
             return Ok(None);
@@ -726,9 +774,11 @@ impl CliAcpAgent {
         if self.disconnecting.load(Ordering::SeqCst) {
             return Err(RpcError::internal("client is disconnecting"));
         }
-        let receipt = session.attach_with_receipt(self.connection, self.peer.clone())?;
+        open.ticket = Some(session.attach_open(self.connection, self.peer.clone())?);
         ids.external.insert(id.to_owned());
-        Ok(Some(receipt))
+        drop(ids);
+        drop(sessions);
+        Ok(Some(Box::new(move || open.announce())))
     }
 
     /// The connection ended: stop delivering engine events to it, free

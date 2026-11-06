@@ -7748,11 +7748,14 @@ fn run_external_host_test_in_child() {
 }
 
 #[cfg(target_os = "linux")]
+// The creator's open stays unresolved, as while a creation response is in
+// flight, until the test resolves or drops the returned ticket.
 fn external_race_fixture() -> (
     tempfile::TempDir,
     Arc<Host>,
     Arc<CliAcpAgent>,
     Arc<CliAcpAgent>,
+    external::OpenTicket,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let mock = MockProvider::sequence(vec![]);
@@ -7768,14 +7771,17 @@ fn external_race_fixture() -> (
     };
     let owner = Arc::new(CliAcpAgent::new(Arc::clone(&host), peer()));
     let other = Arc::new(CliAcpAgent::new(Arc::clone(&host), peer()));
-    let session = external_race_session(dir.path(), &owner);
+    let (session, created) = external_race_session(dir.path(), &owner);
     lock(&host.external).insert("external".into(), session);
     lock(&owner.ids).external.insert("external".into());
-    (dir, host, owner, other)
+    (dir, host, owner, other, created)
 }
 
 #[cfg(target_os = "linux")]
-fn external_race_session(dir: &Path, owner: &CliAcpAgent) -> Arc<external::External> {
+fn external_race_session(
+    dir: &Path,
+    owner: &CliAcpAgent,
+) -> (Arc<external::External>, external::OpenTicket) {
     let config = kage_core::config::AcpAgent {
         command: "python3".into(),
         args: vec![
@@ -7813,7 +7819,7 @@ fn wait_until_external_locked(host: &Host) -> bool {
 #[cfg(target_os = "linux")]
 #[test]
 fn external_attach_before_last_close_keeps_session_alive() {
-    let (_dir, host, owner, other) = external_race_fixture();
+    let (_dir, host, owner, other, _created) = external_race_fixture();
     let ids = lock(&other.ids);
     std::thread::scope(|scope| {
         let attaching = scope.spawn(|| other.attach_external("external", &[]));
@@ -7827,7 +7833,7 @@ fn external_attach_before_last_close_keeps_session_alive() {
             })
         });
         drop(ids);
-        assert!(attaching.join().unwrap().unwrap().is_some());
+        attaching.join().unwrap().unwrap().unwrap()();
         closing.join().unwrap().unwrap();
     });
     assert!(lock(&host.external).contains_key("external"));
@@ -7841,7 +7847,7 @@ fn external_attach_before_last_close_keeps_session_alive() {
 #[cfg(target_os = "linux")]
 #[test]
 fn external_attach_blocked_by_disconnect_does_not_leak_attachment() {
-    let (_dir, host, owner, other) = external_race_fixture();
+    let (_dir, host, owner, other, _created) = external_race_fixture();
     let ids = lock(&other.ids);
     std::thread::scope(|scope| {
         let attaching = scope.spawn(|| other.attach_external("external", &[]));
@@ -7877,7 +7883,7 @@ fn external_attach_blocked_by_disconnect_does_not_leak_attachment() {
 #[cfg(target_os = "linux")]
 #[test]
 fn external_last_close_before_attach_removes_session() {
-    let (_dir, host, owner, other) = external_race_fixture();
+    let (_dir, host, owner, other, _created) = external_race_fixture();
     owner
         .close_session(CloseSessionRequest {
             session_id: "external".into(),
@@ -7893,8 +7899,8 @@ fn external_last_close_before_attach_removes_session() {
 #[cfg(target_os = "linux")]
 #[test]
 fn external_close_and_reattach_same_connection_are_ordered() {
-    let (_dir, host, owner, other) = external_race_fixture();
-    assert!(other.attach_external("external", &[]).unwrap().is_some());
+    let (_dir, host, owner, other, _created) = external_race_fixture();
+    other.attach_external("external", &[]).unwrap().unwrap()();
     let ids = lock(&owner.ids);
     std::thread::scope(|scope| {
         let closing = scope.spawn(|| {
@@ -7909,7 +7915,7 @@ fn external_close_and_reattach_same_connection_are_ordered() {
         let attaching = scope.spawn(|| owner.attach_external("external", &[]));
         drop(ids);
         closing.join().unwrap().unwrap();
-        assert!(attaching.join().unwrap().unwrap().is_some());
+        attaching.join().unwrap().unwrap().unwrap()();
     });
     let session = owner.external_session("external").unwrap();
     assert!(session.register_prompt(owner.connection).is_ok());
@@ -7967,11 +7973,17 @@ impl Agent for DelayedPromptAgent {
 #[cfg(target_os = "linux")]
 #[test]
 fn saturated_external_session_leaves_workers_for_another_session() {
-    let (dir, host, owner, other) = external_race_fixture();
+    let (dir, host, owner, other, _created) = external_race_fixture();
     let session = owner.external_session("external").unwrap();
-    session.open_receipt(owner.connection).unwrap()();
-    let independent = external_race_session(dir.path(), &owner);
-    independent.open_receipt(owner.connection).unwrap()();
+    session
+        .attach_open(owner.connection, owner.peer.clone())
+        .unwrap()
+        .announce();
+    let (independent, _independent_created) = external_race_session(dir.path(), &owner);
+    independent
+        .attach_open(owner.connection, owner.peer.clone())
+        .unwrap()
+        .announce();
     lock(&host.external).insert("independent".into(), independent);
     lock(&owner.ids).external.insert("independent".into());
 
@@ -8029,14 +8041,15 @@ fn saturated_external_session_leaves_workers_for_another_session() {
 
 #[cfg(target_os = "linux")]
 fn delayed_external_prompt_test(reattach: bool) {
-    let (_dir, _host, owner, other) = external_race_fixture();
+    let (_dir, _host, owner, other, _created) = external_race_fixture();
     owner
         .external_session("external")
         .unwrap()
-        .open_receipt(owner.connection)
-        .unwrap()();
+        .attach_open(owner.connection, owner.peer.clone())
+        .unwrap()
+        .announce();
     if reattach {
-        assert!(other.attach_external("external", &[]).unwrap().is_some());
+        other.attach_external("external", &[]).unwrap().unwrap()();
     }
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -8193,7 +8206,7 @@ for line in sys.stdin:
             marker.to_string_lossy().into_owned(),
         )]),
     };
-    let session = external::External::start(
+    let (session, receipt) = external::External::start(
         &host.lifecycles,
         "external".into(),
         "fake",
@@ -8206,14 +8219,13 @@ for line in sys.stdin:
     lock(&host.external).insert("external".into(), Arc::clone(&session));
     lock(&owner.ids).external.insert("external".into());
 
-    let receipt = session.open_receipt(owner.connection).unwrap();
     let pending = pending_external_receipt_prompt(&session, owner.connection, "after receipt");
     assert!(matches!(
         pending.recv_timeout(Duration::from_millis(200)),
         Err(RecvTimeoutError::Timeout)
     ));
     assert!(!marker.exists(), "prompt dispatched before receipt");
-    receipt();
+    receipt.announce();
     assert!(pending.recv_timeout(WAIT).unwrap().is_ok());
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "after receipt\n");
 
@@ -8243,7 +8255,7 @@ for line in sys.stdin:
 #[cfg(target_os = "linux")]
 #[test]
 fn external_concurrent_open_receipts_survive_reverse_response_order() {
-    let (_dir, _host, owner, other) = external_race_fixture();
+    let (_dir, _host, owner, other, _created) = external_race_fixture();
     let session = owner.external_session("external").unwrap();
     let (first_tx, first_rx) = mpsc::channel();
     let (second_tx, second_rx) = mpsc::channel();
@@ -8279,11 +8291,47 @@ fn external_concurrent_open_receipts_survive_reverse_response_order() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn external_dropped_and_stale_receipts_do_not_announce_replacement() {
-    let (_dir, _host, owner, other) = external_race_fixture();
+fn external_failed_open_releases_the_connection_claim_and_last_session() {
+    let (_dir, host, owner, other, _created) = external_race_fixture();
     let session = owner.external_session("external").unwrap();
-    let stale = session.open_receipt(owner.connection).unwrap();
-    let dropped = session.open_receipt(owner.connection).unwrap();
+    drop(other.attach_external("external", &[]).unwrap().unwrap());
+    assert!(!lock(&other.ids).external.contains("external"));
+    assert!(!session.owners().contains(&other.connection));
+    assert!(lock(&host.external).contains_key("external"));
+
+    let first = other.attach_external("external", &[]).unwrap().unwrap();
+    let second = other.attach_external("external", &[]).unwrap().unwrap();
+    drop(first);
+    assert!(lock(&other.ids).external.contains("external"));
+    owner
+        .close_session(CloseSessionRequest {
+            session_id: "external".into(),
+        })
+        .unwrap();
+    assert!(lock(&host.external).contains_key("external"));
+    let unwound = std::thread::spawn(move || {
+        let _second = second;
+        panic!("injected open worker panic");
+    })
+    .join();
+    assert!(unwound.is_err());
+    assert!(!lock(&other.ids).external.contains("external"));
+    assert!(lock(&host.external).is_empty());
+    owner.detach();
+    other.detach();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn external_dropped_and_stale_receipts_do_not_announce_replacement() {
+    let (_dir, _host, owner, other, _created) = external_race_fixture();
+    let session = owner.external_session("external").unwrap();
+    let stale = session
+        .attach_open(owner.connection, owner.peer.clone())
+        .unwrap();
+    let dropped = session
+        .attach_open(owner.connection, owner.peer.clone())
+        .unwrap();
     drop(dropped);
     let dropped_prompt = pending_external_receipt_prompt(&session, owner.connection, "dropped");
     assert!(matches!(
@@ -8309,7 +8357,7 @@ fn external_dropped_and_stale_receipts_do_not_announce_replacement() {
         })
         .unwrap();
     let replacement = owner.attach_external("external", &[]).unwrap().unwrap();
-    stale();
+    stale.announce();
     let pending = pending_external_receipt_prompt(&session, owner.connection, "stale");
     assert!(matches!(
         pending.recv_timeout(Duration::from_millis(100)),
@@ -8325,7 +8373,7 @@ fn external_dropped_and_stale_receipts_do_not_announce_replacement() {
 #[cfg(target_os = "linux")]
 #[test]
 fn external_stale_receipt_does_not_announce_replaced_session() {
-    let (dir, host, owner, other) = external_race_fixture();
+    let (dir, host, owner, other, _created) = external_race_fixture();
     let old = owner.external_session("external").unwrap();
     let stale = owner.attach_external("external", &[]).unwrap().unwrap();
     owner
@@ -8333,7 +8381,7 @@ fn external_stale_receipt_does_not_announce_replaced_session() {
             session_id: "external".into(),
         })
         .unwrap();
-    let replacement = external_race_session(dir.path(), &owner);
+    let (replacement, _replacement_created) = external_race_session(dir.path(), &owner);
     assert!(
         lock(&host.external)
             .insert("external".into(), Arc::clone(&replacement))

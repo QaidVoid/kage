@@ -24,7 +24,7 @@ mod unix {
         ClientCapabilities, ContentBlock, InitializeRequest, NewSessionRequest, PROTOCOL_VERSION,
         PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse,
     };
-    use kage_acp::agent::{AgentPeer, OpenReceipt};
+    use kage_acp::agent::AgentPeer;
     use kage_acp::connection::{Message, UnixConnection, UnixPromptCanceller};
     use kage_core::{CancelFlag, sync::lock};
     use kage_jsonrpc::{ResponseBarrier, RpcError};
@@ -34,6 +34,8 @@ mod unix {
     const SESSION_BUDGET: usize = 8 * 1024 * 1024;
     const ATTACHMENT_BUDGET: usize = 2 * 1024 * 1024;
     const MAX_ATTACHMENTS: usize = 32;
+    // Unresolved opens of one attachment, so concurrent opens stay bounded.
+    const MAX_OPEN_RECEIPTS: u8 = 8;
     // Detached writers may still be finishing a write, so allow headroom.
     const MAX_WRITERS: usize = 2 * MAX_ATTACHMENTS;
     // Includes the active prompt and all registered tickets, until each is dropped.
@@ -138,6 +140,7 @@ mod unix {
         identity: Arc<()>,
         epoch: u64,
         announced: bool,
+        receipts: u8,
         pending: Vec<Buffered>,
         bytes: Arc<AtomicUsize>,
         detached: Arc<AtomicBool>,
@@ -338,6 +341,41 @@ mod unix {
         }
     }
 
+    /// One unresolved open of an exact attachment, resolved exactly once.
+    pub(crate) struct OpenTicket {
+        session: Arc<External>,
+        owner: u64,
+        identity: Arc<()>,
+        resolved: bool,
+    }
+
+    impl OpenTicket {
+        pub(crate) fn session(&self) -> &Arc<External> {
+            &self.session
+        }
+
+        /// The open response was written, so updates may follow it.
+        pub(crate) fn announce(mut self) {
+            self.resolved = true;
+            self.session.resolve_open(self.owner, &self.identity, true);
+        }
+
+        /// The open failed. Returns `Some(last)` if this detached the
+        /// attachment, where `last` means the session closed.
+        pub(crate) fn fail(mut self) -> Option<bool> {
+            self.resolved = true;
+            self.session.resolve_open(self.owner, &self.identity, false)
+        }
+    }
+
+    impl Drop for OpenTicket {
+        fn drop(&mut self) {
+            if !self.resolved {
+                self.session.resolve_open(self.owner, &self.identity, false);
+            }
+        }
+    }
+
     /// A single upstream process and session, shared by host attachments.
     pub(crate) struct External {
         connection: UnixConnection,
@@ -350,7 +388,9 @@ mod unix {
     }
 
     impl External {
-        /// Start the agent in a reserved slot, which owns its cleanup.
+        /// Start the agent in a reserved slot, which owns its cleanup. The
+        /// creating owner is attached with an open that the caller resolves
+        /// like any other once the creation response is written.
         pub(crate) fn start(
             lifecycles: &Lifecycles,
             id: String,
@@ -359,7 +399,7 @@ mod unix {
             config: &kage_core::config::AcpAgent,
             owner: u64,
             peer: AgentPeer,
-        ) -> Result<Arc<Self>, RpcError> {
+        ) -> Result<(Arc<Self>, OpenTicket), RpcError> {
             let startup = lifecycles.reserve()?;
             let mut command = Command::new(&config.command);
             command
@@ -395,7 +435,9 @@ mod unix {
             startup.transport(connection.shutdown_handle(), reader_stopped, reader_thread);
             let slot = startup.slot();
             let writers = Arc::new(AtomicUsize::new(0));
-            let first = attachment(peer, slot, &writers)?;
+            let mut first = attachment(peer, slot, &writers)?;
+            first.receipts = 1;
+            let identity = Arc::clone(&first.identity);
             let cancels = cancel_worker(slot)?;
             let state = Arc::new(Mutex::new(State {
                 upstream: None,
@@ -417,7 +459,7 @@ mod unix {
                     return Err(error);
                 }
             };
-            Ok(Arc::new(Self {
+            let session = Arc::new(Self {
                 connection,
                 prompt_gate: Mutex::new(()),
                 admitted: Arc::new(AtomicUsize::new(0)),
@@ -425,9 +467,17 @@ mod unix {
                 slot: startup.commit(),
                 capabilities,
                 state,
-            }))
+            });
+            let created = OpenTicket {
+                session: Arc::clone(&session),
+                owner,
+                identity,
+                resolved: false,
+            };
+            Ok((session, created))
         }
 
+        #[cfg(test)]
         pub(crate) fn attach(&self, owner: u64, peer: AgentPeer) -> Result<(), RpcError> {
             self.attach_locked(&mut lock(&self.state), owner, peer)
                 .map(drop)
@@ -452,45 +502,66 @@ mod unix {
             Ok(&state.attachments[&owner])
         }
 
-        /// Attach and create a receipt for this exact attachment under one lock.
-        pub(crate) fn attach_with_receipt(
+        /// Attach `owner` if needed and start one open of that exact attachment.
+        /// The ticket must be announced after the open response is written.
+        /// Dropping it instead fails the open.
+        pub(crate) fn attach_open(
             self: &Arc<Self>,
             owner: u64,
             peer: AgentPeer,
-        ) -> Result<OpenReceipt, RpcError> {
+        ) -> Result<OpenTicket, RpcError> {
             let mut state = lock(&self.state);
-            let identity = Arc::clone(&self.attach_locked(&mut state, owner, peer)?.identity);
-            Ok(self.receipt(owner, identity))
+            self.attach_locked(&mut state, owner, peer)?;
+            let attachment = state.attachments.get_mut(&owner).expect("attached owner");
+            if attachment.receipts >= MAX_OPEN_RECEIPTS {
+                return Err(RpcError::internal("too many pending external opens"));
+            }
+            attachment.receipts += 1;
+            Ok(OpenTicket {
+                session: Arc::clone(self),
+                owner,
+                identity: Arc::clone(&attachment.identity),
+                resolved: false,
+            })
         }
 
-        /// Create a receipt for an existing attachment, including the initial owner.
-        pub(crate) fn open_receipt(self: &Arc<Self>, owner: u64) -> Result<OpenReceipt, RpcError> {
-            let state = lock(&self.state);
+        #[cfg(test)]
+        pub(crate) fn owners(&self) -> Vec<u64> {
+            lock(&self.state).attachments.keys().copied().collect()
+        }
+
+        #[cfg(test)]
+        pub(crate) fn announce(&self, owner: u64) {
+            let mut state = lock(&self.state);
+            self.announce_locked(&mut state, owner);
+        }
+
+        // Resolve one open of the exact attachment. A failed open detaches the
+        // attachment only while it is unannounced and has no other open. Returns
+        // whether that detach happened and, if so, whether it was the last.
+        fn resolve_open(&self, owner: u64, identity: &Arc<()>, announce: bool) -> Option<bool> {
+            let mut state = lock(&self.state);
             let attachment = state
                 .attachments
-                .get(&owner)
-                .filter(|_| !state.closed)
-                .ok_or_else(|| RpcError::internal("external session is not attached"))?;
-            Ok(self.receipt(owner, Arc::clone(&attachment.identity)))
+                .get_mut(&owner)
+                .filter(|attachment| Arc::ptr_eq(&attachment.identity, identity))?;
+            attachment.receipts = attachment.receipts.saturating_sub(1);
+            if announce {
+                self.announce_locked(&mut state, owner);
+                return None;
+            }
+            if attachment.announced || attachment.receipts > 0 {
+                return None;
+            }
+            self.detach_locked(&mut state, owner)
         }
 
-        fn receipt(self: &Arc<Self>, owner: u64, identity: Arc<()>) -> OpenReceipt {
-            let session = Arc::clone(self);
-            Box::new(move || session.announce_identity(owner, Some(&identity)))
-        }
-
-        pub(crate) fn announce(&self, owner: u64) {
-            self.announce_identity(owner, None);
-        }
-
-        fn announce_identity(&self, owner: u64, identity: Option<&Arc<()>>) {
-            let mut state = lock(&self.state);
+        fn announce_locked(&self, state: &mut State, owner: u64) {
             if state.closed {
                 return;
             }
             let mut failed = false;
             if let Some(attachment) = state.attachments.get_mut(&owner)
-                && identity.is_none_or(|identity| Arc::ptr_eq(&attachment.identity, identity))
                 && !attachment.announced
             {
                 attachment.announced = true;
@@ -508,7 +579,7 @@ mod unix {
                 }
             }
             if failed {
-                self.close(&mut state);
+                self.close(state);
             }
         }
 
@@ -516,14 +587,16 @@ mod unix {
         /// terminal, and the slot finishes cleanup in the background. Otherwise
         /// the owner's active prompt is handed to the cancellation worker.
         pub(crate) fn detach(&self, owner: u64) -> bool {
-            let mut state = lock(&self.state);
-            let Some(attachment) = state.attachments.remove(&owner) else {
-                return false;
-            };
+            self.detach_locked(&mut lock(&self.state), owner)
+                .unwrap_or(false)
+        }
+
+        fn detach_locked(&self, state: &mut State, owner: u64) -> Option<bool> {
+            let attachment = state.attachments.remove(&owner)?;
             attachment.detached.store(true, Ordering::Release);
             let last = state.attachments.is_empty();
             if last {
-                self.close(&mut state);
+                self.close(state);
             } else if let Some(action) = state
                 .active
                 .as_mut()
@@ -532,9 +605,9 @@ mod unix {
                 })
                 .and_then(|active| active.cancel(&self.state))
             {
-                self.queue_cancel(&mut state, action);
+                self.queue_cancel(state, action);
             }
-            last
+            Some(last)
         }
 
         // Closing only marks state and the slot. It never waits for cleanup.
@@ -1053,6 +1126,7 @@ mod unix {
             identity: Arc::new(()),
             epoch: 0,
             announced: false,
+            receipts: 0,
             pending: Vec::new(),
             bytes: Arc::new(AtomicUsize::new(0)),
             detached,
@@ -1281,7 +1355,7 @@ for line in sys.stdin:
             writer.socket = Some(a);
             let (peer, _, _) = kage_jsonrpc::connect(BufReader::new(b), writer);
             let cwd = std::env::current_dir().unwrap();
-            let session = External::start(
+            let (session, created) = External::start(
                 &Lifecycles::new(1),
                 "local".into(),
                 "fake",
@@ -1291,7 +1365,7 @@ for line in sys.stdin:
                 peer.into(),
             )
             .unwrap();
-            session.announce(1);
+            created.announce();
             session
         }
 
@@ -1373,7 +1447,7 @@ for line in sys.stdin:
                 kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
             let cwd = std::env::current_dir().unwrap();
             let cwd = cwd.to_str().unwrap();
-            let session = External::start(
+            let (session, created) = External::start(
                 &Lifecycles::new(1),
                 "local".into(),
                 "fake",
@@ -1383,7 +1457,7 @@ for line in sys.stdin:
                 peer.into(),
             )
             .unwrap();
-            session.announce(1);
+            created.announce();
             let mut client = BufReader::new(client);
             let mut line = String::new();
             client.read_line(&mut line).unwrap();
@@ -1424,7 +1498,7 @@ for line in sys.stdin:
             let (_a, b) = UnixStream::pair().unwrap();
             let (peer, _, _) = kage_jsonrpc::connect(BufReader::new(b.try_clone().unwrap()), b);
             let cwd = std::env::current_dir().unwrap();
-            let session = External::start(
+            let (session, created) = External::start(
                 &Lifecycles::new(1),
                 "local".into(),
                 "fake",
@@ -1434,7 +1508,7 @@ for line in sys.stdin:
                 peer.into(),
             )
             .unwrap();
-            session.announce(1);
+            created.announce();
             session
         }
 
@@ -2273,7 +2347,7 @@ for line in sys.stdin:
             let (_client, server) = UnixStream::pair().unwrap();
             let (peer, _, _) =
                 kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
-            let receipt = session.attach_with_receipt(2, peer.into()).unwrap();
+            let receipt = session.attach_open(2, peer.into()).unwrap();
             let ticket = session.register_prompt(2).unwrap();
             assert!(
                 session
@@ -2294,7 +2368,7 @@ for line in sys.stdin:
                 StopReason::EndTurn
             );
             assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
-            receipt();
+            receipt.announce();
             assert_eq!(
                 rx.recv_timeout(Duration::from_secs(3))
                     .unwrap()
@@ -2338,15 +2412,110 @@ for line in sys.stdin:
             assert!(session.detach(1));
         }
 
+        fn attached(session: &External, owner: u64) -> bool {
+            lock(&session.state).attachments.contains_key(&owner)
+        }
+
+        #[test]
+        fn failed_open_detaches_only_an_unannounced_attachment_without_other_opens() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            let (_client, server) = UnixStream::pair().unwrap();
+            let (peer, _, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            let peer: AgentPeer = peer.into();
+
+            let only = session.attach_open(2, peer.clone()).unwrap();
+            assert_eq!(only.fail(), Some(false));
+            assert!(!attached(&session, 2));
+
+            let first = session.attach_open(2, peer.clone()).unwrap();
+            let second = session.attach_open(2, peer.clone()).unwrap();
+            drop(first);
+            assert!(attached(&session, 2));
+            drop(second);
+            assert!(!attached(&session, 2));
+
+            session.attach_open(2, peer.clone()).unwrap().announce();
+            let late = session.attach_open(2, peer.clone()).unwrap();
+            assert_eq!(late.fail(), None);
+            assert!(attached(&session, 2));
+
+            let stale = session.attach_open(3, peer.clone()).unwrap();
+            assert!(!session.detach(3));
+            let replacement = session.attach_open(3, peer.clone()).unwrap();
+            assert_eq!(stale.fail(), None);
+            assert!(attached(&session, 3));
+            assert_eq!(replacement.fail(), Some(false));
+            assert!(!attached(&session, 3));
+            assert!(!lock(&session.state).closed);
+        }
+
+        #[test]
+        fn failed_creation_response_closes_the_new_session() {
+            let config = kage_core::config::AcpAgent {
+                command: "python3".into(),
+                args: vec!["-u".into(), "-c".into(), ADMISSION_SCRIPT.into()],
+                env: BTreeMap::default(),
+            };
+            let (_a, b) = UnixStream::pair().unwrap();
+            let (peer, _, _) = kage_jsonrpc::connect(BufReader::new(b.try_clone().unwrap()), b);
+            let cwd = std::env::current_dir().unwrap();
+            let lifecycles = Lifecycles::new(1);
+            let (session, created) = External::start(
+                &lifecycles,
+                "local".into(),
+                "fake",
+                cwd.to_str().unwrap(),
+                &config,
+                1,
+                peer.into(),
+            )
+            .unwrap();
+            assert_eq!(created.fail(), Some(true));
+            assert!(lock(&session.state).closed);
+            assert!(session.slot.wait_finished(WAIT));
+            assert_eq!(lifecycles.live(), 0);
+        }
+
+        #[test]
+        fn pending_opens_are_bounded_per_attachment() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            let (_client, server) = UnixStream::pair().unwrap();
+            let (peer, _, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            let peer: AgentPeer = peer.into();
+            let mut opens: Vec<_> = (0..MAX_OPEN_RECEIPTS)
+                .map(|_| session.attach_open(2, peer.clone()).unwrap())
+                .collect();
+            assert!(session.attach_open(2, peer.clone()).is_err());
+            opens.pop().unwrap().announce();
+            assert!(session.attach_open(2, peer).is_ok());
+            drop(opens);
+            assert!(attached(&session, 2));
+        }
+
+        #[test]
+        fn failed_open_of_last_attachment_closes_and_cleans_up_session() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            let (_client, server) = UnixStream::pair().unwrap();
+            let (peer, _, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            let open = session.attach_open(2, peer.into()).unwrap();
+            assert!(!session.detach(1));
+            assert_eq!(open.fail(), Some(true));
+            assert!(lock(&session.state).closed);
+            assert!(session.slot.wait_finished(WAIT));
+        }
+
         #[test]
         fn open_receipts_are_fresh_exact_once_and_attachment_scoped() {
             let session = scripted_session(ADMISSION_SCRIPT);
             let (_client, server) = UnixStream::pair().unwrap();
             let (peer, _, _) =
                 kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
-            let first = session.attach_with_receipt(2, peer.clone().into()).unwrap();
-            let second = session.attach_with_receipt(2, peer.clone().into()).unwrap();
-            let dropped = session.open_receipt(2).unwrap();
+            let first = session.attach_open(2, peer.clone().into()).unwrap();
+            let second = session.attach_open(2, peer.clone().into()).unwrap();
+            let dropped = session.attach_open(2, peer.clone().into()).unwrap();
             drop(dropped);
             let (sender, receiver) = mpsc::sync_channel(4);
             {
@@ -2356,20 +2525,20 @@ for line in sys.stdin:
                 assert!(!state.attachments[&2].announced);
                 assert_eq!(state.attachments[&2].pending.len(), 1);
             }
-            second();
-            first();
+            second.announce();
+            first.announce();
             assert!(matches!(receiver.try_recv(), Ok(WriteItem::Update(_))));
             assert!(matches!(
                 receiver.try_recv(),
                 Err(mpsc::TryRecvError::Empty)
             ));
 
-            let stale = session.open_receipt(2).unwrap();
+            let stale = session.attach_open(2, peer.clone().into()).unwrap();
             assert!(!session.detach(2));
-            let replacement = session.attach_with_receipt(2, peer.into()).unwrap();
-            stale();
+            let replacement = session.attach_open(2, peer.into()).unwrap();
+            stale.announce();
             assert!(!lock(&session.state).attachments[&2].announced);
-            replacement();
+            replacement.announce();
             assert!(lock(&session.state).attachments[&2].announced);
             assert!(!session.detach(2));
             assert!(session.detach(1));
@@ -3059,7 +3228,7 @@ for line in sys.stdin:
             let (a, b) = UnixStream::pair().unwrap();
             let (peer, _, _) = kage_jsonrpc::connect(BufReader::new(b.try_clone().unwrap()), b);
             let cwd = std::env::current_dir().unwrap();
-            let session = External::start(
+            let (session, created) = External::start(
                 &Lifecycles::new(1),
                 "local".into(),
                 "fake",
@@ -3069,7 +3238,7 @@ for line in sys.stdin:
                 peer.clone().into(),
             )
             .unwrap();
-            session.announce(1);
+            created.announce();
             let worker_done = {
                 let mut state = lock(&session.state);
                 state
@@ -3128,7 +3297,7 @@ for line in sys.stdin:
             let (peer, _incoming, _) =
                 kage_jsonrpc::connect(BufReader::new(b.try_clone().unwrap()), b);
             let cwd = std::env::current_dir().unwrap();
-            let session = External::start(
+            let (session, created) = External::start(
                 &Lifecycles::new(1),
                 "local".into(),
                 "fake",
@@ -3139,7 +3308,7 @@ for line in sys.stdin:
             )
             .unwrap();
             session.attach(2, peer.into()).unwrap();
-            session.announce(1);
+            created.announce();
             session.announce(2);
             let prompt = || PromptRequest {
                 session_id: "local".into(),
@@ -3178,17 +3347,32 @@ for line in sys.stdin:
 #[cfg(target_os = "linux")]
 pub(super) use lifecycle::Lifecycles;
 #[cfg(target_os = "linux")]
-pub(super) use unix::{External, PromptTicket};
+pub(super) use unix::{External, OpenTicket, PromptTicket};
 
 #[cfg(not(target_os = "linux"))]
 mod unsupported {
     use kage_acp::acp::{PromptRequest, PromptResponse};
-    use kage_acp::agent::{AgentPeer, OpenReceipt};
+    use kage_acp::agent::AgentPeer;
     use kage_jsonrpc::RpcError;
     use std::sync::Arc;
 
     pub(crate) struct External;
     pub(crate) struct PromptTicket;
+
+    /// No open can start without external session support.
+    pub(crate) enum OpenTicket {}
+
+    impl OpenTicket {
+        pub(crate) fn session(&self) -> &Arc<External> {
+            match *self {}
+        }
+        pub(crate) fn announce(self) {
+            match self {}
+        }
+        pub(crate) fn fail(self) -> Option<bool> {
+            match self {}
+        }
+    }
 
     /// External sessions are unavailable, so no capacity is ever reserved.
     pub(crate) struct Lifecycles;
@@ -3208,25 +3392,16 @@ mod unsupported {
             _: &kage_core::config::AcpAgent,
             _: u64,
             _: AgentPeer,
-        ) -> Result<Arc<Self>, RpcError> {
+        ) -> Result<(Arc<Self>, OpenTicket), RpcError> {
             Err(RpcError::internal("external ACP requires Linux"))
         }
-        pub(crate) fn attach(&self, _: u64, _: AgentPeer) -> Result<(), RpcError> {
-            Err(RpcError::internal("external ACP requires Linux"))
-        }
-        /// Attach and create a receipt for the attachment.
-        pub(crate) fn attach_with_receipt(
+        pub(crate) fn attach_open(
             self: &Arc<Self>,
             _: u64,
             _: AgentPeer,
-        ) -> Result<OpenReceipt, RpcError> {
+        ) -> Result<OpenTicket, RpcError> {
             Err(RpcError::internal("external ACP requires Linux"))
         }
-        /// Create a receipt for an existing attachment.
-        pub(crate) fn open_receipt(self: &Arc<Self>, _: u64) -> Result<OpenReceipt, RpcError> {
-            Err(RpcError::internal("external ACP requires Linux"))
-        }
-        pub(crate) fn announce(&self, _: u64) {}
         pub(crate) fn detach(&self, _: u64) -> bool {
             true
         }
@@ -3244,4 +3419,4 @@ mod unsupported {
     }
 }
 #[cfg(not(target_os = "linux"))]
-pub(super) use unsupported::{External, Lifecycles, PromptTicket};
+pub(super) use unsupported::{External, Lifecycles, OpenTicket, PromptTicket};

@@ -312,8 +312,8 @@ pub(crate) fn write_line(writer: &mut impl Write, value: &impl Serialize) -> io:
     writer.flush()
 }
 
-/// Whether the peer of `stream` runs as this process's user.
-fn peer_is_us(stream: &UnixStream) -> bool {
+/// Whether the process at the other end of `stream` runs as this user.
+pub(crate) fn peer_is_us(stream: &UnixStream) -> bool {
     peer_uid(stream).is_some_and(|uid| uid == nix::unistd::geteuid().as_raw())
 }
 

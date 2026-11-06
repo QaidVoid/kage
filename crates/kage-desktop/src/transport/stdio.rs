@@ -3,8 +3,10 @@
 //!
 //! A reader thread turns the child's stdout lines into [`Event`]s; a
 //! writer thread drains a channel of outgoing frames into the child's
-//! stdin. The child is killed when the transport drops, so closing the
-//! window never leaves an engine behind. `Config::program` may be a
+//! stdin. The child is killed when the transport drops. On Unix `kage rpc`
+//! relays to the shared per-user host, so sessions and running turns
+//! outlive the window until the host goes idle; `KAGE_STANDALONE=1`
+//! keeps a private engine that dies with it. `Config::program` may be a
 //! path or a bare name resolved on `PATH`; the shell passes an
 //! override for tests and for running a locally built engine.
 

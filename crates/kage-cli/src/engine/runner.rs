@@ -188,8 +188,11 @@ impl Run {
             None => (None, None),
         };
         let worktree = self.worktree.clone();
+        let session = self.session;
         thread::spawn(move || {
-            let mut finished = self.execute(&done);
+            // Plugin hooks and events the run fires are for this session.
+            let mut finished =
+                kage_plugin::Invocation::session(session).scope(|| self.execute(&done));
             drop(ended);
             finished.note = worktree.map(|w| w.checkpoint());
             if finished.outcome == RunOutcome::Cancelled

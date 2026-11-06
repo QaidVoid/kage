@@ -2585,6 +2585,143 @@ fn agent_runs_skip_plugin_events_and_session_ops() {
     assert!(!child_file.contains("plugin:"), "{child_file}");
 }
 
+/// A spawned child runs the plugin tool its registry copied from its
+/// parent and reads the environment the child captured, not the
+/// runtime default; once the engine reaps the child, its registration
+/// is forgotten and the runtime default answers again.
+#[test]
+fn a_child_reads_its_own_environment_not_the_runtime_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut caps = std::collections::BTreeMap::new();
+    caps.insert("t".to_owned(), vec!["env".to_owned()]);
+    let runtime = Arc::new(
+        PluginRuntime::builder()
+            .capabilities(caps)
+            .env(Environment::captured(vec![(
+                "CLIENT".into(),
+                "host".into(),
+            )]))
+            .build()
+            .unwrap(),
+    );
+    runtime
+        .eval_plugin(
+            "t",
+            "kage.request_capabilities({'env'}) \
+             kage.register_tool({ name = 'who', description = 'd', \
+               schema = { type = 'object' }, \
+               execute = function() return 'client:' .. tostring(kage.env('CLIENT')) end })",
+        )
+        .unwrap();
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("work"))]),
+        tool_turn("who"),
+        text_turn("child reply"),
+        text_turn("parent done"),
+    ]));
+    let parent = SessionId::new();
+    let (_, path) = recorder_in(dir.path(), parent);
+    let writer = SessionWriter::open(&path).unwrap();
+    let mut spec = h.spec(parent);
+    spec.cx.env = Environment::captured(vec![("CLIENT".into(), "editor".into())]);
+    spec.recorder = Some(Recorder::new(writer, Some(Arc::clone(&runtime))));
+    spec.plugins = Some(Arc::clone(&runtime));
+    spec.agents = Some(agent_setup(1, 1));
+    h.engine.open(spec);
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 2);
+    let (child, _) = spawned(&events)[0].clone();
+    let output = tool_output(&events, child, "call_who");
+    assert_eq!(output.text, "client:editor");
+    let reads = || {
+        kage_plugin::Invocation::session(child).scope(|| {
+            runtime
+                .eval_plugin("t", "return kage.env('CLIENT')")
+                .unwrap()
+        })
+    };
+    let deadline = Instant::now() + WAIT;
+    while reads().as_string().unwrap().to_str().unwrap() != "host" {
+        assert!(
+            Instant::now() < deadline,
+            "the reaped child was not forgotten"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    h.engine.shutdown();
+}
+
+/// A grandchild spawned by a child reads the environment the
+/// grandchild captured, through the chain of registrations each open
+/// makes on its parent's runtime.
+#[test]
+fn a_grandchild_reads_its_own_environment_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut caps = std::collections::BTreeMap::new();
+    caps.insert("t".to_owned(), vec!["env".to_owned()]);
+    let runtime = Arc::new(
+        PluginRuntime::builder()
+            .capabilities(caps)
+            .env(Environment::captured(vec![(
+                "CLIENT".into(),
+                "host".into(),
+            )]))
+            .build()
+            .unwrap(),
+    );
+    runtime
+        .eval_plugin(
+            "t",
+            "kage.request_capabilities({'env'}) \
+             kage.register_tool({ name = 'who', description = 'd', \
+               schema = { type = 'object' }, \
+               execute = function() return 'client:' .. tostring(kage.env('CLIENT')) end })",
+        )
+        .unwrap();
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("work"))]),
+        agent_turn(&[("call_g", task("deep"))]),
+        tool_turn("who"),
+        text_turn("deep done"),
+        text_turn("child done"),
+        text_turn("parent done"),
+    ]));
+    let parent = SessionId::new();
+    let (_, path) = recorder_in(dir.path(), parent);
+    let writer = SessionWriter::open(&path).unwrap();
+    let mut spec = h.spec(parent);
+    spec.cx.env = Environment::captured(vec![("CLIENT".into(), "editor".into())]);
+    spec.recorder = Some(Recorder::new(writer, Some(Arc::clone(&runtime))));
+    spec.plugins = Some(Arc::clone(&runtime));
+    spec.agents = Some(agent_setup(2, 1));
+    h.engine.open(spec);
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 3);
+    let spawned = spawned(&events);
+    let child = spawned[0].0;
+    let grandchild = spawned[1].0;
+    let output = tool_output(&events, grandchild, "call_who");
+    assert_eq!(output.text, "client:editor");
+    let reads = |id: SessionId| {
+        kage_plugin::Invocation::session(id).scope(|| {
+            runtime
+                .eval_plugin("t", "return kage.env('CLIENT')")
+                .unwrap()
+        })
+    };
+    let deadline = Instant::now() + WAIT;
+    for id in [child, grandchild] {
+        while reads(id).as_string().unwrap().to_str().unwrap() != "host" {
+            assert!(
+                Instant::now() < deadline,
+                "the reaped session was not forgotten"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    h.engine.shutdown();
+}
+
 #[test]
 fn shutdown_with_running_and_waiting_agents_returns() {
     let h = harness(MockProvider::sequence(vec![
@@ -6749,4 +6886,57 @@ fn events_a_named_command_publishes_carry_its_id() {
     assert_eq!(rx.recv_timeout(WAIT).unwrap(), Some(named));
     h.engine.send(Command::to(id, CommandKind::ListPrompts));
     assert_eq!(rx.recv_timeout(WAIT).unwrap(), None);
+}
+
+/// A session's plugin work reads the environment the session opened with:
+/// a hook on the run thread, and a plugin tool on a dispatch worker. Once
+/// the session closes, the runtime forgets it.
+#[test]
+fn plugin_work_runs_in_its_sessions_environment() {
+    let mut caps = std::collections::BTreeMap::new();
+    caps.insert("p".to_owned(), vec!["env".to_owned()]);
+    let runtime = Arc::new(PluginRuntime::builder().capabilities(caps).build().unwrap());
+    runtime
+        .eval_plugin(
+            "p",
+            "kage.request_capabilities({'env'}) \
+             kage.on('agent_start', function() hooked = kage.env('KAGE_TEST_CLIENT') end) \
+             kage.register_tool({ name = 'client', description = 'd', \
+               schema = { type = 'object' }, \
+               execute = function() return kage.env('KAGE_TEST_CLIENT') or 'none' end })",
+        )
+        .unwrap();
+    let mock = MockProvider::sequence(vec![tool_turn("client"), text_turn("done")]);
+    let h = harness(mock.clone());
+    let id = SessionId::new();
+    let mut spec = h.spec(id);
+    spec.cx.env = kage_core::environment::Environment::captured(vec![(
+        "KAGE_TEST_CLIENT".into(),
+        "editor".into(),
+    )]);
+    spec.plugins = Some(Arc::clone(&runtime));
+    h.engine.open(spec);
+    prompt(&h.engine, id, "go", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+    let sent = serde_json::to_string(&mock.requests()[1].messages).unwrap();
+    assert!(sent.contains("editor"), "{sent}");
+    let hooked = runtime.eval_plugin("p", "return hooked").unwrap();
+    assert_eq!(hooked.as_string().unwrap().to_str().unwrap(), "editor");
+
+    h.engine.send(Command::to(id, CommandKind::Close));
+    let read = || {
+        kage_plugin::Invocation::session(id).scope(|| {
+            runtime
+                .eval_plugin("p", "return kage.env('KAGE_TEST_CLIENT')")
+                .unwrap()
+        })
+    };
+    let deadline = Instant::now() + WAIT;
+    while !read().is_nil() {
+        assert!(
+            Instant::now() < deadline,
+            "the closed session was not forgotten"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }

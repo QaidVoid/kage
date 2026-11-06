@@ -29,7 +29,29 @@ use kage_core::{
 use kage_tools::{ProgressSink, ToolContext, ToolError, ToolRegistry};
 
 use crate::Hooks;
+use crate::context::AgentContext;
 use crate::stream::PendingToolCall;
+
+/// What every tool call of a run starts with besides its input: whether
+/// file paths stay under the workdir, the environment processes start
+/// with, and the session the run belongs to.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ToolScope {
+    pub(crate) confine_paths: bool,
+    pub(crate) env: Environment,
+    pub(crate) session: Option<kage_core::SessionId>,
+}
+
+impl ToolScope {
+    /// The scope of the run `cx` describes.
+    pub(crate) fn of(cx: &AgentContext) -> Self {
+        Self {
+            confine_paths: cx.confine_paths,
+            env: cx.env.clone(),
+            session: cx.session,
+        }
+    }
+}
 
 /// Maximum worker threads per dispatch batch. Oversized batches run in
 /// waves; result placement is index-keyed, so waves never reorder
@@ -131,8 +153,7 @@ fn execute_live<F, D>(
     tools: &ToolRegistry,
     workdir: &Path,
     cancel: &CancelFlag,
-    confine_paths: bool,
-    env: &Environment,
+    scope: &ToolScope,
     history: &[Arc<Message>],
     emit: &mut F,
     mut done: D,
@@ -171,7 +192,7 @@ fn execute_live<F, D>(
         let tools = owned_tools.clone();
         let workdir = owned_workdir.clone();
         let cancel = owned_cancel.clone();
-        let env = env.clone();
+        let scope = scope.clone();
         let history = Arc::clone(&owned_history);
         std::thread::spawn(move || {
             for job in job_rx {
@@ -197,8 +218,7 @@ fn execute_live<F, D>(
                         &job.call,
                         &workdir,
                         &cancel,
-                        confine_paths,
-                        &env,
+                        &scope,
                         &history,
                         Some(sink),
                     )
@@ -460,8 +480,7 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
     tools: &ToolRegistry,
     workdir: &Path,
     cancel: &CancelFlag,
-    confine_paths: bool,
-    env: &Environment,
+    scope: &ToolScope,
     history: &[Arc<Message>],
     parent: MessageId,
     hooks: &mut dyn Hooks,
@@ -485,8 +504,7 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
                     tools,
                     workdir,
                     cancel,
-                    confine_paths,
-                    env,
+                    scope,
                     history,
                     emit,
                     |_, _, done| result = Some(done),
@@ -566,8 +584,7 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
     tools: &ToolRegistry,
     workdir: &Path,
     cancel: &CancelFlag,
-    confine_paths: bool,
-    env: &Environment,
+    scope: &ToolScope,
     history: &[Arc<Message>],
     parent: MessageId,
     hooks: &mut dyn Hooks,
@@ -631,8 +648,7 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
             tools,
             workdir,
             cancel,
-            confine_paths,
-            env,
+            scope,
             history,
             emit,
             |emit, index, raw| finish(emit, to_run[index], raw),
@@ -654,17 +670,12 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
 /// Cancellation surfaces as `Err(LoopError::Cancelled)`; every other tool
 /// error is converted to `Ok(ToolOutput { is_error: true, ... })` so the
 /// model can observe the failure and adapt rather than terminating the run.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the loop hands over its run state unbundled"
-)]
 fn execute(
     tools: &ToolRegistry,
     call: &PendingToolCall,
     workdir: &Path,
     cancel: &CancelFlag,
-    confine_paths: bool,
-    env: &Environment,
+    scope: &ToolScope,
     history: &[Arc<Message>],
     progress: Option<Arc<dyn ProgressSink>>,
 ) -> Result<ToolOutput, LoopError> {
@@ -688,8 +699,9 @@ fn execute(
     let mut cx = ToolContext::new(workdir, cancel)
         .with_call_id(&call.id)
         .with_history(history)
-        .with_env(env.clone());
-    if confine_paths {
+        .with_env(scope.env.clone())
+        .with_session(scope.session);
+    if scope.confine_paths {
         cx = cx.with_confine();
     }
     if let Some(sink) = progress {

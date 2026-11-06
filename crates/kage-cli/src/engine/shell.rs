@@ -137,7 +137,9 @@ impl super::Dispatcher {
         }
         flush_pending(&self.bus, id, session);
         if let Some(rt) = &session.plugins {
-            crate::plugins::notify_user_shell(rt, &command, exit_code);
+            kage_plugin::Invocation::session(id).scope(|| {
+                crate::plugins::notify_user_shell(rt, &command, exit_code);
+            });
         }
         self.bus.publish(
             id,

@@ -557,6 +557,9 @@ struct Session {
     queued: VecDeque<Vec<Content>>,
     tools: ToolRegistry,
     plugins: Option<Arc<PluginRuntime>>,
+    /// Keeps the session's environment registered with its plugin runtime
+    /// while the session exists.
+    plugin_env: Option<PluginSession>,
     gate: PermissionGate,
     loop_cfg: LoopConfig,
     /// `None` while a run start, an idle restart or the first bring-up
@@ -807,6 +810,13 @@ impl Dispatcher {
         let workdir = cx.workdir.clone();
         let confine_paths = cx.confine_paths;
         let env = cx.env.clone();
+        // A child's registry carries the parent's plugin tools, so its
+        // `kage.env` work must read the child's captured environment:
+        // register it under the parent's runtime, dropping with the
+        // session. No hooks and no new tools: `plugins` stays `None`.
+        let plugin_session = self
+            .registration_runtime(plugins.as_ref(), link.as_ref())
+            .map(|runtime| PluginSession::new(&runtime, id, &env));
         let title_pending = title && !has_reply(&cx);
         let starting_mcp = mcp
             .as_ref()
@@ -854,6 +864,7 @@ impl Dispatcher {
                 confine_paths,
                 env,
                 instance,
+                plugin_env: plugin_session,
                 swarm_mode: false,
             },
         );
@@ -863,6 +874,22 @@ impl Dispatcher {
         if starting_mcp {
             self.start_mcp(id);
         }
+    }
+
+    /// The runtime a session registers its environment with: the one
+    /// its spec carries, else the one its parent's guard holds, which
+    /// is what a child of a plugin session runs its inherited plugin
+    /// tools against.
+    fn registration_runtime(
+        &self,
+        plugins: Option<&Arc<PluginRuntime>>,
+        link: Option<&AgentLink>,
+    ) -> Option<Arc<PluginRuntime>> {
+        plugins.cloned().or_else(|| {
+            link.and_then(|l| self.sessions.get(&l.parent))
+                .and_then(|parent| parent.plugin_env.as_ref())
+                .map(|guard| Arc::clone(&guard.runtime))
+        })
     }
 
     /// Report `[tools.<name>]` tables that name no tool this session can
@@ -1409,7 +1436,7 @@ impl Dispatcher {
             link.inherited_until = cx.history.last().map(|m| m.id);
         }
         cx.model = bare_model;
-        cx.session = Some(id.to_string());
+        cx.session = Some(id);
         fit_context(&mut cx, &self.registry, &model);
         if std::mem::take(&mut session.thinking_changed) {
             cx.thinking_level = session.state.thinking;
@@ -1930,7 +1957,7 @@ impl Dispatcher {
         let workdir = cx.workdir.clone();
         let env = cx.env.clone();
         thread::spawn(move || {
-            let verdict = match resolved {
+            let verdict = kage_plugin::Invocation::session(id).scope(|| match resolved {
                 Ok((provider, bare_model)) => crate::goal::judge(
                     provider.as_ref(),
                     &bare_model,
@@ -1941,7 +1968,7 @@ impl Dispatcher {
                     &CancelFlag::new(),
                 ),
                 Err(e) => crate::goal::Verdict::Unknown(e.to_string()),
-            };
+            });
             let _ = tx.send(Input::GoalChecked {
                 session: id,
                 goal,
@@ -1968,15 +1995,17 @@ impl Dispatcher {
         let env = cx.env.clone();
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let title = crate::title::generate(
-                provider.as_ref(),
-                &bare_model,
-                &user,
-                &reply,
-                &workdir,
-                &env,
-                &CancelFlag::new(),
-            );
+            let title = kage_plugin::Invocation::session(id).scope(|| {
+                crate::title::generate(
+                    provider.as_ref(),
+                    &bare_model,
+                    &user,
+                    &reply,
+                    &workdir,
+                    &env,
+                    &CancelFlag::new(),
+                )
+            });
             let _ = tx.send(Input::Title { session: id, title });
         });
     }
@@ -2227,6 +2256,30 @@ fn usage_of(cx: &AgentContext) -> Usage {
 /// Whether the conversation already has an assistant reply.
 fn has_reply(cx: &AgentContext) -> bool {
     cx.history.iter().any(|m| m.role == Role::Assistant)
+}
+
+/// Keeps a session's environment registered with its plugin runtime, so
+/// `kage.exec` and `kage.env` in work for the session use it, until the
+/// session is dropped.
+struct PluginSession {
+    runtime: Arc<PluginRuntime>,
+    id: SessionId,
+}
+
+impl PluginSession {
+    fn new(runtime: &Arc<PluginRuntime>, id: SessionId, env: &Environment) -> Self {
+        runtime.set_session_env(id, env.clone());
+        Self {
+            runtime: Arc::clone(runtime),
+            id,
+        }
+    }
+}
+
+impl Drop for PluginSession {
+    fn drop(&mut self) {
+        self.runtime.forget_session(self.id);
+    }
 }
 
 /// Clone `cx` with an empty history, for commands that replace the

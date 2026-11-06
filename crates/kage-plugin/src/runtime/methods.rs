@@ -673,48 +673,107 @@ impl PluginRuntime {
         func: &mlua::Function,
         args: &[serde_json::Value],
     ) -> Result<BridgeStep, PluginError> {
+        self.bridge_begin(Some(bridge::SINGLE_CALL), func, args)
+            .map(|(_, step)| step)
+    }
+
+    /// Like [`Self::bridge_call`], but under a fresh call id, so calls of
+    /// different clients park side by side. Drive the call on with
+    /// [`Self::bridge_resume_call`], [`Self::bridge_cancel_call`] and
+    /// [`Self::bridge_abort_call`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::bridge_call`], except it is never busy.
+    pub fn bridge_start(
+        &self,
+        func: &mlua::Function,
+        args: &[serde_json::Value],
+    ) -> Result<(u64, BridgeStep), PluginError> {
+        self.bridge_begin(None, func, args)
+    }
+
+    fn bridge_begin(
+        &self,
+        call: Option<u64>,
+        func: &mlua::Function,
+        args: &[serde_json::Value],
+    ) -> Result<(u64, BridgeStep), PluginError> {
         let func = func.clone();
         let args = args.to_vec();
         let bridge = Arc::clone(&self.bridge);
         let budget = self.eval.script_budget;
         self.host.call(move |lua| {
-            let mut slot = lock(&bridge);
-            if slot.is_some() {
-                return Err(PluginError::BridgeBusy);
-            }
+            let mut parked = lock(&bridge);
+            let call = match call {
+                Some(call) if parked.contains(call) => return Err(PluginError::BridgeBusy),
+                Some(call) => call,
+                None => parked.next_call(),
+            };
             let thread = lua.create_thread(func)?;
             watchdog::install_on_thread(&thread)?;
             let resume_args = bridge::args_to_multi(lua, &args)?;
-            watchdog::run(lua, budget, || bridge::step(thread, resume_args, &mut slot))
+            let mut slot = None;
+            let step = watchdog::run(lua, budget, || bridge::step(thread, resume_args, &mut slot));
+            parked.park(call, slot);
+            step.map(|step| (call, step))
         })?
     }
 
     /// Resume the parked coroutine, delivering `result` as the return
     /// value of the blocking call that suspended it. Returns the next
-    /// step (done or suspended again).
+    /// step.
     pub fn bridge_resume(&self, result: &serde_json::Value) -> Result<BridgeStep, PluginError> {
+        self.bridge_resume_call(bridge::SINGLE_CALL, result)
+    }
+
+    /// [`Self::bridge_resume`] for the call [`Self::bridge_start`] named.
+    ///
+    /// # Errors
+    ///
+    /// When `call` is not parked, or the coroutine fails.
+    pub fn bridge_resume_call(
+        &self,
+        call: u64,
+        result: &serde_json::Value,
+    ) -> Result<BridgeStep, PluginError> {
         let result = result.clone();
-        self.bridge_step(move |lua| bridge::args_to_multi(lua, std::slice::from_ref(&result)))
+        self.bridge_step(call, move |lua| {
+            bridge::args_to_multi(lua, std::slice::from_ref(&result))
+        })
     }
 
     /// Resume the parked coroutine signalling the host action was
     /// cancelled. The blocking call returns `nil` to the plugin (the
     /// `kage.ui.*` dialog contract for "user dismissed").
     pub fn bridge_cancel(&self) -> Result<BridgeStep, PluginError> {
-        self.bridge_step(|_| Ok(mlua::MultiValue::new()))
+        self.bridge_cancel_call(bridge::SINGLE_CALL)
+    }
+
+    /// [`Self::bridge_cancel`] for the call [`Self::bridge_start`] named.
+    ///
+    /// # Errors
+    ///
+    /// When `call` is not parked, or the coroutine fails.
+    pub fn bridge_cancel_call(&self, call: u64) -> Result<BridgeStep, PluginError> {
+        self.bridge_step(call, |_| Ok(mlua::MultiValue::new()))
     }
 
     fn bridge_step(
         &self,
+        call: u64,
         resume_args: impl FnOnce(&Lua) -> Result<mlua::MultiValue, PluginError> + Send + 'static,
     ) -> Result<BridgeStep, PluginError> {
         let bridge = Arc::clone(&self.bridge);
         let budget = self.eval.script_budget;
         self.host.call(move |lua| {
-            let mut slot = lock(&bridge);
-            let thread = slot.take().ok_or(PluginError::BridgeIdle)?;
+            let mut parked = lock(&bridge);
+            let thread = parked.take(call).ok_or(PluginError::BridgeIdle)?;
             let resume_args = resume_args(lua)?;
-            watchdog::run(lua, budget, || bridge::step(thread, resume_args, &mut slot))
+            let mut slot = None;
+            let step = watchdog::run(lua, budget, || bridge::step(thread, resume_args, &mut slot));
+            parked.park(call, slot);
+            step
         })?
     }
 
@@ -724,9 +783,16 @@ impl PluginRuntime {
     #[must_use = "the boolean reports whether a coroutine was dropped; \
                   discard with `let _ =` if only the side effect matters"]
     pub fn bridge_abort(&self) -> bool {
+        self.bridge_abort_call(bridge::SINGLE_CALL)
+    }
+
+    /// [`Self::bridge_abort`] for the call [`Self::bridge_start`] named.
+    #[must_use = "the boolean reports whether a coroutine was dropped; \
+                  discard with `let _ =` if only the side effect matters"]
+    pub fn bridge_abort_call(&self, call: u64) -> bool {
         let bridge = Arc::clone(&self.bridge);
         self.host
-            .call(move |_| lock(&bridge).take().is_some())
+            .call(move |_| lock(&bridge).take(call).is_some())
             .unwrap_or(false)
     }
 
@@ -734,7 +800,7 @@ impl PluginRuntime {
     /// action.
     #[must_use]
     pub fn bridge_is_suspended(&self) -> bool {
-        lock(&self.bridge).is_some()
+        !lock(&self.bridge).is_empty()
     }
 
     /// Reload with `dir` as the plugins directory. Same as
@@ -796,7 +862,7 @@ impl PluginRuntime {
             slots::clear_hooks(lua);
             acp::clear_permission_handler(lua)?;
             eval.keymaps.clear(lua)?;
-            *lock(&bridge) = None;
+            lock(&bridge).clear();
             eval.reset(lua);
             crate::loader::load_on(lua, dir.as_deref(), &eval)
         })?

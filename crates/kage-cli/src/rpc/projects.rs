@@ -23,6 +23,8 @@ use kage_plugin::{PluginRuntime, SharedOptions};
 
 /// How long a runtime no session holds is kept.
 const GRACE: Duration = Duration::from_secs(60);
+/// How long a project's fingerprint is trusted before it is read again.
+const RECHECK: Duration = Duration::from_secs(1);
 
 /// A project's plugin runtime and the option store its `init.lua` set.
 #[derive(Clone)]
@@ -35,6 +37,8 @@ struct Entry {
     project: Project,
     /// What the runtime was loaded from; see [`fingerprint`].
     fingerprint: u64,
+    /// When the fingerprint was last found unchanged.
+    checked: Instant,
     /// When the registry became the runtime's only holder.
     unused_since: Option<Instant>,
 }
@@ -67,27 +71,36 @@ impl Default for Projects {
 
 impl Projects {
     /// The runtime of the project at `workdir`, loaded when the project has
-    /// none or what it loads from changed, with `model` and `system_prompt`
-    /// as what `kage.config()` reports and `env` for work no session asked
-    /// for. `None` when the runtime cannot be built; sessions then run
-    /// without plugins.
+    /// none or what it loads from changed, with `model` and the prompt
+    /// `system_prompt` builds as what `kage.config()` reports, and `env`
+    /// for work no session asked for. What it loads from is read at most
+    /// every [`RECHECK`]. `None` when the runtime cannot be built; sessions
+    /// then run without plugins.
     pub(super) fn get(
         &self,
         workdir: &Path,
         model: &str,
-        system_prompt: &str,
+        system_prompt: &dyn Fn() -> String,
         env: &Environment,
     ) -> Option<Project> {
         self.prune();
         let key = workdir
             .canonicalize()
             .unwrap_or_else(|_| workdir.to_path_buf());
+        if let Some(entry) = lock(&self.entries)
+            .get_mut(&key)
+            .filter(|entry| entry.checked.elapsed() < RECHECK)
+        {
+            entry.unused_since = None;
+            return Some(entry.project.clone());
+        }
         let fingerprint = (self.fingerprint)(&key);
         let current = |entries: &mut HashMap<PathBuf, Entry>| {
             let entry = entries
                 .get_mut(&key)
                 .filter(|entry| entry.fingerprint == fingerprint)?;
             entry.unused_since = None;
+            entry.checked = Instant::now();
             Some(entry.project.clone())
         };
         if let Some(project) = current(&mut lock(&self.entries)) {
@@ -97,12 +110,13 @@ impl Projects {
         if let Some(project) = current(&mut lock(&self.entries)) {
             return Some(project);
         }
-        let project = (self.load)(&key, model, system_prompt, env)?;
+        let project = (self.load)(&key, model, &system_prompt(), env)?;
         lock(&self.entries).insert(
             key,
             Entry {
                 project: project.clone(),
                 fingerprint,
+                checked: Instant::now(),
                 unused_since: None,
             },
         );
@@ -232,14 +246,19 @@ mod tests {
             },
         };
         let first = projects
-            .get(one.path(), "mock/m", "", &Environment::inherit())
+            .get(one.path(), "mock/m", &String::new, &Environment::inherit())
             .unwrap();
         let second = projects
-            .get(one.path(), "mock/m", "", &Environment::inherit())
+            .get(one.path(), "mock/m", &String::new, &Environment::inherit())
             .unwrap();
         assert!(Arc::ptr_eq(&first.runtime, &second.runtime));
         let elsewhere = projects
-            .get(other.path(), "mock/m", "", &Environment::inherit())
+            .get(
+                other.path(),
+                "mock/m",
+                &String::new,
+                &Environment::inherit(),
+            )
             .unwrap();
         assert!(!Arc::ptr_eq(&first.runtime, &elsewhere.runtime));
         let count = || lock(&projects.entries).len();
@@ -273,12 +292,16 @@ mod tests {
         };
         let get = || {
             projects
-                .get(dir.path(), "mock/m", "", &Environment::inherit())
+                .get(dir.path(), "mock/m", &String::new, &Environment::inherit())
                 .unwrap()
         };
         let open = get();
         assert!(Arc::ptr_eq(&open.runtime, &get().runtime));
         GENERATION.store(1, std::sync::atomic::Ordering::SeqCst);
+        // The recheck window trusts the fingerprint for a moment; expire it.
+        let key = dir.path().canonicalize().unwrap();
+        lock(&projects.entries).get_mut(&key).unwrap().checked =
+            Instant::now().checked_sub(RECHECK).unwrap();
         let fresh = get();
         assert!(!Arc::ptr_eq(&open.runtime, &fresh.runtime));
         assert!(Arc::ptr_eq(&fresh.runtime, &get().runtime));

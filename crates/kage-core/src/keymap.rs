@@ -566,6 +566,52 @@ impl Mapping {
     }
 }
 
+/// One mapping as plain data: [`Keymap::to_data`] and
+/// [`Keymap::replace_with`].
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MappingData {
+    /// The mode's letter, such as `n`.
+    pub mode: String,
+    /// The key sequence in notation, such as `<C-x>g`.
+    pub lhs: String,
+    /// What the mapping does.
+    pub rhs: RhsData,
+    /// Description shown in help.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desc: Option<String>,
+    /// Help section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Who set it.
+    pub owner: String,
+}
+
+/// What a mapping does, as plain data.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RhsData {
+    /// A Rust action by name.
+    Action {
+        /// Action name.
+        name: String,
+        /// Its integer argument.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arg: Option<i64>,
+    },
+    /// A command line.
+    Command {
+        /// The line.
+        line: String,
+    },
+    /// A Lua handler, run where the plugins run.
+    Lua {
+        /// Handler id.
+        id: u64,
+    },
+    /// Swallow the key.
+    Nop,
+}
+
 /// Result of [`Keymap::lookup`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lookup<'a> {
@@ -631,6 +677,65 @@ impl Keymap {
         );
         self.next_order += 1;
         None
+    }
+
+    /// The table as plain data, in [`Self::entries`] order, for a client
+    /// that keeps its own copy.
+    #[must_use]
+    pub fn to_data(&self) -> Vec<MappingData> {
+        self.entries()
+            .into_iter()
+            .map(|entry| MappingData {
+                mode: entry.mode.as_str().to_owned(),
+                lhs: entry.lhs.iter().map(ToString::to_string).collect(),
+                rhs: match &entry.mapping.rhs {
+                    Rhs::Action { name, arg } => RhsData::Action {
+                        name: (*name).to_owned(),
+                        arg: *arg,
+                    },
+                    Rhs::Command(line) => RhsData::Command { line: line.clone() },
+                    Rhs::Lua(id) => RhsData::Lua { id: *id },
+                    Rhs::Nop => RhsData::Nop,
+                },
+                desc: entry.mapping.desc.clone(),
+                group: entry.mapping.group.clone(),
+                owner: entry.mapping.owner.clone(),
+            })
+            .collect()
+    }
+
+    /// Replace the table with `data`, as [`Self::to_data`] gave it, keeping
+    /// the generation moving so readers notice.
+    ///
+    /// # Errors
+    ///
+    /// The first entry whose mode, keys or action this build does not know.
+    pub fn replace_with(&mut self, data: &[MappingData]) -> Result<(), KeymapError> {
+        let mut table = Self {
+            generation: self.generation + 1,
+            ..Self::default()
+        };
+        for entry in data {
+            let mode = Mode::parse(&entry.mode)
+                .ok_or_else(|| notation_error(&entry.mode, "unknown mode"))?;
+            let lhs = parse(&entry.lhs, None)?;
+            let rhs = match &entry.rhs {
+                RhsData::Action { name, arg } => Rhs::action(name, *arg)?,
+                RhsData::Command { line } => Rhs::Command(line.clone()),
+                RhsData::Lua { id } => Rhs::Lua(*id),
+                RhsData::Nop => Rhs::Nop,
+            };
+            let mapping = Mapping {
+                rhs,
+                desc: entry.desc.clone(),
+                group: entry.group.clone(),
+                owner: entry.owner.clone(),
+            };
+            table.set(mode, lhs, mapping);
+        }
+        table.generation = self.generation + 1;
+        *self = table;
+        Ok(())
     }
 
     /// Remove the mapping for `lhs` in `mode`.
@@ -739,6 +844,56 @@ pub enum KeymapError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The data form keeps every kind of mapping, keys that need notation,
+    /// the order and the owners.
+    #[test]
+    fn a_table_survives_its_data_form() {
+        let mut table = Keymap::new();
+        let mapping = |rhs: Rhs, owner: &str| Mapping {
+            rhs,
+            desc: Some("d".to_owned()),
+            group: None,
+            owner: owner.to_owned(),
+        };
+        table.set(
+            Mode::Normal,
+            parse_keys("<C-x><lt> g", " ").unwrap(),
+            mapping(Rhs::action("Cancel", None).unwrap(), OWNER_USER),
+        );
+        table.set(
+            Mode::Insert,
+            parse_keys("<leader>w", " ").unwrap(),
+            mapping(Rhs::Command("write".to_owned()), "plugin"),
+        );
+        table.set(
+            Mode::Global,
+            parse_keys("<F5>", " ").unwrap(),
+            mapping(Rhs::Lua(7), OWNER_TOML),
+        );
+        table.set(
+            Mode::Visual,
+            parse_keys("x", " ").unwrap(),
+            mapping(Rhs::Nop, OWNER_DEFAULTS),
+        );
+        table.set(
+            Mode::Buffer,
+            parse_keys("<M-S-a><C-->", " ").unwrap(),
+            mapping(Rhs::action("Scroll", Some(3)).unwrap(), "plugin"),
+        );
+        // Setting a mapping again keeps its place in the table.
+        table.set(
+            Mode::Visual,
+            parse_keys("x", " ").unwrap(),
+            mapping(Rhs::Nop, "plugin"),
+        );
+        let data = table.to_data();
+        let mut copy = Keymap::new();
+        copy.replace_with(&data).unwrap();
+        assert_eq!(copy.to_data(), data);
+        assert_eq!(copy.entries(), table.entries());
+        assert!(copy.generation() > 0);
+    }
 
     fn keys(s: &str) -> Vec<Key> {
         parse_keys(s, "\\").unwrap()

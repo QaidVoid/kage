@@ -24,6 +24,8 @@ use std::thread;
 use kage_core::CancelFlag;
 use kage_jsonrpc::{CancelNotice, Inbound, Peer, RpcError, connect_with};
 
+use crate::acp::{UiAttachRequest, UiCommandRequest, UiKeymapRequest, UiOutput, UiSnapshot};
+
 use crate::acp::{
     AuthSetRequest, CloseSessionRequest, CloseSessionResponse, ConfigGetRequest, ConfigGetResult,
     ConfigSetRequest, ConfigTestRequest, ConfigTestResult, DirectoryRequest, DirectoryResult,
@@ -569,6 +571,38 @@ pub trait Agent: Send + Sync + 'static {
     /// Returns an [`RpcError`] if the session is unknown.
     fn mcp_restart(&self, _req: McpRestartRequest) -> Result<serde_json::Value, RpcError> {
         Err(RpcError::method_not_found("_kage/mcp/restart"))
+    }
+
+    /// The plugin UI of the project at `req.cwd` (`_kage/ui/attach`). The
+    /// connection keeps the project's plugins loaded until it ends. The
+    /// default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the project's plugins cannot load.
+    fn ui_attach(&self, _req: UiAttachRequest) -> Result<UiSnapshot, RpcError> {
+        Err(RpcError::method_not_found("_kage/ui/attach"))
+    }
+
+    /// Run a plugin command for the client (`_kage/ui/command`). Dialogs
+    /// it opens reach the client as `_kage/ui/dialog` requests. The
+    /// default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if no plugin registered the command.
+    fn ui_command(&self, _req: UiCommandRequest) -> Result<UiOutput, RpcError> {
+        Err(RpcError::method_not_found("_kage/ui/command"))
+    }
+
+    /// Run a key mapping's Lua handler for the client
+    /// (`_kage/ui/keymap`), dialogs included. The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if no mapping has the handler.
+    fn ui_keymap(&self, _req: UiKeymapRequest) -> Result<UiOutput, RpcError> {
+        Err(RpcError::method_not_found("_kage/ui/keymap"))
     }
 
     /// Delete a recorded session no client has open
@@ -1118,6 +1152,18 @@ fn handle_session_request<A: Agent>(
         },
         "_kage/mcp/restart" => match parse::<McpRestartRequest>(params) {
             Ok(req) => spawn_op(peer, agent, id, move |a| a.mcp_restart(req)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/ui/attach" => match parse::<UiAttachRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.ui_attach(req).map(jval)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/ui/command" => match parse::<UiCommandRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.ui_command(req).map(jval)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/ui/keymap" => match parse::<UiKeymapRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.ui_keymap(req).map(jval)),
             Err(e) => return parse_failed(peer, &id, e),
         },
         other => {

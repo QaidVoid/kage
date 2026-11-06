@@ -16,6 +16,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use kage_acp_wire as wire;
+
+pub use kage_acp_wire::schema::{
+    UiAttachRequest, UiCommand, UiCommandArg, UiCommandRequest, UiDialogRequest, UiKeymapRequest,
+    UiOutput, UiSnapshot, UiUpdate,
+};
 use kage_core::config::{AcpConfig, McpConfig, PluginsConfig, ProvidersConfig, UiConfig};
 use kage_core::permissions::PermissionsConfig;
 use kage_core::protocol::McpServerStatus;

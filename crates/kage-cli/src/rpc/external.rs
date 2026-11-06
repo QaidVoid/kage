@@ -34,6 +34,8 @@ mod unix {
     const SESSION_BUDGET: usize = 8 * 1024 * 1024;
     const ATTACHMENT_BUDGET: usize = 2 * 1024 * 1024;
     const MAX_ATTACHMENTS: usize = 32;
+    // Outstanding upstream permission asks per session, one waiter each.
+    const MAX_ASKS: usize = 4;
     // Unresolved opens of one attachment, so concurrent opens stay bounded.
     const MAX_OPEN_RECEIPTS: u8 = 8;
     // Detached writers may still be finishing a write, so allow headroom.
@@ -140,6 +142,8 @@ mod unix {
         identity: Arc<()>,
         epoch: u64,
         announced: bool,
+        // Whether the downstream peer can take forwarded permission asks.
+        asks: bool,
         receipts: u8,
         pending: Vec<Buffered>,
         bytes: Arc<AtomicUsize>,
@@ -149,7 +153,25 @@ mod unix {
     enum WriteItem {
         Update(Buffered),
         Barrier(mpsc::Sender<()>),
+        Ask {
+            params: Buffered,
+            ask: Arc<Ask>,
+            dispatched: mpsc::SyncSender<kage_acp::agent_peer::DispatchedRequest>,
+        },
     }
+
+    /// One upstream permission request, bound to the prompt that was active
+    /// when it arrived and forwarded only to that prompt's owner.
+    struct Ask {
+        prompt: Arc<()>,
+        owner: u64,
+        options: Vec<String>,
+        cancel: CancelFlag,
+        reply: Reply,
+    }
+
+    // The upstream request handle, answered exactly once by whoever takes it.
+    type Reply = Arc<Mutex<Option<kage_acp::connection::Request>>>;
 
     struct State {
         upstream: Option<String>,
@@ -160,12 +182,21 @@ mod unix {
         closed: bool,
         cancels: Option<mpsc::Sender<CancelAction>>,
         writers: Arc<AtomicUsize>,
+        asks: Vec<Arc<Ask>>,
     }
 
     impl State {
+        // Withdraw asks; each waiter then answers its upstream request.
+        fn cancel_asks(&self, matches: impl Fn(&Ask) -> bool) {
+            for ask in self.asks.iter().filter(|ask| matches(ask)) {
+                ask.cancel.cancel();
+            }
+        }
+
         fn close(&mut self) {
             self.closed = true;
             self.cancels = None;
+            self.cancel_asks(|_| true);
             if let Some(active) = &self.active {
                 active.abort.cancel();
             }
@@ -225,6 +256,7 @@ mod unix {
     struct Active {
         owner: u64,
         identity: Arc<()>,
+        token: Arc<()>,
         cancelled: bool,
         canceller: Option<UnixPromptCanceller>,
         abort: CancelFlag,
@@ -298,8 +330,10 @@ mod unix {
 
     fn cancel_worker(slot: &Arc<Slot>) -> Result<mpsc::Sender<CancelAction>, RpcError> {
         let (sender, actions) = mpsc::channel::<CancelAction>();
+        let owner_slot = Arc::clone(slot);
         slot.spawn("kage-external-cancel", move || {
             while let Ok(action) = actions.recv() {
+                answer_withdrawn_asks(&action.state, &owner_slot);
                 run_cancel(&action);
             }
         })
@@ -448,6 +482,7 @@ mod unix {
                 closed: false,
                 cancels: Some(cancels),
                 writers,
+                asks: Vec::new(),
             }));
             let session_id = id.clone();
             let started = receive_updates(incoming, Arc::clone(&state), id, slot)
@@ -593,6 +628,7 @@ mod unix {
 
         fn detach_locked(&self, state: &mut State, owner: u64) -> Option<bool> {
             let attachment = state.attachments.remove(&owner)?;
+            state.cancel_asks(|ask| ask.owner == owner);
             attachment.detached.store(true, Ordering::Release);
             let last = state.attachments.is_empty();
             if last {
@@ -715,6 +751,7 @@ mod unix {
                 state.active = Some(Active {
                     owner,
                     identity: Arc::clone(&ticket.identity),
+                    token: Arc::new(()),
                     cancelled: false,
                     canceller: None,
                     abort: abort.clone(),
@@ -745,7 +782,12 @@ mod unix {
                 }
             }
             let mut result = prompt.wait(None, TIMEOUT, Some(&abort));
-            let active = lock(&self.state).active.take().expect("active prompt");
+            let active = {
+                let mut state = lock(&self.state);
+                let active = state.active.take().expect("active prompt");
+                state.cancel_asks(|ask| Arc::ptr_eq(&ask.prompt, &active.token));
+                active
+            };
             let cancelled = active.cancelled;
             if self.cancellation_write_failed(active.cancellation) {
                 self.terminate();
@@ -933,6 +975,7 @@ mod unix {
             };
             attachment.epoch = attachment.epoch.wrapping_add(1);
             let identity = Arc::clone(&attachment.identity);
+            state.cancel_asks(|ask| ask.owner == owner);
             if let Some(action) = state
                 .active
                 .as_mut()
@@ -956,6 +999,7 @@ mod unix {
             state: Arc::clone(&sink),
             slot: Arc::clone(slot),
         };
+        let asks_slot = Arc::clone(slot);
         slot.spawn("kage-external-receive", move || {
             let _terminal = terminal;
             while let Ok(message) = incoming.recv() {
@@ -978,12 +1022,13 @@ mod unix {
                             break;
                         }
                     }
+                    Message::Request(request) if request.method == "session/request_permission" => {
+                        if !admit_ask(&sink, &asks_slot, &external_id, request) {
+                            break;
+                        }
+                    }
                     Message::Request(mut request) => {
-                        let response = if request.method == "session/request_permission" {
-                            Ok(json!({"outcome": {"outcome": "cancelled"}}))
-                        } else {
-                            Err(RpcError::method_not_found(&request.method))
-                        };
+                        let response = Err(RpcError::method_not_found(&request.method));
                         if request
                             .respond_bounded(response, Some(Instant::now() + TIMEOUT), None)
                             .is_err()
@@ -997,6 +1042,215 @@ mod unix {
             drop(incoming);
         })
         .map_err(|e| RpcError::internal(format!("cannot start external receiver: {e}")))
+    }
+
+    fn cancelled() -> Value {
+        json!({"outcome": {"outcome": "cancelled"}})
+    }
+
+    // Admit one upstream permission request. Returns false once the upstream
+    // can no longer be answered, which shuts the session down.
+    fn admit_ask(
+        sink: &Arc<Mutex<State>>,
+        slot: &Arc<Slot>,
+        id: &str,
+        request: kage_acp::connection::Request,
+    ) -> bool {
+        let reply: Reply = Arc::new(Mutex::new(Some(request)));
+        let queued = queue_ask(&mut lock(sink), sink, slot, id, &reply);
+        queued || answer(&reply, None, None, sink, slot)
+    }
+
+    // Queue the ask on the active prompt owner's update stream, after the
+    // updates that preceded it, with a waiter that answers it once.
+    fn queue_ask(
+        state: &mut State,
+        sink: &Arc<Mutex<State>>,
+        slot: &Arc<Slot>,
+        id: &str,
+        reply: &Reply,
+    ) -> bool {
+        if state.closed || state.asks.len() >= MAX_ASKS {
+            return false;
+        }
+        let Some(active) = state.active.as_ref().filter(|active| !active.cancelled) else {
+            return false;
+        };
+        let owner = active.owner;
+        let prompt = Arc::clone(&active.token);
+        let Some(attachment) = state.attachments.get(&owner).filter(|attachment| {
+            attachment.announced
+                && attachment.asks
+                && Arc::ptr_eq(&attachment.identity, &active.identity)
+        }) else {
+            return false;
+        };
+        let Some(sender) = attachment.sender.clone() else {
+            return false;
+        };
+        let mut params = {
+            let mut request = lock(reply);
+            let Some(request) = request.as_mut() else {
+                return false;
+            };
+            if request.params.get("sessionId").and_then(Value::as_str) != state.upstream.as_deref()
+            {
+                return false;
+            }
+            std::mem::take(&mut request.params)
+        };
+        let Some(options) = offered(&params) else {
+            return false;
+        };
+        params["sessionId"] = Value::String(id.to_owned());
+        let Some(params) = Buffered::new(params, &state.bytes, Some(&attachment.bytes)) else {
+            return false;
+        };
+        let ask = Arc::new(Ask {
+            prompt,
+            owner,
+            options,
+            cancel: CancelFlag::new(),
+            reply: Arc::clone(reply),
+        });
+        let (dispatched, handle) = mpsc::sync_channel(1);
+        let waiter = {
+            let (ask, sink, owner_slot) = (Arc::clone(&ask), Arc::clone(sink), Arc::clone(slot));
+            slot.spawn("kage-external-ask", move || {
+                wait_ask(&ask, &handle, &sink, &owner_slot);
+            })
+        };
+        if waiter.is_err() {
+            return false;
+        }
+        state.asks.push(Arc::clone(&ask));
+        let _ = sender.try_send(WriteItem::Ask {
+            params,
+            ask,
+            dispatched,
+        });
+        true
+    }
+
+    // Offered option IDs, which must be present and unambiguous.
+    fn offered(params: &Value) -> Option<Vec<String>> {
+        let mut ids = Vec::new();
+        for option in params.get("options")?.as_array()? {
+            let id = option.get("optionId")?.as_str()?;
+            if ids.iter().any(|other| other == id) {
+                return None;
+            }
+            ids.push(id.to_owned());
+        }
+        (!ids.is_empty()).then_some(ids)
+    }
+
+    // Only an offered selection passes through, with its extension metadata.
+    fn selected(ask: &Ask, value: &Value) -> Option<Value> {
+        let outcome = value.get("outcome")?;
+        if outcome.get("outcome")?.as_str()? != "selected" {
+            return None;
+        }
+        let option = outcome.get("optionId")?.as_str()?;
+        if !ask.options.iter().any(|offered| offered == option) {
+            return None;
+        }
+        let mut result = json!({"outcome": {"outcome": "selected", "optionId": option}});
+        if let Some(meta) = outcome.get("_meta") {
+            result["outcome"]["_meta"] = meta.clone();
+        }
+        if let Some(meta) = value.get("_meta") {
+            result["_meta"] = meta.clone();
+        }
+        Some(result)
+    }
+
+    // Answer the upstream request once. The decision is made under the
+    // session lock, where cancellation is marked, so a cancelled ask is never
+    // answered with a selection. A failed answer shuts the session down,
+    // because the upstream would otherwise wait forever.
+    fn answer(
+        reply: &Reply,
+        outcome: Option<Value>,
+        ask: Option<&Ask>,
+        sink: &Mutex<State>,
+        slot: &Slot,
+    ) -> bool {
+        let (request, outcome) = {
+            let _state = lock(sink);
+            let outcome = outcome
+                .filter(|_| !ask.is_some_and(|ask| ask.cancel.is_cancelled()))
+                .unwrap_or_else(cancelled);
+            (lock(reply).take(), outcome)
+        };
+        let Some(mut request) = request else {
+            return true;
+        };
+        if request
+            .respond_bounded(Ok(outcome), Some(Instant::now() + TIMEOUT), None)
+            .is_ok()
+        {
+            return true;
+        }
+        lock(sink).close();
+        slot.terminate();
+        false
+    }
+
+    // Answer withdrawn asks upstream before the cancellation notice, so a
+    // slow downstream withdrawal cannot hold back the upstream turn.
+    fn answer_withdrawn_asks(state: &Mutex<State>, slot: &Slot) {
+        let replies: Vec<Reply> = lock(state)
+            .asks
+            .iter()
+            .filter(|ask| ask.cancel.is_cancelled())
+            .map(|ask| Arc::clone(&ask.reply))
+            .collect();
+        for reply in replies {
+            answer(&reply, None, None, state, slot);
+        }
+    }
+
+    // A withdrawn ask is answered as cancelled at once. The waiter still
+    // settles a request the writer dispatched, which withdraws it downstream.
+    fn wait_ask(
+        ask: &Ask,
+        handle: &mpsc::Receiver<kage_acp::agent_peer::DispatchedRequest>,
+        sink: &Arc<Mutex<State>>,
+        slot: &Slot,
+    ) {
+        let _settle = Settle { ask, sink, slot };
+        let dispatched = loop {
+            match handle.recv_timeout(Duration::from_millis(25)) {
+                Ok(request) => break Some(request),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break None,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if ask.cancel.is_cancelled() {
+                        answer(&ask.reply, None, None, sink, slot);
+                    }
+                }
+            }
+        };
+        let outcome = dispatched
+            .and_then(|request| request.wait(&ask.cancel).ok())
+            .and_then(|value| selected(ask, &value));
+        answer(&ask.reply, outcome, Some(ask), sink, slot);
+    }
+
+    // Answers the ask if its waiter unwinds, and frees its place.
+    struct Settle<'a> {
+        ask: &'a Ask,
+        sink: &'a Mutex<State>,
+        slot: &'a Slot,
+    }
+
+    impl Drop for Settle<'_> {
+        fn drop(&mut self) {
+            answer(&self.ask.reply, None, None, self.sink, self.slot);
+            lock(self.sink)
+                .asks
+                .retain(|other| !std::ptr::eq(other.as_ref(), self.ask));
+        }
     }
 
     // Closes the session when the receive worker exits, including by panic.
@@ -1093,6 +1347,7 @@ mod unix {
             return Err(RpcError::internal("too many external attachment writers"));
         }
         let writer = Writer(Arc::clone(writers));
+        let asks = peer.splits_requests();
         let (sender, receiver) = mpsc::sync_channel(1024);
         let detached = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&detached);
@@ -1113,6 +1368,27 @@ mod unix {
                     WriteItem::Barrier(done) => {
                         let _ = done.send(());
                     }
+                    // A dropped item tells the waiter that nothing was asked.
+                    WriteItem::Ask {
+                        params,
+                        ask,
+                        dispatched,
+                    } => {
+                        if ask.cancel.is_cancelled() {
+                            continue;
+                        }
+                        match peer.dispatch_cancellable(
+                            "session/request_permission",
+                            params.value.clone(),
+                            &ask.cancel,
+                        ) {
+                            Ok(request) => {
+                                let _ = dispatched.send(request);
+                            }
+                            Err(_) if ask.cancel.is_cancelled() => {}
+                            Err(_) => break,
+                        }
+                    }
                 }
             }
             #[cfg(test)]
@@ -1126,6 +1402,7 @@ mod unix {
             identity: Arc::new(()),
             epoch: 0,
             announced: false,
+            asks,
             receipts: 0,
             pending: Vec::new(),
             bytes: Arc::new(AtomicUsize::new(0)),
@@ -2507,6 +2784,252 @@ for line in sys.stdin:
             assert!(session.slot.wait_finished(WAIT));
         }
 
+        // Asks once per prompt and reports the outcome it received as text.
+        // Answers are buffered by id, since they can arrive in any order and
+        // after a cancellation notice.
+        const ASK_SCRIPT: &str = r"
+import json,sys
+def send(m): print(json.dumps(m),flush=True)
+seen={}
+def answer(i):
+ while i not in seen:
+  r=json.loads(sys.stdin.readline())
+  if 'id' in r and 'method' not in r: seen[r['id']]=r.get('result',{}).get('outcome',{})
+ return seen.pop(i)
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); i=m.get('id')
+ if method=='initialize': result={'protocolVersion':1,'agentCapabilities':{}}
+ elif method=='session/new': result={'sessionId':'up'}
+ elif method=='session/prompt':
+  n=len(m['params']['prompt'][0]['text'])
+  for k in range(n):
+   send({'jsonrpc':'2.0','id':'p%d'%k,'method':'session/request_permission','params':{'sessionId':'up','toolCall':{'toolCallId':'c1'},'options':[{'optionId':'yes','name':'Yes','kind':'allow_once'},{'optionId':'no','name':'No','kind':'reject_once'}],'_meta':{'x':1}}})
+  got={}
+  for k in reversed(range(n)):
+   o=answer('p%d'%k); got[k]=o.get('outcome','')+':'+o.get('optionId','')
+   if k==n-1 and n>1:
+    send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'up','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'last '+got[k]}}}})
+  text=' '.join(got[k] for k in range(n))
+  send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'up','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':text}}}})
+  result={'stopReason':'end_turn'}
+ else: continue
+ send({'jsonrpc':'2.0','id':i,'result':result})
+";
+
+        // A downstream client on an ordered Unix transport, which forwarded
+        // asks need. Barriers are acknowledged as they arrive.
+        fn unix_client() -> (
+            AgentPeer,
+            kage_jsonrpc::Peer,
+            mpsc::Receiver<kage_jsonrpc::Inbound>,
+        ) {
+            let (reader, input) = std::io::pipe().unwrap();
+            let (output, writer) = std::io::pipe().unwrap();
+            let (unix, inbound, _reader) = kage_jsonrpc::unix_peer::connect_ordered_server(
+                BufReader::new(reader),
+                writer.into(),
+            )
+            .unwrap();
+            thread::spawn(move || {
+                for item in inbound {
+                    if let kage_jsonrpc::OrderedInbound::Barrier(marker) = item {
+                        marker.acknowledge();
+                    }
+                }
+            });
+            let (client, inbox, _reader) = kage_jsonrpc::connect(BufReader::new(output), input);
+            (AgentPeer::unix(unix, Duration::from_secs(2)), client, inbox)
+        }
+
+        fn ask_session(peer: AgentPeer) -> Arc<External> {
+            let config = kage_core::config::AcpAgent {
+                command: "python3".into(),
+                args: vec!["-u".into(), "-c".into(), ASK_SCRIPT.into()],
+                env: BTreeMap::default(),
+            };
+            let cwd = std::env::current_dir().unwrap();
+            let (session, created) = External::start(
+                &Lifecycles::new(1),
+                "local".into(),
+                "fake",
+                cwd.to_str().unwrap(),
+                &config,
+                1,
+                peer,
+            )
+            .unwrap();
+            created.announce();
+            session
+        }
+
+        fn next_request(inbox: &mpsc::Receiver<kage_jsonrpc::Inbound>) -> (Value, Value) {
+            loop {
+                match inbox.recv_timeout(WAIT).unwrap() {
+                    kage_jsonrpc::Inbound::Request { id, method, params } => {
+                        assert_eq!(method, "session/request_permission");
+                        break (id, params);
+                    }
+                    kage_jsonrpc::Inbound::Notification { .. } => {}
+                }
+            }
+        }
+
+        fn next_text(inbox: &mpsc::Receiver<kage_jsonrpc::Inbound>) -> String {
+            loop {
+                if let kage_jsonrpc::Inbound::Notification { method, params } =
+                    inbox.recv_timeout(WAIT).unwrap()
+                    && method == "session/update"
+                {
+                    break params["update"]["content"]["text"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned();
+                }
+            }
+        }
+
+        fn prompt_in_background(
+            session: &Arc<External>,
+            text: &str,
+        ) -> thread::JoinHandle<Result<PromptResponse, RpcError>> {
+            let session = Arc::clone(session);
+            let text = text.to_owned();
+            thread::spawn(move || session.prompt_owned(1, request(&text)))
+        }
+
+        #[test]
+        fn permission_ask_reaches_the_prompt_owner_and_returns_its_selection() {
+            let (peer, client, inbox) = unix_client();
+            let session = ask_session(peer);
+            let (_other_client, other_server) = UnixStream::pair().unwrap();
+            let (other, _, _) = kage_jsonrpc::connect(
+                BufReader::new(other_server.try_clone().unwrap()),
+                other_server,
+            );
+            session.attach(2, other.into()).unwrap();
+            session.announce(2);
+            let prompt = prompt_in_background(&session, "a");
+            let (id, params) = next_request(&inbox);
+            assert_eq!(params["sessionId"], "local");
+            assert_eq!(params["_meta"], json!({"x": 1}));
+            assert_eq!(params["options"][1]["optionId"], "no");
+            client
+                .respond(
+                    &id,
+                    Ok(json!({"outcome": {"outcome": "selected", "optionId": "yes"}})),
+                )
+                .unwrap();
+            assert_eq!(next_text(&inbox), "selected:yes");
+            assert_eq!(
+                prompt.join().unwrap().unwrap().stop_reason,
+                StopReason::EndTurn
+            );
+            let until = Instant::now() + WAIT;
+            while !lock(&session.state).asks.is_empty() {
+                assert!(Instant::now() < until, "answered ask was not released");
+                thread::sleep(Duration::from_millis(2));
+            }
+            assert!(!session.detach(2));
+            assert!(session.detach(1));
+        }
+
+        #[test]
+        fn unoffered_selection_is_answered_as_cancelled() {
+            let (peer, client, inbox) = unix_client();
+            let session = ask_session(peer);
+            let prompt = prompt_in_background(&session, "a");
+            let (id, _) = next_request(&inbox);
+            client
+                .respond(
+                    &id,
+                    Ok(json!({"outcome": {"outcome": "selected", "optionId": "always"}})),
+                )
+                .unwrap();
+            assert_eq!(next_text(&inbox), "cancelled:");
+            assert_eq!(
+                prompt.join().unwrap().unwrap().stop_reason,
+                StopReason::EndTurn
+            );
+            assert!(session.detach(1));
+        }
+
+        #[test]
+        fn cancelling_the_prompt_withdraws_its_ask() {
+            let (peer, client, inbox) = unix_client();
+            let session = ask_session(peer);
+            let prompt = prompt_in_background(&session, "a");
+            let (id, _) = next_request(&inbox);
+            session.cancel(1);
+            loop {
+                if let kage_jsonrpc::Inbound::Notification { method, params } =
+                    inbox.recv_timeout(WAIT).unwrap()
+                    && method == "$/cancel_request"
+                {
+                    assert_eq!(params["requestId"], id);
+                    break;
+                }
+            }
+            client
+                .respond(
+                    &id,
+                    Ok(json!({"outcome": {"outcome": "selected", "optionId": "yes"}})),
+                )
+                .unwrap();
+            assert_eq!(next_text(&inbox), "cancelled:");
+            assert_eq!(
+                prompt.join().unwrap().unwrap().stop_reason,
+                StopReason::Cancelled
+            );
+            assert!(session.detach(1));
+        }
+
+        #[test]
+        fn asks_for_a_generic_downstream_peer_are_cancelled() {
+            let (client, server) = UnixStream::pair().unwrap();
+            let (peer, _, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            let session = ask_session(peer.into());
+            let prompt = prompt_in_background(&session, "a");
+            let mut lines = BufReader::new(client).lines();
+            let update = loop {
+                let line: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+                assert_ne!(line["method"], "session/request_permission");
+                if line["method"] == "session/update" {
+                    break line;
+                }
+            };
+            assert_eq!(update["params"]["update"]["content"]["text"], "cancelled:");
+            assert_eq!(
+                prompt.join().unwrap().unwrap().stop_reason,
+                StopReason::EndTurn
+            );
+            assert!(session.detach(1));
+        }
+
+        #[test]
+        fn outstanding_asks_are_bounded() {
+            let (peer, client, inbox) = unix_client();
+            let session = ask_session(peer);
+            let prompt = prompt_in_background(&session, &"a".repeat(MAX_ASKS + 1));
+            let ids: Vec<_> = (0..MAX_ASKS).map(|_| next_request(&inbox).0).collect();
+            assert_eq!(next_text(&inbox), "last cancelled:");
+            for id in &ids {
+                client
+                    .respond(
+                        id,
+                        Ok(json!({"outcome": {"outcome": "selected", "optionId": "no"}})),
+                    )
+                    .unwrap();
+            }
+            let expected = format!("{}cancelled:", "selected:no ".repeat(MAX_ASKS));
+            assert_eq!(next_text(&inbox), expected);
+            assert_eq!(
+                prompt.join().unwrap().unwrap().stop_reason,
+                StopReason::EndTurn
+            );
+            assert!(session.detach(1));
+        }
+
         #[test]
         fn open_receipts_are_fresh_exact_once_and_attachment_scoped() {
             let session = scripted_session(ADMISSION_SCRIPT);
@@ -2730,6 +3253,7 @@ for line in sys.stdin:
                 state.active = Some(Active {
                     owner: 2,
                     identity: Arc::clone(&ticket.identity),
+                    token: Arc::new(()),
                     cancelled: false,
                     canceller: None,
                     abort: CancelFlag::new(),
@@ -2795,6 +3319,7 @@ for line in sys.stdin:
                 closed: false,
                 cancels: None,
                 writers: Arc::new(AtomicUsize::new(0)),
+                asks: Vec::new(),
             };
             forward(
                 &mut state,
@@ -2890,6 +3415,7 @@ for line in sys.stdin:
                 closed: false,
                 cancels: None,
                 writers: Arc::new(AtomicUsize::new(0)),
+                asks: Vec::new(),
             };
             state.close();
             assert!(state.attachments.contains_key(&1));
@@ -2966,6 +3492,7 @@ for line in sys.stdin:
                 closed: true,
                 cancels: None,
                 writers: Arc::new(AtomicUsize::new(0)),
+                asks: Vec::new(),
             }));
             let startup = Lifecycles::new(1).reserve().unwrap();
             startup.transport(
@@ -3001,6 +3528,7 @@ for line in sys.stdin:
                 closed: false,
                 cancels: None,
                 writers: Arc::new(AtomicUsize::new(0)),
+                asks: Vec::new(),
             }));
             let startup = Lifecycles::new(1).reserve().unwrap();
             startup.transport(

@@ -71,6 +71,14 @@ impl AgentPeer {
         }
     }
 
+    /// Whether requests can be dispatched without waiting for their response,
+    /// which only the native Unix pipe transport supports.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn splits_requests(&self) -> bool {
+        matches!(self.inner, Transport::Unix(..))
+    }
+
     /// Send a notification.
     ///
     /// # Errors

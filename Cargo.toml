@@ -71,7 +71,7 @@ grep = "0.4.1"
 html2text = "0.17.1"
 ignore = "0.4.33"
 libc = "0.2.189"
-mimalloc = "0.1.52"
+mimalloc = { version = "0.1.52", features = ["no_thp"] }
 mlua = { version = "0.12.1", features = ["lua54", "send", "vendored", "async"] }
 nix = { version = "0.31.3", default-features = false, features = ["fs", "process", "signal", "socket", "user"] }
 notify = "8.2.0"

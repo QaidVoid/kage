@@ -11,7 +11,7 @@ use std::thread;
 use std::time::Duration;
 
 use kage_remote::head::{self, Auth, HeadError};
-use kage_remote::pipe::{self, Outgoing};
+use kage_remote::pipe::{self, Incoming, Outgoing};
 use kage_remote::token::Token;
 
 use tungstenite::WebSocket;
@@ -91,7 +91,7 @@ pub fn accept(stream: &mut TcpStream, token: &Token) -> Accepted {
 
 /// The outcome of [`accept`].
 pub enum Accepted {
-    Upgraded(BufReader<std::io::PipeReader>, Outgoing),
+    Upgraded(BufReader<Incoming>, Outgoing),
     Rejected(u16),
 }
 
@@ -99,7 +99,7 @@ pub enum Accepted {
 /// thread, and returns the bound address.
 pub fn serve_upgraded(
     token: Arc<Token>,
-    run: impl FnOnce(BufReader<std::io::PipeReader>, Outgoing) + Send + 'static,
+    run: impl FnOnce(BufReader<Incoming>, Outgoing) + Send + 'static,
 ) -> SocketAddr {
     let (listener, addr) = listener();
     thread::spawn(move || {

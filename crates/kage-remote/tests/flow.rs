@@ -127,6 +127,73 @@ fn binary_frames_are_dropped() {
 }
 
 #[test]
+fn inbound_message_cap_is_exclusive() {
+    let (_dir, token) = fresh_token();
+    let (accepted, was_accepted) = mpsc::channel();
+    let (closed, was_closed) = mpsc::channel();
+    let addr = serve_upgraded(Arc::clone(&token), move |mut reader, _writer| {
+        let mut message = vec![0; MAX_MESSAGE];
+        reader.read_exact(&mut message).unwrap();
+        assert!(message[..MAX_MESSAGE - 1].iter().all(|&byte| byte == b'a'));
+        assert_eq!(message[MAX_MESSAGE - 1], b'\n');
+        accepted.send(()).unwrap();
+
+        let mut extra = [0];
+        assert_eq!(reader.read(&mut extra).unwrap(), 0);
+        closed.send(()).unwrap();
+    });
+
+    let mut client = connect_client(addr, &token);
+    client
+        .send(Message::text("a".repeat(MAX_MESSAGE - 1)))
+        .unwrap();
+    was_accepted
+        .recv_timeout(TIMEOUT)
+        .expect("the largest accepted frame must arrive with its appended newline");
+    client.send(Message::text("b".repeat(MAX_MESSAGE))).unwrap();
+    was_closed
+        .recv_timeout(TIMEOUT)
+        .expect("a frame at the cap must close the inbound stream without being delivered");
+}
+
+#[test]
+fn dropping_reader_aborts_after_output_is_queued() {
+    let (_dir, token) = fresh_token();
+    let (dropped, was_dropped) = mpsc::channel();
+    let addr = serve_upgraded(Arc::clone(&token), move |reader, mut writer| {
+        writer.write_all(b"queued output").unwrap();
+        writer.flush().unwrap();
+        // Flush only enqueues. Dropping the reader aborts and joins the workers,
+        // so it does not promise delivery of this output, even after flush.
+        drop(reader);
+        writer.write_all(b"after abort").unwrap();
+        assert!(writer.flush().is_err());
+        dropped.send(()).unwrap();
+    });
+
+    let mut client = connect_client(addr, &token);
+    was_dropped
+        .recv_timeout(TIMEOUT)
+        .expect("reader drop must stop and join the workers");
+    // The queued frame may have reached the socket before the abort. Drain it
+    // if present, but do not require either delivery or discard.
+    loop {
+        match client.read() {
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                panic!("the aborted socket did not close: {error}");
+            }
+            Ok(Message::Close(_)) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+}
+
+#[test]
 fn message_over_the_cap_closes_the_connection() {
     let (_dir, token) = fresh_token();
     let (gone, is_gone) = mpsc::channel();

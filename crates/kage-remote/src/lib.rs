@@ -34,8 +34,9 @@ pub const HEAD_CAP: usize = 16 * 1024;
 /// How long the peer may take to deliver a complete request head.
 pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Largest inbound message in bytes. A larger message closes the
-/// connection.
+/// Largest inbound JSON-RPC line in bytes, including the newline added
+/// after a WebSocket text message. A text payload must therefore be smaller
+/// than this limit. Larger messages close the connection.
 pub const MAX_MESSAGE: usize = 8 * 1024 * 1024;
 
 /// Byte cap on messages queued for a peer that stopped reading. Once

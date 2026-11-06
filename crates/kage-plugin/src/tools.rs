@@ -102,6 +102,11 @@ impl Tool for LuaTool {
         if cx.is_cancelled() {
             return Err(ToolError::Cancelled);
         }
+        // The call runs on a dispatch worker, so it names its session
+        // rather than inheriting the run thread's invocation.
+        let _entered = cx
+            .session()
+            .map(|session| crate::invocation::Entered::new(crate::Invocation::session(session)));
         let failed = |e: &dyn std::fmt::Display| {
             ToolError::Other(format!("plugin tool '{}': {e}", self.name))
         };

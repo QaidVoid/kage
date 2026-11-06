@@ -6685,3 +6685,56 @@ fn events_a_named_command_publishes_carry_its_id() {
     h.engine.send(Command::to(id, CommandKind::ListPrompts));
     assert_eq!(rx.recv_timeout(WAIT).unwrap(), None);
 }
+
+/// A session's plugin work reads the environment the session opened with:
+/// a hook on the run thread, and a plugin tool on a dispatch worker. Once
+/// the session closes, the runtime forgets it.
+#[test]
+fn plugin_work_runs_in_its_sessions_environment() {
+    let mut caps = std::collections::BTreeMap::new();
+    caps.insert("p".to_owned(), vec!["env".to_owned()]);
+    let runtime = Arc::new(PluginRuntime::builder().capabilities(caps).build().unwrap());
+    runtime
+        .eval_plugin(
+            "p",
+            "kage.request_capabilities({'env'}) \
+             kage.on('agent_start', function() hooked = kage.env('KAGE_TEST_CLIENT') end) \
+             kage.register_tool({ name = 'client', description = 'd', \
+               schema = { type = 'object' }, \
+               execute = function() return kage.env('KAGE_TEST_CLIENT') or 'none' end })",
+        )
+        .unwrap();
+    let mock = MockProvider::sequence(vec![tool_turn("client"), text_turn("done")]);
+    let h = harness(mock.clone());
+    let id = SessionId::new();
+    let mut spec = h.spec(id);
+    spec.cx.env = kage_core::environment::Environment::captured(vec![(
+        "KAGE_TEST_CLIENT".into(),
+        "editor".into(),
+    )]);
+    spec.plugins = Some(Arc::clone(&runtime));
+    h.engine.open(spec);
+    prompt(&h.engine, id, "go", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+    let sent = serde_json::to_string(&mock.requests()[1].messages).unwrap();
+    assert!(sent.contains("editor"), "{sent}");
+    let hooked = runtime.eval_plugin("p", "return hooked").unwrap();
+    assert_eq!(hooked.as_string().unwrap().to_str().unwrap(), "editor");
+
+    h.engine.send(Command::to(id, CommandKind::Close));
+    let read = || {
+        kage_plugin::Invocation::session(id).scope(|| {
+            runtime
+                .eval_plugin("p", "return kage.env('KAGE_TEST_CLIENT')")
+                .unwrap()
+        })
+    };
+    let deadline = Instant::now() + WAIT;
+    while !read().is_nil() {
+        assert!(
+            Instant::now() < deadline,
+            "the closed session was not forgotten"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}

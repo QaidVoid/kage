@@ -119,8 +119,9 @@ pub struct AgentContext {
     pub budget: TokenBudget,
     /// Id of the session this conversation belongs to, forwarded on
     /// every [`kage_provider::StreamRequest`] for gateways that route
-    /// by conversation. `None` outside a session.
-    pub session: Option<String>,
+    /// by conversation and on every [`kage_tools::ToolContext`]. `None`
+    /// outside a session.
+    pub session: Option<kage_core::SessionId>,
 }
 
 impl AgentContext {

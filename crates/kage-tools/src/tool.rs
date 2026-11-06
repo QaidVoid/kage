@@ -110,6 +110,7 @@ pub struct ToolContext<'a> {
     call_id: Option<&'a ToolCallId>,
     history: &'a [Arc<Message>],
     env: kage_core::environment::Environment,
+    session: Option<kage_core::SessionId>,
 }
 
 impl std::fmt::Debug for ToolContext<'_> {
@@ -120,6 +121,7 @@ impl std::fmt::Debug for ToolContext<'_> {
             .field("confine", &self.confine)
             .field("call_id", &self.call_id)
             .field("history", &self.history.len())
+            .field("session", &self.session)
             .finish_non_exhaustive()
     }
 }
@@ -137,6 +139,7 @@ impl<'a> ToolContext<'a> {
             call_id: None,
             history: &[],
             env: kage_core::environment::Environment::inherit(),
+            session: None,
         }
     }
 
@@ -146,6 +149,19 @@ impl<'a> ToolContext<'a> {
     pub fn with_env(mut self, env: kage_core::environment::Environment) -> Self {
         self.env = env;
         self
+    }
+
+    /// Name the session the call runs in.
+    #[must_use]
+    pub fn with_session(mut self, session: Option<kage_core::SessionId>) -> Self {
+        self.session = session;
+        self
+    }
+
+    /// The session the call runs in, `None` outside one.
+    #[must_use]
+    pub fn session(&self) -> Option<kage_core::SessionId> {
+        self.session
     }
 
     /// The environment processes a tool runs start with.

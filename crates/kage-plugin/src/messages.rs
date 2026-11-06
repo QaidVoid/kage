@@ -56,7 +56,7 @@ pub struct PendingMessage {
 }
 
 /// Shared queue of plugin-supplied messages, drained by the host.
-pub type SharedPendingMessages = Arc<Mutex<Vec<PendingMessage>>>;
+pub type SharedPendingMessages = Arc<Mutex<crate::invocation::Tagged<PendingMessage>>>;
 
 /// Construct an empty queue.
 #[must_use]
@@ -87,11 +87,14 @@ pub(crate) fn register(registry: &CapabilityRegistry, queue: SharedPendingMessag
                     let mut queue_guard = queue_for_lua
                         .lock()
                         .map_err(|_| mlua::Error::external("plugin send_message mutex poisoned"))?;
-                    queue_guard.push(PendingMessage {
-                        text,
-                        trigger_turn,
-                        deliver_as,
-                    });
+                    queue_guard.push((
+                        crate::Invocation::current().session,
+                        PendingMessage {
+                            text,
+                            trigger_turn,
+                            deliver_as,
+                        },
+                    ));
                     Ok(mlua::Value::Nil)
                 })?,
             )?;

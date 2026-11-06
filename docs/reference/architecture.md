@@ -477,12 +477,18 @@ the thread until it finishes.
 
 The TUI loads, in order: `_defaults.lua`, the plugins sorted by file
 name, `[keybindings]` from `config.toml`, then `init.lua`, and fires
-`color_scheme` once. Each layer overrides the ones before it. Print
-mode and `kage rpc` load `_defaults.lua` and the plugins, never
-`init.lua`. Each file
-evaluates in its own environment with private copies of the shared
-`kage` tables, so no plugin can change another's view or reach the
-trusted user environment.
+`color_scheme` once. Each layer overrides the ones before it. A host
+(`kage rpc` and `kage serve`) loads the same layers once per project,
+keyed by the canonical workdir, and every session in that project
+shares that runtime. Each piece of Lua work carries the session it
+runs for (`kage_plugin::Invocation`), so `kage.exec` and `kage.env`
+use that session's environment and its queued session writes reach its
+own file. A project runtime no session has held for a minute is
+dropped on the shared host's next tick, or elsewhere when a session
+opens. Print mode loads `_defaults.lua` and the plugins, never
+`init.lua`. Each file evaluates in its own environment with private
+copies of the shared `kage` tables, so no plugin can change another's
+view or reach the trusted user environment.
 
 The keymap table, the option store and the highlight table are plain
 data in `kage-core`, shared behind mutexes with generation counters.

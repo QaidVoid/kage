@@ -24,7 +24,7 @@ pub(crate) use kage_tui::{
     shared_session_usage, shared_toasts,
 };
 
-pub(crate) use crate::plugins::setup_tui_runtime;
+pub(crate) use crate::plugins::setup_user_runtime;
 
 mod entry;
 mod host;
@@ -36,7 +36,6 @@ pub(crate) use host::Link;
 
 pub use entry::run_tui;
 
-#[cfg(test)]
 pub(crate) use entry::startup_options;
 
 pub(crate) use support::{

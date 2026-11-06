@@ -7787,6 +7787,7 @@ fn external_race_session(dir: &Path, owner: &CliAcpAgent) -> Arc<external::Exter
         env: BTreeMap::new(),
     };
     external::External::start(
+        &owner.host.lifecycles,
         "external".into(),
         "fake",
         dir.to_str().unwrap(),
@@ -8193,6 +8194,7 @@ for line in sys.stdin:
         )]),
     };
     let session = external::External::start(
+        &host.lifecycles,
         "external".into(),
         "fake",
         dir.path().to_str().unwrap(),

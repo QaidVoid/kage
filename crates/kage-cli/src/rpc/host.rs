@@ -71,6 +71,12 @@ pub(super) struct Open {
 pub(crate) struct Host {
     pub(super) engine: Engine,
     pub(super) external: Mutex<HashMap<String, Arc<super::external::External>>>,
+    /// Capacity for external agent processes, held until cleanup finishes.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "external session creation is disabled")
+    )]
+    pub(super) lifecycles: super::external::Lifecycles,
     /// The providers in effect, replaced when the config's change.
     registry: RwLock<Arc<ProviderRegistry>>,
     pub(super) default_model: String,
@@ -206,6 +212,7 @@ impl Host {
         let host = Arc::new(Self {
             engine,
             external: Mutex::default(),
+            lifecycles: super::external::Lifecycles::new(super::external::MAX_SESSIONS),
             registry: RwLock::new(registry),
             default_model,
             sessions,

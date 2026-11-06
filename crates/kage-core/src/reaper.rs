@@ -150,6 +150,12 @@ mod protected {
             self.pid.cast_unsigned()
         }
 
+        /// Return whether ownership was lost, so cleanup can never succeed.
+        #[must_use]
+        pub fn identity_lost(&self) -> bool {
+            self.identity_lost
+        }
+
         /// Take the leader's piped standard input, if configured and available.
         pub fn take_stdin(&mut self) -> Option<ChildStdin> {
             self.child.as_mut()?.stdin.take()
@@ -515,11 +521,13 @@ mod protected {
     }
 
     /// Return an empty list because protected guards are unavailable.
+    #[must_use]
     pub fn quarantined_pids() -> Vec<u32> {
         Vec::new()
     }
 
     /// Protected guards cannot exist on this platform.
+    #[must_use]
     pub fn recover_protected(_: u32) -> Option<ProtectedChild> {
         None
     }
@@ -528,6 +536,11 @@ mod protected {
         /// Return the process identifier.
         #[must_use]
         pub fn id(&self) -> u32 {
+            unreachable!("protected children require Linux")
+        }
+        /// Protected children cannot exist on this platform.
+        #[must_use]
+        pub fn identity_lost(&self) -> bool {
             unreachable!("protected children require Linux")
         }
         /// Protected children have no standard input on this platform.

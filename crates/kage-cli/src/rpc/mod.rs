@@ -691,23 +691,18 @@ impl CliAcpAgent {
     }
 
     fn release_external(&self, id: &str) -> bool {
-        let detached = {
-            // Always acquire the host map before the connection ids, as in attach.
-            let mut sessions = lock(&self.host.external);
-            let mut ids = lock(&self.ids);
-            if !ids.external.remove(id) {
-                return false;
-            }
-            sessions.get(id).cloned().map(|session| {
-                let (last, cancel) = session.detach_mark(self.connection);
-                if last {
-                    sessions.remove(id);
-                }
-                (session, last, cancel)
-            })
-        };
-        if let Some((session, last, cancel)) = detached {
-            session.finish_detach(last, cancel);
+        // Always acquire the host map before the connection ids, as in attach.
+        // Detaching never blocks, so it can run under both locks.
+        let mut sessions = lock(&self.host.external);
+        let mut ids = lock(&self.ids);
+        if !ids.external.remove(id) {
+            return false;
+        }
+        if sessions
+            .get(id)
+            .is_some_and(|session| session.detach(self.connection))
+        {
+            sessions.remove(id);
         }
         true
     }

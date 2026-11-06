@@ -1,13 +1,20 @@
 //! Host-owned external ACP sessions.
 
 #[cfg(target_os = "linux")]
+mod lifecycle;
+
+/// External agent processes a host runs at once, including ones cleaning up.
+pub(super) const MAX_SESSIONS: usize = 16;
+
+#[cfg(target_os = "linux")]
 mod unix {
 
     use std::collections::HashMap;
     use std::io::{self, BufReader, Read};
     use std::process::{Command, Stdio};
 
-    use kage_core::reaper::{ProtectedChild, spawn_protected};
+    use super::lifecycle::{Lifecycles, Slot};
+    use kage_core::reaper::spawn_protected;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
     use std::thread;
@@ -18,7 +25,7 @@ mod unix {
         PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse,
     };
     use kage_acp::agent::{AgentPeer, OpenReceipt};
-    use kage_acp::connection::{Message, UnixConnection, UnixPromptCanceller, UnixShutdown};
+    use kage_acp::connection::{Message, UnixConnection, UnixPromptCanceller};
     use kage_core::{CancelFlag, sync::lock};
     use kage_jsonrpc::{ResponseBarrier, RpcError};
     use serde_json::{Value, json};
@@ -27,6 +34,8 @@ mod unix {
     const SESSION_BUDGET: usize = 8 * 1024 * 1024;
     const ATTACHMENT_BUDGET: usize = 2 * 1024 * 1024;
     const MAX_ATTACHMENTS: usize = 32;
+    // Detached writers may still be finishing a write, so allow headroom.
+    const MAX_WRITERS: usize = 2 * MAX_ATTACHMENTS;
     // Includes the active prompt and all registered tickets, until each is dropped.
     // Stay below the 32 ACP workers per connection so one session cannot occupy all
     // of them. Multiple external sessions can still exhaust the shared workers.
@@ -104,17 +113,6 @@ mod unix {
     struct InterruptibleReader<R> {
         reader: R,
         stopped: Arc<AtomicBool>,
-        #[cfg(test)]
-        done: Option<mpsc::Sender<()>>,
-    }
-
-    #[cfg(test)]
-    impl<R> Drop for InterruptibleReader<R> {
-        fn drop(&mut self) {
-            if let Some(done) = self.done.take() {
-                let _ = done.send(());
-            }
-        }
     }
 
     impl<R: Read> Read for InterruptibleReader<R> {
@@ -157,13 +155,14 @@ mod unix {
         attachments: HashMap<u64, Attachment>,
         active: Option<Active>,
         closed: bool,
-        #[cfg(test)]
-        reader_done: bool,
+        cancels: Option<mpsc::Sender<CancelAction>>,
+        writers: Arc<AtomicUsize>,
     }
 
     impl State {
         fn close(&mut self) {
             self.closed = true;
+            self.cancels = None;
             if let Some(active) = &self.active {
                 active.abort.cancel();
             }
@@ -294,8 +293,15 @@ mod unix {
         Some((receiver, write_done))
     }
 
-    fn send_cancel(action: CancelAction) {
-        thread::spawn(move || run_cancel(&action));
+    fn cancel_worker(slot: &Arc<Slot>) -> Result<mpsc::Sender<CancelAction>, RpcError> {
+        let (sender, actions) = mpsc::channel::<CancelAction>();
+        slot.spawn("kage-external-cancel", move || {
+            while let Ok(action) = actions.recv() {
+                run_cancel(&action);
+            }
+        })
+        .map_err(|e| RpcError::internal(format!("cannot start external cancellation: {e}")))?;
+        Ok(sender)
     }
 
     fn run_cancel(action: &CancelAction) {
@@ -335,19 +341,18 @@ mod unix {
     /// A single upstream process and session, shared by host attachments.
     pub(crate) struct External {
         connection: UnixConnection,
-        reader_stopped: Arc<AtomicBool>,
-        #[cfg(test)]
-        reader_done: Mutex<mpsc::Receiver<()>>,
         prompt_gate: Mutex<()>,
         admitted: Arc<AtomicUsize>,
         unannounced: Arc<AtomicUsize>,
-        child: Arc<Mutex<Option<ProtectedChild>>>,
+        slot: Arc<Slot>,
         capabilities: PromptCapabilities,
         state: Arc<Mutex<State>>,
     }
 
     impl External {
+        /// Start the agent in a reserved slot, which owns its cleanup.
         pub(crate) fn start(
+            lifecycles: &Lifecycles,
             id: String,
             name: &str,
             cwd: &str,
@@ -355,6 +360,7 @@ mod unix {
             owner: u64,
             peer: AgentPeer,
         ) -> Result<Arc<Self>, RpcError> {
+            let startup = lifecycles.reserve()?;
             let mut command = Command::new(&config.command);
             command
                 .args(&config.args)
@@ -366,99 +372,84 @@ mod unix {
             let mut child = spawn_protected(&mut command).map_err(|e| {
                 RpcError::internal(format!("cannot start external agent {name:?}: {e}"))
             })?;
-            let stdout = child.take_stdout().expect("piped stdout");
-            let stdin = child.take_stdin().expect("piped stdin");
-            if let Err(error) = nix::fcntl::fcntl(
+            let stdout = child.take_stdout();
+            let stdin = child.take_stdin();
+            startup.child(child);
+            let (Some(stdout), Some(stdin)) = (stdout, stdin) else {
+                return Err(RpcError::internal("external agent pipes are unavailable"));
+            };
+            nix::fcntl::fcntl(
                 &stdout,
                 nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
-            ) {
-                let _ = child.finish(nix::libc::SIGKILL);
-                return Err(RpcError::internal(format!(
-                    "cannot configure external reader: {error}"
-                )));
-            }
+            )
+            .map_err(|e| RpcError::internal(format!("cannot configure external reader: {e}")))?;
             let reader_stopped = Arc::new(AtomicBool::new(false));
-            #[cfg(test)]
-            let (reader_done_tx, reader_done) = mpsc::channel();
             let reader = InterruptibleReader {
                 reader: stdout,
                 stopped: Arc::clone(&reader_stopped),
-                #[cfg(test)]
-                done: Some(reader_done_tx),
             };
             let (mut connection, incoming, reader_thread) =
-                match UnixConnection::new_managed(BufReader::new(reader), stdin.into()) {
-                    Ok(connection) => connection,
-                    Err(error) => {
-                        let _ = child.finish(nix::libc::SIGKILL);
-                        return Err(RpcError::internal(format!(
-                            "cannot connect external agent: {error}"
-                        )));
-                    }
-                };
-            let child = Arc::new(Mutex::new(Some(child)));
+                UnixConnection::new_managed(BufReader::new(reader), stdin.into()).map_err(|e| {
+                    RpcError::internal(format!("cannot connect external agent: {e}"))
+                })?;
+            startup.transport(connection.shutdown_handle(), reader_stopped, reader_thread);
+            let slot = startup.slot();
+            let writers = Arc::new(AtomicUsize::new(0));
+            let first = attachment(peer, slot, &writers)?;
+            let cancels = cancel_worker(slot)?;
             let state = Arc::new(Mutex::new(State {
                 upstream: None,
                 early: Vec::new(),
                 bytes: Arc::new(AtomicUsize::new(0)),
-                attachments: HashMap::from([(owner, attachment(peer))]),
+                attachments: HashMap::from([(owner, first)]),
                 active: None,
                 closed: false,
-                #[cfg(test)]
-                reader_done: false,
+                cancels: Some(cancels),
+                writers,
             }));
-            let sink = Arc::clone(&state);
             let session_id = id.clone();
-            let external_id = id;
-            let process = Arc::clone(&child);
-            receive_updates(
-                incoming,
-                sink,
-                external_id,
-                process,
-                Arc::clone(&reader_stopped),
-                connection.shutdown_handle(),
-                reader_thread,
-            );
-            let result = initialize(&mut connection, &state, cwd, &session_id);
-            let capabilities = match result {
-                Ok(value) => value,
+            let started = receive_updates(incoming, Arc::clone(&state), id, slot)
+                .and_then(|()| initialize(&mut connection, &state, cwd, &session_id));
+            let capabilities = match started {
+                Ok(capabilities) => capabilities,
                 Err(error) => {
                     lock(&state).close();
-                    reader_stopped.store(true, Ordering::Release);
-                    connection.shutdown();
-                    cleanup(&child);
                     return Err(error);
                 }
             };
             Ok(Arc::new(Self {
                 connection,
-                reader_stopped,
-                #[cfg(test)]
-                reader_done: Mutex::new(reader_done),
                 prompt_gate: Mutex::new(()),
                 admitted: Arc::new(AtomicUsize::new(0)),
                 unannounced: Arc::new(AtomicUsize::new(0)),
-                child,
+                slot: startup.commit(),
                 capabilities,
                 state,
             }))
         }
 
         pub(crate) fn attach(&self, owner: u64, peer: AgentPeer) -> Result<(), RpcError> {
-            let mut state = lock(&self.state);
+            self.attach_locked(&mut lock(&self.state), owner, peer)
+                .map(drop)
+        }
+
+        fn attach_locked<'a>(
+            &self,
+            state: &'a mut State,
+            owner: u64,
+            peer: AgentPeer,
+        ) -> Result<&'a Attachment, RpcError> {
             if state.closed {
                 return Err(RpcError::internal("external session is closed"));
             }
-            if !state.attachments.contains_key(&owner) && state.attachments.len() >= MAX_ATTACHMENTS
-            {
-                return Err(RpcError::internal("too many external attachments"));
+            if !state.attachments.contains_key(&owner) {
+                if state.attachments.len() >= MAX_ATTACHMENTS {
+                    return Err(RpcError::internal("too many external attachments"));
+                }
+                let attachment = attachment(peer, &self.slot, &state.writers)?;
+                state.attachments.insert(owner, attachment);
             }
-            state
-                .attachments
-                .entry(owner)
-                .or_insert_with(|| attachment(peer));
-            Ok(())
+            Ok(&state.attachments[&owner])
         }
 
         /// Attach and create a receipt for this exact attachment under one lock.
@@ -468,18 +459,8 @@ mod unix {
             peer: AgentPeer,
         ) -> Result<OpenReceipt, RpcError> {
             let mut state = lock(&self.state);
-            if state.closed {
-                return Err(RpcError::internal("external session is closed"));
-            }
-            if !state.attachments.contains_key(&owner) && state.attachments.len() >= MAX_ATTACHMENTS
-            {
-                return Err(RpcError::internal("too many external attachments"));
-            }
-            let attachment = state
-                .attachments
-                .entry(owner)
-                .or_insert_with(|| attachment(peer));
-            Ok(self.receipt(owner, Arc::clone(&attachment.identity)))
+            let identity = Arc::clone(&self.attach_locked(&mut state, owner, peer)?.identity);
+            Ok(self.receipt(owner, identity))
         }
 
         /// Create a receipt for an existing attachment, including the initial owner.
@@ -527,57 +508,55 @@ mod unix {
                 }
             }
             if failed {
-                state.close();
-            }
-            drop(state);
-            if failed {
-                self.shutdown();
+                self.close(&mut state);
             }
         }
 
+        /// Detach `owner` without blocking. The last detach marks the session
+        /// terminal, and the slot finishes cleanup in the background. Otherwise
+        /// the owner's active prompt is handed to the cancellation worker.
         pub(crate) fn detach(&self, owner: u64) -> bool {
-            let (last, cancel) = self.detach_mark(owner);
-            self.finish_detach(last, cancel);
-            last
-        }
-
-        pub(crate) fn detach_mark(&self, owner: u64) -> (bool, Option<CancelAction>) {
             let mut state = lock(&self.state);
             let Some(attachment) = state.attachments.remove(&owner) else {
-                return (false, None);
+                return false;
             };
             attachment.detached.store(true, Ordering::Release);
             let last = state.attachments.is_empty();
             if last {
-                state.close();
+                self.close(&mut state);
+            } else if let Some(action) = state
+                .active
+                .as_mut()
+                .filter(|active| {
+                    active.owner == owner && Arc::ptr_eq(&active.identity, &attachment.identity)
+                })
+                .and_then(|active| active.cancel(&self.state))
+            {
+                self.queue_cancel(&mut state, action);
             }
-            let cancel = if last {
-                None
-            } else {
-                state
-                    .active
-                    .as_mut()
-                    .filter(|active| {
-                        active.owner == owner && Arc::ptr_eq(&active.identity, &attachment.identity)
-                    })
-                    .and_then(|active| active.cancel(&self.state))
-            };
-            (last, cancel)
+            last
         }
 
-        pub(crate) fn finish_detach(&self, last: bool, cancel: Option<CancelAction>) {
-            if last {
-                self.shutdown();
-            } else if let Some(canceller) = cancel {
-                send_cancel(canceller);
-            }
+        // Closing only marks state and the slot. It never waits for cleanup.
+        fn close(&self, state: &mut State) {
+            state.close();
+            self.slot.terminate();
         }
 
-        fn shutdown(&self) {
-            lock(&self.state).close();
-            self.reader_stopped.store(true, Ordering::Release);
-            self.connection.shutdown();
-            cleanup(&self.child);
+        fn terminate(&self) {
+            self.close(&mut lock(&self.state));
+        }
+
+        // A cancellation that cannot reach its worker cannot be resolved, so
+        // the session fails closed.
+        fn queue_cancel(&self, state: &mut State, action: CancelAction) {
+            let queued = state
+                .cancels
+                .as_ref()
+                .is_some_and(|cancels| cancels.send(action).is_ok());
+            if !queued && !state.closed {
+                self.close(state);
+            }
         }
 
         pub(crate) fn register_prompt(&self, owner: u64) -> Result<PromptTicket, RpcError> {
@@ -678,31 +657,25 @@ mod unix {
                 Err(error) => {
                     let mut state = lock(&self.state);
                     state.active = None;
-                    state.close();
-                    drop(state);
-                    self.shutdown();
+                    self.close(&mut state);
                     return Err(error);
                 }
             };
-            let action = {
+            {
                 let mut state = lock(&self.state);
                 let active = state.active.as_mut().expect("active prompt");
                 active.canceller = Some(prompt.canceller());
-                if active.cancelled {
-                    active.cancel_action(&self.state)
-                } else {
-                    None
+                if active.cancelled
+                    && let Some(action) = active.cancel_action(&self.state)
+                {
+                    self.queue_cancel(&mut state, action);
                 }
-            };
-            if let Some(action) = action {
-                send_cancel(action);
             }
             let mut result = prompt.wait(None, TIMEOUT, Some(&abort));
             let active = lock(&self.state).active.take().expect("active prompt");
             let cancelled = active.cancelled;
             if self.cancellation_write_failed(active.cancellation) {
-                lock(&self.state).close();
-                self.shutdown();
+                self.terminate();
                 return Err(RpcError::internal(
                     "external cancellation write did not finish",
                 ));
@@ -713,8 +686,7 @@ mod unix {
                 response.stop_reason = kage_acp::acp::StopReason::Cancelled;
             }
             if result.is_err() {
-                lock(&self.state).close();
-                self.shutdown();
+                self.terminate();
                 return result;
             }
             self.wait_for_writes(&ticket)?;
@@ -836,9 +808,7 @@ mod unix {
                     .try_send(WriteItem::Barrier(tx))
                     .is_err()
                 {
-                    state.close();
-                    drop(state);
-                    self.shutdown();
+                    self.close(&mut state);
                     return Err(RpcError::internal(
                         "external notification queue unavailable",
                     ));
@@ -878,44 +848,43 @@ mod unix {
         fn close_if_ticket_current(&self, ticket: &PromptTicket) {
             let mut state = lock(&self.state);
             if ticket.attached(&state) {
-                state.close();
-                drop(state);
-                self.shutdown();
+                self.close(&mut state);
             }
         }
 
+        /// Cancel `owner`'s prompts without blocking the inbound path.
         pub(crate) fn cancel(&self, owner: u64) {
-            let canceller = {
-                let mut state = lock(&self.state);
-                let Some(attachment) = state.attachments.get_mut(&owner) else {
-                    return;
-                };
-                attachment.epoch = attachment.epoch.wrapping_add(1);
-                let identity = Arc::clone(&attachment.identity);
-                state
-                    .active
-                    .as_mut()
-                    .filter(|active| {
-                        active.owner == owner && Arc::ptr_eq(&active.identity, &identity)
-                    })
-                    .and_then(|active| active.cancel(&self.state))
+            let mut state = lock(&self.state);
+            let Some(attachment) = state.attachments.get_mut(&owner) else {
+                return;
             };
-            if let Some(canceller) = canceller {
-                send_cancel(canceller);
+            attachment.epoch = attachment.epoch.wrapping_add(1);
+            let identity = Arc::clone(&attachment.identity);
+            if let Some(action) = state
+                .active
+                .as_mut()
+                .filter(|active| active.owner == owner && Arc::ptr_eq(&active.identity, &identity))
+                .and_then(|active| active.cancel(&self.state))
+            {
+                self.queue_cancel(&mut state, action);
             }
         }
     }
 
+    // The worker closes the session when upstream input ends. The slot then
+    // shuts down the transport, reaps the process, and joins the reader.
     fn receive_updates(
         incoming: kage_acp::connection::Incoming,
         sink: Arc<Mutex<State>>,
         external_id: String,
-        process: Arc<Mutex<Option<ProtectedChild>>>,
-        reader_stopped: Arc<AtomicBool>,
-        shutdown: UnixShutdown,
-        reader_thread: thread::JoinHandle<()>,
-    ) {
-        thread::spawn(move || {
+        slot: &Arc<Slot>,
+    ) -> Result<(), RpcError> {
+        let terminal = Closer {
+            state: Arc::clone(&sink),
+            slot: Arc::clone(slot),
+        };
+        slot.spawn("kage-external-receive", move || {
+            let _terminal = terminal;
             while let Ok(message) = incoming.recv() {
                 match message {
                     Message::Notification { method, params } if method == "session/update" => {
@@ -953,38 +922,20 @@ mod unix {
                 }
             }
             drop(incoming);
-            let abort = {
-                let mut state = lock(&sink);
-                state.close();
-                state.active.as_ref().map(|active| active.abort.clone())
-            };
-            reader_stopped.store(true, Ordering::Release);
-            shutdown.signal_shutdown();
-            if let Some(abort) = abort {
-                abort.cancel();
-            }
-            shutdown.shutdown();
-            cleanup(&process);
-            let _ = reader_thread.join();
-            #[cfg(test)]
-            {
-                lock(&sink).reader_done = true;
-            }
-        });
+        })
+        .map_err(|e| RpcError::internal(format!("cannot start external receiver: {e}")))
     }
 
-    // This synchronous cleanup is retained only for dormant external sessions.
-    // It must move to bounded workers before the feature can be enabled.
-    fn cleanup(child: &Mutex<Option<ProtectedChild>>) {
-        cleanup_with_signal(child, nix::libc::SIGKILL);
+    // Closes the session when the receive worker exits, including by panic.
+    struct Closer {
+        state: Arc<Mutex<State>>,
+        slot: Arc<Slot>,
     }
 
-    fn cleanup_with_signal(child: &Mutex<Option<ProtectedChild>>, signal: i32) {
-        let mut child = lock(child);
-        if let Some(process) = child.as_mut()
-            && process.finish(signal).is_ok()
-        {
-            *child = None;
+    impl Drop for Closer {
+        fn drop(&mut self) {
+            lock(&self.state).close();
+            self.slot.terminate();
         }
     }
 
@@ -1057,13 +1008,25 @@ mod unix {
     // update already selected for writing will not arrive after the stop.
     // External sessions must remain disabled until the downstream transport
     // provides interruptible, ordered writes.
-    fn attachment(peer: AgentPeer) -> Attachment {
+    //
+    // A detached writer can still be blocked in a write, so writer threads are
+    // counted until they exit rather than per attachment.
+    fn attachment(
+        peer: AgentPeer,
+        slot: &Arc<Slot>,
+        writers: &Arc<AtomicUsize>,
+    ) -> Result<Attachment, RpcError> {
+        if !reserve(writers, 1, MAX_WRITERS) {
+            return Err(RpcError::internal("too many external attachment writers"));
+        }
+        let writer = Writer(Arc::clone(writers));
         let (sender, receiver) = mpsc::sync_channel(1024);
         let detached = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&detached);
         #[cfg(test)]
         let (worker_done_tx, worker_done) = mpsc::channel();
-        thread::spawn(move || {
+        let spawned = slot.spawn("kage-external-writer", move || {
+            let _writer = writer;
             while let Ok(item) = receiver.recv() {
                 if stopped.load(Ordering::Acquire) {
                     break;
@@ -1082,7 +1045,8 @@ mod unix {
             #[cfg(test)]
             let _ = worker_done_tx.send(());
         });
-        Attachment {
+        spawned.map_err(|e| RpcError::internal(format!("cannot start external writer: {e}")))?;
+        Ok(Attachment {
             sender: Some(sender),
             #[cfg(test)]
             worker_done: Some(worker_done),
@@ -1092,6 +1056,14 @@ mod unix {
             pending: Vec::new(),
             bytes: Arc::new(AtomicUsize::new(0)),
             detached,
+        })
+    }
+
+    struct Writer(Arc<AtomicUsize>);
+
+    impl Drop for Writer {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
         }
     }
 
@@ -1131,10 +1103,7 @@ mod unix {
 
     impl Drop for External {
         fn drop(&mut self) {
-            lock(&self.state).close();
-            self.reader_stopped.store(true, Ordering::Release);
-            self.connection.shutdown();
-            cleanup(&self.child);
+            self.terminate();
         }
     }
 
@@ -1146,35 +1115,12 @@ mod unix {
         use std::io::{BufRead, BufReader};
         use std::os::unix::net::UnixStream;
 
-        #[test]
-        fn failed_cleanup_and_unwind_retain_process_ownership() {
-            let process = spawn_protected(Command::new("sleep").arg("30")).unwrap();
-            let pid = process.id();
-            let child = Mutex::new(Some(process));
-            cleanup_with_signal(&child, 0);
-            assert_eq!(lock(&child).as_ref().unwrap().id(), pid);
-            let result = std::panic::catch_unwind(|| {
-                let _guard = lock(&child);
-                panic!("injected cleanup panic");
-            });
-            assert!(result.is_err());
-            assert_eq!(lock(&child).as_ref().unwrap().id(), pid);
-            cleanup(&child);
-            assert!(lock(&child).is_none());
-        }
+        const WAIT: Duration = Duration::from_secs(3);
 
-        #[test]
-        fn startup_unwind_quarantines_the_process() {
-            let pid = std::sync::atomic::AtomicU32::new(0);
-            let result = std::panic::catch_unwind(|| {
-                let child = spawn_protected(Command::new("sleep").arg("30")).unwrap();
-                pid.store(child.id(), Ordering::Relaxed);
-                panic!("injected startup panic");
-            });
-            assert!(result.is_err());
-            let mut child =
-                kage_core::reaper::recover_protected(pid.load(Ordering::Relaxed)).unwrap();
-            child.finish(nix::libc::SIGKILL).unwrap();
+        fn test_attachment(peer: AgentPeer) -> Attachment {
+            static SLOT: std::sync::OnceLock<Arc<Slot>> = std::sync::OnceLock::new();
+            let slot = SLOT.get_or_init(|| Lifecycles::new(1).reserve().unwrap().commit());
+            attachment(peer, slot, &Arc::new(AtomicUsize::new(0))).unwrap()
         }
 
         fn response_barrier() -> (ResponseBarrier, kage_jsonrpc::BarrierMarker) {
@@ -1336,6 +1282,7 @@ for line in sys.stdin:
             let (peer, _, _) = kage_jsonrpc::connect(BufReader::new(b), writer);
             let cwd = std::env::current_dir().unwrap();
             let session = External::start(
+                &Lifecycles::new(1),
                 "local".into(),
                 "fake",
                 cwd.to_str().unwrap(),
@@ -1426,8 +1373,16 @@ for line in sys.stdin:
                 kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
             let cwd = std::env::current_dir().unwrap();
             let cwd = cwd.to_str().unwrap();
-            let session =
-                External::start("local".into(), "fake", cwd, &config, 1, peer.into()).unwrap();
+            let session = External::start(
+                &Lifecycles::new(1),
+                "local".into(),
+                "fake",
+                cwd,
+                &config,
+                1,
+                peer.into(),
+            )
+            .unwrap();
             session.announce(1);
             let mut client = BufReader::new(client);
             let mut line = String::new();
@@ -1470,6 +1425,7 @@ for line in sys.stdin:
             let (peer, _, _) = kage_jsonrpc::connect(BufReader::new(b.try_clone().unwrap()), b);
             let cwd = std::env::current_dir().unwrap();
             let session = External::start(
+                &Lifecycles::new(1),
                 "local".into(),
                 "fake",
                 cwd.to_str().unwrap(),
@@ -1742,7 +1698,7 @@ for line in sys.stdin:
                 assert!(Instant::now() < until);
                 thread::sleep(Duration::from_millis(2));
             }
-            session.shutdown();
+            session.terminate();
             assert!(rx.recv_timeout(Duration::from_secs(3)).unwrap().is_err());
             worker.join().unwrap();
             assert!(session.detach(1));
@@ -2045,10 +2001,7 @@ for line in sys.stdin:
                 assert!(Instant::now() < until);
                 thread::sleep(Duration::from_millis(2));
             }
-            let (last, action) = session.detach_mark(1);
-            assert!(!last);
-            assert!(action.is_some());
-            session.finish_detach(last, action);
+            assert!(!session.detach(1));
             assert!(worker.join().unwrap().is_err());
             assert_eq!(
                 session
@@ -2632,6 +2585,12 @@ for line in sys.stdin:
                 session.cancel(owner);
                 assert!(!session.detach(owner));
                 assert_eq!(lock(&session.state).attachments.len(), 1);
+                let writers = Arc::clone(&lock(&session.state).writers);
+                let until = Instant::now() + WAIT;
+                while writers.load(Ordering::Acquire) > 1 {
+                    assert!(Instant::now() < until, "detached writer did not exit");
+                    thread::sleep(Duration::from_millis(1));
+                }
             }
             assert!(session.detach(1));
         }
@@ -2662,10 +2621,11 @@ for line in sys.stdin:
                 upstream: Some("up".into()),
                 early: Vec::new(),
                 bytes: session_bytes,
-                attachments: HashMap::from([(1, attachment(peer.into()))]),
+                attachments: HashMap::from([(1, test_attachment(peer.into()))]),
                 active: None,
                 closed: false,
-                reader_done: false,
+                cancels: None,
+                writers: Arc::new(AtomicUsize::new(0)),
             };
             forward(
                 &mut state,
@@ -2688,7 +2648,7 @@ for line in sys.stdin:
                 socket: Some(client),
             };
             let (peer, _, _) = kage_jsonrpc::connect(BufReader::new(server), writer);
-            let attachment = attachment(peer.into());
+            let attachment = test_attachment(peer.into());
             let bytes = Arc::new(AtomicUsize::new(0));
             let item = || {
                 Buffered::new(json!({"text":"update"}), &bytes, Some(&attachment.bytes)).unwrap()
@@ -2727,7 +2687,7 @@ for line in sys.stdin:
                 socket: Some(client),
             };
             let (peer, _, _) = kage_jsonrpc::connect(BufReader::new(server), writer);
-            let attachment = attachment(peer.into());
+            let attachment = test_attachment(peer.into());
             let bytes = Arc::new(AtomicUsize::new(0));
             let item = || {
                 Buffered::new(json!({"text":"update"}), &bytes, Some(&attachment.bytes)).unwrap()
@@ -2759,7 +2719,8 @@ for line in sys.stdin:
                 attachments: HashMap::from([(1, attachment)]),
                 active: None,
                 closed: false,
-                reader_done: false,
+                cancels: None,
+                writers: Arc::new(AtomicUsize::new(0)),
             };
             state.close();
             assert!(state.attachments.contains_key(&1));
@@ -2778,7 +2739,7 @@ for line in sys.stdin:
         #[test]
         fn shutdown_stops_idle_worker_without_detaching_owner() {
             let session = scripted_session(ADMISSION_SCRIPT);
-            session.shutdown();
+            session.terminate();
             let worker_done = {
                 let mut state = lock(&session.state);
                 assert!(state.closed);
@@ -2834,22 +2795,18 @@ for line in sys.stdin:
                 attachments: HashMap::new(),
                 active: None,
                 closed: true,
-                reader_done: false,
+                cancels: None,
+                writers: Arc::new(AtomicUsize::new(0)),
             }));
-            receive_updates(
-                incoming,
-                Arc::clone(&state),
-                String::new(),
-                Arc::new(Mutex::new(None)),
-                Arc::new(AtomicBool::new(false)),
+            let startup = Lifecycles::new(1).reserve().unwrap();
+            startup.transport(
                 connection.shutdown_handle(),
+                Arc::new(AtomicBool::new(false)),
                 reader_thread,
             );
-            let deadline = Instant::now() + Duration::from_secs(3);
-            while !lock(&state).reader_done {
-                assert!(Instant::now() < deadline, "reader was not joined");
-                thread::sleep(Duration::from_millis(2));
-            }
+            receive_updates(incoming, Arc::clone(&state), String::new(), startup.slot()).unwrap();
+            let slot = startup.commit();
+            assert!(slot.wait_finished(WAIT), "reader was not joined");
             drop(read_end);
         }
 
@@ -2873,28 +2830,19 @@ for line in sys.stdin:
                 attachments: HashMap::new(),
                 active: None,
                 closed: false,
-                reader_done: false,
+                cancels: None,
+                writers: Arc::new(AtomicUsize::new(0)),
             }));
-            receive_updates(
-                incoming,
-                Arc::clone(&state),
-                String::new(),
-                Arc::new(Mutex::new(None)),
-                Arc::new(AtomicBool::new(false)),
+            let startup = Lifecycles::new(1).reserve().unwrap();
+            startup.transport(
                 connection.shutdown_handle(),
+                Arc::new(AtomicBool::new(false)),
                 reader_thread,
             );
-            let deadline = Instant::now() + Duration::from_secs(3);
-            loop {
-                let state = lock(&state);
-                if state.reader_done {
-                    assert!(state.closed);
-                    break;
-                }
-                drop(state);
-                assert!(Instant::now() < deadline, "panicked reader was not joined");
-                thread::sleep(Duration::from_millis(2));
-            }
+            receive_updates(incoming, Arc::clone(&state), String::new(), startup.slot()).unwrap();
+            let slot = startup.commit();
+            assert!(slot.wait_finished(WAIT), "panicked reader was not joined");
+            assert!(lock(&state).closed);
             drop(read_end);
         }
 
@@ -2910,7 +2858,6 @@ for line in sys.stdin:
             let mut reader = InterruptibleReader {
                 reader,
                 stopped: Arc::clone(&stopped),
-                done: None,
             };
             let (tx, rx) = mpsc::channel();
             thread::spawn(move || {
@@ -2939,14 +2886,10 @@ for line in sys.stdin:
 ";
             let session = scripted_session(script);
             assert!(session.detach(1));
-            let until = Instant::now() + Duration::from_secs(3);
-            while !lock(&session.state).reader_done {
-                assert!(Instant::now() < until, "incoming reader remained blocked");
-                thread::sleep(Duration::from_millis(2));
-            }
-            lock(&session.reader_done)
-                .recv_timeout(Duration::from_secs(3))
-                .unwrap();
+            assert!(
+                session.slot.wait_finished(WAIT),
+                "incoming reader remained blocked"
+            );
         }
 
         #[test]
@@ -3036,9 +2979,7 @@ for line in sys.stdin:
                 let _ = tx.send(active.prompt_owned(1, request("overflow")));
             });
             assert!(rx.recv_timeout(Duration::from_secs(3)).unwrap().is_err());
-            lock(&session.reader_done)
-                .recv_timeout(Duration::from_secs(3))
-                .unwrap();
+            assert!(session.slot.wait_finished(WAIT));
             assert_eq!(std::fs::read(&ready).unwrap(), b"ready");
             assert!(std::fs::read(&exited).unwrap().is_empty());
             let state = lock(&session.state);
@@ -3091,7 +3032,7 @@ for line in sys.stdin:
                     .prompt_owned(1, request("must not dispatch"))
                     .is_err()
             );
-            assert!(lock(&session.child).is_none());
+            assert!(session.slot.wait_finished(WAIT));
             assert!(session.detach(1));
         }
 
@@ -3119,6 +3060,7 @@ for line in sys.stdin:
             let (peer, _, _) = kage_jsonrpc::connect(BufReader::new(b.try_clone().unwrap()), b);
             let cwd = std::env::current_dir().unwrap();
             let session = External::start(
+                &Lifecycles::new(1),
                 "local".into(),
                 "fake",
                 cwd.to_str().unwrap(),
@@ -3158,7 +3100,7 @@ for line in sys.stdin:
             assert!(lock(&session.state).attachments.contains_key(&1));
             assert!(session.attach(2, peer.into()).is_err());
             assert!(session.detach(1));
-            assert!(lock(&session.child).is_none());
+            assert!(session.slot.wait_finished(WAIT));
             assert!(prompt.join().unwrap().is_err());
             drop(a);
         }
@@ -3187,6 +3129,7 @@ for line in sys.stdin:
                 kage_jsonrpc::connect(BufReader::new(b.try_clone().unwrap()), b);
             let cwd = std::env::current_dir().unwrap();
             let session = External::start(
+                &Lifecycles::new(1),
                 "local".into(),
                 "fake",
                 cwd.to_str().unwrap(),
@@ -3226,12 +3169,14 @@ for line in sys.stdin:
             );
             assert!(!session.detach(2));
             assert!(session.detach(1));
-            assert!(lock(&session.child).is_none());
+            assert!(session.slot.wait_finished(WAIT));
             drop(a);
         }
     }
 }
 
+#[cfg(target_os = "linux")]
+pub(super) use lifecycle::Lifecycles;
 #[cfg(target_os = "linux")]
 pub(super) use unix::{External, PromptTicket};
 
@@ -3243,10 +3188,20 @@ mod unsupported {
     use std::sync::Arc;
 
     pub(crate) struct External;
-    pub(crate) struct CancelAction;
     pub(crate) struct PromptTicket;
+
+    /// External sessions are unavailable, so no capacity is ever reserved.
+    pub(crate) struct Lifecycles;
+
+    impl Lifecycles {
+        pub(crate) fn new(_: usize) -> Self {
+            Self
+        }
+    }
+
     impl External {
         pub(crate) fn start(
+            _: &Lifecycles,
             _: String,
             _: &str,
             _: &str,
@@ -3275,10 +3230,6 @@ mod unsupported {
         pub(crate) fn detach(&self, _: u64) -> bool {
             true
         }
-        pub(crate) fn detach_mark(&self, _: u64) -> (bool, Option<CancelAction>) {
-            (true, None)
-        }
-        pub(crate) fn finish_detach(&self, _: bool, _: Option<CancelAction>) {}
         pub(crate) fn register_prompt(&self, _: u64) -> Result<PromptTicket, RpcError> {
             Err(RpcError::internal("external ACP requires Linux"))
         }
@@ -3293,4 +3244,4 @@ mod unsupported {
     }
 }
 #[cfg(not(target_os = "linux"))]
-pub(super) use unsupported::{External, PromptTicket};
+pub(super) use unsupported::{External, Lifecycles, PromptTicket};

@@ -61,6 +61,7 @@ pub(crate) mod guard;
 pub mod highlight;
 pub(crate) mod host;
 pub mod http;
+pub mod invocation;
 pub mod keymap;
 pub mod launch;
 pub mod lifecycle;
@@ -104,6 +105,7 @@ pub use commands::{BridgeArgs, BridgePrep, CommandOutput, LuaCommand, PluginArgS
 pub use error::PluginError;
 pub use events::{DiscoveryEntries, KNOWN_EVENTS, SessionOpDecision};
 pub use highlight::{SharedHighlights, SharedThemeResolver, ThemeBase, ThemeResolver};
+pub use invocation::Invocation;
 pub use keymap::SharedKeymap;
 pub use lifecycle::{SharedCompactRequest, SharedUsage};
 pub use loader::{LoadReport, load_all, load_dir};

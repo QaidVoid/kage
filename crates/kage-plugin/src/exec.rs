@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kage_core::environment::Environment;
+use crate::invocation::Environments;
 use kage_core::reaper;
 use kage_core::sync::lock;
 use kage_tools::resolve_under;
@@ -71,19 +71,19 @@ fn drain(pipe: impl Read) -> (Vec<u8>, bool) {
 /// The installer runs (via `request_capabilities`) against a granted
 /// plugin's `kage` proxy and sets `exec` on it. `workdir` is the host
 /// workdir; a spec `cwd` is resolved under it and may not escape. Every
-/// process starts with `env`.
-pub(crate) fn register(registry: &CapabilityRegistry, workdir: PathBuf, env: Environment) {
+/// process starts with the environment of the session it runs for.
+pub(crate) fn register(registry: &CapabilityRegistry, workdir: PathBuf, envs: Environments) {
     let mut reg = lock(registry);
     reg.entry(Capability::Exec)
         .or_default()
         .push(Box::new(move |lua: &Lua, pkage: &Table| {
             let root = workdir.clone();
-            let env = env.clone();
+            let envs = envs.clone();
             pkage.set(
                 "exec",
                 lua.create_async_function(move |lua, spec: Table| {
                     let root = root.clone();
-                    let env = env.clone();
+                    let env = envs.current();
                     async move {
                         let cmd: Option<String> = spec.get("cmd")?;
                         let cmd = cmd.filter(|c| !c.is_empty()).ok_or_else(|| {

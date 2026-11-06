@@ -2,12 +2,25 @@
 
 use std::sync::atomic::AtomicBool;
 
+use kage_core::SessionId;
+use kage_core::environment::Environment;
 use kage_core::options::{OptionSource, OptionValue};
 use kage_core::sync::lock;
 
 use super::*;
 
 impl PluginRuntime {
+    /// Start the processes of work `session` asks for with `env`, rather
+    /// than with the runtime's own environment.
+    pub fn set_session_env(&self, session: SessionId, env: Environment) {
+        self.environments.set(session, env);
+    }
+
+    /// Forget what the runtime keeps for `session`, once it has closed.
+    pub fn forget_session(&self, session: SessionId) {
+        self.environments.forget(session);
+    }
+
     /// Build a runtime with default host log + empty config. Equivalent to
     /// `PluginRuntime::builder().build()`.
     pub fn new() -> Result<Self, PluginError> {
@@ -139,12 +152,12 @@ impl PluginRuntime {
     /// log. Jobs keep submission order, so a later [`Self::dispatch_event`]
     /// runs after this one. With no subscriber nothing is queued.
     ///
-    /// At most one queued dispatch per event name is held: while the
-    /// owner thread is still busy, a repeat notification replaces the
-    /// stale queued payload instead of queueing another copy, so an
-    /// event fired per keystroke or per delta cannot pile up. Handlers
-    /// that must see every occurrence of an event need a caller that
-    /// dispatches synchronously.
+    /// At most one queued dispatch per event name and invocation is held:
+    /// while the owner thread is still busy, a repeat notification for the
+    /// same session and client replaces the stale queued payload instead of
+    /// queueing another copy, so an event fired per keystroke or per delta
+    /// cannot pile up. Handlers that must see every occurrence of an event
+    /// need a caller that dispatches synchronously.
     pub fn notify_event(
         &self,
         event_name: &str,
@@ -153,11 +166,10 @@ impl PluginRuntime {
         if self.handler_count(event_name) == 0 {
             return Ok(());
         }
+        let key = (event_name.to_owned(), crate::Invocation::current());
         let queued = {
             let mut pending = lock(&self.pending_notifies);
-            pending
-                .insert(event_name.to_owned(), payload.clone())
-                .is_none()
+            pending.insert(key.clone(), payload.clone()).is_none()
         };
         if !queued {
             return Ok(());
@@ -169,7 +181,7 @@ impl PluginRuntime {
             self.eval.script_budget,
         );
         self.host.submit(move |lua| {
-            if let Some(payload) = lock(&pending).remove(&name) {
+            if let Some(payload) = lock(&pending).remove(&key) {
                 let result = watchdog::run(lua, budget, || {
                     events::dispatch(lua, &name, &payload, &sink)
                 });
@@ -623,6 +635,22 @@ impl PluginRuntime {
     #[must_use]
     pub fn take_pending_session_ops(&self) -> Vec<PendingSessionOp> {
         std::mem::take(&mut *lock(&self.session_ops))
+            .into_iter()
+            .map(|(_, op)| op)
+            .collect()
+    }
+
+    /// Drain the queued session ops that `session`'s work queued, and those
+    /// no session's work did, in submission order. Ops another session
+    /// queued stay for that session's drain.
+    #[must_use]
+    pub fn take_pending_session_ops_for(&self, session: SessionId) -> Vec<PendingSessionOp> {
+        let mut queue = lock(&self.session_ops);
+        let (mine, others) = std::mem::take(&mut *queue)
+            .into_iter()
+            .partition(|(owner, _)| owner.is_none_or(|owner| owner == session));
+        *queue = others;
+        mine.into_iter().map(|(_, op)| op).collect()
     }
 
     /// Run `func` inside a fresh plugin coroutine with `args` as its

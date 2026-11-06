@@ -236,11 +236,12 @@ impl PluginRuntimeBuilder {
         // Capability installers first: `mcp`/`acp` attach their
         // declaring functions under `exec`, and every granted plugin
         // needs the registry complete before `request_capabilities`.
-        exec::register(&cap_registry, self.workdir.clone(), self.env.clone());
+        let environments = Environments::new(self.env.clone());
+        exec::register(&cap_registry, self.workdir.clone(), environments.clone());
         env::register(
             &cap_registry,
             self.credential_lookup.clone(),
-            self.env.clone(),
+            environments.clone(),
         );
         http::register(&cap_registry);
         crypto::register(&cap_registry);
@@ -388,6 +389,7 @@ impl PluginRuntimeBuilder {
             session_entries,
             switch_request,
             pending_notifies,
+            environments,
         })
     }
 }

@@ -12,7 +12,7 @@
 
 use std::ffi::OsString;
 
-use kage_core::environment::Environment;
+use crate::invocation::Environments;
 use kage_core::sync::lock;
 
 use mlua::{Lua, Table};
@@ -31,9 +31,13 @@ pub type CredentialLookup = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send
 /// plugin's `kage` proxy and sets `env` and `credential` on it. A
 /// missing variable returns `nil`; an empty value returns the empty
 /// string. A provider id with no stored credential answers `nil`.
-/// Variables are read from `env`, the one `kage.exec` starts processes
-/// with.
-pub(crate) fn register(registry: &CapabilityRegistry, lookup: CredentialLookup, env: Environment) {
+/// Variables are read from the environment of the session the call runs
+/// for, the one `kage.exec` starts processes with.
+pub(crate) fn register(
+    registry: &CapabilityRegistry,
+    lookup: CredentialLookup,
+    envs: Environments,
+) {
     let mut reg = lock(registry);
     reg.entry(Capability::Env)
         .or_default()
@@ -41,8 +45,12 @@ pub(crate) fn register(registry: &CapabilityRegistry, lookup: CredentialLookup, 
             pkage.set(
                 "env",
                 lua.create_function({
-                    let env = env.clone();
-                    move |_, name: String| match env.var(&name).map(OsString::into_string) {
+                    let envs = envs.clone();
+                    move |_, name: String| match envs
+                        .current()
+                        .var(&name)
+                        .map(OsString::into_string)
+                    {
                         Some(Ok(value)) => Ok(Some(value)),
                         None => Ok(None),
                         Some(Err(_)) => Err(mlua::Error::external(format!(
@@ -120,6 +128,73 @@ mod tests {
             )
             .unwrap();
         assert_eq!(v.as_boolean(), Some(true));
+    }
+
+    /// Work for a session reads that session's environment, and so does a
+    /// timer set while doing it; other work reads the runtime's own.
+    #[test]
+    fn each_session_reads_its_own_environment() {
+        use crate::Invocation;
+        use kage_core::SessionId;
+        use kage_core::environment::Environment;
+
+        let mut caps = std::collections::BTreeMap::new();
+        caps.insert("p".to_owned(), vec!["env".to_owned()]);
+        let rt = PluginRuntime::builder()
+            .capabilities(caps)
+            .env(Environment::captured(vec![(
+                "CLIENT".into(),
+                "host".into(),
+            )]))
+            .build()
+            .unwrap();
+        let (a, b) = (SessionId::new(), SessionId::new());
+        rt.set_session_env(
+            a,
+            Environment::captured(vec![("CLIENT".into(), "a".into())]),
+        );
+        rt.set_session_env(
+            b,
+            Environment::captured(vec![("CLIENT".into(), "b".into())]),
+        );
+        let read = |invocation: Invocation| {
+            invocation.scope(|| {
+                rt.eval_plugin(
+                    "p",
+                    "kage.request_capabilities({'env'}); return kage.env('CLIENT')",
+                )
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned()
+            })
+        };
+        assert_eq!(read(Invocation::session(a)), "a");
+        assert_eq!(read(Invocation::session(b)), "b");
+        assert_eq!(read(Invocation::default()), "host");
+
+        Invocation::session(b).scope(|| {
+            rt.eval_plugin(
+                "p",
+                "kage.request_capabilities({'env'}); \
+                 kage.defer(function() seen = kage.env('CLIENT') end, 0)",
+            )
+            .unwrap();
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let seen = rt.eval_plugin("p", "return seen").unwrap();
+            if let Some(seen) = seen.as_string() {
+                assert_eq!(seen.to_str().unwrap(), "b");
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the timer never ran");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        rt.forget_session(b);
+        assert_eq!(read(Invocation::session(b)), "host");
     }
 
     #[test]

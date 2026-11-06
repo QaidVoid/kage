@@ -271,7 +271,15 @@ fn connect(
     let aliases = kage_tools::builtin_registry()
         .with_renames(&config.tools.rename)
         .alias_map();
-    let mut observe = host::mirror(Arc::clone(mirror), plugins);
+    let notices = events.clone();
+    let session = attached.session;
+    let mut observe = host::mirror(Arc::clone(mirror), plugins, move |event| {
+        let _ = notices.send(Envelope {
+            session,
+            seq: 0,
+            event: event.into(),
+        });
+    });
     let app = events.clone();
     let remote = Remote::start(
         attached.pid,

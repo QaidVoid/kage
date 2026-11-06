@@ -144,9 +144,6 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
         eprintln!("{}", crate::NO_MODEL_MESSAGE);
         return ExitCode::from(1);
     }
-    if let Some(warning) = support::legacy_acp_warning(&qualified_model) {
-        lock(&buffer).push_custom("kage:error", warning.to_owned(), false);
-    }
     let bare_model = match registry.resolve(&qualified_model) {
         Ok(r) => r.model.clone(),
         Err(e) => {
@@ -254,9 +251,11 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
             &aliases,
         ));
     }));
+    let acp_warnings = engine.commander();
     engine.subscribe(Box::new(host::mirror(
         Arc::clone(&mirror),
         plugin_runtime.clone(),
+        move |event| acp_warnings.publish(event),
     )));
     engine.open(crate::engine::SessionSpec {
         id: session_id,

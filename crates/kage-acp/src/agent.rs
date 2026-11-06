@@ -10,14 +10,17 @@
 //! request the agent abandons (a permission ask outlived by its run) is
 //! withdrawn with `$/cancel_request`, so the client can close its dialog.
 //!
-//! Every request except `initialize` runs on its own thread, so the
-//! dispatch loop keeps draining inbound messages: a `session/cancel`
-//! always lands, and a slow `session/new` never blocks a running prompt.
+//! Admitted requests except `initialize` run on their own threads. Prompt
+//! workers are limited per connection, including their response writes. Excess
+//! prompts are rejected rather than waiting for a worker slot. Other request
+//! threads are not limited by this cap. The dispatch loop can continue to
+//! receive cancellation while prompt slots are occupied.
 //! When the input ends, every request but a prompt that is still in
 //! flight is answered before [`serve_agent`] returns.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
@@ -956,6 +959,28 @@ where
     serve_inbound(&peer, messages, make_agent)
 }
 
+// This bounds queued as well as executing prompts, for each connection.
+const MAX_PROMPT_WORKERS: usize = 32;
+
+struct PromptPermit(Arc<AtomicUsize>);
+
+impl PromptPermit {
+    fn acquire(count: &Arc<AtomicUsize>) -> Option<Self> {
+        count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                (current < MAX_PROMPT_WORKERS).then_some(current + 1)
+            })
+            .ok()
+            .map(|_| Self(Arc::clone(count)))
+    }
+}
+
+impl Drop for PromptPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 fn serve_inbound<A, F>(
     peer: &AgentPeer,
     inbound: impl IntoIterator<Item = Inbound>,
@@ -968,6 +993,7 @@ where
     let agent = Arc::new(make_agent(peer.clone()));
 
     let mut ops = Vec::new();
+    let prompt_workers = Arc::new(AtomicUsize::new(0));
     let mut starts: HashMap<String, Vec<Weak<Mutex<bool>>>> = HashMap::new();
     for message in inbound {
         starts.retain(|_, entries| {
@@ -998,7 +1024,15 @@ where
                 _ => {}
             },
             Inbound::Request { id, method, params } => {
-                if let Some(op) = handle_request(peer, &agent, &mut starts, id, &method, params) {
+                if let Some(op) = handle_request(
+                    peer,
+                    &agent,
+                    &mut starts,
+                    &prompt_workers,
+                    id,
+                    &method,
+                    params,
+                ) {
                     ops.retain(|op: &thread::JoinHandle<()>| !op.is_finished());
                     ops.push(op);
                 }
@@ -1038,6 +1072,29 @@ where
         let outcome = op(&agent);
         let _ = peer.respond(&id, outcome);
     })
+}
+
+fn spawn_prompt<A: Agent>(
+    peer: &AgentPeer,
+    agent: &Arc<A>,
+    id: &serde_json::Value,
+    req: PromptRequest,
+    ctx: PromptContext,
+    permit: PromptPermit,
+) {
+    let agent = Arc::clone(agent);
+    let worker_peer = peer.clone();
+    let worker_id = id.clone();
+    if let Err(error) = thread::Builder::new().spawn(move || {
+        let _permit = permit;
+        let outcome = agent.prompt(req, &ctx).map(jval);
+        let _ = worker_peer.respond(&worker_id, outcome);
+    }) {
+        let _ = peer.respond(
+            id,
+            Err(RpcError::internal(format!("spawn prompt worker: {error}"))),
+        );
+    }
 }
 
 /// Answer request `id` with `op`, which opens the session it returns
@@ -1084,6 +1141,7 @@ fn handle_request<A: Agent>(
     peer: &AgentPeer,
     agent: &Arc<A>,
     starts: &mut HashMap<String, Vec<Weak<Mutex<bool>>>>,
+    prompt_workers: &Arc<AtomicUsize>,
     id: serde_json::Value,
     method: &str,
     params: serde_json::Value,
@@ -1104,6 +1162,13 @@ fn handle_request<A: Agent>(
         "session/prompt" => match parse::<PromptRequest>(params) {
             Err(e) => return parse_failed(peer, &id, e),
             Ok(req) => {
+                let Some(permit) = PromptPermit::acquire(prompt_workers) else {
+                    return parse_failed(
+                        peer,
+                        &id,
+                        RpcError::new(-32000, "prompt worker limit reached"),
+                    );
+                };
                 let start = Arc::new(Mutex::new(false));
                 starts
                     .entry(req.session_id.clone())
@@ -1114,7 +1179,7 @@ fn handle_request<A: Agent>(
                     session_id: req.session_id.clone(),
                     start: Some(start),
                 };
-                spawn_op(peer, agent, id, move |a| a.prompt(req, &ctx).map(jval));
+                spawn_prompt(peer, agent, &id, req, ctx, permit);
                 return None;
             }
         },
@@ -1393,6 +1458,119 @@ mod tests {
         }
 
         fn cancel(&self, _session_id: &str) {}
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn prompt_limit_rejects_without_starting_and_cancellation_stays_responsive() {
+        use std::io::{BufRead, Write};
+        use std::os::unix::net::UnixStream;
+        use std::sync::{Condvar, mpsc};
+        use std::time::Duration;
+
+        struct BlockingAgent {
+            entered: mpsc::Sender<()>,
+            cancelled: mpsc::Sender<()>,
+            gate: Arc<(Mutex<bool>, Condvar)>,
+        }
+        impl Agent for BlockingAgent {
+            fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
+                MockAgent.initialize(req)
+            }
+            fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+                MockAgent.new_session(req)
+            }
+            fn prompt(
+                &self,
+                _: PromptRequest,
+                ctx: &PromptContext,
+            ) -> Result<PromptResponse, RpcError> {
+                self.entered.send(()).unwrap();
+                let (lock, wake) = &*self.gate;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = wake.wait(released).unwrap();
+                }
+                let started = ctx.start(|| ());
+                Ok(PromptResponse {
+                    stop_reason: if started.is_some() {
+                        StopReason::EndTurn
+                    } else {
+                        StopReason::Cancelled
+                    },
+                })
+            }
+            fn cancel(&self, _: &str) {
+                self.cancelled.send(()).unwrap();
+            }
+        }
+        let (server_io, mut client) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let server_read = server_io.try_clone().unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let server_gate = Arc::clone(&gate);
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result = serve_agent(BufReader::new(server_read), server_io, |_| BlockingAgent {
+                entered: entered_tx,
+                cancelled: cancel_tx,
+                gate: server_gate,
+            });
+            done_tx.send(result).unwrap();
+        });
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        let send_prompt = |client: &mut UnixStream, id: usize| {
+            writeln!(client, "{}", serde_json::json!({"jsonrpc":"2.0", "id":id, "method":"session/prompt", "params":{"sessionId":"s", "prompt":[]}})).unwrap();
+        };
+        for id in 0..MAX_PROMPT_WORKERS {
+            send_prompt(&mut client, id);
+        }
+        for _ in 0..MAX_PROMPT_WORKERS {
+            entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        }
+        send_prompt(&mut client, MAX_PROMPT_WORKERS);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["id"], MAX_PROMPT_WORKERS);
+        assert_eq!(response["error"]["code"], -32000);
+        assert_eq!(response["error"]["message"], "prompt worker limit reached");
+        assert!(entered_rx.try_recv().is_err());
+        writeln!(client, "{}", serde_json::json!({"jsonrpc":"2.0", "method":"session/cancel", "params":{"sessionId":"s"}})).unwrap();
+        cancel_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        for _ in 0..MAX_PROMPT_WORKERS {
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(response["result"]["stopReason"], "cancelled");
+        }
+        // Response bytes can be read just before the worker drops its permit.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            assert!(std::time::Instant::now() < deadline);
+            send_prompt(&mut client, MAX_PROMPT_WORKERS + 1);
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if response.get("result").is_some() {
+                assert_eq!(response["result"]["stopReason"], "end_turn");
+                break;
+            }
+            thread::yield_now();
+        }
+        entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        client.shutdown(std::net::Shutdown::Both).unwrap();
+        done_rx
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .unwrap();
     }
 
     #[test]

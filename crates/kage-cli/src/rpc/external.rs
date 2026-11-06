@@ -26,6 +26,8 @@ mod unix {
     const SESSION_BUDGET: usize = 8 * 1024 * 1024;
     const ATTACHMENT_BUDGET: usize = 2 * 1024 * 1024;
     const MAX_ATTACHMENTS: usize = 32;
+    // Includes the active prompt and all registered tickets, until each is dropped.
+    const MAX_PROMPTS: usize = 32;
 
     // Account for value nodes and string storage, not just wire bytes.
     fn value_size(value: &Value) -> usize {
@@ -147,6 +149,25 @@ mod unix {
     pub(crate) struct PromptTicket {
         owner: u64,
         generation: u64,
+        admitted: Arc<AtomicUsize>,
+    }
+
+    impl PromptTicket {
+        fn validate_session(&self, admitted: &Arc<AtomicUsize>) -> Result<(u64, u64), RpcError> {
+            if Arc::ptr_eq(&self.admitted, admitted) {
+                Ok((self.owner, self.generation))
+            } else {
+                Err(RpcError::internal(
+                    "prompt ticket belongs to another external session",
+                ))
+            }
+        }
+    }
+
+    impl Drop for PromptTicket {
+        fn drop(&mut self) {
+            self.admitted.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 
     struct Active {
@@ -216,6 +237,7 @@ mod unix {
         connection: UnixConnection,
         reader_stopped: Arc<AtomicBool>,
         prompt_gate: Mutex<()>,
+        admitted: Arc<AtomicUsize>,
         child: Arc<Mutex<Option<Child>>>,
         capabilities: PromptCapabilities,
         state: Arc<Mutex<State>>,
@@ -300,6 +322,7 @@ mod unix {
                 connection,
                 reader_stopped,
                 prompt_gate: Mutex::new(()),
+                admitted: Arc::new(AtomicUsize::new(0)),
                 child,
                 capabilities,
                 state,
@@ -395,9 +418,13 @@ mod unix {
             if state.closed || !state.attachments.contains_key(&owner) {
                 return Err(RpcError::new(-32602, "external session is not attached"));
             }
+            if !reserve(&self.admitted, 1, MAX_PROMPTS) {
+                return Err(RpcError::internal("too many external prompts"));
+            }
             Ok(PromptTicket {
                 owner,
                 generation: *state.generation.get(&owner).unwrap_or(&0),
+                admitted: Arc::clone(&self.admitted),
             })
         }
 
@@ -410,7 +437,7 @@ mod unix {
             ticket: PromptTicket,
             mut req: PromptRequest,
         ) -> Result<PromptResponse, RpcError> {
-            let PromptTicket { owner, generation } = ticket;
+            let (owner, generation) = ticket.validate_session(&self.admitted)?;
             if req.delivery == Some(PromptDelivery::Steer) {
                 return Err(RpcError::new(
                     -32602,
@@ -1544,6 +1571,168 @@ for line in sys.stdin:
                 StopReason::EndTurn
             );
             assert!(session.detach(2));
+        }
+
+        const ADMISSION_SCRIPT: &str = r"
+import json,sys
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); i=m.get('id')
+ if method=='initialize': result={'protocolVersion':1,'agentCapabilities':{}}
+ elif method=='session/new': result={'sessionId':'up'}
+ elif method=='session/prompt': result={'stopReason':'end_turn'}
+ else: continue
+ print(json.dumps({'jsonrpc':'2.0','id':i,'result':result}),flush=True)
+";
+
+        #[test]
+        fn prompt_admission_is_bounded_and_released() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            let other = scripted_session(ADMISSION_SCRIPT);
+            let mut tickets: Vec<_> = (0..MAX_PROMPTS)
+                .map(|_| session.register_prompt(1).unwrap())
+                .collect();
+            assert!(session.register_prompt(1).is_err());
+            let independent = other.register_prompt(1).unwrap();
+            drop(independent);
+
+            drop(tickets.pop());
+            let ticket = session.register_prompt(1).unwrap();
+            let mut invalid = request("invalid");
+            invalid.delivery = Some(PromptDelivery::Steer);
+            assert!(session.prompt(ticket, invalid).is_err());
+            let ticket = session.register_prompt(1).unwrap();
+            assert_eq!(
+                session.prompt(ticket, request("ok")).unwrap().stop_reason,
+                StopReason::EndTurn
+            );
+            let ticket = session.register_prompt(1).unwrap();
+            let panic = std::panic::catch_unwind(|| {
+                let _ticket = ticket;
+                panic!("test ticket unwind");
+            });
+            assert!(panic.is_err());
+            let ticket = session.register_prompt(1).unwrap();
+            drop(ticket);
+            drop(tickets);
+            assert_eq!(session.admitted.load(Ordering::Acquire), 0);
+            assert!(session.detach(1));
+            assert!(other.detach(1));
+        }
+
+        #[test]
+        fn prompt_ticket_cannot_be_used_in_another_session() {
+            let first = scripted_session(ADMISSION_SCRIPT);
+            let second = scripted_session(ADMISSION_SCRIPT);
+            let ticket = first.register_prompt(1).unwrap();
+            assert!(second.prompt(ticket, request("wrong session")).is_err());
+            assert_eq!(first.admitted.load(Ordering::Acquire), 0);
+            assert_eq!(second.admitted.load(Ordering::Acquire), 0);
+            assert!(first.detach(1));
+            assert!(second.detach(1));
+        }
+
+        #[test]
+        fn concurrent_registration_respects_limit() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            let barrier = Arc::new(std::sync::Barrier::new(MAX_PROMPTS * 2));
+            let workers: Vec<_> = (0..MAX_PROMPTS * 2)
+                .map(|_| {
+                    let session = Arc::clone(&session);
+                    let barrier = Arc::clone(&barrier);
+                    thread::spawn(move || {
+                        barrier.wait();
+                        let ticket = session.register_prompt(1).ok();
+                        barrier.wait();
+                        ticket
+                    })
+                })
+                .collect();
+            let tickets: Vec<_> = workers
+                .into_iter()
+                .filter_map(|worker| worker.join().unwrap())
+                .collect();
+            assert_eq!(tickets.len(), MAX_PROMPTS);
+            assert!(session.register_prompt(1).is_err());
+            drop(tickets);
+            assert_eq!(session.admitted.load(Ordering::Acquire), 0);
+            assert!(session.detach(1));
+        }
+
+        #[test]
+        fn active_prompt_occupies_an_admission_slot() {
+            let dir = tempfile::tempdir().unwrap();
+            let trigger = dir.path().join("release");
+            let script = format!(
+                r"
+import json,sys,time,os
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); i=m.get('id')
+ if method=='initialize': result={{'protocolVersion':1,'agentCapabilities':{{}}}}
+ elif method=='session/new': result={{'sessionId':'up'}}
+ elif method=='session/prompt':
+  while not os.path.exists({:?}): time.sleep(0.001)
+  result={{'stopReason':'end_turn'}}
+ else: continue
+ print(json.dumps({{'jsonrpc':'2.0','id':i,'result':result}}),flush=True)
+",
+                trigger.to_str().unwrap()
+            );
+            let session = scripted_session(&script);
+            let worker_session = Arc::clone(&session);
+            let ticket = session.register_prompt(1).unwrap();
+            let worker = thread::spawn(move || worker_session.prompt(ticket, request("active")));
+            let until = Instant::now() + Duration::from_secs(3);
+            while lock(&session.state).active.is_none() {
+                assert!(Instant::now() < until);
+                thread::sleep(Duration::from_millis(2));
+            }
+            let tickets: Vec<_> = (1..MAX_PROMPTS)
+                .map(|_| session.register_prompt(1).unwrap())
+                .collect();
+            assert!(session.register_prompt(1).is_err());
+            std::fs::write(trigger, "release").unwrap();
+            assert_eq!(
+                worker.join().unwrap().unwrap().stop_reason,
+                StopReason::EndTurn
+            );
+            let replacement = session.register_prompt(1).unwrap();
+            drop(replacement);
+            drop(tickets);
+            assert!(session.detach(1));
+        }
+
+        #[test]
+        fn cancelled_and_detached_waiters_release_admission() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            let (_client, server) = UnixStream::pair().unwrap();
+            let (peer, _, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            session.attach(2, peer.into()).unwrap();
+            let gate = lock(&session.prompt_gate);
+            let cancelled = session.register_prompt(1).unwrap();
+            let detached = session.register_prompt(2).unwrap();
+            let first = Arc::clone(&session);
+            let second = Arc::clone(&session);
+            let a = thread::spawn(move || first.prompt(cancelled, request("cancelled")));
+            let b = thread::spawn(move || second.prompt(detached, request("detached")));
+            session.cancel(1);
+            assert!(!session.detach(2));
+            assert_eq!(
+                a.join().unwrap().unwrap().stop_reason,
+                StopReason::Cancelled
+            );
+            assert_eq!(
+                b.join().unwrap().unwrap().stop_reason,
+                StopReason::Cancelled
+            );
+            assert_eq!(session.admitted.load(Ordering::Acquire), 0);
+            let tickets: Vec<_> = (0..MAX_PROMPTS)
+                .map(|_| session.register_prompt(1).unwrap())
+                .collect();
+            assert!(session.register_prompt(1).is_err());
+            drop(tickets);
+            drop(gate);
+            assert!(session.detach(1));
         }
 
         #[test]

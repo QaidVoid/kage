@@ -2,7 +2,7 @@
 //!
 //! [`setup_runtime`] builds a [`PluginRuntime`] for print mode and
 //! `kage rpc`, loads every `*.lua` file in `plugins_dir`, and returns
-//! the runtime if any plugin contributed anything. [`setup_tui_runtime`]
+//! the runtime if any plugin contributed anything. [`setup_user_runtime`]
 //! always returns a runtime for the TUI and also loads the trusted
 //! `init.lua` from the user config dir. [`PluginEventHooks`] wraps
 //! another `Hooks` and forwards loop events to subscribed plugin
@@ -82,7 +82,7 @@ pub fn setup_runtime(
     clippy::too_many_arguments,
     reason = "each argument is separately loaded startup state"
 )]
-pub(crate) fn setup_tui_runtime(
+pub(crate) fn setup_user_runtime(
     plugins_dir: Option<&Path>,
     user_dir: Option<&Path>,
     plugins_cfg: PluginsConfig,
@@ -92,11 +92,13 @@ pub(crate) fn setup_tui_runtime(
     model: &str,
     system_prompt: &str,
     sink: SharedHostLog,
+    env: &Environment,
 ) -> Result<Arc<PluginRuntime>, String> {
     migrate_plugin_store_dir();
     let themes_dir = crate::themes_dir().ok();
     let runtime = runtime_builder(plugins_cfg, workdir, model, system_prompt)
         .sink(sink)
+        .env(env.clone())
         .state_dir(crate::data_root().ok().map(|r| r.join("plugin-state")))
         .user_dir(user_dir.map(Path::to_path_buf))
         .keybindings(keybindings)

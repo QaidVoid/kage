@@ -83,6 +83,20 @@ impl Drop for Entered {
     }
 }
 
+/// Queued items, each with the session whose work queued it.
+pub type Tagged<T> = Vec<(Option<SessionId>, T)>;
+
+/// Take from `queue` the items `session`'s work queued and those no
+/// session's work did, in order; with no session, take them all. Items
+/// another session queued stay for that session.
+pub(crate) fn drain_for<T>(queue: &mut Tagged<T>, session: Option<SessionId>) -> Vec<T> {
+    let (mine, others) = std::mem::take(queue)
+        .into_iter()
+        .partition(|(owner, _)| session.is_none() || owner.is_none() || *owner == session);
+    *queue = others;
+    mine.into_iter().map(|(_, item)| item).collect()
+}
+
 /// The environment each session's processes start with, and the one for
 /// work no known session asked for.
 #[derive(Clone, Default)]
@@ -158,5 +172,14 @@ mod tests {
             assert_eq!(Invocation::current(), outer);
         });
         assert_eq!(Invocation::current(), Invocation::default());
+    }
+
+    #[test]
+    fn a_session_drains_its_own_items_and_those_of_none() {
+        let (a, b) = (SessionId::new(), SessionId::new());
+        let mut queue: Tagged<&str> = vec![(Some(a), "a"), (Some(b), "b"), (None, "any")];
+        assert_eq!(drain_for(&mut queue, Some(a)), ["a", "any"]);
+        assert_eq!(drain_for(&mut queue, None), ["b"]);
+        assert!(queue.is_empty());
     }
 }

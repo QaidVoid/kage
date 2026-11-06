@@ -178,7 +178,7 @@ pub(crate) fn run(attached: Attached, model: Option<&str>) -> ExitCode {
     };
     let shown_model = model.map_or_else(|| crate::default_model(&registry), str::to_owned);
     let log_publisher: Arc<OnceLock<LogPublisher>> = Arc::default();
-    let plugins = match setup_tui_runtime(
+    let plugins = match setup_user_runtime(
         None,
         None,
         config.plugins.clone(),
@@ -188,6 +188,7 @@ pub(crate) fn run(attached: Attached, model: Option<&str>) -> ExitCode {
         &shown_model,
         "",
         buffer_host_log(buffer.clone(), toasts.clone(), Arc::clone(&log_publisher)),
+        &kage_core::environment::Environment::inherit(),
     ) {
         Ok(rt) => Some(rt),
         Err(e) => {

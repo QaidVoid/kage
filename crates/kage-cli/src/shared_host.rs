@@ -359,6 +359,7 @@ fn serve_until_idle(
         if ready.is_err() {
             thread::sleep(TICK);
         }
+        host.prune_projects();
         if accepted || connections.load(Ordering::SeqCst) > 0 || host.busy() {
             quiet_since = Instant::now();
         } else if quiet_since.elapsed() >= idle {

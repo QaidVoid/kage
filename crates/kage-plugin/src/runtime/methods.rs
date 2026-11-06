@@ -417,9 +417,14 @@ impl PluginRuntime {
     /// `kage.mcp.restart`. The host applies each against the live
     /// manager between turns; an unknown name surfaces as an error
     /// there rather than failing silently.
+    /// With a session in effect, only the restarts that session's work, or
+    /// no session's, asked for.
     #[must_use]
     pub fn take_mcp_restarts(&self) -> Vec<String> {
-        std::mem::take(&mut *lock(&self.mcp_restart))
+        crate::invocation::drain_for(
+            &mut lock(&self.mcp_restart),
+            crate::Invocation::current().session,
+        )
     }
 
     /// Consult the plugin's `kage.on_acp_permission` handler for an
@@ -615,9 +620,14 @@ impl PluginRuntime {
     /// Drain every queued message. Called by the host between turns;
     /// returns the entries in submission order so a `send_message`
     /// chain reads naturally.
+    /// With a session in effect, only the messages that session's work, or
+    /// no session's, queued.
     #[must_use]
     pub fn take_pending_messages(&self) -> Vec<PendingMessage> {
-        std::mem::take(&mut *lock(&self.pending_messages))
+        crate::invocation::drain_for(
+            &mut lock(&self.pending_messages),
+            crate::Invocation::current().session,
+        )
     }
 
     /// Cloneable handle to the queue of plugin-requested session
@@ -645,12 +655,7 @@ impl PluginRuntime {
     /// queued stay for that session's drain.
     #[must_use]
     pub fn take_pending_session_ops_for(&self, session: SessionId) -> Vec<PendingSessionOp> {
-        let mut queue = lock(&self.session_ops);
-        let (mine, others) = std::mem::take(&mut *queue)
-            .into_iter()
-            .partition(|(owner, _)| owner.is_none_or(|owner| owner == session));
-        *queue = others;
-        mine.into_iter().map(|(_, op)| op).collect()
+        crate::invocation::drain_for(&mut lock(&self.session_ops), Some(session))
     }
 
     /// Run `func` inside a fresh plugin coroutine with `args` as its

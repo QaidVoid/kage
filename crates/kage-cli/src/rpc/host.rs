@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 
 use kage_acp::acp::SessionConfigSelectOption;
@@ -23,6 +23,7 @@ use kage_provider::{Provider, ProviderRegistry};
 use kage_tools::ToolRegistry;
 
 use super::options::{Settings, choice};
+use super::projects::{Project, Projects};
 use super::{CliAcpAgent, live::Live, mcp};
 use crate::engine::{AgentSetup, Background, Engine, SessionSpec, WithMediaTools as _};
 use crate::permissions::PermissionGate;
@@ -83,6 +84,8 @@ pub(crate) struct Host {
     next_connection: AtomicU64,
     /// The id the next command a request waits on gets.
     next_command: AtomicU64,
+    /// The plugin runtime of each project, when the host loads plugins.
+    projects: OnceLock<Arc<Projects>>,
 }
 
 impl Host {
@@ -122,11 +125,22 @@ impl Host {
                 .unwrap_or_default();
             ToolRegistry::new().with_renames(&renames).alias_map()
         };
+        let projects = Arc::new(Projects::default());
         let spec: SpecBuilder = {
             let system_role = system_role.to_owned();
+            let projects = Arc::clone(&projects);
             Box::new(
                 move |registry: &ProviderRegistry, id, cwd: &str, model: &str, servers, env| {
-                    let spec = session_spec(registry, &system_role, id, cwd, model, servers, env)?;
+                    let spec = session_spec(
+                        registry,
+                        &system_role,
+                        id,
+                        cwd,
+                        model,
+                        servers,
+                        env,
+                        &projects,
+                    )?;
                     if yolo {
                         spec.gate.set_mode(Some(PermissionAction::Allow));
                     }
@@ -136,6 +150,7 @@ impl Host {
         };
         let host = Self::new(registry, default_model, sessions, spec, aliases);
         *lock(&host.plugin_providers) = plugin_providers;
+        let _ = host.projects.set(projects);
         Ok(host)
     }
 
@@ -165,6 +180,7 @@ impl Host {
             workdirs: Arc::default(),
             next_connection: AtomicU64::new(0),
             next_command: AtomicU64::new(0),
+            projects: OnceLock::new(),
         });
         let open = Arc::clone(&host.open);
         host.engine.subscribe(Box::new(move |envelope| {
@@ -290,6 +306,15 @@ impl Host {
         lock(&self.open).insert(spec.id, Open { settings });
         lock(&self.workdirs).insert(spec.id, spec.cx.workdir.clone());
         self.engine.open(spec);
+    }
+
+    /// Drop the plugin runtimes of projects no session has used for a
+    /// while.
+    #[cfg_attr(not(unix), allow(dead_code, reason = "the shared host is unix only"))]
+    pub(crate) fn prune_projects(&self) {
+        if let Some(projects) = self.projects.get() {
+            projects.prune();
+        }
     }
 
     /// A fresh id for a command a request waits on.
@@ -431,10 +456,40 @@ fn model_choices(registry: &ProviderRegistry) -> Arc<[SessionConfigSelectOption]
         .collect()
 }
 
+/// The loop settings a session runs with and the thinking level init.lua or
+/// a plugin chose, if one did. The project's options start from the config
+/// and then take what init.lua set; with no project, the config's own.
+fn project_options(
+    project: Option<&Project>,
+    config: &Config,
+) -> (LoopConfig, Option<kage_core::ThinkingLevel>) {
+    let Some(project) = project else {
+        let loop_cfg = LoopConfig {
+            compaction_threshold: config.loop_settings.compaction_threshold,
+            max_provider_retries: config.loop_settings.max_provider_retries,
+            parallel_tools: false,
+            ..LoopConfig::default()
+        };
+        return (loop_cfg, None);
+    };
+    let (loop_cfg, thinking) = crate::tui::startup_options(&project.options);
+    let from_lua = lock(&project.options).source("thinking_level")
+        == Some(kage_core::options::OptionSource::Lua);
+    let loop_cfg = LoopConfig {
+        parallel_tools: false,
+        ..loop_cfg
+    };
+    (loop_cfg, thinking.filter(|_| from_lua))
+}
+
 /// Everything an engine session for `cwd` on `model` runs with, including
-/// the client's MCP `servers`. Its shell commands, stdio servers and
-/// plugin processes start with `env`. The caller fills in the history and
-/// recorder.
+/// the client's MCP `servers` and the plugin runtime of its project from
+/// `projects`. Its shell commands, stdio servers and plugin processes start
+/// with `env`. The caller fills in the history and recorder.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each is one input of the session the client asked for"
+)]
 fn session_spec(
     registry: &ProviderRegistry,
     system_role: &str,
@@ -443,6 +498,7 @@ fn session_spec(
     model: &str,
     servers: BTreeMap<String, McpSpec>,
     env: &Environment,
+    projects: &Projects,
 ) -> Result<SessionSpec, RpcError> {
     let workdir = if cwd.is_empty() {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -453,18 +509,13 @@ fn session_spec(
     let config = Config::load_layered(&workdir).map_err(|e| RpcError::internal(e.to_string()))?;
     let model = model.to_owned();
     let bare = crate::runtime_env::build_system_prompt(system_role, &workdir, &model, &[], None);
-    let plugins = match crate::plugins_dir() {
-        Ok(dir) => crate::plugins::setup_runtime(&dir, &workdir, &model, &bare, env)
-            .unwrap_or_else(|e| {
-                eprintln!("kage: {e}");
-                None
-            }),
-        Err(e) => {
-            eprintln!("kage: {e}");
-            None
-        }
-    };
-    let skills = crate::load_skills(&workdir, plugins.as_deref());
+    let project = projects.get(&workdir, &model, &bare, env);
+    let plugins = project.as_ref().map(|project| Arc::clone(&project.runtime));
+    if let Some(runtime) = &plugins {
+        runtime.set_session_env(id, env.clone());
+    }
+    let skills = kage_plugin::Invocation::session(id)
+        .scope(|| crate::load_skills(&workdir, plugins.as_deref()));
     let shell = config
         .shell
         .program
@@ -506,6 +557,10 @@ fn session_spec(
         .map_err(|e| RpcError::internal(format!("shell: {e}")))?;
     let mut cx = AgentContext::new(model.clone(), &system_prompt).with_workdir(&workdir);
     cx.env = env.clone();
+    let (loop_cfg, thinking) = project_options(project.as_ref(), &config);
+    if thinking.is_some() {
+        cx.thinking_level = thinking;
+    }
     if config.permissions.confine_paths {
         cx = cx.with_confine_paths();
     } else {
@@ -527,12 +582,7 @@ fn session_spec(
             .with_fallback(PermissionAction::Ask)
             .with_aliases(aliases)
             .with_mcp_servers(mcp.server_names().map(str::to_owned).collect()),
-        loop_cfg: LoopConfig {
-            compaction_threshold: config.loop_settings.compaction_threshold,
-            max_provider_retries: config.loop_settings.max_provider_retries,
-            parallel_tools: false,
-            ..LoopConfig::default()
-        },
+        loop_cfg,
         plugins,
         mcp: Some(mcp),
         interactive: true,

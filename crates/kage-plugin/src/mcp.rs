@@ -35,7 +35,7 @@ pub fn shared_mcp_servers() -> SharedMcpServers {
 
 /// FIFO of server names a plugin asked to restart, drained by the
 /// host between turns and applied against the live MCP manager.
-pub type SharedMcpRestart = Arc<Mutex<Vec<String>>>;
+pub type SharedMcpRestart = Arc<Mutex<crate::invocation::Tagged<String>>>;
 
 /// Construct an empty restart queue.
 #[must_use]
@@ -132,7 +132,7 @@ fn restart_fn(lua: &Lua, restart: SharedMcpRestart) -> mlua::Result<mlua::Functi
         restart
             .lock()
             .map_err(|_| mlua::Error::external("plugin mcp restart queue poisoned"))?
-            .push(name);
+            .push((crate::Invocation::current().session, name));
         Ok(())
     })
 }
@@ -249,7 +249,7 @@ mod tests {
         let queue = shared_mcp_restart();
         install_for_test(&lua, &shared_mcp_servers(), &queue);
         lua.load(r#"kage.mcp.restart("fs")"#).exec().unwrap();
-        assert_eq!(queue.lock().unwrap().as_slice(), ["fs"]);
+        assert_eq!(queue.lock().unwrap().as_slice(), [(None, "fs".to_owned())]);
         assert!(lua.load(r#"kage.mcp.restart("")"#).exec().is_err());
     }
 }

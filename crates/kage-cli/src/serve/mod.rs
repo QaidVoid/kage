@@ -273,7 +273,7 @@ fn log_connect(addr: SocketAddr, token: &Token, token_file: &Path, log: &Log) {
 /// exits immediately. When the handler thread cannot start, a plain
 /// flag still stops the loop.
 #[cfg(unix)]
-fn install_signals(stop: &Arc<AtomicBool>, log: &Log) {
+pub(crate) fn install_signals(stop: &Arc<AtomicBool>, log: &Log) {
     let Ok(mut signals) = Signals::new([SIGINT, SIGTERM]) else {
         log("warning: cannot register signal handlers; kill the process to stop it");
         return;
@@ -301,7 +301,7 @@ fn install_signals(stop: &Arc<AtomicBool>, log: &Log) {
 /// which signal-hook offers only on unix. The first signal sets `stop`;
 /// a second one, arriving with `stop` already set, exits immediately.
 #[cfg(not(unix))]
-fn install_signals(stop: &Arc<AtomicBool>, log: &Log) {
+pub(crate) fn install_signals(stop: &Arc<AtomicBool>, log: &Log) {
     for signal in [SIGINT, SIGTERM] {
         let registered =
             signal_hook::flag::register_conditional_shutdown(signal, 130, Arc::clone(stop))

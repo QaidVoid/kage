@@ -333,6 +333,13 @@ impl Host {
         self.next_connection.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Whether a run, an agent, or an ask is in flight, so the shared host
+    /// must not exit for being idle.
+    #[cfg_attr(not(unix), allow(dead_code, reason = "the shared host is unix only"))]
+    pub(crate) fn busy(&self) -> bool {
+        lock(&self.live).busy()
+    }
+
     /// Cancels every run. The dispatcher stops once each session is
     /// idle, which closes the session files; the caller gives it a
     /// moment before the process exits.

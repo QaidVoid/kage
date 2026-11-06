@@ -129,6 +129,9 @@ A file whose contents are appended to the system prompt
 \fB\-\-yolo\fR
 Start every session in allow mode: every tool call runs without asking, MCP servers included. A configured deny still denies, and a client may still change the mode
 .TP
+\fB\-\-standalone\fR
+Run a private engine instead of sharing the per\-user host. Implied by `\-m`, `\-\-system`, `\-\-system\-file` and `\-\-yolo`, which configure an engine, and by `KAGE_STANDALONE=1`
+.TP
 \fBkage serve\fR
 Serve the Agent Client Protocol over WebSocket so remote editors and ACP clients can drive kage over the network. One endpoint (`/acp`) behind a bearer token; every connection shares one engine. The same listener serves the web client bundle at `/`, so a browser needs only the page URL and the token. The startup output on stderr carries the connect URL, the only place the token is ever printed
 .TP
@@ -296,6 +299,15 @@ Forget the stored OAuth token of a remote MCP server
 .TP
 \fISERVER\fR
 Server name from `[mcp.servers.<name>]`
+.TP
+\fBkage host\fR
+The shared host: one kage engine per user that local clients connect to. Clients start it when they need it, and it exits once it has had no clients and no work for a while
+.TP
+\fBkage host run\fR
+Run the shared host in the foreground. Exits at once when another host is already running
+.TP
+\fB\-\-idle\-secs\fR\fI <IDLE_SECS>\fR
+Seconds without clients or work before the host exits
 .PP
 Run \fBkage \fR\fIcommand\fR\fB \-\-help\fR for the options of a command.
 .SH FILES

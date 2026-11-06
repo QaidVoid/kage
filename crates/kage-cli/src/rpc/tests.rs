@@ -6362,3 +6362,51 @@ fn an_unreadable_system_prompt_file_stops_the_run() {
 
     assert!(error.contains("/nonexistent/prompt.md"), "{error}");
 }
+
+#[test]
+fn the_host_is_busy_only_while_a_turn_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve_paused(
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::TextDelta {
+                delta: "Hel".into(),
+            }),
+        ],
+        vec![Ok(ProviderEvent::MessageEnd {
+            stop_reason: CoreStopReason::EndTurn,
+            usage: TokenUsage::default(),
+        })],
+        vec![text_turn("titled")],
+        dir.path(),
+        dir.path(),
+    );
+    assert!(!h.host.busy());
+    let client = h.client.clone();
+    let session = h.session.clone();
+    let prompt = std::thread::spawn(move || {
+        client.request(
+            "session/prompt",
+            serde_json::json!({"sessionId": session, "prompt": [{"type": "text", "text": "hi"}]}),
+        )
+    });
+    let until = Instant::now() + WAIT;
+    while !h.host.busy() {
+        assert!(
+            Instant::now() < until,
+            "a running turn did not make the host busy"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    h.release.send(()).unwrap();
+    let reply = prompt.join().unwrap().unwrap();
+    assert_eq!(reply["stopReason"], "end_turn");
+    let until = Instant::now() + WAIT;
+    while h.host.busy() {
+        assert!(
+            Instant::now() < until,
+            "the host stayed busy after the turn ended"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}

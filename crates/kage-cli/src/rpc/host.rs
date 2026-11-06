@@ -66,6 +66,46 @@ pub(super) struct Open {
     pub(super) settings: Settings,
 }
 
+/// How long one native write may wait for a slow client.
+#[cfg(unix)]
+const NATIVE_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Inbound lines as large as the generic transport accepts, with fewer queued
+/// so the reader's memory stays within the native peer's budget.
+#[cfg(unix)]
+const NATIVE_LIMITS: kage_jsonrpc::unix_peer::ReadLimits = kage_jsonrpc::unix_peer::ReadLimits {
+    max_line_bytes: 8 * 1024 * 1024,
+    inbound_capacity: 2,
+};
+
+/// How long serving waits for its last output to reach the client.
+#[cfg(unix)]
+const NATIVE_DRAIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A writer that reports when the pump is done with it.
+#[cfg(unix)]
+struct DoneOnDrop<W>(W, Option<std::sync::mpsc::Sender<()>>);
+
+#[cfg(unix)]
+impl<W: std::io::Write> std::io::Write for DoneOnDrop<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+#[cfg(unix)]
+impl<W> Drop for DoneOnDrop<W> {
+    fn drop(&mut self) {
+        if let Some(done) = self.1.take() {
+            let _ = done.send(());
+        }
+    }
+}
+
 /// One engine with the shared setup of [`CliAcpAgent`], behind every
 /// connection served on the host.
 pub(crate) struct Host {
@@ -347,23 +387,64 @@ impl Host {
         self.serve_with(reader, writer, CliAcpAgent::take_environment)
     }
 
-    /// Serves one connection over the native Unix transport, which external
-    /// sessions need. Production serving does not use it yet.
+    /// Serves one connection over the native transport, writing to `writer`
+    /// through a pumped pipe.
     #[cfg(all(test, unix))]
-    pub(super) fn serve_unix<R>(
+    pub(super) fn serve_native<R, W>(self: Arc<Self>, reader: R, writer: W) -> Result<(), RpcError>
+    where
+        R: BufRead + Send + 'static,
+        W: std::io::Write + Send + 'static,
+    {
+        self.serve_native_with(reader, writer, |_| {})
+    }
+
+    // Output still queued when serving ends gets a bounded time to drain.
+    // A thread that keeps the peer alive past it must not hold up the caller.
+    #[cfg(unix)]
+    fn serve_native_with<R, W, P>(
         self: Arc<Self>,
         reader: R,
-        writer: std::os::fd::OwnedFd,
+        writer: W,
+        prepare: P,
     ) -> Result<(), RpcError>
     where
         R: BufRead + Send + 'static,
+        W: std::io::Write + Send + 'static,
+        P: FnOnce(&CliAcpAgent) + Send + 'static,
     {
-        kage_acp::agent::serve_agent_unix(
-            reader,
-            writer,
-            std::time::Duration::from_secs(10),
-            |peer| CliAcpAgent::new(Arc::clone(&self), peer),
-        )
+        let (done, drained) = std::sync::mpsc::channel::<()>();
+        let (fd, _pump) = super::native::pumped(DoneOnDrop(writer, Some(done)))
+            .map_err(|e| RpcError::internal(format!("start native output: {e}")))?;
+        let (peer, inbound, _reader) =
+            kage_jsonrpc::unix_peer::connect_ordered_server_with_limits(reader, fd, NATIVE_LIMITS)
+                .map_err(|e| RpcError::internal(format!("start native transport: {e}")))?;
+        let served = kage_acp::agent::serve_agent_unix_connected(
+            peer.clone(),
+            &inbound,
+            NATIVE_WRITE_TIMEOUT,
+            |peer| {
+                let agent = CliAcpAgent::new(Arc::clone(&self), peer);
+                prepare(&agent);
+                agent
+            },
+        );
+        // Prompt workers may still hold the peer. Closing it ends the pump
+        // once its queued lines are out.
+        peer.shutdown();
+        let _ = drained.recv_timeout(NATIVE_DRAIN);
+        served
+    }
+
+    /// Whether connections are served over the native transport, which
+    /// external sessions need.
+    #[cfg(unix)]
+    fn serves_natively(&self) -> bool {
+        #[cfg(test)]
+        if std::env::var_os("KAGE_TEST_NATIVE_SERVE").is_some() {
+            return true;
+        }
+        self.external_sessions
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// [`Host::serve`] with `prepare` run on the connection's agent
@@ -380,6 +461,10 @@ impl Host {
         W: std::io::Write + Send + 'static,
         P: FnOnce(&CliAcpAgent) + Send + 'static,
     {
+        #[cfg(unix)]
+        if self.serves_natively() {
+            return self.serve_native_with(reader, writer, prepare);
+        }
         serve_agent(reader, writer, |peer| {
             let agent = CliAcpAgent::new(Arc::clone(&self), peer);
             prepare(&agent);

@@ -8724,7 +8724,7 @@ impl NativeClient {
         let (cli_r, srv_w) = std::io::pipe().unwrap();
         let running = Arc::clone(host);
         std::thread::spawn(move || {
-            let _ = running.serve_unix(BufReader::new(srv_r), srv_w.into());
+            let _ = running.serve_native(BufReader::new(srv_r), srv_w);
         });
         let (tx, replies) = mpsc::channel();
         let texts = Arc::new(Mutex::new(Vec::new()));
@@ -8909,4 +8909,26 @@ fn external_sessions_are_refused_on_the_generic_transport() {
     assert!(error.message.contains("native transport"), "{error:?}");
     assert_eq!(host.lifecycles.live(), 0);
     agent.detach();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_serving_accepts_lines_as_large_as_the_generic_transport() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = test_host(
+        Arc::new(Listed::of(MockProvider::sequence(vec![]))),
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+        false,
+    );
+    let mut client = NativeClient::serve(&host);
+    client.request("initialize", serde_json::json!({"protocolVersion": 1}));
+    let large = "x".repeat(2 * 1024 * 1024);
+    let reply = client.request(
+        "session/prompt",
+        serde_json::json!({"sessionId": "missing", "prompt": [{"type": "text", "text": large}]}),
+    );
+    assert_eq!(reply["error"]["code"], -32602, "{}", reply["error"]);
+    let listed = client.request("session/list", serde_json::json!({}));
+    assert!(listed["result"].is_object(), "{listed}");
 }

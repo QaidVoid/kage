@@ -43,6 +43,8 @@ pub(crate) mod host;
 mod live;
 mod mcp;
 mod models;
+#[cfg(unix)]
+mod native;
 mod options;
 mod plugin_files;
 mod plugin_registry;

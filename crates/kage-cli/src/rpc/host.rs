@@ -11,6 +11,7 @@ use std::thread;
 use kage_acp::acp::SessionConfigSelectOption;
 use kage_acp::agent::serve_agent;
 use kage_core::config::{Config, McpServer as McpSpec};
+use kage_core::environment::Environment;
 use kage_core::permissions::PermissionAction;
 use kage_core::protocol::{Command, CommandKind, Event, HostEvent, PermissionDecision, SessionId};
 use kage_core::sync::lock;
@@ -25,8 +26,9 @@ use crate::engine::{AgentSetup, Background, Engine, SessionSpec, WithMediaTools 
 use crate::permissions::PermissionGate;
 
 /// Builds the engine session for a client session from the providers
-/// in effect, its id, working directory, model and the MCP servers the
-/// client passed. The caller fills in the history and recorder.
+/// in effect, its id, working directory, model, the MCP servers the
+/// client passed and the environment its processes start with. The
+/// caller fills in the history and recorder.
 pub(crate) type SpecBuilder = Box<
     dyn Fn(
             &ProviderRegistry,
@@ -34,6 +36,7 @@ pub(crate) type SpecBuilder = Box<
             &str,
             &str,
             BTreeMap<String, McpSpec>,
+            &Environment,
         ) -> Result<SessionSpec, RpcError>
         + Send
         + Sync,
@@ -118,8 +121,8 @@ impl Host {
         let spec: SpecBuilder = {
             let system_role = system_role.to_owned();
             Box::new(
-                move |registry: &ProviderRegistry, id, cwd: &str, model: &str, servers| {
-                    let spec = session_spec(registry, &system_role, id, cwd, model, servers)?;
+                move |registry: &ProviderRegistry, id, cwd: &str, model: &str, servers, env| {
+                    let spec = session_spec(registry, &system_role, id, cwd, model, servers, env)?;
                     if yolo {
                         spec.gate.set_mode(Some(PermissionAction::Allow));
                     }
@@ -242,6 +245,17 @@ impl Host {
         self.serve_with(reader, writer, |_| {})
     }
 
+    /// [`Host::serve`] for a client of this user on the local socket,
+    /// whose `_kage/environment` the sessions it opens run tools with.
+    #[cfg_attr(not(unix), allow(dead_code, reason = "the shared host is unix only"))]
+    pub(crate) fn serve_local<R, W>(self: Arc<Self>, reader: R, writer: W) -> Result<(), RpcError>
+    where
+        R: BufRead + Send + 'static,
+        W: std::io::Write + Send + 'static,
+    {
+        self.serve_with(reader, writer, CliAcpAgent::take_environment)
+    }
+
     /// [`Host::serve`] with `prepare` run on the connection's agent
     /// before the first request arrives. The rpc tests open their
     /// standing session there.
@@ -333,6 +347,13 @@ impl Host {
         self.next_connection.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Whether a run, an agent, or an ask is in flight, so the shared host
+    /// must not exit for being idle.
+    #[cfg_attr(not(unix), allow(dead_code, reason = "the shared host is unix only"))]
+    pub(crate) fn busy(&self) -> bool {
+        lock(&self.live).busy()
+    }
+
     /// Cancels every run. The dispatcher stops once each session is
     /// idle, which closes the session files; the caller gives it a
     /// moment before the process exits.
@@ -366,10 +387,13 @@ fn merge_plugin_providers(
     let model = model_override.map_or_else(|| crate::default_model(registry), str::to_owned);
     let bare = crate::runtime_env::build_system_prompt(system_role, &cwd, &model, &[], None);
     let runtime = match crate::plugins_dir() {
-        Ok(dir) => crate::plugins::setup_runtime(&dir, &cwd, &model, &bare).unwrap_or_else(|e| {
-            eprintln!("kage: {e}");
-            None
-        }),
+        Ok(dir) => {
+            crate::plugins::setup_runtime(&dir, &cwd, &model, &bare, &Environment::inherit())
+                .unwrap_or_else(|e| {
+                    eprintln!("kage: {e}");
+                    None
+                })
+        }
         Err(e) => {
             eprintln!("kage: {e}");
             None
@@ -398,7 +422,8 @@ fn model_choices(registry: &ProviderRegistry) -> Arc<[SessionConfigSelectOption]
 }
 
 /// Everything an engine session for `cwd` on `model` runs with, including
-/// the client's MCP `servers`. The caller fills in the history and
+/// the client's MCP `servers`. Its shell commands, stdio servers and
+/// plugin processes start with `env`. The caller fills in the history and
 /// recorder.
 fn session_spec(
     registry: &ProviderRegistry,
@@ -407,6 +432,7 @@ fn session_spec(
     cwd: &str,
     model: &str,
     servers: BTreeMap<String, McpSpec>,
+    env: &Environment,
 ) -> Result<SessionSpec, RpcError> {
     let workdir = if cwd.is_empty() {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -418,31 +444,40 @@ fn session_spec(
     let model = model.to_owned();
     let bare = crate::runtime_env::build_system_prompt(system_role, &workdir, &model, &[], None);
     let plugins = match crate::plugins_dir() {
-        Ok(dir) => {
-            crate::plugins::setup_runtime(&dir, &workdir, &model, &bare).unwrap_or_else(|e| {
+        Ok(dir) => crate::plugins::setup_runtime(&dir, &workdir, &model, &bare, env)
+            .unwrap_or_else(|e| {
                 eprintln!("kage: {e}");
                 None
-            })
-        }
+            }),
         Err(e) => {
             eprintln!("kage: {e}");
             None
         }
     };
     let skills = crate::load_skills(&workdir, plugins.as_deref());
+    let shell = config
+        .shell
+        .program
+        .clone()
+        .or_else(|| env.var("SHELL")?.into_string().ok());
     let system_prompt = crate::runtime_env::build_system_prompt(
         system_role,
         &workdir,
         &model,
         &skills,
-        config.shell.program.as_deref(),
+        shell.as_deref(),
     );
     let mut tools =
         kage_tools::configured_registry(&config.tools, &config.shell).with_media_tools(&config);
     let aliases = tools.alias_map();
     let editor: Vec<String> = servers.keys().cloned().collect();
-    let (mcp, mcp_errors) =
-        crate::mcp::spawn_and_register_with(&mut tools, &workdir, plugins.as_deref(), servers);
+    let (mcp, mcp_errors) = crate::mcp::spawn_and_register_with(
+        &mut tools,
+        &workdir,
+        plugins.as_deref(),
+        servers,
+        env.clone(),
+    );
     for (server, err) in mcp_errors {
         eprintln!("kage: mcp `{server}`: {}", mcp::without_login(err, &editor));
     }
@@ -460,6 +495,7 @@ fn session_spec(
         .validate()
         .map_err(|e| RpcError::internal(format!("shell: {e}")))?;
     let mut cx = AgentContext::new(model.clone(), &system_prompt).with_workdir(&workdir);
+    cx.env = env.clone();
     if config.permissions.confine_paths {
         cx = cx.with_confine_paths();
     } else {
@@ -514,7 +550,7 @@ mod tests {
     fn host_in(dir: &tempfile::TempDir) -> Arc<Host> {
         let registry =
             Arc::new(ProviderRegistry::new().with(Arc::new(MockProvider::sequence(Vec::new()))));
-        let spec: SpecBuilder = Box::new(|_, id, cwd, _, _| {
+        let spec: SpecBuilder = Box::new(|_, id, cwd, _, _, _| {
             Ok(SessionSpec {
                 id,
                 model: "mock/m".to_owned(),
@@ -551,6 +587,7 @@ mod tests {
             dir.path().to_str().unwrap(),
             "mock/m",
             BTreeMap::new(),
+            &Environment::inherit(),
         )
         .unwrap();
         let settings = Settings::of(&spec, &host.registry());

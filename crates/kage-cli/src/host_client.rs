@@ -1,0 +1,255 @@
+//! Reaching the shared host from a client process, starting it when it is
+//! not running, and relaying a client's stdio to it.
+//!
+//! A client connects to `host.sock` in the runtime directory. When nothing
+//! listens there it starts `kage host run --detached` and retries. Several
+//! clients may start a host at once: the losers wait and defer to the
+//! winner. A host of another kage version is not used, so the caller can
+//! fall back to its own engine until that host goes idle and exits.
+
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read, Write};
+use std::net::Shutdown;
+use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::net::UnixStream;
+use std::path::Path;
+use std::process::{Child, Command, ExitCode, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use crate::shared_host::{RECORD, Record, SOCKET};
+
+// How long a client waits for a host it started.
+const START_WAIT: Duration = Duration::from_secs(10);
+// The host log is moved aside at this size when a client starts a host.
+const MAX_LOG_BYTES: u64 = 1024 * 1024;
+// A larger environment is not sent, and the client's sessions use the
+// host's own.
+const MAX_ENVIRONMENT_BYTES: usize = 1024 * 1024;
+
+/// Why a client cannot use the shared host.
+#[derive(Debug)]
+pub(crate) enum Unavailable {
+    /// The running host is another kage version.
+    Version(String),
+    /// The host could not be reached or started.
+    Failed(String),
+}
+
+impl std::fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Version(version) => write!(f, "the shared host runs kage {version}"),
+            Self::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
+/// Connects to the shared host of this kage version, starting it when none
+/// is running.
+pub(crate) fn connect() -> Result<UnixStream, Unavailable> {
+    let dir = crate::paths::runtime_dir().map_err(Unavailable::Failed)?;
+    let mut started = None;
+    let stream = if let Ok(stream) = UnixStream::connect(dir.join(SOCKET)) {
+        stream
+    } else {
+        started = Some(start()?);
+        wait_for_socket(&dir, started.as_mut())?
+    };
+    check_version(&dir, &stream, started.as_mut())?;
+    Ok(stream)
+}
+
+fn start() -> Result<Child, Unavailable> {
+    let exe = std::env::current_exe()
+        .map_err(|e| Unavailable::Failed(format!("cannot find kage: {e}")))?;
+    let mut command = Command::new(exe);
+    command
+        .args(["host", "run", "--detached"])
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log_file().map_or_else(|_| Stdio::null(), Stdio::from));
+    if let Some(idle) = std::env::var("KAGE_HOST_IDLE_SECS")
+        .ok()
+        .filter(|idle| idle.parse::<u64>().is_ok())
+    {
+        command.arg("--idle-secs").arg(idle);
+    }
+    command
+        .spawn()
+        .map_err(|e| Unavailable::Failed(format!("cannot start the shared host: {e}")))
+}
+
+// A host this client started and that failed ends the wait at once. One that
+// exited cleanly lost the start race to another, so the wait goes on.
+fn failed(started: Option<&mut Child>) -> Option<Unavailable> {
+    let status = started?.try_wait().ok()??;
+    (!status.success()).then(|| {
+        Unavailable::Failed(
+            "the shared host failed to start; see host.log in the kage state directory".to_owned(),
+        )
+    })
+}
+
+// The host's log, `$XDG_STATE_HOME/kage/host.log`, private to the user and
+// moved aside when large.
+fn log_file() -> io::Result<fs::File> {
+    let dir = crate::paths::state_root().map_err(io::Error::other)?;
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("host.log");
+    if fs::metadata(&path).is_ok_and(|meta| meta.len() > MAX_LOG_BYTES) {
+        let _ = fs::rename(&path, dir.join("host.log.1"));
+    }
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+}
+
+fn wait_for_socket(dir: &Path, mut started: Option<&mut Child>) -> Result<UnixStream, Unavailable> {
+    let deadline = Instant::now() + START_WAIT;
+    let mut delay = Duration::from_millis(10);
+    loop {
+        if let Ok(stream) = UnixStream::connect(dir.join(SOCKET)) {
+            return Ok(stream);
+        }
+        if let Some(failure) = failed(started.as_deref_mut()) {
+            return Err(failure);
+        }
+        if Instant::now() >= deadline {
+            return Err(Unavailable::Failed(
+                "the shared host did not start; see host.log in the kage state directory"
+                    .to_owned(),
+            ));
+        }
+        thread::sleep(delay);
+        delay = (delay * 2).min(Duration::from_millis(200));
+    }
+}
+
+// A host binds its socket before its engine is up and records its version
+// once it is, so a connected client waits for the record. A host that fails
+// meanwhile hangs up.
+fn check_version(
+    dir: &Path,
+    stream: &UnixStream,
+    mut started: Option<&mut Child>,
+) -> Result<(), Unavailable> {
+    let deadline = Instant::now() + START_WAIT;
+    loop {
+        if let Some(record) = fs::read(dir.join(RECORD))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
+        {
+            let ours = kage_core::build::version();
+            if record.version == ours {
+                return Ok(());
+            }
+            return Err(Unavailable::Version(record.version));
+        }
+        if let Some(failure) = failed(started.as_deref_mut()) {
+            return Err(failure);
+        }
+        if hung_up(stream) || Instant::now() >= deadline {
+            return Err(Unavailable::Failed(
+                "the shared host never became ready".to_owned(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn hung_up(stream: &UnixStream) -> bool {
+    use nix::sys::socket::{MsgFlags, recv};
+    use std::os::fd::AsRawFd as _;
+    let mut byte = [0];
+    matches!(
+        recv(
+            stream.as_raw_fd(),
+            &mut byte,
+            MsgFlags::MSG_PEEK | MsgFlags::MSG_DONTWAIT
+        ),
+        Ok(0)
+    )
+}
+
+/// The `_kage/environment` notification carrying this process's
+/// environment, so the client's sessions run tools with its `PATH` and
+/// variables rather than those of whichever client started the host.
+/// Variables that are not UTF-8 are left out.
+fn environment_notification() -> Option<Vec<u8>> {
+    let vars: serde_json::Map<String, serde_json::Value> = std::env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .map(|(name, value)| (name, value.into()))
+        .collect();
+    let message = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "_kage/environment",
+        "params": {"vars": vars},
+    });
+    let mut line = serde_json::to_vec(&message).ok()?;
+    if line.len() > MAX_ENVIRONMENT_BYTES {
+        eprintln!("kage: rpc: the environment is too large to send; tools use the shared host's");
+        return None;
+    }
+    line.push(b'\n');
+    Some(line)
+}
+
+/// Sends this process's environment to the host, then copies stdin to the
+/// host and the host's output to stdout until the client closes stdin and
+/// the host has answered, or the host goes away.
+pub(crate) fn relay(stream: &UnixStream) -> ExitCode {
+    let upstream = match stream.try_clone() {
+        Ok(upstream) => upstream,
+        Err(e) => {
+            eprintln!("kage: rpc: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Some(line) = environment_notification()
+        && let Err(e) = (&upstream).write_all(&line)
+    {
+        eprintln!("kage: rpc: {e}");
+        return ExitCode::from(1);
+    }
+    let ended = Arc::new(AtomicBool::new(false));
+    let input_ended = Arc::clone(&ended);
+    thread::spawn(move || {
+        if io::copy(&mut io::stdin().lock(), &mut &upstream).is_ok() {
+            input_ended.store(true, Ordering::SeqCst);
+        }
+        let _ = upstream.shutdown(Shutdown::Write);
+    });
+    let mut stdout = io::stdout().lock();
+    let mut buffer = vec![0; 64 * 1024];
+    let mut reader = stream;
+    let output = loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break Ok(()),
+            Ok(n) => {
+                if let Err(e) = stdout.write_all(&buffer[..n]).and_then(|()| stdout.flush()) {
+                    break Err(e);
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => break Err(e),
+        }
+    };
+    if output.is_err() {
+        let _ = stream.shutdown(Shutdown::Both);
+        return ExitCode::from(1);
+    }
+    // The host closes the connection only after the client's input ended,
+    // unless the host itself went away.
+    if ended.load(Ordering::SeqCst) {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("kage: rpc: the shared host closed the connection");
+        ExitCode::from(1)
+    }
+}

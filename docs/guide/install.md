@@ -81,7 +81,8 @@ On Windows, the same build runs in PowerShell and the binary lands at
 
 ## desktop client
 
-`kage-desktop` is a window onto the same engine: it starts `kage rpc`
+`kage-desktop` is a window onto the same engine: it starts `kage rpc`,
+which joins the [shared host](/guide/shared-host) on Linux and macOS,
 and shows its sessions. It ships in every release on the
 [releases page](https://github.com/QaidVoid/kage/releases), with that
 release's `kage` inside:

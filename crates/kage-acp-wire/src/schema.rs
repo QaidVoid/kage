@@ -1082,6 +1082,16 @@ pub struct AuthSetRequest {
     pub key: Option<String>,
 }
 
+/// `_kage/environment` notification params: the environment a relay's
+/// client runs in. Sessions the connection opens afterwards start their
+/// processes with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentNotification {
+    /// Every variable, by name.
+    pub vars: BTreeMap<String, String>,
+}
+
 /// `_kage/session/rename` request params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

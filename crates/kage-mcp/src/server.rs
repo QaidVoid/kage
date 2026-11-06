@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use kage_core::CancelFlag;
 use kage_core::config::McpServer;
+use kage_core::environment::Environment;
 use kage_core::reaper;
 
 use kage_jsonrpc::{CancelNotice, Inbound, Peer, RpcError, connect_with};
@@ -656,13 +657,22 @@ impl McpServerHandle {
         handler: Option<Arc<dyn ServerRequestHandler>>,
         tokens: Option<Arc<dyn TokenSource>>,
     ) -> Result<Self, McpError> {
-        Self::spawn_with_startup_timeout(name, cfg, roots, handler, tokens, INITIALIZE_TIMEOUT)
+        Self::spawn_with_startup_timeout(
+            name,
+            cfg,
+            roots,
+            handler,
+            tokens,
+            INITIALIZE_TIMEOUT,
+            &Environment::inherit(),
+        )
     }
 
     /// [`Self::spawn_with`] with an explicit startup deadline for the
     /// `initialize` handshake, for a server whose cold start (a first
     /// `npx` download, say) outlasts the default. The 15 s per-request
-    /// deadline is unchanged.
+    /// deadline is unchanged. A stdio child starts with `env` plus the
+    /// server's own `env` entries.
     ///
     /// # Errors
     ///
@@ -674,11 +684,12 @@ impl McpServerHandle {
         handler: Option<Arc<dyn ServerRequestHandler>>,
         tokens: Option<Arc<dyn TokenSource>>,
         startup_timeout: Duration,
+        env: &Environment,
     ) -> Result<Self, McpError> {
         let name = name.into();
         match (cfg.command.as_deref(), cfg.url.as_deref()) {
             (Some(command), None) => {
-                Self::spawn_stdio(name, command, cfg, roots, handler, startup_timeout)
+                Self::spawn_stdio(name, command, cfg, roots, handler, startup_timeout, env)
             }
             (None, Some(url)) => {
                 Self::connect_http(name, url, cfg, roots, handler, tokens, startup_timeout)
@@ -703,8 +714,10 @@ impl McpServerHandle {
         roots: &[std::path::PathBuf],
         handler: Option<Arc<dyn ServerRequestHandler>>,
         startup_timeout: Duration,
+        env: &Environment,
     ) -> Result<Self, McpError> {
         let mut process = Command::new(command);
+        env.apply(&mut process);
         process
             .args(&cfg.args)
             .envs(&cfg.env)
@@ -901,6 +914,7 @@ mod tests {
             None,
             None,
             Duration::from_millis(500),
+            &Environment::inherit(),
         );
         assert!(spawn.is_err(), "the silent handshake must time out");
         let pid: i32 = std::fs::read_to_string(&pidfile)
@@ -1087,6 +1101,7 @@ mod tests {
             None,
             None,
             Duration::from_secs(1),
+            &Environment::inherit(),
         )
         .err()
         .expect("a silent server must fail the handshake");

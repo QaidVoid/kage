@@ -67,6 +67,7 @@ impl super::Dispatcher {
         let cancel = session.cancel.child();
         let workdir = session.workdir.clone();
         let shell = session.shell.clone();
+        let env = session.env.clone();
         let progress = Arc::new(ShellProgress {
             bus: Arc::clone(&self.bus),
             session: id,
@@ -79,7 +80,9 @@ impl super::Dispatcher {
                 content: String::new(),
                 structured: None,
             });
-            let cx = ToolContext::new(&workdir, &cancel).with_progress(progress.clone());
+            let cx = ToolContext::new(&workdir, &cancel)
+                .with_progress(progress.clone())
+                .with_env(env);
             let (exit_code, output) = run_shell(&progress.command, shell.as_deref(), &cx)
                 .unwrap_or_else(|_| {
                     let tail = lock(&progress.tail);

@@ -243,11 +243,13 @@ pub struct CommandOutput {
     pub exit_code: Option<i32>,
 }
 
-/// Give `cmd` the parent environment minus the names matched by `patterns`,
-/// so a model-authored command cannot read variables the user withheld.
-/// Invalid patterns are skipped; config validation refuses them at startup.
-fn scrub_env(cmd: &mut Command, patterns: &[String]) {
+/// Give `cmd` the session's environment minus the names matched by
+/// `patterns`, so a model-authored command cannot read variables the user
+/// withheld. Invalid patterns are skipped; config validation refuses them
+/// at startup.
+fn scrub_env(cmd: &mut Command, patterns: &[String], env: &kage_core::environment::Environment) {
     if patterns.is_empty() {
+        env.apply(cmd);
         return;
     }
     // Windows variable names are case-insensitive, so a configured
@@ -263,7 +265,7 @@ fn scrub_env(cmd: &mut Command, patterns: &[String]) {
                 .map(|g| g.compile_matcher())
         })
         .collect();
-    let parent: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os().collect();
+    let parent = env.vars();
     cmd.env_clear();
     for (name, value) in parent {
         let name = name.to_string_lossy();
@@ -331,7 +333,7 @@ pub(crate) fn run_capped(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
-    scrub_env(&mut cmd, env_scrub);
+    scrub_env(&mut cmd, env_scrub, cx.env());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -898,7 +900,11 @@ mod tests {
     #[cfg(windows)]
     fn scrub_matches_windows_env_names_case_insensitively() {
         let mut cmd = Command::new("pwsh");
-        scrub_env(&mut cmd, &["PATH".to_owned()]);
+        scrub_env(
+            &mut cmd,
+            &["PATH".to_owned()],
+            &kage_core::environment::Environment::inherit(),
+        );
         assert!(
             cmd.get_envs()
                 .all(|(name, _)| !name.eq_ignore_ascii_case("PATH")),
@@ -906,6 +912,39 @@ mod tests {
             cmd.get_envs()
                 .map(|(name, _)| name.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// A session's captured environment replaces this process's, and the
+    /// scrub still applies on top of it.
+    #[test]
+    #[cfg(unix)]
+    fn a_captured_environment_replaces_the_process_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = CancelFlag::new();
+        let env = kage_core::environment::Environment::captured(vec![
+            ("PATH".into(), std::env::var_os("PATH").unwrap_or_default()),
+            ("CLIENT".into(), "editor".into()),
+            ("CLIENT_TOKEN".into(), "secret".into()),
+        ]);
+        let cx = ToolContext::new(dir.path(), &cancel).with_env(env);
+        let command = serde_json::json!({
+            "command": "printf '%s|%s|%s' \"$CLIENT\" \"$CLIENT_TOKEN\" \"${HOME-unset}\""
+        });
+        let plain = ShellTool::default().execute(command.clone(), &cx).unwrap();
+        assert!(
+            plain.text.contains("\neditor|secret|unset\n"),
+            "{}",
+            plain.text
+        );
+        let scrubbed = ShellTool::default()
+            .with_env_scrub(&["*_TOKEN".to_owned()])
+            .execute(command, &cx)
+            .unwrap();
+        assert!(
+            scrubbed.text.contains("\neditor||unset\n"),
+            "{}",
+            scrubbed.text
         );
     }
 

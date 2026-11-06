@@ -41,6 +41,8 @@ mod doctor;
 mod engine;
 mod goal;
 mod history;
+#[cfg(unix)]
+mod host_client;
 mod init;
 mod mcp;
 mod mcp_auth;
@@ -55,6 +57,8 @@ mod runtime_env;
 mod serve;
 #[cfg(unix)]
 mod serve_registry;
+#[cfg(unix)]
+mod shared_host;
 mod state;
 mod title;
 mod trust;
@@ -244,29 +248,7 @@ pub(crate) enum Command {
     /// editor (Zed, Neovim, ...) can drive kage. Messages are
     /// newline-delimited JSON. Each request is answered, and loop
     /// progress is streamed back as ACP `session/update` notifications.
-    Rpc {
-        /// Provider-qualified model id (`provider/model`). Defaults
-        /// the same way as the top-level `-m`.
-        #[arg(short = 'm', long = "model", value_parser = model_arg)]
-        model: Option<String>,
-        /// System-prompt role override forwarded to the agent loop.
-        #[arg(long = "system", default_value = "")]
-        system: String,
-        /// A file whose contents are appended to the system prompt.
-        ///
-        /// For a prompt too long or too private to spell out on the
-        /// command line, which `/proc/<pid>/cmdline` publishes to every
-        /// user on the host. Read once, before any session starts; a
-        /// file that cannot be read is an error rather than a session
-        /// that starts without its instructions.
-        #[arg(long = "system-file", value_name = "PATH")]
-        system_file: Option<PathBuf>,
-        /// Start every session in allow mode: every tool call runs
-        /// without asking, MCP servers included. A configured deny
-        /// still denies, and a client may still change the mode.
-        #[arg(long)]
-        yolo: bool,
-    },
+    Rpc(RpcArgs),
     /// Serve the Agent Client Protocol over WebSocket so remote editors
     /// and ACP clients can drive kage over the network. One endpoint
     /// (`/acp`) behind a bearer token; every connection shares one
@@ -342,6 +324,61 @@ pub(crate) enum Command {
         /// MCP sub-action.
         #[command(subcommand)]
         action: McpAction,
+    },
+    /// The shared host: one kage engine per user that local clients
+    /// connect to. Clients start it when they need it, and it exits once
+    /// it has had no clients and no work for a while.
+    Host {
+        /// Host sub-action.
+        #[command(subcommand)]
+        action: HostAction,
+    },
+}
+
+/// Arguments of `kage rpc`.
+#[derive(clap::Args, Debug)]
+pub(crate) struct RpcArgs {
+    /// Provider-qualified model id (`provider/model`). Defaults
+    /// the same way as the top-level `-m`.
+    #[arg(short = 'm', long = "model", value_parser = model_arg)]
+    pub(crate) model: Option<String>,
+    /// System-prompt role override forwarded to the agent loop.
+    #[arg(long = "system", default_value = "")]
+    pub(crate) system: String,
+    /// A file whose contents are appended to the system prompt.
+    ///
+    /// For a prompt too long or too private to spell out on the
+    /// command line, which `/proc/<pid>/cmdline` publishes to every
+    /// user on the host. Read once, before any session starts; a
+    /// file that cannot be read is an error rather than a session
+    /// that starts without its instructions.
+    #[arg(long = "system-file", value_name = "PATH")]
+    pub(crate) system_file: Option<PathBuf>,
+    /// Start every session in allow mode: every tool call runs
+    /// without asking, MCP servers included. A configured deny
+    /// still denies, and a client may still change the mode.
+    #[arg(long)]
+    pub(crate) yolo: bool,
+    /// Run a private engine instead of sharing the per-user host.
+    /// Implied by `-m`, `--system`, `--system-file` and `--yolo`,
+    /// which configure an engine, and by `KAGE_STANDALONE=1`.
+    #[arg(long)]
+    pub(crate) standalone: bool,
+}
+
+/// Sub-actions of `kage host`.
+#[derive(Subcommand, Debug)]
+pub(crate) enum HostAction {
+    /// Run the shared host in the foreground. Exits at once when another
+    /// host is already running.
+    Run {
+        /// Seconds without clients or work before the host exits.
+        #[arg(long = "idle-secs", default_value_t = 600)]
+        idle_secs: u64,
+        /// Leave the starting process's session. Clients that start the
+        /// host pass this.
+        #[arg(long, hide = true)]
+        detached: bool,
     },
 }
 
@@ -572,13 +609,7 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
         Command::Providers { json } => providers::run_list(json),
         Command::GenManpage { out, check } => run_gen_manpage(&out, check),
         Command::Completions { shell } => run_completions(shell),
-        Command::Rpc {
-            model,
-            system,
-            system_file,
-            yolo,
-        } => config_error()
-            .unwrap_or_else(|| rpc::run(model.as_deref(), &system, system_file.as_deref(), yolo)),
+        Command::Rpc(args) => config_error().unwrap_or_else(|| run_rpc(&args)),
         Command::Serve {
             model,
             system,
@@ -620,6 +651,7 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
             ),
         },
         Command::Plugin { action } => plugin_cmd::run(action),
+        Command::Host { action } => config_error().unwrap_or_else(|| run_host(&action)),
         Command::Mcp { action } => match action {
             McpAction::Serve { tools } => mcp::run_serve(&tools),
             McpAction::Login { server } => mcp_auth::run_login(&server),
@@ -1177,6 +1209,59 @@ fn main() -> ExitCode {
 /// starts. A config that does not load stops kage with the error and
 /// the returned exit status, because running on defaults would drop
 /// custom providers and could start the first-run wizard.
+/// Entry point for `kage rpc`: a relay to the shared host, or a private
+/// engine when asked for one, when a flag configures the engine, or when
+/// the shared host cannot be used.
+fn run_rpc(args: &RpcArgs) -> ExitCode {
+    let private = args.standalone
+        || args.yolo
+        || args.model.is_some()
+        || !args.system.is_empty()
+        || args.system_file.is_some()
+        || std::env::var("KAGE_STANDALONE")
+            .is_ok_and(|value| !matches!(value.trim(), "" | "0" | "false" | "no" | "off"));
+    if !private && let Some(code) = relay_to_shared_host() {
+        return code;
+    }
+    rpc::run(
+        args.model.as_deref(),
+        &args.system,
+        args.system_file.as_deref(),
+        args.yolo,
+    )
+}
+
+/// Serves `kage rpc` through the shared host, or returns `None` with a note
+/// on stderr so the caller runs its own engine.
+fn relay_to_shared_host() -> Option<ExitCode> {
+    #[cfg(unix)]
+    match host_client::connect() {
+        Ok(stream) => Some(host_client::relay(&stream)),
+        Err(why) => {
+            eprintln!("kage: rpc: {why}; using a private engine");
+            None
+        }
+    }
+    #[cfg(not(unix))]
+    None
+}
+
+/// Entry point for `kage host`.
+fn run_host(action: &HostAction) -> ExitCode {
+    match action {
+        #[cfg(unix)]
+        HostAction::Run {
+            idle_secs,
+            detached,
+        } => shared_host::run(std::time::Duration::from_secs(*idle_secs), *detached),
+        #[cfg(not(unix))]
+        HostAction::Run { .. } => {
+            eprintln!("kage: host: the shared host needs a Unix system");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn config_error() -> Option<ExitCode> {
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let err = kage_core::config::Config::load_layered(&workdir).err()?;
@@ -1240,7 +1325,13 @@ fn run_print_mode(cli: Cli) -> ExitCode {
         shell.as_deref(),
     );
     let plugin_runtime = match plugins_dir() {
-        Ok(dir) => match setup_runtime(&dir, &workdir, &provisional_model, &bare_prompt) {
+        Ok(dir) => match setup_runtime(
+            &dir,
+            &workdir,
+            &provisional_model,
+            &bare_prompt,
+            &kage_core::environment::Environment::inherit(),
+        ) {
             Ok(rt) => rt,
             Err(e) => {
                 eprintln!("kage: {e}");

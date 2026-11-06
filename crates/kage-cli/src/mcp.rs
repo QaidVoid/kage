@@ -25,6 +25,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use kage_core::config::{Config, McpConfig, McpServer, ShellConfig, ToolsConfig};
+use kage_core::environment::Environment;
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
 use kage_mcp::{McpError, McpManager};
 use kage_plugin::PluginRuntime;
@@ -171,17 +172,25 @@ pub(crate) fn spawn_and_register(
     workdir: &Path,
     runtime: Option<&PluginRuntime>,
 ) -> (McpManager, Vec<(String, McpError)>) {
-    spawn_and_register_with(tools, workdir, runtime, BTreeMap::new())
+    spawn_and_register_with(
+        tools,
+        workdir,
+        runtime,
+        BTreeMap::new(),
+        Environment::inherit(),
+    )
 }
 
 /// [`spawn_and_register`] plus `extra`, the servers an editor passed
 /// for this session. They are user level, so no trust prompt applies,
 /// and each replaces a configured or plugin server of the same name.
+/// Stdio servers start with `env`.
 pub(crate) fn spawn_and_register_with(
     tools: &mut ToolRegistry,
     workdir: &Path,
     runtime: Option<&PluginRuntime>,
     extra: BTreeMap<String, McpServer>,
+    env: Environment,
 ) -> (McpManager, Vec<(String, McpError)>) {
     let mut cfg = merged_config(workdir, runtime);
     merge_extra(&mut cfg, extra);
@@ -191,6 +200,7 @@ pub(crate) fn spawn_and_register_with(
         vec![workdir.to_path_buf()],
         handler,
         crate::mcp_auth::token_source(),
+        env,
     );
     errors.extend(manager.register_into(tools));
     (manager, errors)

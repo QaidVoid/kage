@@ -16,6 +16,7 @@
 //! When the input ends, every request but a prompt that is still in
 //! flight is answered before [`serve_agent`] returns.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::sync::Arc;
 use std::thread;
@@ -687,6 +688,11 @@ pub trait Agent: Send + Sync + 'static {
     /// The connection ended and every request but a prompt that is
     /// still running is answered. The default does nothing.
     fn detached(&self) {}
+
+    /// The client sent its environment in a `_kage/environment`
+    /// notification. Requests read after it see it. The default ignores
+    /// it.
+    fn environment(&self, _vars: BTreeMap<String, String>) {}
 }
 
 /// The `$/cancel_request` notice ACP expects for an abandoned request.
@@ -725,13 +731,19 @@ where
     let mut ops = Vec::new();
     for message in inbound {
         match message {
-            Inbound::Notification { method, params } => {
-                if method == "session/cancel"
-                    && let Ok(c) = parse::<crate::acp::CancelNotification>(params)
-                {
-                    agent.cancel(&c.session_id);
+            Inbound::Notification { method, params } => match method.as_str() {
+                "session/cancel" => {
+                    if let Ok(c) = parse::<crate::acp::CancelNotification>(params) {
+                        agent.cancel(&c.session_id);
+                    }
                 }
-            }
+                "_kage/environment" => {
+                    if let Ok(e) = parse::<crate::acp::EnvironmentNotification>(params) {
+                        agent.environment(e.vars);
+                    }
+                }
+                _ => {}
+            },
             Inbound::Request { id, method, params } => {
                 if let Some(op) = handle_request(&peer, &agent, id, &method, params) {
                     ops.retain(|op: &thread::JoinHandle<()>| !op.is_finished());

@@ -26,6 +26,14 @@ impl PluginRuntimeBuilder {
         self
     }
 
+    /// Set the environment `kage.exec` starts processes with. Defaults to
+    /// this process's own.
+    #[must_use]
+    pub fn env(mut self, env: kage_core::environment::Environment) -> Self {
+        self.env = env;
+        self
+    }
+
     /// Set the per-plugin capability grants (from
     /// `[plugins.capabilities]`), keyed by plugin file stem. Unknown
     /// capability names are rejected by [`build`](Self::build).
@@ -228,8 +236,12 @@ impl PluginRuntimeBuilder {
         // Capability installers first: `mcp`/`acp` attach their
         // declaring functions under `exec`, and every granted plugin
         // needs the registry complete before `request_capabilities`.
-        exec::register(&cap_registry, self.workdir.clone());
-        env::register(&cap_registry, self.credential_lookup.clone());
+        exec::register(&cap_registry, self.workdir.clone(), self.env.clone());
+        env::register(
+            &cap_registry,
+            self.credential_lookup.clone(),
+            self.env.clone(),
+        );
         http::register(&cap_registry);
         crypto::register(&cap_registry);
         mcp::register(

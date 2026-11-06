@@ -10,6 +10,7 @@ use kage_acp::acp::{
 };
 use kage_core::agents::AgentDefs;
 use kage_core::config::{McpServer as McpSpec, PluginsConfig};
+use kage_core::environment::Environment;
 use kage_core::permissions::{PermissionAction, PermissionsConfig, ToolPermissionRules};
 use kage_core::protocol::{McpServerInfo, McpServerStatus, Usage};
 use kage_core::{
@@ -271,9 +272,15 @@ fn serve_on(
     std::thread::spawn(move || {
         standing
             .serve_with(BufReader::new(srv_r), srv_w, move |agent| {
-                let mut spec =
-                    (agent.host.spec)(&agent.host.registry(), id, "", "mock/m", BTreeMap::new())
-                        .unwrap();
+                let mut spec = (agent.host.spec)(
+                    &agent.host.registry(),
+                    id,
+                    "",
+                    "mock/m",
+                    BTreeMap::new(),
+                    &Environment::inherit(),
+                )
+                .unwrap();
                 if record {
                     let path = sessions.join(format!("{id}.jsonl"));
                     let header = Header {
@@ -356,7 +363,7 @@ fn test_host_agents(
     let registry = Arc::new(ProviderRegistry::new().with(provider));
     let agents = Arc::new(agents);
     let spec = Box::new(
-        move |_: &ProviderRegistry, id, _cwd: &str, model: &str, servers| {
+        move |_: &ProviderRegistry, id, _cwd: &str, model: &str, servers, env: &Environment| {
             let agents = Arc::clone(&agents);
             let mut rules = PermissionsConfig::default();
             rules.tools.insert(
@@ -376,9 +383,12 @@ fn test_host_agents(
             Ok(SessionSpec {
                 id,
                 model: model.to_owned(),
-                cx: AgentContext::new(model, "")
-                    .with_workdir(&workdir)
-                    .with_context_window(WINDOW),
+                cx: AgentContext {
+                    env: env.clone(),
+                    ..AgentContext::new(model, "")
+                        .with_workdir(&workdir)
+                        .with_context_window(WINDOW)
+                },
                 recorder: None,
                 tools,
                 gate,
@@ -4782,9 +4792,15 @@ fn serve_paused(
     std::thread::spawn(move || {
         standing
             .serve_with(BufReader::new(srv_r), srv_w, move |agent| {
-                let spec =
-                    (agent.host.spec)(&agent.host.registry(), id, "", "mock/m", BTreeMap::new())
-                        .unwrap();
+                let spec = (agent.host.spec)(
+                    &agent.host.registry(),
+                    id,
+                    "",
+                    "mock/m",
+                    BTreeMap::new(),
+                    &Environment::inherit(),
+                )
+                .unwrap();
                 agent.open(id.to_string(), spec);
                 agent.session_announced(&id.to_string());
                 let _ = opened_tx.send(());
@@ -6361,4 +6377,101 @@ fn an_unreadable_system_prompt_file_stops_the_run() {
         .expect_err("a missing file must be refused");
 
     assert!(error.contains("/nonexistent/prompt.md"), "{error}");
+}
+
+#[test]
+fn the_host_is_busy_only_while_a_turn_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve_paused(
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::TextDelta {
+                delta: "Hel".into(),
+            }),
+        ],
+        vec![Ok(ProviderEvent::MessageEnd {
+            stop_reason: CoreStopReason::EndTurn,
+            usage: TokenUsage::default(),
+        })],
+        vec![text_turn("titled")],
+        dir.path(),
+        dir.path(),
+    );
+    assert!(!h.host.busy());
+    let client = h.client.clone();
+    let session = h.session.clone();
+    let prompt = std::thread::spawn(move || {
+        client.request(
+            "session/prompt",
+            serde_json::json!({"sessionId": session, "prompt": [{"type": "text", "text": "hi"}]}),
+        )
+    });
+    let until = Instant::now() + WAIT;
+    while !h.host.busy() {
+        assert!(
+            Instant::now() < until,
+            "a running turn did not make the host busy"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    h.release.send(()).unwrap();
+    let reply = prompt.join().unwrap().unwrap();
+    assert_eq!(reply["stopReason"], "end_turn");
+    let until = Instant::now() + WAIT;
+    while h.host.busy() {
+        assert!(
+            Instant::now() < until,
+            "the host stayed busy after the turn ended"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Only a client on the local socket gives the sessions it opens its
+/// environment; a remote connection's `_kage/environment` is ignored.
+#[test]
+fn only_a_local_client_sets_the_environment_of_its_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    let registry =
+        Arc::new(ProviderRegistry::new().with(Arc::new(MockProvider::sequence(Vec::new()))));
+    let spec: super::host::SpecBuilder = Box::new(move |_, _, _, _, _, env: &Environment| {
+        let from_client = env
+            .vars()
+            .iter()
+            .any(|(name, value)| name == "KAGE_TEST_CLIENT" && value == "editor");
+        lock(&record).push(from_client);
+        Err(RpcError::internal("recorded"))
+    });
+    let host = Host::new(
+        registry,
+        "mock/m".into(),
+        dir.path().to_path_buf(),
+        spec,
+        BTreeMap::new(),
+    );
+    for local in [false, true] {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let serving = Arc::clone(&host);
+        std::thread::spawn(move || {
+            let reader = BufReader::new(srv_r);
+            if local {
+                serving.serve_local(reader, srv_w)
+            } else {
+                serving.serve(reader, srv_w)
+            }
+        });
+        let (client, _inbox, _reader) = kage_jsonrpc::connect(BufReader::new(cli_r), cli_w);
+        client
+            .notify(
+                "_kage/environment",
+                serde_json::json!({"vars": {"KAGE_TEST_CLIENT": "editor"}}),
+            )
+            .unwrap();
+        let params = serde_json::json!({"cwd": dir.path(), "mcpServers": []});
+        assert!(client.request("session/new", params).is_err());
+    }
+    assert_eq!(*lock(&seen), [false, true]);
 }

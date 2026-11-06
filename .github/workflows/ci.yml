@@ -111,6 +111,19 @@ jobs:
       # runs kage-desktop's suite, which needs a software GL stack.
       - run: cargo nextest run --profile ci --workspace --exclude kage-desktop --all-targets --no-tests=pass --no-fail-fast
 
+  # The shared host must stay as small as a private engine. Memory is
+  # only meaningful in a release build, so this measures one on Linux.
+  memory:
+    name: memory
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: memory
+      - run: cargo test --locked --release -p kage-cli --test shared_host -- --ignored
+
   desktop:
     name: desktop (${{ matrix.os }})
     strategy:

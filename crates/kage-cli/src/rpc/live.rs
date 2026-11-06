@@ -242,6 +242,16 @@ pub(super) struct Live {
 }
 
 impl Live {
+    /// Whether any session is working, any agent is running or waiting
+    /// out a rate limit, or any ask is open.
+    #[cfg_attr(not(unix), allow(dead_code, reason = "the shared host is unix only"))]
+    pub(super) fn busy(&self) -> bool {
+        !self.working.is_empty()
+            || !self.running.is_empty()
+            || !self.paused.is_empty()
+            || !self.asks.is_empty()
+    }
+
     pub(super) fn new(commander: Commander) -> Self {
         Self {
             commander,

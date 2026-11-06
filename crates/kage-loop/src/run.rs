@@ -323,8 +323,7 @@ where
                 tools,
                 &workdir,
                 cancel,
-                cx.confine_paths,
-                &cx.env,
+                &crate::dispatch::ToolScope::of(cx),
                 &cx.history,
                 assistant_id,
                 hooks,
@@ -591,7 +590,7 @@ fn build_request(
     req.reasoning = cx.reasoning;
     req.produces = cx.produces;
     req.accepts = cx.accepts;
-    req.session.clone_from(&cx.session);
+    req.session = cx.session.map(|session| session.to_string());
     req.workdir = Some(cx.workdir.clone());
     req.env = cx.env.clone();
     req

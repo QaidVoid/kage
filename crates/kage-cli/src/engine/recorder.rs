@@ -149,7 +149,13 @@ impl Recorder {
         let Some(plugins) = &self.plugins else {
             return Ok(());
         };
-        for op in plugins.take_pending_session_ops() {
+        // The run thread names its session, so another session's ops stay
+        // for that session's recorder.
+        let ops = match kage_plugin::Invocation::current().session {
+            Some(session) => plugins.take_pending_session_ops_for(session),
+            None => plugins.take_pending_session_ops(),
+        };
+        for op in ops {
             if let Some(entry) = plugin_op_entry(op) {
                 self.writer()?.append(&entry)?;
             }

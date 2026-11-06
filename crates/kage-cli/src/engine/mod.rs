@@ -512,6 +512,9 @@ struct Session {
     queued: VecDeque<Vec<Content>>,
     tools: ToolRegistry,
     plugins: Option<Arc<PluginRuntime>>,
+    /// Keeps the session's environment registered with its plugin runtime
+    /// while the session exists.
+    _plugin_env: Option<PluginSession>,
     gate: PermissionGate,
     loop_cfg: LoopConfig,
     /// `None` while a run start, an idle restart or the first bring-up
@@ -749,6 +752,9 @@ impl Dispatcher {
         let workdir = cx.workdir.clone();
         let confine_paths = cx.confine_paths;
         let env = cx.env.clone();
+        let plugin_session = plugins
+            .as_ref()
+            .map(|runtime| PluginSession::new(runtime, id, &env));
         let title_pending = title && !has_reply(&cx);
         let starting_mcp = mcp
             .as_ref()
@@ -795,6 +801,7 @@ impl Dispatcher {
                 note: None,
                 confine_paths,
                 env,
+                _plugin_env: plugin_session,
                 swarm_mode: false,
             },
         );
@@ -1350,7 +1357,7 @@ impl Dispatcher {
             link.inherited_until = cx.history.last().map(|m| m.id);
         }
         cx.model = bare_model;
-        cx.session = Some(id.to_string());
+        cx.session = Some(id);
         fit_context(&mut cx, &self.registry, &model);
         if std::mem::take(&mut session.thinking_changed) {
             cx.thinking_level = session.state.thinking;
@@ -1864,7 +1871,7 @@ impl Dispatcher {
             .map(|resolved| (Arc::clone(resolved.provider), resolved.model.clone()));
         let history = cx.history.clone();
         thread::spawn(move || {
-            let verdict = match resolved {
+            let verdict = kage_plugin::Invocation::session(id).scope(|| match resolved {
                 Ok((provider, bare_model)) => crate::goal::judge(
                     provider.as_ref(),
                     &bare_model,
@@ -1873,7 +1880,7 @@ impl Dispatcher {
                     &CancelFlag::new(),
                 ),
                 Err(e) => crate::goal::Verdict::Unknown(e.to_string()),
-            };
+            });
             let _ = tx.send(Input::GoalChecked {
                 session: id,
                 goal,
@@ -1898,13 +1905,15 @@ impl Dispatcher {
         let (user, reply) = (first_text(Role::User), first_text(Role::Assistant));
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let title = crate::title::generate(
-                provider.as_ref(),
-                &bare_model,
-                &user,
-                &reply,
-                &CancelFlag::new(),
-            );
+            let title = kage_plugin::Invocation::session(id).scope(|| {
+                crate::title::generate(
+                    provider.as_ref(),
+                    &bare_model,
+                    &user,
+                    &reply,
+                    &CancelFlag::new(),
+                )
+            });
             let _ = tx.send(Input::Title { session: id, title });
         });
     }
@@ -2155,6 +2164,30 @@ fn usage_of(cx: &AgentContext) -> Usage {
 /// Whether the conversation already has an assistant reply.
 fn has_reply(cx: &AgentContext) -> bool {
     cx.history.iter().any(|m| m.role == Role::Assistant)
+}
+
+/// Keeps a session's environment registered with its plugin runtime, so
+/// `kage.exec` and `kage.env` in work for the session use it, until the
+/// session is dropped.
+struct PluginSession {
+    runtime: Arc<PluginRuntime>,
+    id: SessionId,
+}
+
+impl PluginSession {
+    fn new(runtime: &Arc<PluginRuntime>, id: SessionId, env: &Environment) -> Self {
+        runtime.set_session_env(id, env.clone());
+        Self {
+            runtime: Arc::clone(runtime),
+            id,
+        }
+    }
+}
+
+impl Drop for PluginSession {
+    fn drop(&mut self) {
+        self.runtime.forget_session(self.id);
+    }
 }
 
 /// Clone `cx` with an empty history, for commands that replace the

@@ -55,7 +55,7 @@ Plugins and `init.lua` share this API but not the same privileges.
 | Capabilities (`session_write`, `exec`, `env`, `net`, `crypto`, `context`, `provider`, `fs_write`) | only when granted in `[plugins.capabilities]` and requested | all, without asking |
 | `require` | packages only, confined to their own `lua/` | confined to `~/.config/kage/lua/` |
 | the `io` library, `os.execute`, `debug` | removed | removed |
-| Loaded by | the TUI, print mode and `kage rpc` | the TUI only |
+| Loaded by | the TUI, print mode, `kage rpc` and `kage serve` | the TUI, `kage rpc` and `kage serve` |
 
 Each plugin and `init.lua` get their own copy of the `kage` tables. A
 plugin that replaces `kage.ui.set_header` changes only its own copy,

@@ -73,7 +73,7 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
     };
     let user_dir = crate::config_dir().ok();
     let log_publisher: Arc<OnceLock<LogPublisher>> = Arc::default();
-    let plugin_runtime = match setup_tui_runtime(
+    let plugin_runtime = match setup_user_runtime(
         plugins_dir_path.as_deref(),
         user_dir.as_deref(),
         app_config.plugins.clone(),
@@ -83,6 +83,7 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
         &provisional_model,
         &bare_prompt,
         buffer_host_log(buffer.clone(), toasts.clone(), Arc::clone(&log_publisher)),
+        &kage_core::environment::Environment::inherit(),
     ) {
         Ok(rt) => Some(rt),
         Err(e) => {

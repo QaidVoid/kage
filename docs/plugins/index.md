@@ -84,7 +84,7 @@ are closed by default and loud when granted.
 | Capabilities | granted per plugin in `[plugins.capabilities]` | all, without asking |
 | `require` | packages only, from their own `lua/` | from `~/.config/kage/lua/` |
 | Loads | after kage's defaults, sorted by name | last |
-| Runs in | the TUI, print mode and `kage rpc` | the TUI only |
+| Runs in | the TUI, print mode, `kage rpc` and `kage serve` | the TUI, `kage rpc` and `kage serve` |
 
 Both run in the same Lua state, but each file gets its own copy of the
 `kage` tables, so a plugin cannot change what another plugin or

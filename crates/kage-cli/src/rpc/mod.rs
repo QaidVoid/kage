@@ -44,6 +44,7 @@ mod options;
 mod plugin_files;
 mod plugin_registry;
 pub(crate) mod probe;
+mod projects;
 mod registry;
 mod rewind;
 mod sessions;

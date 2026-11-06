@@ -14,15 +14,18 @@ A complete, working example is at the [end of this page](#complete-example).
 kage reads `$XDG_CONFIG_HOME/kage/init.lua`, which is
 `~/.config/kage/init.lua` by default. The file is optional.
 
-- Only the TUI loads it. Print mode (`kage -p`), `kage rpc` and
-  `kage mcp serve` read `config.toml` only.
+- The TUI loads it, and so do `kage rpc` and `kage serve`, once for
+  each project they serve: its tools, hooks and engine options apply
+  to editor, desktop and browser sessions too. Print mode (`kage -p`)
+  and `kage mcp serve` read `config.toml` only.
 - A project's `.kage/init.lua` is never loaded. Project settings go in
   `.kage/config.toml` (see [configuration](/guide/config)).
-- An error in `init.lua` shows as an error block in the
+- An error in `init.lua` shows in the TUI as an error block in the
   conversation, such as `init.lua: runtime error: init.lua:3: boom`
   followed by `Fix init.lua, then run /reload.` The Lua traceback is
   left out. kage still starts, with its defaults and your plugins
-  loaded.
+  loaded. A host writes the error to its log instead (see
+  [shared host](/guide/shared-host)).
 
 `require` loads modules from the `lua/` directory next to `init.lua`.
 A name is dot-separated segments of letters, digits, `_` and `-`, and
@@ -59,7 +62,7 @@ through `..`, an absolute name or a symlink, are rejected.
 | Capabilities | all of `exec`, `env`, `net` and `session_write`, without asking | only what `[plugins.capabilities]` grants and the plugin requests |
 | `require` | confined to `lua/` | not available |
 | Raw `io`, `os.execute`, `debug` | removed | removed |
-| Loaded by | the TUI only | the TUI, print mode and `kage rpc` |
+| Loaded by | the TUI, `kage rpc` and `kage serve` | the TUI, print mode, `kage rpc` and `kage serve` |
 
 `kage.request_capabilities` still works in `init.lua` and reports every
 capability as granted. Each plugin and `init.lua` run in their own

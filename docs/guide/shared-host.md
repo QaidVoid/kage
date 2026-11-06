@@ -120,6 +120,16 @@ client:
   project `.kage/config.toml` still applies to sessions opened in that
   project, as before.
 
+Your plugins and `init.lua` load once per project on the host, and
+every session in that project shares them: their tools, hooks, MCP
+servers and engine options apply whichever client opened the session.
+A session that opens after a plugin, `init.lua`, the config or the
+project's trust changed gets them freshly loaded, while sessions already
+open keep what they started with. A project's plugins unload a minute
+after its last session closes. Two things still come from the plugins
+the host loaded at startup, not from `init.lua`: providers a plugin
+registers, and `kage.acp` agents and permission handlers.
+
 A config or credential change made through a client, such as the
 desktop's settings, reloads the providers for every client.
 

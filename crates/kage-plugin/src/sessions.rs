@@ -69,7 +69,7 @@ pub enum PendingSessionOp {
 /// Shared queue of plugin-requested session writes, each with the session
 /// whose work queued it. The host drains this between turns and applies
 /// each entry to its session writer.
-pub type SharedSessionOps = Arc<Mutex<Vec<(Option<kage_core::SessionId>, PendingSessionOp)>>>;
+pub type SharedSessionOps = Arc<Mutex<crate::invocation::Tagged<PendingSessionOp>>>;
 
 /// Construct an empty session-op queue.
 #[must_use]

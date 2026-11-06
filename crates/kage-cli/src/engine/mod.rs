@@ -2087,7 +2087,7 @@ fn mcp_lease(bus: &Bus, id: SessionId, session: &mut Session) -> Option<McpLease
     let mut restarts = session
         .plugins
         .as_ref()
-        .map(|rt| rt.take_mcp_restarts())
+        .map(|rt| kage_plugin::Invocation::session(id).scope(|| rt.take_mcp_restarts()))
         .unwrap_or_default();
     restarts.append(&mut session.mcp_restarts);
     Some(McpLease { manager, restarts })

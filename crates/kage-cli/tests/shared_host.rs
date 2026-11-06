@@ -496,6 +496,38 @@ fn the_idle_timeout_comes_from_the_user_config() {
     assert!(exit_within(&mut host, WAIT).success());
 }
 
+/// The host loads the user's init.lua for an editor's session, once per
+/// project, as the TUI does.
+#[test]
+fn an_editor_session_runs_with_the_users_init_lua() {
+    let env = Env::new();
+    let config = env.dir.path().join("config/kage");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("init.lua"),
+        "local ok, seen = pcall(kage.fs.read, 'loads')\n\
+         local n = (ok and tonumber(seen) or 0) + 1\n\
+         kage.fs.write('loads', tostring(n))\n",
+    )
+    .unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut rpc = env.rpc(&[]);
+    rpc.request("initialize", json!({"protocolVersion": 1}));
+    for _ in 0..2 {
+        let created = rpc.request(
+            "session/new",
+            json!({"cwd": project.path(), "mcpServers": []}),
+        );
+        assert!(created["result"]["sessionId"].is_string(), "{created}");
+    }
+    let log =
+        std::fs::read_to_string(env.dir.path().join("state/kage/host.log")).unwrap_or_default();
+    let loads = std::fs::read_to_string(project.path().join("loads"))
+        .unwrap_or_else(|e| panic!("{e}: {log}"));
+    assert_eq!(loads, "1", "two sessions in one project share one load");
+    assert!(rpc.close().success());
+}
+
 /// A client whose `KAGE_*` configuration overrides the host cannot
 /// honor runs an engine of its own: the host merged its own environment
 /// at startup, so joining it would silently drop the overrides. A

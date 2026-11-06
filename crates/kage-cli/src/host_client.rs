@@ -12,14 +12,14 @@ use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::shared_host::{RECORD, Record, SOCKET};
+use crate::shared_host::{SOCKET, read_record};
 
 // How long a client waits for a host it started.
 const START_WAIT: Duration = Duration::from_secs(10);
@@ -74,7 +74,7 @@ fn start() -> Result<Child, Unavailable> {
         .stderr(log_file().map_or_else(|_| Stdio::null(), Stdio::from));
     if let Some(idle) = std::env::var("KAGE_HOST_IDLE_SECS")
         .ok()
-        .filter(|idle| idle.parse::<u64>().is_ok())
+        .filter(|idle| idle.parse::<u64>().is_ok_and(|secs| secs > 0))
     {
         command.arg("--idle-secs").arg(idle);
     }
@@ -94,14 +94,19 @@ fn failed(started: Option<&mut Child>) -> Option<Unavailable> {
     })
 }
 
-// The host's log, `$XDG_STATE_HOME/kage/host.log`, private to the user and
-// moved aside when large.
+/// Where a host started by a client writes its output.
+pub(crate) fn log_path() -> Result<PathBuf, String> {
+    Ok(crate::paths::state_root()?.join("host.log"))
+}
+
+// The host's log, private to the user and moved aside when large.
 fn log_file() -> io::Result<fs::File> {
-    let dir = crate::paths::state_root().map_err(io::Error::other)?;
-    fs::create_dir_all(&dir)?;
-    let path = dir.join("host.log");
+    let path = log_path().map_err(io::Error::other)?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
     if fs::metadata(&path).is_ok_and(|meta| meta.len() > MAX_LOG_BYTES) {
-        let _ = fs::rename(&path, dir.join("host.log.1"));
+        let _ = fs::rename(&path, path.with_extension("log.1"));
     }
     OpenOptions::new()
         .create(true)
@@ -141,10 +146,7 @@ fn check_version(
 ) -> Result<(), Unavailable> {
     let deadline = Instant::now() + START_WAIT;
     loop {
-        if let Some(record) = fs::read(dir.join(RECORD))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
-        {
+        if let Some(record) = read_record(dir) {
             let ours = kage_core::build::version();
             if record.version == ours {
                 return Ok(());
@@ -175,6 +177,31 @@ fn hung_up(stream: &UnixStream) -> bool {
         ),
         Ok(0)
     )
+}
+
+/// Entry point for `kage host logs`: prints the host's log.
+pub(crate) fn print_log() -> ExitCode {
+    let path = match log_path() {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("kage: host: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let _ = io::stdout().lock().write_all(&bytes);
+            ExitCode::SUCCESS
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            eprintln!("kage: host: no log yet at {}", path.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("kage: host: {}: {e}", path.display());
+            ExitCode::from(1)
+        }
+    }
 }
 
 /// The `_kage/environment` notification carrying this process's

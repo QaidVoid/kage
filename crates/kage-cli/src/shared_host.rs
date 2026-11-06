@@ -45,6 +45,9 @@ const TICK: Duration = Duration::from_millis(250);
 // How long a new host waits for an old one that is shutting down.
 const TAKEOVER: Duration = Duration::from_secs(10);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+// How long `kage host stop` waits after SIGTERM, and then after SIGKILL.
+const STOP_WAIT: Duration = Duration::from_secs(10);
+const KILL_WAIT: Duration = Duration::from_secs(5);
 // Output queued for one client before it is disconnected. A client that is
 // only paused, such as a suspended terminal editor, keeps its connection
 // until this fills.
@@ -123,6 +126,126 @@ fn serve(idle: Duration, log: &Log) -> Result<(), String> {
     thread::sleep(SHUTDOWN_GRACE);
     drop(lock);
     Ok(())
+}
+
+/// Entry point for `kage host status`.
+pub(crate) fn status() -> ExitCode {
+    let dir = match crate::paths::runtime_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("kage: host: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    if !lock_held(&dir) {
+        println!("no shared host is running");
+        return ExitCode::from(1);
+    }
+    let Some(record) = read_record(&dir) else {
+        println!("a shared host is starting or stopping");
+        return ExitCode::SUCCESS;
+    };
+    println!("pid      {}", record.pid);
+    println!("version  {}", record.version);
+    println!(
+        "started  {}",
+        record
+            .started
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+    );
+    println!("socket   {}", record.socket.display());
+    if let Ok(log) = crate::host_client::log_path() {
+        println!("log      {} (a host clients started)", log.display());
+    }
+    ExitCode::SUCCESS
+}
+
+/// Entry point for `kage host stop`.
+pub(crate) fn stop() -> ExitCode {
+    match stop_host() {
+        Ok(Some(message)) => {
+            println!("{message}");
+            ExitCode::SUCCESS
+        }
+        Ok(None) => {
+            println!("no shared host is running");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("kage: host: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn stop_host() -> Result<Option<String>, String> {
+    use nix::sys::signal::{Signal, kill};
+    let dir = crate::paths::runtime_dir()?;
+    if !lock_held(&dir) {
+        return Ok(None);
+    }
+    let record = read_record(&dir)
+        .ok_or("the shared host is starting or stopping and has no process id; try again")?;
+    let pid = i32::try_from(record.pid)
+        .map(nix::unistd::Pid::from_raw)
+        .map_err(|e| e.to_string())?;
+    let stopped = Ok(Some(format!("stopped the shared host (pid {pid})")));
+    match kill(pid, Signal::SIGTERM) {
+        Err(nix::errno::Errno::ESRCH) => return stopped,
+        Err(e) => return Err(format!("cannot stop pid {pid}: {e}")),
+        Ok(()) => {}
+    }
+    if gone(&dir, &record, STOP_WAIT) {
+        return stopped;
+    }
+    match kill(pid, Signal::SIGKILL) {
+        Err(nix::errno::Errno::ESRCH) => return stopped,
+        Err(e) => return Err(format!("cannot kill pid {pid}: {e}")),
+        Ok(()) => {}
+    }
+    if gone(&dir, &record, KILL_WAIT) {
+        return Ok(Some(format!("killed the shared host (pid {pid})")));
+    }
+    Err(format!("pid {pid} still holds the host lock"))
+}
+
+// Waits up to `limit` for the host `record` describes to be gone: the lock
+// is free, its process no longer exists, or another host has taken over.
+// A client may start a new host while the old one shuts down, and that one
+// takes the lock the moment it is released.
+fn gone(dir: &Path, record: &Record, limit: Duration) -> bool {
+    let exited = || {
+        i32::try_from(record.pid).is_ok_and(|pid| {
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None)
+                == Err(nix::errno::Errno::ESRCH)
+        })
+    };
+    let replaced = || read_record(dir).is_some_and(|now| now.pid != record.pid);
+    let deadline = Instant::now() + limit;
+    while lock_held(dir) && !exited() && !replaced() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+// Whether a host holds the single-instance lock in `dir`.
+fn lock_held(dir: &Path) -> bool {
+    let Ok(file) = OpenOptions::new().write(true).open(dir.join(LOCK)) else {
+        return false;
+    };
+    match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+        Ok(_unlocked_on_drop) => false,
+        Err((_, errno)) => errno == nix::errno::Errno::EWOULDBLOCK,
+    }
+}
+
+/// The record of the host in `dir`, once it has written one.
+pub(crate) fn read_record(dir: &Path) -> Option<Record> {
+    serde_json::from_slice(&fs::read(dir.join(RECORD)).ok()?).ok()
 }
 
 fn prepare(dir: &Path) -> Result<(), String> {

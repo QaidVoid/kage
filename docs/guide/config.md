@@ -332,7 +332,8 @@ kage does not know, the agent definitions in `.kage/agents/` (see
 [agents](/guide/agents#project-agents-and-trust)) and the skills in
 `.kage/skills/`. All of them share one trust decision.
 
-The `[providers]` table, `[acp.agents]`, `plugins.registry` and the media
+The `[providers]` table, `[acp.agents]`, `[host]` (see
+[shared host](/guide/shared-host#configuration)), `plugins.registry` and the media
 tables `[tools.generate_image]`, `[tools.edit_image]`,
 `[tools.generate_speech]` and `[tools.generate_music]` are never read
 from a project, trusted or not.

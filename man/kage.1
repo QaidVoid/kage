@@ -307,7 +307,16 @@ The shared host: one kage engine per user that local clients connect to. Clients
 Run the shared host in the foreground. Exits at once when another host is already running
 .TP
 \fB\-\-idle\-secs\fR\fI <IDLE_SECS>\fR
-Seconds without clients or work before the host exits
+Seconds without clients or work before the host exits. Defaults to `[host] idle_timeout_secs`, 600 unless configured
+.TP
+\fBkage host status\fR
+Show whether the shared host runs, with its process id, version, start time and log file. Exits 1 when no host runs
+.TP
+\fBkage host stop\fR
+Stop the shared host: SIGTERM, then SIGKILL if it has not exited after 10 seconds. Its clients are disconnected, and running turns are cancelled
+.TP
+\fBkage host logs\fR
+Print the shared host\*(Aqs log
 .PP
 Run \fBkage \fR\fIcommand\fR\fB \-\-help\fR for the options of a command.
 .SH FILES

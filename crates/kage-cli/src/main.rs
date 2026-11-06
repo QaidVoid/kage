@@ -373,13 +373,23 @@ pub(crate) enum HostAction {
     /// host is already running.
     Run {
         /// Seconds without clients or work before the host exits.
-        #[arg(long = "idle-secs", default_value_t = 600)]
-        idle_secs: u64,
+        /// Defaults to `[host] idle_timeout_secs`, 600 unless configured.
+        #[arg(long = "idle-secs", value_parser = clap::value_parser!(u64).range(1..))]
+        idle_secs: Option<u64>,
         /// Leave the starting process's session. Clients that start the
         /// host pass this.
         #[arg(long, hide = true)]
         detached: bool,
     },
+    /// Show whether the shared host runs, with its process id, version,
+    /// start time and log file. Exits 1 when no host runs.
+    Status,
+    /// Stop the shared host: SIGTERM, then SIGKILL if it has not exited
+    /// after 10 seconds. Its clients are disconnected, and running turns
+    /// are cancelled.
+    Stop,
+    /// Print the shared host's log.
+    Logs,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1219,7 +1229,8 @@ fn run_rpc(args: &RpcArgs) -> ExitCode {
         || !args.system.is_empty()
         || args.system_file.is_some()
         || std::env::var("KAGE_STANDALONE")
-            .is_ok_and(|value| !matches!(value.trim(), "" | "0" | "false" | "no" | "off"));
+            .is_ok_and(|value| !matches!(value.trim(), "" | "0" | "false" | "no" | "off"))
+        || !user_host_config().share;
     if !private && let Some(code) = relay_to_shared_host() {
         return code;
     }
@@ -1253,11 +1264,36 @@ fn run_host(action: &HostAction) -> ExitCode {
         HostAction::Run {
             idle_secs,
             detached,
-        } => shared_host::run(std::time::Duration::from_secs(*idle_secs), *detached),
+        } => {
+            let idle = idle_secs.unwrap_or_else(|| user_host_config().idle_timeout_secs);
+            shared_host::run(std::time::Duration::from_secs(idle), *detached)
+        }
+        #[cfg(unix)]
+        HostAction::Status => shared_host::status(),
+        #[cfg(unix)]
+        HostAction::Stop => shared_host::stop(),
+        #[cfg(unix)]
+        HostAction::Logs => host_client::print_log(),
         #[cfg(not(unix))]
-        HostAction::Run { .. } => {
+        _ => {
             eprintln!("kage: host: the shared host needs a Unix system");
             ExitCode::from(1)
+        }
+    }
+}
+
+/// The `[host]` table of the user config. A config that does not load
+/// gives the defaults, with a warning, since the user's settings are then
+/// ignored.
+fn user_host_config() -> kage_core::config::HostConfig {
+    let Some(path) = kage_core::config::Config::default_path() else {
+        return kage_core::config::HostConfig::default();
+    };
+    match kage_core::config::Config::load(&path) {
+        Ok(config) => config.host,
+        Err(e) => {
+            eprintln!("kage: {e}; using the default [host] settings");
+            kage_core::config::HostConfig::default()
         }
     }
 }

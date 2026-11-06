@@ -377,6 +377,14 @@ pub fn send_update(
     peer.notify("session/update", params)
 }
 
+/// A per-open action invoked once after the successful response is written.
+/// If the response cannot be written, the receipt is dropped without invocation.
+pub type OpenReceipt = Box<dyn FnOnce() + Send + 'static>;
+
+/// An open response and its optional per-operation completion receipt.
+/// A receipt replaces the call to [`Agent::session_announced`] for that open.
+pub type OpenResult<T> = Result<(T, Option<OpenReceipt>), RpcError>;
+
 /// The host-supplied agent the server drives. The server owns the
 /// protocol; this trait owns the agent. Methods take `&self` and may run
 /// concurrently on different sessions.
@@ -390,6 +398,15 @@ pub trait Agent: Send + Sync + 'static {
     ///
     /// Returns an [`RpcError`] if a session cannot be created.
     fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError>;
+
+    /// Create a session with an optional completion receipt. The default calls
+    /// [`Agent::new_session`] and returns no receipt.
+    ///
+    /// # Errors
+    /// Returns an error if the session cannot be created.
+    fn new_session_with_receipt(&self, req: NewSessionRequest) -> OpenResult<NewSessionResponse> {
+        self.new_session(req).map(|response| (response, None))
+    }
 
     /// Resume a previously recorded session, streaming its history
     /// back through `ctx` as `session/update` notifications. The
@@ -406,6 +423,20 @@ pub trait Agent: Send + Sync + 'static {
         _ctx: &PromptContext,
     ) -> Result<LoadSessionResponse, RpcError> {
         Err(RpcError::method_not_found("session/load"))
+    }
+
+    /// Load a session with an optional completion receipt. The default calls
+    /// [`Agent::load_session`] and returns no receipt. History is still streamed
+    /// before the response.
+    ///
+    /// # Errors
+    /// Returns an error if the session cannot be loaded.
+    fn load_session_with_receipt(
+        &self,
+        req: LoadSessionRequest,
+        ctx: &PromptContext,
+    ) -> OpenResult<LoadSessionResponse> {
+        self.load_session(req, ctx).map(|response| (response, None))
     }
 
     /// List recorded sessions, one page at a time. The default rejects:
@@ -434,6 +465,20 @@ pub trait Agent: Send + Sync + 'static {
         _ctx: &PromptContext,
     ) -> Result<ResumeSessionResponse, RpcError> {
         Err(RpcError::method_not_found("session/resume"))
+    }
+
+    /// Resume a session with an optional completion receipt. The default calls
+    /// [`Agent::resume_session`] and returns no receipt.
+    ///
+    /// # Errors
+    /// Returns an error if the session cannot be resumed.
+    fn resume_session_with_receipt(
+        &self,
+        req: ResumeSessionRequest,
+        ctx: &PromptContext,
+    ) -> OpenResult<ResumeSessionResponse> {
+        self.resume_session(req, ctx)
+            .map(|response| (response, None))
     }
 
     /// Release a session the connection loaded, created or resumed: it
@@ -1139,14 +1184,20 @@ fn spawn_open<A, F>(
 ) -> thread::JoinHandle<()>
 where
     A: Agent,
-    F: FnOnce(&A) -> Result<(String, serde_json::Value), RpcError> + Send + 'static,
+    F: FnOnce(&A) -> Result<(String, serde_json::Value, Option<OpenReceipt>), RpcError>
+        + Send
+        + 'static,
 {
     let agent = Arc::clone(agent);
     let peer = peer.clone();
     thread::spawn(move || match op(&agent) {
-        Ok((session, response)) => {
+        Ok((session, response, receipt)) => {
             if peer.respond(&id, Ok(response)).is_ok() {
-                agent.session_announced(&session);
+                if let Some(receipt) = receipt {
+                    receipt();
+                } else {
+                    agent.session_announced(&session);
+                }
             }
         }
         Err(e) => {
@@ -1186,8 +1237,8 @@ fn handle_request<A: Agent>(
         "session/new" => match parse::<NewSessionRequest>(params) {
             Err(e) => return parse_failed(peer, &id, e),
             Ok(req) => spawn_open(peer, agent, id, move |a| {
-                a.new_session(req)
-                    .map(|resp| (resp.session_id.clone(), jval(resp)))
+                a.new_session_with_receipt(req)
+                    .map(|(resp, receipt)| (resp.session_id.clone(), jval(resp), receipt))
             }),
         },
         "session/prompt" => match parse::<PromptRequest>(params) {
@@ -1228,7 +1279,8 @@ fn handle_request<A: Agent>(
                 };
                 spawn_open(peer, agent, id, move |a| {
                     let session = req.session_id.clone();
-                    a.load_session(req, &ctx).map(|resp| (session, jval(resp)))
+                    a.load_session_with_receipt(req, &ctx)
+                        .map(|(resp, receipt)| (session, jval(resp), receipt))
                 })
             }
         },
@@ -1249,8 +1301,8 @@ fn handle_request<A: Agent>(
                 };
                 spawn_open(peer, agent, id, move |a| {
                     let session = req.session_id.clone();
-                    a.resume_session(req, &ctx)
-                        .map(|resp| (session, jval(resp)))
+                    a.resume_session_with_receipt(req, &ctx)
+                        .map(|(resp, receipt)| (session, jval(resp), receipt))
                 })
             }
         },
@@ -1869,6 +1921,293 @@ mod tests {
         let mut out = String::new();
         cli_r.read_to_string(&mut out).unwrap();
         assert!(out.contains("interrupted"), "{out}");
+    }
+
+    #[derive(Clone)]
+    struct ReceiptWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        fail: bool,
+    }
+
+    impl Write for ReceiptWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.fail {
+                return Err(std::io::Error::other("failed writer"));
+            }
+            self.bytes.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct DropSignal(std::sync::mpsc::Sender<&'static str>);
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.send("dropped").unwrap();
+        }
+    }
+
+    struct ReceiptAgent {
+        writer: ReceiptWriter,
+        events: std::sync::mpsc::Sender<String>,
+        drops: std::sync::mpsc::Sender<&'static str>,
+        receipts: bool,
+        barrier: Option<Arc<std::sync::Barrier>>,
+    }
+
+    impl ReceiptAgent {
+        fn receipt(&self, label: String) -> Option<OpenReceipt> {
+            if !self.receipts {
+                return None;
+            }
+            let writer = self.writer.clone();
+            let events = self.events.clone();
+            let guard = DropSignal(self.drops.clone());
+            Some(Box::new(move || {
+                let _guard = guard;
+                let bytes = writer.bytes.lock().unwrap();
+                let lines = String::from_utf8(bytes.clone()).unwrap();
+                let expected_id: i64 = label.parse().unwrap();
+                assert!(
+                    lines.lines().any(|line| {
+                        let response: serde_json::Value = serde_json::from_str(line).unwrap();
+                        response["id"] == expected_id && response.get("result").is_some()
+                    }),
+                    "receipt before response: {lines}"
+                );
+                events.send(label).unwrap();
+            }))
+        }
+    }
+
+    impl Agent for ReceiptAgent {
+        fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
+            MockAgent.initialize(req)
+        }
+        fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+            MockAgent.new_session(req)
+        }
+        fn load_session(
+            &self,
+            req: LoadSessionRequest,
+            ctx: &PromptContext,
+        ) -> Result<LoadSessionResponse, RpcError> {
+            LoadAgent.load_session(req, ctx)
+        }
+        fn resume_session(
+            &self,
+            req: ResumeSessionRequest,
+            ctx: &PromptContext,
+        ) -> Result<ResumeSessionResponse, RpcError> {
+            LoadAgent.resume_session(req, ctx)
+        }
+        fn new_session_with_receipt(
+            &self,
+            req: NewSessionRequest,
+        ) -> OpenResult<NewSessionResponse> {
+            let label = req.cwd.clone();
+            if label == "error" {
+                let _receipt = self.receipt("9".into());
+                return Err(RpcError::internal("open failed"));
+            }
+            let response = self.new_session(req)?;
+            let receipt = self.receipt(label);
+            if let Some(barrier) = &self.barrier {
+                barrier.wait();
+            }
+            Ok((response, receipt))
+        }
+        fn load_session_with_receipt(
+            &self,
+            req: LoadSessionRequest,
+            ctx: &PromptContext,
+        ) -> OpenResult<LoadSessionResponse> {
+            let label = req.session_id.clone();
+            self.load_session(req, ctx)
+                .map(|response| (response, self.receipt(label)))
+        }
+        fn resume_session_with_receipt(
+            &self,
+            req: ResumeSessionRequest,
+            ctx: &PromptContext,
+        ) -> OpenResult<ResumeSessionResponse> {
+            let label = req.session_id.clone();
+            self.resume_session(req, ctx)
+                .map(|response| (response, self.receipt(label)))
+        }
+        fn prompt(&self, _: PromptRequest, _: &PromptContext) -> Result<PromptResponse, RpcError> {
+            unreachable!()
+        }
+        fn cancel(&self, _: &str) {}
+        fn session_announced(&self, session: &str) {
+            self.events.send(format!("default:{session}")).unwrap();
+        }
+    }
+
+    fn open_input() -> String {
+        [
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"1"}}),
+            serde_json::json!({"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"2","cwd":"/","mcpServers":[]}}),
+            serde_json::json!({"jsonrpc":"2.0","id":3,"method":"session/resume","params":{"sessionId":"3","cwd":"/","mcpServers":[]}}),
+        ].iter().fold(String::new(), |mut output, value| {
+            use std::fmt::Write as _;
+            writeln!(output, "{value}").unwrap();
+            output
+        })
+    }
+
+    #[test]
+    fn open_receipts_follow_responses_for_all_wrappers() {
+        let writer = ReceiptWriter {
+            bytes: Arc::default(),
+            fail: false,
+        };
+        let (events, received) = std::sync::mpsc::channel();
+        let (drops, dropped) = std::sync::mpsc::channel();
+        let agent = ReceiptAgent {
+            writer: writer.clone(),
+            events,
+            drops,
+            receipts: true,
+            barrier: None,
+        };
+        serve_agent(
+            BufReader::new(std::io::Cursor::new(open_input())),
+            writer.clone(),
+            |_| agent,
+        )
+        .unwrap();
+        let mut observed: Vec<_> = received.try_iter().collect();
+        observed.sort();
+        assert_eq!(observed, ["1", "2", "3"]);
+        assert_eq!(dropped.try_iter().count(), 3);
+        let lines = String::from_utf8(writer.bytes.lock().unwrap().clone()).unwrap();
+        let messages: Vec<serde_json::Value> = lines
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let history = messages
+            .iter()
+            .position(|m| m["method"] == "session/update")
+            .unwrap();
+        let response = messages.iter().position(|m| m["id"] == 2).unwrap();
+        assert!(history < response);
+    }
+
+    #[test]
+    fn open_receipt_is_dropped_on_failed_response_or_open() {
+        for (fail, input) in [(true, "1"), (false, "error")] {
+            let writer = ReceiptWriter {
+                bytes: Arc::default(),
+                fail,
+            };
+            let (events, received) = std::sync::mpsc::channel();
+            let (drops, dropped) = std::sync::mpsc::channel();
+            let agent = ReceiptAgent {
+                writer: writer.clone(),
+                events,
+                drops,
+                receipts: true,
+                barrier: None,
+            };
+            let request = format!(
+                "{}\n",
+                serde_json::json!({"jsonrpc":"2.0","id":9,"method":"session/new","params":{"cwd":input}})
+            );
+            serve_agent(
+                BufReader::new(std::io::Cursor::new(request)),
+                writer,
+                |_| agent,
+            )
+            .unwrap();
+            assert!(received.try_iter().next().is_none());
+            assert_eq!(dropped.try_iter().collect::<Vec<_>>(), ["dropped"]);
+        }
+    }
+
+    #[test]
+    fn concurrent_opens_keep_independent_receipts_for_same_session() {
+        let writer = ReceiptWriter {
+            bytes: Arc::default(),
+            fail: false,
+        };
+        let (events, received) = std::sync::mpsc::channel();
+        let (drops, dropped) = std::sync::mpsc::channel();
+        let agent = ReceiptAgent {
+            writer: writer.clone(),
+            events,
+            drops,
+            receipts: true,
+            barrier: Some(Arc::new(std::sync::Barrier::new(2))),
+        };
+        let input = (1..=2).fold(String::new(), |mut output, id| {
+            use std::fmt::Write as _;
+            writeln!(output, "{}", serde_json::json!({"jsonrpc":"2.0","id":id,"method":"session/new","params":{"cwd":id.to_string()}})).unwrap();
+            output
+        });
+        serve_agent(BufReader::new(std::io::Cursor::new(input)), writer, |_| {
+            agent
+        })
+        .unwrap();
+        let mut observed: Vec<_> = received.try_iter().collect();
+        observed.sort();
+        assert_eq!(observed, ["1", "2"]);
+        assert_eq!(dropped.try_iter().count(), 2);
+    }
+
+    #[test]
+    fn default_open_wrappers_announce_each_session() {
+        struct DefaultAgent(std::sync::mpsc::Sender<String>);
+        impl Agent for DefaultAgent {
+            fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
+                MockAgent.initialize(req)
+            }
+            fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+                MockAgent.new_session(req)
+            }
+            fn load_session(
+                &self,
+                req: LoadSessionRequest,
+                ctx: &PromptContext,
+            ) -> Result<LoadSessionResponse, RpcError> {
+                LoadAgent.load_session(req, ctx)
+            }
+            fn resume_session(
+                &self,
+                req: ResumeSessionRequest,
+                ctx: &PromptContext,
+            ) -> Result<ResumeSessionResponse, RpcError> {
+                LoadAgent.resume_session(req, ctx)
+            }
+            fn prompt(
+                &self,
+                _: PromptRequest,
+                _: &PromptContext,
+            ) -> Result<PromptResponse, RpcError> {
+                unreachable!()
+            }
+            fn cancel(&self, _: &str) {}
+            fn session_announced(&self, session: &str) {
+                self.0.send(session.to_owned()).unwrap();
+            }
+        }
+        let writer = ReceiptWriter {
+            bytes: Arc::default(),
+            fail: false,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        serve_agent(
+            BufReader::new(std::io::Cursor::new(open_input())),
+            writer,
+            |_| DefaultAgent(tx),
+        )
+        .unwrap();
+        let mut observed: Vec<_> = rx.try_iter().collect();
+        observed.sort();
+        assert_eq!(observed, ["2", "3", "sess-1"]);
     }
 
     struct LoadAgent;

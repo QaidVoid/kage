@@ -161,6 +161,9 @@ mod unix {
     impl State {
         fn close(&mut self) {
             self.closed = true;
+            if let Some(active) = &self.active {
+                active.abort.cancel();
+            }
             self.early.clear();
             for attachment in self.attachments.values_mut() {
                 attachment.detached.store(true, Ordering::Release);
@@ -216,61 +219,110 @@ mod unix {
         cancelled: bool,
         canceller: Option<UnixPromptCanceller>,
         abort: CancelFlag,
-        cancel_done: Option<mpsc::Sender<()>>,
-        cancel_write_done: Option<mpsc::Receiver<Result<(), RpcError>>>,
+        cancellation: Cancellation,
+    }
+
+    enum Cancellation {
+        None,
+        Pending(Arc<()>),
+        Claimed {
+            identity: Arc<()>,
+            done: mpsc::Sender<()>,
+            write_done: mpsc::Receiver<Result<(), RpcError>>,
+        },
+        Finished {
+            done: mpsc::Sender<()>,
+            result: Result<(), RpcError>,
+        },
     }
 
     pub(crate) struct CancelAction {
+        state: Arc<Mutex<State>>,
+        identity: Arc<()>,
         canceller: UnixPromptCanceller,
         abort: CancelFlag,
-        done: mpsc::Receiver<()>,
-        write_done: mpsc::Sender<Result<(), RpcError>>,
     }
 
     impl Active {
-        fn cancel(&mut self) -> Option<CancelAction> {
+        fn cancel(&mut self, state: &Arc<Mutex<State>>) -> Option<CancelAction> {
             if self.cancelled {
                 return None;
             }
             self.cancelled = true;
-            self.cancel_action()
+            self.cancel_action(state)
         }
 
-        fn cancel_action(&mut self) -> Option<CancelAction> {
+        fn cancel_action(&mut self, state: &Arc<Mutex<State>>) -> Option<CancelAction> {
             let canceller = self.canceller.clone()?;
-            let (done, receiver) = mpsc::channel();
-            let (write_done, write_receiver) = mpsc::channel();
-            self.cancel_done = Some(done);
-            self.cancel_write_done = Some(write_receiver);
+            let identity = Arc::new(());
+            self.cancellation = Cancellation::Pending(Arc::clone(&identity));
             Some(CancelAction {
+                state: Arc::clone(state),
+                identity,
                 canceller,
                 abort: self.abort.clone(),
-                done: receiver,
-                write_done,
             })
         }
     }
 
+    type ClaimedCancel = (mpsc::Receiver<()>, mpsc::Sender<Result<(), RpcError>>);
+
+    fn claim_cancel(action: &CancelAction) -> Option<ClaimedCancel> {
+        let mut state = lock(&action.state);
+        if state.closed {
+            return None;
+        }
+        let active = state.active.as_mut()?;
+        if !matches!(&active.cancellation, Cancellation::Pending(identity) if Arc::ptr_eq(identity, &action.identity))
+        {
+            return None;
+        }
+        let (done, receiver) = mpsc::channel();
+        let (write_done, write_receiver) = mpsc::channel();
+        active.cancellation = Cancellation::Claimed {
+            identity: Arc::clone(&action.identity),
+            done,
+            write_done: write_receiver,
+        };
+        Some((receiver, write_done))
+    }
+
     fn send_cancel(action: CancelAction) {
-        thread::spawn(move || {
-            let deadline = Instant::now() + TIMEOUT;
-            let cancel_result = action
-                .canceller
-                .cancel_if_active(deadline, None)
-                .map(|_| ());
-            let failed = cancel_result.is_err();
-            let _ = action.write_done.send(cancel_result);
-            if failed
-                || matches!(
-                    action
-                        .done
-                        .recv_timeout(deadline.saturating_duration_since(Instant::now())),
-                    Err(mpsc::RecvTimeoutError::Timeout)
-                )
+        thread::spawn(move || run_cancel(&action));
+    }
+
+    fn run_cancel(action: &CancelAction) {
+        let Some((done, write_done)) = claim_cancel(action) else {
+            return;
+        };
+        let deadline = Instant::now() + TIMEOUT;
+        let cancel_result = action
+            .canceller
+            .cancel_if_active(deadline, None)
+            .map(|_| ());
+        let failed = cancel_result.is_err();
+        {
+            let mut state = lock(&action.state);
+            if let Some(active) = &mut state.active
+                && matches!(&active.cancellation, Cancellation::Claimed { identity, .. } if Arc::ptr_eq(identity, &action.identity))
+                && let Cancellation::Claimed { done, .. } =
+                    std::mem::replace(&mut active.cancellation, Cancellation::None)
             {
-                action.abort.cancel();
+                active.cancellation = Cancellation::Finished {
+                    done,
+                    result: cancel_result.clone(),
+                };
             }
-        });
+        }
+        let _ = write_done.send(cancel_result);
+        if failed
+            || matches!(
+                done.recv_timeout(deadline.saturating_duration_since(Instant::now())),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            )
+        {
+            action.abort.cancel();
+        }
     }
 
     /// A single upstream process and session, shared by host attachments.
@@ -456,7 +508,7 @@ mod unix {
                     .filter(|active| {
                         active.owner == owner && Arc::ptr_eq(&active.identity, &attachment.identity)
                     })
-                    .and_then(Active::cancel)
+                    .and_then(|active| active.cancel(&self.state))
             };
             (last, cancel)
         }
@@ -544,8 +596,7 @@ mod unix {
                     cancelled: false,
                     canceller: None,
                     abort: abort.clone(),
-                    cancel_done: None,
-                    cancel_write_done: None,
+                    cancellation: Cancellation::None,
                 });
             }
             req.delivery = None;
@@ -566,7 +617,7 @@ mod unix {
                 let active = state.active.as_mut().expect("active prompt");
                 active.canceller = Some(prompt.canceller());
                 if active.cancelled {
-                    active.cancel_action()
+                    active.cancel_action(&self.state)
                 } else {
                     None
                 }
@@ -577,11 +628,7 @@ mod unix {
             let mut result = prompt.wait(None, TIMEOUT, Some(&abort));
             let active = lock(&self.state).active.take().expect("active prompt");
             let cancelled = active.cancelled;
-            let cancel_write_done = active.cancel_write_done;
-            drop(active.cancel_done);
-            if let Some(done) = cancel_write_done
-                && !matches!(done.recv_timeout(TIMEOUT), Ok(Ok(())))
-            {
+            if self.cancellation_write_failed(active.cancellation) {
                 lock(&self.state).close();
                 self.shutdown();
                 return Err(RpcError::internal(
@@ -600,6 +647,32 @@ mod unix {
             }
             self.wait_for_writes(&ticket)?;
             result
+        }
+
+        fn cancellation_write_failed(&self, cancellation: Cancellation) -> bool {
+            match cancellation {
+                Cancellation::Finished { done, result } => {
+                    drop(done);
+                    result.is_err()
+                }
+                Cancellation::Claimed {
+                    done, write_done, ..
+                } => {
+                    drop(done);
+                    loop {
+                        match write_done.recv_timeout(Duration::from_millis(25)) {
+                            Ok(result) => break result.is_err(),
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break true,
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                if lock(&self.state).closed {
+                                    break true;
+                                }
+                            }
+                        }
+                    }
+                }
+                Cancellation::None | Cancellation::Pending(_) => false,
+            }
         }
 
         fn wait_prompt_gate(&self, ticket: &PromptTicket) -> Option<std::sync::MutexGuard<'_, ()>> {
@@ -706,7 +779,7 @@ mod unix {
                     .filter(|active| {
                         active.owner == owner && Arc::ptr_eq(&active.identity, &identity)
                     })
-                    .and_then(Active::cancel)
+                    .and_then(|active| active.cancel(&self.state))
             };
             if let Some(canceller) = canceller {
                 send_cancel(canceller);
@@ -1338,21 +1411,22 @@ for line in sys.stdin:
             let active = Arc::clone(&session);
             let first = thread::spawn(move || active.prompt_owned(1, request("first")));
             let until = Instant::now() + Duration::from_secs(3);
-            let (write_tx, write_rx) = mpsc::channel();
             let action = loop {
                 let mut state = lock(&session.state);
                 if let Some(active) = state.active.as_mut()
                     && active.canceller.is_some()
                 {
-                    let action = active.cancel().unwrap();
-                    active.cancel_write_done = Some(write_rx);
-                    break action;
+                    break active.cancel(&session.state).unwrap();
                 }
                 drop(state);
                 assert!(Instant::now() < until);
                 thread::sleep(Duration::from_millis(2));
             };
-            send_cancel(action);
+            let (_done, write_tx) = claim_cancel(&action).unwrap();
+            action
+                .canceller
+                .cancel_if_active(Instant::now() + TIMEOUT, None)
+                .unwrap();
             while lock(&session.state).active.is_some() {
                 assert!(Instant::now() < until);
                 thread::sleep(Duration::from_millis(2));
@@ -1384,6 +1458,142 @@ for line in sys.stdin:
         }
 
         #[test]
+        fn claimed_executor_scheduling_delay_does_not_close_session() {
+            let dir = tempfile::tempdir().unwrap();
+            let trigger = dir.path().join("release");
+            let script = format!(
+                r"
+import json,sys,time,os
+n=0
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); i=m.get('id')
+ if method=='initialize': result={{'protocolVersion':1,'agentCapabilities':{{}}}}
+ elif method=='session/new': result={{'sessionId':'up'}}
+ elif method=='session/prompt':
+  n+=1
+  if n==1:
+   while not os.path.exists({:?}): time.sleep(0.001)
+  result={{'stopReason':'end_turn'}}
+ elif method=='session/cancel': sys.exit(2)
+ else: continue
+ print(json.dumps({{'jsonrpc':'2.0','id':i,'result':result}}),flush=True)
+",
+                trigger.to_str().unwrap()
+            );
+            let session = scripted_session(&script);
+            let active = Arc::clone(&session);
+            let (first_tx, first_rx) = mpsc::channel();
+            let first = thread::spawn(move || {
+                let _ = first_tx.send(active.prompt_owned(1, request("first")));
+            });
+            let until = Instant::now() + Duration::from_secs(3);
+            let action = loop {
+                let mut state = lock(&session.state);
+                if let Some(active) = state.active.as_mut()
+                    && active.canceller.is_some()
+                {
+                    break active.cancel(&session.state).unwrap();
+                }
+                drop(state);
+                assert!(Instant::now() < until);
+                thread::sleep(Duration::from_millis(2));
+            };
+            let (_done, write_tx) = claim_cancel(&action).unwrap();
+            std::fs::write(&trigger, "").unwrap();
+            while lock(&session.state).active.is_some() {
+                assert!(Instant::now() < until);
+                thread::sleep(Duration::from_millis(2));
+            }
+            let queued = Arc::clone(&session);
+            let (second_tx, second_rx) = mpsc::channel();
+            let second = thread::spawn(move || {
+                let _ = second_tx.send(queued.prompt_owned(1, request("second")));
+            });
+            assert!(matches!(
+                first_rx.recv_timeout(TIMEOUT + Duration::from_millis(250)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+            assert!(!lock(&session.state).closed);
+            assert!(matches!(
+                second_rx.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+            let result = action
+                .canceller
+                .cancel_if_active(Instant::now() + TIMEOUT, None)
+                .map(|_| ());
+            write_tx.send(result).unwrap();
+            assert_eq!(
+                first_rx
+                    .recv_timeout(Duration::from_secs(3))
+                    .unwrap()
+                    .unwrap()
+                    .stop_reason,
+                StopReason::Cancelled
+            );
+            assert_eq!(
+                second_rx
+                    .recv_timeout(Duration::from_secs(3))
+                    .unwrap()
+                    .unwrap()
+                    .stop_reason,
+                StopReason::EndTurn
+            );
+            first.join().unwrap();
+            second.join().unwrap();
+            assert!(!lock(&session.state).closed);
+            assert!(session.detach(1));
+        }
+
+        #[test]
+        fn shutdown_interrupts_claimed_cancellation_wait() {
+            let script = r"
+import json,sys
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); i=m.get('id')
+ if method=='initialize': result={'protocolVersion':1,'agentCapabilities':{}}
+ elif method=='session/new': result={'sessionId':'up'}
+ elif method=='session/prompt':
+  cancel=json.loads(sys.stdin.readline())
+  if cancel.get('method')!='session/cancel': sys.exit(2)
+  result={'stopReason':'end_turn'}
+ else: continue
+ print(json.dumps({'jsonrpc':'2.0','id':i,'result':result}),flush=True)
+";
+            let session = scripted_session(script);
+            let active = Arc::clone(&session);
+            let (tx, rx) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                let _ = tx.send(active.prompt_owned(1, request("first")));
+            });
+            let until = Instant::now() + Duration::from_secs(3);
+            let action = loop {
+                let mut state = lock(&session.state);
+                if let Some(active) = state.active.as_mut()
+                    && active.canceller.is_some()
+                {
+                    break active.cancel(&session.state).unwrap();
+                }
+                drop(state);
+                assert!(Instant::now() < until);
+                thread::sleep(Duration::from_millis(2));
+            };
+            let (_done, _write_tx) = claim_cancel(&action).unwrap();
+            action
+                .canceller
+                .cancel_if_active(Instant::now() + TIMEOUT, None)
+                .unwrap();
+            while lock(&session.state).active.is_some() {
+                assert!(Instant::now() < until);
+                thread::sleep(Duration::from_millis(2));
+            }
+            session.shutdown();
+            assert!(rx.recv_timeout(Duration::from_secs(3)).unwrap().is_err());
+            worker.join().unwrap();
+            assert!(session.detach(1));
+        }
+
+        #[test]
         fn cancellation_write_error_closes_session() {
             let script = r"
 import json,sys
@@ -1402,21 +1612,22 @@ for line in sys.stdin:
             let active = Arc::clone(&session);
             let worker = thread::spawn(move || active.prompt_owned(1, request("first")));
             let until = Instant::now() + Duration::from_secs(3);
-            let (write_tx, write_rx) = mpsc::channel();
             let action = loop {
                 let mut state = lock(&session.state);
                 if let Some(active) = state.active.as_mut()
                     && active.canceller.is_some()
                 {
-                    let action = active.cancel().unwrap();
-                    active.cancel_write_done = Some(write_rx);
-                    break action;
+                    break active.cancel(&session.state).unwrap();
                 }
                 drop(state);
                 assert!(Instant::now() < until);
                 thread::sleep(Duration::from_millis(2));
             };
-            send_cancel(action);
+            let (_done, write_tx) = claim_cancel(&action).unwrap();
+            action
+                .canceller
+                .cancel_if_active(Instant::now() + TIMEOUT, None)
+                .unwrap();
             write_tx
                 .send(Err(RpcError::internal("uncertain write")))
                 .unwrap();
@@ -1431,13 +1642,18 @@ for line in sys.stdin:
             let dir = tempfile::tempdir().unwrap();
             let trigger = dir.path().join("release");
             let script = r"
-import json,sys,time,os
+import json,sys,time,os,select
+n=0
 for line in sys.stdin:
  m=json.loads(line); method=m.get('method'); i=m.get('id')
  if method=='initialize': result={'protocolVersion':1,'agentCapabilities':{}}
  elif method=='session/new': result={'sessionId':'up'}
  elif method=='session/prompt':
+  n+=1
   while not os.path.exists('TRIGGER'): time.sleep(0.001)
+  if n==2 and select.select([sys.stdin],[],[],0.2)[0]:
+   unexpected=json.loads(sys.stdin.readline())
+   if unexpected.get('method')=='session/cancel': sys.exit(2)
   result={'stopReason':'end_turn'}
  else: continue
  print(json.dumps({'jsonrpc':'2.0','id':i,'result':result}),flush=True)
@@ -1452,30 +1668,60 @@ for line in sys.stdin:
                 if let Some(active) = state.active.as_mut()
                     && active.canceller.is_some()
                 {
-                    break active.cancel().unwrap();
+                    break active.cancel(&session.state).unwrap();
                 }
                 drop(state);
                 assert!(Instant::now() < until);
                 thread::sleep(Duration::from_millis(2));
             };
-            std::fs::write(trigger, "").unwrap();
+            {
+                let mut state = lock(&session.state);
+                assert!(
+                    state
+                        .active
+                        .as_mut()
+                        .unwrap()
+                        .cancel(&session.state)
+                        .is_none()
+                );
+            }
+            std::fs::write(&trigger, "").unwrap();
             while lock(&session.state).active.is_some() {
                 assert!(Instant::now() < until);
                 thread::sleep(Duration::from_millis(2));
             }
-            send_cancel(action);
             assert_eq!(
                 worker.join().unwrap().unwrap().stop_reason,
                 StopReason::Cancelled
             );
             assert!(!lock(&session.state).closed);
+            std::fs::remove_file(&trigger).unwrap();
+            let successor_session = Arc::clone(&session);
+            let successor =
+                thread::spawn(move || successor_session.prompt_owned(1, request("second")));
+            let until = Instant::now() + Duration::from_secs(3);
+            while lock(&session.state)
+                .active
+                .as_ref()
+                .is_none_or(|active| active.canceller.is_none())
+            {
+                assert!(Instant::now() < until);
+                thread::sleep(Duration::from_millis(2));
+            }
+            assert!(claim_cancel(&action).is_none());
+            let (executor_tx, executor_rx) = mpsc::channel();
+            let executor = thread::spawn(move || {
+                run_cancel(&action);
+                let _ = executor_tx.send(());
+            });
+            executor_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            executor.join().unwrap();
+            std::fs::write(trigger, "").unwrap();
             assert_eq!(
-                session
-                    .prompt_owned(1, request("second"))
-                    .unwrap()
-                    .stop_reason,
+                successor.join().unwrap().unwrap().stop_reason,
                 StopReason::EndTurn
             );
+            assert!(!lock(&session.state).closed);
             assert!(session.detach(1));
         }
 
@@ -2049,8 +2295,7 @@ for line in sys.stdin:
                     cancelled: false,
                     canceller: None,
                     abort: CancelFlag::new(),
-                    cancel_done: None,
-                    cancel_write_done: None,
+                    cancellation: Cancellation::None,
                 });
             }
             session.cancel(2);

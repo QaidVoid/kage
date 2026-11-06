@@ -26,7 +26,10 @@
 
 /// mimalloc hands freed memory back to the system. glibc's allocator
 /// keeps the peak of a long session's resume for the life of the
-/// process, and musl's is slow.
+/// process, and musl's is slow. It is built not to ask for transparent
+/// huge pages, which made each touched arena region resident as a 2 MiB
+/// page, several megabytes for an idle process. A kernel that applies
+/// huge pages to every mapping still does so.
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

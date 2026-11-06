@@ -41,6 +41,30 @@ struct Shared {
 #[derive(Clone)]
 pub struct PipeWriter(Arc<Shared>);
 
+pub(crate) enum GuardedWriteError {
+    CleanEof,
+    Cancelled,
+    Other(io::Error),
+}
+
+impl GuardedWriteError {
+    fn from_check(error: io::Error, written: usize) -> Self {
+        if written == 0 && error.kind() == io::ErrorKind::Interrupted {
+            Self::Cancelled
+        } else {
+            Self::Other(error)
+        }
+    }
+
+    pub(crate) fn into_io(self) -> io::Error {
+        match self {
+            Self::CleanEof => closed(),
+            Self::Cancelled => io::Error::new(io::ErrorKind::Interrupted, "write cancelled"),
+            Self::Other(error) => error,
+        }
+    }
+}
+
 impl PipeWriter {
     /// Take ownership of a writable pipe or FIFO descriptor.
     ///
@@ -108,6 +132,7 @@ impl PipeWriter {
         cancel: Option<&CancelFlag>,
     ) -> io::Result<()> {
         self.write_frame_guarded(frame, deadline, cancel, None)
+            .map_err(GuardedWriteError::into_io)
     }
 
     pub(crate) fn write_frame_guarded(
@@ -116,16 +141,18 @@ impl PipeWriter {
         deadline: Option<Instant>,
         cancel: Option<&CancelFlag>,
         eof: Option<&Mutex<bool>>,
-    ) -> io::Result<()> {
+    ) -> Result<(), GuardedWriteError> {
         let mut guard = loop {
-            self.check(deadline, cancel)?;
+            self.check(deadline, cancel)
+                .map_err(|e| GuardedWriteError::from_check(e, 0))?;
             match self.0.fd.try_lock() {
                 Ok(guard) => break guard,
                 Err(TryLockError::Poisoned(err)) => break err.into_inner(),
                 Err(TryLockError::WouldBlock) => std::thread::sleep(wait_interval(deadline)),
             }
         };
-        self.check(deadline, cancel)?;
+        self.check(deadline, cancel)
+            .map_err(|e| GuardedWriteError::from_check(e, 0))?;
         let mut written = 0;
         loop {
             if written == frame.len() {
@@ -136,10 +163,10 @@ impl PipeWriter {
                     self.0.closed.store(true, Ordering::Release);
                     guard.take();
                 }
-                return Err(error);
+                return Err(GuardedWriteError::from_check(error, written));
             }
             let Some(fd) = guard.as_ref() else {
-                return Err(closed());
+                return Err(GuardedWriteError::Other(closed()));
             };
             let result = if let Some(eof) = eof {
                 let eof = eof
@@ -151,7 +178,11 @@ impl PipeWriter {
                         self.0.closed.store(true, Ordering::Release);
                         guard.take();
                     }
-                    return Err(closed());
+                    return Err(if written == 0 {
+                        GuardedWriteError::CleanEof
+                    } else {
+                        GuardedWriteError::Other(closed())
+                    });
                 }
                 write(fd, &frame[written..])
             } else {
@@ -168,10 +199,10 @@ impl PipeWriter {
                 Ok(0) => {
                     self.0.closed.store(true, Ordering::Release);
                     guard.take();
-                    return Err(io::Error::new(
+                    return Err(GuardedWriteError::Other(io::Error::new(
                         io::ErrorKind::WriteZero,
                         "pipe write returned zero",
-                    ));
+                    )));
                 }
                 Ok(n) => written += n,
                 Err(Errno::EINTR) => {}
@@ -184,17 +215,22 @@ impl PipeWriter {
                         Err(error) => {
                             self.0.closed.store(true, Ordering::Release);
                             guard.take();
-                            return Err(error.into());
+                            return Err(GuardedWriteError::Other(error.into()));
                         }
                     }
                 }
                 Err(error) => {
                     self.0.closed.store(true, Ordering::Release);
                     guard.take();
-                    return Err(error.into());
+                    return Err(GuardedWriteError::Other(error.into()));
                 }
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lock_for_test(&self) -> std::sync::MutexGuard<'_, Option<OwnedFd>> {
+        self.0.fd.lock().unwrap()
     }
 
     #[cfg(test)]

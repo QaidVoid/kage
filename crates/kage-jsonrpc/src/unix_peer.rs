@@ -16,9 +16,9 @@ use crossbeam_channel::{Receiver, select_biased};
 use kage_core::CancelFlag;
 use kage_core::sync::lock;
 
-use crate::unix_pipe::PipeWriter;
+use crate::unix_pipe::{GuardedWriteError, PipeWriter};
 use crate::{
-    InboundSender, OrderedInbound, OrderedReply, Peer, Pending, PendingRequest, ResponseBarrier,
+    InboundSender, OrderedInbound, Peer, Pending, PendingReply, PendingRequest, ResponseBarrier,
     RpcError, close_pending, closed, connect_inner,
 };
 
@@ -74,6 +74,8 @@ struct State {
     eof_gate: Arc<Mutex<bool>>,
     read_status: Arc<AtomicU8>,
     shutting_down: AtomicBool,
+    #[cfg(test)]
+    admission_blocked: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 struct Admission<'a>(&'a AtomicUsize);
@@ -119,7 +121,46 @@ pub struct CommittedRequest {
     id: i64,
     method: String,
     pending: Pending,
-    receiver: Receiver<OrderedReply>,
+    receiver: Receiver<PendingReply>,
+}
+
+/// The reason a request could not be committed.
+///
+/// Clean EOF and cancellation mean no request bytes were written. They do not
+/// guarantee the write side remains open after this outcome is returned.
+#[derive(Debug)]
+pub enum DispatchError {
+    /// Clean server EOF prevented the first request byte.
+    CleanEof(RpcError),
+    /// Cancellation prevented the first request byte.
+    Cancelled(RpcError),
+    /// Any other dispatch failure, including a partially written frame.
+    Other(RpcError),
+}
+
+impl From<DispatchError> for RpcError {
+    fn from(error: DispatchError) -> Self {
+        match error {
+            DispatchError::CleanEof(error)
+            | DispatchError::Cancelled(error)
+            | DispatchError::Other(error) => error,
+        }
+    }
+}
+
+/// The origin of a committed request's completion.
+pub enum RequestWaitOutcome {
+    /// A valid response from the remote peer, including a JSON-RPC error.
+    Delivered {
+        /// The remote result or error.
+        result: Result<serde_json::Value, RpcError>,
+        /// The ordering barrier, absent if the inbound receiver was dropped.
+        barrier: Option<ResponseBarrier>,
+    },
+    /// A locally detected error, including a deadline or invalid response.
+    LocalError(RpcError),
+    /// The caller's cancellation flag was triggered.
+    Cancelled,
 }
 
 impl Drop for CommittedRequest {
@@ -147,6 +188,27 @@ impl CommittedRequest {
         deadline: Option<Instant>,
         cancel: Option<&CancelFlag>,
     ) -> (Result<serde_json::Value, RpcError>, Option<ResponseBarrier>) {
+        match self.wait_typed(deadline, cancel) {
+            RequestWaitOutcome::Delivered { result, barrier } => (result, barrier),
+            RequestWaitOutcome::LocalError(error) => (Err(error), None),
+            RequestWaitOutcome::Cancelled => {
+                (Err(RpcError::new(-32800, "request cancelled")), None)
+            }
+        }
+    }
+
+    /// Wait for a response with explicit provenance.
+    ///
+    /// Valid remote successes and errors are delivered even when no barrier
+    /// could be queued. Invalid responses, closure and deadlines are local
+    /// errors. Cancellation takes priority over the deadline and a buffered
+    /// response, and the deadline takes priority over a buffered response.
+    /// Like [`Self::wait`], this never sends a cancellation notice.
+    pub fn wait_typed(
+        self,
+        deadline: Option<Instant>,
+        cancel: Option<&CancelFlag>,
+    ) -> RequestWaitOutcome {
         let watch = cancel.map(CancelFlag::watch);
         let cancelled = watch
             .as_ref()
@@ -155,9 +217,13 @@ impl CommittedRequest {
             crossbeam_channel::after(d.saturating_duration_since(Instant::now()))
         });
         select_biased! {
-            recv(cancelled) -> _ => (Err(RpcError::new(-32800, "request cancelled")), None),
-            recv(timer) -> _ => (Err(RpcError::timed_out(&self.method)), None),
-            recv(self.receiver) -> result => result.unwrap_or_else(|_| (Err(closed()), None)),
+            recv(cancelled) -> _ => RequestWaitOutcome::Cancelled,
+            recv(timer) -> _ => RequestWaitOutcome::LocalError(RpcError::timed_out(&self.method)),
+            recv(self.receiver) -> result => match result {
+                Ok(PendingReply::Delivered((result, barrier))) => RequestWaitOutcome::Delivered { result, barrier },
+                Ok(PendingReply::LocalError(error)) => RequestWaitOutcome::LocalError(error),
+                Err(_) => RequestWaitOutcome::LocalError(closed()),
+            },
         }
     }
 }
@@ -293,10 +359,10 @@ fn connect_with_mode<R: BufRead + Send + 'static>(
             if server && clean_eof {
                 {
                     let mut gate = lock(&reader_gate);
+                    reader_status.store(1, Ordering::Release);
                     *gate = true;
                     reader_eof.store(true, Ordering::Release);
                 }
-                reader_status.store(1, Ordering::Release);
             } else {
                 reader_status.store(if clean_eof { 1 } else { 2 }, Ordering::Release);
                 if let Some(pipe) = weak_pipe.upgrade() {
@@ -314,6 +380,8 @@ fn connect_with_mode<R: BufRead + Send + 'static>(
             eof_gate,
             read_status,
             shutting_down: AtomicBool::new(false),
+            #[cfg(test)]
+            admission_blocked: Mutex::new(None),
         })),
         rx,
         handle,
@@ -345,15 +413,17 @@ impl UnixPeer {
         self.0.pipe.shutdown();
     }
 
-    fn ensure_writable(&self, allow_after_eof: bool) -> Result<(), RpcError> {
+    fn ensure_writable(&self, allow_after_eof: bool) -> Result<(), DispatchError> {
         let pending_closed = lock(&self.0.peer.pending).closed;
         let eof = self.0.read_eof.load(Ordering::Acquire);
         if self.0.shutting_down.load(Ordering::Acquire)
             || self.0.pipe.is_closed()
-            || (eof && !allow_after_eof)
             || (!eof && pending_closed)
         {
-            return Err(closed());
+            return Err(DispatchError::Other(closed()));
+        }
+        if eof && !allow_after_eof {
+            return Err(DispatchError::CleanEof(closed()));
         }
         Ok(())
     }
@@ -363,14 +433,20 @@ impl UnixPeer {
         deadline: Option<Instant>,
         cancel: Option<&CancelFlag>,
         allow_after_eof: bool,
-    ) -> Result<Admission<'_>, RpcError> {
+    ) -> Result<Admission<'_>, DispatchError> {
         loop {
             self.ensure_writable(allow_after_eof)?;
             if cancel.is_some_and(CancelFlag::is_cancelled) {
-                return Err(RpcError::new(-32800, "write cancelled"));
+                return Err(DispatchError::Cancelled(RpcError::new(
+                    -32800,
+                    "write cancelled",
+                )));
             }
             if deadline.is_some_and(|d| Instant::now() >= d) {
-                return Err(RpcError::new(-32000, "write timed out"));
+                return Err(DispatchError::Other(RpcError::new(
+                    -32000,
+                    "write timed out",
+                )));
             }
             if self
                 .0
@@ -381,6 +457,10 @@ impl UnixPeer {
                 .is_ok()
             {
                 return Ok(Admission(&self.0.admitted));
+            }
+            #[cfg(test)]
+            if let Some(hook) = lock(&self.0.admission_blocked).take() {
+                hook();
             }
             let delay = deadline.map_or(ADMISSION_INTERVAL, |d| {
                 d.saturating_duration_since(Instant::now())
@@ -396,11 +476,11 @@ impl UnixPeer {
         deadline: Option<Instant>,
         cancel: Option<&CancelFlag>,
         allow_after_eof: bool,
-    ) -> Result<(), RpcError> {
+    ) -> Result<(), DispatchError> {
         self.ensure_writable(allow_after_eof)?;
         let mut frame = CappedFrame(Vec::new());
         serde_json::to_writer(&mut frame, value)
-            .map_err(|e| RpcError::internal(format!("encode: {e}")))?;
+            .map_err(|e| DispatchError::Other(RpcError::internal(format!("encode: {e}"))))?;
         frame.0.push(b'\n');
         match self.0.pipe.write_frame_guarded(
             &frame.0,
@@ -413,10 +493,20 @@ impl UnixPeer {
                 if self.0.pipe.is_closed() {
                     close_pending(&self.0.peer.pending);
                 }
-                Err(match e.kind() {
+                let clean_eof = matches!(e, GuardedWriteError::CleanEof);
+                let cancelled = matches!(e, GuardedWriteError::Cancelled);
+                let e = e.into_io();
+                let error = match e.kind() {
                     io::ErrorKind::Interrupted => RpcError::new(-32800, "write cancelled"),
                     io::ErrorKind::TimedOut => RpcError::new(-32000, "write timed out"),
                     _ => RpcError::internal(format!("write: {e}")),
+                };
+                Err(if clean_eof {
+                    DispatchError::CleanEof(error)
+                } else if cancelled {
+                    DispatchError::Cancelled(error)
+                } else {
+                    DispatchError::Other(error)
                 })
             }
         }
@@ -437,6 +527,7 @@ impl UnixPeer {
         let _admission = self.admit(deadline, cancel, true)?;
         check_method(method)?;
         self.write_value(&message(method, params, None), deadline, cancel, true)
+            .map_err(Into::into)
     }
 
     /// Write a response to an inbound request with bounded writer admission.
@@ -454,14 +545,16 @@ impl UnixPeer {
         serde_json::to_writer(&mut CappedFrame(Vec::new()), id)
             .map_err(|e| RpcError::internal(format!("encode: {e}")))?;
         self.write_value(&native_response(id, result), deadline, cancel, true)
+            .map_err(Into::into)
     }
 
     /// Commit a request frame and return a handle for its ordered response.
     ///
     /// The deadline and cancellation cover writer admission and the complete
     /// write. If cancellation or timeout occurs after a partial frame, the
-    /// transport closes and all pending requests fail. An error before any
-    /// bytes are written leaves the connection usable. Pass the same absolute
+    /// transport closes and all pending requests fail. Cancellation or timeout
+    /// before the first byte leaves the writer usable, but I/O errors close it.
+    /// Pass the same absolute
     /// deadline to [`CommittedRequest::wait`] to bound the full operation.
     ///
     /// Response correlation assumes a cooperative peer. The request ID is
@@ -480,22 +573,45 @@ impl UnixPeer {
         deadline: Option<Instant>,
         cancel: Option<&CancelFlag>,
     ) -> Result<CommittedRequest, RpcError> {
+        self.dispatch_typed(method, params, deadline, cancel)
+            .map_err(Into::into)
+    }
+
+    /// Commit a request while preserving the origin of a dispatch failure.
+    ///
+    /// # Errors
+    /// Returns a typed failure if the request frame was not committed.
+    pub fn dispatch_typed(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        deadline: Option<Instant>,
+        cancel: Option<&CancelFlag>,
+    ) -> Result<CommittedRequest, DispatchError> {
         let _admission = self.admit(deadline, cancel, false)?;
-        check_method(method)?;
+        check_method(method).map_err(DispatchError::Other)?;
         let id = self
             .0
             .peer
             .next_id
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |id| id.checked_add(1))
-            .map_err(|_| RpcError::internal("request IDs exhausted"))?;
+            .map_err(|_| DispatchError::Other(RpcError::internal("request IDs exhausted")))?;
         let (tx, receiver) = crossbeam_channel::bounded(1);
         {
             let mut pending = lock(&self.0.peer.pending);
-            if pending.closed || self.0.read_eof.load(Ordering::Acquire) {
-                return Err(closed());
+            if self.0.shutting_down.load(Ordering::Acquire) || self.0.pipe.is_closed() {
+                return Err(DispatchError::Other(closed()));
+            }
+            if self.0.read_eof.load(Ordering::Acquire) {
+                return Err(DispatchError::CleanEof(closed()));
+            }
+            if pending.closed {
+                return Err(DispatchError::Other(closed()));
             }
             if pending.requests.len() >= MAX_PENDING {
-                return Err(RpcError::internal("too many pending requests"));
+                return Err(DispatchError::Other(RpcError::internal(
+                    "too many pending requests",
+                )));
             }
             pending
                 .requests
@@ -587,6 +703,179 @@ mod tests {
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
         serde_json::from_str(&line).unwrap()
+    }
+
+    #[test]
+    fn typed_wait_distinguishes_remote_errors_from_local_failures() {
+        let (peer, incoming, reader, mut agent_in, mut agent_out) = fixture();
+        for code in [-32800, -32000, -32600, -32603] {
+            let request = peer
+                .dispatch("test", serde_json::Value::Null, None, None)
+                .unwrap();
+            let id = read_message(&mut agent_in)["id"].clone();
+            writeln!(agent_out, "{}", serde_json::json!({"jsonrpc":"2.0", "id":id, "error":{"code":code, "message":"remote"}})).unwrap();
+            let OrderedInbound::Barrier(marker) =
+                incoming.recv_timeout(Duration::from_secs(2)).unwrap()
+            else {
+                panic!("expected barrier")
+            };
+            marker.acknowledge();
+            match request.wait_typed(Some(Instant::now() + Duration::from_secs(2)), None) {
+                RequestWaitOutcome::Delivered {
+                    result: Err(error),
+                    barrier: Some(barrier),
+                } => {
+                    assert_eq!(error.code, code);
+                    barrier.wait_timeout(Duration::from_secs(2)).unwrap();
+                }
+                _ => panic!("expected remote error"),
+            }
+        }
+        let request = peer
+            .dispatch("test", serde_json::Value::Null, None, None)
+            .unwrap();
+        let id = read_message(&mut agent_in)["id"].clone();
+        writeln!(agent_out, "{}", serde_json::json!({"id":id, "result":true})).unwrap();
+        assert!(
+            matches!(request.wait_typed(Some(Instant::now() + Duration::from_secs(2)), None), RequestWaitOutcome::LocalError(error) if error.code == -32600)
+        );
+        drop(agent_out);
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn typed_wait_reports_cancellation_deadline_and_close() {
+        let (peer, _incoming, reader, mut agent_in, agent_out) = fixture();
+        let cancel = CancelFlag::new();
+        cancel.cancel();
+        let request = peer
+            .dispatch("cancel", serde_json::Value::Null, None, None)
+            .unwrap();
+        read_message(&mut agent_in);
+        assert!(matches!(
+            request.wait_typed(Some(Instant::now()), Some(&cancel)),
+            RequestWaitOutcome::Cancelled
+        ));
+        let request = peer
+            .dispatch("timeout", serde_json::Value::Null, None, None)
+            .unwrap();
+        read_message(&mut agent_in);
+        assert!(
+            matches!(request.wait_typed(Some(Instant::now()), None), RequestWaitOutcome::LocalError(error) if error == RpcError::timed_out("timeout"))
+        );
+        let request = peer
+            .dispatch("close", serde_json::Value::Null, None, None)
+            .unwrap();
+        read_message(&mut agent_in);
+        peer.shutdown();
+        assert!(
+            matches!(request.wait_typed(Some(Instant::now() + Duration::from_secs(2)), None), RequestWaitOutcome::LocalError(error) if error == closed())
+        );
+        drop(agent_out);
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn typed_wait_delivers_without_barrier_when_receiver_is_dropped() {
+        let (peer, incoming, reader, mut agent_in, mut agent_out) = fixture();
+        let request = peer
+            .dispatch("test", serde_json::Value::Null, None, None)
+            .unwrap();
+        let id = read_message(&mut agent_in)["id"].clone();
+        drop(incoming);
+        writeln!(
+            agent_out,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0", "id":id, "result":42})
+        )
+        .unwrap();
+        assert!(
+            matches!(request.wait_typed(Some(Instant::now() + Duration::from_secs(2)), None), RequestWaitOutcome::Delivered { result: Ok(value), barrier: None } if value == 42)
+        );
+        drop(agent_out);
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn typed_wait_prioritizes_cancellation_and_deadline_over_buffered_response() {
+        let (peer, incoming, reader, mut agent_in, mut agent_out) = fixture();
+        for cancelled in [true, false] {
+            let request = peer
+                .dispatch("priority", serde_json::Value::Null, None, None)
+                .unwrap();
+            let id = read_message(&mut agent_in)["id"].clone();
+            writeln!(
+                agent_out,
+                "{}",
+                serde_json::json!({"jsonrpc":"2.0", "id":id, "result":42})
+            )
+            .unwrap();
+            let OrderedInbound::Barrier(marker) =
+                incoming.recv_timeout(Duration::from_secs(2)).unwrap()
+            else {
+                panic!("expected barrier")
+            };
+            let limit = Instant::now() + Duration::from_secs(2);
+            while request.receiver.is_empty() {
+                assert!(Instant::now() < limit, "response was not buffered");
+                thread::yield_now();
+            }
+            marker.acknowledge();
+            let cancel = CancelFlag::new();
+            if cancelled {
+                cancel.cancel();
+            }
+            let outcome = request.wait_typed(Some(Instant::now()), Some(&cancel));
+            if cancelled {
+                assert!(matches!(outcome, RequestWaitOutcome::Cancelled));
+            } else {
+                assert!(
+                    matches!(outcome, RequestWaitOutcome::LocalError(error) if error == RpcError::timed_out("priority"))
+                );
+            }
+        }
+        peer.shutdown();
+        drop(agent_out);
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn tuple_wait_preserves_remote_error_and_local_cancellation() {
+        let (peer, incoming, reader, mut agent_in, mut agent_out) = fixture();
+        let request = peer
+            .dispatch("remote", serde_json::Value::Null, None, None)
+            .unwrap();
+        let id = read_message(&mut agent_in)["id"].clone();
+        writeln!(agent_out, "{}", serde_json::json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32800, "message":"remote"}})).unwrap();
+        let OrderedInbound::Barrier(marker) =
+            incoming.recv_timeout(Duration::from_secs(2)).unwrap()
+        else {
+            panic!("expected barrier")
+        };
+        marker.acknowledge();
+        let (result, barrier) = request.wait(Some(Instant::now() + Duration::from_secs(2)), None);
+        assert_eq!(result.unwrap_err(), RpcError::new(-32800, "remote"));
+        barrier
+            .unwrap()
+            .wait_timeout(Duration::from_secs(2))
+            .unwrap();
+
+        let request = peer
+            .dispatch("cancel", serde_json::Value::Null, None, None)
+            .unwrap();
+        read_message(&mut agent_in);
+        let cancel = CancelFlag::new();
+        cancel.cancel();
+        let (result, barrier) =
+            request.wait(Some(Instant::now() + Duration::from_secs(2)), Some(&cancel));
+        assert_eq!(
+            result.unwrap_err(),
+            RpcError::new(-32800, "request cancelled")
+        );
+        assert!(barrier.is_none());
+        peer.shutdown();
+        drop(agent_out);
+        reader.join().unwrap();
     }
 
     #[test]
@@ -1126,7 +1415,7 @@ mod eof_race_tests {
         output.read_exact(&mut first).unwrap();
         let p = peer.clone();
         let dispatch =
-            thread::spawn(move || p.dispatch("queued", serde_json::Value::Null, None, None));
+            thread::spawn(move || p.dispatch_typed("queued", serde_json::Value::Null, None, None));
         let deadline = Instant::now() + Duration::from_secs(2);
         while lock(&peer.0.peer.pending).requests.is_empty() {
             assert!(Instant::now() < deadline, "request was not registered");
@@ -1144,7 +1433,10 @@ mod eof_race_tests {
             }
         }
         notify.join().unwrap().unwrap();
-        assert!(dispatch.join().unwrap().is_err());
+        assert!(matches!(
+            dispatch.join().unwrap(),
+            Err(DispatchError::CleanEof(_))
+        ));
         peer.notify("after", serde_json::Value::Null, None, None)
             .unwrap();
         peer.shutdown();
@@ -1160,7 +1452,7 @@ mod eof_race_tests {
         let p = peer.clone();
         let (done, result) = mpsc::channel();
         let dispatch = thread::spawn(move || {
-            done.send(p.dispatch(
+            done.send(p.dispatch_typed(
                 "large",
                 serde_json::Value::String("x".repeat(256 * 1024)),
                 None,
@@ -1176,7 +1468,10 @@ mod eof_race_tests {
         if outcome.is_err() {
             peer.shutdown();
         }
-        assert!(outcome.expect("request did not stop after EOF").is_err());
+        assert!(matches!(
+            outcome.expect("request did not stop after EOF"),
+            Err(DispatchError::Other(_))
+        ));
         dispatch.join().unwrap();
         assert!(!peer.is_write_open());
         let mut rest = Vec::new();
@@ -1195,7 +1490,7 @@ mod eof_race_tests {
         });
         let p = peer.clone();
         let dispatch =
-            thread::spawn(move || p.dispatch("test", serde_json::Value::Null, None, None));
+            thread::spawn(move || p.dispatch_typed("test", serde_json::Value::Null, None, None));
         wait.recv_timeout(Duration::from_secs(2)).unwrap();
         let mut line = String::new();
         std::io::BufRead::read_line(&mut BufReader::new(&mut output), &mut line).unwrap();
@@ -1218,6 +1513,234 @@ mod eof_race_tests {
         let handle = dispatch.join().unwrap().unwrap();
         assert_eq!(handle.wait(None, None).0.unwrap(), 42);
         peer.shutdown();
+    }
+
+    #[test]
+    fn cancellation_while_admission_is_full_is_nonfatal() {
+        let (peer, _rx, reader, mut output, input) = server();
+        let permits: Vec<_> = (0..MAX_ADMITTED)
+            .map(|_| peer.admit(None, None, false).unwrap())
+            .collect();
+        let (entered, waiting) = mpsc::channel();
+        *lock(&peer.0.admission_blocked) = Some(Box::new(move || {
+            entered.send(()).unwrap();
+        }));
+        let cancel = CancelFlag::new();
+        let worker_cancel = cancel.clone();
+        let worker_peer = peer.clone();
+        let (done, result) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            done.send(worker_peer.dispatch_typed(
+                "blocked",
+                serde_json::Value::Null,
+                Some(Instant::now() + Duration::from_secs(2)),
+                Some(&worker_cancel),
+            ))
+            .unwrap();
+        });
+        waiting.recv_timeout(Duration::from_secs(1)).unwrap();
+        cancel.cancel();
+        assert!(matches!(
+            result.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Err(DispatchError::Cancelled(_))
+        ));
+        worker.join().unwrap();
+        drop(permits);
+        peer.notify(
+            "after",
+            serde_json::Value::Null,
+            Some(Instant::now() + Duration::from_secs(1)),
+            None,
+        )
+        .unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut BufReader::new(&mut output), &mut line).unwrap();
+        assert!(line.contains("after"));
+        peer.shutdown();
+        drop(input);
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn eof_while_admission_is_full_is_nonfatal() {
+        let (peer, _rx, reader, mut output, input) = server();
+        let permits: Vec<_> = (0..MAX_ADMITTED)
+            .map(|_| peer.admit(None, None, false).unwrap())
+            .collect();
+        let (entered, waiting) = mpsc::channel();
+        *lock(&peer.0.admission_blocked) = Some(Box::new(move || {
+            entered.send(()).unwrap();
+        }));
+        let worker_peer = peer.clone();
+        let (done, result) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            done.send(worker_peer.dispatch_typed(
+                "blocked",
+                serde_json::Value::Null,
+                Some(Instant::now() + Duration::from_secs(2)),
+                None,
+            ))
+            .unwrap();
+        });
+        waiting.recv_timeout(Duration::from_secs(1)).unwrap();
+        drop(input);
+        reader.join().unwrap();
+        assert_eq!(peer.read_status(), ReadStatus::CleanEof);
+        assert!(matches!(
+            result.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Err(DispatchError::CleanEof(_))
+        ));
+        worker.join().unwrap();
+        drop(permits);
+        peer.notify(
+            "after",
+            serde_json::Value::Null,
+            Some(Instant::now() + Duration::from_secs(1)),
+            None,
+        )
+        .unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut BufReader::new(&mut output), &mut line).unwrap();
+        assert!(line.contains("after"));
+        peer.shutdown();
+    }
+
+    #[test]
+    fn cancellation_queued_for_writer_is_nonfatal() {
+        let (peer, _rx, reader, mut output, input) = server();
+        let guard = peer.0.pipe.lock_for_test();
+        let cancel = CancelFlag::new();
+        let worker_cancel = cancel.clone();
+        let worker_peer = peer.clone();
+        let (done, result) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            done.send(worker_peer.dispatch_typed(
+                "queued",
+                serde_json::Value::Null,
+                Some(Instant::now() + Duration::from_secs(2)),
+                Some(&worker_cancel),
+            ))
+            .unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while lock(&peer.0.peer.pending).requests.is_empty() {
+            assert!(Instant::now() < deadline, "dispatch did not register");
+            thread::yield_now();
+        }
+        cancel.cancel();
+        assert!(matches!(
+            result.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Err(DispatchError::Cancelled(_))
+        ));
+        worker.join().unwrap();
+        drop(guard);
+        peer.notify(
+            "after",
+            serde_json::Value::Null,
+            Some(Instant::now() + Duration::from_secs(1)),
+            None,
+        )
+        .unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut BufReader::new(&mut output), &mut line).unwrap();
+        assert!(line.contains("after"));
+        peer.shutdown();
+        drop(input);
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn dispatch_classifies_cancellation_and_timeout() {
+        let (peer, _rx, reader, _output, input) = server();
+        let cancel = CancelFlag::new();
+        cancel.cancel();
+        assert!(matches!(
+            peer.dispatch_typed("cancel", serde_json::Value::Null, None, Some(&cancel)),
+            Err(DispatchError::Cancelled(_))
+        ));
+        assert!(peer.is_write_open());
+        assert!(matches!(
+            peer.dispatch_typed(
+                "timeout",
+                serde_json::Value::Null,
+                Some(Instant::now()),
+                None
+            ),
+            Err(DispatchError::Other(_))
+        ));
+        assert!(peer.is_write_open());
+        peer.shutdown();
+        drop(input);
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn dispatch_classifies_partial_cancellation() {
+        use nix::errno::Errno;
+        use nix::fcntl::{FcntlArg, OFlag, fcntl};
+        use nix::poll::{PollFd, PollFlags, poll};
+        use std::os::fd::AsFd;
+
+        let (out_read, out_write) = nix::unistd::pipe().unwrap();
+        let flags = OFlag::from_bits_truncate(fcntl(&out_write, FcntlArg::F_GETFL).unwrap());
+        fcntl(&out_write, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)).unwrap();
+        let mut filled = 0;
+        for bytes in [&[b'x'; 4096][..], &[b'x'][..]] {
+            loop {
+                match nix::unistd::write(&out_write, bytes) {
+                    Ok(n) => filled += n,
+                    Err(Errno::EAGAIN) => break,
+                    Err(error) => panic!("fill pipe: {error}"),
+                }
+            }
+        }
+        let mut output = File::from(out_read);
+        let drained = filled.min(4096);
+        assert!(drained > 0);
+        output.read_exact(&mut vec![0; drained]).unwrap();
+        let probe = nix::unistd::dup(&out_write).unwrap();
+        let writable = || {
+            let mut fds = [PollFd::new(probe.as_fd(), PollFlags::POLLOUT)];
+            poll(&mut fds, 0u8).unwrap() > 0
+        };
+        assert!(writable(), "draining did not make the pipe writable");
+        let (in_read, in_write) = nix::unistd::pipe().unwrap();
+        let (peer, _rx, reader) =
+            connect_ordered_server(BufReader::new(File::from(in_read)), out_write).unwrap();
+        let input = File::from(in_write);
+        let cancel = CancelFlag::new();
+        let cancel_write = cancel.clone();
+        let p = peer.clone();
+        let (tx, rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let _ = tx.send(p.dispatch_typed(
+                "large",
+                serde_json::Value::String("x".repeat(256 * 1024)),
+                Some(Instant::now() + Duration::from_secs(3)),
+                Some(&cancel_write),
+            ));
+        });
+        let limit = Instant::now() + Duration::from_secs(2);
+        let observed = loop {
+            if !writable() {
+                break true;
+            }
+            if Instant::now() >= limit {
+                break false;
+            }
+            thread::yield_now();
+        };
+        cancel.cancel();
+        let outcome = rx.recv_timeout(Duration::from_secs(2));
+        if !observed || outcome.is_err() {
+            peer.shutdown();
+        }
+        drop(input);
+        reader.join().unwrap();
+        assert!(observed, "request did not write into the pipe");
+        assert!(matches!(outcome.unwrap(), Err(DispatchError::Other(_))));
+        assert!(!peer.is_write_open());
+        worker.join().unwrap();
     }
 
     #[test]

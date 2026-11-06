@@ -353,8 +353,9 @@ impl<'de> Deserialize<'de> for PresentationText {
 
 /// A deliberately restricted external ACP presentation event.
 ///
-/// Records are ordered by their JSONL position. A prompt is recorded only
-/// after acceptance. Tool updates are partial replacements, not executable
+/// Records are ordered by their JSONL position. A prompt is recorded once
+/// the host admits it, before dispatch, so a failed dispatch is followed by a
+/// failed turn end. Tool updates are partial replacements, not executable
 /// requests. The host must omit unsupported content, raw input and output,
 /// metadata, permission requests and decisions, and authentication data.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -404,6 +405,8 @@ pub enum ExternalAcpPresentation {
         /// Outcome observed by the host.
         outcome: PresentationTurnOutcome,
     },
+    /// Recording stopped here, so later events of the session are missing.
+    Gap,
 }
 
 /// Display status of an external tool call.

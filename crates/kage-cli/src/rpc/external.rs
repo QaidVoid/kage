@@ -2,6 +2,31 @@
 
 #[cfg(target_os = "linux")]
 mod lifecycle;
+#[cfg(target_os = "linux")]
+mod recorder;
+
+/// What an external session is started from.
+pub(crate) struct Launch<'a> {
+    pub(crate) id: String,
+    pub(crate) name: &'a str,
+    pub(crate) cwd: &'a str,
+    pub(crate) config: &'a kage_core::config::AcpAgent,
+    pub(crate) owner: u64,
+    pub(crate) peer: kage_acp::agent::AgentPeer,
+    pub(crate) record: Option<Recording>,
+}
+
+/// Where to record presentation history.
+pub(crate) enum Recording {
+    /// A new file. The header's backend identity is filled in once the
+    /// upstream session exists.
+    Create {
+        path: std::path::PathBuf,
+        header: Box<kage_session::entry::Header>,
+    },
+    /// The existing file of a restored session.
+    Append { path: std::path::PathBuf },
+}
 
 /// External agent processes a host runs at once, including ones cleaning up.
 pub(super) const MAX_SESSIONS: usize = 16;
@@ -14,7 +39,10 @@ mod unix {
     use std::process::{Command, Stdio};
 
     use super::lifecycle::{Lifecycles, Slot};
+    use super::recorder::{Recorder, Target, bounded, presentation};
+    use super::{Launch, Recording};
     use kage_core::reaper::spawn_protected;
+    use kage_session::entry::{ExternalAcpPresentation, PresentationTurnOutcome};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
     use std::thread;
@@ -183,6 +211,10 @@ mod unix {
         cancels: Option<mpsc::Sender<CancelAction>>,
         writers: Arc<AtomicUsize>,
         asks: Vec<Arc<Ask>>,
+        recorder: Option<Recorder>,
+        turn: u64,
+        // A recorded prompt whose end is not recorded yet.
+        turn_open: bool,
     }
 
     impl State {
@@ -193,7 +225,22 @@ mod unix {
             }
         }
 
+        fn record(&self, event: ExternalAcpPresentation) {
+            if let Some(recorder) = &self.recorder {
+                recorder.record(event);
+            }
+        }
+
+        fn end_turn(&mut self, outcome: PresentationTurnOutcome) {
+            if std::mem::take(&mut self.turn_open) {
+                self.record(ExternalAcpPresentation::TurnEnd { outcome });
+            }
+        }
+
+        // A turn still active when the session closes ended in failure.
         fn close(&mut self) {
+            self.end_turn(PresentationTurnOutcome::Failed);
+            self.recorder = None;
             self.closed = true;
             self.cancels = None;
             self.cancel_asks(|_| true);
@@ -375,6 +422,12 @@ mod unix {
         }
     }
 
+    struct Initialized {
+        capabilities: PromptCapabilities,
+        protocol_version: u32,
+        upstream: String,
+    }
+
     /// One unresolved open of an exact attachment, resolved exactly once.
     pub(crate) struct OpenTicket {
         session: Arc<External>,
@@ -427,13 +480,17 @@ mod unix {
         /// like any other once the creation response is written.
         pub(crate) fn start(
             lifecycles: &Lifecycles,
-            id: String,
-            name: &str,
-            cwd: &str,
-            config: &kage_core::config::AcpAgent,
-            owner: u64,
-            peer: AgentPeer,
+            launch: Launch<'_>,
         ) -> Result<(Arc<Self>, OpenTicket), RpcError> {
+            let Launch {
+                id,
+                name,
+                cwd,
+                config,
+                owner,
+                peer,
+                record,
+            } = launch;
             let startup = lifecycles.reserve()?;
             let mut command = Command::new(&config.command);
             command
@@ -483,14 +540,28 @@ mod unix {
                 cancels: Some(cancels),
                 writers,
                 asks: Vec::new(),
+                recorder: None,
+                turn: 0,
+                turn_open: false,
             }));
             let session_id = id.clone();
             let started = receive_updates(incoming, Arc::clone(&state), id, slot)
-                .and_then(|()| initialize(&mut connection, &state, cwd, &session_id));
+                .and_then(|()| initialize(&mut connection, cwd))
+                .and_then(|initialized| {
+                    let recorder = record
+                        .map(|record| start_recording(slot, record, name, &initialized))
+                        .transpose()?;
+                    publish(&state, &session_id, initialized.upstream, recorder)?;
+                    Ok(initialized.capabilities)
+                });
             let capabilities = match started {
                 Ok(capabilities) => capabilities,
                 Err(error) => {
-                    lock(&state).close();
+                    let mut state = lock(&state);
+                    if let Some(recorder) = state.recorder.take() {
+                        recorder.discard();
+                    }
+                    state.close();
                     return Err(error);
                 }
             };
@@ -714,21 +785,7 @@ mod unix {
                     "external session steering is not supported; queue a prompt instead",
                 ));
             }
-            for content in &req.prompt {
-                let supported = match content {
-                    ContentBlock::Text(_) | ContentBlock::ResourceLink(_) => true,
-                    ContentBlock::Image(_) => self.capabilities.image,
-                    ContentBlock::Audio(_) => self.capabilities.audio,
-                    ContentBlock::Resource(_) => self.capabilities.embedded_context,
-                    ContentBlock::Unknown => false,
-                };
-                if !supported {
-                    return Err(RpcError::new(
-                        -32602,
-                        "external agent does not support this prompt content",
-                    ));
-                }
-            }
+            self.check_content(&req)?;
             if !self.wait_for_announcement(&ticket, TIMEOUT)? {
                 return Ok(PromptResponse {
                     stop_reason: kage_acp::acp::StopReason::Cancelled,
@@ -748,6 +805,7 @@ mod unix {
                     });
                 }
                 req.session_id = state.upstream.clone().expect("initialized upstream");
+                begin_turn(&mut state, &req);
                 state.active = Some(Active {
                     owner,
                     identity: Arc::clone(&ticket.identity),
@@ -766,8 +824,8 @@ mod unix {
                 Ok(prompt) => prompt,
                 Err(error) => {
                     let mut state = lock(&self.state);
-                    state.active = None;
                     self.close(&mut state);
+                    state.active = None;
                     return Err(error);
                 }
             };
@@ -790,6 +848,7 @@ mod unix {
             };
             let cancelled = active.cancelled;
             if self.cancellation_write_failed(active.cancellation) {
+                self.end_turn(PresentationTurnOutcome::Failed);
                 self.terminate();
                 return Err(RpcError::internal(
                     "external cancellation write did not finish",
@@ -800,12 +859,50 @@ mod unix {
             {
                 response.stop_reason = kage_acp::acp::StopReason::Cancelled;
             }
+            // The prompt gate is still held, so the next turn cannot start
+            // before this one is recorded as ended.
+            let outcome = match &result {
+                Ok(response) => turn_outcome(response.stop_reason),
+                Err(_) => PresentationTurnOutcome::Failed,
+            };
+            self.end_turn(outcome);
             if result.is_err() {
                 self.terminate();
                 return result;
             }
             self.wait_for_writes(&ticket)?;
             result
+        }
+
+        fn check_content(&self, req: &PromptRequest) -> Result<(), RpcError> {
+            for content in &req.prompt {
+                let supported = match content {
+                    ContentBlock::Text(_) | ContentBlock::ResourceLink(_) => true,
+                    ContentBlock::Image(_) => self.capabilities.image,
+                    ContentBlock::Audio(_) => self.capabilities.audio,
+                    ContentBlock::Resource(_) => self.capabilities.embedded_context,
+                    ContentBlock::Unknown => false,
+                };
+                if !supported {
+                    return Err(RpcError::new(
+                        -32602,
+                        "external agent does not support this prompt content",
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        fn end_turn(&self, outcome: PresentationTurnOutcome) {
+            lock(&self.state).end_turn(outcome);
+        }
+
+        /// Whether the presentation history has no gap so far.
+        pub(crate) fn recording_complete(&self) -> bool {
+            lock(&self.state)
+                .recorder
+                .as_ref()
+                .is_some_and(Recorder::complete)
         }
 
         fn cancellation_write_failed(&self, cancellation: Cancellation) -> bool {
@@ -1042,6 +1139,37 @@ mod unix {
             drop(incoming);
         })
         .map_err(|e| RpcError::internal(format!("cannot start external receiver: {e}")))
+    }
+
+    // Start a turn and record its prompt text, before dispatch, so updates
+    // the upstream sends for it are recorded after it.
+    // Exactly one prompt record starts each turn, with its text blocks cut
+    // to the presentation limit.
+    fn begin_turn(state: &mut State, req: &PromptRequest) {
+        state.turn += 1;
+        let text: Vec<&str> = req
+            .prompt
+            .iter()
+            .filter_map(|content| match content {
+                ContentBlock::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        state.record(ExternalAcpPresentation::Prompt {
+            text: bounded(&text.join("\n")),
+        });
+        state.turn_open = true;
+    }
+
+    fn turn_outcome(stop: kage_acp::acp::StopReason) -> PresentationTurnOutcome {
+        use kage_acp::acp::StopReason;
+        match stop {
+            StopReason::EndTurn => PresentationTurnOutcome::EndTurn,
+            StopReason::MaxTokens => PresentationTurnOutcome::MaxTokens,
+            StopReason::MaxTurnRequests => PresentationTurnOutcome::MaxTurnRequests,
+            StopReason::Refusal => PresentationTurnOutcome::Refusal,
+            StopReason::Cancelled => PresentationTurnOutcome::Cancelled,
+        }
     }
 
     fn cancelled() -> Value {
@@ -1286,12 +1414,7 @@ mod unix {
         result
     }
 
-    fn initialize(
-        connection: &mut UnixConnection,
-        state: &Mutex<State>,
-        cwd: &str,
-        id: &str,
-    ) -> Result<PromptCapabilities, RpcError> {
+    fn initialize(connection: &mut UnixConnection, cwd: &str) -> Result<Initialized, RpcError> {
         let deadline = Instant::now() + TIMEOUT;
         let (init, barrier) = connection.initialize(
             &InitializeRequest {
@@ -1314,8 +1437,48 @@ mod unix {
             None,
         );
         let response = ordered_result(response, barrier, deadline, "session")?;
+        Ok(Initialized {
+            capabilities: init.agent_capabilities.prompt_capabilities,
+            protocol_version: u32::try_from(init.protocol_version)
+                .map_err(|_| RpcError::internal("invalid external protocol version"))?,
+            upstream: response.session_id,
+        })
+    }
+
+    // Create the session file before any update is published, so its record
+    // starts with the session. Waits on a slot worker, never on the caller.
+    fn start_recording(
+        slot: &Arc<Slot>,
+        record: Recording,
+        name: &str,
+        initialized: &Initialized,
+    ) -> Result<Recorder, RpcError> {
+        match record {
+            Recording::Create { path, mut header } => {
+                header.backend = Some(kage_session::entry::SessionBackend::ExternalAcp(
+                    kage_session::entry::ExternalAcpSession {
+                        agent_name: name.to_owned(),
+                        protocol_version: initialized.protocol_version,
+                        upstream_session_id: initialized.upstream.clone(),
+                    },
+                ));
+                Recorder::start(slot, path, Target::Create(header), TIMEOUT)
+            }
+            Recording::Append { path } => Recorder::start(slot, path, Target::Append, TIMEOUT),
+        }
+    }
+
+    // Updates that arrived before the upstream session id are published, and
+    // recorded, in arrival order once it is known.
+    fn publish(
+        state: &Mutex<State>,
+        id: &str,
+        upstream: String,
+        recorder: Option<Recorder>,
+    ) -> Result<(), RpcError> {
         let mut state = lock(state);
-        state.upstream = Some(response.session_id);
+        state.upstream = Some(upstream);
+        state.recorder = recorder;
         let early = std::mem::take(&mut state.early);
         for update in early {
             let value = update.value.clone();
@@ -1327,7 +1490,7 @@ mod unix {
                 "external agent sent too many updates before session announcement",
             ));
         }
-        Ok(init.agent_capabilities.prompt_capabilities)
+        Ok(())
     }
 
     // A generic Peer cannot interrupt a write already in progress. Detaching
@@ -1424,6 +1587,9 @@ mod unix {
         }
         if params.get("sessionId").and_then(Value::as_str) != state.upstream.as_deref() {
             return;
+        }
+        for event in presentation(&params, state.turn) {
+            state.record(event);
         }
         let Some(object) = params.as_object_mut() else {
             return;
@@ -1634,12 +1800,15 @@ for line in sys.stdin:
             let cwd = std::env::current_dir().unwrap();
             let (session, created) = External::start(
                 &Lifecycles::new(1),
-                "local".into(),
-                "fake",
-                cwd.to_str().unwrap(),
-                &config,
-                1,
-                peer.into(),
+                Launch {
+                    id: "local".into(),
+                    name: "fake",
+                    cwd: cwd.to_str().unwrap(),
+                    config: &config,
+                    owner: 1,
+                    peer: peer.into(),
+                    record: None,
+                },
             )
             .unwrap();
             created.announce();
@@ -1726,12 +1895,15 @@ for line in sys.stdin:
             let cwd = cwd.to_str().unwrap();
             let (session, created) = External::start(
                 &Lifecycles::new(1),
-                "local".into(),
-                "fake",
-                cwd,
-                &config,
-                1,
-                peer.into(),
+                Launch {
+                    id: "local".into(),
+                    name: "fake",
+                    cwd,
+                    config: &config,
+                    owner: 1,
+                    peer: peer.into(),
+                    record: None,
+                },
             )
             .unwrap();
             created.announce();
@@ -1777,12 +1949,15 @@ for line in sys.stdin:
             let cwd = std::env::current_dir().unwrap();
             let (session, created) = External::start(
                 &Lifecycles::new(1),
-                "local".into(),
-                "fake",
-                cwd.to_str().unwrap(),
-                &config,
-                1,
-                peer.into(),
+                Launch {
+                    id: "local".into(),
+                    name: "fake",
+                    cwd: cwd.to_str().unwrap(),
+                    config: &config,
+                    owner: 1,
+                    peer: peer.into(),
+                    record: None,
+                },
             )
             .unwrap();
             created.announce();
@@ -2740,12 +2915,15 @@ for line in sys.stdin:
             let lifecycles = Lifecycles::new(1);
             let (session, created) = External::start(
                 &lifecycles,
-                "local".into(),
-                "fake",
-                cwd.to_str().unwrap(),
-                &config,
-                1,
-                peer.into(),
+                Launch {
+                    id: "local".into(),
+                    name: "fake",
+                    cwd: cwd.to_str().unwrap(),
+                    config: &config,
+                    owner: 1,
+                    peer: peer.into(),
+                    record: None,
+                },
             )
             .unwrap();
             assert_eq!(created.fail(), Some(true));
@@ -2850,12 +3028,15 @@ for line in sys.stdin:
             let cwd = std::env::current_dir().unwrap();
             let (session, created) = External::start(
                 &Lifecycles::new(1),
-                "local".into(),
-                "fake",
-                cwd.to_str().unwrap(),
-                &config,
-                1,
-                peer,
+                Launch {
+                    id: "local".into(),
+                    name: "fake",
+                    cwd: cwd.to_str().unwrap(),
+                    config: &config,
+                    owner: 1,
+                    peer,
+                    record: None,
+                },
             )
             .unwrap();
             created.announce();
@@ -3028,6 +3209,126 @@ for line in sys.stdin:
                 StopReason::EndTurn
             );
             assert!(session.detach(1));
+        }
+
+        // Streams one update during each prompt. A prompt saying "hang" gets
+        // no response.
+        const RECORD_SCRIPT: &str = r"
+import json,sys
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); i=m.get('id')
+ if method=='initialize': result={'protocolVersion':1,'agentCapabilities':{}}
+ elif method=='session/new': result={'sessionId':'up'}
+ elif method=='session/prompt':
+  print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'up','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'reply'}}}}),flush=True)
+  if m['params']['prompt'][0]['text']=='hang': continue
+  result={'stopReason':'end_turn'}
+ else: continue
+ print(json.dumps({'jsonrpc':'2.0','id':i,'result':result}),flush=True)
+";
+
+        fn recorded_session(
+            dir: &std::path::Path,
+        ) -> (Arc<External>, std::path::PathBuf, UnixStream) {
+            let config = kage_core::config::AcpAgent {
+                command: "python3".into(),
+                args: vec!["-u".into(), "-c".into(), RECORD_SCRIPT.into()],
+                env: BTreeMap::default(),
+            };
+            let (client, b) = UnixStream::pair().unwrap();
+            let (peer, _, _) = kage_jsonrpc::connect(BufReader::new(b.try_clone().unwrap()), b);
+            let (path, mut header) = crate::plan_session_in(dir, "external", "");
+            header.cwd = dir.to_path_buf();
+            let (session, created) = External::start(
+                &Lifecycles::new(1),
+                Launch {
+                    id: "local".into(),
+                    name: "fake",
+                    cwd: dir.to_str().unwrap(),
+                    config: &config,
+                    owner: 1,
+                    peer: peer.into(),
+                    record: Some(Recording::Create {
+                        path: path.clone(),
+                        header: Box::new(header),
+                    }),
+                },
+            )
+            .unwrap();
+            created.announce();
+            (session, path, client)
+        }
+
+        fn shown(event: &ExternalAcpPresentation) -> String {
+            match event {
+                ExternalAcpPresentation::Prompt { text } => format!("prompt {}", text.as_str()),
+                ExternalAcpPresentation::AgentMessage { text, .. } => {
+                    format!("message {}", text.as_str())
+                }
+                ExternalAcpPresentation::TurnEnd { outcome } => format!("end {outcome:?}"),
+                other => format!("{other:?}"),
+            }
+        }
+
+        #[test]
+        fn turns_are_recorded_in_order_with_the_upstream_identity() {
+            let dir = tempfile::tempdir().unwrap();
+            let (session, path, _client) = recorded_session(dir.path());
+            for text in ["one", "two"] {
+                assert_eq!(
+                    session.prompt_owned(1, request(text)).unwrap().stop_reason,
+                    StopReason::EndTurn
+                );
+            }
+            assert!(session.detach(1));
+            assert!(session.slot.wait_finished(WAIT));
+            let replay = kage_session::external_replay::replay_external(&path).unwrap();
+            let Some(kage_session::entry::SessionBackend::ExternalAcp(backend)) =
+                &replay.header.backend
+            else {
+                panic!("missing external backend");
+            };
+            assert_eq!(backend.upstream_session_id, "up");
+            assert_eq!(backend.agent_name, "fake");
+            let events: Vec<_> = replay.events.iter().map(shown).collect();
+            assert_eq!(
+                events,
+                [
+                    "prompt one",
+                    "message reply",
+                    "end EndTurn",
+                    "prompt two",
+                    "message reply",
+                    "end EndTurn"
+                ]
+            );
+        }
+
+        #[test]
+        fn closing_during_a_turn_records_it_as_failed() {
+            let dir = tempfile::tempdir().unwrap();
+            let (session, path, _client) = recorded_session(dir.path());
+            let active = Arc::clone(&session);
+            let prompt = thread::spawn(move || active.prompt_owned(1, request("hang")));
+            let until = Instant::now() + WAIT;
+            while lock(&session.state).active.is_none() {
+                assert!(Instant::now() < until);
+                thread::sleep(Duration::from_millis(2));
+            }
+            assert!(session.detach(1));
+            assert!(prompt.join().unwrap().is_err());
+            assert!(session.slot.wait_finished(WAIT));
+            let replay = kage_session::external_replay::replay_external(&path).unwrap();
+            let events: Vec<_> = replay.events.iter().map(shown).collect();
+            assert_eq!(events.first().map(String::as_str), Some("prompt hang"));
+            assert_eq!(events.last().map(String::as_str), Some("end Failed"));
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.starts_with("end"))
+                    .count(),
+                1
+            );
         }
 
         #[test]
@@ -3320,6 +3621,9 @@ for line in sys.stdin:
                 cancels: None,
                 writers: Arc::new(AtomicUsize::new(0)),
                 asks: Vec::new(),
+                recorder: None,
+                turn: 0,
+                turn_open: false,
             };
             forward(
                 &mut state,
@@ -3416,6 +3720,9 @@ for line in sys.stdin:
                 cancels: None,
                 writers: Arc::new(AtomicUsize::new(0)),
                 asks: Vec::new(),
+                recorder: None,
+                turn: 0,
+                turn_open: false,
             };
             state.close();
             assert!(state.attachments.contains_key(&1));
@@ -3493,6 +3800,9 @@ for line in sys.stdin:
                 cancels: None,
                 writers: Arc::new(AtomicUsize::new(0)),
                 asks: Vec::new(),
+                recorder: None,
+                turn: 0,
+                turn_open: false,
             }));
             let startup = Lifecycles::new(1).reserve().unwrap();
             startup.transport(
@@ -3529,6 +3839,9 @@ for line in sys.stdin:
                 cancels: None,
                 writers: Arc::new(AtomicUsize::new(0)),
                 asks: Vec::new(),
+                recorder: None,
+                turn: 0,
+                turn_open: false,
             }));
             let startup = Lifecycles::new(1).reserve().unwrap();
             startup.transport(
@@ -3758,12 +4071,15 @@ for line in sys.stdin:
             let cwd = std::env::current_dir().unwrap();
             let (session, created) = External::start(
                 &Lifecycles::new(1),
-                "local".into(),
-                "fake",
-                cwd.to_str().unwrap(),
-                &config,
-                1,
-                peer.clone().into(),
+                Launch {
+                    id: "local".into(),
+                    name: "fake",
+                    cwd: cwd.to_str().unwrap(),
+                    config: &config,
+                    owner: 1,
+                    peer: peer.clone().into(),
+                    record: None,
+                },
             )
             .unwrap();
             created.announce();
@@ -3827,12 +4143,15 @@ for line in sys.stdin:
             let cwd = std::env::current_dir().unwrap();
             let (session, created) = External::start(
                 &Lifecycles::new(1),
-                "local".into(),
-                "fake",
-                cwd.to_str().unwrap(),
-                &config,
-                1,
-                peer.clone().into(),
+                Launch {
+                    id: "local".into(),
+                    name: "fake",
+                    cwd: cwd.to_str().unwrap(),
+                    config: &config,
+                    owner: 1,
+                    peer: peer.clone().into(),
+                    record: None,
+                },
             )
             .unwrap();
             session.attach(2, peer.into()).unwrap();
@@ -3914,12 +4233,7 @@ mod unsupported {
     impl External {
         pub(crate) fn start(
             _: &Lifecycles,
-            _: String,
-            _: &str,
-            _: &str,
-            _: &kage_core::config::AcpAgent,
-            _: u64,
-            _: AgentPeer,
+            _: super::Launch<'_>,
         ) -> Result<(Arc<Self>, OpenTicket), RpcError> {
             Err(RpcError::internal("external ACP requires Linux"))
         }

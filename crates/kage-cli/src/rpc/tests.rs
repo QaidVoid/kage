@@ -7794,12 +7794,15 @@ fn external_race_session(
     };
     external::External::start(
         &owner.host.lifecycles,
-        "external".into(),
-        "fake",
-        dir.to_str().unwrap(),
-        &config,
-        owner.connection,
-        owner.peer.clone(),
+        external::Launch {
+            id: "external".into(),
+            name: "fake",
+            cwd: dir.to_str().unwrap(),
+            config: &config,
+            owner: owner.connection,
+            peer: owner.peer.clone(),
+            record: None,
+        },
     )
     .unwrap()
 }
@@ -8222,12 +8225,15 @@ for line in sys.stdin:
     };
     let (session, receipt) = external::External::start(
         &host.lifecycles,
-        "external".into(),
-        "fake",
-        dir.path().to_str().unwrap(),
-        &config,
-        owner.connection,
-        owner.peer.clone(),
+        external::Launch {
+            id: "external".into(),
+            name: "fake",
+            cwd: dir.path().to_str().unwrap(),
+            config: &config,
+            owner: owner.connection,
+            peer: owner.peer.clone(),
+            record: None,
+        },
     )
     .unwrap();
     lock(&host.external).insert("external".into(), Arc::clone(&session));

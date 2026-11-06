@@ -16,12 +16,13 @@ The first `kage rpc` finds no host and starts `kage host run --detached`
 in the background. Later ones connect to it. When several start at
 once, one host wins and the rest connect to it.
 
-The host exits 10 minutes after its last client leaves, once no turn is
-running and no permission or question is waiting. A running turn keeps
-it alive, so work started in an editor finishes even if the editor
-closes. A permission or question that turn asks while no client is
-connected waits for the next client that opens the session, and keeps
-the host running until then. SIGINT and SIGTERM stop it.
+The host exits 10 minutes (`[host] idle_timeout_secs`) after its last
+client leaves, once no turn is running and no permission or question
+is waiting. A running turn keeps it alive, so work started in an
+editor finishes even if the editor closes. A permission or question
+that turn asks while no client is connected waits for the next client
+that opens the session, and keeps the host running until then. SIGINT
+and SIGTERM stop it.
 
 Its files live in the runtime directory (`$XDG_RUNTIME_DIR/kage`, else
 `$XDG_DATA_HOME/kage/run`, mode 0700):
@@ -36,13 +37,30 @@ A background host has no terminal, so it writes to
 `$XDG_STATE_HOME/kage/host.log`, which moves aside to `host.log.1` past
 1 MiB.
 
-To run the host in the foreground instead, for example to watch its
-output:
+## managing it
 
 ```sh
-kage host run                  # exits after 10 idle minutes
-kage host run --idle-secs 60
+kage host status    # pid, version, start time, socket and log, or exit 1
+kage host stop      # SIGTERM, then SIGKILL after 10 seconds
+kage host logs      # print host.log
+kage host run       # run it in the foreground, to watch its output
 ```
+
+Stopping the host disconnects its clients and cancels running turns.
+The next `kage rpc` starts a fresh one. `kage host run --idle-secs 60`
+overrides the idle timeout for that host.
+
+## configuration
+
+The user config's `[host]` table sets:
+
+```toml
+[host]
+share = true             # false: every kage rpc runs a private engine
+idle_timeout_secs = 600  # how long an unused host stays up
+```
+
+A project's `.kage/config.toml` never sets it.
 
 ## a private engine
 
@@ -50,6 +68,7 @@ kage host run --idle-secs 60
 
 - it gets `--standalone`, or `KAGE_STANDALONE` is set to anything but
   empty, `0`, `false`, `no` or `off`;
+- the user config sets `[host] share = false`;
 - it gets `-m`, `--system`, `--system-file` or `--yolo`, which change
   the engine for one client only;
 - the running host is another kage version. It prints a notice and
@@ -75,9 +94,9 @@ it:
 Agents a session starts inherit its environment. The environment is
 never saved: a session reopened after it closed uses the environment
 of the client that reopens it. A client that opens a session another
-client still has open joins it as it is, environment included. Variables that are not valid UTF-8 are left
-out, and an environment over 1 MiB is not sent at all, so its sessions
-use the host's.
+client still has open joins it as it is, environment included.
+Variables that are not valid UTF-8 are left out, and an environment
+over 1 MiB is not sent at all, so its sessions use the host's.
 
 Only clients on the local socket can set it. A `kage serve` connection
 cannot.

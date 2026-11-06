@@ -62,6 +62,10 @@ pub struct Config {
     /// never applies.
     #[serde(default, skip_serializing_if = "TrustConfig::is_default")]
     pub trust: TrustConfig,
+    /// The shared host (`[host]`), read from the user config and env
+    /// only.
+    #[serde(default, skip_serializing_if = "HostConfig::is_default")]
+    pub host: HostConfig,
 }
 
 /// The longest a media tool call may take, matching the ceiling the
@@ -262,7 +266,8 @@ impl Config {
         self.permissions.validate()?;
         self.shell.validate()?;
         self.tools.validate()?;
-        self.trust.validate()
+        self.trust.validate()?;
+        self.host.validate()
     }
 
     /// Load configuration from `path`, merging with defaults and env overrides.
@@ -340,7 +345,7 @@ impl Config {
     /// `[loop]`, `[agents]`, `provider.default_model` and
     /// `plugins.disabled`. Everything else in it waits for trust,
     /// except what the user config's `[trust]` table already trusts
-    /// by path. The project file's `providers`, `acp`, `trust`,
+    /// by path. The project file's `providers`, `acp`, `trust`, `host`,
     /// `plugins.registry` and the media tables `tools.generate_image`,
     /// `tools.edit_image`, `tools.generate_speech` and
     /// `tools.generate_music` never apply: those are only read from
@@ -1045,6 +1050,51 @@ impl TrustPart {
             Self::Shell => "shell",
             Self::Plugins => "plugins",
         }
+    }
+}
+
+/// The shared host every `kage rpc` connects to (`[host]`). Only the user
+/// config sets it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostConfig {
+    /// Whether `kage rpc` connects to the shared host. With `false`, every
+    /// `kage rpc` runs a private engine.
+    pub share: bool,
+    /// Seconds the host waits with no clients and no work before it
+    /// exits.
+    pub idle_timeout_secs: u64,
+}
+
+impl Default for HostConfig {
+    fn default() -> Self {
+        Self {
+            share: true,
+            idle_timeout_secs: 600,
+        }
+    }
+}
+
+impl HostConfig {
+    /// Whether nothing is configured, so serializing skips the table.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Refuses an idle timeout of zero, which would stop the host before
+    /// a client could connect.
+    ///
+    /// # Errors
+    ///
+    /// When `idle_timeout_secs` is zero.
+    pub fn validate(&self) -> Result<()> {
+        if self.idle_timeout_secs == 0 {
+            return Err(config_error(
+                "[host] idle_timeout_secs must be at least 1".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 

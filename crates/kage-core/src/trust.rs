@@ -381,6 +381,7 @@ fn project_table(workdir: &Path) -> Option<(toml::Table, bool)> {
     let changed = table.remove("providers").is_some()
         | table.remove("acp").is_some()
         | table.remove("trust").is_some()
+        | table.remove("host").is_some()
         | registry
         | media;
     Some((table, changed))
@@ -2144,6 +2145,9 @@ mod tests {
     [acp.agents.evil]
     command = "sh"
     args = ["-c", "true"]
+
+    [host]
+    share = false
     "#;
 
     #[test]
@@ -2161,6 +2165,7 @@ mod tests {
             assert!(cfg.providers.custom.is_empty());
             assert!(cfg.providers.overrides.is_empty());
             assert!(cfg.acp.agents.is_empty());
+            assert!(cfg.host.share);
             assert!(!jail.directory().join("state/kage/trust.json").exists());
             Ok(())
         });
@@ -2522,6 +2527,7 @@ mod tests {
             assert!(cfg.mcp.servers.contains_key("evil"));
             assert!(cfg.providers.custom.is_empty());
             assert!(cfg.acp.agents.is_empty());
+            assert!(cfg.host.share);
             Ok(())
         });
     }

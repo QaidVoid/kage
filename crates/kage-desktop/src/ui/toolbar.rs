@@ -1272,6 +1272,16 @@ fn model_button(
     let model = store.composer_option("model");
     let thinking = store.composer_option("thinking");
     if model.is_none() && thinking.is_none() {
+        if let Some(agent) = store.active_external_agent() {
+            let agent = agent.to_owned();
+            dimmed_pill(
+                ui,
+                &agent,
+                palette,
+                "an external agent session, whose agent chooses its own model",
+            );
+            return Some(());
+        }
         dimmed_pill(
             ui,
             "Model",

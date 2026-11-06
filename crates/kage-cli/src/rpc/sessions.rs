@@ -877,10 +877,13 @@ pub(super) fn list_page(
                 s.updated_at
                     .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             ),
-            meta: s.parent_session.map(|parent| SessionInfoMeta {
-                kage: Some(SessionInfoKage {
-                    parent_session_id: Some(parent.to_string()),
-                }),
+            meta: (s.parent_session.is_some() || s.external_agent.is_some()).then(|| {
+                SessionInfoMeta {
+                    kage: Some(SessionInfoKage {
+                        parent_session_id: s.parent_session.map(|parent| parent.to_string()),
+                        external_agent: s.external_agent.clone(),
+                    }),
+                }
             }),
         })
         .collect();

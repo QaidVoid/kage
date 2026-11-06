@@ -837,6 +837,9 @@ impl CliAcpAgent {
         ids.external.insert(id.to_owned());
         drop(ids);
         drop(sessions);
+        if let Some(ticket) = open.ticket.as_mut() {
+            ticket.wait_history()?;
+        }
         Ok(Some(Box::new(move || open.announce())))
     }
 

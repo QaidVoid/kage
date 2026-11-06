@@ -122,6 +122,10 @@ pub struct SessionSummary {
     /// read from the [`AGENT_ENTRY_KIND`] entry wherever it sits, so a
     /// forked child whose marker follows its copied history counts too.
     pub agent: Option<String>,
+    /// Configured name of the external ACP agent that owns this session,
+    /// absent for native sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_agent: Option<String>,
 }
 
 /// The index of summaries kept in the sessions directory. Its extension
@@ -129,7 +133,7 @@ pub struct SessionSummary {
 pub const INDEX_FILE: &str = ".index.json";
 
 /// The index format; an index written with another is ignored.
-const INDEX_VERSION: u32 = 1;
+const INDEX_VERSION: u32 = 2;
 
 /// The most characters of the latest prompt a summary keeps: enough for
 /// any label, without carrying a pasted document per session.
@@ -499,6 +503,9 @@ fn summary_from_header(
     title: Option<String>,
     agent: Option<String>,
 ) -> SessionSummary {
+    let external_agent = header.backend.map(|backend| match backend {
+        crate::entry::SessionBackend::ExternalAcp(external) => external.agent_name,
+    });
     SessionSummary {
         id: header.session,
         path,
@@ -510,6 +517,7 @@ fn summary_from_header(
         last_user_prompt,
         title,
         agent,
+        external_agent,
     }
 }
 

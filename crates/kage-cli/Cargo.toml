@@ -58,6 +58,7 @@ nix.workspace = true
 
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
+kage-client.workspace = true
 kage-provider = { workspace = true, features = ["testing"] }
 kage-tools.workspace = true
 serde_json.workspace = true

@@ -484,11 +484,24 @@ mod unix {
         owner: u64,
         identity: Arc<()>,
         resolved: bool,
+        // Acknowledges that a load's history reached the client.
+        written: Option<mpsc::Receiver<()>>,
     }
 
     impl OpenTicket {
         pub(crate) fn session(&self) -> &Arc<External> {
             &self.session
+        }
+
+        /// Wait until a load's history is written, so the response follows
+        /// it. Call with no host lock held.
+        pub(crate) fn wait_history(&mut self) -> Result<(), RpcError> {
+            match self.written.take() {
+                Some(written) => written
+                    .recv_timeout(TIMEOUT)
+                    .map_err(|_| RpcError::internal("the session history was not delivered")),
+                None => Ok(()),
+            }
         }
 
         /// The open response was written, so updates may follow it.
@@ -598,11 +611,12 @@ mod unix {
                         .as_ref()
                         .is_some_and(|restore| restore.history)
                         .then_some(owner);
-                    publish(&state, &session_id, &initialized, recorder, seed, history)?;
-                    Ok(initialized.capabilities)
+                    let written =
+                        publish(&state, &session_id, &initialized, recorder, seed, history)?;
+                    Ok((initialized.capabilities, written))
                 });
-            let capabilities = match started {
-                Ok(capabilities) => capabilities,
+            let (capabilities, written) = match started {
+                Ok(started) => started,
                 Err(error) => {
                     let mut state = lock(&state);
                     if let Some(recorder) = state.recorder.take() {
@@ -627,6 +641,7 @@ mod unix {
                 owner,
                 identity,
                 resolved: false,
+                written,
             };
             Ok((session, created))
         }
@@ -684,11 +699,14 @@ mod unix {
             history: bool,
         ) -> Result<OpenTicket, RpcError> {
             let mut state = lock(&self.state);
+            // A load must be the only open of its attachment, or another
+            // open's announcement could release live updates before this
+            // load's history and response.
             if history
                 && state
                     .attachments
                     .get(&owner)
-                    .is_some_and(|attachment| attachment.announced)
+                    .is_some_and(|attachment| attachment.announced || attachment.receipts > 0)
             {
                 return Err(RpcError::new(
                     -32602,
@@ -696,8 +714,12 @@ mod unix {
                 ));
             }
             self.attach_locked(&mut state, owner, peer)?;
+            let mut written = None;
             if history && !state.attachments[&owner].shown_history {
-                queue_history(&mut state, owner, &self.id);
+                written = Some(
+                    queue_history(&mut state, owner, &self.id)
+                        .ok_or_else(|| RpcError::internal("cannot send the session history"))?,
+                );
             }
             let attachment = state.attachments.get_mut(&owner).expect("attached owner");
             if attachment.receipts >= MAX_OPEN_RECEIPTS {
@@ -709,6 +731,7 @@ mod unix {
                 owner,
                 identity: Arc::clone(&attachment.identity),
                 resolved: false,
+                written,
             })
         }
 
@@ -1264,10 +1287,11 @@ mod unix {
         .map_err(|e| RpcError::internal(format!("cannot start external receiver: {e}")))
     }
 
-    // Queue the display history for an unannounced attachment. Fragments of
-    // one message are merged. The newest history is kept within half the
+    // Send the display history to an unannounced attachment opened by a
+    // load. Returns the barrier that the history was written, or `None` if
+    // it could not be queued. Fragments of one message are merged. The newest history is kept within half the
     // attachment budget, and a notice marks where older history was cut.
-    fn queue_history(state: &mut State, owner: u64, id: &str) {
+    fn queue_history(state: &mut State, owner: u64, id: &str) -> Option<mpsc::Receiver<()>> {
         let mut updates: Vec<Value> = Vec::new();
         let mut last_item: Option<(&'static str, String)> = None;
         for (event, _) in &state.history {
@@ -1323,7 +1347,17 @@ mod unix {
         if cut && let Some(gap) = Buffered::new(history_gap(id), bytes, Some(&attachment.bytes)) {
             kept.push(gap);
         }
-        attachment.pending.extend(kept.into_iter().rev());
+        // A load's history precedes its response, so it is written now, and
+        // the opener waits for the barrier before answering. Live updates
+        // stay pending until the response is written.
+        let sender = attachment.sender.as_ref()?;
+        let history: Vec<_> = kept.into_iter().rev().collect();
+        if !history.is_empty() && sender.try_send(WriteItem::Batch(history)).is_err() {
+            return None;
+        }
+        let (done, written) = mpsc::channel();
+        sender.try_send(WriteItem::Barrier(done)).ok()?;
+        Some(written)
     }
 
     // A recorded display event as the `session/update` it was shown as.
@@ -1788,16 +1822,20 @@ mod unix {
         recorder: Option<Recorder>,
         seed: Vec<ExternalAcpPresentation>,
         history: Option<u64>,
-    ) -> Result<(), RpcError> {
+    ) -> Result<Option<mpsc::Receiver<()>>, RpcError> {
         let mut state = lock(state);
         state.upstream = Some(initialized.upstream.clone());
         state.discard_replay = false;
         for event in seed {
             state.remember(event);
         }
-        if let Some(owner) = history {
-            queue_history(&mut state, owner, id);
-        }
+        let written = match history {
+            Some(owner) => Some(
+                queue_history(&mut state, owner, id)
+                    .ok_or_else(|| RpcError::internal("cannot send the session history"))?,
+            ),
+            None => None,
+        };
         state.recorder = recorder;
         let early = std::mem::take(&mut state.early);
         for update in early {
@@ -1810,7 +1848,7 @@ mod unix {
                 "external agent sent too many updates before session announcement",
             ));
         }
-        Ok(())
+        Ok(written)
     }
 
     // A generic Peer cannot interrupt a write already in progress. Detaching
@@ -3867,6 +3905,21 @@ for line in sys.stdin:
             assert!(session.attach_load(2, peer_for_test()).is_err());
         }
 
+        #[test]
+        fn a_load_is_refused_while_another_open_of_the_attachment_is_unresolved() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            let pending = session.attach_open(2, peer_for_test()).unwrap();
+            assert!(session.attach_load(2, peer_for_test()).is_err());
+            pending.announce();
+            assert!(session.attach_load(2, peer_for_test()).is_err());
+            assert!(!session.detach(2));
+            let mut load = session.attach_load(2, peer_for_test()).unwrap();
+            load.wait_history().unwrap();
+            load.announce();
+            assert!(!session.detach(2));
+            assert!(session.detach(1));
+        }
+
         fn peer_for_test() -> AgentPeer {
             let (_client, server) = UnixStream::pair().unwrap();
             let (peer, _, _) =
@@ -4839,6 +4892,9 @@ mod unsupported {
         }
         pub(crate) fn fail(self) -> Option<bool> {
             match self {}
+        }
+        pub(crate) fn wait_history(&mut self) -> Result<(), RpcError> {
+            match *self {}
         }
     }
 

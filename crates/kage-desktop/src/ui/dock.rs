@@ -791,6 +791,7 @@ mod tests {
             opened: true,
             parent: None,
             cwd: None,
+            external_agent: None,
             title: None,
             updated_at: None,
             items: Vec::new(),

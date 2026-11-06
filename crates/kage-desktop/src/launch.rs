@@ -1967,7 +1967,11 @@ impl ShellApp {
                     if store.active_id().is_none() && !store.pending_prompt() {
                         store.open_with_prompt(&text);
                     } else if steer && running && steer_available {
-                        let _ = store.steer(&text);
+                        // An external session cannot steer, so the text
+                        // queues as a plain prompt instead.
+                        if store.steer(&text).is_err() {
+                            let _ = store.submit(&text);
+                        }
                     } else {
                         let _ = store.submit(&text);
                     }

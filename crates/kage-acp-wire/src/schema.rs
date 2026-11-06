@@ -499,6 +499,10 @@ pub struct SessionInfoKage {
     /// The session this one was forked from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
+    /// The configured external ACP agent that owns this session, which
+    /// takes no kage model, mode or plan changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_agent: Option<String>,
 }
 
 /// `session/set_config_option` request params.
@@ -3557,6 +3561,7 @@ mod tests {
                         meta: Some(SessionInfoMeta {
                             kage: Some(SessionInfoKage {
                                 parent_session_id: Some("s1".into()),
+                                external_agent: None,
                             }),
                         }),
                     },

@@ -112,6 +112,7 @@ enum Pending {
     Initialize,
     NewSession {
         cwd: String,
+        external_agent: Option<String>,
     },
     Open {
         session_id: String,
@@ -291,6 +292,9 @@ impl Client {
         mcp_servers: &[McpServer],
         meta: Option<NewSessionMeta>,
     ) -> u64 {
+        let external_agent = meta
+            .as_ref()
+            .and_then(|meta| meta.kage.as_ref()?.external_agent.clone());
         self.request(
             "session/new",
             params(&NewSessionRequest {
@@ -300,6 +304,7 @@ impl Client {
             }),
             Pending::NewSession {
                 cwd: cwd.to_owned(),
+                external_agent,
             },
         )
     }
@@ -1356,25 +1361,14 @@ impl Client {
         };
         match pending {
             Pending::Initialize => self.apply_initialize(id, result),
-            Pending::NewSession { cwd } => self.apply_new_session(id, cwd, result),
+            Pending::NewSession {
+                cwd,
+                external_agent,
+            } => self.apply_new_session(id, cwd, external_agent, result),
             Pending::Open {
                 session_id,
                 snapshot: _,
-            } => {
-                match answer::<kage_acp_wire::LoadSessionResponse>(
-                    id,
-                    result,
-                    "session open result",
-                ) {
-                    Err(failed) => failed,
-                    Ok(response) => {
-                        let session = self.session_mut(&session_id);
-                        session.opened = true;
-                        session.config_options = response.config_options;
-                        vec![Change::Session { id: session_id }]
-                    }
-                }
-            }
+            } => self.apply_open(id, session_id, result),
             Pending::List { cwd } => self.apply_list_page(id, cwd.as_deref(), result),
             Pending::Prompt {
                 session_id,
@@ -1536,8 +1530,37 @@ impl Client {
         vec![Change::Directory]
     }
 
+    /// Records the answer to a `session/load` or `session/resume`. A
+    /// session the directory lists as external stays marked as such.
+    fn apply_open(&mut self, id: u64, session_id: String, result: Value) -> Vec<Change> {
+        match answer::<kage_acp_wire::LoadSessionResponse>(id, result, "session open result") {
+            Err(failed) => failed,
+            Ok(response) => {
+                let external_agent = self
+                    .state
+                    .directory
+                    .iter()
+                    .find(|listed| listed.session_id == session_id)
+                    .and_then(|listed| listed.meta.as_ref()?.kage.as_ref()?.external_agent.clone());
+                let session = self.session_mut(&session_id);
+                session.opened = true;
+                session.config_options = response.config_options;
+                if external_agent.is_some() {
+                    session.external_agent = external_agent;
+                }
+                vec![Change::Session { id: session_id }]
+            }
+        }
+    }
+
     /// Records the session a `session/new` answer created.
-    fn apply_new_session(&mut self, id: u64, cwd: String, result: Value) -> Vec<Change> {
+    fn apply_new_session(
+        &mut self,
+        id: u64,
+        cwd: String,
+        external_agent: Option<String>,
+        result: Value,
+    ) -> Vec<Change> {
         match answer::<kage_acp_wire::NewSessionResponse>(id, result, "session/new result") {
             Err(failed) => failed,
             Ok(response) => {
@@ -1550,6 +1573,7 @@ impl Client {
                     Some(cwd)
                 };
                 session.config_options = response.config_options;
+                session.external_agent = external_agent;
                 let session_id = session.id.clone();
                 self.state.sessions.insert(session_id.clone(), session);
                 vec![Change::Session { id: session_id }]
@@ -2223,6 +2247,49 @@ mod tests {
                 result,
             });
             assert_eq!(client.state().external_sessions, expected);
+        }
+    }
+
+    #[test]
+    fn external_sessions_are_marked_when_created_or_opened_from_the_list() {
+        let mut client = Client::new();
+        let created = client.new_session_with_external_agent("/project", &[], "reviewer");
+        client.handle(Frame::Success {
+            id: RequestId::Number(created),
+            result: json!({"sessionId": "made"}),
+        });
+        assert_eq!(
+            client
+                .state()
+                .session("made")
+                .unwrap()
+                .external_agent
+                .as_deref(),
+            Some("reviewer")
+        );
+        let listed = client.list_sessions(None, None);
+        client.handle(Frame::Success {
+            id: RequestId::Number(listed),
+            result: json!({"sessions": [
+                {"sessionId": "kept", "cwd": "/project", "_meta": {"kage": {"externalAgent": "claude"}}},
+                {"sessionId": "native", "cwd": "/project"}
+            ]}),
+        });
+        for (id, expected) in [("kept", Some("claude")), ("native", None)] {
+            let (opened, _) = client.load_session(id, "/project", &[], None);
+            client.handle(Frame::Success {
+                id: RequestId::Number(opened),
+                result: json!({}),
+            });
+            assert_eq!(
+                client
+                    .state()
+                    .session(id)
+                    .unwrap()
+                    .external_agent
+                    .as_deref(),
+                expected
+            );
         }
     }
 

@@ -179,6 +179,9 @@ impl CliAcpAgent {
         open.ticket = Some(created);
         drop(ids);
         drop(sessions);
+        if let Some(ticket) = open.ticket.as_mut() {
+            ticket.wait_history()?;
+        }
         Ok(Box::new(move || open.announce()))
     }
 }

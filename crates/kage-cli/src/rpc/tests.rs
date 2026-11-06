@@ -8962,3 +8962,187 @@ fn native_serving_accepts_lines_as_large_as_the_generic_transport() {
     let listed = client.request("session/list", serde_json::json!({}));
     assert!(listed["result"].is_object(), "{listed}");
 }
+
+/// The desktop's protocol client, driven against a host over the native
+/// transport until `done` holds.
+#[cfg(target_os = "linux")]
+struct DrivenClient {
+    client: kage_client::Client,
+    wire: std::io::PipeWriter,
+    incoming: mpsc::Receiver<serde_json::Value>,
+}
+
+#[cfg(target_os = "linux")]
+impl DrivenClient {
+    fn serve(host: &Arc<Host>) -> Self {
+        let (srv_r, wire) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let running = Arc::clone(host);
+        std::thread::spawn(move || {
+            let _ = running.serve_native(BufReader::new(srv_r), srv_w);
+        });
+        let (tx, incoming) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(cli_r).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(serde_json::from_str(&line).unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            client: kage_client::Client::new(),
+            wire,
+            incoming,
+        }
+    }
+
+    fn connected(host: &Arc<Host>) -> Self {
+        let mut driven = Self::serve(host);
+        driven
+            .client
+            .initialize(kage_acp::acp::ClientCapabilities::default(), None);
+        driven.until("the handshake", |client| client.state().external_sessions);
+        driven
+    }
+
+    fn until(&mut self, what: &str, mut done: impl FnMut(&kage_client::Client) -> bool) {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            for frame in self.client.take_outgoing() {
+                writeln!(self.wire, "{}", frame.to_value()).unwrap();
+            }
+            if done(&self.client) {
+                return;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(!left.is_zero(), "timed out waiting for {what}");
+            if let Ok(value) = self
+                .incoming
+                .recv_timeout(left.min(Duration::from_millis(50)))
+                && let Some(frame) = kage_client::Frame::parse(&value)
+            {
+                self.client.handle(frame);
+            }
+        }
+    }
+
+    fn replies(&self, id: &str) -> Vec<String> {
+        self.client
+            .state()
+            .session(id)
+            .map(|session| {
+                session
+                    .items
+                    .iter()
+                    .filter_map(|item| match item {
+                        kage_client::TranscriptItem::Assistant { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn desktop_client_creates_lists_and_reopens_an_external_session() {
+    const NAME: &str = "rpc::tests::desktop_client_creates_lists_and_reopens_an_external_session";
+    if std::env::var_os("KAGE_TEST_EXTERNAL_CHILD").is_none() {
+        run_external_restore_test_in_child(NAME);
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap().to_owned();
+    let host = enabled_external_host(dir.path());
+    let mut desktop = DrivenClient::connected(&host);
+    desktop
+        .client
+        .new_session_with_external_agent(&cwd, &[], "fake");
+    desktop.until("the created session", |client| {
+        !client.state().sessions.is_empty()
+    });
+    let id = desktop
+        .client
+        .state()
+        .sessions
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        desktop
+            .client
+            .state()
+            .session(&id)
+            .unwrap()
+            .external_agent
+            .as_deref(),
+        Some("fake")
+    );
+    let _ = desktop
+        .client
+        .prompt(&id, vec![kage_acp::acp::ContentBlock::text("one")]);
+    desktop.until("the first reply", |client| {
+        client
+            .state()
+            .session(&id)
+            .is_some_and(|session| !session.running)
+    });
+    assert_eq!(desktop.replies(&id), ["one"]);
+    desktop.client.close_session(&id);
+    desktop.until("the close", |_| lock(&host.external).is_empty());
+
+    let mut reopened = DrivenClient::connected(&host);
+    reopened.client.list_sessions(None, None);
+    reopened.until("the listed session", |client| {
+        client
+            .state()
+            .directory
+            .iter()
+            .any(|listed| listed.session_id == id)
+    });
+    let listed = reopened
+        .client
+        .state()
+        .directory
+        .iter()
+        .find(|listed| listed.session_id == id)
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        listed
+            .meta
+            .and_then(|meta| meta.kage)
+            .and_then(|kage| kage.external_agent),
+        Some("fake".to_owned())
+    );
+    reopened.client.load_session(&id, &cwd, &[], None);
+    reopened.until("the reopened history", |client| {
+        client
+            .state()
+            .session(&id)
+            .is_some_and(|session| session.opened && !session.items.is_empty())
+    });
+    assert_eq!(
+        reopened
+            .client
+            .state()
+            .session(&id)
+            .unwrap()
+            .external_agent
+            .as_deref(),
+        Some("fake")
+    );
+    let _ = reopened
+        .client
+        .prompt(&id, vec![kage_acp::acp::ContentBlock::text("two")]);
+    reopened.until("the second reply", |client| {
+        client
+            .state()
+            .session(&id)
+            .is_some_and(|session| !session.running && session.items.len() >= 4)
+    });
+    assert_eq!(reopened.replies(&id), ["one", "one|two"]);
+}

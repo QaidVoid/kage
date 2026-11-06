@@ -998,6 +998,10 @@ impl Store {
         let Some(id) = self.active.clone() else {
             return Err(SteerError::NotRunning);
         };
+        // External agents cannot steer a running turn.
+        if self.active_external_agent().is_some() {
+            return Err(SteerError::NotAdvertised);
+        }
         self.client.steer(&id, vec![ContentBlock::text(text)])
     }
 
@@ -1041,6 +1045,9 @@ impl Store {
         let Some(session) = self.active.clone() else {
             return false;
         };
+        if self.refuse_external() {
+            return false;
+        }
         if members.is_empty() {
             return false;
         }
@@ -1105,6 +1112,9 @@ impl Store {
     }
 
     pub fn fork(&mut self, through: Option<usize>) -> bool {
+        if self.refuse_external() {
+            return false;
+        }
         let Some(session) = self.active_session() else {
             return false;
         };
@@ -1140,6 +1150,9 @@ impl Store {
     /// Refused while a run is in flight. Reports whether a request went
     /// out.
     pub fn rewind(&mut self, prompt: usize) -> bool {
+        if self.refuse_external() {
+            return false;
+        }
         let Some(session) = self.active_session() else {
             return false;
         };
@@ -1216,6 +1229,9 @@ impl Store {
         let Some(id) = self.active.clone().filter(|_| !title.is_empty()) else {
             return false;
         };
+        if self.refuse_external() {
+            return false;
+        }
         self.client.rename_session(&id, title);
         true
     }
@@ -1223,6 +1239,9 @@ impl Store {
     /// Summarizes the active session's older turns now. Refused while a
     /// run is in flight. Reports whether a request went out.
     pub fn compact(&mut self) -> bool {
+        if self.refuse_external() {
+            return false;
+        }
         let Some(session) = self.active_session() else {
             return false;
         };
@@ -1240,6 +1259,9 @@ impl Store {
         let Some(id) = self.active.clone() else {
             return false;
         };
+        if self.refuse_external() {
+            return false;
+        }
         self.client.export_session(&id);
         true
     }
@@ -1700,6 +1722,24 @@ impl Store {
         self.state().draft(session)
     }
 
+    /// The external ACP agent that owns the active session, if any.
+    pub fn active_external_agent(&self) -> Option<&str> {
+        self.active_session()?.external_agent.as_deref()
+    }
+
+    // External sessions take prompts, cancellation and permission answers
+    // only. Their agent owns models, modes, history and files.
+    fn refuse_external(&mut self) -> bool {
+        let Some(agent) = self.active_external_agent().map(str::to_owned) else {
+            return false;
+        };
+        self.note(
+            NoticeTone::Warn,
+            format!("{agent} is an external agent session. Its agent manages models, modes, history and files, so kage cannot change them here."),
+        );
+        true
+    }
+
     /// Sets one config option of the active session, by option id.
     /// Reports whether a session is open to carry it.
     pub fn set_option(&mut self, id: &str, value: &str) -> bool {
@@ -1707,6 +1747,9 @@ impl Store {
             self.hold_option(id, value);
             return true;
         };
+        if self.refuse_external() {
+            return false;
+        }
         if id == "model" && value.starts_with("acp:") {
             self.note(NoticeTone::Warn, "An external agent must be selected on the new session screen. A session's backend cannot be changed.");
             return false;
@@ -1878,6 +1921,9 @@ impl Store {
         let Some(session) = self.active.clone() else {
             return false;
         };
+        if self.refuse_external() {
+            return false;
+        }
         self.client.fs(&session, FsOp::List, path);
         true
     }
@@ -1919,6 +1965,9 @@ impl Store {
         let Some(session) = self.active.clone() else {
             return false;
         };
+        if self.refuse_external() {
+            return false;
+        }
         let request = self.client.fs(&session, FsOp::Read, path);
         self.fs_reading = Some((request, session, path.to_owned()));
         true
@@ -1947,6 +1996,9 @@ impl Store {
         let Some(session) = self.active.clone() else {
             return Err(SteerError::NotRunning);
         };
+        if self.active_external_agent().is_some() {
+            return Err(SteerError::NotAdvertised);
+        }
         self.client.steer_queued(&session, index)
     }
 
@@ -2091,6 +2143,21 @@ mod tests {
         );
         assert!(!store.set_option("model", "acp:other"));
         assert!(store.take_outgoing().is_empty());
+
+        assert_eq!(store.active_external_agent(), Some("claude"));
+        store.take_notes();
+        assert!(!store.set_option("mode", "default"));
+        assert!(!store.fork(None));
+        assert!(!store.compact());
+        assert!(!store.export());
+        assert!(!store.rename("renamed"));
+        assert!(!store.fs_list("."));
+        assert!(!store.fs_read("README.md"));
+        assert!(!store.resume_swarm(&["member".to_owned()]));
+        assert!(!store.rewind(0));
+        assert_eq!(store.steer("faster"), Err(SteerError::NotAdvertised));
+        assert!(store.take_outgoing().is_empty());
+        assert_eq!(store.take_notes().len(), 9);
     }
 
     #[test]

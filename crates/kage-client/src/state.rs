@@ -193,6 +193,10 @@ pub struct Session {
     pub parent: Option<String>,
     /// The working directory the session was opened with.
     pub cwd: Option<String>,
+    /// The configured external ACP agent that owns this session. It takes
+    /// prompts, cancellation and permission answers, but no kage model,
+    /// mode, plan, fork or file changes.
+    pub external_agent: Option<String>,
     /// The display title, as `session_info_update` last set it.
     pub title: Option<String>,
     /// ISO 8601 time of the last activity, as the agent reported it.

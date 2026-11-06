@@ -122,6 +122,7 @@ mod unix {
     struct Attachment {
         sender: mpsc::SyncSender<WriteItem>,
         identity: Arc<()>,
+        epoch: u64,
         announced: bool,
         pending: Vec<Buffered>,
         bytes: Arc<AtomicUsize>,
@@ -138,7 +139,6 @@ mod unix {
         early: Vec<Buffered>,
         bytes: Arc<AtomicUsize>,
         attachments: HashMap<u64, Attachment>,
-        generation: HashMap<u64, u64>,
         active: Option<Active>,
         closed: bool,
         #[cfg(test)]
@@ -148,19 +148,34 @@ mod unix {
     /// Registration for one attachment at a particular cancellation generation.
     pub(crate) struct PromptTicket {
         owner: u64,
-        generation: u64,
+        identity: Arc<()>,
+        epoch: u64,
         admitted: Arc<AtomicUsize>,
     }
 
     impl PromptTicket {
-        fn validate_session(&self, admitted: &Arc<AtomicUsize>) -> Result<(u64, u64), RpcError> {
+        fn validate_session(&self, admitted: &Arc<AtomicUsize>) -> Result<(), RpcError> {
             if Arc::ptr_eq(&self.admitted, admitted) {
-                Ok((self.owner, self.generation))
+                Ok(())
             } else {
                 Err(RpcError::internal(
                     "prompt ticket belongs to another external session",
                 ))
             }
+        }
+    }
+
+    impl PromptTicket {
+        fn valid(&self, state: &State) -> bool {
+            self.attached(state) && state.attachments[&self.owner].epoch == self.epoch
+        }
+
+        fn attached(&self, state: &State) -> bool {
+            !state.closed
+                && state
+                    .attachments
+                    .get(&self.owner)
+                    .is_some_and(|attachment| Arc::ptr_eq(&attachment.identity, &self.identity))
         }
     }
 
@@ -172,6 +187,7 @@ mod unix {
 
     struct Active {
         owner: u64,
+        identity: Arc<()>,
         cancelled: bool,
         canceller: Option<UnixPromptCanceller>,
         abort: CancelFlag,
@@ -297,7 +313,6 @@ mod unix {
                 early: Vec::new(),
                 bytes: Arc::new(AtomicUsize::new(0)),
                 attachments: HashMap::from([(owner, attachment(peer))]),
-                generation: HashMap::new(),
                 active: None,
                 closed: false,
                 #[cfg(test)]
@@ -382,7 +397,6 @@ mod unix {
                 return (false, None);
             };
             attachment.detached.store(true, Ordering::Release);
-            *state.generation.entry(owner).or_default() += 1;
             let last = state.attachments.is_empty();
             if last {
                 state.closed = true;
@@ -393,7 +407,9 @@ mod unix {
                 state
                     .active
                     .as_mut()
-                    .filter(|active| active.owner == owner)
+                    .filter(|active| {
+                        active.owner == owner && Arc::ptr_eq(&active.identity, &attachment.identity)
+                    })
                     .and_then(Active::cancel)
             };
             (last, cancel)
@@ -415,15 +431,16 @@ mod unix {
 
         pub(crate) fn register_prompt(&self, owner: u64) -> Result<PromptTicket, RpcError> {
             let state = lock(&self.state);
-            if state.closed || !state.attachments.contains_key(&owner) {
+            let Some(attachment) = state.attachments.get(&owner).filter(|_| !state.closed) else {
                 return Err(RpcError::new(-32602, "external session is not attached"));
-            }
+            };
             if !reserve(&self.admitted, 1, MAX_PROMPTS) {
                 return Err(RpcError::internal("too many external prompts"));
             }
             Ok(PromptTicket {
                 owner,
-                generation: *state.generation.get(&owner).unwrap_or(&0),
+                identity: Arc::clone(&attachment.identity),
+                epoch: attachment.epoch,
                 admitted: Arc::clone(&self.admitted),
             })
         }
@@ -437,7 +454,8 @@ mod unix {
             ticket: PromptTicket,
             mut req: PromptRequest,
         ) -> Result<PromptResponse, RpcError> {
-            let (owner, generation) = ticket.validate_session(&self.admitted)?;
+            ticket.validate_session(&self.admitted)?;
+            let owner = ticket.owner;
             if req.delivery == Some(PromptDelivery::Steer) {
                 return Err(RpcError::new(
                     -32602,
@@ -460,17 +478,14 @@ mod unix {
                 }
             }
             let abort = CancelFlag::new();
-            let Some(_gate) = self.wait_prompt_gate(owner, generation) else {
+            let Some(_gate) = self.wait_prompt_gate(&ticket) else {
                 return Ok(PromptResponse {
                     stop_reason: kage_acp::acp::StopReason::Cancelled,
                 });
             };
             {
                 let mut state = lock(&self.state);
-                if state.closed
-                    || !state.attachments.contains_key(&owner)
-                    || *state.generation.get(&owner).unwrap_or(&0) != generation
-                {
+                if !ticket.valid(&state) {
                     return Ok(PromptResponse {
                         stop_reason: kage_acp::acp::StopReason::Cancelled,
                     });
@@ -478,6 +493,7 @@ mod unix {
                 req.session_id = state.upstream.clone().expect("initialized upstream");
                 state.active = Some(Active {
                     owner,
+                    identity: Arc::clone(&ticket.identity),
                     cancelled: false,
                     canceller: None,
                     abort: abort.clone(),
@@ -535,15 +551,11 @@ mod unix {
                 self.shutdown();
                 return result;
             }
-            self.wait_for_writes(owner)?;
+            self.wait_for_writes(&ticket)?;
             result
         }
 
-        fn wait_prompt_gate(
-            &self,
-            owner: u64,
-            generation: u64,
-        ) -> Option<std::sync::MutexGuard<'_, ()>> {
+        fn wait_prompt_gate(&self, ticket: &PromptTicket) -> Option<std::sync::MutexGuard<'_, ()>> {
             loop {
                 match self.prompt_gate.try_lock() {
                     Ok(gate) => return Some(gate),
@@ -552,10 +564,7 @@ mod unix {
                     }
                     Err(std::sync::TryLockError::WouldBlock) => {
                         let state = lock(&self.state);
-                        if state.closed
-                            || !state.attachments.contains_key(&owner)
-                            || *state.generation.get(&owner).unwrap_or(&0) != generation
-                        {
+                        if !ticket.valid(&state) {
                             return None;
                         }
                         drop(state);
@@ -565,21 +574,22 @@ mod unix {
             }
         }
 
-        fn wait_for_writes(&self, owner: u64) -> Result<(), RpcError> {
+        fn wait_for_writes(&self, ticket: &PromptTicket) -> Result<(), RpcError> {
             let (tx, rx) = mpsc::channel();
-            let identity = {
+            {
                 let mut state = lock(&self.state);
-                if state.closed {
-                    return Err(RpcError::internal("external session is closed"));
+                if !ticket.attached(&state) {
+                    return Err(RpcError::internal(
+                        "external session was closed or detached",
+                    ));
                 }
                 let attachment = state
                     .attachments
-                    .get(&owner)
-                    .ok_or_else(|| RpcError::internal("external session was detached"))?;
+                    .get(&ticket.owner)
+                    .expect("validated attachment");
                 if !attachment.announced {
                     return Err(RpcError::internal("external session is not announced"));
                 }
-                let identity = Arc::clone(&attachment.identity);
                 if attachment.sender.try_send(WriteItem::Barrier(tx)).is_err() {
                     state.closed = true;
                     drop(state);
@@ -588,31 +598,23 @@ mod unix {
                         "external notification queue unavailable",
                     ));
                 }
-                identity
-            };
+            }
             let deadline = Instant::now() + TIMEOUT;
             loop {
                 if Instant::now() >= deadline {
-                    lock(&self.state).closed = true;
-                    self.shutdown();
+                    self.close_if_ticket_current(ticket);
                     return Err(RpcError::internal("external notification write timed out"));
                 }
                 match rx.recv_timeout(Duration::from_millis(25)) {
                     Ok(()) => break,
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        lock(&self.state).closed = true;
-                        self.shutdown();
+                        self.close_if_ticket_current(ticket);
                         return Err(RpcError::internal(
                             "external notification writer disconnected",
                         ));
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        let state = lock(&self.state);
-                        if state.closed
-                            || !state.attachments.get(&owner).is_some_and(|attachment| {
-                                Arc::ptr_eq(&attachment.identity, &identity)
-                            })
-                        {
+                        if !ticket.attached(&lock(&self.state)) {
                             return Err(RpcError::internal(
                                 "external session was closed or detached",
                             ));
@@ -620,13 +622,7 @@ mod unix {
                     }
                 }
             }
-            let state = lock(&self.state);
-            if state.closed
-                || !state
-                    .attachments
-                    .get(&owner)
-                    .is_some_and(|attachment| Arc::ptr_eq(&attachment.identity, &identity))
-            {
+            if !ticket.attached(&lock(&self.state)) {
                 return Err(RpcError::internal(
                     "external session was closed or detached",
                 ));
@@ -634,17 +630,29 @@ mod unix {
             Ok(())
         }
 
+        fn close_if_ticket_current(&self, ticket: &PromptTicket) {
+            let mut state = lock(&self.state);
+            if ticket.attached(&state) {
+                state.closed = true;
+                drop(state);
+                self.shutdown();
+            }
+        }
+
         pub(crate) fn cancel(&self, owner: u64) {
             let canceller = {
                 let mut state = lock(&self.state);
-                if !state.attachments.contains_key(&owner) {
+                let Some(attachment) = state.attachments.get_mut(&owner) else {
                     return;
-                }
-                *state.generation.entry(owner).or_default() += 1;
+                };
+                attachment.epoch = attachment.epoch.wrapping_add(1);
+                let identity = Arc::clone(&attachment.identity);
                 state
                     .active
                     .as_mut()
-                    .filter(|active| active.owner == owner)
+                    .filter(|active| {
+                        active.owner == owner && Arc::ptr_eq(&active.identity, &identity)
+                    })
                     .and_then(Active::cancel)
             };
             if let Some(canceller) = canceller {
@@ -811,6 +819,7 @@ mod unix {
         Attachment {
             sender,
             identity: Arc::new(()),
+            epoch: 0,
             announced: false,
             pending: Vec::new(),
             bytes: Arc::new(AtomicUsize::new(0)),
@@ -1814,6 +1823,182 @@ for line in sys.stdin:
         }
 
         #[test]
+        fn stale_completion_never_enqueues_on_replacement() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            let (_client, server) = UnixStream::pair().unwrap();
+            let (peer, _, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            session.attach(2, peer.clone().into()).unwrap();
+            let ticket = session.register_prompt(2).unwrap();
+            assert!(!session.detach(2));
+            session.attach(2, peer.into()).unwrap();
+            let (sender, receiver) = mpsc::sync_channel(1);
+            {
+                let mut state = lock(&session.state);
+                let attachment = state.attachments.get_mut(&2).unwrap();
+                attachment.sender = sender;
+                attachment.announced = true;
+            }
+            assert!(session.wait_for_writes(&ticket).is_err());
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+            assert!(!session.detach(2));
+            assert!(session.detach(1));
+        }
+
+        #[test]
+        fn detached_barrier_disconnect_does_not_close_shared_session() {
+            for detach in [true, false] {
+                let session = scripted_session(ADMISSION_SCRIPT);
+                let (_client, server) = UnixStream::pair().unwrap();
+                let (peer, _, _) =
+                    kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+                session.attach(2, peer.into()).unwrap();
+                let ticket = session.register_prompt(2).unwrap();
+                let (sender, receiver) = mpsc::sync_channel(1);
+                {
+                    let mut state = lock(&session.state);
+                    let attachment = state.attachments.get_mut(&2).unwrap();
+                    attachment.sender = sender;
+                    attachment.announced = true;
+                }
+                let worker_session = Arc::clone(&session);
+                let worker = thread::spawn(move || worker_session.wait_for_writes(&ticket));
+                let barrier = receiver.recv_timeout(Duration::from_secs(3)).unwrap();
+                if detach {
+                    assert!(!session.detach(2));
+                } else {
+                    session.cancel(2);
+                }
+                drop(barrier);
+                assert!(worker.join().unwrap().is_err());
+                assert_eq!(lock(&session.state).closed, !detach);
+                if detach {
+                    assert_eq!(
+                        session
+                            .prompt_owned(1, request("still alive"))
+                            .unwrap()
+                            .stop_reason,
+                        StopReason::EndTurn
+                    );
+                } else {
+                    assert!(!session.detach(2));
+                }
+                assert!(session.detach(1));
+            }
+        }
+
+        #[test]
+        fn cancel_after_upstream_completion_does_not_break_barrier() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            let (sender, receiver) = mpsc::sync_channel(1);
+            lock(&session.state).attachments.get_mut(&1).unwrap().sender = sender;
+            let active = Arc::clone(&session);
+            let worker = thread::spawn(move || active.prompt_owned(1, request("complete")));
+            let WriteItem::Barrier(ack) = receiver.recv_timeout(Duration::from_secs(3)).unwrap()
+            else {
+                panic!("expected completion barrier");
+            };
+            assert!(lock(&session.state).active.is_none());
+            session.cancel(1);
+            ack.send(()).unwrap();
+            assert_eq!(
+                worker.join().unwrap().unwrap().stop_reason,
+                StopReason::EndTurn
+            );
+            assert!(!lock(&session.state).closed);
+            assert!(session.detach(1));
+        }
+
+        #[test]
+        fn repeated_cancellation_preserves_active_cancelled_result() {
+            let dir = tempfile::tempdir().unwrap();
+            let trigger = dir.path().join("release");
+            let script = format!(
+                r"
+import json,sys,time,os
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); i=m.get('id')
+ if method=='initialize': result={{'protocolVersion':1,'agentCapabilities':{{}}}}
+ elif method=='session/new': result={{'sessionId':'up'}}
+ elif method=='session/prompt':
+  while not os.path.exists({:?}): time.sleep(0.001)
+  result={{'stopReason':'end_turn'}}
+ else: continue
+ print(json.dumps({{'jsonrpc':'2.0','id':i,'result':result}}),flush=True)
+",
+                trigger.to_str().unwrap()
+            );
+            let session = scripted_session(&script);
+            let worker_session = Arc::clone(&session);
+            let worker = thread::spawn(move || worker_session.prompt_owned(1, request("active")));
+            let until = Instant::now() + Duration::from_secs(3);
+            while lock(&session.state)
+                .active
+                .as_ref()
+                .is_none_or(|active| active.canceller.is_none())
+            {
+                assert!(Instant::now() < until);
+                thread::sleep(Duration::from_millis(2));
+            }
+            session.cancel(1);
+            session.cancel(1);
+            std::fs::write(trigger, "release").unwrap();
+            assert_eq!(
+                worker.join().unwrap().unwrap().stop_reason,
+                StopReason::Cancelled
+            );
+            assert!(!lock(&session.state).closed);
+            assert!(session.detach(1));
+        }
+
+        #[test]
+        fn replacement_cannot_cancel_old_active_prompt() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            let (_client, server) = UnixStream::pair().unwrap();
+            let (peer, _, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            session.attach(2, peer.clone().into()).unwrap();
+            let ticket = session.register_prompt(2).unwrap();
+            assert!(!session.detach(2));
+            session.attach(2, peer.into()).unwrap();
+            {
+                let mut state = lock(&session.state);
+                state.active = Some(Active {
+                    owner: 2,
+                    identity: Arc::clone(&ticket.identity),
+                    cancelled: false,
+                    canceller: None,
+                    abort: CancelFlag::new(),
+                    cancel_done: None,
+                    cancel_write_done: None,
+                });
+            }
+            session.cancel(2);
+            assert!(!lock(&session.state).active.as_ref().unwrap().cancelled);
+            assert!(!session.detach(2));
+            assert!(!lock(&session.state).active.take().unwrap().cancelled);
+            assert!(session.detach(1));
+        }
+
+        #[test]
+        fn repeated_owner_churn_leaves_only_live_attachments() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            let (_client, server) = UnixStream::pair().unwrap();
+            let (peer, _, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            for owner in 2..258 {
+                session.attach(owner, peer.clone().into()).unwrap();
+                session.cancel(owner);
+                assert!(!session.detach(owner));
+                assert_eq!(lock(&session.state).attachments.len(), 1);
+            }
+            assert!(session.detach(1));
+        }
+
+        #[test]
         fn buffer_budgets_are_released_and_overflow_fails_closed() {
             let session_bytes = Arc::new(AtomicUsize::new(0));
             let attachment_bytes = Arc::new(AtomicUsize::new(0));
@@ -1840,7 +2025,6 @@ for line in sys.stdin:
                 early: Vec::new(),
                 bytes: session_bytes,
                 attachments: HashMap::from([(1, attachment(peer.into()))]),
-                generation: HashMap::new(),
                 active: None,
                 closed: false,
                 reader_done: false,

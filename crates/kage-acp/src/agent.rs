@@ -811,6 +811,36 @@ pub trait Agent: Send + Sync + 'static {
         Err(RpcError::method_not_found("_kage/registry/install"))
     }
 
+    /// Prepare a prompt on the dispatch thread after a worker slot is reserved.
+    /// Keep this operation short and nonblocking. The returned owned token is
+    /// passed to [`Agent::prompt_prepared`] on the worker thread. It is dropped
+    /// if the worker cannot be spawned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the prompt cannot be prepared.
+    fn prepare_prompt(
+        &self,
+        _req: &PromptRequest,
+    ) -> Result<Option<Box<dyn std::any::Any + Send>>, RpcError> {
+        Ok(None)
+    }
+
+    /// Run a prompt using the token returned by [`Agent::prepare_prompt`].
+    /// The default ignores the token and calls [`Agent::prompt`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the turn cannot start or fails irrecoverably.
+    fn prompt_prepared(
+        &self,
+        req: PromptRequest,
+        ctx: &PromptContext,
+        _prepared: Option<Box<dyn std::any::Any + Send>>,
+    ) -> Result<PromptResponse, RpcError> {
+        self.prompt(req, ctx)
+    }
+
     /// Run one prompt turn to completion, streaming `session/update`
     /// notifications through `ctx`. Implementations that register work before
     /// cancellation can affect it must use [`PromptContext::start`] for that
@@ -1081,13 +1111,14 @@ fn spawn_prompt<A: Agent>(
     req: PromptRequest,
     ctx: PromptContext,
     permit: PromptPermit,
+    prepared: Option<Box<dyn std::any::Any + Send>>,
 ) {
     let agent = Arc::clone(agent);
     let worker_peer = peer.clone();
     let worker_id = id.clone();
     if let Err(error) = thread::Builder::new().spawn(move || {
         let _permit = permit;
-        let outcome = agent.prompt(req, &ctx).map(jval);
+        let outcome = agent.prompt_prepared(req, &ctx, prepared).map(jval);
         let _ = worker_peer.respond(&worker_id, outcome);
     }) {
         let _ = peer.respond(
@@ -1169,6 +1200,10 @@ fn handle_request<A: Agent>(
                         RpcError::new(-32000, "prompt worker limit reached"),
                     );
                 };
+                let prepared = match agent.prepare_prompt(&req) {
+                    Ok(prepared) => prepared,
+                    Err(error) => return parse_failed(peer, &id, error),
+                };
                 let start = Arc::new(Mutex::new(false));
                 starts
                     .entry(req.session_id.clone())
@@ -1179,7 +1214,7 @@ fn handle_request<A: Agent>(
                     session_id: req.session_id.clone(),
                     start: Some(start),
                 };
-                spawn_prompt(peer, agent, &id, req, ctx, permit);
+                spawn_prompt(peer, agent, &id, req, ctx, permit, prepared);
                 return None;
             }
         },
@@ -1458,6 +1493,93 @@ mod tests {
         }
 
         fn cancel(&self, _session_id: &str) {}
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prompt_preparation_errors_and_transfers_token_to_worker() {
+        use std::io::{BufRead, Write};
+        use std::os::unix::net::UnixStream;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct PreparedAgent(mpsc::Sender<(thread::ThreadId, thread::ThreadId, String)>);
+        impl Agent for PreparedAgent {
+            fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
+                MockAgent.initialize(req)
+            }
+            fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+                MockAgent.new_session(req)
+            }
+            fn prepare_prompt(
+                &self,
+                req: &PromptRequest,
+            ) -> Result<Option<Box<dyn std::any::Any + Send>>, RpcError> {
+                if req.session_id == "reject" {
+                    return Err(RpcError::new(-32001, "preparation rejected"));
+                }
+                Ok(Some(Box::new((
+                    thread::current().id(),
+                    req.session_id.clone(),
+                ))))
+            }
+            fn prompt_prepared(
+                &self,
+                _: PromptRequest,
+                _: &PromptContext,
+                prepared: Option<Box<dyn std::any::Any + Send>>,
+            ) -> Result<PromptResponse, RpcError> {
+                let (dispatch, session) = *prepared
+                    .unwrap()
+                    .downcast::<(thread::ThreadId, String)>()
+                    .unwrap();
+                self.0
+                    .send((dispatch, thread::current().id(), session))
+                    .unwrap();
+                Ok(PromptResponse {
+                    stop_reason: StopReason::EndTurn,
+                })
+            }
+            fn prompt(
+                &self,
+                _: PromptRequest,
+                _: &PromptContext,
+            ) -> Result<PromptResponse, RpcError> {
+                panic!("prepared prompt must be used")
+            }
+            fn cancel(&self, _: &str) {}
+        }
+
+        let (server_io, mut client) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let server_read = server_io.try_clone().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            serve_agent(BufReader::new(server_read), server_io, |_| {
+                PreparedAgent(tx)
+            })
+        });
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        for (id, session) in [(1, "reject"), (2, "accept")] {
+            writeln!(client, "{}", serde_json::json!({"jsonrpc":"2.0", "id":id, "method":"session/prompt", "params":{"sessionId":session, "prompt":[]}})).unwrap();
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(response["id"], id);
+            if id == 1 {
+                assert_eq!(response["error"]["message"], "preparation rejected");
+                assert!(rx.try_recv().is_err());
+            } else {
+                assert_eq!(response["result"]["stopReason"], "end_turn");
+            }
+        }
+        let (dispatch, worker, session) = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_ne!(dispatch, worker);
+        assert_eq!(session, "accept");
+        client.shutdown(std::net::Shutdown::Both).unwrap();
+        server.join().unwrap().unwrap();
     }
 
     #[cfg(unix)]

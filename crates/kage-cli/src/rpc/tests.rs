@@ -7906,3 +7906,137 @@ fn external_close_and_reattach_same_connection_are_ordered() {
     owner.detach();
     other.detach();
 }
+
+#[cfg(unix)]
+struct DelayedPromptAgent {
+    inner: Arc<CliAcpAgent>,
+    entered: mpsc::Sender<bool>,
+    release: Mutex<Option<mpsc::Receiver<()>>>,
+}
+
+#[cfg(unix)]
+impl Agent for DelayedPromptAgent {
+    fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
+        self.inner.initialize(req)
+    }
+
+    fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+        self.inner.new_session(req)
+    }
+
+    fn prepare_prompt(
+        &self,
+        req: &PromptRequest,
+    ) -> Result<Option<Box<dyn std::any::Any + Send>>, RpcError> {
+        self.inner.prepare_prompt(req)
+    }
+
+    fn prompt_prepared(
+        &self,
+        req: PromptRequest,
+        ctx: &PromptContext,
+        prepared: Option<Box<dyn std::any::Any + Send>>,
+    ) -> Result<PromptResponse, RpcError> {
+        let release = lock(&self.release).take();
+        if let Some(release) = release {
+            self.entered.send(prepared.is_some()).unwrap();
+            release.recv_timeout(WAIT).unwrap();
+        }
+        self.inner.prompt_prepared(req, ctx, prepared)
+    }
+
+    fn prompt(&self, req: PromptRequest, ctx: &PromptContext) -> Result<PromptResponse, RpcError> {
+        self.inner.prompt(req, ctx)
+    }
+
+    fn cancel(&self, session_id: &str) {
+        self.inner.cancel(session_id);
+    }
+}
+
+#[cfg(unix)]
+fn delayed_external_prompt_test(reattach: bool) {
+    let (_dir, _host, owner, other) = external_race_fixture();
+    owner.session_announced("external");
+    if reattach {
+        assert!(other.attach_external("external", &[]).unwrap());
+    }
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (srv_r, cli_w) = std::io::pipe().unwrap();
+    let (cli_r, srv_w) = std::io::pipe().unwrap();
+    let inner = Arc::clone(&owner);
+    std::thread::spawn(move || {
+        kage_acp::agent::serve_agent(BufReader::new(srv_r), srv_w, |_| DelayedPromptAgent {
+            inner,
+            entered: entered_tx,
+            release: Mutex::new(Some(release_rx)),
+        })
+        .unwrap();
+    });
+    let (client, _inbox, _reader) = kage_jsonrpc::connect(BufReader::new(cli_r), cli_w);
+    let params =
+        |text| serde_json::json!({"sessionId":"external", "prompt":[{"type":"text", "text":text}]});
+    let (done_tx, done_rx) = mpsc::channel();
+    let requester = client.clone();
+    std::thread::spawn(move || {
+        done_tx
+            .send(requester.request("session/prompt", params("wait")))
+            .unwrap();
+    });
+    assert!(
+        entered_rx.recv_timeout(WAIT).unwrap(),
+        "external prompt was not prepared at dispatch"
+    );
+    if reattach {
+        owner
+            .close_session(CloseSessionRequest {
+                session_id: "external".into(),
+            })
+            .unwrap();
+        assert!(owner.attach_external("external", &[]).unwrap());
+        owner.session_announced("external");
+    } else {
+        owner.cancel("external");
+    }
+    release_tx.send(()).unwrap();
+    let result = done_rx.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(result["stopReason"], "cancelled");
+    let result = client.request("session/prompt", params("next")).unwrap();
+    assert_eq!(result["stopReason"], "end_turn");
+    owner.detach();
+    other.detach();
+}
+
+#[cfg(unix)]
+#[test]
+fn dispatch_prepared_external_prompt_does_not_cross_reattachment() {
+    delayed_external_prompt_test(true);
+}
+
+#[cfg(unix)]
+#[test]
+fn dispatch_prepared_external_prompt_is_cancelled_before_worker_runs() {
+    delayed_external_prompt_test(false);
+}
+
+#[test]
+fn native_prompt_preparation_defaults_to_normal_dispatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(vec![text_turn("native ok")], dir.path(), dir.path());
+    let peer = || {
+        let (peer, _, _) = kage_jsonrpc::connect(std::io::empty(), std::io::sink());
+        peer.into()
+    };
+    let agent = CliAcpAgent::new(Arc::clone(&h.host), peer());
+    let req: PromptRequest = serde_json::from_value(serde_json::json!({
+        "sessionId": h.session, "prompt": [{"type":"text", "text":"hello"}]
+    }))
+    .unwrap();
+    assert!(agent.prepare_prompt(&req).unwrap().is_none());
+    let result = h
+        .client
+        .request("session/prompt", serde_json::to_value(req).unwrap())
+        .unwrap();
+    assert_eq!(result["stopReason"], "end_turn");
+}

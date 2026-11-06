@@ -979,6 +979,23 @@ pub struct UnixConnection {
     active_prompts: Arc<Mutex<HashSet<String>>>,
 }
 
+/// A clonable handle for interrupting writes and settling pending requests.
+///
+/// Shutdown does not interrupt the separately owned reader.
+#[cfg(unix)]
+#[derive(Clone)]
+pub struct UnixShutdown {
+    peer: UnixPeer,
+}
+
+#[cfg(unix)]
+impl UnixShutdown {
+    /// Interrupt writes and settle pending requests without joining the reader.
+    pub fn shutdown(&self) {
+        self.peer.shutdown();
+    }
+}
+
 /// A committed prompt. Dropping it permanently reserves its session on this
 /// connection because the turn may still be active. Other sessions are not
 /// affected. It never sends `session/cancel` automatically.
@@ -1197,6 +1214,14 @@ impl UnixConnection {
                 receiver,
             },
         ))
+    }
+
+    /// Obtain a handle that can shut down this connection from another thread.
+    #[must_use]
+    pub fn shutdown_handle(&self) -> UnixShutdown {
+        UnixShutdown {
+            peer: self.peer.clone(),
+        }
     }
 
     /// Interrupt writes and settle pending requests. This does not interrupt the reader.

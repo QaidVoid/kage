@@ -17,7 +17,7 @@ mod unix {
         PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse,
     };
     use kage_acp::agent::AgentPeer;
-    use kage_acp::connection::{Message, UnixConnection, UnixPromptCanceller};
+    use kage_acp::connection::{Message, UnixConnection, UnixPromptCanceller, UnixShutdown};
     use kage_core::{CancelFlag, sync::lock};
     use kage_jsonrpc::{ResponseBarrier, RpcError};
     use serde_json::{Value, json};
@@ -101,6 +101,17 @@ mod unix {
     struct InterruptibleReader<R> {
         reader: R,
         stopped: Arc<AtomicBool>,
+        #[cfg(test)]
+        done: Option<mpsc::Sender<()>>,
+    }
+
+    #[cfg(test)]
+    impl<R> Drop for InterruptibleReader<R> {
+        fn drop(&mut self) {
+            if let Some(done) = self.done.take() {
+                let _ = done.send(());
+            }
+        }
     }
 
     impl<R: Read> Read for InterruptibleReader<R> {
@@ -120,7 +131,9 @@ mod unix {
     }
 
     struct Attachment {
-        sender: mpsc::SyncSender<WriteItem>,
+        sender: Option<mpsc::SyncSender<WriteItem>>,
+        #[cfg(test)]
+        worker_done: Option<mpsc::Receiver<()>>,
         identity: Arc<()>,
         epoch: u64,
         announced: bool,
@@ -143,6 +156,18 @@ mod unix {
         closed: bool,
         #[cfg(test)]
         reader_done: bool,
+    }
+
+    impl State {
+        fn close(&mut self) {
+            self.closed = true;
+            self.early.clear();
+            for attachment in self.attachments.values_mut() {
+                attachment.detached.store(true, Ordering::Release);
+                attachment.sender.take();
+                attachment.pending.clear();
+            }
+        }
     }
 
     /// Registration for one attachment at a particular cancellation generation.
@@ -252,6 +277,8 @@ mod unix {
     pub(crate) struct External {
         connection: UnixConnection,
         reader_stopped: Arc<AtomicBool>,
+        #[cfg(test)]
+        reader_done: Mutex<mpsc::Receiver<()>>,
         prompt_gate: Mutex<()>,
         admitted: Arc<AtomicUsize>,
         child: Arc<Mutex<Option<Child>>>,
@@ -293,9 +320,13 @@ mod unix {
                 )));
             }
             let reader_stopped = Arc::new(AtomicBool::new(false));
+            #[cfg(test)]
+            let (reader_done_tx, reader_done) = mpsc::channel();
             let reader = InterruptibleReader {
                 reader: stdout,
                 stopped: Arc::clone(&reader_stopped),
+                #[cfg(test)]
+                done: Some(reader_done_tx),
             };
             let (mut connection, incoming) =
                 match UnixConnection::new(BufReader::new(reader), stdin.into()) {
@@ -322,11 +353,19 @@ mod unix {
             let session_id = id.clone();
             let external_id = id;
             let process = Arc::clone(&child);
-            receive_updates(incoming, sink, external_id, process);
+            receive_updates(
+                incoming,
+                sink,
+                external_id,
+                process,
+                Arc::clone(&reader_stopped),
+                connection.shutdown_handle(),
+            );
             let result = initialize(&mut connection, &state, cwd, &session_id);
             let capabilities = match result {
                 Ok(value) => value,
                 Err(error) => {
+                    lock(&state).close();
                     reader_stopped.store(true, Ordering::Release);
                     connection.shutdown();
                     cleanup(&child);
@@ -336,6 +375,8 @@ mod unix {
             Ok(Arc::new(Self {
                 connection,
                 reader_stopped,
+                #[cfg(test)]
+                reader_done: Mutex::new(reader_done),
                 prompt_gate: Mutex::new(()),
                 admitted: Arc::new(AtomicUsize::new(0)),
                 child,
@@ -362,12 +403,17 @@ mod unix {
 
         pub(crate) fn announce(&self, owner: u64) {
             let mut state = lock(&self.state);
+            if state.closed {
+                return;
+            }
             let mut failed = false;
             if let Some(attachment) = state.attachments.get_mut(&owner) {
                 attachment.announced = true;
                 for update in attachment.pending.drain(..) {
                     if attachment
                         .sender
+                        .as_ref()
+                        .expect("open attachment")
                         .try_send(WriteItem::Update(update))
                         .is_err()
                     {
@@ -377,7 +423,7 @@ mod unix {
                 }
             }
             if failed {
-                state.closed = true;
+                state.close();
             }
             drop(state);
             if failed {
@@ -399,7 +445,7 @@ mod unix {
             attachment.detached.store(true, Ordering::Release);
             let last = state.attachments.is_empty();
             if last {
-                state.closed = true;
+                state.close();
             }
             let cancel = if last {
                 None
@@ -424,6 +470,7 @@ mod unix {
         }
 
         fn shutdown(&self) {
+            lock(&self.state).close();
             self.reader_stopped.store(true, Ordering::Release);
             self.connection.shutdown();
             cleanup(&self.child);
@@ -508,7 +555,7 @@ mod unix {
                 Err(error) => {
                     let mut state = lock(&self.state);
                     state.active = None;
-                    state.closed = true;
+                    state.close();
                     drop(state);
                     self.shutdown();
                     return Err(error);
@@ -535,7 +582,7 @@ mod unix {
             if let Some(done) = cancel_write_done
                 && !matches!(done.recv_timeout(TIMEOUT), Ok(Ok(())))
             {
-                lock(&self.state).closed = true;
+                lock(&self.state).close();
                 self.shutdown();
                 return Err(RpcError::internal(
                     "external cancellation write did not finish",
@@ -547,7 +594,7 @@ mod unix {
                 response.stop_reason = kage_acp::acp::StopReason::Cancelled;
             }
             if result.is_err() {
-                lock(&self.state).closed = true;
+                lock(&self.state).close();
                 self.shutdown();
                 return result;
             }
@@ -590,8 +637,14 @@ mod unix {
                 if !attachment.announced {
                     return Err(RpcError::internal("external session is not announced"));
                 }
-                if attachment.sender.try_send(WriteItem::Barrier(tx)).is_err() {
-                    state.closed = true;
+                if attachment
+                    .sender
+                    .as_ref()
+                    .expect("open attachment")
+                    .try_send(WriteItem::Barrier(tx))
+                    .is_err()
+                {
+                    state.close();
                     drop(state);
                     self.shutdown();
                     return Err(RpcError::internal(
@@ -633,7 +686,7 @@ mod unix {
         fn close_if_ticket_current(&self, ticket: &PromptTicket) {
             let mut state = lock(&self.state);
             if ticket.attached(&state) {
-                state.closed = true;
+                state.close();
                 drop(state);
                 self.shutdown();
             }
@@ -666,17 +719,22 @@ mod unix {
         sink: Arc<Mutex<State>>,
         external_id: String,
         process: Arc<Mutex<Option<Child>>>,
+        reader_stopped: Arc<AtomicBool>,
+        shutdown: UnixShutdown,
     ) {
         thread::spawn(move || {
             while let Ok(message) = incoming.recv() {
                 match message {
                     Message::Notification { method, params } if method == "session/update" => {
                         let mut state = lock(&sink);
+                        if state.closed {
+                            break;
+                        }
                         if state.upstream.is_none() {
                             if let Some(update) = Buffered::new(params, &state.bytes, None) {
                                 state.early.push(update);
                             } else {
-                                state.closed = true;
+                                state.close();
                             }
                         } else {
                             forward(&mut state, &external_id, params);
@@ -701,14 +759,20 @@ mod unix {
                     Message::Notification { .. } => {}
                 }
             }
-            {
+            let abort = {
                 let mut state = lock(&sink);
-                state.closed = true;
+                state.close();
                 #[cfg(test)]
                 {
                     state.reader_done = true;
                 }
+                state.active.as_ref().map(|active| active.abort.clone())
+            };
+            reader_stopped.store(true, Ordering::Release);
+            if let Some(abort) = abort {
+                abort.cancel();
             }
+            shutdown.shutdown();
             cleanup(&process);
         });
     }
@@ -792,20 +856,23 @@ mod unix {
     }
 
     // A generic Peer cannot interrupt a write already in progress. Detaching
-    // suppresses queued updates but cannot guarantee that an in-flight update
-    // will not arrive after detach. External sessions must remain disabled until
-    // the downstream transport provides interruptible, ordered writes.
+    // and terminal closure suppress queued updates but cannot guarantee that an
+    // update already selected for writing will not arrive after the stop.
+    // External sessions must remain disabled until the downstream transport
+    // provides interruptible, ordered writes.
     fn attachment(peer: AgentPeer) -> Attachment {
         let (sender, receiver) = mpsc::sync_channel(1024);
         let detached = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&detached);
+        #[cfg(test)]
+        let (worker_done_tx, worker_done) = mpsc::channel();
         thread::spawn(move || {
             while let Ok(item) = receiver.recv() {
+                if stopped.load(Ordering::Acquire) {
+                    break;
+                }
                 match item {
                     WriteItem::Update(update) => {
-                        if stopped.load(Ordering::Acquire) {
-                            break;
-                        }
                         if peer.notify("session/update", update.value.clone()).is_err() {
                             break;
                         }
@@ -815,9 +882,13 @@ mod unix {
                     }
                 }
             }
+            #[cfg(test)]
+            let _ = worker_done_tx.send(());
         });
         Attachment {
-            sender,
+            sender: Some(sender),
+            #[cfg(test)]
+            worker_done: Some(worker_done),
             identity: Arc::new(()),
             epoch: 0,
             announced: false,
@@ -828,6 +899,9 @@ mod unix {
     }
 
     fn forward(state: &mut State, id: &str, mut params: Value) {
+        if state.closed {
+            return;
+        }
         if params.get("sessionId").and_then(Value::as_str) != state.upstream.as_deref() {
             return;
         }
@@ -838,16 +912,18 @@ mod unix {
         for attachment in state.attachments.values_mut() {
             let Some(update) = Buffered::new(params.clone(), &state.bytes, Some(&attachment.bytes))
             else {
-                state.closed = true;
+                state.close();
                 break;
             };
             if attachment.announced {
                 if attachment
                     .sender
+                    .as_ref()
+                    .expect("open attachment")
                     .try_send(WriteItem::Update(update))
                     .is_err()
                 {
-                    state.closed = true;
+                    state.close();
                     break;
                 }
             } else {
@@ -858,6 +934,7 @@ mod unix {
 
     impl Drop for External {
         fn drop(&mut self) {
+            lock(&self.state).close();
             self.reader_stopped.store(true, Ordering::Release);
             self.connection.shutdown();
             cleanup(&self.child);
@@ -1836,7 +1913,7 @@ for line in sys.stdin:
             {
                 let mut state = lock(&session.state);
                 let attachment = state.attachments.get_mut(&2).unwrap();
-                attachment.sender = sender;
+                attachment.sender = Some(sender);
                 attachment.announced = true;
             }
             assert!(session.wait_for_writes(&ticket).is_err());
@@ -1861,7 +1938,7 @@ for line in sys.stdin:
                 {
                     let mut state = lock(&session.state);
                     let attachment = state.attachments.get_mut(&2).unwrap();
-                    attachment.sender = sender;
+                    attachment.sender = Some(sender);
                     attachment.announced = true;
                 }
                 let worker_session = Arc::clone(&session);
@@ -1894,7 +1971,7 @@ for line in sys.stdin:
         fn cancel_after_upstream_completion_does_not_break_barrier() {
             let session = scripted_session(ADMISSION_SCRIPT);
             let (sender, receiver) = mpsc::sync_channel(1);
-            lock(&session.state).attachments.get_mut(&1).unwrap().sender = sender;
+            lock(&session.state).attachments.get_mut(&1).unwrap().sender = Some(sender);
             let active = Arc::clone(&session);
             let worker = thread::spawn(move || active.prompt_owned(1, request("complete")));
             let WriteItem::Barrier(ack) = receiver.recv_timeout(Duration::from_secs(3)).unwrap()
@@ -2055,12 +2132,105 @@ for line in sys.stdin:
             let item = || {
                 Buffered::new(json!({"text":"update"}), &bytes, Some(&attachment.bytes)).unwrap()
             };
-            assert!(attachment.sender.send(WriteItem::Update(item())).is_ok());
+            assert!(
+                attachment
+                    .sender
+                    .as_ref()
+                    .unwrap()
+                    .send(WriteItem::Update(item()))
+                    .is_ok()
+            );
             entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
-            assert!(attachment.sender.send(WriteItem::Update(item())).is_ok());
+            assert!(
+                attachment
+                    .sender
+                    .as_ref()
+                    .unwrap()
+                    .send(WriteItem::Update(item()))
+                    .is_ok()
+            );
             attachment.detached.store(true, Ordering::Release);
             release_tx.send(()).unwrap();
             assert!(entered_rx.recv_timeout(Duration::from_millis(200)).is_err());
+        }
+
+        #[test]
+        fn terminal_close_discards_queued_updates_and_barriers() {
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let (client, server) = UnixStream::pair().unwrap();
+            let writer = GatedWriter {
+                entered: entered_tx,
+                release: release_rx,
+                fail: false,
+                socket: Some(client),
+            };
+            let (peer, _, _) = kage_jsonrpc::connect(BufReader::new(server), writer);
+            let attachment = attachment(peer.into());
+            let bytes = Arc::new(AtomicUsize::new(0));
+            let item = || {
+                Buffered::new(json!({"text":"update"}), &bytes, Some(&attachment.bytes)).unwrap()
+            };
+            attachment
+                .sender
+                .as_ref()
+                .unwrap()
+                .send(WriteItem::Update(item()))
+                .unwrap();
+            entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            attachment
+                .sender
+                .as_ref()
+                .unwrap()
+                .send(WriteItem::Update(item()))
+                .unwrap();
+            let (ack, barrier) = mpsc::channel();
+            attachment
+                .sender
+                .as_ref()
+                .unwrap()
+                .send(WriteItem::Barrier(ack))
+                .unwrap();
+            let mut state = State {
+                upstream: Some("up".into()),
+                early: Vec::new(),
+                bytes: Arc::clone(&bytes),
+                attachments: HashMap::from([(1, attachment)]),
+                active: None,
+                closed: false,
+                reader_done: false,
+            };
+            state.close();
+            assert!(state.attachments.contains_key(&1));
+            release_tx.send(()).unwrap();
+            state.attachments[&1]
+                .worker_done
+                .as_ref()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap();
+            assert!(barrier.recv_timeout(Duration::from_secs(3)).is_err());
+            assert!(entered_rx.try_recv().is_err());
+            assert_eq!(bytes.load(Ordering::Acquire), 0);
+        }
+
+        #[test]
+        fn shutdown_stops_idle_worker_without_detaching_owner() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            session.shutdown();
+            let worker_done = {
+                let mut state = lock(&session.state);
+                assert!(state.closed);
+                assert_eq!(state.attachments.len(), 1);
+                state
+                    .attachments
+                    .get_mut(&1)
+                    .unwrap()
+                    .worker_done
+                    .take()
+                    .unwrap()
+            };
+            worker_done.recv_timeout(Duration::from_secs(3)).unwrap();
         }
 
         #[test]
@@ -2075,6 +2245,7 @@ for line in sys.stdin:
             let mut reader = InterruptibleReader {
                 reader,
                 stopped: Arc::clone(&stopped),
+                done: None,
             };
             let (tx, rx) = mpsc::channel();
             thread::spawn(move || {
@@ -2087,7 +2258,7 @@ for line in sys.stdin:
         }
 
         #[test]
-        fn shutdown_kills_descendant_holding_stdout_and_unblocks_reader() {
+        fn shutdown_unblocks_incoming_and_transport_readers_with_inherited_stdout() {
             let script = r"
 import json,sys,os,time
 for line in sys.stdin:
@@ -2108,6 +2279,113 @@ for line in sys.stdin:
                 assert!(Instant::now() < until, "incoming reader remained blocked");
                 thread::sleep(Duration::from_millis(2));
             }
+            lock(&session.reader_done)
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap();
+        }
+
+        #[test]
+        fn receive_failure_interrupts_reader_and_prompt_with_escaped_stdout_holder() {
+            struct ChildGuard {
+                release: std::path::PathBuf,
+                exited: std::path::PathBuf,
+                finished: bool,
+            }
+            impl ChildGuard {
+                fn finish(&mut self) -> bool {
+                    if self.finished {
+                        return true;
+                    }
+                    let _ = std::fs::write(&self.release, "release");
+                    let deadline = Instant::now() + Duration::from_secs(3);
+                    while Instant::now() < deadline {
+                        if std::fs::read(&self.exited).is_ok_and(|bytes| !bytes.is_empty()) {
+                            self.finished = true;
+                            return true;
+                        }
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    false
+                }
+            }
+            impl Drop for ChildGuard {
+                fn drop(&mut self) {
+                    let _ = self.finish();
+                }
+            }
+
+            let dir = tempfile::tempdir().unwrap();
+            let ready = dir.path().join("ready");
+            let release = dir.path().join("release");
+            let exited = dir.path().join("exited");
+            for path in [&ready, &release, &exited] {
+                std::fs::write(path, "").unwrap();
+            }
+            let mut guard = ChildGuard {
+                release: release.clone(),
+                exited: exited.clone(),
+                finished: false,
+            };
+            let script = format!(
+                r"
+import json,sys,os,time
+ready_fd=os.open({ready:?},os.O_RDWR)
+release_fd=os.open({release:?},os.O_RDONLY)
+exited_fd=os.open({exited:?},os.O_RDWR)
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); i=m.get('id')
+ if method=='initialize': result={{'protocolVersion':1,'agentCapabilities':{{}}}}
+ elif method=='session/new': result={{'sessionId':'up'}}
+ elif method=='session/prompt':
+  if os.fork()==0:
+   os.setsid()
+   os.write(ready_fd,b'ready')
+   end=time.monotonic()+15
+   while time.monotonic()<end:
+    os.lseek(release_fd,0,os.SEEK_SET)
+    if os.read(release_fd,1): break
+    time.sleep(0.005)
+   os.close(1)
+   os.write(exited_fd,b'exited')
+   os._exit(0)
+  while os.fstat(ready_fd).st_size==0: time.sleep(0.001)
+  for _ in range(4):
+   print(json.dumps({{'jsonrpc':'2.0','method':'session/update','params':{{'sessionId':'up','text':'x'*700000}}}}),flush=True)
+  time.sleep(15)
+  continue
+ else: continue
+ print(json.dumps({{'jsonrpc':'2.0','id':i,'result':result}}),flush=True)
+",
+                ready = ready.to_str().unwrap(),
+                release = release.to_str().unwrap(),
+                exited = exited.to_str().unwrap()
+            );
+            let session = scripted_session(&script);
+            let (_client, server) = UnixStream::pair().unwrap();
+            let (peer, _, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            session.attach(2, peer.into()).unwrap();
+            let active = Arc::clone(&session);
+            let (tx, rx) = mpsc::channel();
+            thread::spawn(move || {
+                let _ = tx.send(active.prompt_owned(1, request("overflow")));
+            });
+            assert!(rx.recv_timeout(Duration::from_secs(3)).unwrap().is_err());
+            lock(&session.reader_done)
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap();
+            assert_eq!(std::fs::read(&ready).unwrap(), b"ready");
+            assert!(std::fs::read(&exited).unwrap().is_empty());
+            let state = lock(&session.state);
+            assert!(state.closed);
+            assert_eq!(state.attachments.len(), 2);
+            drop(state);
+            assert!(!session.detach(2));
+            assert!(session.detach(1));
+            assert!(
+                guard.finish(),
+                "escaped stdout holder did not acknowledge release"
+            );
         }
 
         #[test]
@@ -2185,6 +2463,16 @@ for line in sys.stdin:
             )
             .unwrap();
             session.announce(1);
+            let worker_done = {
+                let mut state = lock(&session.state);
+                state
+                    .attachments
+                    .get_mut(&1)
+                    .unwrap()
+                    .worker_done
+                    .take()
+                    .unwrap()
+            };
             let active = Arc::clone(&session);
             let prompt = thread::spawn(move || {
                 active.prompt_owned(
@@ -2201,6 +2489,8 @@ for line in sys.stdin:
                 assert!(std::time::Instant::now() < until);
                 thread::sleep(Duration::from_millis(5));
             }
+            worker_done.recv_timeout(Duration::from_secs(3)).unwrap();
+            assert!(lock(&session.state).attachments.contains_key(&1));
             assert!(session.attach(2, peer.into()).is_err());
             assert!(session.detach(1));
             assert!(lock(&session.child).is_none());
@@ -2278,7 +2568,7 @@ for line in sys.stdin:
 }
 
 #[cfg(unix)]
-pub(super) use unix::External;
+pub(super) use unix::{External, PromptTicket};
 
 #[cfg(not(unix))]
 mod unsupported {
@@ -2326,4 +2616,4 @@ mod unsupported {
     }
 }
 #[cfg(not(unix))]
-pub(super) use unsupported::External;
+pub(super) use unsupported::{External, PromptTicket};

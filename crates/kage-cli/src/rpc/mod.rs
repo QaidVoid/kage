@@ -382,6 +382,11 @@ struct PromptEnd {
     stop: Option<CoreStopReason>,
 }
 
+struct PreparedExternalPrompt {
+    session: Arc<external::External>,
+    ticket: external::PromptTicket,
+}
+
 type Waiters = Arc<Mutex<HashMap<SessionId, Vec<mpsc::Sender<PromptEnd>>>>>;
 
 type ShownBySession = Arc<Mutex<HashMap<SessionId, Shown>>>;
@@ -1332,18 +1337,44 @@ impl Agent for CliAcpAgent {
         fs::handle(&workdir, &permissions, &req)
     }
 
-    fn prompt(&self, req: PromptRequest, ctx: &PromptContext) -> Result<PromptResponse, RpcError> {
-        if let Some(session) = self.external_session(&req.session_id) {
-            let ticket = match ctx.start(|| session.register_prompt(self.connection)) {
-                Some(result) => result?,
-                None => {
-                    return Ok(PromptResponse {
-                        stop_reason: StopReason::Cancelled,
-                    });
-                }
-            };
-            return session.prompt(ticket, req);
+    fn prepare_prompt(
+        &self,
+        req: &PromptRequest,
+    ) -> Result<Option<Box<dyn std::any::Any + Send>>, RpcError> {
+        let sessions = lock(&self.host.external);
+        let ids = lock(&self.ids);
+        if !ids.external.contains(&req.session_id) {
+            return Ok(None);
         }
+        let session = sessions
+            .get(&req.session_id)
+            .cloned()
+            .ok_or_else(|| RpcError::new(-32602, "external session is unavailable"))?;
+        let ticket = session.register_prompt(self.connection)?;
+        Ok(Some(Box::new(PreparedExternalPrompt { session, ticket })))
+    }
+
+    fn prompt_prepared(
+        &self,
+        req: PromptRequest,
+        ctx: &PromptContext,
+        prepared: Option<Box<dyn std::any::Any + Send>>,
+    ) -> Result<PromptResponse, RpcError> {
+        let Some(prepared) = prepared else {
+            return self.prompt(req, ctx);
+        };
+        let prepared = prepared
+            .downcast::<PreparedExternalPrompt>()
+            .map_err(|_| RpcError::internal("invalid prepared external prompt"))?;
+        if ctx.start(|| ()).is_none() {
+            return Ok(PromptResponse {
+                stop_reason: StopReason::Cancelled,
+            });
+        }
+        prepared.session.prompt(prepared.ticket, req)
+    }
+
+    fn prompt(&self, req: PromptRequest, ctx: &PromptContext) -> Result<PromptResponse, RpcError> {
         if lock(&self.ids).read_only.contains(&req.session_id) {
             return Err(RpcError::new(
                 -32602,

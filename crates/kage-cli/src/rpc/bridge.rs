@@ -6,12 +6,13 @@ use std::sync::{Arc, Mutex};
 
 use kage_acp::acp::{
     AvailableCommandsUpdate, BlobContent, CompactionPhase, CompactionUpdate, ConfigOptionUpdate,
-    ContentBlock, Cost, CurrentModeUpdate, DiffContent, KageMeta, McpStatusUpdate, MessageChunk,
-    NoticeTone, NoticeUpdate, Plan, QuestionChoice, QuestionPrompt, SessionConfigSelectOption,
-    SessionInfoUpdate, SessionUpdate, SubagentSessionCapabilities, SubagentState, SubagentSwarm,
-    SubagentUpdate, SubagentUsage, SwarmMeta, ToolCall, ToolCallContent, ToolCallMeta,
-    ToolCallStatus, ToolCallUpdate, ToolKind, TurnPhase, TurnReason, TurnUpdate, UsageMeta,
-    UsageTokens, UsageUpdate,
+    ContentBlock, Cost, CurrentModeUpdate, DiffContent, KageMeta, McpServersUpdate,
+    McpStatusUpdate, MessageChunk, NoticeTone, NoticeUpdate, Plan, PromptDelivery, PromptWithdrawn,
+    QuestionChoice, QuestionPrompt, SessionConfigSelectOption, SessionInfoUpdate, SessionUpdate,
+    ShellUpdate, SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate,
+    SubagentUsage, SwarmMeta, ToolCall, ToolCallContent, ToolCallMeta, ToolCallStatus,
+    ToolCallUpdate, ToolKind, TurnPhase, TurnReason, TurnUpdate, UsageMeta, UsageTokens,
+    UsageUpdate,
 };
 use kage_acp::agent::{
     PermissionDecision, PlanReviewDecision, QuestionsAnswer, request_plan_review,
@@ -457,6 +458,11 @@ impl Bridge {
             }) => {
                 self.replaced(session, &client_id, path, title.clone(), timeline);
             }
+            Event::Host(
+                event @ (HostEvent::ShellOutput { .. }
+                | HostEvent::ShellFinished { .. }
+                | HostEvent::PromptWithdrawn { .. }),
+            ) => self.shell_or_withdrawn(session, &client_id, event),
             Event::Host(_) => {}
         }
     }
@@ -571,6 +577,13 @@ impl Bridge {
     /// commands as one `available_commands_update` when they changed,
     /// and one `_kage/mcp_status` per server whose status changed.
     fn mcp_servers(&mut self, session: SessionId, client_id: &str, servers: &[McpServerInfo]) {
+        let catalog = McpServersUpdate {
+            servers: servers
+                .iter()
+                .filter_map(|server| serde_json::to_value(server).ok())
+                .collect(),
+        };
+        self.send(session, client_id, SessionUpdate::McpServers(catalog));
         let commands = prompt_commands(servers);
         let last = self.commands.insert(session, commands.clone());
         if last.unwrap_or_default() != commands {
@@ -685,7 +698,7 @@ impl Bridge {
 
     /// The session's conversation was replaced in place, by an undo or a
     /// rewind: a kage client drops what it shows and gets the conversation
-    /// as it now stands, with its finished agents, as a load sends it.
+    /// as it now stands, then its finished agents, as a load sends them.
     /// Other clients know no way to drop a transcript, so they keep theirs.
     fn replaced(
         &mut self,
@@ -705,24 +718,71 @@ impl Bridge {
         for update in super::sessions::replay_updates(timeline) {
             self.send(session, client_id, update);
         }
-        let Ok(replay) = kage_session::replay(path) else {
-            return;
-        };
-        let Some(dir) = path.parent() else {
-            return;
-        };
-        let restored = {
-            let live = lock(&self.live);
-            super::sessions::restored_subagents(dir, session, &replay, &live)
-        };
-        for (parent, update) in restored {
-            let update = SessionUpdate::SubagentUpdate(update);
-            if parent == session {
-                self.send(session, client_id, update);
-            } else {
-                send_update(&self.peer, &parent.to_string(), update);
+        // Reading the session's agent files is slow next to the bus, whose
+        // other subscribers wait on this one, so the cards follow later.
+        let path = path.to_path_buf();
+        let live = Arc::clone(&self.live);
+        let peer = self.peer.clone();
+        let client_id = client_id.to_owned();
+        let _ = std::thread::Builder::new()
+            .name("kage-rpc-agents".to_owned())
+            .spawn(move || {
+                let (Ok(replay), Some(dir)) = (kage_session::replay(&path), path.parent()) else {
+                    return;
+                };
+                let restored = {
+                    let live = lock(&live);
+                    super::sessions::restored_subagents(dir, session, &replay, &live)
+                };
+                for (parent, update) in restored {
+                    let to = if parent == session {
+                        client_id.clone()
+                    } else {
+                        parent.to_string()
+                    };
+                    send_update(&peer, &to, SessionUpdate::SubagentUpdate(update));
+                }
+            });
+    }
+
+    /// A user shell command's progress, or a steer a cancel handed back.
+    /// A withdraw a request asked for answers that request alone, so it is
+    /// not sent here.
+    fn shell_or_withdrawn(&self, session: SessionId, client_id: &str, event: &HostEvent) {
+        let update = match event {
+            HostEvent::ShellOutput { command, tail } => SessionUpdate::Shell(ShellUpdate {
+                command: command.clone(),
+                finished: false,
+                tail: Some(tail.clone()),
+                output: None,
+                exit_code: None,
+            }),
+            HostEvent::ShellFinished {
+                command,
+                output,
+                exit_code,
+            } => SessionUpdate::Shell(ShellUpdate {
+                command: command.clone(),
+                finished: true,
+                tail: None,
+                output: Some(output.clone()),
+                exit_code: *exit_code,
+            }),
+            HostEvent::PromptWithdrawn {
+                delivery,
+                content: Some(content),
+            } if crate::engine::answering().is_none() => {
+                SessionUpdate::PromptWithdrawn(PromptWithdrawn {
+                    delivery: match delivery {
+                        Delivery::Steer => PromptDelivery::Steer,
+                        Delivery::Queue => PromptDelivery::Queue,
+                    },
+                    content: super::rewind::blocks(content),
+                })
             }
-        }
+            _ => return,
+        };
+        self.send(session, client_id, update);
     }
 
     /// Reports a streamed agent's usage and model to its parent's client

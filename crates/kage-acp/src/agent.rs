@@ -29,16 +29,17 @@ use crate::acp::{
     ConfigSetRequest, ConfigTestRequest, ConfigTestResult, DirectoryRequest, DirectoryResult,
     FoldersRequest, FoldersResult, FsRequest, FsResult, ImageSaveRequest, InitializeRequest,
     InitializeResponse, KageMeta, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, ModelsResponse, NewSessionRequest, NewSessionResponse, OptionSetRequest,
-    OptionsResponse, PermissionOption, PermissionOptionKind, PermissionOutcome, PlanReview,
-    PluginInstallRequest, PluginRemoveRequest, PromptRequest, PromptResponse, QuestionMeta,
-    QuestionPrompt, RegistryInstallRequest, RegistryInstallResult, RegistrySearchRequest,
-    RegistrySearchResult, RequestMeta, RequestPermissionRequest, RequestPermissionResponse,
-    RequestPermissionResult, ResumeSessionRequest, ResumeSessionResponse, SessionExportResponse,
-    SessionForkRequest, SessionForkResponse, SessionNotification, SessionPromptsResponse,
-    SessionRenameRequest, SessionRequest, SessionRewindRequest, SessionUndoResponse, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SwarmResumeRequest,
-    SwarmResumeResponse, ThemesRequest, ThemesResult, ToolCallUpdate,
+    LoadSessionResponse, McpRestartRequest, ModelsResponse, NewSessionRequest, NewSessionResponse,
+    OptionSetRequest, OptionsResponse, PermissionOption, PermissionOptionKind, PermissionOutcome,
+    PlanReview, PluginInstallRequest, PluginRemoveRequest, PromptRequest, PromptResponse,
+    PromptWithdrawn, QuestionMeta, QuestionPrompt, RegistryInstallRequest, RegistryInstallResult,
+    RegistrySearchRequest, RegistrySearchResult, RequestMeta, RequestPermissionRequest,
+    RequestPermissionResponse, RequestPermissionResult, ResumeSessionRequest,
+    ResumeSessionResponse, SessionExportResponse, SessionForkRequest, SessionForkResponse,
+    SessionNotification, SessionPromptsResponse, SessionRenameRequest, SessionRequest,
+    SessionRewindRequest, SessionUndoResponse, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, ShellRequest, SwarmResumeRequest, SwarmResumeResponse,
+    ThemesRequest, ThemesResult, ToolCallUpdate, WithdrawRequest,
 };
 
 /// The client's answer to a `session/request_permission`.
@@ -537,6 +538,37 @@ pub trait Agent: Send + Sync + 'static {
     /// Returns an [`RpcError`] if the session is unknown.
     fn session_prompts(&self, _req: SessionRequest) -> Result<SessionPromptsResponse, RpcError> {
         Err(RpcError::method_not_found("_kage/session/prompts"))
+    }
+
+    /// Run a shell command the user typed in the session
+    /// (`_kage/shell`). Its progress reaches clients as `_kage/shell`
+    /// updates. The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session is unknown.
+    fn session_shell(&self, _req: ShellRequest) -> Result<serde_json::Value, RpcError> {
+        Err(RpcError::method_not_found("_kage/shell"))
+    }
+
+    /// Take back the session's newest pending prompt of one queue
+    /// (`_kage/prompt/withdraw`). The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session is unknown.
+    fn prompt_withdraw(&self, _req: WithdrawRequest) -> Result<PromptWithdrawn, RpcError> {
+        Err(RpcError::method_not_found("_kage/prompt/withdraw"))
+    }
+
+    /// Restart one of the session's MCP servers (`_kage/mcp/restart`).
+    /// The result reaches clients as MCP updates. The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session is unknown.
+    fn mcp_restart(&self, _req: McpRestartRequest) -> Result<serde_json::Value, RpcError> {
+        Err(RpcError::method_not_found("_kage/mcp/restart"))
     }
 
     /// Delete a recorded session no client has open
@@ -1044,14 +1076,15 @@ fn handle_kage_request<A: Agent>(
             Ok(req) => spawn_op(peer, agent, id, move |a| a.session_rename(req)),
             Err(e) => return parse_failed(peer, &id, e),
         },
-        other => return handle_history_request(peer, agent, id, other, params),
+        other => return handle_session_request(peer, agent, id, other, params),
     };
     Some(op)
 }
 
-/// The `_kage/session/*` requests that rewrite or list a session's
-/// history: undo, rewind, its prompts, and deleting it.
-fn handle_history_request<A: Agent>(
+/// The requests that act on one session: undo, rewind, its prompts,
+/// deleting it, a user shell command, withdrawing a pending prompt and
+/// restarting an MCP server.
+fn handle_session_request<A: Agent>(
     peer: &Peer,
     agent: &Arc<A>,
     id: serde_json::Value,
@@ -1073,6 +1106,18 @@ fn handle_history_request<A: Agent>(
         },
         "_kage/session/delete" => match parse::<SessionRequest>(params) {
             Ok(req) => spawn_op(peer, agent, id, move |a| a.session_delete(req)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/shell" => match parse::<ShellRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.session_shell(req)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/prompt/withdraw" => match parse::<WithdrawRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.prompt_withdraw(req).map(jval)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
+        "_kage/mcp/restart" => match parse::<McpRestartRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.mcp_restart(req)),
             Err(e) => return parse_failed(peer, &id, e),
         },
         other => {

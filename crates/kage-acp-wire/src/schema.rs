@@ -513,6 +513,81 @@ pub struct SessionForkResponse {
     pub truncated: bool,
 }
 
+/// `_kage/shell` request params: a shell command the user typed, run in
+/// the session's directory and environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellRequest {
+    /// The session to run it in.
+    pub session_id: String,
+    /// The command line.
+    pub command: String,
+}
+
+/// `_kage/prompt/withdraw` request params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WithdrawRequest {
+    /// The session whose pending prompt to take back.
+    pub session_id: String,
+    /// Which queue to take it from.
+    pub delivery: PromptDelivery,
+}
+
+/// The `_kage/prompt/withdraw` result, and the `_kage/prompt_withdrawn`
+/// update every client gets, also for each steer a cancel left pending.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptWithdrawn {
+    /// The queue the prompt came from.
+    pub delivery: PromptDelivery,
+    /// The prompt taken back, empty when nothing was pending.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content: Vec<ContentBlock>,
+}
+
+/// `_kage/mcp/restart` request params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpRestartRequest {
+    /// The session whose server to restart.
+    pub session_id: String,
+    /// The configured server name.
+    pub server: String,
+}
+
+/// The `_kage/shell` update: a user shell command's progress, sent to
+/// every client showing the session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellUpdate {
+    /// The command line.
+    pub command: String,
+    /// Whether the command has ended.
+    pub finished: bool,
+    /// While it runs: the last lines of its output so far.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail: Option<String>,
+    /// Once finished: its combined, truncated output, which the model
+    /// sees on the next turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Once finished: the exit code, absent when a signal ended it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
+/// The `_kage/mcp_servers` update: every MCP server of the session with
+/// what it offers, sent when the catalog changes. Each server is
+/// `{ name, status, error?, tools, resources, templates, prompts }`, in the
+/// shape kage's engine reports.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServersUpdate {
+    /// The servers, in registration order.
+    pub servers: Vec<serde_json::Value>,
+}
+
 /// `_kage/session/rewind` request params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1563,6 +1638,15 @@ pub enum SessionUpdate {
     /// The conversation was replaced; see [`SessionReplacedUpdate`].
     #[serde(rename = "_kage/session_replaced")]
     SessionReplaced(SessionReplacedUpdate),
+    /// A user shell command's progress; see [`ShellUpdate`].
+    #[serde(rename = "_kage/shell")]
+    Shell(ShellUpdate),
+    /// A pending prompt was taken back; see [`PromptWithdrawn`].
+    #[serde(rename = "_kage/prompt_withdrawn")]
+    PromptWithdrawn(PromptWithdrawn),
+    /// The session's MCP catalog; see [`McpServersUpdate`].
+    #[serde(rename = "_kage/mcp_servers")]
+    McpServers(McpServersUpdate),
     /// Any update kind kage does not know. Never sent.
     #[serde(other)]
     Unknown,

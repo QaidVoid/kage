@@ -6877,3 +6877,106 @@ fn delete_needs_the_whole_session_id() {
             .is_some()
     );
 }
+
+#[test]
+fn a_user_shell_command_streams_to_the_session_and_finishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(Vec::new(), dir.path(), dir.path());
+    let ran = h.client.request(
+        "_kage/shell",
+        serde_json::json!({"sessionId": h.session, "command": "echo shared"}),
+    );
+    assert_eq!(ran.unwrap(), serde_json::json!({}));
+    let updates = updates_until(&h.inbox, &h.session, "_kage/shell");
+    let mut last = updates.last().unwrap()["update"].clone();
+    while last["finished"] != true {
+        last = updates_until(&h.inbox, &h.session, "_kage/shell")
+            .last()
+            .unwrap()["update"]
+            .clone();
+    }
+    assert_eq!(last["command"], "echo shared");
+    assert_eq!(last["exitCode"], 0);
+    assert!(
+        last["output"].as_str().unwrap().contains("shared"),
+        "{last}"
+    );
+}
+
+#[test]
+fn withdrawing_from_an_empty_queue_answers_with_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(Vec::new(), dir.path(), dir.path());
+    let withdrawn = h
+        .client
+        .request(
+            "_kage/prompt/withdraw",
+            serde_json::json!({"sessionId": h.session, "delivery": "queue"}),
+        )
+        .unwrap();
+    assert_eq!(withdrawn, serde_json::json!({"delivery": "queue"}));
+}
+
+#[test]
+fn the_mcp_catalog_arrives_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve_with(
+        vec![text_turn("ok")],
+        dir.path(),
+        dir.path(),
+        true,
+        Modalities::default(),
+    );
+    let updates = updates_until(&h.inbox, &h.session, "_kage/mcp_servers");
+    let servers = &updates.last().unwrap()["update"]["servers"];
+    assert_eq!(servers[0]["name"], "srv");
+    assert_eq!(servers[0]["prompts"][0]["name"], "p");
+    let restarted = h.client.request(
+        "_kage/mcp/restart",
+        serde_json::json!({"sessionId": h.session, "server": "srv"}),
+    );
+    assert_eq!(restarted.unwrap(), serde_json::json!({}));
+}
+
+#[test]
+fn withdrawing_a_queued_prompt_answers_the_requester_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve_paused(
+        vec![Ok(ProviderEvent::MessageStart)],
+        vec![Ok(ProviderEvent::MessageEnd {
+            stop_reason: CoreStopReason::EndTurn,
+            usage: TokenUsage::default(),
+        })],
+        vec![text_turn("titled")],
+        dir.path(),
+        dir.path(),
+    );
+    let first = prompt_async(&h.client, &h.session, "now");
+    until(|| h.host.busy());
+    let queued = prompt_async_with(&h.client, &h.session, "later", Some("queue"));
+    let withdraw = || {
+        h.client.request(
+            "_kage/prompt/withdraw",
+            serde_json::json!({"sessionId": h.session, "delivery": "queue"}),
+        )
+    };
+    let deadline = Instant::now() + WAIT;
+    let withdrawn = loop {
+        let withdrawn = withdraw().unwrap();
+        if withdrawn.get("content").is_some() || Instant::now() > deadline {
+            break withdrawn;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(withdrawn["content"][0]["text"], "later");
+    let seen = drain_quiet(&h.inbox, &h.session);
+    assert!(
+        !seen
+            .iter()
+            .any(|u| u["update"]["sessionUpdate"] == "_kage/prompt_withdrawn"),
+        "an answered withdraw is not broadcast"
+    );
+    h.release.send(()).unwrap();
+    first.recv_timeout(WAIT).unwrap().unwrap();
+    drop(queued);
+}

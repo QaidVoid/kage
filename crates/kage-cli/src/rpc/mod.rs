@@ -62,15 +62,16 @@ use kage_acp::acp::{
     DirectoryRequest, DirectoryResult, FoldersRequest, FoldersResult, FsRequest, FsResult,
     ImageSaveRequest, Implementation, InitializeRequest, InitializeResponse, InstalledPlugin,
     KageAgentInfo, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, McpCapabilities, ModelsResponse, NewSessionRequest, NewSessionResponse,
-    OptionSetRequest, OptionsResponse, PROTOCOL_VERSION, PluginInstallRequest, PluginRemoveRequest,
-    PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse, RegistryInstallRequest,
-    RegistryInstallResult, RegistrySearchRequest, RegistrySearchResult, ResumeSessionRequest,
-    ResumeSessionResponse, SessionCapabilities, SessionConfigOption, SessionExportResponse,
-    SessionForkRequest, SessionForkResponse, SessionPromptsResponse, SessionRenameRequest,
-    SessionRequest, SessionRewindRequest, SessionUndoResponse, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, StopReason, Supported, SwarmResumeRequest, SwarmResumeResponse,
-    ThemesRequest, ThemesResult,
+    LoadSessionResponse, McpCapabilities, McpRestartRequest, ModelsResponse, NewSessionRequest,
+    NewSessionResponse, OptionSetRequest, OptionsResponse, PROTOCOL_VERSION, PluginInstallRequest,
+    PluginRemoveRequest, PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse,
+    PromptWithdrawn, RegistryInstallRequest, RegistryInstallResult, RegistrySearchRequest,
+    RegistrySearchResult, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
+    SessionConfigOption, SessionExportResponse, SessionForkRequest, SessionForkResponse,
+    SessionPromptsResponse, SessionRenameRequest, SessionRequest, SessionRewindRequest,
+    SessionUndoResponse, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+    ShellRequest, StopReason, Supported, SwarmResumeRequest, SwarmResumeResponse, ThemesRequest,
+    ThemesResult, WithdrawRequest,
 };
 use kage_acp::agent::{Agent, PromptContext};
 use kage_core::config::{Config, McpServer as McpSpec, PluginsConfig};
@@ -775,6 +776,26 @@ impl Agent for CliAcpAgent {
 
     fn session_delete(&self, req: SessionRequest) -> Result<serde_json::Value, RpcError> {
         self.delete(&req.session_id)
+    }
+
+    fn session_shell(&self, req: ShellRequest) -> Result<serde_json::Value, RpcError> {
+        let id = self.engine_id(&req.session_id)?;
+        let command = CommandKind::Shell {
+            command: req.command,
+        };
+        self.host.engine.send(Command::to(id, command));
+        Ok(serde_json::json!({}))
+    }
+
+    fn prompt_withdraw(&self, req: WithdrawRequest) -> Result<PromptWithdrawn, RpcError> {
+        self.withdraw(&req)
+    }
+
+    fn mcp_restart(&self, req: McpRestartRequest) -> Result<serde_json::Value, RpcError> {
+        let id = self.engine_id(&req.session_id)?;
+        let command = CommandKind::RestartMcp { server: req.server };
+        self.host.engine.send(Command::to(id, command));
+        Ok(serde_json::json!({}))
     }
 
     /// Asks the engine to compact the session now. The result reaches

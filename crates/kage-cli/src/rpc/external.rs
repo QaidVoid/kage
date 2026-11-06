@@ -16,7 +16,7 @@ mod unix {
         ClientCapabilities, ContentBlock, InitializeRequest, NewSessionRequest, PROTOCOL_VERSION,
         PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse,
     };
-    use kage_acp::agent::AgentPeer;
+    use kage_acp::agent::{AgentPeer, OpenReceipt};
     use kage_acp::connection::{Message, UnixConnection, UnixPromptCanceller, UnixShutdown};
     use kage_core::{CancelFlag, sync::lock};
     use kage_jsonrpc::{ResponseBarrier, RpcError};
@@ -179,6 +179,7 @@ mod unix {
         identity: Arc<()>,
         epoch: u64,
         admitted: Arc<AtomicUsize>,
+        unannounced: Option<Arc<AtomicUsize>>,
     }
 
     impl PromptTicket {
@@ -210,6 +211,9 @@ mod unix {
     impl Drop for PromptTicket {
         fn drop(&mut self) {
             self.admitted.fetch_sub(1, Ordering::AcqRel);
+            if let Some(counter) = &self.unannounced {
+                counter.fetch_sub(1, Ordering::AcqRel);
+            }
         }
     }
 
@@ -333,6 +337,7 @@ mod unix {
         reader_done: Mutex<mpsc::Receiver<()>>,
         prompt_gate: Mutex<()>,
         admitted: Arc<AtomicUsize>,
+        unannounced: Arc<AtomicUsize>,
         child: Arc<Mutex<Option<Child>>>,
         capabilities: PromptCapabilities,
         state: Arc<Mutex<State>>,
@@ -431,6 +436,7 @@ mod unix {
                 reader_done: Mutex::new(reader_done),
                 prompt_gate: Mutex::new(()),
                 admitted: Arc::new(AtomicUsize::new(0)),
+                unannounced: Arc::new(AtomicUsize::new(0)),
                 child,
                 capabilities,
                 state,
@@ -453,13 +459,57 @@ mod unix {
             Ok(())
         }
 
+        /// Attach and create a receipt for this exact attachment under one lock.
+        pub(crate) fn attach_with_receipt(
+            self: &Arc<Self>,
+            owner: u64,
+            peer: AgentPeer,
+        ) -> Result<OpenReceipt, RpcError> {
+            let mut state = lock(&self.state);
+            if state.closed {
+                return Err(RpcError::internal("external session is closed"));
+            }
+            if !state.attachments.contains_key(&owner) && state.attachments.len() >= MAX_ATTACHMENTS
+            {
+                return Err(RpcError::internal("too many external attachments"));
+            }
+            let attachment = state
+                .attachments
+                .entry(owner)
+                .or_insert_with(|| attachment(peer));
+            Ok(self.receipt(owner, Arc::clone(&attachment.identity)))
+        }
+
+        /// Create a receipt for an existing attachment, including the initial owner.
+        pub(crate) fn open_receipt(self: &Arc<Self>, owner: u64) -> Result<OpenReceipt, RpcError> {
+            let state = lock(&self.state);
+            let attachment = state
+                .attachments
+                .get(&owner)
+                .filter(|_| !state.closed)
+                .ok_or_else(|| RpcError::internal("external session is not attached"))?;
+            Ok(self.receipt(owner, Arc::clone(&attachment.identity)))
+        }
+
+        fn receipt(self: &Arc<Self>, owner: u64, identity: Arc<()>) -> OpenReceipt {
+            let session = Arc::clone(self);
+            Box::new(move || session.announce_identity(owner, Some(&identity)))
+        }
+
         pub(crate) fn announce(&self, owner: u64) {
+            self.announce_identity(owner, None);
+        }
+
+        fn announce_identity(&self, owner: u64, identity: Option<&Arc<()>>) {
             let mut state = lock(&self.state);
             if state.closed {
                 return;
             }
             let mut failed = false;
-            if let Some(attachment) = state.attachments.get_mut(&owner) {
+            if let Some(attachment) = state.attachments.get_mut(&owner)
+                && identity.is_none_or(|identity| Arc::ptr_eq(&attachment.identity, identity))
+                && !attachment.announced
+            {
                 attachment.announced = true;
                 for update in attachment.pending.drain(..) {
                     if attachment
@@ -533,7 +583,19 @@ mod unix {
             let Some(attachment) = state.attachments.get(&owner).filter(|_| !state.closed) else {
                 return Err(RpcError::new(-32602, "external session is not attached"));
             };
+            // Keep one session slot available to already announced attachments.
+            // Reservations made before announcement last for the ticket lifetime.
+            let unannounced = if attachment.announced {
+                None
+            } else if reserve(&self.unannounced, 1, MAX_PROMPTS - 1) {
+                Some(Arc::clone(&self.unannounced))
+            } else {
+                return Err(RpcError::internal("too many unannounced external prompts"));
+            };
             if !reserve(&self.admitted, 1, MAX_PROMPTS) {
+                if let Some(counter) = &unannounced {
+                    counter.fetch_sub(1, Ordering::AcqRel);
+                }
                 return Err(RpcError::internal("too many external prompts"));
             }
             Ok(PromptTicket {
@@ -541,6 +603,7 @@ mod unix {
                 identity: Arc::clone(&attachment.identity),
                 epoch: attachment.epoch,
                 admitted: Arc::clone(&self.admitted),
+                unannounced,
             })
         }
 
@@ -576,6 +639,11 @@ mod unix {
                     ));
                 }
             }
+            if !self.wait_for_announcement(&ticket, TIMEOUT)? {
+                return Ok(PromptResponse {
+                    stop_reason: kage_acp::acp::StopReason::Cancelled,
+                });
+            }
             let abort = CancelFlag::new();
             let Some(_gate) = self.wait_prompt_gate(&ticket) else {
                 return Ok(PromptResponse {
@@ -601,6 +669,8 @@ mod unix {
             }
             req.delivery = None;
             let deadline = Instant::now() + TIMEOUT;
+            // Cancellation can race with dispatch before the upstream canceller exists.
+            // The pending cancellation is sent once dispatch supplies that canceller.
             let prompt = match self.connection.dispatch_prompt(&req, Some(deadline), None) {
                 Ok(prompt) => prompt,
                 Err(error) => {
@@ -672,6 +742,53 @@ mod unix {
                     }
                 }
                 Cancellation::None | Cancellation::Pending(_) => false,
+            }
+        }
+
+        // A valid, already announced attachment needs no wait. Otherwise the
+        // deadline starts after the first check. Cancellation or detachment wins
+        // over timeout; timeout wins over a subsequently observed announcement.
+        fn wait_for_announcement(
+            &self,
+            ticket: &PromptTicket,
+            timeout: Duration,
+        ) -> Result<bool, RpcError> {
+            {
+                let state = lock(&self.state);
+                if !ticket.valid(&state) {
+                    return Ok(false);
+                }
+                if state.attachments[&ticket.owner].announced {
+                    return Ok(true);
+                }
+            }
+            self.wait_for_announcement_until(ticket, Instant::now() + timeout)
+        }
+
+        fn wait_for_announcement_until(
+            &self,
+            ticket: &PromptTicket,
+            deadline: Instant,
+        ) -> Result<bool, RpcError> {
+            loop {
+                {
+                    let state = lock(&self.state);
+                    if !ticket.valid(&state) {
+                        return Ok(false);
+                    }
+                    // At the deadline, timeout wins even if announcement is visible.
+                    if Instant::now() >= deadline {
+                        return Err(RpcError::internal(
+                            "external session announcement timed out",
+                        ));
+                    }
+                    if state.attachments[&ticket.owner].announced {
+                        return Ok(true);
+                    }
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                // Poll only on the prompt worker. The inbound path never waits for a receipt.
+                thread::sleep(remaining.min(Duration::from_millis(10)));
             }
         }
 
@@ -2107,6 +2224,167 @@ for line in sys.stdin:
         }
 
         #[test]
+        fn unannounced_saturation_reserves_a_slot_for_announced_owner() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            let (_client, server) = UnixStream::pair().unwrap();
+            let (peer, _, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            session.attach(2, peer.into()).unwrap();
+            let tickets: Vec<_> = (0..MAX_PROMPTS - 1)
+                .map(|_| session.register_prompt(2).unwrap())
+                .collect();
+            assert!(session.register_prompt(2).is_err());
+            assert_eq!(
+                session
+                    .prompt_owned(1, request("other"))
+                    .unwrap()
+                    .stop_reason,
+                StopReason::EndTurn
+            );
+            drop(tickets);
+            assert!(session.register_prompt(2).is_ok());
+            assert!(!session.detach(2));
+            assert!(session.detach(1));
+        }
+
+        #[test]
+        fn announcement_deadline_tie_times_out_but_preannounced_succeeds() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            let (_client, server) = UnixStream::pair().unwrap();
+            let (peer, _, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            session.attach(2, peer.into()).unwrap();
+            let ticket = session.register_prompt(2).unwrap();
+            assert!(
+                session
+                    .wait_for_announcement(&ticket, Duration::ZERO)
+                    .is_err()
+            );
+            session.announce(2);
+            assert!(
+                session
+                    .wait_for_announcement_until(&ticket, Instant::now())
+                    .is_err()
+            );
+            assert!(
+                session
+                    .wait_for_announcement(&ticket, Duration::ZERO)
+                    .unwrap()
+            );
+            drop(ticket);
+            assert!(!session.detach(2));
+            assert!(session.detach(1));
+        }
+
+        #[test]
+        fn unannounced_prompt_waits_without_blocking_other_attachments() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            let (_client, server) = UnixStream::pair().unwrap();
+            let (peer, _, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            let receipt = session.attach_with_receipt(2, peer.into()).unwrap();
+            let ticket = session.register_prompt(2).unwrap();
+            assert!(
+                session
+                    .wait_for_announcement(&ticket, Duration::ZERO)
+                    .is_err()
+            );
+            let worker_session = Arc::clone(&session);
+            let (tx, rx) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                tx.send(worker_session.prompt(ticket, request("waiting")))
+                    .unwrap();
+            });
+            assert_eq!(
+                session
+                    .prompt_owned(1, request("other"))
+                    .unwrap()
+                    .stop_reason,
+                StopReason::EndTurn
+            );
+            assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+            receipt();
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(3))
+                    .unwrap()
+                    .unwrap()
+                    .stop_reason,
+                StopReason::EndTurn
+            );
+            worker.join().unwrap();
+            assert!(!session.detach(2));
+            assert!(session.detach(1));
+        }
+
+        #[test]
+        fn unannounced_waiters_observe_cancellation_and_detach() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            let (_client, server) = UnixStream::pair().unwrap();
+            let (peer, _, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            session.attach(2, peer.clone().into()).unwrap();
+            let cancelled = session.register_prompt(2).unwrap();
+            let worker_session = Arc::clone(&session);
+            let worker = thread::spawn(move || worker_session.prompt(cancelled, request("cancel")));
+            session.cancel(2);
+            assert_eq!(
+                worker.join().unwrap().unwrap().stop_reason,
+                StopReason::Cancelled
+            );
+
+            let detached = session.register_prompt(2).unwrap();
+            let worker_session = Arc::clone(&session);
+            let worker = thread::spawn(move || worker_session.prompt(detached, request("detach")));
+            assert!(!session.detach(2));
+            session.attach(2, peer.into()).unwrap();
+            session.announce(2);
+            assert_eq!(
+                worker.join().unwrap().unwrap().stop_reason,
+                StopReason::Cancelled
+            );
+            assert_eq!(session.admitted.load(Ordering::Acquire), 0);
+            assert!(!session.detach(2));
+            assert!(session.detach(1));
+        }
+
+        #[test]
+        fn open_receipts_are_fresh_exact_once_and_attachment_scoped() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            let (_client, server) = UnixStream::pair().unwrap();
+            let (peer, _, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            let first = session.attach_with_receipt(2, peer.clone().into()).unwrap();
+            let second = session.attach_with_receipt(2, peer.clone().into()).unwrap();
+            let dropped = session.open_receipt(2).unwrap();
+            drop(dropped);
+            let (sender, receiver) = mpsc::sync_channel(4);
+            {
+                let mut state = lock(&session.state);
+                state.attachments.get_mut(&2).unwrap().sender = Some(sender);
+                forward(&mut state, "local", json!({"sessionId":"up", "value":1}));
+                assert!(!state.attachments[&2].announced);
+                assert_eq!(state.attachments[&2].pending.len(), 1);
+            }
+            second();
+            first();
+            assert!(matches!(receiver.try_recv(), Ok(WriteItem::Update(_))));
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+
+            let stale = session.open_receipt(2).unwrap();
+            assert!(!session.detach(2));
+            let replacement = session.attach_with_receipt(2, peer.into()).unwrap();
+            stale();
+            assert!(!lock(&session.state).attachments[&2].announced);
+            replacement();
+            assert!(lock(&session.state).attachments[&2].announced);
+            assert!(!session.detach(2));
+            assert!(session.detach(1));
+        }
+
+        #[test]
         fn registered_ticket_is_cancelled_by_detach_and_reattach() {
             let script = r"
 import json,sys
@@ -2818,7 +3096,7 @@ pub(super) use unix::{External, PromptTicket};
 #[cfg(not(unix))]
 mod unsupported {
     use kage_acp::acp::{PromptRequest, PromptResponse};
-    use kage_acp::agent::AgentPeer;
+    use kage_acp::agent::{AgentPeer, OpenReceipt};
     use kage_jsonrpc::RpcError;
     use std::sync::Arc;
 
@@ -2837,6 +3115,18 @@ mod unsupported {
             Err(RpcError::internal("external ACP requires Unix"))
         }
         pub(crate) fn attach(&self, _: u64, _: AgentPeer) -> Result<(), RpcError> {
+            Err(RpcError::internal("external ACP requires Unix"))
+        }
+        /// Attach and create a receipt for the attachment.
+        pub(crate) fn attach_with_receipt(
+            self: &Arc<Self>,
+            _: u64,
+            _: AgentPeer,
+        ) -> Result<OpenReceipt, RpcError> {
+            Err(RpcError::internal("external ACP requires Unix"))
+        }
+        /// Create a receipt for an existing attachment.
+        pub(crate) fn open_receipt(self: &Arc<Self>, _: u64) -> Result<OpenReceipt, RpcError> {
             Err(RpcError::internal("external ACP requires Unix"))
         }
         pub(crate) fn announce(&self, _: u64) {}

@@ -82,7 +82,7 @@ use kage_acp::acp::{
     WithdrawRequest,
 };
 use kage_acp::acp::{UiAttachRequest, UiCommandRequest, UiKeymapRequest, UiOutput, UiSnapshot};
-use kage_acp::agent::{Agent, AgentPeer, PromptContext};
+use kage_acp::agent::{Agent, AgentPeer, OpenReceipt, OpenResult, PromptContext};
 use kage_core::config::{Config, McpServer as McpSpec, PluginsConfig};
 use kage_core::environment::Environment;
 use kage_core::options::OptionValue;
@@ -716,10 +716,10 @@ impl CliAcpAgent {
         &self,
         id: &str,
         servers: &[kage_acp::acp::McpServer],
-    ) -> Result<bool, RpcError> {
+    ) -> Result<Option<OpenReceipt>, RpcError> {
         let sessions = lock(&self.host.external);
         let Some(session) = sessions.get(id) else {
-            return Ok(false);
+            return Ok(None);
         };
         if !servers.is_empty() {
             return Err(RpcError::new(
@@ -731,9 +731,9 @@ impl CliAcpAgent {
         if self.disconnecting.load(Ordering::SeqCst) {
             return Err(RpcError::internal("client is disconnecting"));
         }
-        session.attach(self.connection, self.peer.clone())?;
+        let receipt = session.attach_with_receipt(self.connection, self.peer.clone())?;
         ids.external.insert(id.to_owned());
-        Ok(true)
+        Ok(Some(receipt))
     }
 
     /// The connection ended: stop delivering engine events to it, free
@@ -856,6 +856,7 @@ impl Agent for CliAcpAgent {
             .and_then(|kage| kage.external_agent.as_deref())
             .is_some()
         {
+            // TODO: If external creation is enabled, return an identity-scoped open receipt.
             return Err(RpcError::new(
                 -32602,
                 "external agent sessions are temporarily unavailable",
@@ -917,11 +918,8 @@ impl Agent for CliAcpAgent {
         req: ResumeSessionRequest,
         ctx: &PromptContext,
     ) -> Result<ResumeSessionResponse, RpcError> {
-        if self.attach_external(&req.session_id, &req.mcp_servers)? {
-            return Ok(ResumeSessionResponse {
-                config_options: Vec::new(),
-            });
-        }
+        // External opens require the receipt-aware callback to order announcement
+        // after the response. This legacy callback only opens native sessions.
         let config_options = self.open_recorded(
             &req.session_id,
             &req.cwd,
@@ -931,6 +929,23 @@ impl Agent for CliAcpAgent {
             req.meta.as_ref(),
         )?;
         Ok(ResumeSessionResponse { config_options })
+    }
+
+    fn resume_session_with_receipt(
+        &self,
+        req: ResumeSessionRequest,
+        ctx: &PromptContext,
+    ) -> OpenResult<ResumeSessionResponse> {
+        if let Some(receipt) = self.attach_external(&req.session_id, &req.mcp_servers)? {
+            return Ok((
+                ResumeSessionResponse {
+                    config_options: Vec::new(),
+                },
+                Some(receipt),
+            ));
+        }
+        self.resume_session(req, ctx)
+            .map(|response| (response, None))
     }
 
     /// Releases the caller's attachment to `req.session_id`, closing
@@ -1446,10 +1461,6 @@ impl Agent for CliAcpAgent {
     }
 
     fn session_announced(&self, session_id: &str) {
-        if let Some(session) = self.external_session(session_id) {
-            session.announce(self.connection);
-            return;
-        }
         let Some(id) = lock(&self.ids).by_client.get(session_id).copied() else {
             return;
         };

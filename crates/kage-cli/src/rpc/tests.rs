@@ -7768,6 +7768,14 @@ fn external_race_fixture() -> (
     };
     let owner = Arc::new(CliAcpAgent::new(Arc::clone(&host), peer()));
     let other = Arc::new(CliAcpAgent::new(Arc::clone(&host), peer()));
+    let session = external_race_session(dir.path(), &owner);
+    lock(&host.external).insert("external".into(), session);
+    lock(&owner.ids).external.insert("external".into());
+    (dir, host, owner, other)
+}
+
+#[cfg(unix)]
+fn external_race_session(dir: &Path, owner: &CliAcpAgent) -> Arc<external::External> {
     let config = kage_core::config::AcpAgent {
         command: "python3".into(),
         args: vec![
@@ -7778,18 +7786,15 @@ fn external_race_fixture() -> (
         ],
         env: BTreeMap::new(),
     };
-    let session = external::External::start(
+    external::External::start(
         "external".into(),
         "fake",
-        dir.path().to_str().unwrap(),
+        dir.to_str().unwrap(),
         &config,
         owner.connection,
         owner.peer.clone(),
     )
-    .unwrap();
-    lock(&host.external).insert("external".into(), session);
-    lock(&owner.ids).external.insert("external".into());
-    (dir, host, owner, other)
+    .unwrap()
 }
 
 #[cfg(unix)]
@@ -7821,7 +7826,7 @@ fn external_attach_before_last_close_keeps_session_alive() {
             })
         });
         drop(ids);
-        assert!(attaching.join().unwrap().unwrap());
+        assert!(attaching.join().unwrap().unwrap().is_some());
         closing.join().unwrap().unwrap();
     });
     assert!(lock(&host.external).contains_key("external"));
@@ -7853,7 +7858,11 @@ fn external_attach_blocked_by_disconnect_does_not_leak_attachment() {
             std::thread::yield_now();
         }
         drop(ids);
-        let error = attaching.join().unwrap().unwrap_err();
+        let error = attaching
+            .join()
+            .unwrap()
+            .err()
+            .expect("attachment succeeded");
         assert!(error.message.contains("disconnecting"));
         disconnecting.join().unwrap();
     });
@@ -7874,7 +7883,7 @@ fn external_last_close_before_attach_removes_session() {
         })
         .unwrap();
     assert!(lock(&host.external).is_empty());
-    assert!(!other.attach_external("external", &[]).unwrap());
+    assert!(other.attach_external("external", &[]).unwrap().is_none());
     assert!(lock(&other.ids).external.is_empty());
     owner.detach();
     other.detach();
@@ -7884,7 +7893,7 @@ fn external_last_close_before_attach_removes_session() {
 #[test]
 fn external_close_and_reattach_same_connection_are_ordered() {
     let (_dir, host, owner, other) = external_race_fixture();
-    assert!(other.attach_external("external", &[]).unwrap());
+    assert!(other.attach_external("external", &[]).unwrap().is_some());
     let ids = lock(&owner.ids);
     std::thread::scope(|scope| {
         let closing = scope.spawn(|| {
@@ -7899,7 +7908,7 @@ fn external_close_and_reattach_same_connection_are_ordered() {
         let attaching = scope.spawn(|| owner.attach_external("external", &[]));
         drop(ids);
         closing.join().unwrap().unwrap();
-        assert!(attaching.join().unwrap().unwrap());
+        assert!(attaching.join().unwrap().unwrap().is_some());
     });
     let session = owner.external_session("external").unwrap();
     assert!(session.register_prompt(owner.connection).is_ok());
@@ -7957,9 +7966,13 @@ impl Agent for DelayedPromptAgent {
 #[cfg(unix)]
 fn delayed_external_prompt_test(reattach: bool) {
     let (_dir, _host, owner, other) = external_race_fixture();
-    owner.session_announced("external");
+    owner
+        .external_session("external")
+        .unwrap()
+        .open_receipt(owner.connection)
+        .unwrap()();
     if reattach {
-        assert!(other.attach_external("external", &[]).unwrap());
+        assert!(other.attach_external("external", &[]).unwrap().is_some());
     }
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -7994,8 +8007,7 @@ fn delayed_external_prompt_test(reattach: bool) {
                 session_id: "external".into(),
             })
             .unwrap();
-        assert!(owner.attach_external("external", &[]).unwrap());
-        owner.session_announced("external");
+        owner.attach_external("external", &[]).unwrap().unwrap()();
     } else {
         owner.cancel("external");
     }
@@ -8039,4 +8051,259 @@ fn native_prompt_preparation_defaults_to_normal_dispatch() {
         .request("session/prompt", serde_json::to_value(req).unwrap())
         .unwrap();
     assert_eq!(result["stopReason"], "end_turn");
+}
+
+#[cfg(unix)]
+fn external_receipt_prompt(
+    session: &external::External,
+    owner: u64,
+    text: &str,
+) -> Result<PromptResponse, RpcError> {
+    let req: PromptRequest = serde_json::from_value(serde_json::json!({
+        "sessionId": "external", "prompt": [{"type": "text", "text": text}]
+    }))
+    .unwrap();
+    session.prompt(session.register_prompt(owner).unwrap(), req)
+}
+
+#[cfg(unix)]
+fn pending_external_receipt_prompt(
+    session: &Arc<external::External>,
+    owner: u64,
+    text: &str,
+) -> mpsc::Receiver<Result<PromptResponse, RpcError>> {
+    let req: PromptRequest = serde_json::from_value(serde_json::json!({
+        "sessionId": "external", "prompt": [{"type": "text", "text": text}]
+    }))
+    .unwrap();
+    let ticket = session.register_prompt(owner).unwrap();
+    let session = Arc::clone(session);
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(session.prompt(ticket, req));
+    });
+    rx
+}
+
+#[cfg(unix)]
+#[test]
+fn prepared_external_prompt_waits_for_receipt_and_cancellation_prevents_dispatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("agent.py");
+    let marker = dir.path().join("prompts");
+    std::fs::write(
+        &script,
+        r"
+import json, os, sys
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get('method')
+    if method == 'initialize':
+        result = {'protocolVersion': 1, 'agentCapabilities': {}}
+    elif method == 'session/new':
+        result = {'sessionId': 'upstream'}
+    elif method == 'session/prompt':
+        with open(os.environ['PROMPT_MARKER'], 'a') as f:
+            f.write(msg['params']['prompt'][0]['text'] + '\n')
+        result = {'stopReason': 'end_turn'}
+    else:
+        continue
+    print(json.dumps({'jsonrpc': '2.0', 'id': msg['id'], 'result': result}), flush=True)
+",
+    )
+    .unwrap();
+    let mock = MockProvider::sequence(vec![]);
+    let host = test_host(
+        Arc::new(Listed::of(mock)),
+        dir.path().into(),
+        dir.path().into(),
+        false,
+    );
+    let (peer, _, _) = kage_jsonrpc::connect(std::io::empty(), std::io::sink());
+    let owner = CliAcpAgent::new(Arc::clone(&host), peer.into());
+    let config = kage_core::config::AcpAgent {
+        command: "python3".into(),
+        args: vec![script.to_string_lossy().into_owned()],
+        env: BTreeMap::from([(
+            "PROMPT_MARKER".into(),
+            marker.to_string_lossy().into_owned(),
+        )]),
+    };
+    let session = external::External::start(
+        "external".into(),
+        "fake",
+        dir.path().to_str().unwrap(),
+        &config,
+        owner.connection,
+        owner.peer.clone(),
+    )
+    .unwrap();
+    lock(&host.external).insert("external".into(), Arc::clone(&session));
+    lock(&owner.ids).external.insert("external".into());
+
+    let receipt = session.open_receipt(owner.connection).unwrap();
+    let pending = pending_external_receipt_prompt(&session, owner.connection, "after receipt");
+    assert!(matches!(
+        pending.recv_timeout(Duration::from_millis(200)),
+        Err(RecvTimeoutError::Timeout)
+    ));
+    assert!(!marker.exists(), "prompt dispatched before receipt");
+    receipt();
+    assert!(pending.recv_timeout(WAIT).unwrap().is_ok());
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "after receipt\n");
+
+    let (peer, _, _) = kage_jsonrpc::connect(std::io::empty(), std::io::sink());
+    let other = CliAcpAgent::new(Arc::clone(&host), peer.into());
+    let receipt = other.attach_external("external", &[]).unwrap().unwrap();
+    let pending = pending_external_receipt_prompt(&session, other.connection, "cancelled");
+    assert!(matches!(
+        pending.recv_timeout(Duration::from_millis(200)),
+        Err(RecvTimeoutError::Timeout)
+    ));
+    other.cancel("external");
+    assert_eq!(
+        pending.recv_timeout(WAIT).unwrap().unwrap().stop_reason,
+        kage_acp::acp::StopReason::Cancelled
+    );
+    receipt();
+    assert!(external_receipt_prompt(&session, other.connection, "next").is_ok());
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap(),
+        "after receipt\nnext\n"
+    );
+    owner.detach();
+    other.detach();
+}
+
+#[cfg(unix)]
+#[test]
+fn external_concurrent_open_receipts_survive_reverse_response_order() {
+    let (_dir, _host, owner, other) = external_race_fixture();
+    let session = owner.external_session("external").unwrap();
+    let (first_tx, first_rx) = mpsc::channel();
+    let (second_tx, second_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let other = &other;
+        scope.spawn(move || {
+            first_tx
+                .send(other.attach_external("external", &[]).unwrap().unwrap())
+                .unwrap();
+        });
+        scope.spawn(move || {
+            second_tx
+                .send(other.attach_external("external", &[]).unwrap().unwrap())
+                .unwrap();
+        });
+    });
+    let first = first_rx.recv_timeout(WAIT).unwrap();
+    let second = second_rx.recv_timeout(WAIT).unwrap();
+    let before = pending_external_receipt_prompt(&session, other.connection, "before");
+    assert!(matches!(
+        before.recv_timeout(Duration::from_millis(100)),
+        Err(RecvTimeoutError::Timeout)
+    ));
+    // The second response completes before the first.
+    second();
+    assert!(before.recv_timeout(WAIT).unwrap().is_ok());
+    assert!(external_receipt_prompt(&session, other.connection, "after").is_ok());
+    first();
+    assert!(external_receipt_prompt(&session, other.connection, "again").is_ok());
+    owner.detach();
+    other.detach();
+}
+
+#[cfg(unix)]
+#[test]
+fn external_dropped_and_stale_receipts_do_not_announce_replacement() {
+    let (_dir, _host, owner, other) = external_race_fixture();
+    let session = owner.external_session("external").unwrap();
+    let stale = session.open_receipt(owner.connection).unwrap();
+    let dropped = session.open_receipt(owner.connection).unwrap();
+    drop(dropped);
+    let dropped_prompt = pending_external_receipt_prompt(&session, owner.connection, "dropped");
+    assert!(matches!(
+        dropped_prompt.recv_timeout(Duration::from_millis(100)),
+        Err(RecvTimeoutError::Timeout)
+    ));
+    owner.cancel("external");
+    assert_eq!(
+        dropped_prompt
+            .recv_timeout(WAIT)
+            .unwrap()
+            .unwrap()
+            .stop_reason,
+        kage_acp::acp::StopReason::Cancelled
+    );
+
+    // Keep the process alive while replacing the owner's attachment.
+    let other_receipt = other.attach_external("external", &[]).unwrap().unwrap();
+    other_receipt();
+    owner
+        .close_session(CloseSessionRequest {
+            session_id: "external".into(),
+        })
+        .unwrap();
+    let replacement = owner.attach_external("external", &[]).unwrap().unwrap();
+    stale();
+    let pending = pending_external_receipt_prompt(&session, owner.connection, "stale");
+    assert!(matches!(
+        pending.recv_timeout(Duration::from_millis(100)),
+        Err(RecvTimeoutError::Timeout)
+    ));
+    replacement();
+    assert!(pending.recv_timeout(WAIT).unwrap().is_ok());
+    assert!(external_receipt_prompt(&session, owner.connection, "replacement").is_ok());
+    owner.detach();
+    other.detach();
+}
+
+#[cfg(unix)]
+#[test]
+fn external_stale_receipt_does_not_announce_replaced_session() {
+    let (dir, host, owner, other) = external_race_fixture();
+    let old = owner.external_session("external").unwrap();
+    let stale = owner.attach_external("external", &[]).unwrap().unwrap();
+    owner
+        .close_session(CloseSessionRequest {
+            session_id: "external".into(),
+        })
+        .unwrap();
+    let replacement = external_race_session(dir.path(), &owner);
+    assert!(
+        lock(&host.external)
+            .insert("external".into(), Arc::clone(&replacement))
+            .is_none()
+    );
+    let receipt = owner.attach_external("external", &[]).unwrap().unwrap();
+    stale();
+    let pending = pending_external_receipt_prompt(&replacement, owner.connection, "stale");
+    assert!(matches!(
+        pending.recv_timeout(Duration::from_millis(100)),
+        Err(RecvTimeoutError::Timeout)
+    ));
+    receipt();
+    assert!(pending.recv_timeout(WAIT).unwrap().is_ok());
+    assert!(external_receipt_prompt(&replacement, owner.connection, "replacement").is_ok());
+    assert!(!old.detach(owner.connection));
+    owner.detach();
+    other.detach();
+    assert!(lock(&host.external).is_empty());
+}
+
+#[test]
+fn native_new_session_with_receipt_preserves_legacy_announcement() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(vec![], dir.path(), dir.path());
+    let (peer, _, _) = kage_jsonrpc::connect(std::io::empty(), std::io::sink());
+    let agent = CliAcpAgent::new(Arc::clone(&h.host), peer.into());
+    let (response, receipt) = agent
+        .new_session_with_receipt(NewSessionRequest {
+            cwd: dir.path().to_string_lossy().into_owned(),
+            mcp_servers: vec![],
+            meta: None,
+        })
+        .unwrap();
+    assert!(receipt.is_none());
+    agent.session_announced(&response.session_id);
+    agent.detach();
 }

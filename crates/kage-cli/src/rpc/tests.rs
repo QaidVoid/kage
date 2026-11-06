@@ -7802,6 +7802,7 @@ fn external_race_session(
             owner: owner.connection,
             peer: owner.peer.clone(),
             record: None,
+            restore: None,
         },
     )
     .unwrap()
@@ -8233,6 +8234,7 @@ for line in sys.stdin:
             owner: owner.connection,
             peer: owner.peer.clone(),
             record: None,
+            restore: None,
         },
     )
     .unwrap();

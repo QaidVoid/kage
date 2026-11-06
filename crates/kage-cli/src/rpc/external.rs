@@ -14,6 +14,17 @@ pub(crate) struct Launch<'a> {
     pub(crate) owner: u64,
     pub(crate) peer: kage_acp::agent::AgentPeer,
     pub(crate) record: Option<Recording>,
+    pub(crate) restore: Option<Restore>,
+}
+
+/// An upstream session to restore instead of creating one. It is restored
+/// only through a capability the fresh agent process advertises, never by
+/// creating a new session or sending local history as context.
+pub(crate) struct Restore {
+    /// The upstream session id recorded in the session header.
+    pub(crate) upstream: String,
+    /// Prefer `session/load`, whose history replay reaches the attachment.
+    pub(crate) replay: bool,
 }
 
 /// Where to record presentation history.
@@ -40,7 +51,7 @@ mod unix {
 
     use super::lifecycle::{Lifecycles, Slot};
     use super::recorder::{Recorder, Target, bounded, presentation};
-    use super::{Launch, Recording};
+    use super::{Launch, Recording, Restore};
     use kage_core::reaper::spawn_protected;
     use kage_session::entry::{ExternalAcpPresentation, PresentationTurnOutcome};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -212,6 +223,8 @@ mod unix {
         writers: Arc<AtomicUsize>,
         asks: Vec<Arc<Ask>>,
         recorder: Option<Recorder>,
+        // Unique to this process, so item ids differ from a restored record's.
+        run: String,
         turn: u64,
         // A recorded prompt whose end is not recorded yet.
         turn_open: bool,
@@ -426,6 +439,8 @@ mod unix {
         capabilities: PromptCapabilities,
         protocol_version: u32,
         upstream: String,
+        // Whether updates before the response replayed upstream history.
+        replayed: bool,
     }
 
     /// One unresolved open of an exact attachment, resolved exactly once.
@@ -490,40 +505,10 @@ mod unix {
                 owner,
                 peer,
                 record,
+                restore,
             } = launch;
             let startup = lifecycles.reserve()?;
-            let mut command = Command::new(&config.command);
-            command
-                .args(&config.args)
-                .envs(&config.env)
-                .current_dir(cwd)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null());
-            let mut child = spawn_protected(&mut command).map_err(|e| {
-                RpcError::internal(format!("cannot start external agent {name:?}: {e}"))
-            })?;
-            let stdout = child.take_stdout();
-            let stdin = child.take_stdin();
-            startup.child(child);
-            let (Some(stdout), Some(stdin)) = (stdout, stdin) else {
-                return Err(RpcError::internal("external agent pipes are unavailable"));
-            };
-            nix::fcntl::fcntl(
-                &stdout,
-                nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
-            )
-            .map_err(|e| RpcError::internal(format!("cannot configure external reader: {e}")))?;
-            let reader_stopped = Arc::new(AtomicBool::new(false));
-            let reader = InterruptibleReader {
-                reader: stdout,
-                stopped: Arc::clone(&reader_stopped),
-            };
-            let (mut connection, incoming, reader_thread) =
-                UnixConnection::new_managed(BufReader::new(reader), stdin.into()).map_err(|e| {
-                    RpcError::internal(format!("cannot connect external agent: {e}"))
-                })?;
-            startup.transport(connection.shutdown_handle(), reader_stopped, reader_thread);
+            let (mut connection, incoming) = spawn_agent(&startup, name, cwd, config)?;
             let slot = startup.slot();
             let writers = Arc::new(AtomicUsize::new(0));
             let mut first = attachment(peer, slot, &writers)?;
@@ -541,17 +526,18 @@ mod unix {
                 writers,
                 asks: Vec::new(),
                 recorder: None,
+                run: kage_session::entry::EntryId::new().to_string(),
                 turn: 0,
                 turn_open: false,
             }));
             let session_id = id.clone();
             let started = receive_updates(incoming, Arc::clone(&state), id, slot)
-                .and_then(|()| initialize(&mut connection, cwd))
+                .and_then(|()| initialize(&mut connection, cwd, restore.as_ref()))
                 .and_then(|initialized| {
                     let recorder = record
                         .map(|record| start_recording(slot, record, name, &initialized))
                         .transpose()?;
-                    publish(&state, &session_id, initialized.upstream, recorder)?;
+                    publish(&state, &session_id, &initialized, recorder)?;
                     Ok(initialized.capabilities)
                 });
             let capabilities = match started {
@@ -1084,6 +1070,48 @@ mod unix {
         }
     }
 
+    // Spawn the agent and connect to it, handing each resource to the slot as
+    // soon as it exists.
+    fn spawn_agent(
+        startup: &super::lifecycle::Startup,
+        name: &str,
+        cwd: &str,
+        config: &kage_core::config::AcpAgent,
+    ) -> Result<(UnixConnection, kage_acp::connection::Incoming), RpcError> {
+        let mut command = Command::new(&config.command);
+        command
+            .args(&config.args)
+            .envs(&config.env)
+            .current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = spawn_protected(&mut command).map_err(|e| {
+            RpcError::internal(format!("cannot start external agent {name:?}: {e}"))
+        })?;
+        let stdout = child.take_stdout();
+        let stdin = child.take_stdin();
+        startup.child(child);
+        let (Some(stdout), Some(stdin)) = (stdout, stdin) else {
+            return Err(RpcError::internal("external agent pipes are unavailable"));
+        };
+        nix::fcntl::fcntl(
+            &stdout,
+            nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
+        )
+        .map_err(|e| RpcError::internal(format!("cannot configure external reader: {e}")))?;
+        let reader_stopped = Arc::new(AtomicBool::new(false));
+        let reader = InterruptibleReader {
+            reader: stdout,
+            stopped: Arc::clone(&reader_stopped),
+        };
+        let (connection, incoming, reader_thread) =
+            UnixConnection::new_managed(BufReader::new(reader), stdin.into())
+                .map_err(|e| RpcError::internal(format!("cannot connect external agent: {e}")))?;
+        startup.transport(connection.shutdown_handle(), reader_stopped, reader_thread);
+        Ok((connection, incoming))
+    }
+
     // The worker closes the session when upstream input ends. The slot then
     // shuts down the transport, reaps the process, and joins the reader.
     fn receive_updates(
@@ -1414,7 +1442,11 @@ mod unix {
         result
     }
 
-    fn initialize(connection: &mut UnixConnection, cwd: &str) -> Result<Initialized, RpcError> {
+    fn initialize(
+        connection: &mut UnixConnection,
+        cwd: &str,
+        restore: Option<&Restore>,
+    ) -> Result<Initialized, RpcError> {
         let deadline = Instant::now() + TIMEOUT;
         let (init, barrier) = connection.initialize(
             &InitializeRequest {
@@ -1426,6 +1458,53 @@ mod unix {
             None,
         );
         let init = ordered_result(init, barrier, deadline, "initialize")?;
+        let protocol_version = u32::try_from(init.protocol_version)
+            .map_err(|_| RpcError::internal("invalid external protocol version"))?;
+        let capabilities = init.agent_capabilities;
+        if let Some(restore) = restore {
+            let can_load = capabilities.load_session;
+            let can_resume = capabilities.session_capabilities.resume.is_some();
+            let load = can_load && (restore.replay || !can_resume);
+            if !load && !can_resume {
+                return Err(RpcError::new(
+                    -32602,
+                    "the external agent cannot restore sessions",
+                ));
+            }
+            let deadline = Instant::now() + TIMEOUT;
+            let restored = if load {
+                let (response, barrier) = connection.load_session(
+                    &kage_acp::acp::LoadSessionRequest {
+                        session_id: restore.upstream.clone(),
+                        cwd: cwd.to_owned(),
+                        mcp_servers: vec![],
+                        meta: None,
+                    },
+                    Some(deadline),
+                    None,
+                );
+                ordered_result(response, barrier, deadline, "session/load").map(drop)
+            } else {
+                let (response, barrier) = connection.resume_session(
+                    &kage_acp::acp::ResumeSessionRequest {
+                        session_id: restore.upstream.clone(),
+                        cwd: cwd.to_owned(),
+                        mcp_servers: vec![],
+                        meta: None,
+                    },
+                    Some(deadline),
+                    None,
+                );
+                ordered_result(response, barrier, deadline, "session/resume").map(drop)
+            };
+            restored?;
+            return Ok(Initialized {
+                capabilities: capabilities.prompt_capabilities,
+                protocol_version,
+                upstream: restore.upstream.clone(),
+                replayed: load,
+            });
+        }
         let deadline = Instant::now() + TIMEOUT;
         let (response, barrier) = connection.new_session(
             &NewSessionRequest {
@@ -1438,10 +1517,10 @@ mod unix {
         );
         let response = ordered_result(response, barrier, deadline, "session")?;
         Ok(Initialized {
-            capabilities: init.agent_capabilities.prompt_capabilities,
-            protocol_version: u32::try_from(init.protocol_version)
-                .map_err(|_| RpcError::internal("invalid external protocol version"))?,
+            capabilities: capabilities.prompt_capabilities,
+            protocol_version,
             upstream: response.session_id,
+            replayed: false,
         })
     }
 
@@ -1468,22 +1547,29 @@ mod unix {
         }
     }
 
-    // Updates that arrived before the upstream session id are published, and
-    // recorded, in arrival order once it is known.
+    // Updates that arrived before the upstream session id are published in
+    // arrival order once it is known. They are recorded too, unless they
+    // replayed upstream history that the local record already holds.
     fn publish(
         state: &Mutex<State>,
         id: &str,
-        upstream: String,
+        initialized: &Initialized,
         recorder: Option<Recorder>,
     ) -> Result<(), RpcError> {
         let mut state = lock(state);
-        state.upstream = Some(upstream);
-        state.recorder = recorder;
+        state.upstream = Some(initialized.upstream.clone());
+        let mut recorder = Some(recorder);
+        if !initialized.replayed {
+            state.recorder = recorder.take().flatten();
+        }
         let early = std::mem::take(&mut state.early);
         for update in early {
             let value = update.value.clone();
             drop(update);
             forward(&mut state, id, value);
+        }
+        if let Some(recorder) = recorder {
+            state.recorder = recorder;
         }
         if state.closed {
             return Err(RpcError::internal(
@@ -1588,7 +1674,8 @@ mod unix {
         if params.get("sessionId").and_then(Value::as_str) != state.upstream.as_deref() {
             return;
         }
-        for event in presentation(&params, state.turn) {
+        let item = format!("{}-{}", state.run, state.turn);
+        for event in presentation(&params, &item) {
             state.record(event);
         }
         let Some(object) = params.as_object_mut() else {
@@ -1808,6 +1895,7 @@ for line in sys.stdin:
                     owner: 1,
                     peer: peer.into(),
                     record: None,
+                    restore: None,
                 },
             )
             .unwrap();
@@ -1903,6 +1991,7 @@ for line in sys.stdin:
                     owner: 1,
                     peer: peer.into(),
                     record: None,
+                    restore: None,
                 },
             )
             .unwrap();
@@ -1957,6 +2046,7 @@ for line in sys.stdin:
                     owner: 1,
                     peer: peer.into(),
                     record: None,
+                    restore: None,
                 },
             )
             .unwrap();
@@ -2923,6 +3013,7 @@ for line in sys.stdin:
                     owner: 1,
                     peer: peer.into(),
                     record: None,
+                    restore: None,
                 },
             )
             .unwrap();
@@ -3036,6 +3127,7 @@ for line in sys.stdin:
                     owner: 1,
                     peer,
                     record: None,
+                    restore: None,
                 },
             )
             .unwrap();
@@ -3252,6 +3344,7 @@ for line in sys.stdin:
                         path: path.clone(),
                         header: Box::new(header),
                     }),
+                    restore: None,
                 },
             )
             .unwrap();
@@ -3329,6 +3422,154 @@ for line in sys.stdin:
                     .count(),
                 1
             );
+        }
+
+        // Advertises the restore capability named by its argument and fails if
+        // asked to create a session. A load replays one history update.
+        const RESTORE_SCRIPT: &str = r"
+import json,sys
+caps={'resume':{'sessionCapabilities':{'resume':{}}},'load':{'loadSession':True},'none':{}}[sys.argv[1]]
+used=None
+def update(sid,text): print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':sid,'update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':text}}}}),flush=True)
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); i=m.get('id'); p=m.get('params',{})
+ if method=='initialize': result={'protocolVersion':1,'agentCapabilities':caps}
+ elif method=='session/new': sys.exit(3)
+ elif method in ('session/resume','session/load'):
+  used=method
+  if method=='session/load': update(p['sessionId'],'history')
+  result={}
+ elif method=='session/prompt':
+  update(p['sessionId'],used+' '+p['sessionId'])
+  result={'stopReason':'end_turn'}
+ else: continue
+ print(json.dumps({'jsonrpc':'2.0','id':i,'result':result}),flush=True)
+";
+
+        type Restored = (
+            Result<(Arc<External>, OpenTicket), RpcError>,
+            Lifecycles,
+            std::path::PathBuf,
+            UnixStream,
+        );
+
+        fn restored_session(dir: &std::path::Path, capability: &str, replay: bool) -> Restored {
+            let (path, mut header) = crate::plan_session_in(dir, "external", "");
+            header.cwd = dir.to_path_buf();
+            header.backend = Some(kage_session::entry::SessionBackend::ExternalAcp(
+                kage_session::entry::ExternalAcpSession {
+                    agent_name: "fake".into(),
+                    protocol_version: 1,
+                    upstream_session_id: "up-old".into(),
+                },
+            ));
+            drop(kage_session::SessionWriter::create(&path, header).unwrap());
+            let config = kage_core::config::AcpAgent {
+                command: "python3".into(),
+                args: vec![
+                    "-u".into(),
+                    "-c".into(),
+                    RESTORE_SCRIPT.into(),
+                    capability.into(),
+                ],
+                env: BTreeMap::default(),
+            };
+            let (client, b) = UnixStream::pair().unwrap();
+            let (peer, _, _) = kage_jsonrpc::connect(BufReader::new(b.try_clone().unwrap()), b);
+            let lifecycles = Lifecycles::new(1);
+            let started = External::start(
+                &lifecycles,
+                Launch {
+                    id: "local".into(),
+                    name: "fake",
+                    cwd: dir.to_str().unwrap(),
+                    config: &config,
+                    owner: 1,
+                    peer: peer.into(),
+                    record: Some(Recording::Append { path: path.clone() }),
+                    restore: Some(Restore {
+                        upstream: "up-old".into(),
+                        replay,
+                    }),
+                },
+            );
+            (started, lifecycles, path, client)
+        }
+
+        fn recorded_texts(path: &std::path::Path) -> Vec<String> {
+            kage_session::external_replay::replay_external(path)
+                .unwrap()
+                .events
+                .iter()
+                .map(shown)
+                .collect()
+        }
+
+        #[test]
+        fn restoring_resumes_the_recorded_upstream_session_and_appends() {
+            let dir = tempfile::tempdir().unwrap();
+            let (started, _lifecycles, path, _client) =
+                restored_session(dir.path(), "resume", true);
+            let (session, created) = started.unwrap();
+            created.announce();
+            assert_eq!(
+                session
+                    .prompt_owned(1, request("again"))
+                    .unwrap()
+                    .stop_reason,
+                StopReason::EndTurn
+            );
+            assert!(session.detach(1));
+            assert!(session.slot.wait_finished(WAIT));
+            assert_eq!(
+                recorded_texts(&path),
+                [
+                    "prompt again",
+                    "message session/resume up-old",
+                    "end EndTurn"
+                ]
+            );
+        }
+
+        #[test]
+        fn restoring_by_load_forwards_history_without_recording_it() {
+            let dir = tempfile::tempdir().unwrap();
+            let (started, _lifecycles, path, client) = restored_session(dir.path(), "load", true);
+            let (session, created) = started.unwrap();
+            created.announce();
+            let mut lines = BufReader::new(client).lines();
+            let history: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+            assert_eq!(history["params"]["sessionId"], "local");
+            assert_eq!(history["params"]["update"]["content"]["text"], "history");
+            assert_eq!(
+                session
+                    .prompt_owned(1, request("again"))
+                    .unwrap()
+                    .stop_reason,
+                StopReason::EndTurn
+            );
+            assert!(session.detach(1));
+            assert!(session.slot.wait_finished(WAIT));
+            assert_eq!(
+                recorded_texts(&path),
+                ["prompt again", "message session/load up-old", "end EndTurn"]
+            );
+        }
+
+        #[test]
+        fn an_agent_that_cannot_restore_is_refused_without_a_new_session() {
+            let dir = tempfile::tempdir().unwrap();
+            let (started, lifecycles, path, _client) = restored_session(dir.path(), "none", true);
+            let Err(error) = started else {
+                panic!("restoration must fail");
+            };
+            assert_eq!(error.code, -32602, "{error:?}");
+            let until = Instant::now() + WAIT;
+            while lifecycles.live() != 0 {
+                assert!(Instant::now() < until, "slot was not released");
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert!(recorded_texts(&path).is_empty());
         }
 
         #[test]
@@ -3622,6 +3863,7 @@ for line in sys.stdin:
                 writers: Arc::new(AtomicUsize::new(0)),
                 asks: Vec::new(),
                 recorder: None,
+                run: kage_session::entry::EntryId::new().to_string(),
                 turn: 0,
                 turn_open: false,
             };
@@ -3721,6 +3963,7 @@ for line in sys.stdin:
                 writers: Arc::new(AtomicUsize::new(0)),
                 asks: Vec::new(),
                 recorder: None,
+                run: kage_session::entry::EntryId::new().to_string(),
                 turn: 0,
                 turn_open: false,
             };
@@ -3801,6 +4044,7 @@ for line in sys.stdin:
                 writers: Arc::new(AtomicUsize::new(0)),
                 asks: Vec::new(),
                 recorder: None,
+                run: kage_session::entry::EntryId::new().to_string(),
                 turn: 0,
                 turn_open: false,
             }));
@@ -3840,6 +4084,7 @@ for line in sys.stdin:
                 writers: Arc::new(AtomicUsize::new(0)),
                 asks: Vec::new(),
                 recorder: None,
+                run: kage_session::entry::EntryId::new().to_string(),
                 turn: 0,
                 turn_open: false,
             }));
@@ -4079,6 +4324,7 @@ for line in sys.stdin:
                     owner: 1,
                     peer: peer.clone().into(),
                     record: None,
+                    restore: None,
                 },
             )
             .unwrap();
@@ -4151,6 +4397,7 @@ for line in sys.stdin:
                     owner: 1,
                     peer: peer.clone().into(),
                     record: None,
+                    restore: None,
                 },
             )
             .unwrap();

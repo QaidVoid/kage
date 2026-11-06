@@ -269,16 +269,17 @@ fn content_text(content: &Value) -> Option<&str> {
         .flatten()
 }
 
-/// The display events of one upstream `session/update`, in `turn`.
+/// The display events of one upstream `session/update`. Message and thought
+/// fragments are grouped by `item`, which must be unique to the turn.
 ///
 /// Only message and thought text and tool call titles and statuses are kept.
 /// Tool output, raw tool input, other content and metadata are omitted,
 /// because they can carry secrets. Titles can still name a command.
-pub(crate) fn presentation(params: &Value, turn: u64) -> Vec<ExternalAcpPresentation> {
+pub(crate) fn presentation(params: &Value, item: &str) -> Vec<ExternalAcpPresentation> {
     let Some(update) = params.get("update") else {
         return Vec::new();
     };
-    let item_id = || bounded(&format!("turn-{turn}"));
+    let item_id = || bounded(item);
     match update.get("sessionUpdate").and_then(Value::as_str) {
         Some(kind @ ("agent_message_chunk" | "agent_thought_chunk")) => update
             .get("content")
@@ -372,7 +373,7 @@ mod tests {
             "sessionUpdate": "agent_message_chunk",
             "content": {"type": "text", "text": "hello"}
         }});
-        for event in presentation(&update, 1) {
+        for event in presentation(&update, "1") {
             recorder.record(event);
         }
         recorder.record(ExternalAcpPresentation::TurnEnd {
@@ -530,7 +531,7 @@ mod tests {
             "content": [{"type": "content", "content": {"type": "text", "text": "ok"}},
                         {"type": "diff", "path": "/x", "newText": "y"}]
         }});
-        let events = presentation(&call, 1);
+        let events = presentation(&call, "1");
         assert_eq!(events.len(), 1);
         let ExternalAcpPresentation::ToolCallUpdate {
             text: shown,
@@ -545,8 +546,8 @@ mod tests {
         let long = "\u{e9}".repeat(EXTERNAL_ACP_TEXT_LIMIT);
         let chunk = json!({"update": {"sessionUpdate": "agent_message_chunk",
             "content": {"type": "text", "text": long}}});
-        let joined: String = presentation(&chunk, 1).iter().filter_map(text).collect();
+        let joined: String = presentation(&chunk, "1").iter().filter_map(text).collect();
         assert_eq!(joined, long);
-        assert!(presentation(&json!({"update": {"sessionUpdate": "plan"}}), 1).is_empty());
+        assert!(presentation(&json!({"update": {"sessionUpdate": "plan"}}), "1").is_empty());
     }
 }

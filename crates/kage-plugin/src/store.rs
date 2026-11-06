@@ -50,7 +50,9 @@ pub(crate) fn install_base(lua: &Lua) -> Result<(), PluginError> {
 /// Attach a real `kage.store` onto a single plugin's `kage` proxy,
 /// backed by `path` (`<state_dir>/<stem>.json`). Each call loads and
 /// rewrites the file so state is durable across reloads; the parent
-/// directory is created lazily on first write.
+/// directory is created lazily on first write. A write holds a lock on
+/// `<stem>.json.lock`, so writes from several runtimes or processes never
+/// drop each other's keys.
 pub(crate) fn install_for_plugin(lua: &Lua, pkage: &Table, path: PathBuf) -> mlua::Result<()> {
     let store = lua.create_table()?;
 
@@ -70,9 +72,11 @@ pub(crate) fn install_for_plugin(lua: &Lua, pkage: &Table, path: PathBuf) -> mlu
     store.set(
         "set",
         lua.create_function(move |_, (key, value): (String, Value)| {
-            let mut map = load(&set_path)?;
-            map.insert(key, lua_to_json(value)?);
-            save(&set_path, &map)
+            let value = lua_to_json(value)?;
+            update(&set_path, |map| {
+                map.insert(key, value);
+                true
+            })
         })?,
     )?;
 
@@ -80,11 +84,7 @@ pub(crate) fn install_for_plugin(lua: &Lua, pkage: &Table, path: PathBuf) -> mlu
     store.set(
         "delete",
         lua.create_function(move |_, key: String| {
-            let mut map = load(&delete_path)?;
-            if map.remove(&key).is_some() {
-                save(&delete_path, &map)?;
-            }
-            Ok(())
+            update(&delete_path, |map| map.remove(&key).is_some())
         })?,
     )?;
 
@@ -120,13 +120,36 @@ fn load(path: &Path) -> mlua::Result<StoreMap> {
     }
 }
 
-/// Atomically persist the store map, creating the parent dir on demand.
-fn save(path: &Path, map: &StoreMap) -> mlua::Result<()> {
+/// Applies `change` to the store with its lock held, saving when `change`
+/// reports a change. Reads take no lock: a save replaces the file
+/// atomically, so a reader sees the old map or the new one.
+fn update(path: &Path, change: impl FnOnce(&mut StoreMap) -> bool) -> mlua::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             mlua::Error::external(format!("kage.store: mkdir {}: {e}", parent.display()))
         })?;
     }
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .and_then(|file| file.lock().map(|()| file))
+        .map_err(|e| mlua::Error::external(format!("kage.store: lock {}: {e}", path.display())))?;
+    let mut map = load(path)?;
+    let saved = if change(&mut map) {
+        save(path, &map)
+    } else {
+        Ok(())
+    };
+    drop(lock);
+    saved
+}
+
+/// Atomically persist the store map.
+fn save(path: &Path, map: &StoreMap) -> mlua::Result<()> {
     let body = serde_json::to_vec_pretty(map)
         .map_err(|e| mlua::Error::external(format!("kage.store: encode: {e}")))?;
     kage_core::fsutil::atomic_write(path, &body)
@@ -137,4 +160,35 @@ fn save(path: &Path, map: &StoreMap) -> mlua::Result<()> {
 #[must_use]
 pub(crate) fn store_path(state_dir: &Path, stem: &str) -> PathBuf {
     state_dir.join(format!("{stem}.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writers in parallel, as several runtimes or processes sharing one
+    /// plugin's store are, keep every key.
+    #[test]
+    fn concurrent_writes_keep_every_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = store_path(dir.path(), "plugin");
+        let writers: Vec<_> = (0..4)
+            .map(|writer| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for n in 0..25 {
+                        update(&path, |map| {
+                            map.insert(format!("{writer}-{n}"), n.into());
+                            true
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        assert_eq!(load(&path).unwrap().len(), 100);
+    }
 }

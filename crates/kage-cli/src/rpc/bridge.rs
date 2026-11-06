@@ -79,6 +79,9 @@ pub(super) struct Bridge {
     pub(super) tree: AgentTree,
     /// Whether the client advertised the subagents capability.
     pub(super) subagents: Arc<AtomicBool>,
+    /// Whether the client is a kage client, which understands
+    /// `_kage/session_replaced`.
+    pub(super) kage_client: Arc<AtomicBool>,
     /// Announced subagents whose terminal state is not sent yet.
     pub(super) streaming: HashSet<SessionId>,
     /// Ended runs held back until their live subagents end.
@@ -446,6 +449,14 @@ impl Bridge {
                 self.finish_compaction(session, &client_id);
                 self.run_ended(session, outcome);
             }
+            Event::Host(HostEvent::SessionChanged {
+                path,
+                title,
+                timeline,
+                ..
+            }) => {
+                self.replaced(session, &client_id, path, title.clone(), timeline);
+            }
             Event::Host(_) => {}
         }
     }
@@ -670,6 +681,48 @@ impl Bridge {
         }
         drop(held);
         send_update(&self.peer, client_id, update);
+    }
+
+    /// The session's conversation was replaced in place, by an undo or a
+    /// rewind: a kage client drops what it shows and gets the conversation
+    /// as it now stands, with its finished agents, as a load sends it.
+    /// Other clients know no way to drop a transcript, so they keep theirs.
+    fn replaced(
+        &mut self,
+        session: SessionId,
+        client_id: &str,
+        path: &std::path::Path,
+        title: Option<String>,
+        timeline: &[kage_core::protocol::TimelineItem],
+    ) {
+        self.seen.remove(&session);
+        if !self.kage_client.load(Ordering::SeqCst) {
+            return;
+        }
+        let replaced =
+            SessionUpdate::SessionReplaced(kage_acp::acp::SessionReplacedUpdate { title });
+        self.send(session, client_id, replaced);
+        for update in super::sessions::replay_updates(timeline) {
+            self.send(session, client_id, update);
+        }
+        let Ok(replay) = kage_session::replay(path) else {
+            return;
+        };
+        let Some(dir) = path.parent() else {
+            return;
+        };
+        let restored = {
+            let live = lock(&self.live);
+            super::sessions::restored_subagents(dir, session, &replay, &live)
+        };
+        for (parent, update) in restored {
+            let update = SessionUpdate::SubagentUpdate(update);
+            if parent == session {
+                self.send(session, client_id, update);
+            } else {
+                send_update(&self.peer, &parent.to_string(), update);
+            }
+        }
     }
 
     /// Reports a streamed agent's usage and model to its parent's client

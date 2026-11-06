@@ -45,6 +45,7 @@ mod plugin_files;
 mod plugin_registry;
 pub(crate) mod probe;
 mod registry;
+mod rewind;
 mod sessions;
 mod themes;
 
@@ -66,9 +67,10 @@ use kage_acp::acp::{
     PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse, RegistryInstallRequest,
     RegistryInstallResult, RegistrySearchRequest, RegistrySearchResult, ResumeSessionRequest,
     ResumeSessionResponse, SessionCapabilities, SessionConfigOption, SessionExportResponse,
-    SessionForkRequest, SessionForkResponse, SessionRenameRequest, SessionRequest,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, Supported,
-    SwarmResumeRequest, SwarmResumeResponse, ThemesRequest, ThemesResult,
+    SessionForkRequest, SessionForkResponse, SessionPromptsResponse, SessionRenameRequest,
+    SessionRequest, SessionRewindRequest, SessionUndoResponse, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, StopReason, Supported, SwarmResumeRequest, SwarmResumeResponse,
+    ThemesRequest, ThemesResult,
 };
 use kage_acp::agent::{Agent, PromptContext};
 use kage_core::config::{Config, McpServer as McpSpec, PluginsConfig};
@@ -253,7 +255,7 @@ struct CliAcpAgent {
     unconfigured_run: AtomicBool,
     /// Whether the client is a kage client, which shows runs it did not
     /// prompt, so an idle session wakes for a background agent's result.
-    kage_client: AtomicBool,
+    kage_client: Arc<AtomicBool>,
     /// The environment the client sent, which sessions it opens from now
     /// on start their processes with. The host's own until it sends one.
     env: Mutex<Environment>,
@@ -276,6 +278,7 @@ impl CliAcpAgent {
         let waiters = Waiters::default();
         let shown = ShownBySession::default();
         let subagents = Arc::new(AtomicBool::new(false));
+        let kage_client = Arc::new(AtomicBool::new(false));
         let held = Held::default();
         let asks = AskSet::default();
         let seeds = Arc::default();
@@ -294,6 +297,7 @@ impl CliAcpAgent {
             asks: Arc::clone(&asks),
             tree: AgentTree::default(),
             subagents: Arc::clone(&subagents),
+            kage_client: Arc::clone(&kage_client),
             streaming: HashSet::new(),
             ended: HashMap::new(),
             commands: HashMap::new(),
@@ -320,7 +324,7 @@ impl CliAcpAgent {
             shown,
             subagents,
             unconfigured_run: AtomicBool::new(false),
-            kage_client: AtomicBool::new(false),
+            kage_client,
             env: Mutex::new(Environment::inherit()),
             takes_env: AtomicBool::new(false),
             peer,
@@ -755,6 +759,22 @@ impl Agent for CliAcpAgent {
 
     fn session_export(&self, req: SessionRequest) -> Result<SessionExportResponse, RpcError> {
         self.export_recorded(&req.session_id)
+    }
+
+    fn session_undo(&self, req: SessionRequest) -> Result<SessionUndoResponse, RpcError> {
+        self.undo(&req.session_id)
+    }
+
+    fn session_rewind(&self, req: SessionRewindRequest) -> Result<serde_json::Value, RpcError> {
+        self.rewind(req)
+    }
+
+    fn session_prompts(&self, req: SessionRequest) -> Result<SessionPromptsResponse, RpcError> {
+        self.prompts(&req.session_id)
+    }
+
+    fn session_delete(&self, req: SessionRequest) -> Result<serde_json::Value, RpcError> {
+        self.delete(&req.session_id)
     }
 
     /// Asks the engine to compact the session now. The result reaches

@@ -582,7 +582,7 @@ impl super::Dispatcher {
     /// prompt. The removed prompt goes back to the client in
     /// [`HostEvent::Undone`] so it can offer it for a retry.
     pub(super) fn undo(&mut self, id: SessionId) {
-        if self.refuse_for_agent(id, "undo") || !self.ensure_idle(id, "undo") {
+        if self.refuse_for_agent(id, "undo") || !self.ensure_tree_idle(id, "undo") {
             return;
         }
         let Some(src) = self.sessions[&id].path.clone() else {
@@ -608,7 +608,7 @@ impl super::Dispatcher {
     /// target. The picked prompt and its reply stay; what follows the
     /// turn is abandoned.
     pub(super) fn rewind(&mut self, id: SessionId, at: &str) {
-        if self.refuse_for_agent(id, "rewind") || !self.ensure_idle(id, "rewind") {
+        if self.refuse_for_agent(id, "rewind") || !self.ensure_tree_idle(id, "rewind") {
             return;
         }
         let Some(src) = self.sessions[&id].path.clone() else {

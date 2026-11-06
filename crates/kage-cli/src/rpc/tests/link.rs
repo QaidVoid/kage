@@ -40,7 +40,15 @@ impl LinkClient {
     }
 
     fn send(&mut self, session: Option<SessionId>, kind: CommandKind) {
-        link::write_line(&mut self.writer, &Command { session, kind }).unwrap();
+        link::write_line(
+            &mut self.writer,
+            &Command {
+                session,
+                id: None,
+                kind,
+            },
+        )
+        .unwrap();
     }
 
     fn next(&mut self) -> Envelope {

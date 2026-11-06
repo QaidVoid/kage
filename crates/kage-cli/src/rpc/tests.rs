@@ -6475,3 +6475,236 @@ fn only_a_local_client_sets_the_environment_of_its_sessions() {
     }
     assert_eq!(*lock(&seen), [false, true]);
 }
+
+/// Two recorded turns, `first` then `second`, for undo and rewind.
+fn two_turns(sessions: &Path) -> String {
+    record(
+        sessions,
+        &sessions.display().to_string(),
+        "mock/m",
+        1,
+        &[
+            message(Role::User, vec![text("first")], None),
+            message(Role::Assistant, vec![text("one")], None),
+            message(Role::User, vec![text("second")], None),
+            message(Role::Assistant, vec![text("two")], None),
+        ],
+    )
+}
+
+/// The user prompts in `updates`, in order.
+fn user_texts(updates: &[serde_json::Value]) -> Vec<String> {
+    updates
+        .iter()
+        .filter(|u| u["update"]["sessionUpdate"] == "user_message_chunk")
+        .map(|u| u["update"]["content"]["text"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Drains `inbox` until no update arrives for a moment.
+fn drain_quiet(inbox: &mpsc::Receiver<Inbound>, session: &str) -> Vec<serde_json::Value> {
+    let mut updates = Vec::new();
+    while let Ok(Inbound::Notification { params, .. }) =
+        inbox.recv_timeout(Duration::from_millis(300))
+    {
+        if params["sessionId"] == session {
+            updates.push(params);
+        }
+    }
+    updates
+}
+
+#[test]
+fn undo_returns_the_prompt_and_replaces_the_session_for_every_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = dir.path();
+    let source = two_turns(sessions);
+    let h = serve(Vec::new(), sessions, sessions);
+    let c2 = h.connect();
+    as_kage_client(&c2);
+    attach_both(&h, &c2, &source, &sessions.display().to_string());
+    drain_quiet(&c2.inbox, &source);
+
+    let undone = h
+        .client
+        .request(
+            "_kage/session/undo",
+            serde_json::json!({"sessionId": source}),
+        )
+        .unwrap();
+    assert_eq!(undone["prompt"][0]["text"], "second");
+    let seen = drain_quiet(&c2.inbox, &source);
+    let replaced = seen
+        .iter()
+        .position(|u| u["update"]["sessionUpdate"] == "_kage/session_replaced")
+        .expect("the other client hears of the replacement");
+    assert_eq!(user_texts(&seen[replaced..]), ["first"]);
+    let theirs = drain_quiet(&h.inbox, &source);
+    assert!(
+        !theirs
+            .iter()
+            .any(|u| u["update"]["sessionUpdate"] == "_kage/session_replaced"),
+        "a client that is not kage keeps its transcript"
+    );
+}
+
+/// Initializes `c` as a kage client, which understands kage-only updates.
+fn as_kage_client(c: &Connection) {
+    let params = serde_json::json!({
+        "protocolVersion": 1,
+        "clientCapabilities": {"_meta": {"kage": {}}},
+    });
+    c.client.request("initialize", params).unwrap();
+}
+
+#[test]
+fn prompts_list_the_branch_tree_and_rewind_continues_from_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = dir.path();
+    let source = two_turns(sessions);
+    let h = serve(Vec::new(), sessions, sessions);
+    let c2 = h.connect();
+    as_kage_client(&c2);
+    attach_both(&h, &c2, &source, &sessions.display().to_string());
+    drain_quiet(&c2.inbox, &source);
+
+    let listed = h
+        .client
+        .request(
+            "_kage/session/prompts",
+            serde_json::json!({"sessionId": source}),
+        )
+        .unwrap();
+    let prompts = listed["prompts"].as_array().unwrap();
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[0]["prompt"][0]["text"], "first");
+    assert_eq!(prompts[1]["active"], true);
+
+    let at = prompts[0]["at"].as_str().unwrap();
+    let rewind = |at: &str| {
+        h.client.request(
+            "_kage/session/rewind",
+            serde_json::json!({"sessionId": source, "at": at}),
+        )
+    };
+    assert_eq!(rewind(at).unwrap(), serde_json::json!({}));
+    let seen = drain_quiet(&c2.inbox, &source);
+    assert!(
+        seen.iter()
+            .any(|u| u["update"]["sessionUpdate"] == "_kage/session_replaced")
+    );
+    assert_eq!(user_texts(&seen), ["first"]);
+    assert!(rewind("zzzz").is_err(), "an unknown prompt is refused");
+}
+
+#[test]
+fn delete_refuses_an_open_session_and_removes_a_closed_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = dir.path();
+    let closed = two_turns(sessions);
+    let h = serve(Vec::new(), sessions, sessions);
+    let delete = |id: &str| {
+        h.client
+            .request("_kage/session/delete", serde_json::json!({"sessionId": id}))
+    };
+    assert!(delete(&h.session).is_err(), "the open session stays");
+    assert_eq!(delete(&closed).unwrap(), serde_json::json!({}));
+    assert!(
+        kage_session::find_by_prefix(sessions, &closed)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn fork_at_an_entry_copies_through_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = dir.path();
+    let source = two_turns(sessions);
+    let h = serve(Vec::new(), sessions, sessions);
+    let path = kage_session::find_by_prefix(sessions, &source)
+        .unwrap()
+        .unwrap();
+    let ids: Vec<String> = kage_session::SessionReader::iter(&path)
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|entry| matches!(entry, SessionEntry::Message(_)))
+        .map(|entry| entry.id().to_string())
+        .collect();
+    let forked = h
+        .client
+        .request(
+            "_kage/session/fork",
+            serde_json::json!({"sessionId": source, "at": ids[1]}),
+        )
+        .unwrap();
+    let copy = kage_session::find_by_prefix(sessions, forked["sessionId"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(kage_session::replay(&copy).unwrap().history.len(), 2);
+}
+
+#[test]
+fn undo_is_refused_at_once_while_a_turn_runs_or_with_nothing_to_undo() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve_paused(
+        vec![Ok(ProviderEvent::MessageStart)],
+        vec![Ok(ProviderEvent::MessageEnd {
+            stop_reason: CoreStopReason::EndTurn,
+            usage: TokenUsage::default(),
+        })],
+        vec![text_turn("titled")],
+        dir.path(),
+        dir.path(),
+    );
+    let undo = || {
+        h.client.request(
+            "_kage/session/undo",
+            serde_json::json!({"sessionId": h.session}),
+        )
+    };
+    let started = Instant::now();
+    assert!(
+        undo().is_err(),
+        "an unrecorded idle session has nothing to undo"
+    );
+    let client = h.client.clone();
+    let session = h.session.clone();
+    let prompt = std::thread::spawn(move || {
+        client.request(
+            "session/prompt",
+            serde_json::json!({"sessionId": session, "prompt": [{"type": "text", "text": "hi"}]}),
+        )
+    });
+    until(|| h.host.busy());
+    let refused = undo().unwrap_err();
+    assert!(
+        refused.message.contains("wait for the current run"),
+        "{}",
+        refused.message
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "refusals answer at once"
+    );
+    h.release.send(()).unwrap();
+    prompt.join().unwrap().unwrap();
+}
+
+#[test]
+fn delete_needs_the_whole_session_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = dir.path();
+    let closed = two_turns(sessions);
+    let h = serve(Vec::new(), sessions, sessions);
+    let delete = |id: &str| {
+        h.client
+            .request("_kage/session/delete", serde_json::json!({"sessionId": id}))
+    };
+    assert!(delete(&closed[..8]).is_err(), "a prefix deletes nothing");
+    assert!(
+        kage_session::find_by_prefix(sessions, &closed)
+            .unwrap()
+            .is_some()
+    );
+}

@@ -218,7 +218,7 @@ impl super::CliAcpAgent {
     }
 
     /// The file of the recorded session `client_id` names.
-    fn recorded_path(&self, client_id: &str) -> Result<PathBuf, RpcError> {
+    pub(super) fn recorded_path(&self, client_id: &str) -> Result<PathBuf, RpcError> {
         kage_session::find_by_prefix(&self.host.sessions, client_id)
             .map_err(|e| RpcError::internal(e.to_string()))?
             .ok_or_else(|| RpcError::new(-32602, format!("unknown session {client_id}")))
@@ -231,7 +231,11 @@ impl super::CliAcpAgent {
         req: &SessionForkRequest,
     ) -> Result<SessionForkResponse, RpcError> {
         let path = self.recorded_path(&req.session_id)?;
-        let at = fork_point(&path, req.before.as_ref())?;
+        let at = match (&req.before, &req.at) {
+            (None, Some(at)) => kage_session::resolve_entry_prefix(&path, at)
+                .map_err(|e| RpcError::new(-32602, e.to_string()))?,
+            (before, _) => fork_point(&path, before.as_ref())?,
+        };
         let id = SessionId::new();
         let dst = self.host.sessions.join(format!("{id}.jsonl"));
         let truncated = kage_session::fork(&path, &dst, id, at)

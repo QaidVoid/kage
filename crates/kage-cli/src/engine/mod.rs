@@ -59,7 +59,7 @@ use kage_tools::ToolRegistry;
 
 use self::swarm_tool::SwarmInfo;
 
-pub(crate) use bus::{Subscriber, SubscriptionId};
+pub(crate) use bus::{Subscriber, SubscriptionId, answering};
 pub(crate) use media_tool::WithMediaTools;
 pub(crate) use recorder::Recorder;
 pub(crate) use sessions::render_session_markdown;
@@ -858,6 +858,7 @@ impl Dispatcher {
         reason = "a flat dispatch over every engine command"
     )]
     fn command(&mut self, command: Command) {
+        let _answering = bus::Answering::enter(command.id);
         match command.kind {
             CommandKind::Shutdown => {
                 self.shutting_down = true;

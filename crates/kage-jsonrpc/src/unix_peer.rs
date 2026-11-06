@@ -103,6 +103,10 @@ impl Drop for State {
 /// bounded streaming serializer. Callers retain ownership of argument values
 /// while waiting for admission, so their memory and thread count are not bounded
 /// by this peer.
+///
+/// Outgoing requests and notifications omit `params` when passed
+/// [`serde_json::Value::Null`]. Other values are sent unchanged without
+/// validation, including nulls nested inside objects or arrays.
 #[derive(Clone)]
 pub struct UnixPeer(Arc<State>);
 
@@ -540,7 +544,9 @@ fn message(method: &str, params: serde_json::Value, id: Option<i64>) -> serde_js
     let mut object = serde_json::Map::new();
     object.insert("jsonrpc".into(), "2.0".into());
     object.insert("method".into(), method.into());
-    object.insert("params".into(), params);
+    if !params.is_null() {
+        object.insert("params".into(), params);
+    }
     if let Some(id) = id {
         object.insert("id".into(), id.into());
     }
@@ -584,6 +590,67 @@ mod tests {
     }
 
     #[test]
+    fn outbound_params_and_null_result_wire_frames() {
+        let (peer, incoming, reader, mut agent_in, mut agent_out) = fixture();
+        for params in [
+            serde_json::Value::Null,
+            serde_json::json!({"nested": null}),
+            serde_json::json!([null, {"nested": null}]),
+            serde_json::json!(42),
+        ] {
+            peer.notify("notice", params.clone(), None, None).unwrap();
+            let notice = read_message(&mut agent_in);
+            let mut expected = serde_json::json!({"jsonrpc": "2.0", "method": "notice"});
+            if !params.is_null() {
+                expected["params"] = params.clone();
+            }
+            assert_eq!(notice, expected);
+
+            let request = peer.dispatch("call", params.clone(), None, None).unwrap();
+            let frame = read_message(&mut agent_in);
+            let id = frame["id"].clone();
+            let mut expected = serde_json::json!({"jsonrpc": "2.0", "method": "call", "id": id});
+            if !params.is_null() {
+                expected["params"] = params;
+            }
+            assert_eq!(frame, expected);
+            writeln!(
+                agent_out,
+                "{}",
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": null})
+            )
+            .unwrap();
+            let OrderedInbound::Barrier(marker) =
+                incoming.recv_timeout(Duration::from_secs(2)).unwrap()
+            else {
+                panic!("expected barrier");
+            };
+            marker.acknowledge();
+            let (result, barrier) =
+                request.wait(Some(Instant::now() + Duration::from_secs(2)), None);
+            assert_eq!(result.unwrap(), serde_json::Value::Null);
+            barrier
+                .unwrap()
+                .wait_timeout(Duration::from_secs(2))
+                .unwrap();
+        }
+        peer.respond(
+            &serde_json::json!(7),
+            Ok(serde_json::Value::Null),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            read_message(&mut agent_in),
+            serde_json::json!({"jsonrpc": "2.0", "id": 7, "result": null})
+        );
+        peer.shutdown();
+        drop(agent_out);
+        reader.join().unwrap();
+    }
+
+    #[test]
     fn cancellation_and_deadline_take_priority_over_buffered_response() {
         let (peer, incoming, reader, mut agent_in, mut agent_out) = fixture();
         for cancelled in [false, true] {
@@ -591,7 +658,12 @@ mod tests {
                 .dispatch("test", serde_json::Value::Null, None, None)
                 .unwrap();
             let id = read_message(&mut agent_in)["id"].clone();
-            writeln!(agent_out, "{}", serde_json::json!({"id": id, "result": 42})).unwrap();
+            writeln!(
+                agent_out,
+                "{}",
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": 42})
+            )
+            .unwrap();
             let OrderedInbound::Barrier(marker) =
                 incoming.recv_timeout(Duration::from_secs(2)).unwrap()
             else {
@@ -634,7 +706,7 @@ mod tests {
         writeln!(
             agent_out,
             "{}",
-            serde_json::json!({"jsonrpc":"2.0", "id": first_id, "result": "ignored"})
+            serde_json::json!({"jsonrpc":false, "id": first_id, "result": "ignored"})
         )
         .unwrap();
         writeln!(
@@ -886,6 +958,10 @@ mod tests {
     #[test]
     fn malformed_response_fails_without_barrier_and_closes_transport() {
         for response in [
+            serde_json::json!({"id":1, "result":true}),
+            serde_json::json!({"jsonrpc":null, "id":1, "result":true}),
+            serde_json::json!({"jsonrpc":2, "id":1, "result":true}),
+            serde_json::json!({"jsonrpc":"1.0", "id":1, "result":true}),
             serde_json::json!({"jsonrpc":"2.0", "id":1}),
             serde_json::json!({"jsonrpc":"2.0", "id":1, "result":true, "error":{"code":-1, "message":"bad"}}),
             serde_json::json!({"jsonrpc":"2.0", "id":1, "error":{"code":"bad", "message":"bad"}}),
@@ -895,12 +971,21 @@ mod tests {
                 .dispatch("pending", serde_json::Value::Null, None, None)
                 .unwrap();
             assert_eq!(read_message(&mut agent_in)["id"], 1);
+            let other = peer
+                .dispatch("other", serde_json::Value::Null, None, None)
+                .unwrap();
+            assert_eq!(read_message(&mut agent_in)["id"], 2);
             writeln!(agent_out, "{response}").unwrap();
             let (result, barrier) =
                 pending.wait(Some(Instant::now() + Duration::from_secs(2)), None);
             assert_eq!(result.unwrap_err().code, -32600);
             assert!(barrier.is_none());
             reader.join().unwrap();
+            assert_eq!(other.wait(None, None).0.unwrap_err(), closed());
+            assert_eq!(peer.read_status(), ReadStatus::Failed);
+            let mut rest = Vec::new();
+            agent_in.read_to_end(&mut rest).unwrap();
+            assert!(rest.is_empty());
             assert!(
                 peer.dispatch("after", serde_json::Value::Null, None, None)
                     .is_err()
@@ -1118,7 +1203,7 @@ mod eof_race_tests {
         writeln!(
             input,
             "{}",
-            serde_json::json!({"id": request["id"], "result": 42})
+            serde_json::json!({"jsonrpc":"2.0", "id": request["id"], "result": 42})
         )
         .unwrap();
         let OrderedInbound::Barrier(barrier) =

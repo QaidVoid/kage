@@ -30,9 +30,15 @@ impl Env {
     }
 
     fn host(&self, idle_secs: u64) -> Child {
+        self.host_with(&["--idle-secs", &idle_secs.to_string()])
+    }
+
+    /// `kage host run` with `args`.
+    fn host_with(&self, args: &[&str]) -> Child {
         let root = self.dir.path();
         Command::new(env!("CARGO_BIN_EXE_kage"))
-            .args(["host", "run", "--idle-secs", &idle_secs.to_string()])
+            .args(["host", "run"])
+            .args(args)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", root)
@@ -77,6 +83,24 @@ impl Env {
             output,
             next: 0,
         }
+    }
+
+    /// Runs `kage` with `args` in this environment and waits for it.
+    fn kage(&self, args: &[&str]) -> std::process::Output {
+        let root = self.dir.path();
+        Command::new(env!("CARGO_BIN_EXE_kage"))
+            .args(args)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", root)
+            .env("XDG_RUNTIME_DIR", root.join("runtime"))
+            .env("XDG_DATA_HOME", root.join("data"))
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_STATE_HOME", root.join("state"))
+            .current_dir(root)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
     }
 
     fn record(&self) -> Option<Value> {
@@ -348,6 +372,173 @@ fn a_session_starts_its_servers_in_the_environment_of_its_client() {
     assert_eq!(seen("b"), "second");
     assert!(first.close().success());
     assert!(second.close().success());
+    assert!(terminate(&mut host).success());
+}
+
+#[test]
+fn host_management_survives_broken_user_and_project_configs() {
+    for relative in ["config/kage/config.toml", ".kage/config.toml"] {
+        let env = Env::new();
+        let mut host = env.host(60);
+        env.ready(host.id());
+        let log = env.dir.path().join("state/kage/host.log");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, "host repair log\n").unwrap();
+        let config = env.dir.path().join(relative);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "[broken\n").unwrap();
+
+        let status = env.kage(&["host", "status"]);
+        let logs = env.kage(&["host", "logs"]);
+        let stop = env.kage(&["host", "stop"]);
+        if stop.status.success() {
+            assert!(exit_within(&mut host, WAIT).success());
+        } else {
+            terminate(&mut host);
+        }
+        assert!(
+            status.status.success(),
+            "{relative}: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&status.stdout).contains(&host.id().to_string()),
+            "status must identify the running host"
+        );
+        assert!(logs.status.success(), "{relative}: {logs:?}");
+        assert_eq!(logs.stdout, b"host repair log\n", "{relative}");
+        assert!(stop.status.success(), "{relative}: {stop:?}");
+        let run = env.kage(&["host", "run", "--idle-secs", "1"]);
+        assert!(
+            !run.status.success(),
+            "host run must still validate {relative}"
+        );
+    }
+}
+
+#[test]
+fn status_and_stop_manage_the_running_host() {
+    let env = Env::new();
+    let idle = env.kage(&["host", "status"]);
+    assert_eq!(idle.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&idle.stdout).contains("no shared host is running"));
+
+    let mut host = env.host(60);
+    env.ready(host.id());
+    let running = env.kage(&["host", "status"]);
+    assert!(running.status.success());
+    let shown = String::from_utf8_lossy(&running.stdout);
+    assert!(
+        shown.contains(&format!("pid      {}", host.id())),
+        "{shown}"
+    );
+
+    let stopped = env.kage(&["host", "stop"]);
+    assert!(stopped.status.success());
+    assert!(String::from_utf8_lossy(&stopped.stdout).contains("stopped the shared host"));
+    assert!(exit_within(&mut host, WAIT).success());
+    assert!(env.record().is_none());
+    let again = env.kage(&["host", "stop"]);
+    assert!(String::from_utf8_lossy(&again.stdout).contains("no shared host is running"));
+}
+
+#[test]
+fn a_killed_hosts_record_is_never_signalled() {
+    let env = Env::new();
+    let mut host = env.host(60);
+    env.ready(host.id());
+    host.kill().unwrap();
+    host.wait().unwrap();
+    assert!(env.record().is_some(), "the record outlives a killed host");
+    let status = env.kage(&["host", "status"]);
+    assert_eq!(status.status.code(), Some(1));
+    let stop = env.kage(&["host", "stop"]);
+    assert!(stop.status.success());
+    assert!(String::from_utf8_lossy(&stop.stdout).contains("no shared host is running"));
+}
+
+#[test]
+fn a_host_started_by_a_client_logs_to_the_state_directory() {
+    let env = Env::new();
+    let mut rpc = env.rpc(&[]);
+    rpc.request("initialize", json!({"protocolVersion": 1}));
+    let logs = env.kage(&["host", "logs"]);
+    assert!(logs.status.success());
+    let text = String::from_utf8_lossy(&logs.stdout);
+    assert!(text.contains("accepting clients"), "{text}");
+    assert!(rpc.close().success());
+}
+
+#[test]
+fn a_user_config_can_turn_sharing_off() {
+    let env = Env::new();
+    let config = env.dir.path().join("config/kage");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("config.toml"), "[host]\nshare = false\n").unwrap();
+    let mut rpc = env.rpc(&[]);
+    rpc.request("initialize", json!({"protocolVersion": 1}));
+    assert!(env.record().is_none());
+    assert!(rpc.close().success());
+}
+
+#[test]
+fn the_idle_timeout_comes_from_the_user_config() {
+    let env = Env::new();
+    let config = env.dir.path().join("config/kage");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.toml"),
+        "[host]\nidle_timeout_secs = 1\n",
+    )
+    .unwrap();
+    let mut host = env.host_with(&[]);
+    env.ready(host.id());
+    assert!(exit_within(&mut host, WAIT).success());
+}
+
+/// A client whose `KAGE_*` configuration overrides the host cannot
+/// honor runs an engine of its own: the host merged its own environment
+/// at startup, so joining it would silently drop the overrides. A
+/// variable that names no config key does not turn the client away.
+#[test]
+fn a_config_env_override_runs_a_private_engine() {
+    let env = Env::new();
+    let project = env.dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("secret.txt"), "contents").unwrap();
+    let mut host = env.host(60);
+    env.ready(host.id());
+
+    let mut shared = env.rpc(&[("KAGE_DEBUG_KEYS", "1")]);
+    shared.request("initialize", json!({"protocolVersion": 1}));
+    assert_eq!(
+        env.record().unwrap()["pid"],
+        host.id(),
+        "a non-config variable still shares the host"
+    );
+    assert!(shared.close().success());
+
+    let mut private = env.rpc(&[("KAGE_PERMISSIONS__TOOLS__READ__DEFAULT", "deny")]);
+    private.request("initialize", json!({"protocolVersion": 1}));
+    assert_eq!(
+        env.record().unwrap()["pid"],
+        host.id(),
+        "the override starts no second host"
+    );
+    let created = private.request(
+        "session/new",
+        json!({"cwd": project.display().to_string(), "mcpServers": []}),
+    );
+    let session = created["result"]["sessionId"].as_str().unwrap();
+    let denied = private.request(
+        "_kage/fs",
+        json!({"sessionId": session, "op": "read", "path": "secret.txt"}),
+    );
+    assert_eq!(
+        denied["error"]["code"], -32602,
+        "the private engine denies the read: {denied}"
+    );
+    assert!(private.close().success());
     assert!(terminate(&mut host).success());
 }
 

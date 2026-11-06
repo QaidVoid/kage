@@ -62,6 +62,10 @@ pub struct Config {
     /// never applies.
     #[serde(default, skip_serializing_if = "TrustConfig::is_default")]
     pub trust: TrustConfig,
+    /// The shared host (`[host]`), read from the user config and env
+    /// only.
+    #[serde(default, skip_serializing_if = "HostConfig::is_default")]
+    pub host: HostConfig,
 }
 
 /// The longest a media tool call may take, matching the ceiling the
@@ -262,7 +266,8 @@ impl Config {
         self.permissions.validate()?;
         self.shell.validate()?;
         self.tools.validate()?;
-        self.trust.validate()
+        self.trust.validate()?;
+        self.host.validate()
     }
 
     /// Load configuration from `path`, merging with defaults and env overrides.
@@ -340,7 +345,7 @@ impl Config {
     /// `[loop]`, `[agents]`, `provider.default_model` and
     /// `plugins.disabled`. Everything else in it waits for trust,
     /// except what the user config's `[trust]` table already trusts
-    /// by path. The project file's `providers`, `acp`, `trust`,
+    /// by path. The project file's `providers`, `acp`, `trust`, `host`,
     /// `plugins.registry` and the media tables `tools.generate_image`,
     /// `tools.edit_image`, `tools.generate_speech` and
     /// `tools.generate_music` never apply: those are only read from
@@ -356,6 +361,12 @@ impl Config {
 
     /// [`Self::load_layered`] without validation, for repair callers.
     pub fn load_layered_raw(workdir: &Path) -> Result<Self> {
+        Self::load_layered_with_env(workdir, true)
+    }
+
+    /// [`Self::load_layered_raw`], with the process environment layer
+    /// merged only when `env` says so.
+    fn load_layered_with_env(workdir: &Path, env: bool) -> Result<Self> {
         let mut figment = Figment::new().merge(Serialized::defaults(Self::default()));
         if let Some(user) = Self::default_path() {
             figment = figment.merge(Toml::file(user));
@@ -364,7 +375,9 @@ impl Config {
             Some(filtered) => figment.merge(Toml::string(&filtered)),
             None => figment.merge(Toml::file(Self::project_path(workdir))),
         };
-        figment = figment.merge(Env::prefixed("KAGE_").split("__"));
+        if env {
+            figment = figment.merge(Env::prefixed("KAGE_").split("__"));
+        }
         let mut cfg: Self = figment.extract()?;
         // A later layer replaces an array, so a project's `disabled`
         // would otherwise re-enable what the user turned off.
@@ -379,6 +392,35 @@ impl Config {
             }
         }
         Ok(cfg)
+    }
+
+    /// Whether this process's `KAGE_*` environment variables change the
+    /// layered configuration of `workdir`: the config the user file,
+    /// the project file and the environment produce differs from the
+    /// one the files alone produce. A variable that names no
+    /// configuration key, such as `KAGE_STANDALONE` or
+    /// `KAGE_HOST_IDLE_SECS`, extracts to nothing and does not count;
+    /// neither does one whose value the other layers already produce.
+    /// An extraction that fails with the environment, or without it,
+    /// counts too: a value may break the extract, or repair a file the
+    /// layers alone cannot extract, and a process carrying either must
+    /// not silently run without it.
+    ///
+    /// The answer says nothing about a host's own environment: a
+    /// process whose overrides the host happens to share still falls
+    /// back, which is the conservative side.
+    #[must_use]
+    pub fn env_overrides_active(workdir: &Path) -> bool {
+        match (
+            Self::load_layered_with_env(workdir, true),
+            Self::load_layered_with_env(workdir, false),
+        ) {
+            (Ok(with), Ok(without)) => with != without,
+            // An env value may break extraction, or repair a file the
+            // layers alone cannot extract. Either way the process
+            // carries configuration the files do not pin down.
+            _ => true,
+        }
     }
 
     /// Set each `(key path, value)` pair in the TOML file at `path`,
@@ -1048,6 +1090,51 @@ impl TrustPart {
     }
 }
 
+/// The shared host every `kage rpc` connects to (`[host]`). Only the user
+/// config sets it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostConfig {
+    /// Whether `kage rpc` connects to the shared host. With `false`, every
+    /// `kage rpc` runs a private engine.
+    pub share: bool,
+    /// Seconds the host waits with no clients and no work before it
+    /// exits.
+    pub idle_timeout_secs: u64,
+}
+
+impl Default for HostConfig {
+    fn default() -> Self {
+        Self {
+            share: true,
+            idle_timeout_secs: 600,
+        }
+    }
+}
+
+impl HostConfig {
+    /// Whether nothing is configured, so serializing skips the table.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Refuses an idle timeout of zero, which would stop the host before
+    /// a client could connect.
+    ///
+    /// # Errors
+    ///
+    /// When `idle_timeout_secs` is zero.
+    pub fn validate(&self) -> Result<()> {
+        if self.idle_timeout_secs == 0 {
+            return Err(config_error(
+                "[host] idle_timeout_secs must be at least 1".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Standing trust for project directories from the user-level
 /// `[trust]` table. It is the user's own trust, so it never expires
 /// when a project's files change, unlike a stored `kage trust`
@@ -1510,6 +1597,126 @@ mod tests {
             jail.set_env("KAGE_UI__THEME", "catppuccin-mocha");
             let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
             assert_eq!(cfg.ui.theme, "catppuccin-mocha");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn env_overrides_see_config_keys_but_not_control_variables() {
+        let _globals = process_globals();
+        // Process-control variables name no configuration key, so they
+        // never count as configuration overrides.
+        figment::Jail::expect_with(|jail| {
+            let home = jail.directory().to_path_buf();
+            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            jail.set_env(
+                "XDG_CONFIG_HOME",
+                home.join(".config").to_string_lossy().as_ref(),
+            );
+            jail.set_env("KAGE_STANDALONE", "1");
+            jail.set_env("KAGE_HOST_IDLE_SECS", "5");
+            jail.set_env("KAGE_DEBUG_KEYS", "1");
+            assert!(!Config::env_overrides_active(&home));
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            let home = jail.directory().to_path_buf();
+            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            jail.set_env(
+                "XDG_CONFIG_HOME",
+                home.join(".config").to_string_lossy().as_ref(),
+            );
+            jail.set_env("KAGE_UI__THEME", "catppuccin-mocha");
+            assert!(Config::env_overrides_active(&home));
+            Ok(())
+        });
+    }
+
+    /// An override whose value equals a built-in default still counts
+    /// when it takes the value away from a config file: the layered
+    /// config changes even though defaults plus env equal the defaults.
+    #[test]
+    fn an_env_value_equal_to_the_default_still_overrides_a_file() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let home = jail.directory().to_path_buf();
+            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            let xdg_config = home.join(".config");
+            jail.set_env("XDG_CONFIG_HOME", xdg_config.to_string_lossy().as_ref());
+            let io = |e: std::io::Error| figment::Error::from(e.to_string());
+            std::fs::create_dir_all(xdg_config.join("kage")).map_err(io)?;
+            std::fs::write(
+                xdg_config.join("kage/config.toml"),
+                "[ui]\ntheme = \"catppuccin-mocha\"\n",
+            )
+            .map_err(io)?;
+            jail.set_env("KAGE_UI__THEME", "default");
+            assert!(Config::env_overrides_active(&home));
+            let layered = Config::load_layered(&home).unwrap();
+            assert_eq!(layered.ui.theme, "default");
+            Ok(())
+        });
+    }
+
+    /// An override whose value the other layers already produce changes
+    /// nothing and does not count.
+    #[test]
+    fn an_env_value_the_files_already_produce_does_not_count() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let home = jail.directory().to_path_buf();
+            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            let xdg_config = home.join(".config");
+            jail.set_env("XDG_CONFIG_HOME", xdg_config.to_string_lossy().as_ref());
+            let io = |e: std::io::Error| figment::Error::from(e.to_string());
+            std::fs::create_dir_all(xdg_config.join("kage")).map_err(io)?;
+            std::fs::write(
+                xdg_config.join("kage/config.toml"),
+                "[ui]\ntheme = \"catppuccin-mocha\"\n",
+            )
+            .map_err(io)?;
+            jail.set_env("KAGE_UI__THEME", "catppuccin-mocha");
+            assert!(!Config::env_overrides_active(&home));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_broken_config_env_value_counts_as_an_override() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let home = jail.directory().to_path_buf();
+            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            jail.set_env(
+                "XDG_CONFIG_HOME",
+                home.join(".config").to_string_lossy().as_ref(),
+            );
+            // A string where the config wants a boolean: extraction
+            // with the environment fails, so the override counts.
+            jail.set_env("KAGE_UI__MOUSE", "7");
+            assert!(Config::env_overrides_active(&home));
+            Ok(())
+        });
+    }
+
+    /// An env value that repairs a file the layers alone cannot
+    /// extract changes the layered config all the same, so it counts:
+    /// the host without it would refuse a config this process loads.
+    #[test]
+    fn an_env_value_that_repairs_a_broken_file_counts_as_an_override() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let home = jail.directory().to_path_buf();
+            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            let xdg_config = home.join(".config");
+            jail.set_env("XDG_CONFIG_HOME", xdg_config.to_string_lossy().as_ref());
+            let io = |e: std::io::Error| figment::Error::from(e.to_string());
+            std::fs::create_dir_all(xdg_config.join("kage")).map_err(io)?;
+            std::fs::write(xdg_config.join("kage/config.toml"), "[ui]\nmouse = 7\n").map_err(io)?;
+            assert!(Config::load_layered(&home).is_err());
+            jail.set_env("KAGE_UI__MOUSE", "true");
+            assert!(Config::env_overrides_active(&home));
+            assert!(Config::load_layered(&home).unwrap().ui.mouse);
             Ok(())
         });
     }

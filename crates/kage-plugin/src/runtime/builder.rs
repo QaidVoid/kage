@@ -161,7 +161,7 @@ impl PluginRuntimeBuilder {
     pub fn build(self) -> Result<PluginRuntime, PluginError> {
         let lua = Lua::new();
         lua.set_memory_limit(self.memory_limit)?;
-        apply_sandbox(&lua)?;
+        apply_sandbox(&lua, self.sink.clone())?;
         watchdog::install(&lua)?;
         api::install(&lua, self.sink.clone(), self.config.clone())?;
         plugin_fs::install_fs(&lua, &self.workdir)?;

@@ -84,7 +84,7 @@ pub trait HostLog: Send {
     fn log(&mut self, level: LogLevel, message: &str);
 }
 
-/// Default sink that writes notifications to stderr and drops log lines.
+/// Default sink that writes notifications and log lines to stderr.
 #[derive(Debug, Default)]
 pub struct StderrHostLog;
 

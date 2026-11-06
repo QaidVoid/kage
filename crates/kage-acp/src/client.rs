@@ -195,11 +195,23 @@ fn option_id(req: &RequestPermissionRequest, kind: PermissionOptionKind) -> Opti
 
 /// Resolve an upstream `session/request_permission` into the JSON-RPC
 /// result value. Without a resolver, or on `Deny`, a reject option is
-/// selected (kage never auto-approves an upstream agent's tools).
+/// selected (kage never auto-approves an upstream agent's tools). A plan
+/// review or a question is not a tool permission, so the tool policy
+/// never answers it and it is cancelled.
 fn permission_result(
     resolver: Option<&PermissionResolver>,
     req: &RequestPermissionRequest,
 ) -> serde_json::Value {
+    let not_a_tool = req
+        .meta
+        .as_ref()
+        .is_some_and(|meta| meta.kage.plan_review.is_some() || meta.kage.question.is_some());
+    if not_a_tool {
+        return serde_json::to_value(RequestPermissionResponse {
+            outcome: PermissionOutcome::Cancelled,
+        })
+        .unwrap_or(serde_json::Value::Null);
+    }
     let decision = resolver.map(|r| r(req));
     let kind = match decision {
         Some(PermissionDecision::Allow | PermissionDecision::AllowSession) => {
@@ -620,6 +632,33 @@ mod tests {
         for resolver in [&once, &session] {
             assert_eq!(
                 permission_result(Some(resolver), &only_always),
+                serde_json::json!({"outcome": {"outcome": "cancelled"}})
+            );
+        }
+    }
+
+    #[test]
+    fn permission_policy_never_answers_plan_reviews_or_questions() {
+        let allow: PermissionResolver = Arc::new(|_| PermissionDecision::Allow);
+        for meta in [
+            serde_json::json!({"kage": {"planReview": {"plan": "# Plan"}}}),
+            serde_json::json!({"kage": {"question": {"prompt": {
+                "header": "Pick", "question": "Which?", "multiSelect": false,
+                "options": [{"label": "A", "description": ""}]
+            }}}}),
+        ] {
+            let req: RequestPermissionRequest = serde_json::from_value(serde_json::json!({
+                "sessionId": "s1",
+                "toolCall": {"toolCallId": "call-1"},
+                "options": [
+                    {"optionId": "approve", "name": "Approve", "kind": "allow_once"},
+                    {"optionId": "reject", "name": "Reject", "kind": "reject_once"}
+                ],
+                "_meta": meta
+            }))
+            .unwrap();
+            assert_eq!(
+                permission_result(Some(&allow), &req),
                 serde_json::json!({"outcome": {"outcome": "cancelled"}})
             );
         }

@@ -94,7 +94,8 @@ pub fn fork(
 /// # Errors
 ///
 /// Errors if `src` cannot be read, if its first entry is not a header,
-/// if `dst` already exists, or if no entry in `src` has id `at`.
+/// if `dst` already exists, if no entry in `src` has id `at`, or if
+/// the destination header ID collides with a copied entry.
 pub fn fork_as(
     src: &Path,
     dst: &Path,
@@ -108,9 +109,19 @@ pub fn fork_as(
             at,
         });
     }
+    let ancestry = tree.ancestry(at);
+    if ancestry.iter().any(|entry| entry.id() == new_header.id) {
+        return Err(SessionError::Io {
+            path: dst.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "destination header ID collides with a copied entry",
+            ),
+        });
+    }
     let truncated = tree.truncated();
     let mut writer = SessionWriter::create(dst.to_path_buf(), new_header)?;
-    for entry in tree.ancestry(at) {
+    for entry in ancestry {
         writer.append(entry)?;
     }
     Ok(truncated)
@@ -147,8 +158,22 @@ impl Snapshot {
     ///
     /// # Errors
     ///
-    /// Errors if `dst` already exists or cannot be written.
+    /// Errors if `dst` already exists, cannot be written, or the destination
+    /// header ID collides with a copied entry.
     pub fn write(&self, dst: &Path, header: Header) -> Result<SessionWriter, SessionError> {
+        for line in self.lines.split(|&byte| byte == b'\n') {
+            if let Ok(entry) = serde_json::from_slice::<SessionEntry>(line)
+                && entry.id() == header.id
+            {
+                return Err(SessionError::Io {
+                    path: dst.to_path_buf(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "destination header ID collides with a copied entry",
+                    ),
+                });
+            }
+        }
         let target = BlobStore::beside(dst);
         if target != self.blobs {
             for sha256 in &self.blob_refs {
@@ -363,6 +388,44 @@ mod tests {
         for e in entries {
             w.append(e).unwrap();
         }
+    }
+
+    #[test]
+    fn fork_as_rejects_header_id_matching_copied_entry_before_creation() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.jsonl");
+        let dst = dir.path().join("dst.jsonl");
+        let entry = message_entry(Role::User, "one");
+        write(&src, fresh_header("x:y"), std::slice::from_ref(&entry));
+        let mut header = fresh_header("x:y");
+        header.id = entry.id();
+        assert!(matches!(
+            fork_as(&src, &dst, header, entry.id()),
+            Err(SessionError::Io { source, .. }) if source.kind() == std::io::ErrorKind::InvalidInput
+        ));
+        assert!(!dst.exists());
+        let mut header = fresh_header("x:y");
+        header.id = entry.id();
+        let root = SessionTree::read(&src).unwrap().header().id;
+        fork_as(&src, &dst, header, root).unwrap();
+        assert!(SessionTree::read(&dst).is_ok());
+    }
+
+    #[test]
+    fn snapshot_rejects_header_id_matching_copied_entry_before_creation() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src.jsonl");
+        let dst = dir.path().join("dst.jsonl");
+        let entry = message_entry(Role::User, "one");
+        write(&src, fresh_header("x:y"), std::slice::from_ref(&entry));
+        let snapshot = snapshot(&src, |_| true).unwrap();
+        let mut header = fresh_header("x:y");
+        header.id = entry.id();
+        assert!(matches!(
+            snapshot.write(&dst, header),
+            Err(SessionError::Io { source, .. }) if source.kind() == std::io::ErrorKind::InvalidInput
+        ));
+        assert!(!dst.exists());
     }
 
     #[test]

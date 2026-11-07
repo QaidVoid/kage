@@ -208,7 +208,11 @@ mod tests {
             method: "initialize".to_owned(),
             params: serde_json::json!({"protocolVersion": 1}),
         });
-        match received.recv_timeout(Duration::from_secs(5)) {
+        // Generous waits: the workspace suite runs this beside
+        // hundreds of other tests, and a slow machine must not fail
+        // it.
+        let wait = Duration::from_secs(30);
+        match received.recv_timeout(wait) {
             Ok(Event::Frame(Frame::Request { method, .. })) => {
                 assert_eq!(method, "initialize");
             }
@@ -218,7 +222,7 @@ mod tests {
         // The child ignores stdin EOF, so this close can only be the
         // drop's kill.
         loop {
-            match received.recv_timeout(Duration::from_secs(5)) {
+            match received.recv_timeout(wait) {
                 Ok(Event::Frame(_)) => {}
                 Ok(Event::Closed) => break,
                 other => panic!("expected the close, got {other:?}"),

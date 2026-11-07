@@ -290,6 +290,7 @@ fn serve_on_host(
                     "mock/m",
                     BTreeMap::new(),
                     &Environment::inherit(),
+                    None,
                 )
                 .unwrap();
                 if record {
@@ -383,12 +384,18 @@ fn test_host_with_plugins(
     mcp: bool,
     agents: AgentSetup,
     fallback: PermissionAction,
-    plugins: Option<Arc<kage_plugin::PluginRuntime>>,
+    runtime: Option<Arc<kage_plugin::PluginRuntime>>,
 ) -> Arc<Host> {
     let registry = Arc::new(ProviderRegistry::new().with(provider));
     let agents = Arc::new(agents);
     let spec = Box::new(
-        move |_: &ProviderRegistry, id, _cwd: &str, model: &str, servers, env: &Environment| {
+        move |_: &ProviderRegistry,
+              id,
+              _cwd: &str,
+              model: &str,
+              servers,
+              env: &Environment,
+              plugins: Option<Arc<dyn kage_plugin::session_plugins::SessionPlugins>>| {
             let agents = Arc::clone(&agents);
             let mut rules = PermissionsConfig::default();
             rules.tools.insert(
@@ -419,8 +426,10 @@ fn test_host_with_plugins(
                     tools,
                     gate,
                     loop_cfg: LoopConfig::default(),
-                    plugins: plugins.clone().map(|runtime| {
-                        runtime as Arc<dyn kage_plugin::session_plugins::SessionPlugins>
+                    plugins: plugins.or_else(|| {
+                        runtime.clone().map(|runtime| {
+                            runtime as Arc<dyn kage_plugin::session_plugins::SessionPlugins>
+                        })
                     }),
                     mcp,
                     interactive: true,
@@ -428,7 +437,7 @@ fn test_host_with_plugins(
                     shell: None,
                     agents: Some((*agents).clone()),
                 },
-                plugins.clone(),
+                runtime.clone(),
             ))
         },
     );
@@ -4829,6 +4838,7 @@ fn serve_paused(
                     "mock/m",
                     BTreeMap::new(),
                     &Environment::inherit(),
+                    None,
                 )
                 .unwrap();
                 agent.open(id.to_string(), spec, runtime);
@@ -6466,7 +6476,7 @@ fn only_a_local_client_sets_the_environment_of_its_sessions() {
     let record = Arc::clone(&seen);
     let registry =
         Arc::new(ProviderRegistry::new().with(Arc::new(MockProvider::sequence(Vec::new()))));
-    let spec: super::host::SpecBuilder = Box::new(move |_, _, _, _, _, env: &Environment| {
+    let spec: super::host::SpecBuilder = Box::new(move |_, _, _, _, _, env: &Environment, _| {
         let from_client = env
             .vars()
             .iter()
@@ -6710,6 +6720,7 @@ fn a_stale_close_report_spares_a_relaunched_session() {
             "mock/m",
             BTreeMap::new(),
             &Environment::inherit(),
+            None,
         )
         .unwrap();
         let settings = super::options::Settings::of(&spec, &host.registry());
@@ -6777,6 +6788,7 @@ fn a_launch_installs_only_after_a_report_is_consumed() {
             "mock/m",
             BTreeMap::new(),
             &Environment::inherit(),
+            None,
         )
         .unwrap();
         let settings = super::options::Settings::of(&spec, &host.registry());
@@ -7146,4 +7158,187 @@ fn withdrawing_a_queued_prompt_answers_the_requester_alone() {
     h.release.send(()).unwrap();
     first.recv_timeout(WAIT).unwrap().unwrap();
     drop(queued);
+}
+
+/// What a scripted plugin-host client answers to `_kage/plugin/tools`:
+/// one tool, and one handler for `message_start`.
+fn client_tools() -> serde_json::Value {
+    serde_json::json!({
+        "tools": [{
+            "name": "echo_client",
+            "description": "Echoes on the client",
+            "schema": { "type": "object", "properties": {} },
+        }],
+        "handlers": { "message_start": 1 },
+    })
+}
+
+/// Initializes as a client that hosts session plugins.
+fn initialize_plugin_host(client: &Peer) {
+    let params = serde_json::json!({
+        "protocolVersion": PROTOCOL_VERSION,
+        "clientCapabilities": { "_meta": { "kage": { "pluginHost": true } } },
+    });
+    client.request("initialize", params).unwrap();
+}
+
+/// What the scripted plugin-host client answered, per method.
+type PluginLog = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+
+/// Answers the `_kage/plugin/*` reverse requests of a client-hosted
+/// session: `tools` and `call` with the given results, events and
+/// hooks with nothing, drains with empty queues. Everything else is
+/// forwarded to the test, and every answered method lands in the
+/// returned log with its params.
+fn serve_plugin_answers(
+    client: &Peer,
+    inbox: mpsc::Receiver<Inbound>,
+    tools: serde_json::Value,
+    call: serde_json::Value,
+) -> (mpsc::Receiver<Inbound>, PluginLog) {
+    let (tx, rx) = mpsc::channel();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    let client = client.clone();
+    std::thread::spawn(move || {
+        for msg in inbox {
+            let Inbound::Request { id, method, params } = &msg else {
+                let _ = tx.send(msg);
+                continue;
+            };
+            let answer = match method.as_str() {
+                "_kage/plugin/tools" => Some(tools.clone()),
+                "_kage/plugin/call" => Some(call.clone()),
+                "_kage/plugin/event" | "_kage/plugin/hook" => Some(serde_json::Value::Null),
+                "_kage/plugin/drain" => Some(serde_json::json!({})),
+                _ => None,
+            };
+            match answer {
+                Some(answer) => {
+                    lock(&record).push((method.clone(), params.clone()));
+                    let _ = client.respond(id, Ok(answer));
+                }
+                None => {
+                    let _ = tx.send(msg);
+                }
+            }
+        }
+    });
+    (rx, seen)
+}
+
+/// A `session/new` that asks for the client to host the session's
+/// plugins.
+fn client_hosted_new_session(client: &Peer, dir: &tempfile::TempDir) -> String {
+    let params = serde_json::json!({
+        "cwd": dir.path().display().to_string(),
+        "mcpServers": [],
+        "_meta": { "kage": { "plugins": "client" } },
+    });
+    let created = client.request("session/new", params).unwrap();
+    created["sessionId"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn a_client_plugin_ask_without_the_capability_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(vec![text_turn("hi")], dir.path(), dir.path());
+    initialize(&h.client);
+    let params = serde_json::json!({
+        "cwd": dir.path().display().to_string(),
+        "mcpServers": [],
+        "_meta": { "kage": { "plugins": "client" } },
+    });
+    let err = h.client.request("session/new", params).unwrap_err();
+    assert!(err.to_string().contains("pluginHost"), "{err}");
+    let asked_plugin = std::iter::from_fn(|| h.inbox.try_recv().ok()).any(|msg| {
+        matches!(
+            msg,
+            Inbound::Request { method, .. } if method.starts_with("_kage/plugin/")
+        )
+    });
+    assert!(
+        !asked_plugin,
+        "no plugin request may reach a client without the capability"
+    );
+}
+
+#[test]
+fn a_client_hosted_tool_runs_on_the_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(
+        vec![
+            tool_turn(
+                "call_echo",
+                "echo_client",
+                serde_json::json!({ "text": "ping" }),
+            ),
+            text_turn("done"),
+            text_turn("title"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    initialize_plugin_host(&h.client);
+    let (inbox, seen) = serve_plugin_answers(
+        &h.client,
+        h.inbox,
+        client_tools(),
+        serde_json::json!({ "text": "client says hi" }),
+    );
+    let session = client_hosted_new_session(&h.client, &dir);
+    let end = prompt_async(&h.client, &session, "call the client tool");
+    let response = end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    let requests = lock(&seen).clone();
+    let snapshots = requests
+        .iter()
+        .filter(|(m, _)| m.as_str() == "_kage/plugin/tools")
+        .collect::<Vec<_>>();
+    assert_eq!(snapshots.len(), 1, "the snapshot is taken once");
+    assert_eq!(snapshots[0].1["sessionId"], session);
+    let calls = requests
+        .iter()
+        .filter(|(m, _)| m.as_str() == "_kage/plugin/call")
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].1["tool"], "echo_client");
+    assert_eq!(calls[0].1["input"]["text"], "ping");
+    assert_eq!(calls[0].1["sessionId"], session);
+    let updates = drain_quiet(&inbox, &session);
+    assert!(
+        contents_of(&updates, "call_echo")
+            .iter()
+            .any(|text| text.contains("client says hi"))
+    );
+}
+
+#[test]
+fn client_hosted_hooks_fire_only_for_reported_handlers() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(vec![text_turn("hi")], dir.path(), dir.path());
+    initialize_plugin_host(&h.client);
+    let (_inbox, seen) =
+        serve_plugin_answers(&h.client, h.inbox, client_tools(), serde_json::json!({}));
+    let session = client_hosted_new_session(&h.client, &dir);
+    let end = prompt_async(&h.client, &session, "say hi");
+    let response = end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    let requests = lock(&seen).clone();
+    assert!(
+        !requests
+            .iter()
+            .any(|(m, _)| m.as_str() == "_kage/plugin/call"),
+        "no tool ran"
+    );
+    let events = requests
+        .iter()
+        .filter(|(m, _)| m.as_str() == "_kage/plugin/event")
+        .collect::<Vec<_>>();
+    assert!(!events.is_empty(), "message_start has a handler");
+    assert!(
+        events
+            .iter()
+            .all(|(_, params)| { params["event"] == "message_start" && params["notify"] == false })
+    );
 }

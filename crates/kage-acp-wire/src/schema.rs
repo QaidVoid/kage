@@ -81,6 +81,11 @@ pub struct KageClientCapabilities {
     /// [`UnconfiguredTools::Ask`], the editor default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unconfigured_tools: Option<UnconfiguredTools>,
+    /// The client hosts session plugins itself and answers the
+    /// `_kage/plugin/*` reverse requests for the sessions it opens with
+    /// `_meta.kage.plugins = "client"`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plugin_host: bool,
 }
 
 /// How a session judges a tool with no `[permissions]` rule.
@@ -113,6 +118,16 @@ impl ClientCapabilities {
         self.subagents
             .as_ref()
             .is_some_and(|v| *v != serde_json::Value::Bool(false))
+    }
+
+    /// Whether the client hosts session plugins and answers the
+    /// `_kage/plugin/*` reverse requests.
+    #[must_use]
+    pub fn hosts_plugins(&self) -> bool {
+        self.meta
+            .as_ref()
+            .and_then(|meta| meta.kage.as_ref())
+            .is_some_and(|kage| kage.plugin_host)
     }
 }
 
@@ -251,6 +266,37 @@ pub struct NewSessionRequest {
     /// MCP servers the client wants the session connected to.
     #[serde(default)]
     pub mcp_servers: Vec<McpServer>,
+    /// Extension facts, under `_meta`.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<NewSessionMeta>,
+}
+
+/// The `_meta` of [`NewSessionRequest`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewSessionMeta {
+    /// What a kage client asks of this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kage: Option<NewSessionKage>,
+}
+
+/// What a kage client asks of one session, under
+/// `session/new`'s `_meta.kage`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewSessionKage {
+    /// Where the session's plugins run. Unset means the host loads
+    /// the project's plugins as always.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugins: Option<PluginsSource>,
+}
+
+/// Where a session's plugins run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginsSource {
+    /// The client that opened the session hosts the plugins: it
+    /// answers the `_kage/plugin/*` reverse requests for them.
+    Client,
 }
 
 /// `session/new` result.
@@ -770,6 +816,229 @@ pub struct McpRestartRequest {
     pub session_id: String,
     /// The configured server name.
     pub server: String,
+}
+
+/// `_kage/plugin/tools` request params: the host asks the client that
+/// hosts a session's plugins what the session's plugins register.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginToolsRequest {
+    /// The session whose plugins to describe.
+    pub session_id: String,
+}
+
+/// The `_kage/plugin/tools` result.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginToolsResult {
+    /// Tools the plugins register as their own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<PluginToolSpec>,
+    /// Tools that replace engine tools of the same name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<PluginToolSpec>,
+    /// In-place renames of engine tools, `from` to `to`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub renames: Vec<PluginToolRename>,
+    /// How many handlers each event has, so the host skips events
+    /// nobody listens to without a round trip.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub handlers: BTreeMap<String, u32>,
+}
+
+/// One tool a client-hosted plugin registers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginToolSpec {
+    /// Stable tool name, `snake_case`.
+    pub name: String,
+    /// Short, model-readable description.
+    pub description: String,
+    /// JSON Schema of the tool's input.
+    pub schema: serde_json::Value,
+    /// Coarse risk classification, `read`, `write`, `exec` or
+    /// `network`. Unset means `read`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    /// Safe to run beside other calls even when the loop's parallel
+    /// flag is off. Unset means the loop decides. `false` is stricter
+    /// than the unset default: it forces sequential dispatch even when
+    /// the loop's parallel flag is on, which the Lua plugin API cannot
+    /// express.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel: Option<bool>,
+}
+
+/// One engine-tool rename a client-hosted plugin asks for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginToolRename {
+    /// The engine tool's name.
+    pub from: String,
+    /// What the plugins call it.
+    pub to: String,
+}
+
+/// `_kage/plugin/call` request params: the host runs one client-hosted
+/// tool call on the client.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCallRequest {
+    /// The session the call belongs to.
+    pub session_id: String,
+    /// The tool's name, as the client registered it.
+    pub tool: String,
+    /// The call's input, as the model produced it.
+    pub input: serde_json::Value,
+}
+
+/// The `_kage/plugin/call` result: the tool's final output.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCallResult {
+    /// Whether the tool reported failure.
+    #[serde(default)]
+    pub is_error: bool,
+    /// Stringified output, verbatim into the next assistant turn.
+    #[serde(default)]
+    pub text: String,
+    /// Optional structured detail for richer rendering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured: Option<serde_json::Value>,
+}
+
+/// `_kage/plugin/hook` request params: a synchronous hook, either a
+/// transform (the result replaces the payload) or a predicate (the
+/// result is its decision).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginHookRequest {
+    /// The session whose plugins to run.
+    pub session_id: String,
+    /// The hook's event name.
+    pub event: String,
+    /// Which dispatch mode the hook runs.
+    pub kind: PluginHookKind,
+    /// The event's payload.
+    pub payload: serde_json::Value,
+}
+
+/// Which dispatch mode a `_kage/plugin/hook` request runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginHookKind {
+    /// Chain the handlers' return values; the reply is the final payload.
+    Transform,
+    /// Short-circuit on the first truthy return; the reply is the
+    /// decision.
+    Predicate,
+}
+
+/// `_kage/plugin/event` request params: an event fired at the client's
+/// plugin handlers. `notify` marks the coalescing kind, where repeated
+/// events may collapse into one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginEventRequest {
+    /// The session whose plugins to run.
+    pub session_id: String,
+    /// The event name.
+    pub event: String,
+    /// The event's payload.
+    pub payload: serde_json::Value,
+    /// Whether repeats of this event may coalesce.
+    #[serde(default)]
+    pub notify: bool,
+}
+
+/// `_kage/plugin/drain` request params: the host takes one queue of
+/// plugin-supplied work for the session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginDrainRequest {
+    /// The session to serve, absent when the queue drains across every
+    /// session the connection hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Which queue to drain.
+    pub queue: PluginDrainQueue,
+}
+
+/// Which queue a `_kage/plugin/drain` request serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginDrainQueue {
+    /// MCP restarts the plugins asked for.
+    McpRestarts,
+    /// Steering and follow-up messages the plugins queued.
+    Messages,
+    /// Session operations queued without a session.
+    SessionOps,
+    /// Session operations queued for the request's session, plus those
+    /// queued without a session.
+    SessionOpsFor,
+}
+
+/// The `_kage/plugin/drain` result. Only the field for the requested
+/// queue carries anything.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginDrainResult {
+    /// MCP server names to restart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restarts: Vec<String>,
+    /// Messages the plugins queued.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<PluginPendingMessage>,
+    /// Session operations the plugins queued.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ops: Vec<PluginSessionOp>,
+}
+
+/// One message a client-hosted plugin queued for the host to deliver.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPendingMessage {
+    /// Raw text the plugin asked the host to deliver.
+    pub text: String,
+    /// Whether the plugin wants the host to wake the loop at once.
+    #[serde(default)]
+    pub trigger_turn: bool,
+    /// Conversation role to deliver it as.
+    pub deliver_as: PluginPendingRole,
+}
+
+/// The role a queued plugin message is delivered as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginPendingRole {
+    /// A synthetic user message.
+    User,
+    /// A synthetic assistant message.
+    Assistant,
+    /// A synthetic system note.
+    System,
+}
+
+/// One session write a client-hosted plugin queued for the host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum PluginSessionOp {
+    /// Append a `SessionEntry::Custom` with a plugin-defined kind.
+    AppendCustom {
+        /// Namespaced kind tag (e.g. `"my-plugin:bookmark"`).
+        kind: String,
+        /// Free-form JSON payload.
+        #[serde(default)]
+        data: serde_json::Value,
+    },
+    /// Attach a label to an entry, or clear it with empty text.
+    SetLabel {
+        /// Entry id of the entry being labeled.
+        anchor: String,
+        /// Label text; empty when the plugin asked to clear.
+        text: String,
+    },
 }
 
 /// The `_kage/shell` update: a user shell command's progress, sent to
@@ -2817,6 +3086,7 @@ mod tests {
             meta: Some(ClientMeta {
                 kage: Some(KageClientCapabilities {
                     unconfigured_tools: Some(UnconfiguredTools::Allow),
+                    plugin_host: false,
                 }),
             }),
             ..ClientCapabilities::default()

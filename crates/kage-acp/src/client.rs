@@ -471,6 +471,7 @@ where
     let new_session = NewSessionRequest {
         cwd,
         mcp_servers: vec![],
+        meta: None,
     };
     let session: SessionCreated = serde_json::from_value(
         peer.request_timeout(

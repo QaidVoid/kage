@@ -269,6 +269,7 @@ impl Client {
             params(&NewSessionRequest {
                 cwd: cwd.to_owned(),
                 mcp_servers: mcp_servers.to_vec(),
+                meta: None,
             }),
             Pending::NewSession {
                 cwd: cwd.to_owned(),

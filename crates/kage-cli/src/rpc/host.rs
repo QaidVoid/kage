@@ -31,8 +31,9 @@ use crate::permissions::PermissionGate;
 
 /// Builds the engine session for a client session from the providers
 /// in effect, its id, working directory, model, the MCP servers the
-/// client passed and the environment its processes start with. The
-/// caller fills in the history and recorder.
+/// client passed, the environment its processes start with and the
+/// session plugins the connection brings, which replace the project's
+/// when present. The caller fills in the history and recorder.
 pub(crate) type SpecBuilder = Box<
     dyn Fn(
             &ProviderRegistry,
@@ -41,6 +42,7 @@ pub(crate) type SpecBuilder = Box<
             &str,
             BTreeMap<String, McpSpec>,
             &Environment,
+            Option<Arc<dyn SessionPlugins>>,
         ) -> Result<(SessionSpec, Option<Arc<kage_plugin::PluginRuntime>>), RpcError>
         + Send
         + Sync,
@@ -143,7 +145,13 @@ impl Host {
             let system_role = system_role.to_owned();
             let projects = Arc::clone(&projects);
             Box::new(
-                move |registry: &ProviderRegistry, id, cwd: &str, model: &str, servers, env| {
+                move |registry: &ProviderRegistry,
+                      id,
+                      cwd: &str,
+                      model: &str,
+                      servers,
+                      env,
+                      plugins| {
                     let (spec, runtime) = session_spec(
                         registry,
                         &system_role,
@@ -153,6 +161,7 @@ impl Host {
                         servers,
                         env,
                         &projects,
+                        plugins,
                     )?;
                     if yolo {
                         spec.gate.set_mode(Some(PermissionAction::Allow));
@@ -578,6 +587,7 @@ fn session_spec(
     servers: BTreeMap<String, McpSpec>,
     env: &Environment,
     projects: &Projects,
+    plugins: Option<Arc<dyn SessionPlugins>>,
 ) -> Result<(SessionSpec, Option<Arc<PluginRuntime>>), RpcError> {
     let workdir = if cwd.is_empty() {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -588,13 +598,23 @@ fn session_spec(
     let config = Config::load_layered(&workdir).map_err(|e| RpcError::internal(e.to_string()))?;
     let model = model.to_owned();
     let bare = crate::runtime_env::build_system_prompt(system_role, &workdir, &model, &[], None);
-    let project = projects.get(&workdir, &model, &|| bare.clone(), env);
-    let plugins = project.as_ref().map(|project| Arc::clone(&project.runtime));
-    if let Some(runtime) = &plugins {
+    // The connection's own plugins replace the project's: nothing of
+    // the project runtime loads, so its plugin MCP servers and option
+    // stores stay out of a session whose plugins live in the client.
+    let project = plugins
+        .is_none()
+        .then(|| projects.get(&workdir, &model, &|| bare.clone(), env))
+        .flatten();
+    let concrete = project.as_ref().map(|project| Arc::clone(&project.runtime));
+    if let Some(runtime) = &concrete {
         runtime.set_session_env(id, env.clone());
     }
+    let session_plugins = plugins.map_or_else(
+        || concrete.clone().map(|rt| rt as Arc<dyn SessionPlugins>),
+        Some,
+    );
     let skills = kage_plugin::Invocation::session(id)
-        .scope(|| crate::load_skills(&workdir, plugins.as_deref()));
+        .scope(|| crate::load_skills(&workdir, concrete.as_deref()));
     let shell = config
         .shell
         .program
@@ -614,7 +634,7 @@ fn session_spec(
     let (mcp, mcp_errors) = crate::mcp::spawn_and_register_with(
         &mut tools,
         &workdir,
-        plugins.as_deref(),
+        concrete.as_deref(),
         servers,
         env.clone(),
     );
@@ -651,7 +671,6 @@ fn session_spec(
     if let Some(window) = crate::runtime_env::context_window_for(registry, &model) {
         cx = cx.with_context_window(window);
     }
-    let session_plugins = plugins.clone().map(|rt| rt as Arc<dyn SessionPlugins>);
     let spec = SessionSpec {
         id,
         model,
@@ -670,7 +689,7 @@ fn session_spec(
         agents: Some(agents),
         shell: config.shell.program.clone(),
     };
-    Ok((spec, plugins))
+    Ok((spec, concrete))
 }
 
 #[cfg(test)]
@@ -691,7 +710,7 @@ mod tests {
     fn host_in(dir: &tempfile::TempDir) -> Arc<Host> {
         let registry =
             Arc::new(ProviderRegistry::new().with(Arc::new(MockProvider::sequence(Vec::new()))));
-        let spec: SpecBuilder = Box::new(|_, id, cwd, _, _, _| {
+        let spec: SpecBuilder = Box::new(|_, id, cwd, _, _, _, _| {
             Ok((
                 SessionSpec {
                     id,
@@ -732,6 +751,7 @@ mod tests {
             "mock/m",
             BTreeMap::new(),
             &Environment::inherit(),
+            None,
         )
         .unwrap();
         let settings = Settings::of(&spec, &host.registry());

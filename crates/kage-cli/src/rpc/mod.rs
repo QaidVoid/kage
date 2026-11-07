@@ -29,6 +29,7 @@
 //! tree, on that session's top-level `agent` call.
 
 mod bridge;
+mod client_plugins;
 pub(crate) mod config_set;
 mod content;
 mod directory;
@@ -64,16 +65,16 @@ use kage_acp::acp::{
     DirectoryRequest, DirectoryResult, FoldersRequest, FoldersResult, FsRequest, FsResult,
     ImageSaveRequest, Implementation, InitializeRequest, InitializeResponse, InstalledPlugin,
     KageAgentInfo, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, McpCapabilities, McpRestartRequest, ModelsResponse, NewSessionRequest,
-    NewSessionResponse, OptionSetRequest, OptionsResponse, PROTOCOL_VERSION, PluginInstallRequest,
-    PluginRemoveRequest, PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse,
-    PromptWithdrawn, RegistryInstallRequest, RegistryInstallResult, RegistrySearchRequest,
-    RegistrySearchResult, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
-    SessionConfigOption, SessionExportResponse, SessionForkRequest, SessionForkResponse,
-    SessionPromptsResponse, SessionRenameRequest, SessionRequest, SessionRewindRequest,
-    SessionUndoResponse, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
-    ShellRequest, StopReason, Supported, SwarmResumeRequest, SwarmResumeResponse, ThemesRequest,
-    ThemesResult, WithdrawRequest,
+    LoadSessionResponse, McpCapabilities, McpRestartRequest, ModelsResponse, NewSessionMeta,
+    NewSessionRequest, NewSessionResponse, OptionSetRequest, OptionsResponse, PROTOCOL_VERSION,
+    PluginInstallRequest, PluginRemoveRequest, PluginsSource, PromptCapabilities, PromptDelivery,
+    PromptRequest, PromptResponse, PromptWithdrawn, RegistryInstallRequest, RegistryInstallResult,
+    RegistrySearchRequest, RegistrySearchResult, ResumeSessionRequest, ResumeSessionResponse,
+    SessionCapabilities, SessionConfigOption, SessionExportResponse, SessionForkRequest,
+    SessionForkResponse, SessionPromptsResponse, SessionRenameRequest, SessionRequest,
+    SessionRewindRequest, SessionUndoResponse, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, ShellRequest, StopReason, Supported, SwarmResumeRequest,
+    SwarmResumeResponse, ThemesRequest, ThemesResult, WithdrawRequest,
 };
 use kage_acp::acp::{UiAttachRequest, UiCommandRequest, UiKeymapRequest, UiOutput, UiSnapshot};
 use kage_acp::agent::{Agent, PromptContext};
@@ -85,6 +86,7 @@ use kage_core::sync::lock;
 use kage_core::{LoopError, SessionId, StopReason as CoreStopReason};
 use kage_jsonrpc::{Peer, RpcError};
 use kage_plugin::PluginRuntime;
+use kage_plugin::session_plugins::SessionPlugins;
 
 use bridge::{Ask, AskSet, Bridge, HeldUpdates};
 use content::prompt_content;
@@ -270,6 +272,9 @@ struct CliAcpAgent {
     /// Whether the client is a kage client, which shows runs it did not
     /// prompt, so an idle session wakes for a background agent's result.
     kage_client: Arc<AtomicBool>,
+    /// Whether the client hosts session plugins and answers the
+    /// `_kage/plugin/*` reverse requests for them.
+    plugin_host: AtomicBool,
     /// The environment the client sent, which sessions it opens from now
     /// on start their processes with. The host's own until it sends one.
     env: Mutex<Environment>,
@@ -342,6 +347,7 @@ impl CliAcpAgent {
             shown,
             subagents,
             unconfigured_run: AtomicBool::new(false),
+            plugin_host: AtomicBool::new(false),
             kage_client,
             env: Mutex::new(Environment::inherit()),
             takes_env: AtomicBool::new(false),
@@ -396,6 +402,32 @@ impl CliAcpAgent {
         config_options(&self.host.models(), &settings)
     }
 
+    /// The session plugins a `session/new` asks for: a proxy over the
+    /// client's own plugin host when it names the `client` source. A
+    /// client that did not advertise the capability gets refused.
+    fn hosted_plugins(
+        &self,
+        id: SessionId,
+        meta: Option<&NewSessionMeta>,
+    ) -> Result<Option<Arc<dyn SessionPlugins>>, RpcError> {
+        let source = meta
+            .and_then(|meta| meta.kage.as_ref())
+            .and_then(|kage| kage.plugins);
+        if source == Some(PluginsSource::Client) && !self.plugin_host.load(Ordering::SeqCst) {
+            return Err(RpcError::new(
+                -32602,
+                "client-hosted plugins need the pluginHost capability",
+            ));
+        }
+        match source {
+            Some(PluginsSource::Client) => Ok(Some(Arc::new(client_plugins::ClientPlugins::open(
+                id,
+                self.peer.clone(),
+            )?) as Arc<dyn SessionPlugins>)),
+            None => Ok(None),
+        }
+    }
+
     /// What a session of this connection runs with: the host's spec,
     /// with the permission fallback the client asked for at
     /// `initialize`, and background results waking an idle session for
@@ -406,10 +438,18 @@ impl CliAcpAgent {
         cwd: &str,
         model: &str,
         servers: BTreeMap<String, McpSpec>,
+        plugins: Option<Arc<dyn SessionPlugins>>,
     ) -> Result<(SessionSpec, Option<Arc<PluginRuntime>>), RpcError> {
         let env = lock(&self.env).clone();
-        let (mut spec, runtime) =
-            (self.host.spec)(&self.host.registry(), id, cwd, model, servers, &env)?;
+        let (mut spec, runtime) = (self.host.spec)(
+            &self.host.registry(),
+            id,
+            cwd,
+            model,
+            servers,
+            &env,
+            plugins,
+        )?;
         if self.unconfigured_run.load(Ordering::SeqCst) {
             spec.gate = spec.gate.with_fallback(PermissionAction::Allow);
         }
@@ -533,6 +573,8 @@ impl Agent for CliAcpAgent {
                 .is_some_and(|meta| meta.kage.is_some()),
             Ordering::SeqCst,
         );
+        self.plugin_host
+            .store(req.client_capabilities.hosts_plugins(), Ordering::SeqCst);
         InitializeResponse {
             protocol_version: PROTOCOL_VERSION,
             agent_capabilities: AgentCapabilities {
@@ -575,8 +617,9 @@ impl Agent for CliAcpAgent {
         let (path, mut header) =
             crate::plan_session_in(&self.host.sessions, &self.host.default_model, "");
         let id = header.session;
+        let plugins = self.hosted_plugins(id, req.meta.as_ref())?;
         let (mut spec, runtime) =
-            self.session_spec(id, &req.cwd, &self.host.default_model, servers)?;
+            self.session_spec(id, &req.cwd, &self.host.default_model, servers, plugins)?;
         header.cwd.clone_from(&spec.cx.workdir);
         header.system_prompt.clone_from(&spec.cx.system_prompt);
         spec.recorder = Some(Recorder::planned(path, header, spec.plugins.clone()));

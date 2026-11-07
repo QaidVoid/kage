@@ -831,6 +831,10 @@ impl Agent for CliAcpAgent {
 
     fn ui_attach(&self, req: UiAttachRequest) -> Result<UiSnapshot, RpcError> {
         let env = lock(&self.env).clone();
+        // Held across the load, so two attaches of one connection load,
+        // swap their watchers and answer in the order they arrived: the
+        // client draws the project of the attach it issued last.
+        let mut ui_watch = lock(&self.ui_watch);
         let project = self
             .host
             .project(Path::new(&req.cwd), &env)
@@ -849,7 +853,7 @@ impl Agent for CliAcpAgent {
             peer: self.peer.clone(),
             stop: Arc::clone(&stop),
         });
-        if let Some(previous) = lock(&self.ui_watch).replace(stop) {
+        if let Some(previous) = ui_watch.replace(stop) {
             previous.store(true, Ordering::SeqCst);
         }
         Ok(snapshot)

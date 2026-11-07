@@ -26,6 +26,7 @@ pub(crate) use kage_tui::{
 
 pub(crate) use crate::plugins::setup_user_runtime;
 
+mod acp;
 mod entry;
 mod host;
 #[cfg(unix)]

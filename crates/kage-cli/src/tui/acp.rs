@@ -734,6 +734,9 @@ struct Pump {
     /// channel its answer lands on.
     dialogs: Vec<(RequestId, mpsc::Receiver<Option<Value>>)>,
     feed: Arc<FeedState>,
+    /// The mirror the run loop and the App read, pointed at the wire
+    /// session's file as sessions are adopted.
+    mirror: Arc<Mutex<Mirror>>,
     /// The session id every envelope names: the App sees one session
     /// per connection, whatever the agent calls its sessions.
     app_session: SessionId,
@@ -877,6 +880,7 @@ impl Pump {
             let fresh = self.store.reset_session(&id);
             self.handed = Some(Arc::clone(&fresh));
             self.feed.send_buffer(fresh);
+            self.note_session_file();
             self.store.client().load_session(&id, &self.cwd, &[]);
         } else {
             self.pending_new = true;
@@ -1140,6 +1144,16 @@ impl Pump {
         }
     }
 
+    /// Points the mirror at the wire session's file, which the exit
+    /// summary, the session tree and the agent loader read. A failing
+    /// sessions directory keeps the previous path, and the readers
+    /// degrade on a stale one.
+    fn note_session_file(&mut self) {
+        if let Ok(dir) = crate::paths::sessions_dir() {
+            lock(&self.mirror).point_at(dir.join(format!("{}.jsonl", self.wire)));
+        }
+    }
+
     /// Draws from the freshly opened session from now on: the buffer
     /// it folds into, no stale cards, and on a brand-new session the
     /// model carried over. A resumed session keeps the model it was
@@ -1151,6 +1165,7 @@ impl Pump {
         self.warned_model = None;
         self.handed = None;
         self.hand_buffer();
+        self.note_session_file();
         self.update_ui_slot(|ui| {
             ui.session_id.clone_from(&self.wire);
             ui.session_title = None;
@@ -2188,6 +2203,7 @@ pub(crate) fn run(
         workdir: workdir.clone(),
         cancel: CancelFlag::new(),
     });
+    let mirror = Arc::new(Mutex::new(Mirror::new()));
     let mut pump = Pump {
         store,
         transport,
@@ -2197,6 +2213,7 @@ pub(crate) fn run(
         dialog_tx,
         dialogs: Vec::new(),
         feed: Arc::clone(&feed),
+        mirror: Arc::clone(&mirror),
         app_session,
         wire: String::new(),
         pending_open: None,
@@ -2256,7 +2273,6 @@ pub(crate) fn run(
         eprintln!("kage: cannot start the pump thread: {error}");
         return ExitCode::from(1);
     }
-    let mirror = Arc::new(Mutex::new(Mirror::new()));
     let model_choices = available_model_items(&registry, &shown_model);
     // The commands the local plugins register; the App completes them
     // and the pump runs them, never the agent.
@@ -2454,6 +2470,7 @@ mod tests {
             dialog_tx,
             dialogs: Vec::new(),
             feed: Arc::clone(&feed),
+            mirror: Arc::new(Mutex::new(Mirror::new())),
             app_session: SessionId::new(),
             wire: "s1".to_owned(),
             pending_open: None,
@@ -3030,6 +3047,54 @@ mod tests {
                 envelope.event
             );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_adopted_session_points_the_mirror_at_its_file() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.wire.clear();
+        pump.pending_new = true;
+        let meta = pump.session_meta();
+        pump.store.client().new_session(&pump.cwd, &[], Some(meta));
+        let outgoing = pump.store.take_outgoing();
+        let new_id = outgoing
+            .iter()
+            .find_map(|frame| match frame {
+                Frame::Request { id, method, .. } if method == "session/new" => Some(id.clone()),
+                _ => None,
+            })
+            .expect("bootstrap asks for a new session");
+        let changes = pump.store.absorb(Frame::Success {
+            id: new_id,
+            result: serde_json::json!({"sessionId": "agent-1"}),
+        });
+        for change in changes {
+            pump.react(change);
+        }
+        let expected = crate::paths::sessions_dir()
+            .expect("the test process has a sessions dir")
+            .join("agent-1.jsonl");
+        assert_eq!(
+            lock(pump.mirror.as_ref()).path(),
+            Some(expected.as_path()),
+            "the exit summary and the tree read the adopted session's file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_resumed_session_points_the_mirror_at_its_file_before_the_load_answers() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.bootstrap(Some(Path::new("/sessions/abc123.jsonl")));
+        let expected = crate::paths::sessions_dir()
+            .expect("the test process has a sessions dir")
+            .join("abc123.jsonl");
+        assert_eq!(
+            lock(pump.mirror.as_ref()).path(),
+            Some(expected.as_path()),
+            "adopt never runs on a resume, so bootstrap points the mirror itself"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

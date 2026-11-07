@@ -452,9 +452,9 @@ pub(crate) fn register_block_renderers(rt: &PluginRuntime) {
 /// How far ahead an expiring OAuth credential is reported at startup.
 const OAUTH_EXPIRY_WARNING: Duration = Duration::days(3);
 
-/// What the TUI knows about the active session's file. The ACP pump
-/// cannot point at one yet, so the exit summary and the session tree
-/// read `None` until a session's path reaches the client.
+/// What the TUI knows about the active session's file. The pump
+/// points it at the session it adopts, and the exit summary, the
+/// session tree and the agent loader read it from there.
 pub(crate) struct Mirror {
     path: Option<PathBuf>,
 }
@@ -462,6 +462,11 @@ pub(crate) struct Mirror {
 impl Mirror {
     pub(crate) fn new() -> Self {
         Self { path: None }
+    }
+
+    /// Names `path` the active session's file.
+    pub(crate) fn point_at(&mut self, path: PathBuf) {
+        self.path = Some(path);
     }
 
     /// The active session's file.

@@ -26,6 +26,7 @@ pub(crate) fn run_resume(
     print: Option<&str>,
     model_override: Option<&str>,
     json: bool,
+    standalone: bool,
 ) -> ExitCode {
     let dir = match sessions_dir() {
         Ok(d) => d,
@@ -42,7 +43,13 @@ pub(crate) fn run_resume(
         }
     };
     let Some(prompt) = print else {
-        return tui::run_tui(model_override, DEFAULT_SYSTEM, Some(path), false);
+        return tui::run_tui(
+            model_override,
+            DEFAULT_SYSTEM,
+            Some(&path),
+            false,
+            standalone,
+        );
     };
 
     let replay = match kage_session::replay(&path) {

@@ -3,7 +3,7 @@
 use super::*;
 
 use chrono::{DateTime, Duration, Local, Utc};
-use kage_core::protocol::NoticeLevel;
+use kage_core::protocol::{NoticeLevel, SessionState};
 
 use crate::auth::AuthStore;
 use crate::state::State;
@@ -181,16 +181,6 @@ pub(crate) fn service_dialog(
         return None;
     }
     reply_rx.recv().unwrap_or(None)
-}
-
-/// Publish `text` as an error notice on `link`: the error sink the
-/// engine path hands the bridge helpers.
-pub(crate) fn dialog_error(link: &Link, text: String) {
-    link.publish(kage_core::protocol::HostEvent::Notice {
-        level: NoticeLevel::Error,
-        text,
-        transient: false,
-    });
 }
 
 /// Build a one-line error [`CommandOutput`] for a failed plugin
@@ -518,6 +508,34 @@ pub(crate) fn register_block_renderers(rt: &PluginRuntime) {
 
 /// How far ahead an expiring OAuth credential is reported at startup.
 const OAUTH_EXPIRY_WARNING: Duration = Duration::days(3);
+
+/// What the TUI knows about the active session. A session a `kage
+/// serve` hosts through the link protocol fills it from the serve's
+/// envelopes. The ACP pump keeps no mirror: there is no session file
+/// to point at.
+pub(crate) struct Mirror {
+    /// The session's last known state, kept for run-end bookkeeping.
+    #[cfg_attr(
+        not(unix),
+        allow(dead_code, reason = "read by the unix-only link protocol")
+    )]
+    pub(crate) state: SessionState,
+    pub(crate) path: Option<PathBuf>,
+}
+
+impl Mirror {
+    pub(crate) fn new(path: Option<PathBuf>) -> Self {
+        Self {
+            state: SessionState::default(),
+            path,
+        }
+    }
+
+    /// The active session's file.
+    pub(crate) fn path(&self) -> Option<&std::path::Path> {
+        self.path.as_deref()
+    }
+}
 
 /// Notices for the start screen: the version-updated line, a configured
 /// default model that does not resolve, OAuth credentials close to

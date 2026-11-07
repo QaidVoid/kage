@@ -111,8 +111,9 @@ jobs:
       # runs kage-desktop's suite, which needs a software GL stack.
       - run: cargo nextest run --profile ci --workspace --exclude kage-desktop --all-targets --no-tests=pass --no-fail-fast
 
-  # The shared host must stay as small as a private engine. Memory is
-  # only meaningful in a release build, so this measures one on Linux.
+  # The shared host must stay as small as a private engine, and the
+  # standalone TUI near what the engine TUI was. Memory is only
+  # meaningful in a release build, so this measures one on Linux.
   memory:
     name: memory
     runs-on: ubuntu-latest

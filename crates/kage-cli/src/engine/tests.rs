@@ -5200,40 +5200,6 @@ fn close_during_a_run_warns_and_keeps_the_session() {
 }
 
 #[test]
-fn closing_the_active_session_clears_active() {
-    let h = harness(MockProvider::replaying(text_turn("ok")));
-    let (a, b) = (SessionId::new(), SessionId::new());
-    h.open(a, None);
-    h.open(b, None);
-    let marker = |text: &str| HostEvent::Notice {
-        level: NoticeLevel::Info,
-        text: text.into(),
-        transient: false,
-    };
-    h.engine.commander.publish(marker("first"));
-    let seen = wait_for(&h.events, |e| {
-        is_notice(e) && notices(std::slice::from_ref(e))[0] == "first"
-    });
-    assert_eq!(
-        seen.last().unwrap().session,
-        a,
-        "a opened first, so it is active"
-    );
-
-    h.engine.send(Command::to(a, CommandKind::Close));
-    h.engine.commander.publish(marker("second"));
-    prompt(&h.engine, b, "go", Delivery::Steer);
-    let events = until_runs_end(&h.events, 1);
-    assert_eq!(outcomes(&events), [RunOutcome::Completed]);
-    assert!(
-        !notices(&events).contains(&"second".to_owned()),
-        "{:?}",
-        notices(&events)
-    );
-    h.engine.shutdown();
-}
-
-#[test]
 fn an_agent_without_delegation_tools_in_its_list_cannot_delegate() {
     let mock = MockProvider::sequence(vec![
         agent_turn(&[(

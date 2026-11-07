@@ -49,8 +49,8 @@ talks to it over ACP instead.
 
 ## the engine
 
-Every frontend (the TUI, `kage rpc` for editors, and `-p` print mode)
-drives the same engine through two channels:
+Every frontend drives the same engine. `kage rpc` for editors and
+`-p` print mode reach it directly through two channels:
 
 - **Events out.** Each event is an envelope addressed to the session
   that produced it, with a per-session sequence number:
@@ -68,8 +68,9 @@ A dispatcher thread owns the sessions and never blocks on a run. Each
 run executes the agent loop on its own thread and hands the session
 back when it ends. Permission questions travel over the same channels:
 the engine publishes `permission_requested` and waits for the client's
-answer. The TUI renders the stream into its buffer, and the ACP adapter
-turns it into ACP traffic (see [the ACP projection](#the-acp-projection)).
+answer. The ACP projection turns the stream into ACP traffic, which is
+what the TUI and the editors speak (see
+[the ACP projection](#the-acp-projection)).
 
 ## agents
 
@@ -246,8 +247,8 @@ once. The TUI sends it from `/mcp restart`, from the picker and after
 a login. `kage.mcp.restart` from Lua joins the same list at run start.
 
 **MCP work off the dispatcher.** The dispatcher never waits on an MCP
-server. The TUI hands the session a manager whose servers are not
-spawned yet (`McpManager::unstarted`), so opening the session is
+server. A session's manager starts with its servers not spawned yet
+(`McpManager::unstarted`), so opening the session is
 instant; the dispatcher then brings every not-yet-started server up on
 a worker thread and keeps the session busy until the manager comes
 back, exactly like an idle restart. At run start it lends the manager
@@ -393,18 +394,18 @@ user keypress
    v
 kage-tui input dispatch
    v  (a request)
-kage-cli TUI host  ->  engine command
+kage-cli TUI pump  ->  ACP session/prompt to the agent
    v
-engine runner thread: kage-loop run()
+agent runner thread: kage-loop run()
    v -> kage-provider stream request
    v <- provider streams events
    v
 each loop event:
    -> Lua plugin events ("turn_start", "message_update", ...)
    -> session recorder appends JSONL
-   -> event bus: TUI, ACP client, or print output
+   -> event bus: ACP session/update chunks, or print output
    v
-kage-tui applies the event and repaints the visible region
+kage-tui applies the update and repaints the visible region
 ```
 
 The loop is fully synchronous. There is no async runtime in core.

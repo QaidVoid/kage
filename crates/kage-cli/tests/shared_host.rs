@@ -103,6 +103,95 @@ impl Env {
             .unwrap()
     }
 
+    /// A standalone TUI under `script`, which gives it a pty so the
+    /// terminal enters raw mode and the App idles for input instead of
+    /// exiting at once. The returned writer feeds the pty, so a test
+    /// can type into the TUI; keep it open until the TUI is done, as
+    /// an end of input ends the App. `extra` carries the environment,
+    /// notably a provider key so first-run onboarding does not wait on
+    /// the pty.
+    fn tui(&self, extra: &[(&str, &str)]) -> (Child, std::process::ChildStdin) {
+        let root = self.dir.path();
+        let mut child = Command::new("script")
+            .arg("-qec")
+            .arg(format!("{} --standalone", env!("CARGO_BIN_EXE_kage")))
+            .arg("/dev/null")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("TERM", "xterm-256color")
+            .env("HOME", root)
+            .env("XDG_RUNTIME_DIR", root.join("runtime"))
+            .env("XDG_DATA_HOME", root.join("data"))
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("KAGE_TEST_TUI", root)
+            .envs(extra.iter().copied())
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let keys = child.stdin.take().unwrap();
+        (child, keys)
+    }
+
+    /// The standalone TUI's process, found by its command line and its
+    /// marker environment variable, so a parallel test's or a stray
+    /// process's argv cannot match.
+    fn kage_pid(&self) -> u32 {
+        let mine = format!("{}\0--standalone\0", env!("CARGO_BIN_EXE_kage"));
+        let marker = format!("KAGE_TEST_TUI={}", self.dir.path().display());
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let found = std::fs::read_dir("/proc").ok().and_then(|entries| {
+                entries.filter_map(Result::ok).find_map(|entry| {
+                    let name = entry.file_name().into_string().ok()?;
+                    if !name.chars().all(|c| c.is_ascii_digit()) {
+                        return None;
+                    }
+                    std::fs::read(format!("/proc/{name}/cmdline"))
+                        .ok()
+                        .filter(|cmdline| cmdline.starts_with(mine.as_bytes()))
+                        .and_then(|_| std::fs::read(format!("/proc/{name}/environ")).ok())
+                        .filter(|environ| {
+                            environ
+                                .split(|b| *b == 0)
+                                .any(|var| var == marker.as_bytes())
+                        })
+                        .map(|_| name.parse().unwrap())
+                })
+            });
+            if let Some(pid) = found {
+                return pid;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the standalone TUI never started"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// A session file the TUI's private host recorded, once its session
+    /// opened.
+    fn session_file(&self) -> PathBuf {
+        let dir = self.dir.path().join("data/kage/sessions");
+        let deadline = Instant::now() + WAIT;
+        loop {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.filter_map(Result::ok) {
+                    let path = entry.path();
+                    if path.extension().is_some_and(|ext| ext == "jsonl") {
+                        return path;
+                    }
+                }
+            }
+            assert!(Instant::now() < deadline, "the TUI never opened a session");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     fn record(&self) -> Option<Value> {
         serde_json::from_slice(&std::fs::read(self.runtime().join("host.json")).ok()?).ok()
     }
@@ -122,6 +211,16 @@ impl Env {
     fn connect(&self) -> UnixStream {
         UnixStream::connect(self.runtime().join("host.sock")).unwrap()
     }
+}
+
+/// Stops the TUI and its pty, without caring how: a measured or
+/// probed process may leave with any status.
+fn stop_tui(pid: u32, mut tui: Child) {
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(pid).unwrap()),
+        nix::sys::signal::Signal::SIGTERM,
+    );
+    let _ = tui.wait();
 }
 
 /// A `kage rpc` process and its stdio.
@@ -1149,6 +1248,53 @@ fn a_relay_stays_within_its_memory_budget() {
     assert!(
         used <= BUDGET_KIB,
         "relay uses {used} KiB, over {BUDGET_KIB} KiB"
+    );
+}
+
+/// A standalone TUI runs a private host in its own process: a message
+/// typed into the TUI is served by that host and recorded under this
+/// environment's data directory while the TUI is up.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_standalone_tui_runs_a_private_host_in_its_process() {
+    let env = Env::new();
+    let (tui, mut keys) = env.tui(&[("OPENAI_API_KEY", "sk-standalone-test")]);
+    let pid = env.kage_pid();
+    // Let the App reach raw mode, then type a message: the host only
+    // writes the session file once a first entry is recorded.
+    std::thread::sleep(Duration::from_secs(2));
+    keys.write_all(b"hi\r").unwrap();
+    keys.flush().unwrap();
+    let session = env.session_file();
+    // A beat more proves the TUI stays up beside the session it opened.
+    std::thread::sleep(Duration::from_secs(1));
+    let header = std::fs::read_to_string(&session).unwrap();
+    assert!(header.contains("\"session\""), "{header}");
+    stop_tui(pid, tui);
+    drop(keys);
+}
+
+/// A standalone TUI runs a private host in process, so it stays near
+/// what the engine TUI used. The measured value locally was under half
+/// the budget.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "measures a release build: cargo test --release -p kage-cli --test shared_host -- --ignored"]
+fn a_standalone_tui_stays_within_its_memory_budget() {
+    const BUDGET_KIB: u64 = 12 * 1024;
+    let env = Env::new();
+    let (tui, keys) = env.tui(&[("OPENAI_API_KEY", "sk-standalone-test")]);
+    // The pty feed stays open for the whole run: its end would stop the App.
+    let _keep_open = keys;
+    let pid = env.kage_pid();
+    // Measure an idle TUI that finished starting, pty raw mode included.
+    std::thread::sleep(Duration::from_secs(3));
+    let used = rss_anon_kib(pid);
+    eprintln!("standalone TUI RssAnon: {used} KiB");
+    stop_tui(pid, tui);
+    assert!(
+        used <= BUDGET_KIB,
+        "standalone TUI uses {used} KiB, over {BUDGET_KIB} KiB"
     );
 }
 

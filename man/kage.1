@@ -4,7 +4,7 @@
 .SH NAME
 kage \- A fast, hackable coding agent for your terminal, editor and browser
 .SH SYNOPSIS
-\fBkage\fR [\fB\-p\fR|\fB\-\-print\fR] [\fB\-m\fR|\fB\-\-model\fR] [\fB\-\-system\fR] [\fB\-\-no\-session\fR] [\fB\-\-yolo\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
+\fBkage\fR [\fB\-p\fR|\fB\-\-print\fR] [\fB\-m\fR|\fB\-\-model\fR] [\fB\-\-system\fR] [\fB\-\-no\-session\fR] [\fB\-\-yolo\fR] [\fB\-\-standalone\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
 .SH DESCRIPTION
 With no command and no \fB\-p\fR, kage opens its interactive TUI in the current directory. Type a prompt and press enter to send it. On an empty prompt, \fB?\fR shows the keys and a prompt starting with \fB/\fR runs a command. \fBctrl+q\fR quits.
 .PP
@@ -25,6 +25,9 @@ Disable session recording. By default every run writes a JSONL session file unde
 .TP
 \fB\-\-yolo\fR
 Start the session in allow mode: every tool call runs without asking, MCP servers included. A configured deny still denies. Same effect as `/permission allow`, applied at startup
+.TP
+\fB\-\-standalone\fR
+Run a private host inside this process instead of sharing the per\-user host. A private host also runs when `[host] share = false`, or where the shared host cannot run on this platform
 .TP
 \fB\-\-json\fR
 Emit one JSON object per event on stdout instead of plain text. Only meaningful with `\-p/\-\-print`. Each line carries the event\*(Aqs `type` (such as `text_delta`, `tool_call_start`, `message_appended`, or `run_ended`) plus the `session` it belongs to and a per\-session `seq` number, so external tools can parse the agent\*(Aqs output without screen\-scraping

@@ -236,20 +236,9 @@ impl Commander {
         let _ = self.0.send(Input::Command(command));
     }
 
-    /// Publish a host event, such as a notice, on the active session.
-    pub(crate) fn publish(&self, event: HostEvent) {
-        let _ = self.0.send(Input::Publish(event));
-    }
-
     /// Resolve models against `registry` from the next run on.
     pub(crate) fn set_registry(&self, registry: Arc<ProviderRegistry>) {
         let _ = self.0.send(Input::SetRegistry(registry));
-    }
-
-    /// Replace every session's plugin tools with what its plugin runtime
-    /// registers now, after a plugin reload.
-    pub(crate) fn reload_plugin_tools(&self) {
-        let _ = self.0.send(Input::ReloadPluginTools);
     }
 }
 
@@ -319,9 +308,7 @@ enum Input {
         goal: String,
         verdict: crate::goal::Verdict,
     },
-    Publish(HostEvent),
     SetRegistry(Arc<ProviderRegistry>),
-    ReloadPluginTools,
     /// The agents under the main session `root` used the agent budget.
     /// The engine stops them.
     BudgetSpent {
@@ -739,18 +726,7 @@ impl Dispatcher {
                 } => {
                     self.goal_checked(session, &goal, verdict);
                 }
-                Input::Publish(event) => {
-                    if let Some(id) = self.active {
-                        self.bus.publish(id, event);
-                    }
-                }
                 Input::SetRegistry(registry) => self.registry = registry,
-                Input::ReloadPluginTools => {
-                    let ids: Vec<SessionId> = self.sessions.keys().copied().collect();
-                    for id in ids {
-                        self.apply_plugin_tools(id);
-                    }
-                }
                 Input::PlanApproved(id) => self.plan_mode_changed(id, false, false),
                 Input::BudgetSpent { root } => self.budget_spent(root),
             }

@@ -1,9 +1,11 @@
-//! Translates the App's requests into engine commands.
+//! Translates the App's requests into the link protocol's commands,
+//! for a TUI attached to a session a `kage serve` hosts. The protocol
+//! retires once the ACP path serves attaching too.
 //!
-//! The engine runs the agent. This thread handles what stays on the TUI
-//! side: plugin commands and keybindings (which may open dialogs in the
-//! App), provider refresh, plugin reload, and the plugin events and
-//! toasts that accompany model, thinking, and permission changes.
+//! This thread handles what stays on the TUI side: plugin commands and
+//! keybindings (which may open dialogs in the App), provider refresh,
+//! plugin reload, and the plugin events and toasts that accompany
+//! model, thinking, and permission changes.
 
 use super::*;
 
@@ -11,89 +13,37 @@ use kage_core::ThinkingLevel;
 use kage_core::permissions::PermissionAction;
 use kage_core::protocol::{
     Command, CommandKind, Delivery, Envelope, Event, HostEvent, NoticeLevel, RunOutcome,
-    SessionState,
 };
 use kage_provider::ProviderError;
 
-use crate::engine::{AUTO_THINKING, Commander};
+use crate::engine::AUTO_THINKING;
 
-/// Where the TUI's commands go: the engine in this process, or the
-/// `kage serve` the TUI attached to.
+/// Where the TUI's commands go: the `kage serve` the TUI attached to.
 #[derive(Clone)]
 pub(crate) enum Link {
-    /// The engine in this process.
-    Local(Commander),
     /// A session a `kage serve` hosts.
-    #[cfg(unix)]
     Remote(Arc<super::remote::Remote>),
 }
 
 impl Link {
-    pub(crate) fn send(&self, command: Command) {
+    pub(crate) fn send(&self, command: &Command) {
         match self {
-            Self::Local(commander) => commander.send(command),
-            #[cfg(unix)]
-            Self::Remote(remote) => remote.send(&command),
+            Self::Remote(remote) => remote.send(command),
         }
     }
 
     /// Publish a host event, such as a notice, on the active session.
     pub(crate) fn publish(&self, event: HostEvent) {
         match self {
-            Self::Local(commander) => commander.publish(event),
-            #[cfg(unix)]
             Self::Remote(remote) => remote.publish(event),
         }
     }
 
-    /// Resolve models against `registry` from the next run on. Serve
-    /// keeps its own registry.
-    fn set_registry(&self, registry: Arc<ProviderRegistry>) {
-        match self {
-            Self::Local(commander) => commander.set_registry(registry),
-            #[cfg(unix)]
-            Self::Remote(_) => {}
-        }
-    }
-
-    /// Replace every session's plugin tools after a plugin reload.
-    /// Serve's plugins are its own.
-    fn reload_plugin_tools(&self) {
-        match self {
-            Self::Local(commander) => commander.reload_plugin_tools(),
-            #[cfg(unix)]
-            Self::Remote(_) => {}
-        }
-    }
-
     /// The process id of the serve the TUI is attached to.
-    fn serve_pid(&self) -> Option<u32> {
+    fn serve_pid(&self) -> u32 {
         match self {
-            Self::Local(_) => None,
-            #[cfg(unix)]
-            Self::Remote(remote) => Some(remote.pid),
+            Self::Remote(remote) => remote.pid,
         }
-    }
-}
-
-/// What the TUI host knows about the active session, kept current by
-/// [`mirror`].
-pub(crate) struct Mirror {
-    state: SessionState,
-    path: Option<PathBuf>,
-}
-
-impl Mirror {
-    pub(crate) fn new(path: Option<PathBuf>) -> Self {
-        Self {
-            state: SessionState::default(),
-            path,
-        }
-    }
-
-    /// The active session's file.
-    pub(crate) fn path(&self) -> Option<&std::path::Path> {
-        self.path.as_deref()
     }
 }
 
@@ -196,7 +146,7 @@ impl Host {
     }
 
     fn send(&self, kind: CommandKind) {
-        self.link.send(Command::active(kind));
+        self.link.send(&Command::active(kind));
     }
 
     fn notify(&self, text: String) {
@@ -233,9 +183,7 @@ impl Host {
     /// Refuses `request` with a notice when it would replace the session
     /// a `kage serve` shares with other clients.
     fn refused_while_attached(&self, request: &RunRequest) -> bool {
-        let Some(pid) = self.link.serve_pid() else {
-            return false;
-        };
+        let pid = self.link.serve_pid();
         let op = match request {
             RunRequest::NewSession => "a new session",
             RunRequest::CloneSession => "cloning",
@@ -284,16 +232,16 @@ impl Host {
                 };
                 let kind = CommandKind::Prompt { content, delivery };
                 match session {
-                    Some(session) => self.link.send(Command::to(session, kind)),
+                    Some(session) => self.link.send(&Command::to(session, kind)),
                     None => self.send(kind),
                 }
             }
             RunRequest::Cancel { session } => match session {
-                Some(session) => self.link.send(Command::to(session, CommandKind::Cancel)),
+                Some(session) => self.link.send(&Command::to(session, CommandKind::Cancel)),
                 None => self.send(CommandKind::Cancel),
             },
             RunRequest::RecallPrompt { session, delivery } => match session {
-                Some(session) => self.link.send(Command::to(
+                Some(session) => self.link.send(&Command::to(
                     session,
                     CommandKind::WithdrawPrompt { delivery },
                 )),
@@ -565,7 +513,6 @@ impl Host {
         }
         let active_ok = fresh.resolve(&lock(&self.mirror).state.model).is_ok();
         self.registry = Arc::new(fresh);
-        self.link.set_registry(Arc::clone(&self.registry));
         Ok(active_ok)
     }
 
@@ -578,7 +525,6 @@ impl Host {
             return;
         };
         let reload = rt.reload_all(self.plugins_dir.as_deref());
-        self.link.reload_plugin_tools();
         super::support::register_block_renderers(&rt);
         if let Err(e) = self.rebuild_registry() {
             self.error(format!("providers not refreshed: {e}"));
@@ -644,9 +590,20 @@ fn switch_error(model: &str, err: &ProviderError) -> String {
     }
 }
 
+/// Publish `text` as an error notice on `link`: the error sink the
+/// attached host hands the bridge helpers.
+pub(crate) fn dialog_error(link: &Link, text: String) {
+    link.publish(HostEvent::Notice {
+        level: NoticeLevel::Error,
+        text,
+        transient: false,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use kage_core::SessionId;
+    use kage_core::protocol::SessionState;
 
     use super::*;
 

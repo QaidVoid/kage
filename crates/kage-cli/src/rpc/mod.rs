@@ -81,6 +81,19 @@ use kage_acp::acp::{UiAttachRequest, UiCommandRequest, UiKeymapRequest, UiOutput
 use kage_acp::agent::{Agent, PromptContext};
 use kage_core::config::{Config, McpServer as McpSpec, PluginsConfig};
 use kage_core::environment::Environment;
+
+/// How large a client's environment may be when it announces itself in
+/// `_kage/environment`. A larger one is not sent, and that client's
+/// sessions use the host's own.
+pub(crate) const MAX_ENVIRONMENT_BYTES: usize = 1024 * 1024;
+
+/// This process's environment, UTF-8 variables only. Variables that
+/// are not UTF-8 are left out.
+pub(crate) fn environment_vars() -> BTreeMap<String, String> {
+    std::env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .collect()
+}
 use kage_core::permissions::PermissionAction;
 use kage_core::protocol::{AgentTree, Command, CommandKind, Delivery, RunOutcome};
 use kage_core::sync::lock;

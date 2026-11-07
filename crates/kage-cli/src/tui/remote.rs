@@ -203,11 +203,11 @@ pub(crate) fn run(attached: Attached, model: Option<&str>) -> ExitCode {
         ui.cwd = workdir.display().to_string();
     }
     let session = attached.session;
-    let mirror = Arc::new(Mutex::new(host::Mirror::new(Some(attached.path.clone()))));
+    let mirror = Arc::new(Mutex::new(Mirror::new(Some(attached.path.clone()))));
     let (events_tx, events_rx) = mpsc::channel();
     let link = connect(attached, &config, &mirror, plugins.clone(), events_tx);
     if let Some(model) = model {
-        link.send(Command::active(CommandKind::SetModel {
+        link.send(&Command::active(CommandKind::SetModel {
             model: model.to_owned(),
         }));
     }
@@ -266,7 +266,7 @@ pub(crate) fn run(attached: Attached, model: Option<&str>) -> ExitCode {
 fn connect(
     attached: Attached,
     config: &kage_core::config::Config,
-    mirror: &Arc<Mutex<host::Mirror>>,
+    mirror: &Arc<Mutex<Mirror>>,
     plugins: Option<Arc<PluginRuntime>>,
     events: mpsc::Sender<Envelope>,
 ) -> Link {

@@ -19,16 +19,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::rpc::{MAX_ENVIRONMENT_BYTES, environment_vars};
 use crate::shared_host::{SOCKET, read_record};
 
 // How long a client waits for a host it started.
 const START_WAIT: Duration = Duration::from_secs(10);
 // The host log is moved aside at this size when a client starts a host.
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
-// A larger environment is not sent, and the client's sessions use the
-// host's own.
-const MAX_ENVIRONMENT_BYTES: usize = 1024 * 1024;
-
 /// Why a client cannot use the shared host.
 #[derive(Debug)]
 pub(crate) enum Unavailable {
@@ -209,8 +206,8 @@ pub(crate) fn print_log() -> ExitCode {
 /// variables rather than those of whichever client started the host.
 /// Variables that are not UTF-8 are left out.
 fn environment_notification() -> Option<Vec<u8>> {
-    let vars: serde_json::Map<String, serde_json::Value> = std::env::vars_os()
-        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+    let vars: serde_json::Map<String, serde_json::Value> = environment_vars()
+        .into_iter()
         .map(|(name, value)| (name, value.into()))
         .collect();
     let message = serde_json::json!({

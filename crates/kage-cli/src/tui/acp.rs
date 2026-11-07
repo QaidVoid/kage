@@ -1,8 +1,12 @@
-//! The TUI on an ACP link: `kage rpc` as a child process, ACP frames
-//! as newline-delimited JSON over its pipes.
+//! The TUI's ACP link, to one of three agents: a `kage rpc` child of
+//! this binary, the user's shared host over its socket, or a private
+//! host served inside this process. The default is the shared host,
+//! started when it is not running; `--standalone`, a host of another
+//! kage version, and platforms without the socket serve a private host
+//! over an in-memory pipe instead, and `KAGE_LINK=acp` runs a child.
 //!
-//! A reader thread turns the child's stdout lines into [`Event`]s and
-//! a writer thread drains [`Frame`]s into its stdin. A pump thread
+//! A reader thread turns the connection's lines into [`Event`]s and
+//! a writer thread drains [`Frame`]s onto it. A pump thread
 //! owns the [`Store`]: it feeds the agent's frames in, sends what the
 //! client produces, and fabricates the signals the wire cannot carry
 //! as [`Envelope`]s for the App's engine channel, because the agent
@@ -11,12 +15,13 @@
 //! `&mut App` waits in a [`FeedState`] the App drains as its
 //! [`kage_tui::AcpFeed`]. The child's stderr is captured to a short
 //! tail rather than let loose on the raw terminal, and the tail rides
-//! the notice when the child dies. The child is this same `kage`
-//! binary, so the TUI and its engine share a build; [`spawn`] runs
-//! another program instead, which the tests use. On Unix `kage rpc`
-//! relays to the shared per-user host, so sessions and running turns
-//! outlive the TUI until the host goes idle. The child is killed when
-//! the transport drops, which happens when the user quits.
+//! the notice when the child dies; the socket and the private pipe
+//! have no stderr. The child is this same `kage` binary, so the TUI
+//! and its engine share a build; [`spawn`] runs another program
+//! instead, which the tests use. A session on the shared host outlives
+//! the TUI: it and a running turn stay with the host until the host
+//! goes idle. The child is killed when the transport drops, which
+//! happens when the user quits; a socket or pipe merely hangs up.
 //!
 //! The plugins load in this process: the runtime the engine path would
 //! build runs beside the pump, answers the agent's
@@ -43,13 +48,13 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use kage_client::wire::{
-    BlobContent, ClientCapabilities, ClientMeta, ContentBlock, EnvVariable, HttpHeader,
-    Implementation, KageClientCapabilities, McpServer, McpServerHttp, McpServerStdio,
-    NewSessionKage, NewSessionMeta, PermissionOptionKind, PluginCallRequest, PluginCallResult,
-    PluginDrainQueue, PluginDrainRequest, PluginDrainResult, PluginEventRequest, PluginHookKind,
-    PluginHookRequest, PluginPendingMessage, PluginPendingRole, PluginSessionOp, PluginToolRename,
-    PluginToolSpec, PluginToolsRequest, PluginToolsResult, PluginsSource, SessionOpt, TextContent,
-    UnconfiguredTools,
+    BlobContent, ClientCapabilities, ClientMeta, ContentBlock, EnvVariable,
+    EnvironmentNotification, HttpHeader, Implementation, KageClientCapabilities, McpServer,
+    McpServerHttp, McpServerStdio, NewSessionKage, NewSessionMeta, PermissionOptionKind,
+    PluginCallRequest, PluginCallResult, PluginDrainQueue, PluginDrainRequest, PluginDrainResult,
+    PluginEventRequest, PluginHookKind, PluginHookRequest, PluginPendingMessage, PluginPendingRole,
+    PluginSessionOp, PluginToolRename, PluginToolSpec, PluginToolsRequest, PluginToolsResult,
+    PluginsSource, SessionOpt, TextContent, UnconfiguredTools,
 };
 use kage_client::{Change, DialogAsk, Frame, PermissionDecision, RequestId, RpcError};
 use kage_core::keymap::{Keymap, MappingData};
@@ -76,23 +81,43 @@ use kage_tui::hostlog::LogPublisher;
 pub(crate) enum Event {
     /// A frame from the agent.
     Frame(Frame),
-    /// The child's stdout ended: it is gone.
+    /// The connection's read side ended: the agent is gone.
     Closed,
+}
+
+/// Which agent the TUI speaks ACP to. The shared host is the default;
+/// the private host takes over where it cannot be used, and the child
+/// stays for `KAGE_LINK=acp`.
+pub(crate) enum Upstream {
+    /// A `kage rpc` child of this same binary.
+    Child,
+    /// The user's shared host, over the socket a client connected to.
+    #[cfg(unix)]
+    Host(std::os::unix::net::UnixStream),
+    /// A private host served inside this process.
+    Private,
+    /// The shared host unless asked or unable to use it, decided after
+    /// onboarding had its turn, so a host started for a first run
+    /// carries the credentials that run saved.
+    Decide { standalone: bool },
 }
 
 /// Everything the threads and the handle share.
 #[derive(Default)]
 struct Shared {
-    /// The writer thread's queue, absent once the child is gone.
+    /// The writer thread's queue, absent once the agent is gone.
     writer: Mutex<Option<mpsc::Sender<Frame>>>,
-    /// The child, so a drop can kill it.
+    /// The child, so a drop can kill it. Absent on the socket and the
+    /// private pipe, whose agent is a process that outlives the
+    /// transport or a host in this same process.
     child: Mutex<Option<Child>>,
     /// The child's last stderr bytes, kept by the stderr thread.
     stderr: Mutex<Vec<u8>>,
 }
 
-/// The stdio connection to the spawned `kage rpc`. Its drop ends the
-/// child, so it is passed by ownership, never cloned.
+/// The TUI's end of the ACP connection. Its drop kills a spawned
+/// child and hangs up a socket or pipe, so it is passed by ownership,
+/// never cloned.
 pub(crate) struct Transport {
     shared: Arc<Shared>,
 }
@@ -100,14 +125,117 @@ pub(crate) struct Transport {
 impl Transport {
     /// Spawns `kage rpc` beside this binary and starts its io
     /// threads.
-    pub(crate) fn start(events: mpsc::Sender<Event>) -> Result<Transport, String> {
+    pub(crate) fn child(events: mpsc::Sender<Event>) -> Result<Transport, String> {
         let program = program()?;
         spawn(&program, &["rpc".to_owned()], events)
     }
 
-    /// Queues `frame` for the child. A frame the child cannot take is
-    /// dropped; [`Event::Closed`] is how the connection learns the
-    /// child is gone.
+    /// Connects to the shared host over the client's socket. The host
+    /// serves one agent per connection, so this TUI's sessions are its
+    /// own, and it runs their tools with the environment the pump
+    /// announces in `_kage/environment`.
+    #[cfg(unix)]
+    pub(crate) fn host(
+        stream: std::os::unix::net::UnixStream,
+        events: mpsc::Sender<Event>,
+    ) -> Result<Transport, String> {
+        let reader = stream
+            .try_clone()
+            .map_err(|error| format!("cannot split the socket: {error}"))?;
+        Self::stream(BufReader::new(reader), stream, None, events)
+    }
+
+    /// Serves a private `rpc::Host` inside this process and connects
+    /// to it over an in-memory pipe: the shape `--standalone` runs and
+    /// the fallback where the shared host cannot be used. The host
+    /// serves this TUI alone and is dropped with the transport.
+    pub(crate) fn memory(
+        model: Option<&str>,
+        system: &str,
+        yolo: bool,
+        events: mpsc::Sender<Event>,
+    ) -> Result<Transport, String> {
+        let host = crate::rpc::host::Host::start(model, system, yolo)?;
+        let (client_read, client_write, host_read, host_write) =
+            private_pair().map_err(|error| format!("cannot open the private pipe: {error}"))?;
+        let spawned = thread::Builder::new()
+            .name("kage-acp-private-host".to_owned())
+            .spawn(move || {
+                let _ = host.serve_local(host_read, host_write);
+            });
+        spawned.map_err(|error| format!("cannot start the private host: {error}"))?;
+        Self::stream(BufReader::new(client_read), client_write, None, events)
+    }
+
+    /// Starts the reader and writer threads on a connected byte
+    /// transport. `child` rides the shared state so the transport's
+    /// drop kills it.
+    fn stream(
+        reader: impl BufRead + Send + 'static,
+        writer: impl Write + Send + 'static,
+        child: Option<Child>,
+        events: mpsc::Sender<Event>,
+    ) -> Result<Transport, String> {
+        let (queue, frames) = mpsc::channel::<Frame>();
+        let shared = Arc::new(Shared {
+            writer: Mutex::new(Some(queue)),
+            child: Mutex::new(child),
+            stderr: Mutex::new(Vec::new()),
+        });
+        let transport = Transport {
+            shared: Arc::clone(&shared),
+        };
+        let shared_for_writer = Arc::clone(&shared);
+        let spawned = thread::Builder::new()
+            .name("kage-acp-writer".to_owned())
+            .spawn(move || {
+                let mut writer = writer;
+                for frame in frames {
+                    let line = serde_json::to_string(&frame.to_value()).expect("frame serializes");
+                    if writeln!(writer, "{line}").is_err() || writer.flush().is_err() {
+                        // The agent is gone; senders learn at once.
+                        *shared_for_writer.writer.lock().unwrap() = None;
+                        break;
+                    }
+                }
+            });
+        spawned.map_err(|error| format!("cannot start the io threads: {error}"))?;
+        let spawned = thread::Builder::new()
+            .name("kage-acp-reader".to_owned())
+            .spawn(move || {
+                let mut reader = reader;
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            while line.ends_with('\n') || line.ends_with('\r') {
+                                line.pop();
+                            }
+                            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                                continue;
+                            };
+                            let Some(frame) = Frame::parse(&value) else {
+                                continue;
+                            };
+                            if events.send(Event::Frame(frame)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(_) => break,
+                    }
+                }
+                let _ = events.send(Event::Closed);
+            });
+        spawned.map_err(|error| format!("cannot start the io threads: {error}"))?;
+        Ok(transport)
+    }
+
+    /// Queues `frame` for the agent. A frame the connection cannot
+    /// take is dropped; [`Event::Closed`] is how the pump learns the
+    /// agent is gone.
     pub(crate) fn send(&self, frame: Frame) {
         let writer = self.shared.writer.lock().unwrap().clone();
         if let Some(writer) = writer {
@@ -116,11 +244,44 @@ impl Transport {
     }
 
     /// The child's last stderr bytes, lossily decoded. Empty while the
-    /// child said nothing on stderr.
+    /// child said nothing on stderr; always empty on the socket and
+    /// the private pipe, which have none.
     pub(crate) fn stderr_tail(&self) -> String {
         let tail = self.shared.stderr.lock().unwrap();
         String::from_utf8_lossy(&tail).into_owned()
     }
+}
+
+/// The four halves of the private host's in-memory pipe: the client
+/// reads the first and writes the second, the host the other two. A
+/// Unix stream pair on Unix, a channel pipe elsewhere.
+type PrivateRead = Box<dyn BufRead + Send>;
+type PrivateWrite = Box<dyn Write + Send>;
+
+#[cfg(unix)]
+fn private_pair() -> std::io::Result<(PrivateRead, PrivateWrite, PrivateRead, PrivateWrite)> {
+    use std::os::unix::net::UnixStream;
+    let (client, host_end) = UnixStream::pair()?;
+    let host_reader = host_end.try_clone()?;
+    let client_reader = client.try_clone()?;
+    Ok((
+        Box::new(BufReader::new(client_reader)),
+        Box::new(client),
+        Box::new(BufReader::new(host_reader)),
+        Box::new(host_end),
+    ))
+}
+
+#[cfg(not(unix))]
+fn private_pair() -> std::io::Result<(PrivateRead, PrivateWrite, PrivateRead, PrivateWrite)> {
+    let (client_write, host_read) = super::pipe::channel_pair();
+    let (host_write, client_read) = super::pipe::channel_pair();
+    Ok((
+        Box::new(BufReader::new(client_read)),
+        Box::new(client_write),
+        Box::new(BufReader::new(host_read)),
+        Box::new(host_write),
+    ))
 }
 
 impl Drop for Transport {
@@ -161,61 +322,8 @@ fn spawn(
     let stdin = child.stdin.take().expect("spawned with piped stdin");
     let stdout = child.stdout.take().expect("spawned with piped stdout");
     let stderr = child.stderr.take().expect("spawned with piped stderr");
-    let (queue, reader) = mpsc::channel::<Frame>();
-    let shared = Arc::new(Shared {
-        writer: Mutex::new(Some(queue)),
-        child: Mutex::new(Some(child)),
-        stderr: Mutex::new(Vec::new()),
-    });
-    let transport = Transport {
-        shared: Arc::clone(&shared),
-    };
-    let shared_for_writer = Arc::clone(&shared);
-    let spawned = thread::Builder::new()
-        .name("kage-acp-writer".to_owned())
-        .spawn(move || {
-            let mut stdin = stdin;
-            for frame in reader {
-                let line = serde_json::to_string(&frame.to_value()).expect("frame serializes");
-                if writeln!(stdin, "{line}").is_err() || stdin.flush().is_err() {
-                    // The child is gone; senders learn at once.
-                    *shared_for_writer.writer.lock().unwrap() = None;
-                    break;
-                }
-            }
-        });
-    spawned.map_err(|error| format!("cannot start the io threads: {error}"))?;
-    let spawned = thread::Builder::new()
-        .name("kage-acp-reader".to_owned())
-        .spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line) {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        while line.ends_with('\n') || line.ends_with('\r') {
-                            line.pop();
-                        }
-                        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-                            continue;
-                        };
-                        let Some(frame) = Frame::parse(&value) else {
-                            continue;
-                        };
-                        if events.send(Event::Frame(frame)).is_err() {
-                            break;
-                        }
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(_) => break,
-                }
-            }
-            let _ = events.send(Event::Closed);
-        });
-    spawned.map_err(|error| format!("cannot start the io threads: {error}"))?;
-    let shared_for_stderr = Arc::clone(&shared);
+    let transport = Transport::stream(BufReader::new(stdout), stdin, Some(child), events)?;
+    let shared_for_stderr = Arc::clone(&transport.shared);
     let spawned = thread::Builder::new()
         .name("kage-acp-stderr".to_owned())
         .spawn(move || {
@@ -585,6 +693,27 @@ fn plugin_session_op(op: PendingSessionOp) -> PluginSessionOp {
     }
 }
 
+/// The `_kage/environment` notification carrying this process's
+/// environment, or `None` when it cannot be sent and the host keeps
+/// its own, like the `kage rpc` relay does.
+fn environment_frame() -> Option<Frame> {
+    let notification = EnvironmentNotification {
+        vars: crate::rpc::environment_vars(),
+    };
+    let Ok(params) = serde_json::to_value(&notification) else {
+        eprintln!("kage: the environment cannot be serialized; tools use the shared host's");
+        return None;
+    };
+    if params.to_string().len() > crate::rpc::MAX_ENVIRONMENT_BYTES {
+        eprintln!("kage: the environment is too large to send; tools use the shared host's");
+        return None;
+    }
+    Some(Frame::Notification {
+        method: "_kage/environment".to_owned(),
+        params,
+    })
+}
+
 /// The thread that owns the connection. It turns the store's view of
 /// the wire into the App's engine vocabulary: changes into
 /// [`HostEvent`]s, its own prompts into user bubbles, and everything
@@ -617,6 +746,7 @@ struct Pump {
     cwd: String,
     /// The model the session runs, as the config option carries it.
     model: String,
+    warned_model: Option<String>,
     /// The option store the session settings are read from at each
     /// session's opening, so a `:set` since startup reaches the next
     /// session too.
@@ -629,6 +759,13 @@ struct Pump {
     plugins: Option<PluginSurface>,
     /// The run-wide session settings that do not come from options.
     yolo: bool,
+    /// Whether the agent serves sessions for this connection without
+    /// this process's environment, so the pump announces it in
+    /// `_kage/environment` and their tools run with the terminal's
+    /// `PATH` and variables. The shared host does; a child inherits
+    /// this process's environment and the private host is this
+    /// process.
+    environment: bool,
     system_prompt: String,
     seq: u64,
     /// Whether the wire session's run is in flight, for the
@@ -713,6 +850,11 @@ impl Pump {
     /// Resuming replays on a fresh buffer; otherwise the new session's
     /// answer lands while the App runs and adopts the wire then.
     fn bootstrap(&mut self, resume: Option<&Path>) {
+        if self.environment
+            && let Some(frame) = environment_frame()
+        {
+            self.transport.send(frame);
+        }
         let capabilities = ClientCapabilities {
             meta: Some(ClientMeta {
                 kage: Some(KageClientCapabilities {
@@ -942,6 +1084,10 @@ impl Pump {
         }
         if !working && self.running {
             self.running = false;
+            // What the link protocol's bus subscriber records: the
+            // model a completed run used, and the run itself.
+            let _ = crate::state::record_last_model(&self.model);
+            let _ = crate::state::record_run_outcome(&self.model, &RunOutcome::Completed);
             self.publish(HostEvent::RunEnded {
                 outcome: RunOutcome::Completed,
             });
@@ -1002,6 +1148,7 @@ impl Pump {
         self.close_ask_cards();
         self.running = false;
         self.wire = id;
+        self.warned_model = None;
         self.handed = None;
         self.hand_buffer();
         self.update_ui_slot(|ui| {
@@ -1680,12 +1827,25 @@ impl Pump {
     }
 
     fn publish(&mut self, event: impl Into<kage_core::protocol::Event>) {
+        let event = event.into();
+        let warning = if let kage_core::protocol::Event::Host(HostEvent::StateChanged { state }) =
+            &event
+            && self.warned_model.as_deref() != Some(state.model.as_str())
+        {
+            self.warned_model = Some(state.model.clone());
+            support::legacy_acp_warning(&state.model)
+        } else {
+            None
+        };
         self.seq += 1;
         let _ = self.events.send(Envelope {
             session: self.app_session,
             seq: self.seq,
-            event: event.into(),
+            event,
         });
+        if let Some(warning) = warning {
+            self.notice(NoticeLevel::Error, warning.to_owned());
+        }
     }
 
     /// Feeds the runtime's UI-state slot the way the engine path's
@@ -1837,7 +1997,37 @@ fn plugin_dialog(ask: &DialogAsk, reply: mpsc::Sender<Option<Value>>) -> Option<
     }
 }
 
-/// Runs the TUI over an ACP link to `kage rpc`, on the recorded
+/// Which agent the TUI drives: the shared host of this user unless
+/// asked or unable to use it. `--standalone`, `[host] share = false`,
+/// client configuration overrides, a host of another kage version, one that cannot be started, and
+/// platforms without the socket all fall back to a private host in
+/// this process, like `kage rpc` falls back to its private engine.
+fn choose_upstream(standalone: bool, workdir: &Path) -> Upstream {
+    #[cfg(not(unix))]
+    {
+        let _ = (standalone, workdir);
+        return Upstream::Private;
+    }
+    #[cfg(unix)]
+    {
+        if standalone
+            || !crate::user_host_config().share
+            || kage_core::config::Config::env_overrides_active(workdir)
+        {
+            return Upstream::Private;
+        }
+        match crate::host_client::connect() {
+            Ok(stream) => Upstream::Host(stream),
+            Err(error) => {
+                eprintln!("kage: {error}; using a private host");
+                Upstream::Private
+            }
+        }
+    }
+}
+
+/// Runs the TUI over an ACP link to `kage rpc`, to the shared host's
+/// socket, or to a private host in this process, on the recorded
 /// session at `resume` when given. Returns the exit code once the user
 /// quits.
 #[expect(clippy::too_many_lines, reason = "one linear startup sequence")]
@@ -1846,6 +2036,7 @@ pub(crate) fn run(
     system: &str,
     resume: Option<&Path>,
     yolo: bool,
+    upstream: Upstream,
 ) -> ExitCode {
     let mut registry = match crate::build_provider_registry() {
         Ok(registry) => registry,
@@ -1908,15 +2099,76 @@ pub(crate) fn run(
         register_block_renderers(rt);
         let ui = rt.slots().ui_state();
         lock(&ui).cwd = workdir.display().to_string();
-        if model.is_none() {
-            shown_model = crate::default_model(&registry);
+    }
+    // First-run onboarding, like the engine path ran it: with no
+    // credentials anywhere, walk the new user through `auth login`
+    // (its provider picker and key prompt run in the normal terminal
+    // before the TUI starts) instead of exiting with instructions.
+    // Esc on the picker or an empty key falls back to the env-var
+    // guidance and exits.
+    if !crate::has_usable_provider(&registry) && registry.resolve(&shown_model).is_err() {
+        eprintln!("kage: welcome! no provider credentials found, let's add one.");
+        loop {
+            let code = crate::auth::run_login(None, &config);
+            if code != ExitCode::SUCCESS {
+                eprintln!("{}", crate::NO_CREDENTIALS_MESSAGE);
+                return ExitCode::from(1);
+            }
+            registry = match crate::build_provider_registry() {
+                Ok(registry) => registry,
+                Err(e) => {
+                    eprintln!("kage: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            if let Some(rt) = plugins.as_ref() {
+                for id in crate::plugins::merge_plugin_providers(rt, &mut registry) {
+                    eprintln!("kage: plugin provider `{id}` shadows the built-in registration");
+                }
+            }
+            if crate::has_usable_provider(&registry) {
+                break;
+            }
+            eprintln!("kage: credential saved, but no provider is usable yet; add another.");
         }
     }
+    // Recompute the default against the merged registry so a last-used
+    // plugin-provided model resolves on restart.
+    if model.is_none() {
+        shown_model = crate::default_model(&registry);
+    }
+    if shown_model.is_empty() {
+        eprintln!("{}", crate::NO_MODEL_MESSAGE);
+        return ExitCode::from(1);
+    }
+    if let Err(err) = crate::state::record_last_model(&shown_model) {
+        lock(&buffer).push_custom("kage:error", format!("state: {err}"), false);
+    }
+    let notices = start_notices(
+        &registry,
+        model.is_none().then_some(shown_model.as_str()),
+        chrono::Utc::now(),
+    );
     let registry = Arc::new(registry);
     let app_session = SessionId::new();
     let store = Store::new();
     let (frames_tx, frames_rx) = mpsc::channel();
-    let transport = match Transport::start(frames_tx) {
+    let upstream = match upstream {
+        Upstream::Decide { standalone } => choose_upstream(standalone, &workdir),
+        upstream => upstream,
+    };
+    #[cfg(unix)]
+    let environment = matches!(upstream, Upstream::Host(_));
+    #[cfg(not(unix))]
+    let environment = false;
+    let transport = match upstream {
+        Upstream::Child => Transport::child(frames_tx),
+        #[cfg(unix)]
+        Upstream::Host(stream) => Transport::host(stream, frames_tx),
+        Upstream::Private => Transport::memory(model, system, yolo, frames_tx),
+        Upstream::Decide { .. } => unreachable!("resolved above"),
+    };
+    let transport = match transport {
         Ok(transport) => transport,
         Err(error) => {
             eprintln!("kage: {error}");
@@ -1951,10 +2203,12 @@ pub(crate) fn run(
         pending_new: false,
         cwd: workdir.display().to_string(),
         model: shown_model.clone(),
+        warned_model: None,
         options: Arc::clone(&options),
         registry: Arc::clone(&registry),
         plugins: surface,
         yolo,
+        environment,
         system_prompt: system.to_owned(),
         seq: 0,
         running: false,
@@ -2002,7 +2256,7 @@ pub(crate) fn run(
         eprintln!("kage: cannot start the pump thread: {error}");
         return ExitCode::from(1);
     }
-    let mirror = Arc::new(Mutex::new(host::Mirror::new(None)));
+    let mirror = Arc::new(Mutex::new(Mirror::new(None)));
     let model_choices = available_model_items(&registry, &shown_model);
     // The commands the local plugins register; the App completes them
     // and the pump runs them, never the agent.
@@ -2010,6 +2264,7 @@ pub(crate) fn run(
         .as_ref()
         .map(|rt| snapshot_plugin_commands(rt))
         .unwrap_or_default();
+    let skills = crate::load_skills(&workdir, plugins.as_deref());
     Frontend {
         buffer: root,
         toasts,
@@ -2026,8 +2281,8 @@ pub(crate) fn run(
         model: shown_model,
         model_choices,
         plugin_commands,
-        skills: Vec::new(),
-        notices: Vec::new(),
+        skills,
+        notices,
         session: app_session,
     }
     .run(|| {})
@@ -2110,6 +2365,57 @@ mod tests {
     }
 
     #[test]
+    fn frames_round_trip_through_a_stream_pair() {
+        let (mine, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (events, received) = mpsc::channel();
+        let transport = Transport::stream(
+            BufReader::new(mine.try_clone().unwrap()),
+            mine,
+            None,
+            events,
+        )
+        .unwrap();
+        let agent = std::thread::spawn(move || {
+            let mut reader = BufReader::new(&theirs);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            (&theirs).write_all(line.as_bytes()).unwrap();
+            // The end drops when the closure's return does, ending the
+            // transport's read side.
+            theirs
+        });
+        transport.send(Frame::Request {
+            id: RequestId::Number(1),
+            method: "initialize".to_owned(),
+            params: serde_json::json!({"protocolVersion": 1}),
+        });
+        let wait = Duration::from_secs(30);
+        match received.recv_timeout(wait) {
+            Ok(Event::Frame(Frame::Request { method, .. })) => {
+                assert_eq!(method, "initialize");
+            }
+            other => panic!("expected the echo, got {other:?}"),
+        }
+        drop(agent);
+        loop {
+            match received.recv_timeout(wait) {
+                Ok(Event::Frame(_)) => {}
+                Ok(Event::Closed) => break,
+                other => panic!("expected the close, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_environment_notification_names_this_process_environment() {
+        let Some(Frame::Notification { method, params }) = environment_frame() else {
+            panic!("the environment rides a notification")
+        };
+        assert_eq!(method, "_kage/environment");
+        assert!(params["vars"].is_object(), "{params}");
+    }
+
+    #[test]
     fn a_missing_program_refuses_without_events() {
         let (events, received) = mpsc::channel();
         let Err(error) = spawn(Path::new("/nonexistent/kage-acp-missing"), &[], events) else {
@@ -2154,10 +2460,12 @@ mod tests {
             pending_new: false,
             cwd: "/w".to_owned(),
             model: "test:model".to_owned(),
+            warned_model: None,
             options: Arc::new(Mutex::new(kage_core::options::OptionStore::default())),
             registry: Arc::new(ProviderRegistry::default()),
             plugins: None,
             yolo: false,
+            environment: false,
             system_prompt: String::new(),
             seq: 0,
             running: false,
@@ -2172,6 +2480,121 @@ mod tests {
             closed: false,
         };
         (pump, app, dialog_rx, feed, dir)
+    }
+
+    #[test]
+    fn a_resumed_legacy_model_warns_once_and_switching_back_warns_again() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.pending_open = Some("resumed".to_owned());
+        pump.store.client().load_session("resumed", "/w", &[]);
+        let request = pump.store.take_outgoing().pop().unwrap();
+        let Frame::Request { id, .. } = request else {
+            panic!("load sends a request");
+        };
+        let changes = pump.store.absorb(Frame::Success {
+            id,
+            result: serde_json::json!({"configOptions": [{
+                "id": "model", "name": "Model", "category": "model",
+                "type": "select", "currentValue": "acp:reviewer", "options": []
+            }]}),
+        });
+        for change in changes {
+            pump.react(change);
+        }
+        pump.session_moved("resumed".to_owned());
+        let warnings = || {
+            app.try_iter()
+                .filter(|envelope| {
+                    matches!(
+                        &envelope.event,
+                        kage_core::protocol::Event::Host(HostEvent::Notice { text, .. })
+                            if text.contains("legacy one-shot ACP")
+                    )
+                })
+                .count()
+        };
+        assert_eq!(warnings(), 1);
+        for model in ["test:model", "acp:reviewer", "acp:reviewer"] {
+            let changes = pump.store.absorb(Frame::Notification {
+                method: "session/update".into(),
+                params: serde_json::json!({"sessionId": "resumed", "update": {
+                    "sessionUpdate": "config_option_update", "configOptions": [{
+                        "id": "model", "name": "Model", "category": "model",
+                        "type": "select", "currentValue": model, "options": []
+                    }]
+                }}),
+            });
+            for change in changes {
+                pump.react(change);
+            }
+        }
+        assert_eq!(warnings(), 1);
+        pump.pending_open = Some("another".to_owned());
+        pump.store.client().load_session("another", "/w", &[]);
+        let request = pump.store.take_outgoing().pop().unwrap();
+        let Frame::Request { id, .. } = request else {
+            panic!("load sends a request");
+        };
+        let changes = pump.store.absorb(Frame::Success {
+            id,
+            result: serde_json::json!({"configOptions": [{
+                "id": "model", "name": "Model", "category": "model",
+                "type": "select", "currentValue": "acp:reviewer", "options": []
+            }]}),
+        });
+        for change in changes {
+            pump.react(change);
+        }
+        pump.session_moved("another".to_owned());
+        assert_eq!(
+            warnings(),
+            1,
+            "a different transcript needs its own warning"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_config_override_selects_a_private_tui_host() {
+        const CHILD: &str = "TEST_KAGE_PRIVATE_UPSTREAM";
+        if std::env::var_os(CHILD).is_some() {
+            assert!(matches!(
+                choose_upstream(false, Path::new(".")),
+                Upstream::Private
+            ));
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tui::acp::tests::a_config_override_selects_a_private_tui_host",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", dir.path())
+            .env("XDG_CONFIG_HOME", dir.path().join("config"))
+            .env("XDG_DATA_HOME", dir.path().join("data"))
+            .env("XDG_STATE_HOME", dir.path().join("state"))
+            .env("XDG_RUNTIME_DIR", dir.path().join("runtime"))
+            .env("KAGE_PERMISSIONS__TOOLS__READ__DEFAULT", "deny")
+            .env("KAGE_HOST_IDLE_SECS", "1")
+            .env(CHILD, "1")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "the override must select private hosting before trying to connect: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     /// The question ask the agent sends for an `ask_user_question`

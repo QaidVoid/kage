@@ -6,9 +6,10 @@ desktop app start `kage rpc`, so they all drive the same engine: a
 session open in Zed and in the desktop app is one live session, and a
 turn started in one streams into the other.
 
-Nothing needs to be started by hand. The TUI, print mode and
-`kage serve` still run engines of their own, and Windows keeps a
-private engine per `kage rpc`.
+Nothing needs to be started by hand. The TUI joins the same host, so
+a session open in the terminal is one live session with the ones an
+editor sees. Print mode and `kage serve` still run engines of their
+own, and Windows keeps a private engine per `kage rpc`.
 
 ## how it starts and stops
 
@@ -83,13 +84,18 @@ A project's `.kage/config.toml` never sets it.
   next client starts one of its own version;
 - the host cannot start. The reason is in `host.log`.
 
+The TUI uses the shared host too, and a private host inside its own
+process with `--standalone`, `[host] share = false`, a host of
+another kage version, one that cannot start, or where the shared host
+cannot run.
+
 ## the session environment
 
 A shared host was started from one client's shell, but each client's
 tools must run in that client's own environment: its virtualenv, its
-`direnv` variables and its `PATH`. So every `kage rpc` sends its
-environment to the host, and the sessions it opens start these with
-it:
+`direnv` variables and its `PATH`. So every client sends its
+environment to the host (`kage rpc` over its stdio, the TUI over the
+socket), and the sessions it opens start these with it:
 
 - the `shell` tool and `!` commands,
 - stdio MCP servers, including restarts,

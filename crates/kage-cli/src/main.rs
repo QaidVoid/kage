@@ -96,6 +96,10 @@ pub(crate) const DEFAULT_SYSTEM: &str = "You are kage, a helpful coding agent.";
     about = "A fast, hackable coding agent for your terminal, editor and browser",
     long_about = None
 )]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "flags are naturally flat booleans on the command line"
+)]
 struct Cli {
     /// Subcommand. With no subcommand, `-p/--print` runs print mode;
     /// with neither, the interactive TUI opens.
@@ -128,6 +132,12 @@ struct Cli {
     /// Same effect as `/permission allow`, applied at startup.
     #[arg(long)]
     yolo: bool,
+
+    /// Run a private host inside this process instead of sharing the
+    /// per-user host. A private host also runs when `[host] share =
+    /// false`, or where the shared host cannot run on this platform.
+    #[arg(long)]
+    standalone: bool,
 
     /// Emit one JSON object per event on stdout instead of plain text.
     /// Only meaningful with `-p/--print`. Each line carries the event's
@@ -577,7 +587,7 @@ pub(crate) enum AuthAction {
 /// doesn't push the entry point past clippy's `too_many_lines`
 /// threshold; the print-mode path below still runs from [`main`]
 /// directly because it needs every local in scope.
-pub(crate) fn run_subcommand(command: Command) -> ExitCode {
+pub(crate) fn run_subcommand(command: Command, standalone: bool) -> ExitCode {
     match command {
         Command::List => run_list(),
         Command::Resume {
@@ -593,6 +603,7 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
                 print.as_deref(),
                 model.as_deref(),
                 json,
+                standalone,
             )
         }),
         Command::Fork { id, at } => run_fork(&id, &at),
@@ -1207,7 +1218,7 @@ fn main() -> ExitCode {
     }
 
     if let Some(command) = cli.command {
-        return run_subcommand(command);
+        return run_subcommand(command, cli.standalone);
     }
     if let Some(code) = config_error() {
         return code;
@@ -1218,7 +1229,13 @@ fn main() -> ExitCode {
     }
 
     // No subcommand and no `-p`: drop into the interactive TUI.
-    tui::run_tui(cli.model.as_deref(), &cli.system, None, cli.yolo)
+    tui::run_tui(
+        cli.model.as_deref(),
+        &cli.system,
+        None,
+        cli.yolo,
+        cli.standalone,
+    )
 }
 
 /// Load the layered config for the current directory before a run
@@ -1295,7 +1312,7 @@ fn run_host(action: &HostAction) -> ExitCode {
 /// The `[host]` table of the user config. A config that does not load
 /// gives the defaults, with a warning, since the user's settings are then
 /// ignored.
-fn user_host_config() -> kage_core::config::HostConfig {
+pub(crate) fn user_host_config() -> kage_core::config::HostConfig {
     let Some(path) = kage_core::config::Config::default_path() else {
         return kage_core::config::HostConfig::default();
     };
@@ -1345,9 +1362,16 @@ fn configured_shell(workdir: &std::path::Path) -> Option<String> {
 
 /// One `-p` print-mode run: provider and tool setup, permission gate,
 /// session recording, and the exit code.
+#[expect(clippy::too_many_lines, reason = "one linear print run")]
 fn run_print_mode(cli: Cli) -> ExitCode {
     let Some(prompt) = cli.print else {
-        return tui::run_tui(cli.model.as_deref(), &cli.system, None, cli.yolo);
+        return tui::run_tui(
+            cli.model.as_deref(),
+            &cli.system,
+            None,
+            cli.yolo,
+            cli.standalone,
+        );
     };
     let mut registry = match build_provider_registry() {
         Ok(registry) => registry,

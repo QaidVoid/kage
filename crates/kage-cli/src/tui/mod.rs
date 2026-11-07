@@ -1,9 +1,11 @@
 //! Interactive TUI mode for kage.
 //!
-//! [`run_tui`] runs [`kage_tui::App`] on the main thread against an
-//! engine: the App's requests become engine commands through
-//! [`host::Host`], and the engine's events flow back to the App over a
-//! channel.
+//! [`run_tui`] runs [`kage_tui::App`] on the main thread against an ACP
+//! agent: the pump in [`acp`] owns the wire, the App's requests become
+//! client calls, and the agent's frames flow back to the App over a
+//! channel. A session a `kage serve` hosts attaches through
+//! [`host::Host`] over the link protocol instead, until that protocol
+//! retires.
 
 pub(crate) use std::path::PathBuf;
 pub(crate) use std::process::ExitCode;
@@ -12,7 +14,7 @@ pub(crate) use std::sync::{Arc, Mutex};
 pub(crate) use std::thread;
 
 pub(crate) use kage_core::{Content, sync::lock};
-pub(crate) use kage_loop::{AgentContext, LoopConfig};
+pub(crate) use kage_loop::LoopConfig;
 pub(crate) use kage_plugin::{
     BridgePrep, BridgeStep, CommandOutput, ConfirmRequest, EditorRequest, InputRequest,
     PluginRuntime, SelectRequest, SwitchTarget,
@@ -28,21 +30,21 @@ pub(crate) use crate::plugins::setup_user_runtime;
 
 mod acp;
 mod entry;
+#[cfg(unix)]
 mod host;
+mod pipe;
 #[cfg(unix)]
 mod remote;
 mod support;
-
-pub(crate) use host::Link;
 
 pub use entry::run_tui;
 
 pub(crate) use entry::startup_options;
 
 pub(crate) use support::{
-    available_model_items, dialog_error, list_session_choices, list_session_nodes,
+    Mirror, available_model_items, list_session_choices, list_session_nodes,
     refresh_session_entries, register_block_renderers, resolve_switch_target, run_bridged_command,
-    run_bridged_keymap, snapshot_plugin_commands,
+    run_bridged_keymap, snapshot_plugin_commands, start_notices,
 };
 
 #[cfg(test)]

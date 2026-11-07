@@ -12,9 +12,10 @@
 //! The state is the honest sum of what frames delivered: open
 //! [`Session`]s with their grouped transcript items, usage, config
 //! options, permission asks, queued prompts and the subagent tree,
-//! plus the directory a `session/list` answered with. Nothing is
-//! assumed that no frame carried, and [`Change`] reports exactly what
-//! a frame moved so a host redraws only that.
+//! the directory a `session/list` answered with, and the plugin UI of
+//! the project the client attached to, with the dialogs its plugins
+//! opened. Nothing is assumed that no frame carried, and [`Change`]
+//! reports exactly what a frame moved so a host redraws only that.
 
 #![forbid(unsafe_code)]
 
@@ -29,8 +30,8 @@ pub use client::{Client, PermissionDecision, PromptOutcome, SteerError};
 pub use frame::{Frame, RequestId, RpcError};
 pub use kage_core::fsutil::unquote_and_trim;
 pub use state::{
-    PermissionAsk, QueuedPrompt, SUBJECT_KEYS, Session, State, Subagent, ToolCallItem,
-    TranscriptItem, Usage,
+    DialogAsk, PermissionAsk, PluginUi, QueuedPrompt, SUBJECT_KEYS, Session, State, Subagent,
+    ToolCallItem, TranscriptItem, Usage,
 };
 
 pub use kage_acp_wire as wire;

@@ -169,6 +169,22 @@ pub enum Change {
         /// The error the agent answered with.
         error: RpcError,
     },
+    /// The plugin UI of the attached project changed: a
+    /// `_kage/ui/attach` snapshot or a `_kage/ui/update` landed.
+    Ui,
+    /// A `_kage/ui/command` or `_kage/ui/keymap` answer arrived. The
+    /// output is delivered here and not kept in state, because a
+    /// client shows it where the command was started.
+    UiOutput {
+        /// The project whose plugins ran it.
+        cwd: String,
+        /// What the command or mapping returned.
+        output: kage_acp_wire::UiOutput,
+    },
+    /// A `_kage/ui/dialog` arrived: a plugin asked this connection to
+    /// show it, or one was answered and the queue moved. The open
+    /// dialogs live in [`State::dialogs`](crate::State::dialogs).
+    Dialog,
 }
 
 impl Change {
@@ -197,7 +213,10 @@ impl Change {
             | Self::Registry { .. }
             | Self::RegistryInstalled { .. }
             | Self::KeySaved { .. }
-            | Self::Failed { .. } => None,
+            | Self::Failed { .. }
+            | Self::Ui
+            | Self::UiOutput { .. }
+            | Self::Dialog => None,
         }
     }
 }

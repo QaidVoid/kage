@@ -21,17 +21,22 @@ use kage_acp_wire::{
     RequestMeta, RequestPermissionRequest, RequestPermissionResult, ResumeSessionRequest,
     SelectedOption, SessionExportResponse, SessionForkRequest, SessionForkResponse,
     SessionNotification, SessionRenameRequest, SessionRequest, SessionUpdate,
-    SetSessionConfigOptionRequest, SwarmResumeRequest,
+    SetSessionConfigOptionRequest, SwarmResumeRequest, UiCommandRequest, UiDialogRequest,
+    UiKeymapRequest, UiSnapshot, UiUpdate,
 };
 
 use crate::change::Change;
 use crate::frame::{Frame, RequestId, RpcError};
 use crate::state::{
-    PermissionAsk, QueuedPrompt, Session, State, ToolCallItem, TranscriptItem, Usage,
+    DialogAsk, PermissionAsk, PluginUi, QueuedPrompt, Session, State, ToolCallItem, TranscriptItem,
+    Usage,
 };
 
 /// The method an agent calls to ask for a tool call's verdict.
 const ASK_METHOD: &str = "session/request_permission";
+
+/// The method an agent calls to show a plugin dialog on this client.
+const DIALOG_METHOD: &str = "_kage/ui/dialog";
 
 /// Why a steer did not go out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +170,21 @@ enum Pending {
     Registry,
     RegistryInstall,
     ImageSave,
+    UiAttach {
+        /// The attachment's id, the request id this attach went out
+        /// under, which its updates carry back.
+        attach_id: u64,
+        cwd: String,
+        /// The updates that arrived between the request and its
+        /// answer, replayed on the snapshot in arrival order.
+        buffered: Vec<UiUpdate>,
+    },
+    UiCommand {
+        cwd: String,
+    },
+    UiKeymap {
+        cwd: String,
+    },
 }
 
 /// The client side of an ACP connection.
@@ -174,6 +194,13 @@ pub struct Client {
     next_id: u64,
     pending: BTreeMap<RequestId, Pending>,
     outgoing: Vec<Frame>,
+    /// The request id of the `_kage/ui/attach` answer that landed
+    /// last. Only a newer answer may replace the UI the state holds,
+    /// so a slow answer cannot overwrite the UI of an attach issued
+    /// after it: a newer attach that failed spent its id without
+    /// landing, and an older attach that already succeeded may still
+    /// land under it.
+    landed_attach: u64,
 }
 
 impl Client {
@@ -527,6 +554,110 @@ impl Client {
                 id: session_id.to_owned(),
             },
         ]
+    }
+
+    /// Attaches this connection to the plugin UI of the project at
+    /// `cwd`, which keeps that project's plugins loaded while it
+    /// lasts. With `session_id`, the UI pins to the runtime that
+    /// session opened with, so what it advertises is what handles the
+    /// session's commands and mappings; without one it follows the
+    /// project's latest loaded runtime. The snapshot arrives as
+    /// [`Change::Ui`], and every later `_kage/ui/update` moves
+    /// [`State::plugin_ui`](crate::State::plugin_ui) from then on.
+    /// Attaching again replaces the attachment held: every request
+    /// carries a fresh attachment id, the host refuses one that is not
+    /// newer, and only an attachment newer than the one that landed
+    /// last replaces the UI, whatever order the answers arrive in.
+    /// Updates are routed by attachment id: the held attachment's
+    /// updates apply even while another attach is in flight, and one
+    /// in flight buffers only its own.
+    pub fn ui_attach(&mut self, cwd: &str, session_id: Option<&str>) -> u64 {
+        let id = self.take_id();
+        self.pending.insert(
+            RequestId::Number(id),
+            Pending::UiAttach {
+                attach_id: id,
+                cwd: cwd.to_owned(),
+                buffered: Vec::new(),
+            },
+        );
+        self.outgoing.push(Frame::Request {
+            id: RequestId::Number(id),
+            method: "_kage/ui/attach".to_owned(),
+            params: params(&kage_acp_wire::UiAttachRequest {
+                cwd: cwd.to_owned(),
+                attach_id: id,
+                session_id: session_id.map(str::to_owned),
+            }),
+        });
+        id
+    }
+
+    /// Runs the plugin command `name` (or one of its aliases) of the
+    /// project at `cwd` with the argument line `args`, for the
+    /// client's session `session_id` when it has one open. Dialogs
+    /// the command opens arrive as [`Change::Dialog`], and the
+    /// command's output as [`Change::UiOutput`].
+    pub fn ui_command(
+        &mut self,
+        cwd: &str,
+        name: &str,
+        args: &str,
+        session_id: Option<&str>,
+    ) -> u64 {
+        self.request(
+            "_kage/ui/command",
+            params(&UiCommandRequest {
+                cwd: cwd.to_owned(),
+                session_id: session_id.map(str::to_owned),
+                name: name.to_owned(),
+                args: args.to_owned(),
+            }),
+            Pending::UiCommand {
+                cwd: cwd.to_owned(),
+            },
+        )
+    }
+
+    /// Runs the Lua handler `id` of a key mapping whose rhs is
+    /// `{ kind: "lua", id }` in the project at `cwd`. Dialogs and the
+    /// output flow as in [`Client::ui_command`].
+    pub fn ui_keymap(&mut self, cwd: &str, id: u64, session_id: Option<&str>) -> u64 {
+        self.request(
+            "_kage/ui/keymap",
+            params(&UiKeymapRequest {
+                cwd: cwd.to_owned(),
+                session_id: session_id.map(str::to_owned),
+                id,
+            }),
+            Pending::UiKeymap {
+                cwd: cwd.to_owned(),
+            },
+        )
+    }
+
+    /// Answers the dialog `request_id` with `answer`, the value the
+    /// parked plugin call resumes with, or `Value::Null` when the user
+    /// dismissed it. What a kind expects: `ui.select` the chosen
+    /// item's `value`, which defaults to its label; `ui.confirm` a
+    /// boolean; `ui.input` the typed string; `ui.editor` the edited
+    /// text. Removes the ask; answering an unknown or already answered
+    /// id sends nothing, so a double answer cannot reach the agent.
+    pub fn reply_dialog(&mut self, request_id: RequestId, answer: Value) -> Vec<Change> {
+        let Some(index) = self
+            .state
+            .dialogs
+            .iter()
+            .position(|dialog| dialog.request_id == request_id)
+        else {
+            return Vec::new();
+        };
+        self.state.dialogs.remove(index);
+        self.outgoing.push(Frame::Success {
+            id: request_id,
+            result: answer,
+        });
+        vec![Change::Dialog]
     }
 
     /// Releases the session: the answer removes it from the state.
@@ -993,6 +1124,9 @@ impl Client {
     }
 
     fn handle_server_request(&mut self, id: RequestId, method: &str, params: Value) -> Vec<Change> {
+        if method == DIALOG_METHOD {
+            return self.open_dialog(id, params);
+        }
         if method != ASK_METHOD {
             self.outgoing.push(Frame::Failure {
                 id,
@@ -1032,6 +1166,35 @@ impl Client {
         vec![Change::Permission { id: session_id }]
     }
 
+    /// Opens a plugin dialog the agent asked this connection to show,
+    /// replacing the echo of an id it already holds. The ask waits in
+    /// [`State::dialogs`](crate::State::dialogs) for
+    /// [`Client::reply_dialog`].
+    fn open_dialog(&mut self, id: RequestId, params: Value) -> Vec<Change> {
+        let Ok(request) = serde_json::from_value::<UiDialogRequest>(params) else {
+            self.outgoing.push(Frame::Failure {
+                id,
+                error: RpcError::invalid_params(DIALOG_METHOD),
+            });
+            return Vec::new();
+        };
+        let ask = DialogAsk {
+            request_id: id,
+            kind: request.kind,
+            payload: request.payload,
+        };
+        match self
+            .state
+            .dialogs
+            .iter()
+            .position(|open| open.request_id == ask.request_id)
+        {
+            Some(index) => self.state.dialogs[index] = ask,
+            None => self.state.dialogs.push(ask),
+        }
+        vec![Change::Dialog]
+    }
+
     fn handle_notification(&mut self, method: &str, params: Value) -> Vec<Change> {
         match method {
             "session/update" => {
@@ -1057,15 +1220,52 @@ impl Client {
                 };
                 self.withdraw_ask(&request_id)
             }
+            "_kage/ui/update" => self.apply_ui_update(params),
             _ => Vec::new(),
         }
+    }
+
+    /// Applies a `_kage/ui/update` to the plugin UI this connection
+    /// holds. The update's attachment id routes it: the held
+    /// attachment's updates apply whether or not another attach is in
+    /// flight, an in-flight attach buffers its own updates to replay
+    /// on its snapshot, and anything else belongs to an attachment
+    /// this connection replaced or never made, and is dropped. An
+    /// unreadable one is dropped without changing the held UI.
+    fn apply_ui_update(&mut self, params: Value) -> Vec<Change> {
+        let Ok(update) = serde_json::from_value::<UiUpdate>(params) else {
+            log::debug!("an unreadable _kage/ui/update arrived");
+            return Vec::new();
+        };
+        if let Some(ui) = &mut self.state.plugin_ui
+            && ui.attach_id == update.attach_id
+        {
+            // An update applies only on top of the generation one
+            // before it, the contract the wire states. An older one is
+            // a stray of a watcher this connection left behind; a
+            // newer one would leave a hole the following updates can
+            // never fill.
+            if ui.cwd != update.cwd || update.generation != ui.generation + 1 {
+                return Vec::new();
+            }
+            apply_update_fields(ui, &update);
+            return vec![Change::Ui];
+        }
+        if let Some(Pending::UiAttach { buffered, .. }) = self
+            .pending
+            .values_mut()
+            .find(|pending| matches!(pending, Pending::UiAttach { attach_id, .. } if *attach_id == update.attach_id))
+        {
+            buffered.push(update);
+        }
+        Vec::new()
     }
 
     /// Removes the open ask `request_id`: it was answered elsewhere
     /// or the agent withdrew it through `$/cancel_request`. The ask
     /// leaves the queue with no reply of ours and no decision record;
     /// [`Change::AnsweredElsewhere`] is the host's cue to close the
-    /// card.
+    /// card. A withdrawn plugin dialog leaves the same way.
     fn withdraw_ask(&mut self, request_id: &RequestId) -> Vec<Change> {
         let mut moved = Vec::new();
         let sessions = self.state.sessions.keys().cloned().collect::<Vec<_>>();
@@ -1088,6 +1288,15 @@ impl Client {
                 id: session_id,
                 request_id: request_id.clone(),
             });
+        }
+        if let Some(index) = self
+            .state
+            .dialogs
+            .iter()
+            .position(|ask| &ask.request_id == request_id)
+        {
+            self.state.dialogs.remove(index);
+            moved.push(Change::Dialog);
         }
         moved
     }
@@ -1183,6 +1392,50 @@ impl Client {
                     }],
                 }
             }
+            Pending::UiAttach {
+                attach_id,
+                cwd,
+                buffered,
+            } => self.land_attach(id, attach_id, result, cwd, buffered),
+            Pending::UiCommand { cwd } | Pending::UiKeymap { cwd } => {
+                Self::land_ui_output(id, result, cwd)
+            }
+        }
+    }
+
+    /// Lands the `_kage/ui/attach` answer: the snapshot becomes the
+    /// plugin UI this connection holds, and the updates that beat it
+    /// replay on it. An answer whose attachment already landed newer
+    /// is dropped with its buffered updates: the attach issued after
+    /// it took over, whatever a failed attach in between spent.
+    fn land_attach(
+        &mut self,
+        id: u64,
+        attach_id: u64,
+        result: Value,
+        cwd: String,
+        buffered: Vec<UiUpdate>,
+    ) -> Vec<Change> {
+        if id <= self.landed_attach {
+            log::debug!("a stale _kage/ui/attach answer arrived and was dropped");
+            return Vec::new();
+        }
+        match answer::<UiSnapshot>(id, result, "_kage/ui/attach result") {
+            Err(failed) => failed,
+            Ok(snapshot) => {
+                self.landed_attach = id;
+                self.state.plugin_ui = Some(fresh_plugin_ui(attach_id, cwd, buffered, snapshot));
+                vec![Change::Ui]
+            }
+        }
+    }
+
+    /// Lands a `_kage/ui/command` or `_kage/ui/keymap` answer: the
+    /// output is handed to the host to show where it started.
+    fn land_ui_output(id: u64, result: Value, cwd: String) -> Vec<Change> {
+        match answer::<kage_acp_wire::UiOutput>(id, result, "_kage/ui command result") {
+            Err(failed) => failed,
+            Ok(output) => vec![Change::UiOutput { cwd, output }],
         }
     }
 
@@ -1638,6 +1891,71 @@ fn answer<T: serde::de::DeserializeOwned>(
             error: RpcError::invalid_params(what),
         }]
     })
+}
+
+/// The plugin UI a snapshot carries, with the updates that beat it
+/// replayed on it, in arrival order. Only an update of this
+/// attachment, chaining on the generation before it, replays, so the
+/// stray of a watcher this connection left behind dies here.
+fn fresh_plugin_ui(
+    attach_id: u64,
+    cwd: String,
+    buffered: Vec<UiUpdate>,
+    snapshot: UiSnapshot,
+) -> PluginUi {
+    let mut ui = PluginUi {
+        attach_id,
+        cwd,
+        generation: snapshot.generation,
+        keymap: snapshot.keymap,
+        highlights: snapshot.highlights,
+        options: snapshot.options,
+        option_sources: snapshot.option_sources,
+        commands: snapshot.commands,
+        status: snapshot.status,
+        block_kinds: snapshot.block_kinds,
+        autocomplete: snapshot.autocomplete,
+        terminal_hooks: snapshot.terminal_hooks,
+    };
+    for update in buffered {
+        if update.cwd == ui.cwd && update.generation == ui.generation + 1 {
+            apply_update_fields(&mut ui, &update);
+        }
+    }
+    ui
+}
+
+/// Applies an update's present fields over `ui`. A field the update
+/// omits did not change.
+fn apply_update_fields(ui: &mut PluginUi, update: &UiUpdate) {
+    ui.generation = update.generation;
+    if let Some(keymap) = &update.keymap {
+        ui.keymap.clone_from(keymap);
+    }
+    if let Some(highlights) = &update.highlights {
+        ui.highlights.clone_from(highlights);
+    }
+    if let Some(options) = &update.options {
+        ui.options.clone_from(options);
+    }
+    if let Some(option_sources) = &update.option_sources {
+        ui.option_sources.clone_from(option_sources);
+    }
+    if let Some(commands) = &update.commands {
+        ui.commands.clone_from(commands);
+    }
+    if let Some(status) = &update.status {
+        ui.status.clone_from(status);
+    }
+    if let Some(block_kinds) = &update.block_kinds {
+        ui.block_kinds.clone_from(block_kinds);
+    }
+    if let Some(autocomplete) = update.autocomplete {
+        ui.autocomplete = autocomplete;
+    }
+    if let Some(terminal_hooks) = update.terminal_hooks {
+        ui.terminal_hooks = terminal_hooks;
+    }
 }
 
 /// The parameters of an outgoing frame. Every wire type serializes

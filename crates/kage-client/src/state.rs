@@ -39,6 +39,13 @@ pub struct State {
     /// The recorded sessions a `session/list` answered with, in page
     /// order. A page whose entries are already listed replaces them.
     pub directory: Vec<SessionInfo>,
+    /// The plugin UI of the project this connection attached to with
+    /// `_kage/ui/attach`, as its snapshot and updates delivered it.
+    pub plugin_ui: Option<PluginUi>,
+    /// The `_kage/ui/dialog` requests the agent asked this connection
+    /// and nobody answered yet, in arrival order. A plugin dialog is
+    /// asked of the client running its command, attached or not.
+    pub dialogs: Vec<DialogAsk>,
 }
 
 impl State {
@@ -110,6 +117,57 @@ impl State {
             .get(session_id)
             .and_then(|session| session.title.clone())
     }
+}
+
+/// The plugin UI a connection attached to, as the `_kage/ui` snapshot
+/// and its updates delivered it. The keymap and the highlight table
+/// stay as the wire carried them: their shape is the host's to
+/// define, and a view reads them against the protocol document.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PluginUi {
+    /// The attachment's id, the request id of the `_kage/ui/attach`
+    /// that filled this UI. Its updates carry the same id back.
+    pub attach_id: u64,
+    /// The project whose plugins declare this UI.
+    pub cwd: String,
+    /// Counts this connection's snapshot and updates: an update
+    /// applies only on top of the snapshot or update one generation
+    /// before it.
+    pub generation: u64,
+    /// Every key mapping, in table order, as the wire carried it.
+    pub keymap: Vec<Value>,
+    /// The highlight table, as the wire carried it.
+    pub highlights: Value,
+    /// Every engine and UI option by name, with its current value.
+    pub options: BTreeMap<String, Value>,
+    /// Where each option's value came from: `default`, `toml`, `lua`
+    /// or `runtime`.
+    pub option_sources: BTreeMap<String, String>,
+    /// The commands plugins registered or override.
+    pub commands: Vec<kage_acp_wire::UiCommand>,
+    /// Status line entries plugins set, by key.
+    pub status: BTreeMap<String, String>,
+    /// The block kinds plugins render.
+    pub block_kinds: Vec<String>,
+    /// Whether a plugin completes input, so a view asks before
+    /// showing its own completions.
+    pub autocomplete: bool,
+    /// Whether a plugin watches terminal input, so a view asks before
+    /// acting on a key.
+    pub terminal_hooks: bool,
+}
+
+/// One open `_kage/ui/dialog`: a plugin asked this connection to show
+/// it, and the answer travels back on `request_id` with
+/// [`Client::reply_dialog`](crate::Client::reply_dialog).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DialogAsk {
+    /// The request the answer completes.
+    pub request_id: RequestId,
+    /// `ui.select`, `ui.confirm`, `ui.input` or `ui.editor`.
+    pub kind: String,
+    /// The fields the plugin passed, as in `kage.ui`.
+    pub payload: Value,
 }
 
 /// One session: a run the client is driving, a subagent it hears, or a

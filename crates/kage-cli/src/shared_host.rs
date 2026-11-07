@@ -47,6 +47,8 @@ const TAKEOVER: Duration = Duration::from_secs(10);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 // How long `kage host stop` waits after SIGTERM, and then after SIGKILL.
 const STOP_WAIT: Duration = Duration::from_secs(10);
+// How long an ask may hold the host after its last client left.
+const ASK_HOLD: Duration = Duration::from_secs(12 * 60 * 60);
 const KILL_WAIT: Duration = Duration::from_secs(5);
 // Output queued for one client before it is disconnected. A client that is
 // only paused, such as a suspended terminal editor, keeps its connection
@@ -360,6 +362,7 @@ fn serve_until_idle(
             thread::sleep(TICK);
         }
         host.prune_projects();
+        host.decline_expired_asks(ASK_HOLD);
         if accepted || connections.load(Ordering::SeqCst) > 0 || host.busy() {
             quiet_since = Instant::now();
         } else if quiet_since.elapsed() >= idle {

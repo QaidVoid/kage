@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
+use std::time::Duration;
 
 use kage_acp::acp::SessionConfigSelectOption;
 use kage_acp::agent::serve_agent;
@@ -449,6 +450,19 @@ impl Host {
         lock(&self.live).held(session)
     }
 
+    /// Declines the asks of sessions whose ask-hold window started at
+    /// least `cap` ago: a permission ask is denied, a question ask is
+    /// answered with no answers. An ask nobody can answer then stops
+    /// holding the session and the host after the cap.
+    #[cfg_attr(not(unix), allow(dead_code, reason = "the shared host is unix only"))]
+    pub(crate) fn decline_expired_asks(&self, cap: Duration) {
+        let expired = lock(&self.live).expired_ask_roots(cap);
+        for root in expired {
+            self.decline_asks_under(root);
+            lock(&self.live).forget_orphan(&root);
+        }
+    }
+
     /// Declines every open ask under `root`: a permission ask is
     /// denied, a question ask is answered with no answers. Sent once no
     /// connection is left to answer, so runs parked on an ask go on
@@ -706,6 +720,7 @@ mod tests {
     use std::time::Duration;
 
     use kage_core::permissions::PermissionsConfig;
+    use kage_core::protocol::{Envelope, Question, QuestionOption, RequestId};
     use kage_provider::testing::MockProvider;
 
     use kage_tools::builtin_registry;
@@ -786,6 +801,185 @@ mod tests {
         assert!(
             host.open_settings(id).is_none(),
             "the open record is pruned"
+        );
+        host.shutdown();
+    }
+
+    /// Launches a mock session in `dir` and folds one event into the
+    /// host's live view of it.
+    fn launched_with(host: &Host, id: SessionId, dir: &tempfile::TempDir, event: HostEvent) {
+        let (spec, runtime) = (host.spec)(
+            &host.registry(),
+            id,
+            dir.path().to_str().unwrap(),
+            "mock/m",
+            BTreeMap::new(),
+            &Environment::inherit(),
+            None,
+            None,
+        )
+        .unwrap();
+        let settings = Settings::of(&spec, &host.registry());
+        host.launch(spec, settings, runtime);
+        lock(&host.live).observe(&Envelope {
+            session: id,
+            seq: 1,
+            event: Event::Host(event),
+        });
+    }
+
+    /// A question the engine would wait on, under `request_id`.
+    fn question_event(request_id: u64) -> HostEvent {
+        HostEvent::QuestionAsked {
+            request_id: RequestId(request_id),
+            tool_call_id: None,
+            questions: vec![Question {
+                header: "Auth".to_owned(),
+                question: "Which way?".to_owned(),
+                options: vec![
+                    QuestionOption {
+                        label: "key".to_owned(),
+                        description: String::new(),
+                    },
+                    QuestionOption {
+                        label: "none".to_owned(),
+                        description: String::new(),
+                    },
+                ],
+                multi_select: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn an_ask_on_a_clientless_session_expires_after_its_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host_in(&dir);
+        let id = SessionId::new();
+        launched_with(&host, id, &dir, question_event(1));
+
+        // The ask holds the session: releasing it stamps the moment
+        // instead of closing, and the stamp counts from release.
+        // Launching counts as the first attachment, so this release is
+        // the last client leaving.
+        host.release(id);
+        assert!(host.open_settings(id).is_some(), "the ask holds it open");
+        let live = lock(&host.live);
+        assert!(live.expired_ask_roots(Duration::ZERO).contains(&id));
+        assert!(
+            !live
+                .expired_ask_roots(Duration::from_secs(3600))
+                .contains(&id),
+            "a fresh stamp outlives the cap"
+        );
+        drop(live);
+
+        // A client coming back clears the moment.
+        host.attach(id, false);
+        assert!(
+            lock(&host.live)
+                .expired_ask_roots(Duration::ZERO)
+                .is_empty()
+        );
+
+        // Past the cap the reaper declines the ask and forgets the
+        // session.
+        host.release(id);
+        assert!(
+            lock(&host.live)
+                .expired_ask_roots(Duration::ZERO)
+                .contains(&id)
+        );
+        host.decline_expired_asks(Duration::ZERO);
+        assert!(
+            lock(&host.live)
+                .expired_ask_roots(Duration::ZERO)
+                .is_empty()
+        );
+        host.shutdown();
+    }
+
+    #[test]
+    fn a_resolved_ask_stops_expiring_its_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host_in(&dir);
+        let id = SessionId::new();
+        launched_with(&host, id, &dir, question_event(2));
+        host.release(id);
+        assert!(
+            lock(&host.live)
+                .expired_ask_roots(Duration::ZERO)
+                .contains(&id)
+        );
+
+        lock(&host.live).observe(&Envelope {
+            session: id,
+            seq: 2,
+            event: Event::Host(HostEvent::QuestionClosed {
+                request_id: RequestId(2),
+            }),
+        });
+        // The answered ask lets the session close instead of sitting
+        // orphaned: the stamp is gone and nothing holds it open.
+        assert!(host.open_settings(id).is_none(), "the session closes");
+        assert!(
+            lock(&host.live)
+                .expired_ask_roots(Duration::ZERO)
+                .is_empty()
+        );
+        host.shutdown();
+    }
+
+    #[test]
+    fn an_ask_on_a_clientless_session_stamps_a_fresh_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host_in(&dir);
+        let id = SessionId::new();
+        // A session released with nothing open closes, so the ask that
+        // follows reaches a clientless session with no stamp of its
+        // own: only the track_ask stamping can hold it.
+        launched_with(&host, id, &dir, HostEvent::RunStarted);
+        host.release(id);
+        lock(&host.live).observe(&Envelope {
+            session: id,
+            seq: 2,
+            event: Event::Host(question_event(4)),
+        });
+        assert!(
+            lock(&host.live)
+                .expired_ask_roots(Duration::ZERO)
+                .contains(&id)
+        );
+        assert!(
+            !lock(&host.live)
+                .expired_ask_roots(Duration::from_secs(3600))
+                .contains(&id),
+            "a fresh ask outlives the cap"
+        );
+        host.shutdown();
+    }
+
+    #[test]
+    fn a_new_ask_starts_its_own_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host_in(&dir);
+        let id = SessionId::new();
+        launched_with(&host, id, &dir, question_event(5));
+        host.release(id);
+        std::thread::sleep(Duration::from_millis(60));
+        // The second ask is brand new: its window starts at the ask,
+        // not at the release 30 ms ago, so a cap the old stamp would
+        // already exceed does not expire it.
+        lock(&host.live).observe(&Envelope {
+            session: id,
+            seq: 2,
+            event: Event::Host(question_event(6)),
+        });
+        assert!(
+            !lock(&host.live)
+                .expired_ask_roots(Duration::from_millis(30))
+                .contains(&id),
+            "the new ask refreshed the window"
         );
         host.shutdown();
     }

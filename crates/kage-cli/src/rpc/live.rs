@@ -12,6 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use kage_acp::acp::{
     SessionConfigOption, SessionInfoUpdate, SessionUpdate, SubagentSessionCapabilities,
@@ -224,6 +225,12 @@ pub(super) struct Live {
     attached: HashMap<SessionId, usize>,
     /// Sessions a close was sent for and not refused.
     closing: HashSet<SessionId>,
+    /// Sessions no client holds, with the moment their current
+    /// ask-hold window started: an ask open on one holds the host
+    /// only up to the ask-hold cap from that moment, then the host
+    /// declines it. A new ask on a clientless session starts its
+    /// own window.
+    orphaned: HashMap<SessionId, Instant>,
 }
 
 impl Live {
@@ -235,6 +242,33 @@ impl Live {
             || !self.running.is_empty()
             || !self.paused.is_empty()
             || !self.asks.is_empty()
+    }
+
+    /// The sessions whose ask-hold window started at least `cap` ago
+    /// and that still hold an open ask with no client: the host
+    /// declines those, so an ask nobody can answer stops holding the
+    /// session and the host.
+    #[cfg_attr(not(unix), allow(dead_code, reason = "the shared host is unix only"))]
+    pub(super) fn expired_ask_roots(&self, cap: Duration) -> Vec<SessionId> {
+        let now = Instant::now();
+        self.orphaned
+            .iter()
+            .filter(|(root, since)| {
+                now.duration_since(**since) >= cap
+                    && !self.attached.contains_key(root)
+                    && self
+                        .asks
+                        .values()
+                        .any(|ask| self.tree.root_of(ask.session) == **root)
+            })
+            .map(|(root, _)| *root)
+            .collect()
+    }
+
+    /// Forgets that `root`'s client left, after its asks were declined.
+    #[cfg_attr(not(unix), allow(dead_code, reason = "the shared host is unix only"))]
+    pub(super) fn forget_orphan(&mut self, root: &SessionId) {
+        self.orphaned.remove(root);
     }
 
     /// Whether `id` is open, closing, running or part of a live agent tree
@@ -261,6 +295,7 @@ impl Live {
             working: HashSet::new(),
             attached: HashMap::new(),
             closing: HashSet::new(),
+            orphaned: HashMap::new(),
         }
     }
 
@@ -352,6 +387,13 @@ impl Live {
             },
             _ => return,
         };
+        let root = self.tree.root_of(session);
+        if !self.attached.contains_key(&root) {
+            // Nobody can answer yet, so this ask holds the session
+            // from now for a full window, however long the session sat
+            // orphaned before it.
+            self.orphaned.insert(root, Instant::now());
+        }
         self.asks.insert(ask.request_id, ask);
     }
 
@@ -453,6 +495,12 @@ impl Live {
         if self.attached.get(&session).is_some_and(|count| *count > 0) {
             return;
         }
+        // No client is left. Whatever keeps the session open now keeps
+        // it only until the ask-hold cap: the moment is what the cap
+        // counts from, and an ask raised later starts its own window.
+        // A stamp on a session kept by work alone is harmless, since
+        // only an open ask expires one.
+        self.orphaned.entry(session).or_insert_with(Instant::now);
         if self.working.contains(&session) {
             return;
         }
@@ -466,6 +514,7 @@ impl Live {
         if self.agents_live_under(session) {
             return;
         }
+        self.orphaned.remove(&session);
         self.closing.insert(session);
         self.commander
             .send(Command::to(session, CommandKind::Close));
@@ -634,6 +683,7 @@ impl Live {
         }
         *self.attached.entry(id).or_default() += 1;
         self.closing.remove(&id);
+        self.orphaned.remove(&id);
     }
 
     /// Records that a connection released `id`, closing the session

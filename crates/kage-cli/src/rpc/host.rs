@@ -19,6 +19,7 @@ use kage_core::protocol::{
 use kage_core::sync::lock;
 use kage_jsonrpc::RpcError;
 use kage_loop::{AgentContext, LoopConfig};
+use kage_plugin::{PluginRuntime, session_plugins::SessionPlugins};
 use kage_provider::{Provider, ProviderRegistry};
 use kage_tools::ToolRegistry;
 
@@ -40,7 +41,7 @@ pub(crate) type SpecBuilder = Box<
             &str,
             BTreeMap<String, McpSpec>,
             &Environment,
-        ) -> Result<SessionSpec, RpcError>
+        ) -> Result<(SessionSpec, Option<Arc<kage_plugin::PluginRuntime>>), RpcError>
         + Send
         + Sync,
 >;
@@ -136,7 +137,7 @@ impl Host {
             let projects = Arc::clone(&projects);
             Box::new(
                 move |registry: &ProviderRegistry, id, cwd: &str, model: &str, servers, env| {
-                    let spec = session_spec(
+                    let (spec, runtime) = session_spec(
                         registry,
                         &system_role,
                         id,
@@ -149,7 +150,7 @@ impl Host {
                     if yolo {
                         spec.gate.set_mode(Some(PermissionAction::Allow));
                     }
-                    Ok(spec)
+                    Ok((spec, runtime))
                 },
             )
         };
@@ -310,12 +311,17 @@ impl Host {
     /// Hosts `spec` in the engine and records it open with `settings`,
     /// so a later load from another connection attaches to it. The
     /// opening connection counts as the session's first attachment.
-    pub(super) fn launch(&self, spec: SessionSpec, settings: Settings) {
+    pub(super) fn launch(
+        &self,
+        spec: SessionSpec,
+        settings: Settings,
+        runtime: Option<Arc<PluginRuntime>>,
+    ) {
         lock(&self.live).attach(spec.id, true);
         lock(&self.open).insert(spec.id, Open { settings });
         lock(&self.workdirs).insert(spec.id, spec.cx.workdir.clone());
-        if let Some(runtime) = &spec.plugins {
-            lock(&self.runtimes).insert(spec.id, Arc::clone(runtime));
+        if let Some(runtime) = runtime {
+            lock(&self.runtimes).insert(spec.id, runtime);
         }
         self.engine.open(spec);
     }
@@ -534,7 +540,7 @@ fn session_spec(
     servers: BTreeMap<String, McpSpec>,
     env: &Environment,
     projects: &Projects,
-) -> Result<SessionSpec, RpcError> {
+) -> Result<(SessionSpec, Option<Arc<PluginRuntime>>), RpcError> {
     let workdir = if cwd.is_empty() {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     } else {
@@ -607,7 +613,8 @@ fn session_spec(
     if let Some(window) = crate::runtime_env::context_window_for(registry, &model) {
         cx = cx.with_context_window(window);
     }
-    Ok(SessionSpec {
+    let session_plugins = plugins.clone().map(|rt| rt as Arc<dyn SessionPlugins>);
+    let spec = SessionSpec {
         id,
         model,
         cx,
@@ -618,13 +625,14 @@ fn session_spec(
             .with_aliases(aliases)
             .with_mcp_servers(mcp.server_names().map(str::to_owned).collect()),
         loop_cfg,
-        plugins,
+        plugins: session_plugins,
         mcp: Some(mcp),
         interactive: true,
         title: true,
         agents: Some(agents),
         shell: config.shell.program.clone(),
-    })
+    };
+    Ok((spec, plugins))
 }
 
 #[cfg(test)]
@@ -646,21 +654,24 @@ mod tests {
         let registry =
             Arc::new(ProviderRegistry::new().with(Arc::new(MockProvider::sequence(Vec::new()))));
         let spec: SpecBuilder = Box::new(|_, id, cwd, _, _, _| {
-            Ok(SessionSpec {
-                id,
-                model: "mock/m".to_owned(),
-                cx: AgentContext::new("mock/m", "").with_workdir(cwd),
-                recorder: None,
-                tools: builtin_registry(),
-                gate: PermissionGate::new(PermissionsConfig::default()),
-                loop_cfg: LoopConfig::default(),
-                plugins: None,
-                mcp: None,
-                interactive: true,
-                title: true,
-                agents: None,
-                shell: None,
-            })
+            Ok((
+                SessionSpec {
+                    id,
+                    model: "mock/m".to_owned(),
+                    cx: AgentContext::new("mock/m", "").with_workdir(cwd),
+                    recorder: None,
+                    tools: builtin_registry(),
+                    gate: PermissionGate::new(PermissionsConfig::default()),
+                    loop_cfg: LoopConfig::default(),
+                    plugins: None,
+                    mcp: None,
+                    interactive: true,
+                    title: true,
+                    agents: None,
+                    shell: None,
+                },
+                None,
+            ))
         });
         Host::new(
             registry,
@@ -676,7 +687,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let host = host_in(&dir);
         let id = SessionId::new();
-        let spec = (host.spec)(
+        let (spec, runtime) = (host.spec)(
             &host.registry(),
             id,
             dir.path().to_str().unwrap(),
@@ -686,7 +697,7 @@ mod tests {
         )
         .unwrap();
         let settings = Settings::of(&spec, &host.registry());
-        host.launch(spec, settings);
+        host.launch(spec, settings, runtime);
 
         assert!(host.open_settings(id).is_some());
         assert!(host.workdir(id).is_some());

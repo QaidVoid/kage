@@ -94,21 +94,24 @@ fn test_host(scripts: Vec<Script>, workdir: &Path) -> Arc<Host> {
               model: &str,
               _servers: BTreeMap<String, McpSpec>,
               _env: &kage_core::environment::Environment| {
-            Ok(SessionSpec {
-                id,
-                model: model.to_owned(),
-                cx: AgentContext::new(model, "").with_workdir(&spec_workdir),
-                recorder: None,
-                tools: builtin_registry(),
-                gate: PermissionGate::new(PermissionsConfig::default()),
-                loop_cfg: LoopConfig::default(),
-                plugins: None,
-                mcp: None,
-                interactive: true,
-                title: false,
-                shell: None,
-                agents: None,
-            })
+            Ok((
+                SessionSpec {
+                    id,
+                    model: model.to_owned(),
+                    cx: AgentContext::new(model, "").with_workdir(&spec_workdir),
+                    recorder: None,
+                    tools: builtin_registry(),
+                    gate: PermissionGate::new(PermissionsConfig::default()),
+                    loop_cfg: LoopConfig::default(),
+                    plugins: None,
+                    mcp: None,
+                    interactive: true,
+                    title: false,
+                    shell: None,
+                    agents: None,
+                },
+                None,
+            ))
         },
     );
     Host::new(

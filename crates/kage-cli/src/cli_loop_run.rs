@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use kage_core::{Content, LoopEvent, Message};
 use kage_loop::{AgentContext, LoopConfig};
+use kage_plugin::session_plugins::SessionPlugins;
 use kage_provider::ProviderRegistry;
 use kage_session::{SessionId, SessionWriter};
 
@@ -101,6 +102,7 @@ pub(crate) fn execute_print_run(
     if yolo {
         gate.set_mode(Some(kage_core::permissions::PermissionAction::Allow));
     }
+    let plugin_runtime = plugin_runtime.map(|rt| rt as Arc<dyn SessionPlugins>);
     engine.open(crate::engine::SessionSpec {
         id: session,
         model: model.to_owned(),

@@ -272,7 +272,7 @@ fn serve_on(
     std::thread::spawn(move || {
         standing
             .serve_with(BufReader::new(srv_r), srv_w, move |agent| {
-                let mut spec = (agent.host.spec)(
+                let (mut spec, runtime) = (agent.host.spec)(
                     &agent.host.registry(),
                     id,
                     "",
@@ -296,7 +296,7 @@ fn serve_on(
                     };
                     spec.recorder = Some(Recorder::planned(path, header, spec.plugins.clone()));
                 }
-                agent.open(id.to_string(), spec);
+                agent.open(id.to_string(), spec, runtime);
                 agent.session_announced(&id.to_string());
                 let _ = opened_tx.send(());
             })
@@ -380,26 +380,29 @@ fn test_host_agents(
             let gate = PermissionGate::new(rules)
                 .with_fallback(fallback)
                 .with_mcp_servers(names.map(str::to_owned).collect());
-            Ok(SessionSpec {
-                id,
-                model: model.to_owned(),
-                cx: AgentContext {
-                    env: env.clone(),
-                    ..AgentContext::new(model, "")
-                        .with_workdir(&workdir)
-                        .with_context_window(WINDOW)
+            Ok((
+                SessionSpec {
+                    id,
+                    model: model.to_owned(),
+                    cx: AgentContext {
+                        env: env.clone(),
+                        ..AgentContext::new(model, "")
+                            .with_workdir(&workdir)
+                            .with_context_window(WINDOW)
+                    },
+                    recorder: None,
+                    tools,
+                    gate,
+                    loop_cfg: LoopConfig::default(),
+                    plugins: None,
+                    mcp,
+                    interactive: true,
+                    title: true,
+                    shell: None,
+                    agents: Some((*agents).clone()),
                 },
-                recorder: None,
-                tools,
-                gate,
-                loop_cfg: LoopConfig::default(),
-                plugins: None,
-                mcp,
-                interactive: true,
-                title: true,
-                shell: None,
-                agents: Some((*agents).clone()),
-            })
+                None,
+            ))
         },
     );
     Host::new(registry, "mock/m".into(), sessions, spec, BTreeMap::new())
@@ -4792,7 +4795,7 @@ fn serve_paused(
     std::thread::spawn(move || {
         standing
             .serve_with(BufReader::new(srv_r), srv_w, move |agent| {
-                let spec = (agent.host.spec)(
+                let (spec, runtime) = (agent.host.spec)(
                     &agent.host.registry(),
                     id,
                     "",
@@ -4801,7 +4804,7 @@ fn serve_paused(
                     &Environment::inherit(),
                 )
                 .unwrap();
-                agent.open(id.to_string(), spec);
+                agent.open(id.to_string(), spec, runtime);
                 agent.session_announced(&id.to_string());
                 let _ = opened_tx.send(());
             })

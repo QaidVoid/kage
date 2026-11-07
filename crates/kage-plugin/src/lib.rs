@@ -75,6 +75,7 @@ pub(crate) mod require;
 pub(crate) mod retained;
 pub mod runtime;
 pub(crate) mod schedule;
+pub mod session_plugins;
 pub(crate) mod session_write;
 pub mod sessions;
 pub mod slots;

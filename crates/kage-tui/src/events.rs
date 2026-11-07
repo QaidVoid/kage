@@ -175,7 +175,7 @@ fn tool_media_label(mime: &str, bytes: usize) -> String {
 
 /// The row that stands for media the model produced: its type and
 /// size, the same live and on replay.
-fn produced_media_label(mime: &str, bytes: usize) -> String {
+pub(crate) fn produced_media_label(mime: &str, bytes: usize) -> String {
     format!(
         "[{mime} from the model, {}]",
         crate::image::human_bytes(bytes)
@@ -250,7 +250,7 @@ pub fn tool_durations(messages: &[Arc<Message>]) -> ToolDurations {
 /// The text of a `kage:compaction` block: a header line naming the
 /// message `counts` and, when known, the tokens the summary saved,
 /// over the `summary`.
-fn compaction_text(
+pub(crate) fn compaction_text(
     counts: Option<CompactionCounts>,
     tokens: Option<(u64, u64)>,
     summary: &str,
@@ -480,7 +480,7 @@ fn push_replayed_message(buf: &mut Buffer, msg: &Arc<Message>, tool_durations: &
 /// bubble, then each agent report as a folded report block and each
 /// message from another session as a one-line row, then any human
 /// words the burst interleaved between them as bubbles.
-fn push_user_text(buf: &mut Buffer, text: String) {
+pub(crate) fn push_user_text(buf: &mut Buffer, text: String) {
     if let Some(note) = engine_note(&text) {
         buf.push_custom("kage:mode", note, false);
         return;

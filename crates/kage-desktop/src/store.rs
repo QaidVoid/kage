@@ -876,6 +876,7 @@ impl Store {
                 meta: Some(kage_client::wire::ClientMeta {
                     kage: Some(kage_client::wire::KageClientCapabilities {
                         unconfigured_tools: Some(kage_client::wire::UnconfiguredTools::Allow),
+                        plugin_host: false,
                     }),
                 }),
                 ..kage_client::wire::ClientCapabilities::default()

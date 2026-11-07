@@ -18,6 +18,7 @@ pub mod markdown;
 pub mod opaque;
 pub mod overlay;
 pub mod picker;
+pub mod store;
 pub mod syntax;
 pub mod terminal;
 pub mod theme;
@@ -51,6 +52,7 @@ pub use layout::{
 };
 pub use overlay::{OverlayAction, OverlayCtx, OverlayPicker, OverlayWidget, SessionNode};
 pub use picker::{PickItem, pick};
+pub use store::Store;
 pub use terminal::Tui;
 pub use theme::{Theme, current as current_theme, set_current as set_current_theme};
 pub use toast::{

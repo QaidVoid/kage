@@ -186,6 +186,31 @@ impl Buffer {
         self.bump_version();
     }
 
+    /// Refresh the input of the call `call_id`, keeping its name. An
+    /// update that carries input but no title, as kage's own streamed
+    /// fragments do, must not blank the header. No-op for an unknown
+    /// id.
+    pub fn refresh_tool_input(&mut self, call_id: impl Into<String>, input: serde_json::Value) {
+        let call_id = call_id.into();
+        let before = self.tool_call_text_bytes(&call_id);
+        let Some(Block::ToolCall {
+            name,
+            input_summary,
+            input_pretty,
+            input: i,
+            ..
+        }) = self.open_tool_call_mut(&call_id)
+        else {
+            return;
+        };
+        *input_summary = crate::events::summarize_input(name, &input);
+        *input_pretty = pretty_input(&input);
+        *i = Arc::new(input);
+        self.reaccount(&call_id, before);
+        self.invalidate_pair_height(&call_id);
+        self.bump_version();
+    }
+
     /// Move the call `call_id` to `phase`. Entering
     /// [`ToolPhase::Running`] restarts its timer. No-op for an unknown
     /// id.

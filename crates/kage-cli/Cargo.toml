@@ -29,6 +29,7 @@ compak = { workspace = true, features = ["tar", "xz"] }
 dirs.workspace = true
 ignore.workspace = true
 kage-acp.workspace = true
+kage-client.workspace = true
 kage-core.workspace = true
 kage-jsonrpc.workspace = true
 kage-kura.workspace = true

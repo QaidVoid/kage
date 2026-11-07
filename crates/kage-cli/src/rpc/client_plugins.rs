@@ -28,11 +28,11 @@ use kage_plugin::{LogLevel, PluginError, SharedHostLog, default_host_log};
 use kage_tools::{ExecMode, Tool, ToolContext, ToolError};
 use serde_json::Value;
 
-const PLUGIN_TOOLS: &str = "_kage/plugin/tools";
-const PLUGIN_CALL: &str = "_kage/plugin/call";
-const PLUGIN_HOOK: &str = "_kage/plugin/hook";
-const PLUGIN_EVENT: &str = "_kage/plugin/event";
-const PLUGIN_DRAIN: &str = "_kage/plugin/drain";
+pub(crate) const PLUGIN_TOOLS: &str = "_kage/plugin/tools";
+pub(crate) const PLUGIN_CALL: &str = "_kage/plugin/call";
+pub(crate) const PLUGIN_HOOK: &str = "_kage/plugin/hook";
+pub(crate) const PLUGIN_EVENT: &str = "_kage/plugin/event";
+pub(crate) const PLUGIN_DRAIN: &str = "_kage/plugin/drain";
 
 /// The plugin surface of session `session`, answered by the client on
 /// `peer`. The snapshot is the one answer to `_kage/plugin/tools`,

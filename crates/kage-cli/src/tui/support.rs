@@ -37,13 +37,14 @@ mod legacy_acp_tests {
 /// may call blocking `kage.ui.*` dialogs. Drives the suspend/resume
 /// loop to completion and returns the command's output (an error
 /// output on any failure), or `None` when the handler produced
-/// nothing.
+/// nothing. Malformed dialog payloads and unsupported kinds reach
+/// `errors` and cancel the handler.
 pub(crate) fn run_bridged_command(
     rt: &PluginRuntime,
     cmd: &kage_plugin::LuaCommand,
     raw: &str,
     dialog_tx: &mpsc::Sender<PluginDialog>,
-    link: &Link,
+    errors: &mut dyn FnMut(String),
 ) -> Option<CommandOutput> {
     let label = format!("command {}", cmd.name());
     let prep = match cmd.prepare_bridge(raw, &serde_json::Value::Null) {
@@ -58,7 +59,7 @@ pub(crate) fn run_bridged_command(
         Ok(step) => step,
         Err(e) => return Some(error_output(&label, &e.to_string())),
     };
-    drive_bridge(rt, &label, step, dialog_tx, link)
+    drive_bridge(rt, &label, step, dialog_tx, errors)
 }
 
 /// Run a key mapping's Lua handler through the coroutine bridge,
@@ -69,7 +70,7 @@ pub(crate) fn run_bridged_keymap(
     rt: &PluginRuntime,
     id: u64,
     dialog_tx: &mpsc::Sender<PluginDialog>,
-    link: &Link,
+    errors: &mut dyn FnMut(String),
 ) -> Option<CommandOutput> {
     let label = "key mapping";
     let handler = match rt.keymap_handler(id) {
@@ -80,7 +81,7 @@ pub(crate) fn run_bridged_keymap(
         Ok(step) => step,
         Err(e) => return Some(error_output(label, &e.to_string())),
     };
-    drive_bridge(rt, label, step, dialog_tx, link)
+    drive_bridge(rt, label, step, dialog_tx, errors)
 }
 
 /// Drive a started bridge call to completion: service each suspend
@@ -92,13 +93,13 @@ pub(crate) fn drive_bridge(
     label: &str,
     mut step: BridgeStep,
     dialog_tx: &mpsc::Sender<PluginDialog>,
-    link: &Link,
+    errors: &mut dyn FnMut(String),
 ) -> Option<CommandOutput> {
     loop {
         match step {
             BridgeStep::Done(value) => return Some(CommandOutput::from_json(&value)),
             BridgeStep::Suspended(req) => {
-                let resumed = match service_dialog(&req, dialog_tx, link) {
+                let resumed = match service_dialog(&req, dialog_tx, errors) {
                     Some(value) => rt.bridge_resume(&value),
                     None => rt.bridge_cancel(),
                 };
@@ -118,11 +119,12 @@ pub(crate) fn drive_bridge(
 /// Builds the matching [`PluginDialog`], hands it to the App, and
 /// blocks on the reply. Returns the value to resume the coroutine
 /// with, or `None` (resume with `nil`) on dismissal, an unsupported
-/// kind, or a malformed payload (the latter two also logged).
+/// kind, or a malformed payload (the latter two also reported
+/// through `errors`).
 pub(crate) fn service_dialog(
     req: &kage_plugin::SuspendRequest,
     dialog_tx: &mpsc::Sender<PluginDialog>,
-    link: &Link,
+    errors: &mut dyn FnMut(String),
 ) -> Option<serde_json::Value> {
     let (reply_tx, reply_rx) = mpsc::channel();
     let dialog = match req.kind.as_str() {
@@ -133,7 +135,7 @@ pub(crate) fn service_dialog(
                 reply: reply_tx,
             },
             Err(e) => {
-                dialog_error(link, format!("ui.select: {e}"));
+                errors(format!("ui.select: {e}"));
                 return None;
             }
         },
@@ -144,7 +146,7 @@ pub(crate) fn service_dialog(
                 reply: reply_tx,
             },
             Err(e) => {
-                dialog_error(link, format!("ui.confirm: {e}"));
+                errors(format!("ui.confirm: {e}"));
                 return None;
             }
         },
@@ -155,7 +157,7 @@ pub(crate) fn service_dialog(
                 reply: reply_tx,
             },
             Err(e) => {
-                dialog_error(link, format!("ui.input: {e}"));
+                errors(format!("ui.input: {e}"));
                 return None;
             }
         },
@@ -166,12 +168,12 @@ pub(crate) fn service_dialog(
                 reply: reply_tx,
             },
             Err(e) => {
-                dialog_error(link, format!("ui.editor: {e}"));
+                errors(format!("ui.editor: {e}"));
                 return None;
             }
         },
         other => {
-            dialog_error(link, format!("unsupported plugin dialog: {other}"));
+            errors(format!("unsupported plugin dialog: {other}"));
             return None;
         }
     };
@@ -181,7 +183,9 @@ pub(crate) fn service_dialog(
     reply_rx.recv().unwrap_or(None)
 }
 
-fn dialog_error(link: &Link, text: String) {
+/// Publish `text` as an error notice on `link`: the error sink the
+/// engine path hands the bridge helpers.
+pub(crate) fn dialog_error(link: &Link, text: String) {
     link.publish(kage_core::protocol::HostEvent::Notice {
         level: NoticeLevel::Error,
         text,

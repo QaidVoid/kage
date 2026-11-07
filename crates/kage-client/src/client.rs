@@ -668,6 +668,19 @@ impl Client {
         vec![Change::Dialog]
     }
 
+    /// Answers the reverse request `id` with `result`, for the surfaces
+    /// the client serves itself, such as the `_kage/plugin/*` requests
+    /// of a session whose plugins it hosts. Nothing checks that `id`
+    /// is still open: the agent ignores a late answer.
+    pub fn reply(&mut self, id: RequestId, result: Value) {
+        self.outgoing.push(Frame::Success { id, result });
+    }
+
+    /// Fails the reverse request `id` with `error`.
+    pub fn fail(&mut self, id: RequestId, error: RpcError) {
+        self.outgoing.push(Frame::Failure { id, error });
+    }
+
     /// Releases the session: the answer removes it from the state.
     pub fn close_session(&mut self, session_id: &str) -> u64 {
         self.request(

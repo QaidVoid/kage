@@ -18,30 +18,50 @@
 //! outlive the TUI until the host goes idle. The child is killed when
 //! the transport drops, which happens when the user quits.
 //!
+//! The plugins load in this process: the runtime the engine path would
+//! build runs beside the pump, answers the agent's
+//! `_kage/plugin/{tools,call,hook,event,drain}` reverse requests from
+//! it, and serves the App's plugin surfaces (commands, keymap,
+//! widgets) locally. The agent learns this at initialize through
+//! `plugin_host` and opens sessions with `_meta.kage.plugins =
+//! "client"`. A Lua call the pump serves runs synchronously on the
+//! pump thread, so frames from the agent stall until it returns; the
+//! engine path pays the same serialization around its Lua mutex. A
+//! resumed session has no such `_meta` on its wire yet, so it runs
+//! without the client's plugins and tools until the load learns to
+//! carry them.
+//!
 //! Some commands the engine path serves have no ACP counterpart yet:
 //! the pump refuses them with a notice instead of dropping them
 //! silently.
 
 use std::collections::{BTreeMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use kage_client::wire::{
-    BlobContent, ClientCapabilities, ClientMeta, ContentBlock, Implementation,
-    KageClientCapabilities, NewSessionKage, NewSessionMeta, PermissionOptionKind, SessionOpt,
-    TextContent, UnconfiguredTools,
+    BlobContent, ClientCapabilities, ClientMeta, ContentBlock, EnvVariable, HttpHeader,
+    Implementation, KageClientCapabilities, McpServer, McpServerHttp, McpServerStdio,
+    NewSessionKage, NewSessionMeta, PermissionOptionKind, PluginCallRequest, PluginCallResult,
+    PluginDrainQueue, PluginDrainRequest, PluginDrainResult, PluginEventRequest, PluginHookKind,
+    PluginHookRequest, PluginPendingMessage, PluginPendingRole, PluginSessionOp, PluginToolRename,
+    PluginToolSpec, PluginToolsRequest, PluginToolsResult, PluginsSource, SessionOpt, TextContent,
+    UnconfiguredTools,
 };
-use kage_client::{Change, DialogAsk, Frame, PermissionDecision, RequestId};
+use kage_client::{Change, DialogAsk, Frame, PermissionDecision, RequestId, RpcError};
 use kage_core::keymap::{Keymap, MappingData};
 use kage_core::options::OptionValue;
 use kage_core::protocol::{
     Delivery, Envelope, HostEvent, NoticeLevel, Question, QuestionOption, RunOutcome, SessionId,
     SessionState,
 };
-use kage_core::{LoopEvent, MediaSource, Message, Role, ThinkingLevel, ToolCallId};
+use kage_core::{CancelFlag, LoopEvent, MediaSource, Message, Role, ThinkingLevel, ToolCallId};
+use kage_plugin::events::KNOWN_EVENTS;
+use kage_plugin::messages::PendingRole;
+use kage_plugin::sessions::PendingSessionOp;
 use kage_tui::command::PluginCommand;
 use kage_tui::{AcpUpdate, SharedBuffer, Store};
 use serde::Deserialize;
@@ -269,12 +289,14 @@ impl kage_tui::AcpFeed for FeedState {
 /// The `_meta.kage` the TUI asks of the session it opens: what this
 /// process would have set up on the engine path, phrased for the
 /// agent to apply instead. Only what the user actually set is sent.
+/// `plugins` marks this process as the session's plugin host.
 fn session_meta(
     options: &kage_plugin::SharedOptions,
     registry: &ProviderRegistry,
     model: &str,
     system: &str,
     yolo: bool,
+    plugins: bool,
 ) -> NewSessionMeta {
     let store = lock(options);
     // A fresh store pre-seeds every option with its default, so only
@@ -307,7 +329,7 @@ fn session_meta(
         });
     NewSessionMeta {
         kage: Some(NewSessionKage {
-            plugins: None,
+            plugins: plugins.then_some(PluginsSource::Client),
             background: None,
             yolo,
             system_prompt: (!system.is_empty()).then(|| system.to_owned()),
@@ -324,6 +346,243 @@ fn session_meta(
 struct OutgoingPrompt {
     session_id: String,
     prompt: Vec<ContentBlock>,
+}
+
+/// The `_kage/plugin/*` surface of the session whose plugins this
+/// process hosts: the local runtime answering for it. One surface per
+/// connection, whatever session the agent names, like the engine
+/// serves every session from one runtime.
+struct PluginSurface {
+    runtime: Arc<PluginRuntime>,
+    /// Where the runtime's tools execute.
+    workdir: PathBuf,
+    /// Raised when the connection ends, so a tool call the agent
+    /// abandoned does not start. One already running keeps the pump
+    /// thread until it returns.
+    cancel: CancelFlag,
+}
+
+impl PluginSurface {
+    /// Answer one reverse request. Unknown methods cannot reach here:
+    /// the pump only routes the `_kage/plugin/` prefix.
+    fn answer(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
+        match method {
+            crate::rpc::client_plugins::PLUGIN_TOOLS => self.tools(params),
+            crate::rpc::client_plugins::PLUGIN_CALL => self.call(params),
+            crate::rpc::client_plugins::PLUGIN_HOOK => self.hook(params),
+            crate::rpc::client_plugins::PLUGIN_EVENT => self.event(params),
+            crate::rpc::client_plugins::PLUGIN_DRAIN => self.drain(params),
+            other => Err(RpcError::method_not_found(other)),
+        }
+    }
+
+    /// Runs `f` with the request session's invocation in effect, the
+    /// way the engine scopes its dispatches, so work the handlers
+    /// queue is tagged to the session that asked for it.
+    fn in_session<R>(session_id: &str, f: impl FnOnce() -> R) -> Result<R, RpcError> {
+        let session = ulid::Ulid::from_string(session_id)
+            .map(kage_core::SessionId)
+            .map_err(|e| RpcError::invalid_params(format!("plugin session: {e}")))?;
+        Ok(kage_plugin::Invocation::session(session).scope(f))
+    }
+
+    /// Drains `take` inside the request session's scope when it names
+    /// one, so only that session's queued work leaves. A session-less
+    /// ask drains across every session, as the wire describes.
+    fn drain_scoped<R>(session_id: Option<&str>, take: impl FnOnce() -> R) -> Result<R, RpcError> {
+        match session_id {
+            Some(id) => Self::in_session(id, take),
+            None => Ok(take()),
+        }
+    }
+
+    /// The registration snapshot the host takes once at session open:
+    /// the tools, overrides and renames the runtime holds, plus the
+    /// per-event handler counts that let it skip round trips.
+    fn tools(&self, params: &Value) -> Result<Value, RpcError> {
+        serde_json::from_value::<PluginToolsRequest>(params.clone())
+            .map_err(|e| RpcError::invalid_params(format!("plugin tools: {e}")))?;
+        let runtime = &*self.runtime;
+        let spec = |tool: &Arc<dyn kage_tools::Tool>| PluginToolSpec {
+            name: tool.name().to_owned(),
+            description: tool.description().to_owned(),
+            schema: tool.schema(),
+            risk: serde_json::to_value(tool.risk())
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned)),
+            parallel: tool
+                .execution_mode()
+                .map(|mode| mode == kage_tools::ExecMode::Parallel),
+        };
+        let result = PluginToolsResult {
+            tools: runtime.registered_tools().iter().map(spec).collect(),
+            overrides: runtime
+                .registered_tool_overrides()
+                .iter()
+                .map(spec)
+                .collect(),
+            renames: runtime
+                .registered_renames()
+                .into_iter()
+                .map(|(from, to)| PluginToolRename { from, to })
+                .collect(),
+            handlers: KNOWN_EVENTS
+                .iter()
+                .filter_map(|(name, _, _)| {
+                    let count = u32::try_from(runtime.handler_count(name)).ok()?;
+                    (count > 0).then(|| (name.to_string(), count))
+                })
+                .collect(),
+        };
+        serde_json::to_value(result).map_err(|e| plugin_internal(format!("plugin tools: {e}")))
+    }
+
+    /// Run one tool call on the runtime. A tool that reports failure
+    /// answers `is_error`; one that throws or was cancelled fails the
+    /// request, which the host turns into a failed tool call. An
+    /// override wins the name, the way the engine's registry replaces
+    /// tools by name.
+    fn call(&self, params: &Value) -> Result<Value, RpcError> {
+        let request = serde_json::from_value::<PluginCallRequest>(params.clone())
+            .map_err(|e| RpcError::invalid_params(format!("plugin call: {e}")))?;
+        let runtime = &*self.runtime;
+        let tool = runtime
+            .registered_tool_overrides()
+            .into_iter()
+            .chain(runtime.registered_tools())
+            .find(|tool| tool.name() == request.tool);
+        let Some(tool) = tool else {
+            return Err(plugin_internal(format!(
+                "no plugin tool `{}`",
+                request.tool
+            )));
+        };
+        let cx = kage_tools::ToolContext::new(&self.workdir, &self.cancel);
+        let output = Self::in_session(&request.session_id, || tool.execute(request.input, &cx))?
+            .map_err(|e| plugin_internal(format!("plugin tool `{}`: {e}", request.tool)))?;
+        let result = PluginCallResult {
+            is_error: output.is_error,
+            text: output.text,
+            structured: output.structured,
+        };
+        serde_json::to_value(result).map_err(|e| plugin_internal(format!("plugin call: {e}")))
+    }
+
+    /// Run one synchronous hook. A transform's reply replaces the
+    /// payload, a predicate's is the decision.
+    fn hook(&self, params: &Value) -> Result<Value, RpcError> {
+        let request = serde_json::from_value::<PluginHookRequest>(params.clone())
+            .map_err(|e| RpcError::invalid_params(format!("plugin hook: {e}")))?;
+        let runtime = &*self.runtime;
+        match request.kind {
+            PluginHookKind::Transform => Self::in_session(&request.session_id, || {
+                runtime.dispatch_transform(&request.event, request.payload)
+            })?
+            .map_err(|e| plugin_internal(format!("{} transform: {e}", request.event))),
+            PluginHookKind::Predicate => Self::in_session(&request.session_id, || {
+                runtime.dispatch_predicate(&request.event, &request.payload)
+            })?
+            .map(Value::Bool)
+            .map_err(|e| plugin_internal(format!("{} predicate: {e}", request.event))),
+        }
+    }
+
+    /// Fire one event. The runtime queues notify events and logs
+    /// handler trouble itself, so a notify failure still answers.
+    fn event(&self, params: &Value) -> Result<Value, RpcError> {
+        let request = serde_json::from_value::<PluginEventRequest>(params.clone())
+            .map_err(|e| RpcError::invalid_params(format!("plugin event: {e}")))?;
+        let runtime = &*self.runtime;
+        let outcome = Self::in_session(&request.session_id, || {
+            if request.notify {
+                runtime.notify_event(&request.event, &request.payload)
+            } else {
+                runtime.dispatch_event(&request.event, &request.payload)
+            }
+        })?;
+        outcome.map_err(|e| plugin_internal(format!("{} event: {e}", request.event)))?;
+        Ok(Value::Null)
+    }
+
+    /// Hand over one queued queue of plugin work. Only the requested
+    /// queue's field carries anything.
+    fn drain(&self, params: &Value) -> Result<Value, RpcError> {
+        let request = serde_json::from_value::<PluginDrainRequest>(params.clone())
+            .map_err(|e| RpcError::invalid_params(format!("plugin drain: {e}")))?;
+        let runtime = &*self.runtime;
+        let result = match request.queue {
+            PluginDrainQueue::McpRestarts => {
+                Self::drain_scoped(request.session_id.as_deref(), || PluginDrainResult {
+                    restarts: runtime.take_mcp_restarts(),
+                    ..PluginDrainResult::default()
+                })?
+            }
+            PluginDrainQueue::Messages => {
+                Self::drain_scoped(request.session_id.as_deref(), || PluginDrainResult {
+                    messages: runtime
+                        .take_pending_messages()
+                        .into_iter()
+                        .map(|message| PluginPendingMessage {
+                            text: message.text,
+                            trigger_turn: message.trigger_turn,
+                            deliver_as: match message.deliver_as {
+                                PendingRole::User => PluginPendingRole::User,
+                                PendingRole::Assistant => PluginPendingRole::Assistant,
+                                PendingRole::System => PluginPendingRole::System,
+                            },
+                        })
+                        .collect(),
+                    ..PluginDrainResult::default()
+                })?
+            }
+            PluginDrainQueue::SessionOps => PluginDrainResult {
+                ops: runtime
+                    .take_pending_session_ops()
+                    .into_iter()
+                    .map(plugin_session_op)
+                    .collect(),
+                ..PluginDrainResult::default()
+            },
+            PluginDrainQueue::SessionOpsFor => {
+                let session = request
+                    .session_id
+                    .as_deref()
+                    .map(ulid::Ulid::from_string)
+                    .transpose()
+                    .map_err(|e| RpcError::invalid_params(format!("plugin drain: {e}")))?;
+                let Some(session) = session else {
+                    return Err(RpcError::invalid_params(
+                        "plugin drain: SessionOpsFor needs a session",
+                    ));
+                };
+                PluginDrainResult {
+                    ops: runtime
+                        .take_pending_session_ops_for(kage_core::SessionId(session))
+                        .into_iter()
+                        .map(plugin_session_op)
+                        .collect(),
+                    ..PluginDrainResult::default()
+                }
+            }
+        };
+        serde_json::to_value(result).map_err(|e| plugin_internal(format!("plugin drain: {e}")))
+    }
+}
+
+/// The internal-error answer for a well-formed plugin request the
+/// runtime could not serve.
+fn plugin_internal(message: impl std::fmt::Display) -> RpcError {
+    RpcError::new(-32603, message.to_string())
+}
+
+/// The plugin form of one queued session write.
+fn plugin_session_op(op: PendingSessionOp) -> PluginSessionOp {
+    match op {
+        PendingSessionOp::AppendCustom { kind, data } => {
+            PluginSessionOp::AppendCustom { kind, data }
+        }
+        PendingSessionOp::SetLabel { anchor, text } => PluginSessionOp::SetLabel { anchor, text },
+    }
 }
 
 /// The thread that owns the connection. It turns the store's view of
@@ -364,6 +623,10 @@ struct Pump {
     options: kage_plugin::SharedOptions,
     /// The provider registry, for the model's output token cap.
     registry: Arc<ProviderRegistry>,
+    /// The plugins this process hosts for the wire session, answering
+    /// the agent's `_kage/plugin/*` reverse requests. `None` leaves
+    /// plugin loading to the agent.
+    plugins: Option<PluginSurface>,
     /// The run-wide session settings that do not come from options.
     yolo: bool,
     system_prompt: String,
@@ -398,11 +661,7 @@ impl Pump {
     fn serve(mut self) {
         loop {
             match self.frames.recv_timeout(TICK) {
-                Ok(Event::Frame(frame)) => {
-                    for change in self.store.absorb(frame) {
-                        self.react(change);
-                    }
-                }
+                Ok(Event::Frame(frame)) => self.absorb(frame),
                 Ok(Event::Closed)
                 // The reader sends Closed before it drops, so this is
                 // its late echo.
@@ -423,6 +682,32 @@ impl Pump {
         }
     }
 
+    /// Feeds one frame in. The plugin reverse requests never touch the
+    /// store: the local surface answers them at once, because the
+    /// client would otherwise fail them as methods it does not know.
+    /// Hosting nothing leaves them to the store, which fails them the
+    /// same way.
+    fn absorb(&mut self, frame: Frame) {
+        if let Frame::Request { id, method, params } = &frame
+            && method.starts_with("_kage/plugin/")
+        {
+            let answered = self
+                .plugins
+                .as_ref()
+                .map(|surface| surface.answer(method, params));
+            if let Some(answered) = answered {
+                match answered {
+                    Ok(result) => self.store.client().reply(id.clone(), result),
+                    Err(error) => self.store.client().fail(id.clone(), error),
+                }
+                return;
+            }
+        }
+        for change in self.store.absorb(frame) {
+            self.react(change);
+        }
+    }
+
     /// Opens the connection before the App starts: handshake, session
     /// and plugin UI, with the frames these produce sent at once.
     /// Resuming replays on a fresh buffer; otherwise the new session's
@@ -434,7 +719,7 @@ impl Pump {
                     // Built-in tools run without asking, like the
                     // engine path of a default configuration.
                     unconfigured_tools: Some(UnconfiguredTools::Allow),
-                    plugin_host: false,
+                    plugin_host: self.plugins.is_some(),
                 }),
             }),
             ..ClientCapabilities::default()
@@ -454,7 +739,10 @@ impl Pump {
         } else {
             self.pending_new = true;
             let meta = self.session_meta();
-            self.store.client().new_session(&self.cwd, &[], Some(meta));
+            let servers = self.mcp_servers();
+            self.store
+                .client()
+                .new_session(&self.cwd, &servers, Some(meta));
         }
         self.store.client().ui_attach(&self.cwd, None);
         self.flush();
@@ -471,7 +759,54 @@ impl Pump {
             &self.model,
             &self.system_prompt,
             self.yolo,
+            self.plugins.is_some(),
         )
+    }
+
+    /// The MCP servers the session brings: the hosted plugins' own
+    /// registrations, disabled ones left out, like the engine path.
+    /// The agent spawns them, so none of this process's MCP runs
+    /// beside the pump.
+    fn mcp_servers(&self) -> Vec<McpServer> {
+        let Some(surface) = self.plugins.as_ref() else {
+            return Vec::new();
+        };
+        surface
+            .runtime
+            .registered_mcp_servers()
+            .into_iter()
+            .filter_map(|(name, server)| {
+                if server.disabled {
+                    return None;
+                }
+                match (server.command, server.url) {
+                    (Some(command), _) => Some(McpServer::Stdio(McpServerStdio {
+                        name,
+                        command,
+                        args: server.args,
+                        env: server
+                            .env
+                            .into_iter()
+                            .map(|(name, value)| EnvVariable { name, value })
+                            .collect(),
+                    })),
+                    (None, Some(url)) => Some(McpServer::Http(McpServerHttp {
+                        name,
+                        url,
+                        headers: server
+                            .headers
+                            .into_iter()
+                            .map(|(name, value)| HttpHeader { name, value })
+                            .collect(),
+                    })),
+                    // Neither transport: the config validator rejects
+                    // such a server before it can get here.
+                    (None, None) => None,
+                    // Fields the wire type cannot carry, such as
+                    // `disabled_tools` and OAuth, drop here.
+                }
+            })
+            .collect()
     }
 
     /// Sends what the client produced, watching its own prompts go by
@@ -517,12 +852,12 @@ impl Pump {
             Change::Session { id } => self.session_moved(id),
             Change::Transcript { id } => {
                 if id == self.wire {
-                    self.publish(HostEvent::StateChanged {
-                        state: self.state_snapshot(),
-                    });
-                    self.publish(HostEvent::UsageUpdated {
-                        usage: self.usage_snapshot(),
-                    });
+                    let state = self.state_snapshot();
+                    self.update_ui_slot(|ui| ui.state = state.clone());
+                    self.publish(HostEvent::StateChanged { state });
+                    let usage = self.usage_snapshot();
+                    self.update_ui_slot(|ui| ui.usage = Some(usage));
+                    self.publish(HostEvent::UsageUpdated { usage });
                     self.hand_buffer();
                 }
             }
@@ -626,9 +961,17 @@ impl Pump {
         {
             self.model = model;
         }
-        self.publish(HostEvent::StateChanged {
-            state: self.state_snapshot(),
+        let state = self.state_snapshot();
+        let title = self
+            .store
+            .state()
+            .session(&self.wire)
+            .and_then(|session| session.title.clone());
+        self.update_ui_slot(|ui| {
+            ui.state = state.clone();
+            ui.session_title = title;
         });
+        self.publish(HostEvent::StateChanged { state });
         self.publish(HostEvent::UsageUpdated {
             usage: self.usage_snapshot(),
         });
@@ -661,6 +1004,10 @@ impl Pump {
         self.wire = id;
         self.handed = None;
         self.hand_buffer();
+        self.update_ui_slot(|ui| {
+            ui.session_id.clone_from(&self.wire);
+            ui.session_title = None;
+        });
         if carry_model {
             self.store
                 .client()
@@ -760,6 +1107,13 @@ impl Pump {
     }
 
     fn ui_moved(&mut self) {
+        // Hosting the plugins makes the local runtime authoritative
+        // for its own surfaces: the agent's `_kage/ui` snapshot
+        // describes the host process's project runtime, whose handler
+        // ids and command set never match what this process serves.
+        if self.plugins.is_some() {
+            return;
+        }
         let commands = self.store.plugin_commands();
         let keymap = self.store.plugin_keymap();
         let status = self.store.state().plugin_ui.as_ref().map(|ui| {
@@ -980,19 +1334,16 @@ impl Pump {
                 self.store.client().export_session(&self.wire);
             }
             RunRequest::InvokePluginCommand { name, args } => {
-                self.store
-                    .client()
-                    .ui_command(&self.cwd, &name, &args, Some(&self.wire));
+                self.invoke_plugin_command(&name, &args);
             }
-            RunRequest::InvokeKeymap { id } => {
-                self.store
-                    .client()
-                    .ui_keymap(&self.cwd, id, Some(&self.wire));
-            }
+            RunRequest::InvokeKeymap { id } => self.invoke_keymap(id),
             RunRequest::NewSession => {
                 self.pending_new = true;
                 let meta = self.session_meta();
-                self.store.client().new_session(&self.cwd, &[], Some(meta));
+                let servers = self.mcp_servers();
+                self.store
+                    .client()
+                    .new_session(&self.cwd, &servers, Some(meta));
             }
             RunRequest::ResumeSession(path) => self.open_recorded(&path),
             RunRequest::SwitchSession(SwitchTarget::Session(target)) => {
@@ -1300,6 +1651,11 @@ impl Pump {
             return;
         }
         self.closed = true;
+        // A tool call the agent left running must not run on: the
+        // surface's next execute sees the flag at once.
+        if let Some(surface) = &self.plugins {
+            surface.cancel.cancel();
+        }
         self.store.interrupt_running();
         if self.running {
             self.running = false;
@@ -1332,12 +1688,79 @@ impl Pump {
         });
     }
 
+    /// Feeds the runtime's UI-state slot the way the engine path's
+    /// bus subscriber does, so plugin widgets and slots read the
+    /// session's current shape.
+    fn update_ui_slot(&self, f: impl FnOnce(&mut kage_plugin::UiState)) {
+        let Some(surface) = self.plugins.as_ref() else {
+            return;
+        };
+        let ui = surface.runtime.slots().ui_state();
+        f(&mut lock(&ui));
+    }
+
     fn notice(&mut self, level: NoticeLevel, text: String) {
         self.publish(HostEvent::Notice {
             level,
             text,
             transient: false,
         });
+    }
+
+    /// Runs a plugin command the App asked for. Hosting the plugins
+    /// runs it here, where its handler's dialogs ride the App's dialog
+    /// channel and the output lands as a notice; otherwise the agent,
+    /// which hosts them, is asked over the wire.
+    fn invoke_plugin_command(&mut self, name: &str, args: &str) {
+        let Some(runtime) = self.plugins.as_ref().map(|s| Arc::clone(&s.runtime)) else {
+            self.store
+                .client()
+                .ui_command(&self.cwd, name, args, Some(&self.wire));
+            return;
+        };
+        let command = runtime
+            .registered_command_overrides()
+            .into_iter()
+            .chain(runtime.registered_commands())
+            .find(|command| command.name() == name);
+        let Some(command) = command else {
+            self.notice(NoticeLevel::Error, format!("no plugin command: {name}"));
+            return;
+        };
+        let dialog_tx = self.dialog_tx.clone();
+        let mut errors = |text| self.notice(NoticeLevel::Error, text);
+        let output = run_bridged_command(&runtime, &command, args, &dialog_tx, &mut errors);
+        self.plugin_output(output);
+    }
+
+    /// Runs a key mapping's handler the way
+    /// [`Self::invoke_plugin_command`] runs a command.
+    fn invoke_keymap(&mut self, id: u64) {
+        let Some(runtime) = self.plugins.as_ref().map(|s| Arc::clone(&s.runtime)) else {
+            self.store
+                .client()
+                .ui_keymap(&self.cwd, id, Some(&self.wire));
+            return;
+        };
+        let dialog_tx = self.dialog_tx.clone();
+        let mut errors = |text| self.notice(NoticeLevel::Error, text);
+        let output = run_bridged_keymap(&runtime, id, &dialog_tx, &mut errors);
+        self.plugin_output(output);
+    }
+
+    /// Publish a locally run plugin command or keymap output the way
+    /// the engine path's host does: a notice, an error one when it
+    /// failed, nothing when the handler produced no text.
+    fn plugin_output(&mut self, output: Option<CommandOutput>) {
+        let Some(output) = output.filter(|output| !output.text.is_empty()) else {
+            return;
+        };
+        let level = if output.is_error {
+            NoticeLevel::Error
+        } else {
+            NoticeLevel::Info
+        };
+        self.notice(level, output.text);
     }
 }
 
@@ -1424,8 +1847,8 @@ pub(crate) fn run(
     resume: Option<&Path>,
     yolo: bool,
 ) -> ExitCode {
-    let registry = match crate::build_provider_registry() {
-        Ok(registry) => Arc::new(registry),
+    let mut registry = match crate::build_provider_registry() {
+        Ok(registry) => registry,
         Err(e) => {
             eprintln!("kage: {e}");
             return ExitCode::from(1);
@@ -1438,19 +1861,37 @@ pub(crate) fn run(
     let Some((config, options)) = startup_config(&workdir, &buffer) else {
         return ExitCode::from(1);
     };
-    let shown_model = model.map_or_else(|| crate::default_model(&registry), str::to_owned);
-    // No plugins load here: Lua runs in the agent, so keybindings,
-    // options and themes work but plugin commands come over the wire.
+    let mut shown_model = model.map_or_else(|| crate::default_model(&registry), str::to_owned);
+    // The plugins load in this process, like the engine path builds its
+    // runtime: tools, commands, handlers and the UI surfaces run beside
+    // the pump, and the session names this process the plugin host.
     let log_publisher: Arc<OnceLock<LogPublisher>> = Arc::default();
+    let plugins_dir_path = match crate::plugins_dir() {
+        Ok(dir) => Some(dir),
+        Err(e) => {
+            lock(&buffer).push_custom("kage:error", e, false);
+            None
+        }
+    };
+    let user_dir = crate::config_dir().ok();
+    // Built against a bare prompt, like the engine path; the session's
+    // real prompt is the agent's business.
+    let bare_prompt = crate::runtime_env::build_system_prompt(
+        system,
+        &workdir,
+        &shown_model,
+        &[],
+        config.shell.program.as_deref(),
+    );
     let plugins = match setup_user_runtime(
-        None,
-        None,
+        plugins_dir_path.as_deref(),
+        user_dir.as_deref(),
         config.plugins.clone(),
         config.keybindings.clone(),
         Arc::clone(&options),
         &workdir,
         &shown_model,
-        "",
+        &bare_prompt,
         buffer_host_log(buffer.clone(), toasts.clone(), Arc::clone(&log_publisher)),
         &kage_core::environment::Environment::inherit(),
     ) {
@@ -1460,6 +1901,18 @@ pub(crate) fn run(
             None
         }
     };
+    if let Some(rt) = plugins.as_ref() {
+        for id in crate::plugins::merge_plugin_providers(rt, &mut registry) {
+            eprintln!("kage: plugin provider `{id}` shadows the built-in registration");
+        }
+        register_block_renderers(rt);
+        let ui = rt.slots().ui_state();
+        lock(&ui).cwd = workdir.display().to_string();
+        if model.is_none() {
+            shown_model = crate::default_model(&registry);
+        }
+    }
+    let registry = Arc::new(registry);
     let app_session = SessionId::new();
     let store = Store::new();
     let (frames_tx, frames_rx) = mpsc::channel();
@@ -1473,10 +1926,16 @@ pub(crate) fn run(
     let (events_tx, events_rx) = mpsc::channel();
     let (requests_tx, requests_rx) = mpsc::channel::<RunRequest>();
     let (dialog_tx, dialog_rx) = mpsc::channel::<PluginDialog>();
-    // Plugin hot reload never fires here: there is no local runtime.
+    // Plugin hot reload stays off: the pump cannot reload a runtime
+    // whose tools the agent already snapshotted for the session.
     let (refresh_tx, refresh_rx) = mpsc::channel::<PluginRefresh>();
     drop(refresh_tx);
     let feed = Arc::new(FeedState::default());
+    let surface = plugins.as_ref().map(|rt| PluginSurface {
+        runtime: Arc::clone(rt),
+        workdir: workdir.clone(),
+        cancel: CancelFlag::new(),
+    });
     let mut pump = Pump {
         store,
         transport,
@@ -1494,6 +1953,7 @@ pub(crate) fn run(
         model: shown_model.clone(),
         options: Arc::clone(&options),
         registry: Arc::clone(&registry),
+        plugins: surface,
         yolo,
         system_prompt: system.to_owned(),
         seq: 0,
@@ -1544,6 +2004,12 @@ pub(crate) fn run(
     }
     let mirror = Arc::new(Mutex::new(host::Mirror::new(None)));
     let model_choices = available_model_items(&registry, &shown_model);
+    // The commands the local plugins register; the App completes them
+    // and the pump runs them, never the agent.
+    let plugin_commands = plugins
+        .as_ref()
+        .map(|rt| snapshot_plugin_commands(rt))
+        .unwrap_or_default();
     Frontend {
         buffer: root,
         toasts,
@@ -1559,7 +2025,7 @@ pub(crate) fn run(
         acp_feed: Some(feed),
         model: shown_model,
         model_choices,
-        plugin_commands: Vec::new(),
+        plugin_commands,
         skills: Vec::new(),
         notices: Vec::new(),
         session: app_session,
@@ -1690,6 +2156,7 @@ mod tests {
             model: "test:model".to_owned(),
             options: Arc::new(Mutex::new(kage_core::options::OptionStore::default())),
             registry: Arc::new(ProviderRegistry::default()),
+            plugins: None,
             yolo: false,
             system_prompt: String::new(),
             seq: 0,
@@ -1892,7 +2359,7 @@ mod tests {
             )
             .unwrap();
         let registry = crate::build_provider_registry().unwrap();
-        let meta = session_meta(&options, &registry, "test:model", "", false);
+        let meta = session_meta(&options, &registry, "test:model", "", false, false);
         let kage = meta.kage.expect("the settings are set");
         assert!(!kage.yolo);
         assert!(kage.system_prompt.is_none(), "an empty system adds nothing");
@@ -1907,7 +2374,7 @@ mod tests {
         // A clean store sends nothing, and a system prompt rides along.
         let clean: kage_plugin::SharedOptions =
             Arc::new(Mutex::new(kage_core::options::OptionStore::default()));
-        let meta = session_meta(&clean, &registry, "test:model", "be brief", true);
+        let meta = session_meta(&clean, &registry, "test:model", "be brief", true, false);
         let kage = meta.kage.expect("yolo and the system prompt are set");
         assert!(kage.yolo);
         assert_eq!(kage.system_prompt.as_deref(), Some("be brief"));
@@ -2140,6 +2607,244 @@ mod tests {
                 envelope.event
             );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Lua fixture the hosted-pump tests load: an echo tool and
+    /// an override of it, a failing tool, and notification, transform
+    /// and predicate handlers.
+    const FIXTURE: &str = r"
+kage.register_tool({
+    name = 'plugin_echo',
+    description = 'echoes input.msg',
+    schema = { type = 'object' },
+    risk = 'read',
+    execute = function(input) return 'echo:' .. (input.msg or '?') end,
+})
+kage.override_tool({
+    name = 'plugin_echo',
+    description = 'shouts instead',
+    schema = { type = 'object' },
+    risk = 'read',
+    execute = function(input) return 'override:' .. (input.msg or '?') end,
+})
+kage.register_tool({
+    name = 'plugin_fail',
+    description = 'fails the call',
+    schema = { type = 'object' },
+    execute = function(input) error('no can do') end,
+})
+kage.on('message_end', function(ev) count = (count or 0) + 1 end)
+kage.on('transform_context', function(messages) return { replaced = true } end)
+kage.on('should_stop_after_turn', function(ev) return true end)
+";
+
+    /// A pump hosting a runtime with [`FIXTURE`] loaded from its
+    /// workdir, standing in for what `run()` builds. The context
+    /// capability is granted in config, the way
+    /// `[plugins.capabilities]` does.
+    fn hosted_pump() -> (Pump, mpsc::Receiver<Envelope>, PathBuf) {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        std::fs::write(dir.join("fixture.lua"), FIXTURE).unwrap();
+        let runtime = PluginRuntime::builder()
+            .workdir(dir.clone())
+            .config(serde_json::json!({"model": "mock/m"}))
+            .capabilities(std::collections::BTreeMap::from([(
+                "fixture".to_owned(),
+                vec!["context".to_owned()],
+            )]))
+            .build()
+            .unwrap();
+        kage_plugin::load_all(Some(&dir), &runtime).unwrap();
+        pump.plugins = Some(PluginSurface {
+            runtime: Arc::new(runtime),
+            workdir: dir.clone(),
+            cancel: CancelFlag::new(),
+        });
+        (pump, app, dir)
+    }
+
+    /// A session id the wire shape demands: a real ULID, since the
+    /// surface scopes dispatches by it.
+    fn fixture_session() -> String {
+        ulid::Ulid::generate().to_string()
+    }
+
+    /// Feed one request in and return the reply the surface queued.
+    fn plugin_reply(pump: &mut Pump, id: u64, method: &str, params: Value) -> Frame {
+        pump.absorb(Frame::Request {
+            id: RequestId::Number(id),
+            method: method.to_owned(),
+            params,
+        });
+        pump.store
+            .take_outgoing()
+            .into_iter()
+            .next()
+            .expect("the surface answers")
+    }
+
+    #[test]
+    fn a_hosted_session_serves_the_plugin_tools() {
+        let (mut pump, _app, dir) = hosted_pump();
+        let reply = plugin_reply(
+            &mut pump,
+            7,
+            "_kage/plugin/tools",
+            serde_json::json!({"sessionId": "s1"}),
+        );
+        let Frame::Success { id, result } = reply else {
+            panic!("the tools answer succeeds, got {reply:?}")
+        };
+        assert_eq!(id, RequestId::Number(7));
+        assert_eq!(result["tools"][0]["name"], "plugin_echo");
+        assert_eq!(result["tools"][0]["risk"], "read");
+        assert_eq!(result["handlers"]["message_end"], 1);
+        assert_eq!(result["handlers"]["transform_context"], 1);
+        assert_eq!(result["handlers"]["should_stop_after_turn"], 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_hosted_session_runs_a_plugin_tool_call() {
+        let (mut pump, _app, dir) = hosted_pump();
+        // The override wins the name, like the engine's registry.
+        let reply = plugin_reply(
+            &mut pump,
+            8,
+            "_kage/plugin/call",
+            serde_json::json!({
+                "sessionId": fixture_session(),
+                "tool": "plugin_echo",
+                "input": {"msg": "ping"},
+            }),
+        );
+        let Frame::Success { result, .. } = reply else {
+            panic!("the call answers, got {reply:?}")
+        };
+        assert_eq!(result["text"], "override:ping");
+        assert_eq!(result["isError"], false);
+        // A tool that raises answers is_error on a success frame, the
+        // way a Lua tool's failure is an output.
+        let reply = plugin_reply(
+            &mut pump,
+            9,
+            "_kage/plugin/call",
+            serde_json::json!({"sessionId": fixture_session(), "tool": "plugin_fail", "input": {}}),
+        );
+        let Frame::Success { result, .. } = reply else {
+            panic!("the failure is an output, got {reply:?}")
+        };
+        assert_eq!(result["isError"], true);
+        assert!(
+            result["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("no can do")),
+            "{result}"
+        );
+        // A tool the runtime does not hold fails the request.
+        let reply = plugin_reply(
+            &mut pump,
+            10,
+            "_kage/plugin/call",
+            serde_json::json!({"sessionId": fixture_session(), "tool": "nope", "input": {}}),
+        );
+        assert!(matches!(reply, Frame::Failure { .. }), "{reply:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_hosted_session_serves_the_hooks() {
+        let (mut pump, _app, dir) = hosted_pump();
+        let reply = plugin_reply(
+            &mut pump,
+            10,
+            "_kage/plugin/hook",
+            serde_json::json!({
+                "sessionId": fixture_session(),
+                "event": "transform_context",
+                "kind": "transform",
+                "payload": [],
+            }),
+        );
+        let Frame::Success { result, .. } = reply else {
+            panic!("the transform answers, got {reply:?}")
+        };
+        assert_eq!(result["replaced"], true);
+        let reply = plugin_reply(
+            &mut pump,
+            11,
+            "_kage/plugin/hook",
+            serde_json::json!({
+                "sessionId": fixture_session(),
+                "event": "should_stop_after_turn",
+                "kind": "predicate",
+                "payload": {},
+            }),
+        );
+        let Frame::Success { result, .. } = reply else {
+            panic!("the predicate answers, got {reply:?}")
+        };
+        assert_eq!(result, Value::Bool(true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_hosted_session_serves_events_and_drains() {
+        let (mut pump, _app, dir) = hosted_pump();
+        let reply = plugin_reply(
+            &mut pump,
+            12,
+            "_kage/plugin/event",
+            serde_json::json!({
+                "sessionId": fixture_session(),
+                "event": "message_end",
+                "payload": {"usage": {"output": 3}},
+                "notify": false,
+            }),
+        );
+        assert!(
+            matches!(&reply, Frame::Success { result, .. } if result.is_null()),
+            "{reply:?}"
+        );
+        // Nothing queued: the drain comes back empty.
+        let reply = plugin_reply(
+            &mut pump,
+            13,
+            "_kage/plugin/drain",
+            serde_json::json!({"sessionId": fixture_session(), "queue": "mcp_restarts"}),
+        );
+        let Frame::Success { result, .. } = reply else {
+            panic!("the drain answers, got {reply:?}")
+        };
+        assert_eq!(result, serde_json::json!({}));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pump_without_plugins_leaves_plugin_requests_to_the_store() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        let reply = plugin_reply(
+            &mut pump,
+            14,
+            "_kage/plugin/tools",
+            serde_json::json!({"sessionId": "s1"}),
+        );
+        let Frame::Failure { error, .. } = reply else {
+            panic!("the store refuses what it cannot serve, got {reply:?}")
+        };
+        assert_eq!(error.code, -32601);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_hosting_pump_names_itself_the_plugin_host() {
+        let (pump, _app, dir) = hosted_pump();
+        let meta = pump.session_meta();
+        assert_eq!(
+            meta.kage.expect("the settings are set").plugins,
+            Some(PluginsSource::Client)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

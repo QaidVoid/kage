@@ -405,8 +405,10 @@ impl Host {
                     .find(|c| c.name() == name);
                 match command {
                     Some(cmd) => {
+                        let link = &self.link;
+                        let mut errors = |text| dialog_error(link, text);
                         let output =
-                            run_bridged_command(&rt, &cmd, &args, &self.dialog_tx, &self.link);
+                            run_bridged_command(&rt, &cmd, &args, &self.dialog_tx, &mut errors);
                         self.show_plugin_output(output);
                     }
                     None => self.error(format!("no plugin command: {name}")),
@@ -416,7 +418,9 @@ impl Host {
                 let Some(rt) = self.plugins.clone() else {
                     return;
                 };
-                let output = run_bridged_keymap(&rt, id, &self.dialog_tx, &self.link);
+                let link = &self.link;
+                let mut errors = |text| dialog_error(link, text);
+                let output = run_bridged_keymap(&rt, id, &self.dialog_tx, &mut errors);
                 self.show_plugin_output(output);
             }
             RunRequest::RefreshProviders => self.refresh_providers(),

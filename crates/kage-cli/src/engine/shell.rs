@@ -136,7 +136,7 @@ impl super::Dispatcher {
             record_late_title(&self.bus, id, session);
         }
         flush_pending(&self.bus, id, session);
-        if let Some(rt) = &session.plugins {
+        if let Some(rt) = session.plugins.as_deref() {
             kage_plugin::Invocation::session(id).scope(|| {
                 crate::plugins::notify_user_shell(rt, &command, exit_code);
             });

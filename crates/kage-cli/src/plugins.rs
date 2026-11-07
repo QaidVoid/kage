@@ -19,6 +19,7 @@ use kage_core::{Content, LoopEvent, Message, ToolOutput, sync::lock};
 use kage_loop::{CompactionPrep, Hooks, StreamRequest, TurnSummary};
 use kage_plugin::{
     LoadReport, LogLevel, PluginRuntime, PluginRuntimeBuilder, SharedHostLog, SharedOptions,
+    session_plugins::SessionPlugins,
 };
 use kage_provider::{Provider, ProviderRegistry};
 use serde_json::json;
@@ -249,7 +250,7 @@ pub fn merge_plugin_providers(
 /// Fire `before_agent_start` and `agent_start` before a run's first turn,
 /// with the system prompt and first user message in scope.
 pub(crate) fn dispatch_run_start(
-    rt: &PluginRuntime,
+    rt: &dyn SessionPlugins,
     system_prompt: &str,
     first_user_message: &str,
 ) {
@@ -265,7 +266,7 @@ pub(crate) fn dispatch_run_start(
 }
 
 /// Fire `agent_end` after a run returns.
-pub(crate) fn dispatch_run_end(rt: &PluginRuntime, ok: bool) {
+pub(crate) fn dispatch_run_end(rt: &dyn SessionPlugins, ok: bool) {
     if let Err(err) = rt.dispatch_event("agent_end", &json!({ "ok": ok })) {
         log_plugin_error(rt, format_args!("agent_end dispatch: {err}"));
     }
@@ -273,14 +274,14 @@ pub(crate) fn dispatch_run_end(rt: &PluginRuntime, ok: bool) {
 
 /// Queue `user_shell` after a `!` shell command ends. `exit_code` is
 /// `None` when a signal ended the command.
-pub(crate) fn notify_user_shell(rt: &PluginRuntime, cmd: &str, exit_code: Option<i32>) {
+pub(crate) fn notify_user_shell(rt: &dyn SessionPlugins, cmd: &str, exit_code: Option<i32>) {
     let payload = json!({ "cmd": cmd, "exit_code": exit_code });
     if let Err(err) = rt.notify_event("user_shell", &payload) {
         log_plugin_error(rt, format_args!("user_shell dispatch: {err}"));
     }
 }
 
-fn log_plugin_error(rt: &PluginRuntime, args: std::fmt::Arguments<'_>) {
+fn log_plugin_error(rt: &dyn SessionPlugins, args: std::fmt::Arguments<'_>) {
     let sink = rt.sink();
     lock(&sink).log(LogLevel::Error, &args.to_string());
 }
@@ -290,7 +291,7 @@ fn log_plugin_error(rt: &PluginRuntime, args: std::fmt::Arguments<'_>) {
 /// `tool_names` maps tool call ids to tool names for the run, so
 /// `tool_result` carries the name its patterns match against.
 pub(crate) fn forward_event(
-    rt: &PluginRuntime,
+    rt: &dyn SessionPlugins,
     event: &LoopEvent,
     tool_names: &mut HashMap<String, String>,
 ) {
@@ -397,7 +398,7 @@ pub(crate) fn forward_event(
 /// abort the loop.
 pub struct PluginEventHooks<H: Hooks> {
     inner: H,
-    runtime: Arc<PluginRuntime>,
+    runtime: Arc<dyn SessionPlugins>,
     /// FIFO of `kage.send_message` payloads pulled out of the runtime
     /// at most once per loop pass. The loop polls
     /// [`Hooks::get_steering`] potentially many times; we drain the
@@ -409,7 +410,7 @@ pub struct PluginEventHooks<H: Hooks> {
 
 impl<H: Hooks> PluginEventHooks<H> {
     /// Wrap `inner` so its calls flow through `runtime`'s plugin dispatch.
-    pub fn new(inner: H, runtime: Arc<PluginRuntime>) -> Self {
+    pub fn new(inner: H, runtime: Arc<dyn SessionPlugins>) -> Self {
         Self {
             inner,
             runtime,
@@ -418,7 +419,7 @@ impl<H: Hooks> PluginEventHooks<H> {
     }
 
     fn log_error(&self, args: std::fmt::Arguments<'_>) {
-        log_plugin_error(&self.runtime, args);
+        log_plugin_error(&*self.runtime, args);
     }
 }
 
@@ -611,7 +612,8 @@ mod tests {
     fn get_steering_returns_send_message_payload_when_inner_is_empty() {
         let rt = Arc::new(granted_runtime());
         send(&rt, "kage.send_message('please continue')");
-        let mut hooks = PluginEventHooks::new(NoopHooks, Arc::clone(&rt));
+        let mut hooks =
+            PluginEventHooks::new(NoopHooks, Arc::clone(&rt) as Arc<dyn SessionPlugins>);
         assert_eq!(
             hooks.get_steering(),
             Some(vec![Content::Text {
@@ -636,7 +638,7 @@ mod tests {
             InnerOnce(Some(vec![Content::Text {
                 text: "user typed this".into(),
             }])),
-            Arc::clone(&rt),
+            Arc::clone(&rt) as Arc<dyn SessionPlugins>,
         );
         // First poll: inner wins.
         assert_eq!(
@@ -675,7 +677,8 @@ mod tests {
              end)",
         )
         .unwrap();
-        let mut hooks = PluginEventHooks::new(NoopHooks, Arc::clone(&rt));
+        let mut hooks =
+            PluginEventHooks::new(NoopHooks, Arc::clone(&rt) as Arc<dyn SessionPlugins>);
         let mut p = sample_prep();
         hooks.prepare_compaction(&mut p).unwrap();
         assert_eq!(p.summary_override.as_deref(), Some("PLUGIN 6"));
@@ -690,7 +693,8 @@ mod tests {
              end)",
         )
         .unwrap();
-        let mut hooks = PluginEventHooks::new(NoopHooks, Arc::clone(&rt));
+        let mut hooks =
+            PluginEventHooks::new(NoopHooks, Arc::clone(&rt) as Arc<dyn SessionPlugins>);
         let mut p = sample_prep();
         hooks.prepare_compaction(&mut p).unwrap();
         assert_eq!(p.prompt, "NEW");
@@ -701,7 +705,8 @@ mod tests {
     #[test]
     fn compact_prepare_without_handler_is_passthrough() {
         let rt = Arc::new(PluginRuntime::new().unwrap());
-        let mut hooks = PluginEventHooks::new(NoopHooks, Arc::clone(&rt));
+        let mut hooks =
+            PluginEventHooks::new(NoopHooks, Arc::clone(&rt) as Arc<dyn SessionPlugins>);
         let mut p = sample_prep();
         hooks.prepare_compaction(&mut p).unwrap();
         assert_eq!(p.prompt, "old prompt");
@@ -716,7 +721,8 @@ mod tests {
             &rt,
             "kage.send_message('first'); kage.send_message('second')",
         );
-        let mut hooks = PluginEventHooks::new(NoopHooks, Arc::clone(&rt));
+        let mut hooks =
+            PluginEventHooks::new(NoopHooks, Arc::clone(&rt) as Arc<dyn SessionPlugins>);
         assert_eq!(
             hooks.get_steering(),
             Some(vec![Content::Text {

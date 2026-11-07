@@ -18,7 +18,7 @@ use kage_core::{
 use kage_loop::{AgentContext, Hooks, LoopConfig};
 use kage_mcp::expand::ExpandError;
 use kage_mcp::{McpConnection, McpManager};
-use kage_plugin::PluginRuntime;
+use kage_plugin::session_plugins::SessionPlugins;
 use kage_provider::Provider;
 use kage_tools::ToolRegistry;
 
@@ -152,7 +152,7 @@ pub(super) struct Run {
     pub gate: PermissionGate,
     pub steering: Steering,
     pub inbox: Inbox,
-    pub plugins: Option<Arc<PluginRuntime>>,
+    pub plugins: Option<Arc<dyn SessionPlugins>>,
     pub mcp: Option<McpLease>,
     pub bus: Arc<Bus>,
     pub limits: Limits,
@@ -237,7 +237,7 @@ impl Run {
         let price = kage_provider::model_cost(provider.as_ref(), &cx.model);
         let mut tool_names = HashMap::new();
         let mut emit = |event: LoopEvent| {
-            if let Some(rt) = &plugins {
+            if let Some(rt) = plugins.as_deref() {
                 crate::plugins::forward_event(rt, &event, &mut tool_names);
             }
             if let Some(rec) = recorder.as_mut()
@@ -293,7 +293,7 @@ impl Run {
                     let message = Arc::new(prompt);
                     cx.history.push(Arc::clone(&message));
                     emit(LoopEvent::MessageAppended { message });
-                    if let Some(rt) = &plugins {
+                    if let Some(rt) = plugins.as_deref() {
                         crate::plugins::dispatch_run_start(rt, &cx.system_prompt, &first_text);
                     }
                     let result = kage_loop::run(
@@ -305,7 +305,7 @@ impl Run {
                         &cancel,
                         &mut emit,
                     );
-                    if let Some(rt) = &plugins {
+                    if let Some(rt) = plugins.as_deref() {
                         crate::plugins::dispatch_run_end(rt, result.is_ok());
                     }
                     result

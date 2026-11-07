@@ -131,7 +131,7 @@ impl super::CliAcpAgent {
             );
             self.host.default_model.clone()
         };
-        let mut spec = self.session_spec(id, cwd, &model, servers)?;
+        let (mut spec, runtime) = self.session_spec(id, cwd, &model, servers)?;
         spec.cx.history = replay.history.into_iter().map(Arc::new).collect();
         spec.cx.budget = TokenBudget {
             used_input: replay.usage_total.input,
@@ -145,7 +145,7 @@ impl super::CliAcpAgent {
             .as_deref()
             .and_then(kage_core::ThinkingLevel::parse);
         spec.recorder = Some(Recorder::new(writer, spec.plugins.clone()));
-        Ok(self.open(client_id.to_owned(), spec))
+        Ok(self.open(client_id.to_owned(), spec, runtime))
     }
 
     /// Opens a recorded session for hosting, waiting out the window

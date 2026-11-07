@@ -84,6 +84,7 @@ use kage_core::protocol::{AgentTree, Command, CommandKind, Delivery, RunOutcome}
 use kage_core::sync::lock;
 use kage_core::{LoopError, SessionId, StopReason as CoreStopReason};
 use kage_jsonrpc::{Peer, RpcError};
+use kage_plugin::PluginRuntime;
 
 use bridge::{Ask, AskSet, Bridge, HeldUpdates};
 use content::prompt_content;
@@ -405,9 +406,10 @@ impl CliAcpAgent {
         cwd: &str,
         model: &str,
         servers: BTreeMap<String, McpSpec>,
-    ) -> Result<SessionSpec, RpcError> {
+    ) -> Result<(SessionSpec, Option<Arc<PluginRuntime>>), RpcError> {
         let env = lock(&self.env).clone();
-        let mut spec = (self.host.spec)(&self.host.registry(), id, cwd, model, servers, &env)?;
+        let (mut spec, runtime) =
+            (self.host.spec)(&self.host.registry(), id, cwd, model, servers, &env)?;
         if self.unconfigured_run.load(Ordering::SeqCst) {
             spec.gate = spec.gate.with_fallback(PermissionAction::Allow);
         }
@@ -416,13 +418,18 @@ impl CliAcpAgent {
         {
             agents.background = Background::Wake;
         }
-        Ok(spec)
+        Ok((spec, runtime))
     }
 
     /// Opens `spec` as the client session `client_id` and returns its
     /// config options. Updates for it wait for
     /// [`Agent::session_announced`].
-    fn open(&self, client_id: String, spec: SessionSpec) -> Vec<SessionConfigOption> {
+    fn open(
+        &self,
+        client_id: String,
+        spec: SessionSpec,
+        runtime: Option<Arc<PluginRuntime>>,
+    ) -> Vec<SessionConfigOption> {
         let settings = Settings::of(&spec, &self.host.registry());
         let options = config_options(&self.host.models(), &settings);
         let shown = Shown {
@@ -434,7 +441,7 @@ impl CliAcpAgent {
         lock(&self.shown).insert(spec.id, shown);
         lock(&self.held).insert(spec.id, HeldUpdates::default());
         lock(&self.ids).insert(client_id, spec.id);
-        self.host.launch(spec, settings);
+        self.host.launch(spec, settings, runtime);
         options
     }
 
@@ -568,11 +575,12 @@ impl Agent for CliAcpAgent {
         let (path, mut header) =
             crate::plan_session_in(&self.host.sessions, &self.host.default_model, "");
         let id = header.session;
-        let mut spec = self.session_spec(id, &req.cwd, &self.host.default_model, servers)?;
+        let (mut spec, runtime) =
+            self.session_spec(id, &req.cwd, &self.host.default_model, servers)?;
         header.cwd.clone_from(&spec.cx.workdir);
         header.system_prompt.clone_from(&spec.cx.system_prompt);
         spec.recorder = Some(Recorder::planned(path, header, spec.plugins.clone()));
-        let config_options = self.open(id.to_string(), spec);
+        let config_options = self.open(id.to_string(), spec, runtime);
         Ok(NewSessionResponse {
             session_id: id.to_string(),
             config_options,

@@ -53,7 +53,7 @@ use kage_core::{
 };
 use kage_loop::{AgentContext, LoopConfig};
 use kage_mcp::{McpError, McpManager};
-use kage_plugin::PluginRuntime;
+use kage_plugin::session_plugins::SessionPlugins;
 use kage_provider::ProviderRegistry;
 use kage_tools::ToolRegistry;
 
@@ -109,7 +109,7 @@ pub(crate) struct SessionSpec {
     pub cx: AgentContext,
     pub recorder: Option<Recorder>,
     pub tools: ToolRegistry,
-    pub plugins: Option<Arc<PluginRuntime>>,
+    pub plugins: Option<Arc<dyn SessionPlugins>>,
     pub gate: PermissionGate,
     pub loop_cfg: LoopConfig,
     /// MCP servers whose tools are in `tools`. Restarts and list changes
@@ -556,7 +556,7 @@ struct Session {
     inbox: Inbox,
     queued: VecDeque<Vec<Content>>,
     tools: ToolRegistry,
-    plugins: Option<Arc<PluginRuntime>>,
+    plugins: Option<Arc<dyn SessionPlugins>>,
     /// Keeps the session's environment registered with its plugin runtime
     /// while the session exists.
     plugin_env: Option<PluginSession>,
@@ -882,9 +882,9 @@ impl Dispatcher {
     /// tools against.
     fn registration_runtime(
         &self,
-        plugins: Option<&Arc<PluginRuntime>>,
+        plugins: Option<&Arc<dyn SessionPlugins>>,
         link: Option<&AgentLink>,
-    ) -> Option<Arc<PluginRuntime>> {
+    ) -> Option<Arc<dyn SessionPlugins>> {
         plugins.cloned().or_else(|| {
             link.and_then(|l| self.sessions.get(&l.parent))
                 .and_then(|parent| parent.plugin_env.as_ref())
@@ -921,10 +921,10 @@ impl Dispatcher {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
-        let Some(rt) = session.plugins.clone() else {
+        let Some(rt) = session.plugins.as_deref() else {
             return;
         };
-        for miss in session.plugin_tools.apply(&mut session.tools, &rt) {
+        for miss in session.plugin_tools.apply(&mut session.tools, rt) {
             let name = &miss.name;
             let text = if miss.disabled {
                 format!(
@@ -2262,12 +2262,12 @@ fn has_reply(cx: &AgentContext) -> bool {
 /// `kage.exec` and `kage.env` in work for the session use it, until the
 /// session is dropped.
 struct PluginSession {
-    runtime: Arc<PluginRuntime>,
+    runtime: Arc<dyn SessionPlugins>,
     id: SessionId,
 }
 
 impl PluginSession {
-    fn new(runtime: &Arc<PluginRuntime>, id: SessionId, env: &Environment) -> Self {
+    fn new(runtime: &Arc<dyn SessionPlugins>, id: SessionId, env: &Environment) -> Self {
         runtime.set_session_env(id, env.clone());
         Self {
             runtime: Arc::clone(runtime),

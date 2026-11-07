@@ -8,6 +8,7 @@ use kage_core::ThinkingLevel;
 use kage_core::options::{OptionStore, OptionValue};
 use kage_core::protocol::{Command, CommandKind, Envelope, HostEvent, NoticeLevel};
 use kage_plugin::LogLevel;
+use kage_plugin::session_plugins::SessionPlugins;
 use kage_tui::TranscriptScope;
 use kage_tui::hostlog::LogPublisher;
 
@@ -258,15 +259,18 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
         plugin_runtime.clone(),
         move |event| acp_warnings.publish(event),
     )));
+    let session_plugins = plugin_runtime
+        .clone()
+        .map(|rt| rt as Arc<dyn SessionPlugins>);
     engine.open(crate::engine::SessionSpec {
         id: session_id,
         model: qualified_model.clone(),
         cx,
         recorder: planned.map(|(path, header)| {
-            crate::engine::Recorder::planned(path, header, plugin_runtime.clone())
+            crate::engine::Recorder::planned(path, header, session_plugins.clone())
         }),
         tools,
-        plugins: plugin_runtime.clone(),
+        plugins: session_plugins,
         gate,
         loop_cfg,
         mcp: Some(mcp_manager),

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use kage_core::{LoopEvent, Message, Role, TokenUsage};
-use kage_plugin::{PendingSessionOp, PluginRuntime};
+use kage_plugin::{PendingSessionOp, session_plugins::SessionPlugins};
 use kage_session::{
     Compaction, Custom, EntryId, Header, Label, MessageEntry, ModelChange, SessionEntry,
     SessionError, SessionWriter,
@@ -18,7 +18,7 @@ use kage_session::{
 /// the turn ends.
 pub(crate) struct Recorder {
     target: Target,
-    plugins: Option<Arc<PluginRuntime>>,
+    plugins: Option<Arc<dyn SessionPlugins>>,
     turn_usage: Option<TokenUsage>,
 }
 
@@ -33,7 +33,7 @@ enum Target {
 }
 
 impl Recorder {
-    pub(crate) fn new(writer: SessionWriter, plugins: Option<Arc<PluginRuntime>>) -> Self {
+    pub(crate) fn new(writer: SessionWriter, plugins: Option<Arc<dyn SessionPlugins>>) -> Self {
         Self {
             target: Target::Open(writer),
             plugins,
@@ -45,7 +45,7 @@ impl Recorder {
     pub(crate) fn planned(
         path: PathBuf,
         header: Header,
-        plugins: Option<Arc<PluginRuntime>>,
+        plugins: Option<Arc<dyn SessionPlugins>>,
     ) -> Self {
         Self {
             target: Target::Planned {
@@ -194,6 +194,7 @@ pub(crate) fn plugin_op_entry(op: PendingSessionOp) -> Option<SessionEntry> {
 #[cfg(test)]
 mod tests {
     use kage_core::{Content, MessageId, StopReason};
+    use kage_plugin::PluginRuntime;
     use kage_session::{FORMAT_VERSION, SessionReader};
 
     use super::*;
@@ -323,7 +324,11 @@ mod tests {
         runtime
             .eval("kage.session.set_label('not-a-ulid', 'dropped')")
             .unwrap();
-        let mut recorder = Recorder::planned(path.clone(), header, Some(Arc::clone(&runtime)));
+        let mut recorder = Recorder::planned(
+            path.clone(),
+            header,
+            Some(Arc::clone(&runtime) as Arc<dyn SessionPlugins>),
+        );
         recorder
             .observe(&LoopEvent::TurnEnded {
                 index: 0,

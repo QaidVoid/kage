@@ -283,7 +283,7 @@ fn serve_on_host(
     std::thread::spawn(move || {
         standing
             .serve_with(BufReader::new(srv_r), srv_w, move |agent| {
-                let mut spec = (agent.host.spec)(
+                let (mut spec, runtime) = (agent.host.spec)(
                     &agent.host.registry(),
                     id,
                     "",
@@ -307,7 +307,7 @@ fn serve_on_host(
                     };
                     spec.recorder = Some(Recorder::planned(path, header, spec.plugins.clone()));
                 }
-                agent.open(id.to_string(), spec);
+                agent.open(id.to_string(), spec, runtime);
                 agent.session_announced(&id.to_string());
                 let _ = opened_tx.send(());
             })
@@ -405,26 +405,31 @@ fn test_host_with_plugins(
             let gate = PermissionGate::new(rules)
                 .with_fallback(fallback)
                 .with_mcp_servers(names.map(str::to_owned).collect());
-            Ok(SessionSpec {
-                id,
-                model: model.to_owned(),
-                cx: AgentContext {
-                    env: env.clone(),
-                    ..AgentContext::new(model, "")
-                        .with_workdir(&workdir)
-                        .with_context_window(WINDOW)
+            Ok((
+                SessionSpec {
+                    id,
+                    model: model.to_owned(),
+                    cx: AgentContext {
+                        env: env.clone(),
+                        ..AgentContext::new(model, "")
+                            .with_workdir(&workdir)
+                            .with_context_window(WINDOW)
+                    },
+                    recorder: None,
+                    tools,
+                    gate,
+                    loop_cfg: LoopConfig::default(),
+                    plugins: plugins.clone().map(|runtime| {
+                        runtime as Arc<dyn kage_plugin::session_plugins::SessionPlugins>
+                    }),
+                    mcp,
+                    interactive: true,
+                    title: true,
+                    shell: None,
+                    agents: Some((*agents).clone()),
                 },
-                recorder: None,
-                tools,
-                gate,
-                loop_cfg: LoopConfig::default(),
-                plugins: plugins.clone(),
-                mcp,
-                interactive: true,
-                title: true,
-                shell: None,
-                agents: Some((*agents).clone()),
-            })
+                plugins.clone(),
+            ))
         },
     );
     Host::new(registry, "mock/m".into(), sessions, spec, BTreeMap::new())
@@ -4817,7 +4822,7 @@ fn serve_paused(
     std::thread::spawn(move || {
         standing
             .serve_with(BufReader::new(srv_r), srv_w, move |agent| {
-                let spec = (agent.host.spec)(
+                let (spec, runtime) = (agent.host.spec)(
                     &agent.host.registry(),
                     id,
                     "",
@@ -4826,7 +4831,7 @@ fn serve_paused(
                     &Environment::inherit(),
                 )
                 .unwrap();
-                agent.open(id.to_string(), spec);
+                agent.open(id.to_string(), spec, runtime);
                 agent.session_announced(&id.to_string());
                 let _ = opened_tx.send(());
             })
@@ -6698,7 +6703,7 @@ fn a_stale_close_report_spares_a_relaunched_session() {
     );
     let id = SessionId::new();
     let launch = |host: &Host| {
-        let spec = (host.spec)(
+        let (spec, runtime) = (host.spec)(
             &host.registry(),
             id,
             "",
@@ -6708,7 +6713,7 @@ fn a_stale_close_report_spares_a_relaunched_session() {
         )
         .unwrap();
         let settings = super::options::Settings::of(&spec, &host.registry());
-        host.launch(spec, settings);
+        host.launch(spec, settings, runtime);
     };
     launch(&host);
     let first = lock(&host.instances).get(&id).copied().unwrap();
@@ -6765,7 +6770,7 @@ fn a_launch_installs_only_after_a_report_is_consumed() {
     );
     let id = SessionId::new();
     let launch = move |host: &Host| {
-        let spec = (host.spec)(
+        let (spec, runtime) = (host.spec)(
             &host.registry(),
             id,
             "",
@@ -6775,7 +6780,7 @@ fn a_launch_installs_only_after_a_report_is_consumed() {
         )
         .unwrap();
         let settings = super::options::Settings::of(&spec, &host.registry());
-        host.launch(spec, settings);
+        host.launch(spec, settings, runtime);
     };
     launch(&host);
     let first = lock(&host.instances).get(&id).copied().unwrap();

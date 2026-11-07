@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use kage_plugin::PluginRuntime;
+use kage_plugin::session_plugins::SessionPlugins;
 use kage_tools::{Tool, ToolRegistry};
 
 /// Names a session's plugin runtime registered, the tools those
@@ -37,7 +37,7 @@ impl PluginTools {
     pub(super) fn apply(
         &mut self,
         tools: &mut ToolRegistry,
-        rt: &PluginRuntime,
+        rt: &dyn SessionPlugins,
     ) -> Vec<OverrideMiss> {
         for name in self.names.drain(..) {
             tools.unregister(&name);
@@ -94,6 +94,7 @@ impl PluginTools {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kage_plugin::PluginRuntime;
 
     fn runtime(lua: &str) -> PluginRuntime {
         let rt = PluginRuntime::new().unwrap();

@@ -7,6 +7,7 @@ use kage_core::agents::{AgentDefs, Isolation};
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
 use kage_core::protocol::{EXIT_PLAN_TOOL, Envelope, Event, RunOutcome};
 use kage_core::{LoopError, LoopEvent, StopReason, TokenUsage, ToolCallId, ToolOutput};
+use kage_plugin::PluginRuntime;
 use kage_provider::testing::MockProvider;
 use kage_provider::{ProviderError, ProviderEvent};
 use kage_session::{EntryId, FORMAT_VERSION, Header, SessionWriter};
@@ -1627,7 +1628,7 @@ fn a_finished_shell_command_fires_user_shell() {
     let h = harness(MockProvider::replaying(text_turn("ok")));
     let id = SessionId::new();
     h.engine.open(SessionSpec {
-        plugins: Some(Arc::clone(&runtime)),
+        plugins: Some(Arc::clone(&runtime) as Arc<dyn SessionPlugins>),
         ..h.spec(id)
     });
     for command in ["exit 3", "kill -9 $$"] {
@@ -1982,9 +1983,12 @@ fn plugin_turn_end_entries_land_in_the_session_file() {
         id,
         model: "mock/m".into(),
         cx: AgentContext::new("m", "").with_workdir(std::env::temp_dir()),
-        recorder: Some(Recorder::new(writer, Some(Arc::clone(&runtime)))),
+        recorder: Some(Recorder::new(
+            writer,
+            Some(Arc::clone(&runtime) as Arc<dyn SessionPlugins>),
+        )),
         tools: h.tools.clone(),
-        plugins: Some(runtime),
+        plugins: Some(runtime as Arc<dyn SessionPlugins>),
         gate: PermissionGate::new(PermissionsConfig::default()),
         loop_cfg: LoopConfig::default(),
         mcp: None,
@@ -2564,8 +2568,11 @@ fn agent_runs_skip_plugin_events_and_session_ops() {
     let (_, path) = recorder_in(dir.path(), parent);
     let writer = SessionWriter::open(&path).unwrap();
     h.engine.open(SessionSpec {
-        recorder: Some(Recorder::new(writer, Some(Arc::clone(&runtime)))),
-        plugins: Some(runtime),
+        recorder: Some(Recorder::new(
+            writer,
+            Some(Arc::clone(&runtime) as Arc<dyn SessionPlugins>),
+        )),
+        plugins: Some(runtime as Arc<dyn SessionPlugins>),
         agents: Some(agent_setup(1, 1)),
         ..h.spec(parent)
     });
@@ -2624,8 +2631,11 @@ fn a_child_reads_its_own_environment_not_the_runtime_default() {
     let writer = SessionWriter::open(&path).unwrap();
     let mut spec = h.spec(parent);
     spec.cx.env = Environment::captured(vec![("CLIENT".into(), "editor".into())]);
-    spec.recorder = Some(Recorder::new(writer, Some(Arc::clone(&runtime))));
-    spec.plugins = Some(Arc::clone(&runtime));
+    spec.recorder = Some(Recorder::new(
+        writer,
+        Some(Arc::clone(&runtime) as Arc<dyn SessionPlugins>),
+    ));
+    spec.plugins = Some(Arc::clone(&runtime) as Arc<dyn SessionPlugins>);
     spec.agents = Some(agent_setup(1, 1));
     h.engine.open(spec);
     prompt(&h.engine, parent, "go", Delivery::Steer);
@@ -2691,8 +2701,11 @@ fn a_grandchild_reads_its_own_environment_too() {
     let writer = SessionWriter::open(&path).unwrap();
     let mut spec = h.spec(parent);
     spec.cx.env = Environment::captured(vec![("CLIENT".into(), "editor".into())]);
-    spec.recorder = Some(Recorder::new(writer, Some(Arc::clone(&runtime))));
-    spec.plugins = Some(Arc::clone(&runtime));
+    spec.recorder = Some(Recorder::new(
+        writer,
+        Some(Arc::clone(&runtime) as Arc<dyn SessionPlugins>),
+    ));
+    spec.plugins = Some(Arc::clone(&runtime) as Arc<dyn SessionPlugins>);
     spec.agents = Some(agent_setup(2, 1));
     h.engine.open(spec);
     prompt(&h.engine, parent, "go", Delivery::Steer);
@@ -6914,7 +6927,7 @@ fn plugin_work_runs_in_its_sessions_environment() {
         "KAGE_TEST_CLIENT".into(),
         "editor".into(),
     )]);
-    spec.plugins = Some(Arc::clone(&runtime));
+    spec.plugins = Some(Arc::clone(&runtime) as Arc<dyn SessionPlugins>);
     h.engine.open(spec);
     prompt(&h.engine, id, "go", Delivery::Steer);
     until_runs_end(&h.events, 1);

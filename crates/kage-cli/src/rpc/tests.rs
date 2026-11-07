@@ -6,7 +6,8 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use kage_acp::acp::{
-    ContentBlock, EmbeddedResource, McpServer, SessionUpdate, ToolCallStatus, ToolKind,
+    ContentBlock, EmbeddedResource, McpServer, NewSessionKage, SessionBackground, SessionOpt,
+    SessionUpdate, ToolCallStatus, ToolKind,
 };
 use kage_core::agents::AgentDefs;
 use kage_core::config::{McpServer as McpSpec, PluginsConfig};
@@ -291,6 +292,7 @@ fn serve_on_host(
                     BTreeMap::new(),
                     &Environment::inherit(),
                     None,
+                    None,
                 )
                 .unwrap();
                 if record {
@@ -388,14 +390,15 @@ fn test_host_with_plugins(
 ) -> Arc<Host> {
     let registry = Arc::new(ProviderRegistry::new().with(provider));
     let agents = Arc::new(agents);
-    let spec = Box::new(
+    let spec: super::host::SpecBuilder = Box::new(
         move |_: &ProviderRegistry,
               id,
               _cwd: &str,
               model: &str,
               servers,
               env: &Environment,
-              plugins: Option<Arc<dyn kage_plugin::session_plugins::SessionPlugins>>| {
+              plugins: Option<Arc<dyn SessionPlugins>>,
+              _client_system: Option<&str>| {
             let agents = Arc::clone(&agents);
             let mut rules = PermissionsConfig::default();
             rules.tools.insert(
@@ -4839,6 +4842,7 @@ fn serve_paused(
                     BTreeMap::new(),
                     &Environment::inherit(),
                     None,
+                    None,
                 )
                 .unwrap();
                 agent.open(id.to_string(), spec, runtime);
@@ -6476,7 +6480,7 @@ fn only_a_local_client_sets_the_environment_of_its_sessions() {
     let record = Arc::clone(&seen);
     let registry =
         Arc::new(ProviderRegistry::new().with(Arc::new(MockProvider::sequence(Vec::new()))));
-    let spec: super::host::SpecBuilder = Box::new(move |_, _, _, _, _, env: &Environment, _| {
+    let spec: super::host::SpecBuilder = Box::new(move |_, _, _, _, _, env: &Environment, _, _| {
         let from_client = env
             .vars()
             .iter()
@@ -6721,6 +6725,7 @@ fn a_stale_close_report_spares_a_relaunched_session() {
             BTreeMap::new(),
             &Environment::inherit(),
             None,
+            None,
         )
         .unwrap();
         let settings = super::options::Settings::of(&spec, &host.registry());
@@ -6788,6 +6793,7 @@ fn a_launch_installs_only_after_a_report_is_consumed() {
             "mock/m",
             BTreeMap::new(),
             &Environment::inherit(),
+            None,
             None,
         )
         .unwrap();
@@ -7341,4 +7347,97 @@ fn client_hosted_hooks_fire_only_for_reported_handlers() {
             .iter()
             .all(|(_, params)| { params["event"] == "message_start" && params["notify"] == false })
     );
+}
+
+/// A spec the meta settings can apply to, with everything at its
+/// default.
+fn default_spec() -> SessionSpec {
+    SessionSpec {
+        id: SessionId::new(),
+        model: "mock/m".to_owned(),
+        cx: AgentContext::new("mock/m", ""),
+        recorder: None,
+        tools: builtin_registry(),
+        gate: PermissionGate::new(PermissionsConfig::default()),
+        loop_cfg: LoopConfig::default(),
+        plugins: None,
+        mcp: None,
+        interactive: true,
+        title: true,
+        agents: Some(AgentSetup::from_options(
+            AgentDefs::default(),
+            &kage_core::options::OptionStore::default(),
+            Background::Hold,
+        )),
+        shell: None,
+    }
+}
+
+#[test]
+fn session_meta_settings_reach_the_spec() {
+    let meta = NewSessionMeta {
+        kage: Some(NewSessionKage {
+            plugins: None,
+            background: Some(SessionBackground::Wake),
+            yolo: true,
+            system_prompt: Some("be terse".into()),
+            opt: Some(SessionOpt {
+                compaction_threshold: Some(0.5),
+                max_provider_retries: Some(2),
+                thinking_level: Some("high".into()),
+            }),
+            max_output_tokens: Some(1_024),
+        }),
+    };
+    let settings = SessionSettings::of(Some(&meta));
+    assert_eq!(settings.system_prompt.as_deref(), Some("be terse"));
+    let mut spec = default_spec();
+    settings.apply(&mut spec, false);
+    assert_eq!(spec.gate.mode(), Some(PermissionAction::Allow));
+    assert!((spec.loop_cfg.compaction_threshold - 0.5).abs() < f32::EPSILON);
+    assert_eq!(spec.loop_cfg.max_provider_retries, 2);
+    assert_eq!(spec.cx.thinking_level, Some(ThinkingLevel::High));
+    assert_eq!(spec.cx.max_output_tokens, Some(1_024));
+    let agents = spec.agents.unwrap();
+    assert_eq!(agents.background, Background::Wake);
+}
+
+#[test]
+fn a_session_without_meta_keeps_the_host_defaults() {
+    let settings = SessionSettings::of(None);
+    let mut spec = default_spec();
+    settings.apply(&mut spec, false);
+    assert_eq!(spec.gate.mode(), None);
+    assert_eq!(spec.cx.max_output_tokens, None);
+    assert_eq!(spec.agents.unwrap().background, Background::Hold);
+
+    // A kage client's background agents wake it, as before the meta.
+    let mut spec = default_spec();
+    SessionSettings::host_defaults(true).apply(&mut spec, true);
+    assert_eq!(spec.agents.unwrap().background, Background::Wake);
+}
+
+#[test]
+fn a_session_new_meta_sets_the_session_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(vec![text_turn("hi")], dir.path(), dir.path());
+    initialize(&h.client);
+    let params = serde_json::json!({
+        "cwd": dir.path().display().to_string(),
+        "mcpServers": [],
+        "_meta": { "kage": {
+            "yolo": true,
+            "background": "wake",
+            "opt": { "thinkingLevel": "high" },
+            "maxOutputTokens": 1_024,
+        }},
+    });
+    let created = h.client.request("session/new", params).unwrap();
+    let thinking = created["configOptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|option| option["id"] == "thinking")
+        .unwrap_or_else(|| panic!("thinking option in {created}"));
+    assert_eq!(thinking["currentValue"], "high");
 }

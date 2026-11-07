@@ -70,11 +70,12 @@ use kage_acp::acp::{
     PluginInstallRequest, PluginRemoveRequest, PluginsSource, PromptCapabilities, PromptDelivery,
     PromptRequest, PromptResponse, PromptWithdrawn, RegistryInstallRequest, RegistryInstallResult,
     RegistrySearchRequest, RegistrySearchResult, ResumeSessionRequest, ResumeSessionResponse,
-    SessionCapabilities, SessionConfigOption, SessionExportResponse, SessionForkRequest,
-    SessionForkResponse, SessionPromptsResponse, SessionRenameRequest, SessionRequest,
-    SessionRewindRequest, SessionUndoResponse, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, ShellRequest, StopReason, Supported, SwarmResumeRequest,
-    SwarmResumeResponse, ThemesRequest, ThemesResult, WithdrawRequest,
+    SessionBackground, SessionCapabilities, SessionConfigOption, SessionExportResponse,
+    SessionForkRequest, SessionForkResponse, SessionOpt, SessionPromptsResponse,
+    SessionRenameRequest, SessionRequest, SessionRewindRequest, SessionUndoResponse,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, ShellRequest, StopReason,
+    Supported, SwarmResumeRequest, SwarmResumeResponse, ThemesRequest, ThemesResult,
+    WithdrawRequest,
 };
 use kage_acp::acp::{UiAttachRequest, UiCommandRequest, UiKeymapRequest, UiOutput, UiSnapshot};
 use kage_acp::agent::{Agent, PromptContext};
@@ -83,7 +84,7 @@ use kage_core::environment::Environment;
 use kage_core::permissions::PermissionAction;
 use kage_core::protocol::{AgentTree, Command, CommandKind, Delivery, RunOutcome};
 use kage_core::sync::lock;
-use kage_core::{LoopError, SessionId, StopReason as CoreStopReason};
+use kage_core::{LoopError, SessionId, StopReason as CoreStopReason, ThinkingLevel};
 use kage_jsonrpc::{Peer, RpcError};
 use kage_plugin::PluginRuntime;
 use kage_plugin::session_plugins::SessionPlugins;
@@ -100,6 +101,91 @@ use crate::engine::{Background, Recorder, SessionSpec, SubscriptionId};
 
 /// What a redacted config value reads as.
 const REDACTED: &str = "<redacted>";
+
+/// What the connection asked one session to run with, beyond what the
+/// host defaults to: the `session/new` `_meta.kage` settings a kage
+/// client sets for itself. Unset fields keep the host's own reading.
+#[derive(Clone, Default)]
+pub(crate) struct SessionSettings {
+    /// The system role the session starts with, replacing the host's.
+    /// Skills and context the host adds still follow it.
+    system_prompt: Option<String>,
+    /// How the session treats a background agent's result while it is
+    /// idle.
+    background: Option<Background>,
+    /// The session opens in allow mode: tools run without asking.
+    yolo: bool,
+    /// Loop settings and the thinking level, from the client's option
+    /// store.
+    opt: Option<SessionOpt>,
+    /// The most tokens one provider answer may carry.
+    max_output_tokens: Option<u32>,
+}
+
+impl SessionSettings {
+    /// What a `session/new`'s `_meta.kage` asked for.
+    fn of(meta: Option<&NewSessionMeta>) -> Self {
+        let kage = meta.and_then(|meta| meta.kage.as_ref());
+        Self {
+            system_prompt: kage.and_then(|kage| kage.system_prompt.clone()),
+            background: kage
+                .and_then(|kage| kage.background)
+                .map(|background| match background {
+                    SessionBackground::Wake => Background::Wake,
+                    SessionBackground::Hold => Background::Hold,
+                }),
+            yolo: kage.is_some_and(|kage| kage.yolo),
+            opt: kage.and_then(|kage| kage.opt.clone()),
+            max_output_tokens: kage.and_then(|kage| kage.max_output_tokens),
+        }
+    }
+
+    /// What a session the wire names no settings for runs with: the
+    /// host's own defaults, with a kage client's background agents
+    /// waking it.
+    fn host_defaults(kage_client: bool) -> Self {
+        Self {
+            background: kage_client.then_some(Background::Wake),
+            ..Self::default()
+        }
+    }
+
+    /// Applies what acts on the built spec: the background agents, the
+    /// allow mode, the loop settings, the thinking level and the
+    /// output limit. The system prompt rode along into the spec build.
+    fn apply(&self, spec: &mut SessionSpec, kage_client: bool) {
+        if let Some(agents) = spec.agents.as_mut() {
+            agents.background = self.background.unwrap_or(if kage_client {
+                Background::Wake
+            } else {
+                Background::Hold
+            });
+        }
+        if self.yolo {
+            spec.gate.set_mode(Some(PermissionAction::Allow));
+        }
+        if let Some(opt) = &self.opt {
+            if let Some(threshold) = opt.compaction_threshold {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "the threshold is a fraction that f32 holds"
+                )]
+                {
+                    spec.loop_cfg.compaction_threshold = threshold as f32;
+                }
+            }
+            if let Some(retries) = opt.max_provider_retries {
+                spec.loop_cfg.max_provider_retries = u32::try_from(retries).unwrap_or(0);
+            }
+            if let Some(level) = opt.thinking_level.as_deref().and_then(ThinkingLevel::parse) {
+                spec.cx.thinking_level = Some(level);
+            }
+        }
+        if let Some(tokens) = self.max_output_tokens {
+            spec.cx.max_output_tokens = Some(tokens);
+        }
+    }
+}
 
 /// The plugins in `dir`, scripts and packages, by name, each marked
 /// with whether `plugins` lets it load, its version and whether it came
@@ -430,8 +516,8 @@ impl CliAcpAgent {
 
     /// What a session of this connection runs with: the host's spec,
     /// with the permission fallback the client asked for at
-    /// `initialize`, and background results waking an idle session for
-    /// kage clients. Agents the session starts inherit its gate.
+    /// `initialize`, and the settings its `session/new` asked for.
+    /// Agents the session starts inherit its gate.
     fn session_spec(
         &self,
         id: SessionId,
@@ -439,6 +525,7 @@ impl CliAcpAgent {
         model: &str,
         servers: BTreeMap<String, McpSpec>,
         plugins: Option<Arc<dyn SessionPlugins>>,
+        settings: &SessionSettings,
     ) -> Result<(SessionSpec, Option<Arc<PluginRuntime>>), RpcError> {
         let env = lock(&self.env).clone();
         let (mut spec, runtime) = (self.host.spec)(
@@ -449,15 +536,12 @@ impl CliAcpAgent {
             servers,
             &env,
             plugins,
+            settings.system_prompt.as_deref(),
         )?;
         if self.unconfigured_run.load(Ordering::SeqCst) {
             spec.gate = spec.gate.with_fallback(PermissionAction::Allow);
         }
-        if self.kage_client.load(Ordering::SeqCst)
-            && let Some(agents) = spec.agents.as_mut()
-        {
-            agents.background = Background::Wake;
-        }
+        settings.apply(&mut spec, self.kage_client.load(Ordering::SeqCst));
         Ok((spec, runtime))
     }
 
@@ -618,8 +702,15 @@ impl Agent for CliAcpAgent {
             crate::plan_session_in(&self.host.sessions, &self.host.default_model, "");
         let id = header.session;
         let plugins = self.hosted_plugins(id, req.meta.as_ref())?;
-        let (mut spec, runtime) =
-            self.session_spec(id, &req.cwd, &self.host.default_model, servers, plugins)?;
+        let settings = SessionSettings::of(req.meta.as_ref());
+        let (mut spec, runtime) = self.session_spec(
+            id,
+            &req.cwd,
+            &self.host.default_model,
+            servers,
+            plugins,
+            &settings,
+        )?;
         header.cwd.clone_from(&spec.cx.workdir);
         header.system_prompt.clone_from(&spec.cx.system_prompt);
         spec.recorder = Some(Recorder::planned(path, header, spec.plugins.clone()));

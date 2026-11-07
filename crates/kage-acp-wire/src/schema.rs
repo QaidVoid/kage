@@ -258,7 +258,7 @@ pub struct KageAgentInfo {
 }
 
 /// `session/new` request params.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionRequest {
     /// Working directory for the session (absolute path).
@@ -272,7 +272,7 @@ pub struct NewSessionRequest {
 }
 
 /// The `_meta` of [`NewSessionRequest`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct NewSessionMeta {
     /// What a kage client asks of this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -281,13 +281,31 @@ pub struct NewSessionMeta {
 
 /// What a kage client asks of one session, under
 /// `session/new`'s `_meta.kage`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionKage {
     /// Where the session's plugins run. Unset means the host loads
     /// the project's plugins as always.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugins: Option<PluginsSource>,
+    /// How the session treats a background agent's result while it is
+    /// idle. Unset keeps the host's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<SessionBackground>,
+    /// The session opens in allow mode: tools run without asking.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub yolo: bool,
+    /// The system role the session starts with, replacing the host's
+    /// own. Skills and context the host adds still follow it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    /// Loop settings and the thinking level, as the client's option
+    /// store holds them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opt: Option<SessionOpt>,
+    /// The most tokens one provider answer may carry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
 }
 
 /// Where a session's plugins run.
@@ -297,6 +315,35 @@ pub enum PluginsSource {
     /// The client that opened the session hosts the plugins: it
     /// answers the `_kage/plugin/*` reverse requests for them.
     Client,
+}
+
+/// How a session treats a background agent's result that arrives
+/// while it is idle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionBackground {
+    /// Start a run to read the result.
+    Wake,
+    /// Keep the result until the next prompt starts a run.
+    Hold,
+}
+
+/// The loop settings a client asks one session to run with, under
+/// `_meta.kage.opt`. Every field the client leaves out keeps the
+/// host's own value.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionOpt {
+    /// The context fraction a run compacts at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_threshold: Option<f64>,
+    /// How often a failed provider call retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_provider_retries: Option<i64>,
+    /// The thinking level the session runs with, `auto` for the
+    /// model's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
 }
 
 /// `session/new` result.
@@ -2877,6 +2924,57 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(call.status, ToolCallStatus::Pending);
+    }
+
+    #[test]
+    fn a_session_new_meta_carries_what_the_client_sets() {
+        let kage = |kage| NewSessionRequest {
+            cwd: "/proj".into(),
+            mcp_servers: Vec::new(),
+            meta: Some(NewSessionMeta { kage: Some(kage) }),
+        };
+        // An empty `_meta.kage` serializes away, so a client that only
+        // names a plugin source keeps the old wire shape.
+        roundtrip(
+            &kage(NewSessionKage {
+                plugins: Some(PluginsSource::Client),
+                ..NewSessionKage::default()
+            }),
+            serde_json::json!({
+                "cwd": "/proj",
+                "mcpServers": [],
+                "_meta": {"kage": {"plugins": "client"}},
+            }),
+        );
+        roundtrip(
+            &kage(NewSessionKage {
+                plugins: None,
+                background: Some(SessionBackground::Wake),
+                yolo: true,
+                system_prompt: Some("code carefully".into()),
+                opt: Some(SessionOpt {
+                    compaction_threshold: Some(0.5),
+                    max_provider_retries: Some(2),
+                    thinking_level: Some("high".into()),
+                }),
+                max_output_tokens: Some(8_192),
+            }),
+            serde_json::json!({
+                "cwd": "/proj",
+                "mcpServers": [],
+                "_meta": {"kage": {
+                    "background": "wake",
+                    "yolo": true,
+                    "systemPrompt": "code carefully",
+                    "opt": {
+                        "compactionThreshold": 0.5,
+                        "maxProviderRetries": 2,
+                        "thinkingLevel": "high",
+                    },
+                    "maxOutputTokens": 8192,
+                }},
+            }),
+        );
     }
 
     #[test]

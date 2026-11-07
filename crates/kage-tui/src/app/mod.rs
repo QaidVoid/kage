@@ -1032,8 +1032,12 @@ pub struct App {
     /// What the last Esc or Ctrl+C left for the next press, and when
     /// it lapses.
     escalation: Option<(keys::Escalation, Instant)>,
+    /// The ACP connection's feed, drained each loop pass for what its
+    /// pump thread cannot apply itself. `None` on the engine path.
+    acp_feed: Option<std::sync::Arc<dyn acp::AcpFeed>>,
 }
 
+mod acp;
 mod actions;
 mod chrome;
 mod editor;
@@ -1044,6 +1048,8 @@ mod lifecycle;
 mod overlays;
 mod plugin_sync;
 mod wiring;
+
+pub use acp::{AcpFeed, AcpUpdate};
 
 /// Translate an absolute terminal `(row, col)` mouse position to a
 /// Best-effort label for the current mode, exposed for the host's

@@ -24,7 +24,7 @@ fn opened() -> Client {
             "_meta": {"kage": {"cwd": "/srv/proj"}},
         }),
     });
-    client.new_session("", &[]);
+    client.new_session("", &[], None);
     client.handle(Frame::Success {
         id: n(2),
         result: json!({"sessionId": "s1"}),

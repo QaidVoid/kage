@@ -38,6 +38,9 @@ impl App {
             self.drain_plugin_fork_request();
             self.drain_plugin_switch_request();
             self.drain_clipboard_attach();
+            if self.drain_acp_feed() {
+                needs_redraw = true;
+            }
             if self.drain_plugin_refresh() {
                 needs_redraw = true;
             }

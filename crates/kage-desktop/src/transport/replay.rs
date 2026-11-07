@@ -295,7 +295,7 @@ mod tests {
     fn replayed_client() -> Client {
         let mut client = Client::new();
         client.initialize(ClientCapabilities::default(), None);
-        client.new_session("/w", &[]);
+        client.new_session("/w", &[], None);
         let _ = client.take_outgoing();
         let frames = transcript();
         client.handle(frames[0].clone());

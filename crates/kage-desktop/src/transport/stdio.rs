@@ -472,7 +472,7 @@ printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id"
             "the initialize answer came through the pipes"
         );
 
-        client.new_session("/w", &[]);
+        client.new_session("/w", &[], None);
         for frame in client.take_outgoing() {
             transport.send(frame);
         }

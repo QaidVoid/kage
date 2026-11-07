@@ -3,6 +3,7 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,7 @@ use kage_session::{
 
 use super::live::Live;
 
+use super::SessionSettings;
 use super::bridge::to_update;
 use super::bridge::user_chunk;
 use super::content::source_block;
@@ -131,7 +133,14 @@ impl super::CliAcpAgent {
             );
             self.host.default_model.clone()
         };
-        let (mut spec, runtime) = self.session_spec(id, cwd, &model, servers, None)?;
+        let (mut spec, runtime) = self.session_spec(
+            id,
+            cwd,
+            &model,
+            servers,
+            None,
+            &SessionSettings::host_defaults(self.kage_client.load(Ordering::SeqCst)),
+        )?;
         spec.cx.history = replay.history.into_iter().map(Arc::new).collect();
         spec.cx.budget = TokenBudget {
             used_input: replay.usage_total.input,

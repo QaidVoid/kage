@@ -249,6 +249,7 @@ pub(crate) fn run(attached: Attached, model: Option<&str>) -> ExitCode {
         events: events_rx,
         dialogs: dialog_rx,
         refresh: plugin_refresh_rx,
+        acp_feed: None,
         model_choices: available_model_items(&registry, &shown_model),
         model: shown_model,
         plugin_commands: Vec::new(),

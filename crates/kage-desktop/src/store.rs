@@ -907,7 +907,7 @@ impl Store {
     /// Opens a fresh session in the store's directory.
     pub fn new_session(&mut self) {
         let dir = self.project.clone().unwrap_or_else(|| self.cwd.clone());
-        self.opening = Some(self.client.new_session(&dir, &[]));
+        self.opening = Some(self.client.new_session(&dir, &[], None));
     }
 
     /// Opens a fresh session to carry `text`, the prompt a welcome

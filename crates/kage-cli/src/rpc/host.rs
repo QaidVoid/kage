@@ -31,9 +31,11 @@ use crate::permissions::PermissionGate;
 
 /// Builds the engine session for a client session from the providers
 /// in effect, its id, working directory, model, the MCP servers the
-/// client passed, the environment its processes start with and the
+/// client passed, the environment its processes start with, the
 /// session plugins the connection brings, which replace the project's
-/// when present. The caller fills in the history and recorder.
+/// when present, and the client's own system role, which replaces the
+/// host's when given. The caller fills in the history and recorder,
+/// and applies the rest of the connection's settings.
 pub(crate) type SpecBuilder = Box<
     dyn Fn(
             &ProviderRegistry,
@@ -43,6 +45,7 @@ pub(crate) type SpecBuilder = Box<
             BTreeMap<String, McpSpec>,
             &Environment,
             Option<Arc<dyn SessionPlugins>>,
+            Option<&str>,
         ) -> Result<(SessionSpec, Option<Arc<kage_plugin::PluginRuntime>>), RpcError>
         + Send
         + Sync,
@@ -151,7 +154,8 @@ impl Host {
                       model: &str,
                       servers,
                       env,
-                      plugins| {
+                      plugins,
+                      client_system| {
                     let (spec, runtime) = session_spec(
                         registry,
                         &system_role,
@@ -162,6 +166,7 @@ impl Host {
                         env,
                         &projects,
                         plugins,
+                        client_system,
                     )?;
                     if yolo {
                         spec.gate.set_mode(Some(PermissionAction::Allow));
@@ -588,6 +593,7 @@ fn session_spec(
     env: &Environment,
     projects: &Projects,
     plugins: Option<Arc<dyn SessionPlugins>>,
+    client_system: Option<&str>,
 ) -> Result<(SessionSpec, Option<Arc<PluginRuntime>>), RpcError> {
     let workdir = if cwd.is_empty() {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -597,6 +603,9 @@ fn session_spec(
     crate::trust::warn_if_untrusted(&workdir);
     let config = Config::load_layered(&workdir).map_err(|e| RpcError::internal(e.to_string()))?;
     let model = model.to_owned();
+    // The client's own role replaces the host's; what the host adds to
+    // it (skills, context) still follows.
+    let system_role = client_system.unwrap_or(system_role);
     let bare = crate::runtime_env::build_system_prompt(system_role, &workdir, &model, &[], None);
     // The connection's own plugins replace the project's: nothing of
     // the project runtime loads, so its plugin MCP servers and option
@@ -710,7 +719,7 @@ mod tests {
     fn host_in(dir: &tempfile::TempDir) -> Arc<Host> {
         let registry =
             Arc::new(ProviderRegistry::new().with(Arc::new(MockProvider::sequence(Vec::new()))));
-        let spec: SpecBuilder = Box::new(|_, id, cwd, _, _, _, _| {
+        let spec: SpecBuilder = Box::new(|_, id, cwd, _, _, _, _, _| {
             Ok((
                 SessionSpec {
                     id,
@@ -751,6 +760,7 @@ mod tests {
             "mock/m",
             BTreeMap::new(),
             &Environment::inherit(),
+            None,
             None,
         )
         .unwrap();

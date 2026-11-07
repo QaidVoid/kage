@@ -15,12 +15,12 @@ use serde_json::Value;
 use kage_acp_wire::{
     CancelNotification, ClientCapabilities, CloseSessionRequest, CompactionPhase, ConfigGetRequest,
     ContentBlock, FsOp, FsRequest, Implementation, InitializeRequest, KageMeta,
-    ListSessionsRequest, LoadSessionRequest, McpServer, ModelsResponse, NewSessionRequest,
-    OptionSetRequest, OptionsResponse, PROTOCOL_VERSION, PermissionOptionKind, PermissionOutcome,
-    PlanReview, PromptDelivery, PromptRef, PromptRequest, PromptResponse, QuestionMeta,
-    RequestMeta, RequestPermissionRequest, RequestPermissionResult, ResumeSessionRequest,
-    SelectedOption, SessionExportResponse, SessionForkRequest, SessionForkResponse,
-    SessionNotification, SessionRenameRequest, SessionRequest, SessionUpdate,
+    ListSessionsRequest, LoadSessionRequest, McpServer, ModelsResponse, NewSessionMeta,
+    NewSessionRequest, OptionSetRequest, OptionsResponse, PROTOCOL_VERSION, PermissionOptionKind,
+    PermissionOutcome, PlanReview, PromptDelivery, PromptRef, PromptRequest, PromptResponse,
+    QuestionMeta, RequestMeta, RequestPermissionRequest, RequestPermissionResult,
+    ResumeSessionRequest, SelectedOption, SessionExportResponse, SessionForkRequest,
+    SessionForkResponse, SessionNotification, SessionRenameRequest, SessionRequest, SessionUpdate,
     SetSessionConfigOptionRequest, SwarmResumeRequest, UiCommandRequest, UiDialogRequest,
     UiKeymapRequest, UiSnapshot, UiUpdate,
 };
@@ -262,14 +262,21 @@ impl Client {
         )
     }
 
-    /// Opens a new session in `cwd`.
-    pub fn new_session(&mut self, cwd: &str, mcp_servers: &[McpServer]) -> u64 {
+    /// Opens a new session in `cwd`. `meta` carries what a kage client
+    /// asks of the session, such as the `_meta.kage` settings of the
+    /// wire's `NewSessionRequest`.
+    pub fn new_session(
+        &mut self,
+        cwd: &str,
+        mcp_servers: &[McpServer],
+        meta: Option<NewSessionMeta>,
+    ) -> u64 {
         self.request(
             "session/new",
             params(&NewSessionRequest {
                 cwd: cwd.to_owned(),
                 mcp_servers: mcp_servers.to_vec(),
-                meta: None,
+                meta,
             }),
             Pending::NewSession {
                 cwd: cwd.to_owned(),
@@ -2119,7 +2126,7 @@ mod tests {
     #[test]
     fn new_session_sends_cwd_and_mcp_servers() {
         let mut client = Client::new();
-        client.new_session("/project", &[]);
+        client.new_session("/project", &[], None);
         let outgoing = client.take_outgoing();
         assert_eq!(outgoing.len(), 1);
         assert_eq!(outgoing[0].to_value()["method"], json!("session/new"));

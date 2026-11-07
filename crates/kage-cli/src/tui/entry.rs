@@ -17,10 +17,14 @@ use crate::engine::WithMediaTools as _;
 /// Drop into the interactive TUI, on the recorded session at `resume`
 /// when given, the way the session picker resumes one. A session
 /// another process holds is attached to through the `kage serve`
-/// hosting it, when one does. Returns the appropriate process exit
-/// code once the user quits.
+/// hosting it, when one does. `KAGE_LINK=acp` drives a `kage rpc`
+/// child over ACP instead of an engine of this process. Returns the
+/// appropriate process exit code once the user quits.
 #[expect(clippy::too_many_lines, reason = "one linear startup sequence")]
 pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo: bool) -> ExitCode {
+    if std::env::var_os("KAGE_LINK").is_some_and(|link| link == "acp") {
+        return super::acp::run(model, system, resume.as_deref(), yolo);
+    }
     #[cfg(unix)]
     if let Some(path) = resume.as_deref()
         && kage_session::is_locked(path)
@@ -347,6 +351,7 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
         events: events_rx,
         dialogs: dialog_rx,
         refresh: plugin_refresh_rx,
+        acp_feed: None,
         model: qualified_model,
         model_choices,
         plugin_commands: plugin_command_listing,
@@ -404,6 +409,9 @@ pub(super) struct Frontend {
     pub(super) events: mpsc::Receiver<Envelope>,
     pub(super) dialogs: mpsc::Receiver<PluginDialog>,
     pub(super) refresh: mpsc::Receiver<PluginRefresh>,
+    /// The feed an ACP connection's pump fills. `None` when the App
+    /// drives an engine.
+    pub(super) acp_feed: Option<Arc<dyn kage_tui::AcpFeed>>,
     /// The model the status line shows until the engine reports one.
     pub(super) model: String,
     pub(super) model_choices: Vec<PickItem>,
@@ -494,6 +502,9 @@ impl Frontend {
         }
         app.set_plugin_dialog(self.dialogs);
         app.set_plugin_refresh(self.refresh);
+        if let Some(feed) = self.acp_feed {
+            app.set_acp_feed(feed);
+        }
         app.set_toasts(self.toasts.clone());
         app.set_session_usage(shared_session_usage());
         app.set_status_session_id(self.session.to_string().chars().take(8).collect());

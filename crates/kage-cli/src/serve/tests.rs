@@ -15,6 +15,7 @@ use kage_core::permissions::PermissionsConfig;
 use kage_core::{CancelFlag, StopReason as CoreStopReason, TokenUsage};
 use kage_jsonrpc::{Inbound, Peer};
 use kage_loop::{AgentContext, LoopConfig};
+use kage_plugin::session_plugins::SessionPlugins;
 use kage_provider::testing::MockProvider;
 use kage_provider::{
     EventStream, Provider, ProviderError, ProviderEvent, ProviderMetadata, ProviderModel,
@@ -87,14 +88,15 @@ fn test_host(scripts: Vec<Script>, workdir: &Path) -> Arc<Host> {
     let mock = MockProvider::sequence(scripts);
     let registry = Arc::new(ProviderRegistry::new().with(Arc::new(Listed { mock })));
     let spec_workdir = workdir.to_path_buf();
-    let spec = Box::new(
+    let spec: crate::rpc::host::SpecBuilder = Box::new(
         move |_: &ProviderRegistry,
               id,
               _cwd: &str,
               model: &str,
               _servers: BTreeMap<String, McpSpec>,
               _env: &kage_core::environment::Environment,
-              _| {
+              _plugins: Option<Arc<dyn SessionPlugins>>,
+              _client_system: Option<&str>| {
             Ok((
                 SessionSpec {
                     id,

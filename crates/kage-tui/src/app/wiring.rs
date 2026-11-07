@@ -116,6 +116,7 @@ impl App {
             pinned_hits: Vec::new(),
             pinned_summary_hit: None,
             escalation: None,
+            acp_feed: None,
         }
     }
 

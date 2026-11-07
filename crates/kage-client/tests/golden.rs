@@ -104,7 +104,7 @@ fn connected(steer: bool) -> Client {
     client.initialize(ClientCapabilities::default(), None);
     let _ = client.take_outgoing();
     client.handle(init_result(steer));
-    client.new_session("/w", &[]);
+    client.new_session("/w", &[], None);
     let _ = client.take_outgoing();
     client.handle(new_result(2, "s1"));
     client
@@ -230,7 +230,7 @@ fn the_fix_fixture_replays_to_the_asserted_state() {
     let frames = fixture("fix-tools.jsonl");
     let mut client = Client::new();
     client.initialize(ClientCapabilities::default(), None);
-    client.new_session("/w", &[]);
+    client.new_session("/w", &[], None);
     let _ = client.take_outgoing();
     let mut changes = drive(&mut client, &frames[..2]);
 
@@ -297,7 +297,7 @@ fn the_approval_fixture_round_trips_a_permission_ask() {
     let frames = fixture("approval.jsonl");
     let mut client = Client::new();
     client.initialize(ClientCapabilities::default(), None);
-    client.new_session("/w", &[]);
+    client.new_session("/w", &[], None);
     let _ = client.take_outgoing();
     drive(&mut client, &frames[..2]);
     let outcome = client.prompt(PARENT, text("run the tests"));
@@ -384,7 +384,7 @@ fn the_cancel_fixture_withdraws_the_ask_and_ends_cancelled() {
     let frames = fixture("cancel.jsonl");
     let mut client = Client::new();
     client.initialize(ClientCapabilities::default(), None);
-    client.new_session("/w", &[]);
+    client.new_session("/w", &[], None);
     let _ = client.take_outgoing();
     drive(&mut client, &frames[..2]);
     let outcome = client.prompt(PARENT, text("build it"));
@@ -429,7 +429,7 @@ fn the_error_fixture_surfaces_a_mid_turn_failure() {
     let frames = fixture("error.jsonl");
     let mut client = Client::new();
     client.initialize(ClientCapabilities::default(), None);
-    client.new_session("/w", &[]);
+    client.new_session("/w", &[], None);
     let _ = client.take_outgoing();
     drive(&mut client, &frames[..2]);
     let outcome = client.prompt(PARENT, text("run the build"));
@@ -468,7 +468,7 @@ fn the_ask_keeps_the_offered_options_verbatim_in_offer_order() {
     let frames = fixture("approval.jsonl");
     let mut client = Client::new();
     client.initialize(ClientCapabilities::default(), None);
-    client.new_session("/w", &[]);
+    client.new_session("/w", &[], None);
     let _ = client.take_outgoing();
     drive(&mut client, &frames[..2]);
     let outcome = client.prompt(PARENT, text("run the tests"));
@@ -516,7 +516,7 @@ fn a_reraised_ask_replaces_its_echo_instead_of_duplicating() {
     let frames = fixture("approval.jsonl");
     let mut client = Client::new();
     client.initialize(ClientCapabilities::default(), None);
-    client.new_session("/w", &[]);
+    client.new_session("/w", &[], None);
     let _ = client.take_outgoing();
     drive(&mut client, &frames[..2]);
     let outcome = client.prompt(PARENT, text("run the tests"));
@@ -558,7 +558,7 @@ fn feedback_rides_the_meta_channel_and_the_record_quotes_it() {
     let frames = fixture("approval.jsonl");
     let mut client = Client::new();
     client.initialize(ClientCapabilities::default(), None);
-    client.new_session("/w", &[]);
+    client.new_session("/w", &[], None);
     let _ = client.take_outgoing();
     drive(&mut client, &frames[..2]);
     let outcome = client.prompt(PARENT, text("run the tests"));
@@ -611,7 +611,7 @@ fn a_dismissal_answers_cancelled_and_records_no_choice() {
     let frames = fixture("approval.jsonl");
     let mut client = Client::new();
     client.initialize(ClientCapabilities::default(), None);
-    client.new_session("/w", &[]);
+    client.new_session("/w", &[], None);
     let _ = client.take_outgoing();
     drive(&mut client, &frames[..2]);
     let outcome = client.prompt(PARENT, text("run the tests"));
@@ -657,7 +657,7 @@ fn the_subagent_fixture_builds_the_agent_tree_and_the_child_transcript() {
         ..ClientCapabilities::default()
     };
     client.initialize(caps, None);
-    client.new_session("/w", &[]);
+    client.new_session("/w", &[], None);
     let _ = client.take_outgoing();
     let mut changes = drive(&mut client, &frames[..2]);
 
@@ -1117,7 +1117,7 @@ fn directory_and_plugin_answers_arrive_under_their_ids() {
 fn one_shot_answers_arrive_as_changes() {
     let mut client = Client::new();
     client.initialize(ClientCapabilities::default(), None);
-    client.new_session("/w", &[]);
+    client.new_session("/w", &[], None);
     let _ = client.take_outgoing();
     client.handle(new_result(2, "s1"));
 
@@ -1173,7 +1173,7 @@ fn one_shot_answers_arrive_as_changes() {
 fn list_pages_merge_and_config_and_close_land_on_the_session() {
     let mut client = Client::new();
     client.initialize(ClientCapabilities::default(), None);
-    client.new_session("/w", &[]);
+    client.new_session("/w", &[], None);
     let _ = client.take_outgoing();
     client.handle(new_result(2, "s1"));
 

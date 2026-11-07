@@ -9,20 +9,26 @@
 //! shapes the engine path does in `events.rs`. A prompt echoes to the
 //! other clients only, so the connection's own prompts never arrive
 //! as frames: whoever submits one adds its bubble, as the engine path
-//! does.
+//! does. The `_kage/ui` snapshot's plugin data is carried too:
+//! [`Store::plugin_commands`] and [`Store::plugin_keymap`] translate
+//! it into the shapes the command registry and the key router
+//! consume.
 
 use std::collections::BTreeMap;
 
 use kage_client::wire::{
     CompactionPhase, ContentBlock, NoticeTone, SessionNotification, SessionUpdate, ToolCallContent,
-    ToolCallMeta, ToolCallStatus, TurnPhase,
+    ToolCallMeta, ToolCallStatus, TurnPhase, UiCommand, UiCommandArg,
 };
 use kage_client::{Change, Client, Frame, State};
+use kage_core::keymap::{Keymap, MappingData};
 use kage_core::protocol::CompactionCounts;
 use kage_core::sync::lock;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::buffer::Buffer;
+use crate::command::{OwnedArgSpec, PluginCommand};
 use crate::events::{
     SharedBuffer, compaction_text, produced_media_label, push_user_text, shared_buffer,
 };
@@ -108,6 +114,35 @@ impl Store {
         for buffer in self.buffers.values() {
             lock(buffer).interrupt_running_tools();
         }
+    }
+
+    /// The plugin commands the attached `_kage/ui` offers, in the
+    /// shapes the command registry consumes. Empty without an
+    /// attachment.
+    #[must_use]
+    pub fn plugin_commands(&self) -> Vec<PluginCommand> {
+        let Some(ui) = self.state().plugin_ui.as_ref() else {
+            return Vec::new();
+        };
+        ui.commands.iter().map(plugin_command).collect()
+    }
+
+    /// The keymap the attached `_kage/ui` offers, rebuilt from the
+    /// snapshot's mappings. `None` without an attachment, or when the
+    /// mappings do not rebuild, so a broken snapshot cannot half
+    /// replace what the App routes with.
+    #[must_use]
+    pub fn plugin_keymap(&self) -> Option<Keymap> {
+        let ui = self.state().plugin_ui.as_ref()?;
+        let mappings = ui
+            .keymap
+            .iter()
+            .map(MappingData::deserialize)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        let mut keymap = Keymap::new();
+        keymap.replace_with(&mappings).ok()?;
+        Some(keymap)
     }
 }
 
@@ -293,11 +328,57 @@ fn meta_duration(meta: Option<&ToolCallMeta>) -> Option<u64> {
     meta.and_then(|meta| meta.kage.duration_ms)
 }
 
+/// Translate one snapshot command into the shape the command registry
+/// consumes.
+fn plugin_command(command: &UiCommand) -> PluginCommand {
+    PluginCommand {
+        name: command.name.clone(),
+        aliases: command.aliases.clone(),
+        is_override: command.overrides,
+        description: command.description.clone(),
+        args: command.args.iter().map(plugin_arg).collect(),
+    }
+}
+
+/// Translate one snapshot argument spec.
+fn plugin_arg(arg: &UiCommandArg) -> OwnedArgSpec {
+    match arg {
+        UiCommandArg::Text {
+            name,
+            optional,
+            hint,
+        } => OwnedArgSpec::Text {
+            name: name.clone(),
+            optional: *optional,
+            hint: hint.clone(),
+        },
+        UiCommandArg::Choice {
+            name,
+            values,
+            optional,
+        } => OwnedArgSpec::Choice {
+            name: name.clone(),
+            values: values.clone(),
+            optional: *optional,
+        },
+        UiCommandArg::Path { name, optional } => OwnedArgSpec::Path {
+            name: name.clone(),
+            optional: *optional,
+        },
+        UiCommandArg::Session { name, optional } => OwnedArgSpec::Session {
+            name: name.clone(),
+            optional: *optional,
+        },
+        UiCommandArg::Flag { name } => OwnedArgSpec::Flag { name: name.clone() },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::buffer::{Block, MAX_BLOCKS};
     use kage_client::{PermissionDecision, RequestId};
+    use kage_core::keymap::RhsData;
     use serde_json::json;
 
     /// A `session/update` notification for `session`.
@@ -740,5 +821,211 @@ mod tests {
             ["kage:image", "call:render", "result:render", "kage:image"],
             "{buffer:#?}"
         );
+    }
+
+    /// An attached `_kage/ui` over `/proj`, holding `snapshot`.
+    fn attached(snapshot: Value) -> Store {
+        let mut store = Store::new();
+        let id = store.client().ui_attach("/proj", None);
+        store.absorb(Frame::Success {
+            id: RequestId::Number(id),
+            result: snapshot,
+        });
+        let _ = store.take_outgoing();
+        store
+    }
+
+    /// A snapshot body: `fields` merged over the empty snapshot's
+    /// fields, which the wire always writes in full.
+    fn snapshot(fields: &Value) -> Value {
+        let mut base = json!({
+            "generation": 0,
+            "keymap": [],
+            "highlights": null,
+            "options": {},
+            "optionSources": {},
+            "commands": [],
+            "status": {},
+            "blockKinds": [],
+            "autocomplete": false,
+            "terminalHooks": false,
+        });
+        let object = base.as_object_mut().unwrap();
+        for (key, value) in fields.as_object().unwrap() {
+            object.insert(key.clone(), value.clone());
+        }
+        base
+    }
+
+    #[test]
+    fn the_snapshot_commands_translate_into_registry_shapes() {
+        let store = attached(snapshot(&json!({
+            "commands": [
+                {
+                    "name": "greet",
+                    "aliases": ["hi"],
+                    "description": "say hi",
+                    "overrides": true,
+                    "args": [
+                        {"kind": "text", "name": "who", "optional": false, "hint": "a name"},
+                        {"kind": "choice", "name": "tone", "values": ["warm", "cool"], "optional": true},
+                        {"kind": "flag", "name": "loud"},
+                    ],
+                },
+                {
+                    "name": "open",
+                    "description": "open a path",
+                    "args": [
+                        {"kind": "path", "name": "p", "optional": false},
+                        {"kind": "session", "name": "s", "optional": true},
+                    ],
+                },
+            ],
+        })));
+        assert_eq!(
+            store.plugin_commands(),
+            [
+                PluginCommand {
+                    name: "greet".to_owned(),
+                    aliases: vec!["hi".to_owned()],
+                    is_override: true,
+                    description: "say hi".to_owned(),
+                    args: vec![
+                        OwnedArgSpec::Text {
+                            name: "who".to_owned(),
+                            optional: false,
+                            hint: "a name".to_owned(),
+                        },
+                        OwnedArgSpec::Choice {
+                            name: "tone".to_owned(),
+                            values: vec!["warm".to_owned(), "cool".to_owned()],
+                            optional: true,
+                        },
+                        OwnedArgSpec::Flag {
+                            name: "loud".to_owned(),
+                        },
+                    ],
+                },
+                PluginCommand {
+                    name: "open".to_owned(),
+                    aliases: Vec::new(),
+                    is_override: false,
+                    description: "open a path".to_owned(),
+                    args: vec![
+                        OwnedArgSpec::Path {
+                            name: "p".to_owned(),
+                            optional: false,
+                        },
+                        OwnedArgSpec::Session {
+                            name: "s".to_owned(),
+                            optional: true,
+                        },
+                    ],
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn the_snapshot_keymap_rebuilds_into_a_routable_keymap() {
+        let store = attached(snapshot(&json!({
+            "keymap": [
+                {
+                    "mode": "n",
+                    "lhs": "<C-x>g",
+                    "rhs": {"kind": "command", "line": ":echo hi"},
+                    "desc": "say hi",
+                    "owner": "greet-plugin",
+                },
+                {
+                    "mode": "i",
+                    "lhs": "<C-r>",
+                    "rhs": {"kind": "lua", "id": 7},
+                    "owner": "greet-plugin",
+                },
+                {
+                    "mode": "n",
+                    "lhs": "gn",
+                    "rhs": {"kind": "nop"},
+                    "owner": "greet-plugin",
+                },
+                {
+                    "mode": "n",
+                    "lhs": "zc",
+                    "rhs": {"kind": "action", "name": "BeginCommand"},
+                    "owner": "greet-plugin",
+                },
+            ],
+        })));
+        let keymap = store.plugin_keymap().expect("the mappings rebuild");
+        let data = keymap.to_data();
+        assert_eq!(data.len(), 4, "{data:#?}");
+        assert!(
+            data.iter().any(|m| m.mode == "n"
+                && m.lhs == "zc"
+                && m.rhs
+                    == RhsData::Action {
+                        name: "BeginCommand".to_owned(),
+                        arg: None,
+                    }),
+            "{data:#?}"
+        );
+        assert!(
+            data.iter().any(|m| m.mode == "n"
+                && m.lhs == "<C-x>g"
+                && m.rhs
+                    == RhsData::Command {
+                        line: ":echo hi".to_owned()
+                    }),
+            "{data:#?}"
+        );
+        assert!(
+            data.iter()
+                .any(|m| m.mode == "i" && m.lhs == "<C-r>" && m.rhs == RhsData::Lua { id: 7 }),
+            "{data:#?}"
+        );
+    }
+
+    #[test]
+    fn a_broken_snapshot_yields_no_keymap() {
+        for keymap in [
+            json!([{
+                "mode": "n",
+                "lhs": "zk",
+                "rhs": {"kind": "action", "name": "no_such_action"},
+                "owner": "p",
+            }]),
+            json!([{
+                "mode": "q",
+                "lhs": "zk",
+                "rhs": {"kind": "nop"},
+                "owner": "p",
+            }]),
+            json!([{
+                "mode": "n",
+                "lhs": "zk",
+                "rhs": {"kind": "wat"},
+                "owner": "p",
+            }]),
+            json!([{
+                "mode": "n",
+                "lhs": "zk",
+                "rhs": {"kind": "nop"},
+            }]),
+        ] {
+            let body = json!({"keymap": keymap});
+            let store = attached(snapshot(&body));
+            assert!(
+                store.plugin_keymap().is_none(),
+                "a broken mapping cannot rebuild: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_an_attachment_the_plugin_data_is_empty() {
+        let store = Store::new();
+        assert!(store.plugin_commands().is_empty());
+        assert!(store.plugin_keymap().is_none());
     }
 }

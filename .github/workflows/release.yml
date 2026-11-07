@@ -462,7 +462,7 @@ jobs:
           base="https://github.com/pkgforge-dev/archlinux-pkgs-debloated/releases/download/continuous"
           mkdir -p debloated
           cd debloated
-          for pkg in llvm-libs-nano mesa-nano libxml2-iculess; do
+          for pkg in mesa-nano libxml2-iculess; do
             curl -fsSL -O --remove-on-error "$base/$pkg-${{ matrix.arch }}.pkg.tar.zst" ||
               curl -fsSL -O --remove-on-error "$base/$pkg-${{ matrix.arch }}.pkg.tar.xz"
           done

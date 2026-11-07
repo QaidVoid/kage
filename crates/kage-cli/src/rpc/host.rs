@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::BufRead;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
@@ -25,7 +25,7 @@ use kage_provider::{Provider, ProviderRegistry};
 use kage_tools::ToolRegistry;
 
 use super::options::{Settings, choice};
-use super::projects::{Project, Projects};
+use super::projects::{Project, Projects, has_plugin_content};
 use super::{CliAcpAgent, live::Live, mcp};
 use crate::engine::{AgentSetup, Background, Engine, SessionSpec, WithMediaTools as _};
 use crate::permissions::PermissionGate;
@@ -563,6 +563,24 @@ fn model_choices(registry: &ProviderRegistry) -> Arc<[SessionConfigSelectOption]
         .collect()
 }
 
+/// The project runtime a session opens with, or `None` when the host has
+/// no plugin content: nothing under the plugins directory, no user
+/// `init.lua`, no user `lua/` modules. Nothing a session consumes would
+/// register in one, so none is built.
+fn project_runtime(
+    projects: &Projects,
+    workdir: &Path,
+    model: &str,
+    system_role: &str,
+    env: &Environment,
+) -> Option<Project> {
+    if !has_plugin_content() {
+        return None;
+    }
+    let bare = crate::runtime_env::build_system_prompt(system_role, workdir, model, &[], None);
+    projects.get(workdir, model, &|| bare.clone(), env)
+}
+
 /// The loop settings a session runs with and the thinking level init.lua or
 /// a plugin chose, if one did. The project's options start from the config
 /// and then take what init.lua set; with no project, the config's own.
@@ -620,13 +638,15 @@ fn session_spec(
     // The client's own role replaces the host's; what the host adds to
     // it (skills, context) still follows.
     let system_role = client_system.unwrap_or(system_role);
-    let bare = crate::runtime_env::build_system_prompt(system_role, &workdir, &model, &[], None);
     // The connection's own plugins replace the project's: nothing of
     // the project runtime loads, so its plugin MCP servers and option
-    // stores stay out of a session whose plugins live in the client.
+    // stores stay out of a session whose plugins live in the client. A
+    // project without plugin content builds no runtime either: nothing
+    // a session consumes would register in one, so the session runs
+    // without plugins.
     let project = plugins
         .is_none()
-        .then(|| projects.get(&workdir, &model, &|| bare.clone(), env))
+        .then(|| project_runtime(projects, &workdir, &model, system_role, env))
         .flatten();
     let concrete = project.as_ref().map(|project| Arc::clone(&project.runtime));
     if let Some(runtime) = &concrete {

@@ -863,6 +863,31 @@ fn an_editor_session_runs_with_the_users_init_lua() {
     assert!(rpc.close().success());
 }
 
+/// A project with no plugin content runs its sessions without a plugin
+/// runtime: a UI command for such a session is told so, instead of
+/// finding an empty one.
+#[test]
+fn a_project_without_plugin_content_skips_the_runtime() {
+    let env = Env::new();
+    let project = tempfile::tempdir().unwrap();
+    let mut rpc = env.rpc(&[]);
+    rpc.request("initialize", json!({"protocolVersion": 1}));
+    let created = rpc.request(
+        "session/new",
+        json!({"cwd": project.path(), "mcpServers": []}),
+    );
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let reply = rpc.request(
+        "_kage/ui/command",
+        json!({"cwd": project.path(), "sessionId": id, "name": "hello", "args": ""}),
+    );
+    assert_eq!(
+        reply["error"]["message"], "the session runs without plugins",
+        "{reply}"
+    );
+    assert!(rpc.close().success());
+}
+
 /// A client drawing the plugin UI attaches to its project and gets what
 /// the user's init.lua declared there.
 #[test]

@@ -490,7 +490,9 @@ name, `[keybindings]` from `config.toml`, then `init.lua`, and fires
 `color_scheme` once. Each layer overrides the ones before it. A host
 (`kage rpc` and `kage serve`) loads the same layers once per project,
 keyed by the canonical workdir, and every session in that project
-shares that runtime. Each piece of Lua work carries the session it
+shares that runtime. A project with no plugin content, nothing under
+the plugins directory and no user `init.lua` or `lua/` modules, loads
+none for its sessions. Each piece of Lua work carries the session it
 runs for (`kage_plugin::Invocation`), so `kage.exec` and `kage.env`
 use that session's environment and its queued session writes reach its
 own file. A project runtime no session has held for a minute is

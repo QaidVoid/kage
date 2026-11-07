@@ -164,9 +164,12 @@ servers and engine options apply whichever client opened the session.
 A session that opens after a plugin, `init.lua`, the config or the
 project's trust changed gets them freshly loaded, while sessions already
 open keep what they started with. A project's plugins unload a minute
-after its last session closes. Two things still come from the plugins
-the host loaded at startup, not from `init.lua`: providers a plugin
-registers, and `kage.acp` agents and permission handlers.
+after its last session closes. A project with nothing to load, no
+plugin under the plugins directory and no `init.lua` or `lua/` modules
+of the user, builds no runtime for its sessions. Two things still come
+from the plugins the host loaded at startup, not from `init.lua`:
+providers a plugin registers, and `kage.acp` agents and permission
+handlers.
 
 A config or credential change made through a client, such as the
 desktop's settings, reloads the providers for every client.

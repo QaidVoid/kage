@@ -203,6 +203,26 @@ fn fingerprint(workdir: &Path) -> u64 {
     hasher.finish()
 }
 
+/// Whether anything would load into a project runtime: an entry under
+/// the plugins directory, the user's `init.lua`, or the user's `lua/`
+/// modules. When none does, nothing a session consumes would register
+/// in one, so sessions skip building it.
+pub(super) fn has_plugin_content() -> bool {
+    has_plugin_content_in(
+        crate::plugins_dir().ok().as_deref(),
+        crate::config_dir().ok().as_deref(),
+    )
+}
+
+/// [`has_plugin_content`] over given directories, so tests need no
+/// environment isolation.
+fn has_plugin_content_in(plugins_dir: Option<&Path>, user_dir: Option<&Path>) -> bool {
+    let occupied =
+        |dir: &Path| std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_some());
+    plugins_dir.is_some_and(occupied)
+        || user_dir.is_some_and(|dir| dir.join("init.lua").is_file() || occupied(&dir.join("lua")))
+}
+
 /// Collect every file under `dir`, at most a few thousand, in a stable
 /// order.
 fn walk(dir: &Path, files: &mut Vec<PathBuf>) {
@@ -227,6 +247,29 @@ fn walk(dir: &Path, files: &mut Vec<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each kind of plugin content decides whether a project runtime
+    /// loads at all: nothing anywhere loads none, a plugin file, the
+    /// user's `init.lua` or a `lua/` module each load one.
+    #[test]
+    fn a_runtime_loads_only_for_plugin_content() {
+        let empty = tempfile::tempdir().unwrap();
+        assert!(!has_plugin_content_in(None, None));
+        assert!(!has_plugin_content_in(Some(empty.path()), None));
+        assert!(!has_plugin_content_in(None, Some(empty.path())));
+
+        let plugins = tempfile::tempdir().unwrap();
+        std::fs::write(plugins.path().join("greet.lua"), "").unwrap();
+        assert!(has_plugin_content_in(Some(plugins.path()), None));
+
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join("init.lua"), "").unwrap();
+        assert!(has_plugin_content_in(None, Some(user.path())));
+
+        std::fs::create_dir(user.path().join("lua")).unwrap();
+        std::fs::write(user.path().join("lua").join("util.lua"), "").unwrap();
+        assert!(has_plugin_content_in(None, Some(user.path())));
+    }
 
     /// Sessions in one project share its runtime, another project gets its
     /// own, and a runtime nothing holds goes after the grace period.

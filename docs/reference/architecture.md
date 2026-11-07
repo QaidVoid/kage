@@ -309,7 +309,9 @@ the editor, the TUI and print mode share one implementation.
 ## the serve component
 
 `kage serve` puts the host behind a TCP listener. One endpoint, one
-token:
+token. On Unix it holds the shared host's single-instance lock for
+its whole life, so it cannot run alongside a `kage host` or another
+serve; on Windows the TCP port is the only guard:
 
 - `kage-remote` parses the upgrade request head (16 KiB cap, 10 s
   deadline), checks the token in constant time in a fixed order (the

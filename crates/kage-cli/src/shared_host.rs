@@ -93,7 +93,7 @@ fn serve(idle: Duration, log: &Log) -> Result<(), String> {
     let dir = crate::paths::runtime_dir()?;
     prepare(&dir)?;
     let Some(lock) = acquire(&dir)? else {
-        log("another host is already running");
+        log("another kage host or serve is already running");
         return Ok(());
     };
     let (listener, mut published) = bind(&dir)?;
@@ -120,13 +120,18 @@ fn serve(idle: Duration, log: &Log) -> Result<(), String> {
         }
         listener = bind_socket(&published.socket)?;
     }
-    // New clients now find no socket and start a host, which waits for
-    // this one's lock and then takes over.
-    drop(published);
+    // The socket goes first: a client either connected before and is
+    // served now, or connects after and starts a new host. The record
+    // goes last, once the lock is about to go: a host holds the lock
+    // only while its socket or its record is present, so a starting
+    // instance can tell a host from a serve, which publishes neither.
+    let _ = fs::remove_file(&published.socket);
     log("shutting down; cancelling runs");
     host.shutdown();
     thread::sleep(SHUTDOWN_GRACE);
+    published.retire();
     drop(lock);
+    drop(published);
     Ok(())
 }
 
@@ -144,7 +149,14 @@ pub(crate) fn status() -> ExitCode {
         return ExitCode::from(1);
     }
     let Some(record) = read_record(&dir) else {
-        println!("a shared host is starting or stopping");
+        if dir.join(SOCKET).exists() {
+            println!("a shared host is starting or stopping");
+        } else {
+            println!(
+                "another kage instance holds the lock with no host: a kage serve is \
+                 probably running; stop it in its own terminal"
+            );
+        }
         return ExitCode::SUCCESS;
     };
     println!("pid      {}", record.pid);
@@ -187,8 +199,22 @@ fn stop_host() -> Result<Option<String>, String> {
     if !lock_held(&dir) {
         return Ok(None);
     }
-    let record = read_record(&dir)
-        .ok_or("the shared host is starting or stopping and has no process id; try again")?;
+    let record = match read_record(&dir) {
+        Some(record) => record,
+        None if dir.join(SOCKET).exists() => {
+            return Err(
+                "the shared host is starting or stopping and has no process id; try again"
+                    .to_owned(),
+            );
+        }
+        None => {
+            return Err(
+                "another kage instance holds the lock with no host: a kage serve is \
+                 probably running; stop it in its own terminal"
+                    .to_owned(),
+            );
+        }
+    };
     let pid = i32::try_from(record.pid)
         .map(nix::unistd::Pid::from_raw)
         .map_err(|e| e.to_string())?;
@@ -260,8 +286,9 @@ fn prepare(dir: &Path) -> Result<(), String> {
 }
 
 /// Takes the single-instance lock, waiting for a host that is shutting
-/// down. Returns `None` when a live host is serving, or when the lock stays
-/// held without one for [`TAKEOVER`].
+/// down. Returns `None` when a live host is serving, when the holder
+/// has neither a socket nor a record across a poll (a serve), or when
+/// the lock stays held for [`TAKEOVER`].
 fn acquire(dir: &Path) -> Result<Option<Flock<File>>, String> {
     let path = dir.join(LOCK);
     let mut file = OpenOptions::new()
@@ -272,17 +299,44 @@ fn acquire(dir: &Path) -> Result<Option<Flock<File>>, String> {
         .open(&path)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     let deadline = Instant::now() + TAKEOVER;
+    // A holder with neither socket nor record across a full poll is a
+    // serve, which publishes neither and will not let go of the lock.
+    // A host crosses the same look for instants far shorter than the
+    // poll, once between taking its lock and binding its socket and
+    // once between retiring its record and letting go of the lock
+    // while shutting down, so the first sight of the tell only arms
+    // the refusal, and the lock is tried again first on every round.
+    let mut told = false;
     loop {
         match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
             Ok(lock) => return Ok(Some(lock)),
             Err((held, nix::errno::Errno::EWOULDBLOCK)) => file = held,
             Err((_, e)) => return Err(format!("lock {}: {e}", path.display())),
         }
-        if UnixStream::connect(dir.join(SOCKET)).is_ok() || Instant::now() >= deadline {
+        if UnixStream::connect(dir.join(SOCKET)).is_ok() {
+            return Ok(None);
+        }
+        let serve = !dir.join(SOCKET).exists() && !dir.join(RECORD).exists();
+        if serve && told {
+            return Ok(None);
+        }
+        told = serve;
+        if Instant::now() >= deadline {
             return Ok(None);
         }
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Takes the single-instance lock for `kage serve`, which serves
+/// remote clients instead of local ones but still must not run
+/// alongside a shared host. Returns `None` when another instance
+/// holds it, whether a live host or another serve, so the caller
+/// exits quietly.
+pub(crate) fn acquire_for_serve() -> Result<Option<Flock<File>>, String> {
+    let dir = crate::paths::runtime_dir()?;
+    prepare(&dir)?;
+    acquire(&dir)
 }
 
 /// Removes the socket and the record when the host stops.
@@ -306,6 +360,14 @@ impl Published {
         self.record = Some(path.clone());
         kage_core::fsutil::atomic_write_private(&path, &bytes)
             .map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Removes the record while the lock is still held, as the last
+    /// thing a host publishes.
+    fn retire(&mut self) {
+        if let Some(record) = self.record.take() {
+            let _ = fs::remove_file(record);
+        }
     }
 }
 

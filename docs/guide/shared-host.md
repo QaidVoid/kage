@@ -32,7 +32,7 @@ Its files live in the runtime directory (`$XDG_RUNTIME_DIR/kage`, else
 | --- | --- |
 | `host.sock` | The socket clients connect to, mode 0600. Only processes of the same user are served. |
 | `host.json` | The running host's `pid`, `version`, `protocol`, `socket` and `started` time, written once it accepts clients and removed when it exits. |
-| `host.lock` | Held for the host's whole life, so only one runs at a time. |
+| `host.lock` | Held for the host's whole life, so only one runs at a time. `kage serve` holds it too, so a serve and a host cannot run alongside each other. |
 
 A background host has no terminal, so it writes to
 `$XDG_STATE_HOME/kage/host.log`, which moves aside to `host.log.1` past
@@ -50,6 +50,12 @@ kage host run       # run it in the foreground, to watch its output
 Stopping the host disconnects its clients and cancels running turns.
 The next `kage rpc` starts a fresh one. `kage host run --idle-secs 60`
 overrides the idle timeout for that host.
+
+While a `kage serve` holds the lock instead, `kage host status` and
+`kage host stop` say so, since a serve cannot be stopped that way, and
+a `kage rpc` that would start a host falls back to a private engine
+after a moment, because a serve and a host cannot run alongside each
+other.
 
 ## configuration
 

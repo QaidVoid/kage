@@ -27,6 +27,10 @@
 //! `connect.txt` beside the token file and the startup output names
 //! that file; the token is never rendered in the log. Refusals name
 //! the peer address, never a presented value.
+//!
+//! On Unix, serve takes the shared host's single-instance lock for
+//! its whole life, so it cannot run alongside a `kage host` or
+//! another serve; on Windows the TCP port stays the only guard.
 
 use std::io::{self, Read as _};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -131,6 +135,18 @@ pub(crate) fn run(
     web_dir: Option<&Path>,
     fetch_web: bool,
 ) -> ExitCode {
+    #[cfg(unix)]
+    let _instance = match crate::shared_host::acquire_for_serve() {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            eprintln!("kage: serve: another kage host or serve is already running");
+            return ExitCode::from(1);
+        }
+        Err(e) => {
+            eprintln!("kage: serve: {e}");
+            return ExitCode::from(1);
+        }
+    };
     kage_core::reaper::start();
     let log: Log = Arc::new(|line| eprintln!("kage serve: {line}"));
     let host = match Host::start(model, system_role, false) {

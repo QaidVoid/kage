@@ -7,11 +7,60 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
 const WAIT: Duration = Duration::from_secs(20);
+
+/// A TCP port that was free a moment ago, for a serve that binds it
+/// right after.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Kills a serve when the test ends, however it ends: a serve has no
+/// idle exit, so a failing assert would otherwise orphan it.
+struct KillOnDrop(Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Forwards a child's stderr lines to a channel, so a test waits for
+/// one bounded instead of blocking in `read_line`.
+fn stderr_lines(stderr: BufReader<std::process::ChildStderr>) -> mpsc::Receiver<String> {
+    let (send, recv) = mpsc::channel();
+    thread::spawn(move || {
+        for line in stderr.lines() {
+            if send.send(line.unwrap_or_default()).is_err() {
+                break;
+            }
+        }
+    });
+    recv
+}
+
+/// Waits bounded for a stderr line carrying `needle`.
+fn wait_for_line(lines: &mpsc::Receiver<String>, needle: &str, what: &str) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(line) if line.contains(needle) => return,
+            Ok(_) => {}
+            Err(e) => panic!("{what}: {e}"),
+        }
+    }
+}
 
 /// Isolated XDG directories for one test's hosts.
 struct Env {
@@ -52,6 +101,30 @@ impl Env {
             .stderr(Stdio::null())
             .spawn()
             .unwrap()
+    }
+
+    /// `kage serve` on `port`, with its stderr piped so a test can
+    /// read its startup lines and know when it holds the instance
+    /// lock.
+    fn serve(&self, port: u16) -> (Child, BufReader<std::process::ChildStderr>) {
+        let root = self.dir.path();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_kage"))
+            .args(["serve", "--host", "127.0.0.1", "--port", &port.to_string()])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", root)
+            .env("XDG_RUNTIME_DIR", root.join("runtime"))
+            .env("XDG_DATA_HOME", root.join("data"))
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_STATE_HOME", root.join("state"))
+            .current_dir(root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = BufReader::new(child.stderr.take().unwrap());
+        (child, stderr)
     }
 
     /// `kage rpc` as an editor or the desktop runs it, with a short idle
@@ -384,6 +457,105 @@ fn only_one_host_runs_at_a_time() {
     assert_eq!(env.record().unwrap()["pid"], first.id());
     assert_eq!(initialize(&env.connect())["id"], 1);
     assert!(terminate(&mut first).success());
+}
+
+#[test]
+fn a_serve_and_a_host_do_not_run_alongside_each_other() {
+    let env = Env::new();
+    let (serve, stderr) = env.serve(free_port());
+    let mut serve = KillOnDrop(serve);
+    let lines = stderr_lines(stderr);
+    // The token line comes after the lock is taken and the engine
+    // started, so serve is holding the instance lock from here on.
+    wait_for_line(&lines, "token file", "serve did not start in time");
+
+    // A host run refuses at once, publishes nothing, and leaves serve
+    // alone.
+    let host = env.kage(&["host", "run", "--idle-secs", "1"]);
+    assert!(host.status.success(), "{:?}", host.stderr);
+    assert!(
+        String::from_utf8_lossy(&host.stderr).contains("already running"),
+        "{:?}",
+        host.stderr
+    );
+    assert!(
+        env.record().is_none(),
+        "the refused host published a record"
+    );
+    assert!(
+        serve.0.try_wait().unwrap().is_none(),
+        "serve exited while holding the lock"
+    );
+
+    // A second serve refuses too, on a free port, so only the lock can
+    // be the reason.
+    let second = env.kage(&[
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &free_port().to_string(),
+    ]);
+    assert!(!second.status.success(), "{:?}", second.stderr);
+    assert!(
+        String::from_utf8_lossy(&second.stderr).contains("already running"),
+        "{:?}",
+        second.stderr
+    );
+    assert!(
+        serve.0.try_wait().unwrap().is_none(),
+        "serve exited while holding the lock"
+    );
+}
+
+#[test]
+fn a_serve_refuses_fast_while_a_host_holds_the_lock() {
+    let env = Env::new();
+    let mut host = env.host(60);
+    env.ready(host.id());
+    let started = Instant::now();
+    let second = env.kage(&[
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &free_port().to_string(),
+    ]);
+    assert!(!second.status.success(), "{:?}", second.stderr);
+    assert!(
+        String::from_utf8_lossy(&second.stderr).contains("already running"),
+        "{:?}",
+        second.stderr
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the refusal waited out the takeover window"
+    );
+    assert!(terminate(&mut host).success());
+}
+
+#[test]
+fn a_relay_falls_back_fast_while_a_serve_holds_the_lock() {
+    let env = Env::new();
+    let (serve, stderr) = env.serve(free_port());
+    // Bound for the whole test: its Drop kills the serve.
+    let _serve = KillOnDrop(serve);
+    let lines = stderr_lines(stderr);
+    wait_for_line(&lines, "token file", "serve did not start in time");
+
+    let started = Instant::now();
+    let mut relay = env.rpc(&[]);
+    assert_eq!(
+        relay.request("initialize", json!({"protocolVersion": 1}))["result"]["agentInfo"]["name"],
+        "kage"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the relay waited out the whole takeover window"
+    );
+    // The private engine publishes no host record: the serve keeps
+    // holding the lock.
+    assert!(env.record().is_none());
 }
 
 #[test]

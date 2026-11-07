@@ -91,6 +91,19 @@ fn failed(started: Option<&mut Child>) -> Option<Unavailable> {
     })
 }
 
+// The host this client started refused the lock cleanly. That usually
+// means it lost a start race, and the winner binds its socket at once,
+// so the wait goes on while a socket or a record shows up. A serve
+// holding the lock publishes neither, so with no socket and no record
+// one poll later the fallback is a private engine instead of the whole
+// takeover wait.
+fn refused_the_lock(dir: &Path, started: Option<&mut Child>) -> bool {
+    let Some(status) = started.and_then(|child| child.try_wait().ok().flatten()) else {
+        return false;
+    };
+    status.success() && !dir.join(SOCKET).exists() && read_record(dir).is_none()
+}
+
 /// Where a host started by a client writes its output.
 pub(crate) fn log_path() -> Result<PathBuf, String> {
     Ok(crate::paths::state_root()?.join("host.log"))
@@ -121,6 +134,11 @@ fn wait_for_socket(dir: &Path, mut started: Option<&mut Child>) -> Result<UnixSt
         }
         if let Some(failure) = failed(started.as_deref_mut()) {
             return Err(failure);
+        }
+        if refused_the_lock(dir, started.as_deref_mut()) {
+            return Err(Unavailable::Failed(
+                "another kage host or serve is already running".to_owned(),
+            ));
         }
         if Instant::now() >= deadline {
             return Err(Unavailable::Failed(

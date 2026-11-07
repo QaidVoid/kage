@@ -97,27 +97,30 @@ fn token_path() -> Result<PathBuf, String> {
 
 /// The web bundle directory when `--web-dir` is not given:
 /// `$XDG_DATA_HOME/kage/web`, where `--fetch-web` installs it.
-fn default_web_dir() -> Result<PathBuf, String> {
+pub(crate) fn default_web_dir() -> Result<PathBuf, String> {
     Ok(crate::data_root()?.join("web"))
 }
 
 /// Opens the web bundle at `dir` and logs what serve will do with it:
 /// nothing when it has no page, and a nudge when it was made for
 /// another build.
-fn open_web(dir: &Path, log: &Log) -> WebDir {
+/// Opens the web bundle at `dir` and logs what the caller will do
+/// with it: nothing when it has no page, and a nudge when it was made
+/// for another build. `install_hint` and `update_hint` say how this
+/// caller fills or refreshes the bundle, since `kage serve` has flags
+/// for it and the shared host does not.
+pub(crate) fn open_web(dir: &Path, install_hint: &str, update_hint: &str, log: &Log) -> WebDir {
     let web = WebDir::open(dir);
     if !web.available() {
         log(&format!(
-            "web UI unavailable: no index.html under {}; pass --fetch-web to install it, \
-             or --web-dir to serve another",
+            "web UI unavailable: no index.html under {}; {install_hint}",
             dir.display()
         ));
     } else if let Some(found) = fetch::installed(dir)
         && found != fetch::build().1
     {
         log(&format!(
-            "warning: the web UI under {} is {found}, not this kage's {}; \
-             pass --fetch-web to update it",
+            "warning: the web UI under {} is {found}, not this kage's {}; {update_hint}",
             dir.display(),
             fetch::build().1
         ));
@@ -180,7 +183,12 @@ pub(crate) fn run(
             return ExitCode::from(1);
         }
     }
-    let web = open_web(&bundle_dir, &log);
+    let web = open_web(
+        &bundle_dir,
+        "pass --fetch-web to install it, or --web-dir to serve another",
+        "pass --fetch-web to update it",
+        &log,
+    );
     let listener = match TcpListener::bind((bind_host, port)) {
         Ok(listener) => listener,
         Err(e) => {
@@ -204,7 +212,8 @@ pub(crate) fn run(
 
     let stop = Arc::new(AtomicBool::new(false));
     install_signals(&stop, &log);
-    accept_until(&listener, &host, &token, &web, &stop, &log);
+    let budget = Budget::new(MAX_CONNECTIONS);
+    accept_until(&listener, &host, &token, &web, &budget, &stop, &log);
 
     log("shutting down; cancelling runs");
     host.shutdown();
@@ -214,7 +223,7 @@ pub(crate) fn run(
 
 /// Loads the token at [`token_path`], or replaces it when `rotate` is
 /// set. Returns the path beside the token for the startup line.
-fn load_token(rotate: bool) -> Result<(PathBuf, Arc<Token>), String> {
+pub(crate) fn load_token(rotate: bool) -> Result<(PathBuf, Arc<Token>), String> {
     let path = token_path()?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
@@ -237,7 +246,7 @@ fn connect_url(addr: SocketAddr, token: &Token) -> String {
 /// a file beside the token and logs where it went. The token itself
 /// never reaches the log: stderr lands in journals anyone on the
 /// machine can read, while the file is user-only.
-fn log_connect(addr: SocketAddr, token: &Token, token_file: &Path, log: &Log) {
+pub(crate) fn log_connect(addr: SocketAddr, token: &Token, token_file: &Path, log: &Log) {
     let url = connect_url(addr, token);
     let file = token_file.with_file_name("connect.txt");
     match kage_core::fsutil::atomic_write_private(&file, url.as_bytes()) {
@@ -295,19 +304,66 @@ pub(crate) fn install_signals(stop: &Arc<AtomicBool>, log: &Log) {
     }
 }
 
+/// The connection budget an accept loop admits against: a counter of
+/// live connections and the most it may hold. Cloning shares the
+/// counter, so several accept loops (the shared host's socket and its
+/// web endpoint) can share one budget, and a web client holds the host
+/// exactly like a local one.
+#[derive(Clone)]
+pub(crate) struct Budget {
+    connections: Arc<AtomicUsize>,
+    max: usize,
+}
+
+impl Budget {
+    /// A fresh budget of `max` live connections.
+    pub(crate) fn new(max: usize) -> Self {
+        Self {
+            connections: Arc::new(AtomicUsize::new(0)),
+            max,
+        }
+    }
+
+    /// How many connections the budget holds now.
+    pub(crate) fn live(&self) -> usize {
+        self.connections.load(Ordering::SeqCst)
+    }
+
+    /// Whether the budget is spent, so the next peer is refused.
+    pub(crate) fn spent(&self) -> bool {
+        self.live() >= self.max
+    }
+
+    /// Counts one more connection, released when the returned guard
+    /// drops.
+    pub(crate) fn admit(&self) -> Connection {
+        self.connections.fetch_add(1, Ordering::SeqCst);
+        Connection(Arc::clone(&self.connections))
+    }
+}
+
+/// One live connection, counted against a [`Budget`] until dropped.
+pub(crate) struct Connection(Arc<AtomicUsize>);
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Accepts connections until `stop` is set. Every connection gets its
-/// own thread; once [`MAX_CONNECTIONS`] threads are live the next peer
-/// is refused with `503`.
-fn accept_until(
+/// own thread and one slot in `budget`; once the budget is spent the
+/// next peer is refused with `503`.
+pub(crate) fn accept_until(
     listener: &TcpListener,
     host: &Arc<Host>,
     token: &Arc<Token>,
     web: &WebDir,
+    budget: &Budget,
     stop: &AtomicBool,
     log: &Log,
 ) {
     let _ = listener.set_nonblocking(true);
-    let active = Arc::new(AtomicUsize::new(0));
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, peer)) => {
@@ -315,7 +371,7 @@ fn accept_until(
                 // BSD and macOS hand the listener's nonblocking flag
                 // to the accepted socket.
                 let _ = stream.set_nonblocking(false);
-                if active.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
+                if budget.spent() {
                     log(&format!("refuse {peer} (503)"));
                     // The rejection drains up to REJECT_DRAIN, so it
                     // runs on its own thread and the accept loop never
@@ -325,15 +381,15 @@ fn accept_until(
                         .spawn(move || reject(stream, 503, "Service Unavailable", BODY_503));
                     continue;
                 }
-                active.fetch_add(1, Ordering::SeqCst);
+                let guard = budget.admit();
                 let thread_host = Arc::clone(host);
                 let thread_token = Arc::clone(token);
                 let thread_web = web.clone();
                 let thread_log = Arc::clone(log);
-                let thread_active = Arc::clone(&active);
                 let spawned = thread::Builder::new()
                     .name("kage-serve-conn".to_owned())
                     .spawn(move || {
+                        let _guard = guard;
                         handle_connection(
                             stream,
                             peer,
@@ -342,10 +398,8 @@ fn accept_until(
                             &thread_web,
                             &thread_log,
                         );
-                        thread_active.fetch_sub(1, Ordering::SeqCst);
                     });
                 if spawned.is_err() {
-                    active.fetch_sub(1, Ordering::SeqCst);
                     log(&format!("refuse {peer} (thread spawn failed)"));
                 }
             }
@@ -466,7 +520,7 @@ const BODY_503: &str = "the server is at its connection limit; try again later\n
 
 /// Prints the plain-text warning when `bind_host` does not name a
 /// loopback address, because kage itself serves no TLS.
-fn warn_non_loopback(bind_host: &str, log: &Log) {
+pub(crate) fn warn_non_loopback(bind_host: &str, log: &Log) {
     let loopback = match bind_host.parse::<IpAddr>() {
         Ok(ip) => ip.is_loopback(),
         Err(_) => bind_host.eq_ignore_ascii_case("localhost"),

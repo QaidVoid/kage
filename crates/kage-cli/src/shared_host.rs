@@ -10,7 +10,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, ErrorKind, Write};
-use std::net::Shutdown;
+use std::net::{Shutdown, TcpListener};
 use std::os::fd::AsFd as _;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -28,7 +28,7 @@ use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use serde::{Deserialize, Serialize};
 
 use crate::rpc::host::Host;
-use crate::serve::Log;
+use crate::serve::{Budget, Log};
 
 /// The socket clients connect to, in the runtime directory.
 pub(crate) const SOCKET: &str = "host.sock";
@@ -72,12 +72,16 @@ pub(crate) struct Record {
 
 /// Entry point for `kage host run`. A detached host, started by a client,
 /// leaves the client's session so the client's terminal does not stop it.
-pub(crate) fn run(idle: Duration, detached: bool) -> ExitCode {
+pub(crate) fn run(
+    idle: Duration,
+    detached: bool,
+    host_cfg: &kage_core::config::HostConfig,
+) -> ExitCode {
     if detached {
         let _ = nix::unistd::setsid();
     }
     let log: Log = Arc::new(|line| eprintln!("kage host: {line}"));
-    match serve(idle, &log) {
+    match serve(idle, host_cfg, &log) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("kage: host: {e}");
@@ -86,7 +90,11 @@ pub(crate) fn run(idle: Duration, detached: bool) -> ExitCode {
     }
 }
 
-fn serve(idle: Duration, log: &Log) -> Result<(), String> {
+fn serve(
+    idle: Duration,
+    host_cfg: &kage_core::config::HostConfig,
+    log: &Log,
+) -> Result<(), String> {
     // Before anything is published, so a signal always shuts down cleanly.
     let stop = Arc::new(AtomicBool::new(false));
     crate::serve::install_signals(&stop, log);
@@ -99,32 +107,43 @@ fn serve(idle: Duration, log: &Log) -> Result<(), String> {
     let (listener, mut published) = bind(&dir)?;
     kage_core::reaper::start();
     let host = Host::start(None, "", false)?;
+    let budget = Budget::new(MAX_CONNECTIONS);
+    let mut web = if host_cfg.web {
+        Some(start_web(host_cfg, &host, budget.clone(), log)?)
+    } else {
+        None
+    };
     published.record(&dir)?;
     log(&format!(
         "accepting clients on {}",
         dir.join(SOCKET).display()
     ));
-    let connections = Arc::new(AtomicUsize::new(0));
     let mut listener = listener;
     loop {
-        serve_until_idle(&listener, &host, &connections, &stop, idle, log);
+        serve_until_idle(&listener, &host, &budget, &stop, idle, log);
         if stop.load(Ordering::SeqCst) {
             break;
         }
         // Unlink first, so a client either connected before and is served
         // now, or connects after and starts a new host.
         let _ = fs::remove_file(&published.socket);
-        if !accept_all(&listener, &host, &connections, log) {
+        if !accept_all(&listener, &host, &budget, log) && budget.live() == 0 {
             log("idle; exiting");
             break;
         }
         listener = bind_socket(&published.socket)?;
     }
-    // The socket goes first: a client either connected before and is
-    // served now, or connects after and starts a new host. The record
-    // goes last, once the lock is about to go: a host holds the lock
-    // only while its socket or its record is present, so a starting
-    // instance can tell a host from a serve, which publishes neither.
+    // The web endpoint stops accepting first: a web client that dials
+    // from here on is refused, and a local one starts a new host with
+    // the rest. The socket goes
+    // next: a client either connected before and is served now, or
+    // connects after and starts a new host. The record goes last, once
+    // the lock is about to go: a host holds the lock only while its
+    // socket or its record is present, so a starting instance can tell
+    // a host from a serve, which publishes neither.
+    if let Some(web) = web.as_mut() {
+        web.stop();
+    }
     let _ = fs::remove_file(&published.socket);
     log("shutting down; cancelling runs");
     host.shutdown();
@@ -407,7 +426,7 @@ fn bind_socket(socket: &Path) -> Result<UnixListener, String> {
 fn serve_until_idle(
     listener: &UnixListener,
     host: &Arc<Host>,
-    connections: &Arc<AtomicUsize>,
+    budget: &Budget,
     stop: &AtomicBool,
     idle: Duration,
     log: &Log,
@@ -419,13 +438,13 @@ fn serve_until_idle(
             &mut fds,
             PollTimeout::try_from(TICK).unwrap_or(PollTimeout::NONE),
         );
-        let accepted = accept_all(listener, host, connections, log);
+        let accepted = accept_all(listener, host, budget, log);
         if ready.is_err() {
             thread::sleep(TICK);
         }
         host.prune_projects();
         host.decline_expired_asks(ASK_HOLD);
-        if accepted || connections.load(Ordering::SeqCst) > 0 || host.busy() {
+        if accepted || budget.live() > 0 || host.busy() {
             quiet_since = Instant::now();
         } else if quiet_since.elapsed() >= idle {
             return;
@@ -434,18 +453,13 @@ fn serve_until_idle(
 }
 
 // Accepts every queued client. Returns whether there was any.
-fn accept_all(
-    listener: &UnixListener,
-    host: &Arc<Host>,
-    connections: &Arc<AtomicUsize>,
-    log: &Log,
-) -> bool {
+fn accept_all(listener: &UnixListener, host: &Arc<Host>, budget: &Budget, log: &Log) -> bool {
     let mut any = false;
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
                 any = true;
-                accept(stream, host, connections, log);
+                accept(stream, host, budget, log);
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => return any,
             Err(e) if e.kind() == ErrorKind::Interrupted => {}
@@ -457,12 +471,12 @@ fn accept_all(
     }
 }
 
-fn accept(stream: UnixStream, host: &Arc<Host>, connections: &Arc<AtomicUsize>, log: &Log) {
+fn accept(stream: UnixStream, host: &Arc<Host>, budget: &Budget, log: &Log) {
     if !peer_is_us(&stream) {
         log("refused a client running as another user");
         return;
     }
-    if connections.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
+    if budget.spent() {
         log("refused a client: too many connections");
         return;
     }
@@ -483,8 +497,7 @@ fn accept(stream: UnixStream, host: &Arc<Host>, connections: &Arc<AtomicUsize>, 
             return;
         }
     };
-    connections.fetch_add(1, Ordering::SeqCst);
-    let guard = Connection(Arc::clone(connections));
+    let guard = budget.admit();
     let host = Arc::clone(host);
     let spawned = thread::Builder::new()
         .name("kage-host-client".into())
@@ -537,13 +550,80 @@ fn peer_uid(_stream: &UnixStream) -> Option<u32> {
     None
 }
 
-// Counts a client from accept until its thread ends.
-struct Connection(Arc<AtomicUsize>);
+/// The host's web endpoint, served on its own thread.
+struct WebListener {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
 
-impl Drop for Connection {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+impl WebListener {
+    /// Stops accepting web clients and waits for the accept loop to
+    /// finish. Live connections end with the process, as the local
+    /// clients' do during the drain.
+    fn stop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
     }
+}
+
+/// Binds the web endpoint `[host] web` asks for, the same listener `kage
+/// serve` runs with the same token and assets, and serves it on its own
+/// thread until stopped, against the same host and the same connection
+/// budget as the local socket, so a web client holds the host exactly
+/// like a local one.
+fn start_web(
+    host_cfg: &kage_core::config::HostConfig,
+    host: &Arc<Host>,
+    budget: Budget,
+    log: &Log,
+) -> Result<WebListener, String> {
+    let (token_path, token) = crate::serve::load_token(false)?;
+    let bundle_dir = crate::serve::default_web_dir()?;
+    let web = crate::serve::open_web(
+        &bundle_dir,
+        "run kage serve --fetch-web while no host or serve runs, to install it",
+        "run kage serve --fetch-web while no host or serve runs, to update it",
+        log,
+    );
+    let listener = TcpListener::bind((host_cfg.bind.as_str(), host_cfg.port)).map_err(|e| {
+        format!(
+            "cannot bind {}:{}: {e}; set [host] port to a free port",
+            host_cfg.bind, host_cfg.port
+        )
+    })?;
+    let addr = listener
+        .local_addr()
+        .map_err(|e| format!("web endpoint: {e}"))?;
+    log(&format!("token file {}", token_path.display()));
+    crate::serve::log_connect(addr, &token, &token_path, log);
+    if web.available() {
+        log(&format!("web UI: http://{addr}/"));
+    }
+    crate::serve::warn_non_loopback(&host_cfg.bind, log);
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let thread_host = Arc::clone(host);
+    let thread_log = Arc::clone(log);
+    let handle = thread::Builder::new()
+        .name("kage-host-web".to_owned())
+        .spawn(move || {
+            crate::serve::accept_until(
+                &listener,
+                &thread_host,
+                &token,
+                &web,
+                &budget,
+                &thread_stop,
+                &thread_log,
+            );
+        })
+        .map_err(|e| format!("cannot start the web listener: {e}"))?;
+    Ok(WebListener {
+        stop,
+        handle: Some(handle),
+    })
 }
 
 /// A client's output, queued for its own writer thread, so a client that

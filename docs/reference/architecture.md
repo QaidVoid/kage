@@ -370,6 +370,13 @@ every `kage rpc` of one user shares one engine. See
   and no ask open) for the idle timeout. On idle it unlinks the socket
   first, then accepts what queued in the meantime, and binds again if
   anything did, so a client never connects to a host that is leaving.
+- **Web endpoint.** With `[host] web = true` the host binds the same
+  TCP listener `kage serve` runs, on its own thread, with the same
+  token, routing table and web directory defaults, and shares the
+  local socket's connection budget, so a web client counts toward the
+  connection cap and holds the host against idleness like a local
+  one. The listener stops accepting before the exit path unlinks the
+  socket. Off by default; on Windows the host does not run at all.
 - **Per-client output.** Each connection writes through a bounded
   queue drained by its own thread. A client that stops reading is
   disconnected once 16 MiB are queued for it, so it can never stall

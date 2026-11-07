@@ -1101,6 +1101,15 @@ pub struct HostConfig {
     /// Seconds the host waits with no clients and no work before it
     /// exits.
     pub idle_timeout_secs: u64,
+    /// Whether the host also serves the web endpoint that `kage serve`
+    /// runs, with the same token.
+    pub web: bool,
+    /// TCP port the web endpoint binds when [`HostConfig::web`] is on.
+    pub port: u16,
+    /// Address the web endpoint binds when [`HostConfig::web`] is on.
+    /// Anything but a loopback address serves the token to other
+    /// machines.
+    pub bind: String,
 }
 
 impl Default for HostConfig {
@@ -1108,6 +1117,9 @@ impl Default for HostConfig {
         Self {
             share: true,
             idle_timeout_secs: 600,
+            web: false,
+            port: 7433,
+            bind: "127.0.0.1".to_owned(),
         }
     }
 }
@@ -1120,15 +1132,20 @@ impl HostConfig {
     }
 
     /// Refuses an idle timeout of zero, which would stop the host before
-    /// a client could connect.
+    /// a client could connect, and an empty bind address.
     ///
     /// # Errors
     ///
-    /// When `idle_timeout_secs` is zero.
+    /// When `idle_timeout_secs` is zero or `bind` is empty.
     pub fn validate(&self) -> Result<()> {
         if self.idle_timeout_secs == 0 {
             return Err(config_error(
                 "[host] idle_timeout_secs must be at least 1".to_owned(),
+            ));
+        }
+        if self.bind.is_empty() {
+            return Err(config_error(
+                "[host] bind must name an address, or be left unset for 127.0.0.1".to_owned(),
             ));
         }
         Ok(())
@@ -1467,6 +1484,43 @@ mod tests {
             );
             Ok(())
         });
+    }
+
+    #[test]
+    fn host_web_settings_default_off_and_parse_from_table() {
+        let host = HostConfig::default();
+        assert!(!host.web);
+        assert_eq!(host.port, 7433);
+        assert_eq!(host.bind, "127.0.0.1");
+        assert!(host.validate().is_ok());
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                r#"
+                [host]
+                web = true
+                port = 8123
+                bind = "0.0.0.0"
+                "#,
+            )?;
+            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
+            assert!(cfg.host.web);
+            assert_eq!(cfg.host.port, 8123);
+            assert_eq!(cfg.host.bind, "0.0.0.0");
+            assert!(!cfg.host.is_default());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn host_web_settings_refuse_an_empty_bind() {
+        let host = HostConfig {
+            bind: String::new(),
+            ..HostConfig::default()
+        };
+        let err = format!("{}", host.validate().unwrap_err());
+        assert!(err.contains("[host] bind"), "{err}");
     }
 
     #[test]

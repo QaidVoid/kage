@@ -1290,8 +1290,9 @@ fn run_host(action: &HostAction) -> ExitCode {
             idle_secs,
             detached,
         } => {
-            let idle = idle_secs.unwrap_or_else(|| user_host_config().idle_timeout_secs);
-            shared_host::run(std::time::Duration::from_secs(idle), *detached)
+            let host_cfg = user_host_config();
+            let idle = idle_secs.unwrap_or(host_cfg.idle_timeout_secs);
+            shared_host::run(std::time::Duration::from_secs(idle), *detached, &host_cfg)
         }
         #[cfg(unix)]
         HostAction::Status => shared_host::status(),

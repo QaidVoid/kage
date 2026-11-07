@@ -65,9 +65,35 @@ The user config's `[host]` table sets:
 [host]
 share = true             # false: every kage rpc runs a private engine
 idle_timeout_secs = 600  # how long an unused host stays up
+web = false              # true: the host also serves the web endpoint
+port = 7433              # the web endpoint's TCP port, when web = true
+bind = "127.0.0.1"       # the web endpoint's address, when web = true
 ```
 
 A project's `.kage/config.toml` never sets it.
+
+## the web endpoint
+
+With `[host] web = true`, the host also serves what `kage serve`
+serves: the WebSocket endpoint at `/acp` and the web client's assets,
+with the same token. It is off by default, and the default bind is
+loopback. Setting `bind` to another address serves the endpoint to
+other machines, which the host warns about in its log, and the token
+is all that guards it.
+
+A web client connects like a serve client: the token lives in
+`$XDG_DATA_HOME/kage/remote-token`, and the ready-to-open URL beside
+it in `connect.txt`. A web client holds the host like a local one, and
+every client, local and web, shares the host's connection budget.
+
+The web client bundle is not installed by default. The host serves
+whatever lies under `$XDG_DATA_HOME/kage/web`; to fill it, run
+`kage serve --fetch-web` while no host or serve holds the lock, stop
+that serve, and start the host again.
+
+`kage serve` stays as the explicit foreground host for remote and
+headless machines, and neither can run while the other holds the
+instance lock.
 
 ## a private engine
 

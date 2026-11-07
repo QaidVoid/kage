@@ -167,6 +167,13 @@ impl Server {
 }
 
 /// Serves `scripts` from a mock host with a fresh token.
+/// kage-core cannot depend on kage-cli, so the host web port's default
+/// is written twice; this pins the two together.
+#[test]
+fn the_host_web_port_default_matches_serve() {
+    assert_eq!(kage_core::config::HostConfig::default().port, DEFAULT_PORT);
+}
+
 fn spawn_server(scripts: Vec<Script>) -> Server {
     spawn_server_in(scripts, None)
 }
@@ -185,19 +192,26 @@ fn spawn_server_in(scripts: Vec<Script>, web_dir: Option<&Path>) -> Server {
     let sink = Arc::clone(&lines);
     let log: Log = Arc::new(move |line| sink.lock().unwrap().push(line.to_owned()));
     let missing = dir.path().join("web");
-    let web = open_web(web_dir.unwrap_or(&missing), &log);
+    let web = open_web(
+        web_dir.unwrap_or(&missing),
+        "pass --fetch-web to install it, or --web-dir to serve another",
+        "pass --fetch-web to update it",
+        &log,
+    );
     if web.available() {
         log(&format!("web UI: http://{addr}/"));
     }
     let served_token = Arc::clone(&token);
     let served_stop = Arc::clone(&stop);
     let served_log = Arc::clone(&log);
+    let budget = Budget::new(MAX_CONNECTIONS);
     thread::spawn(move || {
         accept_until(
             &listener,
             &host,
             &served_token,
             &web,
+            &budget,
             &served_stop,
             &served_log,
         );

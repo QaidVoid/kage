@@ -1508,3 +1508,226 @@ fn a_stale_record_of_another_version_does_not_turn_clients_away() {
     );
     assert!(rpc.close().success());
 }
+
+#[test]
+fn a_host_with_web_enabled_serves_the_web_endpoint() {
+    let env = Env::new();
+    let port = free_port();
+    let config = env.dir.path().join("config/kage");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.toml"),
+        format!("[host]\nweb = true\nport = {port}\n"),
+    )
+    .unwrap();
+    let mut host = env.host(60);
+    env.ready(host.id());
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let status = http_status(addr, "GET /acp HTTP/1.1\r\nHost: x\r\n\r\n");
+    assert!(status.starts_with("HTTP/1.1 401"), "{status}");
+    let token = std::fs::read_to_string(env.dir.path().join("data/kage/remote-token")).unwrap();
+    let status = http_status(
+        addr,
+        &format!(
+            "HEAD /acp?token={} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            token.trim()
+        ),
+    );
+    assert!(status.starts_with("HTTP/1.1 204"), "{status}");
+    let status = http_status(
+        addr,
+        "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    assert!(status.starts_with("HTTP/1.1 404"), "{status}");
+    assert!(env.dir.path().join("data/kage/connect.txt").exists());
+    let client = web_client(addr, token.trim());
+    let reply = client.request("initialize", json!({"protocolVersion": 1}));
+    assert_eq!(reply["agentInfo"]["name"], "kage", "{reply}");
+    drop(client);
+    assert!(terminate(&mut host).success());
+    assert!(
+        std::net::TcpStream::connect(addr).is_err(),
+        "the web endpoint stayed open"
+    );
+}
+
+#[test]
+fn a_web_client_keeps_an_idle_host_alive_until_it_leaves() {
+    let env = Env::new();
+    let port = free_port();
+    let config = env.dir.path().join("config/kage");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.toml"),
+        format!("[host]\nweb = true\nport = {port}\n"),
+    )
+    .unwrap();
+    let mut host = env.host(1);
+    env.ready(host.id());
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let token = std::fs::read_to_string(env.dir.path().join("data/kage/remote-token")).unwrap();
+    let client = web_client(addr, token.trim());
+    client.request("initialize", json!({"protocolVersion": 1}));
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        host.try_wait().unwrap().is_none(),
+        "the host exited with a web client connected"
+    );
+    drop(client);
+    assert!(exit_within(&mut host, WAIT).success());
+    assert!(env.record().is_none());
+}
+
+#[test]
+fn a_host_without_web_config_keeps_the_port_closed() {
+    let env = Env::new();
+    let port = free_port();
+    let config = env.dir.path().join("config/kage");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.toml"),
+        format!("[host]\nweb = false\nport = {port}\n"),
+    )
+    .unwrap();
+    let mut host = env.host(60);
+    env.ready(host.id());
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+    assert!(terminate(&mut host).success());
+}
+
+/// The first status line an HTTP request to `addr` earns.
+fn http_status(addr: std::net::SocketAddr, request: &str) -> String {
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    stream.set_read_timeout(Some(WAIT)).unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    line
+}
+
+/// Reads WebSocket text frames as JSON-RPC lines: one frame, one line,
+/// like the host's web pipe does in reverse.
+struct WebFramesIn {
+    ws: tungstenite::WebSocket<std::net::TcpStream>,
+    buffer: Vec<u8>,
+}
+
+impl std::io::Read for WebFramesIn {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.buffer.is_empty() {
+            match self.ws.read() {
+                Ok(tungstenite::Message::Text(text)) => {
+                    self.buffer.extend_from_slice(text.as_bytes());
+                    self.buffer.push(b'\n');
+                }
+                Ok(tungstenite::Message::Close(_)) | Err(_) => return Ok(0),
+                Ok(_) => {}
+            }
+        }
+        let n = buf.len().min(self.buffer.len());
+        buf[..n].copy_from_slice(&self.buffer[..n]);
+        self.buffer.drain(..n);
+        Ok(n)
+    }
+}
+
+/// Writes one text frame per flush.
+struct WebFramesOut {
+    ws: tungstenite::WebSocket<std::net::TcpStream>,
+    buffer: Vec<u8>,
+}
+
+impl std::io::Write for WebFramesOut {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.buffer.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let message = String::from_utf8_lossy(&self.buffer).into_owned();
+        self.buffer.clear();
+        self.ws
+            .send(tungstenite::Message::text(message))
+            .map_err(std::io::Error::other)
+    }
+}
+
+/// A web client of the host, as a JSON-RPC peer. Dropping it shuts the
+/// socket down, because the host's reader thread would otherwise hold
+/// it open forever.
+struct WebClient {
+    peer: kage_jsonrpc::Peer,
+    sock: std::sync::Arc<std::net::TcpStream>,
+}
+
+impl Drop for WebClient {
+    fn drop(&mut self) {
+        let _ = self.sock.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+impl WebClient {
+    /// Sends `method` and waits for the answer.
+    fn request(&self, method: &str, params: Value) -> Value {
+        self.peer
+            .request_timeout(method, params, WAIT)
+            .unwrap_or_else(|e| panic!("{method}: {e}"))
+    }
+}
+
+/// Connects to the host's web endpoint at `addr` and upgrades with
+/// `token`.
+fn web_client(addr: std::net::SocketAddr, token: &str) -> WebClient {
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    stream.set_read_timeout(Some(WAIT)).unwrap();
+    let request = format!(
+        "GET /acp HTTP/1.1\r\n\
+         Host: {addr}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         Authorization: Bearer {token}\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut reply = String::new();
+    let mut buffered = BufReader::new(stream.try_clone().unwrap());
+    loop {
+        let mut line = String::new();
+        let read = buffered.read_line(&mut line).unwrap();
+        let done = read == 0 || line == "\r\n";
+        reply.push_str(&line);
+        if done {
+            break;
+        }
+    }
+    assert!(reply.starts_with("HTTP/1.1 101"), "{reply}");
+    let frames_in = tungstenite::WebSocket::from_partially_read(
+        stream.try_clone().unwrap(),
+        Vec::new(),
+        tungstenite::protocol::Role::Client,
+        None,
+    );
+    let frames_out = tungstenite::WebSocket::from_raw_socket(
+        stream.try_clone().unwrap(),
+        tungstenite::protocol::Role::Client,
+        None,
+    );
+    let sock = std::sync::Arc::new(stream);
+    // The inbox of server-initiated notifications is dropped: these
+    // tests only ask.
+    let (peer, _inbox, _thread) = kage_jsonrpc::connect(
+        BufReader::new(WebFramesIn {
+            ws: frames_in,
+            buffer: Vec::new(),
+        }),
+        WebFramesOut {
+            ws: frames_out,
+            buffer: Vec::new(),
+        },
+    );
+    WebClient { peer, sock }
+}

@@ -49,6 +49,7 @@ mod registry;
 mod rewind;
 mod sessions;
 mod themes;
+mod ui;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufReader;
@@ -74,6 +75,7 @@ use kage_acp::acp::{
     ShellRequest, StopReason, Supported, SwarmResumeRequest, SwarmResumeResponse, ThemesRequest,
     ThemesResult, WithdrawRequest,
 };
+use kage_acp::acp::{UiAttachRequest, UiCommandRequest, UiKeymapRequest, UiOutput, UiSnapshot};
 use kage_acp::agent::{Agent, PromptContext};
 use kage_core::config::{Config, McpServer as McpSpec, PluginsConfig};
 use kage_core::environment::Environment;
@@ -264,6 +266,10 @@ struct CliAcpAgent {
     /// Whether this connection may send its environment: only a local
     /// client of this user, never a remote one.
     takes_env: AtomicBool,
+    /// Stops the updates of the project whose plugin UI the client draws.
+    /// A connection follows one project; attaching to another stops the
+    /// first.
+    ui_watch: Mutex<Option<Arc<AtomicBool>>>,
     peer: Peer,
     held: Held,
     asks: AskSet,
@@ -329,12 +335,40 @@ impl CliAcpAgent {
             kage_client,
             env: Mutex::new(Environment::inherit()),
             takes_env: AtomicBool::new(false),
+            ui_watch: Mutex::new(None),
             peer,
             held,
             asks,
             subscription,
             seeds,
         }
+    }
+
+    /// The runtime of the project at `cwd`, and the invocation of work this
+    /// connection asks for in its session `client_session`.
+    fn ui_context(
+        &self,
+        cwd: &str,
+        client_session: Option<&str>,
+    ) -> Result<(Arc<kage_plugin::PluginRuntime>, kage_plugin::Invocation), RpcError> {
+        let invocation = |session| kage_plugin::Invocation {
+            session,
+            client: Some(self.connection),
+        };
+        if let Some(client_session) = client_session {
+            let id = self.engine_id(client_session)?;
+            let runtime = self
+                .host
+                .session_runtime(id)
+                .ok_or_else(|| RpcError::new(-32602, "the session runs without plugins"))?;
+            return Ok((runtime, invocation(Some(id))));
+        }
+        let env = lock(&self.env).clone();
+        let project = self
+            .host
+            .project(Path::new(cwd), &env)
+            .ok_or_else(|| RpcError::internal("the project's plugins did not load"))?;
+        Ok((project.runtime, invocation(None)))
     }
 
     /// Accept the client's `_kage/environment` on this connection.
@@ -424,6 +458,9 @@ impl CliAcpAgent {
     /// client that may never come back. The engine and its runs keep
     /// going for the connections that stay.
     fn detach(&self) {
+        if let Some(stop) = lock(&self.ui_watch).take() {
+            stop.store(true, Ordering::SeqCst);
+        }
         self.host.engine.unsubscribe(self.subscription);
         self.host.release_prompts_of(self.connection);
         lock(&self.waiters).clear();
@@ -790,6 +827,42 @@ impl Agent for CliAcpAgent {
 
     fn prompt_withdraw(&self, req: WithdrawRequest) -> Result<PromptWithdrawn, RpcError> {
         self.withdraw(&req)
+    }
+
+    fn ui_attach(&self, req: UiAttachRequest) -> Result<UiSnapshot, RpcError> {
+        let env = lock(&self.env).clone();
+        let project = self
+            .host
+            .project(Path::new(&req.cwd), &env)
+            .ok_or_else(|| RpcError::internal("the project's plugins did not load"))?;
+        // Marked first, so a change while the snapshot is built is sent.
+        let marker = ui::marker(&project.runtime);
+        let snapshot = ui::snapshot(&project.runtime);
+        let stop = Arc::new(AtomicBool::new(false));
+        ui::watch(ui::Watch {
+            host: Arc::clone(&self.host),
+            cwd: req.cwd,
+            env,
+            project,
+            marker,
+            sent: snapshot.clone(),
+            peer: self.peer.clone(),
+            stop: Arc::clone(&stop),
+        });
+        if let Some(previous) = lock(&self.ui_watch).replace(stop) {
+            previous.store(true, Ordering::SeqCst);
+        }
+        Ok(snapshot)
+    }
+
+    fn ui_command(&self, req: UiCommandRequest) -> Result<UiOutput, RpcError> {
+        let (runtime, invocation) = self.ui_context(&req.cwd, req.session_id.as_deref())?;
+        invocation.scope(|| ui::run_command(&runtime, &req.name, &req.args, &self.peer))
+    }
+
+    fn ui_keymap(&self, req: UiKeymapRequest) -> Result<UiOutput, RpcError> {
+        let (runtime, invocation) = self.ui_context(&req.cwd, req.session_id.as_deref())?;
+        invocation.scope(|| ui::run_keymap(&runtime, req.id, &self.peer))
     }
 
     fn mcp_restart(&self, req: McpRestartRequest) -> Result<serde_json::Value, RpcError> {

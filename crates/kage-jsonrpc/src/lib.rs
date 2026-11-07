@@ -81,6 +81,13 @@ impl RpcError {
         Self::new(-32603, message)
     }
 
+    /// Whether the request failed because the connection closed, before
+    /// or while it waited for an answer.
+    #[must_use]
+    pub fn is_connection_closed(&self) -> bool {
+        self.code == -32603 && self.message == CLOSED
+    }
+
     /// `-32601` method not found.
     #[must_use]
     pub fn method_not_found(method: &str) -> Self {
@@ -131,7 +138,15 @@ pub enum Inbound {
 
 type Reply = Result<serde_json::Value, RpcError>;
 
-type Pending = Arc<Mutex<HashMap<i64, Sender<Reply>>>>;
+/// The requests waiting for their response, and whether the connection
+/// closed, after which a new request fails at once.
+#[derive(Default)]
+struct PendingTable {
+    calls: HashMap<i64, Sender<Reply>>,
+    closed: bool,
+}
+
+type Pending = Arc<Mutex<PendingTable>>;
 
 /// Builds the notification a [`Peer`] sends when one of its requests is
 /// abandoned on a cancel or at its deadline. It receives the request id and
@@ -268,14 +283,20 @@ impl Peer {
     ) -> Result<(i64, Receiver<Reply>), RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = crossbeam_channel::bounded(1);
-        lock(&self.pending).insert(id, tx);
+        {
+            let mut pending = lock(&self.pending);
+            if pending.closed {
+                return Err(closed());
+            }
+            pending.calls.insert(id, tx);
+        }
         let mut obj = serde_json::Map::with_capacity(4);
         obj.insert("jsonrpc".to_owned(), serde_json::Value::from("2.0"));
         obj.insert("id".to_owned(), serde_json::Value::from(id));
         obj.insert("method".to_owned(), serde_json::Value::from(method));
         obj.insert("params".to_owned(), params);
         if let Err(e) = self.write(&serde_json::Value::Object(obj)) {
-            lock(&self.pending).remove(&id);
+            lock(&self.pending).calls.remove(&id);
             return Err(e);
         }
         Ok((id, rx))
@@ -285,7 +306,7 @@ impl Peer {
     /// [`CancelNotice`] goes out only when the entry was still pending: a
     /// missing one means the reader already answered or closed it.
     fn abandon(&self, id: i64, method: &str) -> RpcError {
-        let pending = lock(&self.pending).remove(&id).is_some();
+        let pending = lock(&self.pending).calls.remove(&id).is_some();
         if pending
             && let Some((notice, params)) = self
                 .cancel_notice
@@ -299,8 +320,10 @@ impl Peer {
 }
 
 /// The error a request gets when the connection closes under it.
+const CLOSED: &str = "connection closed";
+
 fn closed() -> RpcError {
-    RpcError::internal("connection closed")
+    RpcError::internal(CLOSED)
 }
 
 /// A JSON-RPC response message shared by both reply paths.
@@ -377,7 +400,7 @@ where
     W: Write + Send + 'static,
 {
     let writer: Arc<Mutex<dyn Write + Send>> = Arc::new(Mutex::new(writer));
-    let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+    let pending: Pending = Arc::default();
     let peer = Peer {
         writer: Arc::clone(&writer),
         pending: Arc::clone(&pending),
@@ -428,7 +451,12 @@ where
                 break;
             }
         }
-        for (_, tx) in lock(&pending).drain() {
+        let waiting: Vec<Sender<Reply>> = {
+            let mut pending = lock(&pending);
+            pending.closed = true;
+            pending.calls.drain().map(|(_, tx)| tx).collect()
+        };
+        for tx in waiting {
             let _ = tx.send(Err(closed()));
         }
     });
@@ -529,7 +557,7 @@ fn route_line(
 /// Route a response-shaped object by i64 id. Unknown or late ids are
 /// dropped: the spec forbids replying to a response.
 fn route_response(pending: &Pending, id: i64, obj: &serde_json::Map<String, serde_json::Value>) {
-    if let Some(tx) = lock(pending).remove(&id) {
+    if let Some(tx) = lock(pending).calls.remove(&id) {
         let outcome = match (obj.get("error"), obj.get("result")) {
             (Some(err), _) => Err(RpcError::from_value(err)),
             (None, Some(result)) => Ok(result.clone()),
@@ -785,6 +813,17 @@ mod tests {
         assert_eq!(waiter.join().unwrap().unwrap_err().code, -32603);
     }
 
+    /// A request made after the peer hung up fails at once, even though
+    /// writing to it still succeeds, instead of waiting for no one.
+    #[test]
+    fn a_request_after_the_connection_closed_fails_at_once() {
+        let (peer, in_w, _out, handle) = recorded(None);
+        drop(in_w);
+        handle.join().unwrap();
+        let err = peer.request("x", serde_json::Value::Null).unwrap_err();
+        assert_eq!(err.code, -32603);
+    }
+
     #[test]
     fn method_not_found_message_includes_method() {
         let err = RpcError::method_not_found("tools/call");
@@ -845,9 +884,9 @@ mod tests {
     /// waiting caller as an error, not as a successful `null`.
     #[test]
     fn a_response_with_neither_result_nor_error_is_an_error() {
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Pending = Arc::default();
         let (tx, rx) = crossbeam_channel::bounded(1);
-        lock(&pending).insert(7, tx);
+        lock(&pending).calls.insert(7, tx);
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"jsonrpc":"2.0","id":7}"#).unwrap();
         route_response(&pending, 7, &obj);
@@ -860,9 +899,9 @@ mod tests {
     /// still succeeds, so the fix does not turn nulls into errors.
     #[test]
     fn an_explicit_null_result_still_succeeds() {
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Pending = Arc::default();
         let (tx, rx) = crossbeam_channel::bounded(1);
-        lock(&pending).insert(7, tx);
+        lock(&pending).calls.insert(7, tx);
         let obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"jsonrpc":"2.0","id":7,"result":null}"#).unwrap();
         route_response(&pending, 7, &obj);

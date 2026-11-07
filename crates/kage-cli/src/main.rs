@@ -56,8 +56,6 @@ mod rpc;
 mod runtime_env;
 mod serve;
 #[cfg(unix)]
-mod serve_registry;
-#[cfg(unix)]
 mod shared_host;
 mod state;
 mod title;

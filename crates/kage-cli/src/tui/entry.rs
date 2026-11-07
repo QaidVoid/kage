@@ -9,13 +9,12 @@ use kage_core::protocol::{Envelope, NoticeLevel};
 use kage_tui::TranscriptScope;
 
 /// Drop into the interactive TUI, on the recorded session at `resume`
-/// when given, the way the session picker resumes one. A session
-/// another process holds is attached to through the `kage serve`
-/// hosting it, when one does. The TUI speaks ACP: by default to the
-/// user's shared host, started when it is not running, with
-/// `--standalone` or where the shared host cannot be used to a private
-/// host in this process, and with `KAGE_LINK=acp` to a `kage rpc`
-/// child. Returns the appropriate process exit code once the user quits.
+/// when given, the way the session picker resumes one. The TUI speaks
+/// ACP: by default to the user's shared host, started when it is not
+/// running, with `--standalone` or where the shared host cannot be used
+/// to a private host in this process, and with `KAGE_LINK=acp` to a
+/// `kage rpc` child. Returns the appropriate process exit code once the
+/// user quits.
 pub fn run_tui(
     model: Option<&str>,
     system: &str,
@@ -25,13 +24,6 @@ pub fn run_tui(
 ) -> ExitCode {
     if std::env::var_os("KAGE_LINK").is_some_and(|link| link == "acp") {
         return super::acp::run(model, system, resume, yolo, super::acp::Upstream::Child);
-    }
-    #[cfg(unix)]
-    if let Some(path) = resume
-        && kage_session::is_locked(path)
-        && let Some(attached) = super::remote::attach(path)
-    {
-        return super::remote::run(attached, model);
     }
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     crate::trust::confirm_project_trust(&workdir);
@@ -91,9 +83,8 @@ pub(super) struct Frontend {
     pub(super) events: mpsc::Receiver<Envelope>,
     pub(super) dialogs: mpsc::Receiver<PluginDialog>,
     pub(super) refresh: mpsc::Receiver<PluginRefresh>,
-    /// The feed an ACP connection's pump fills. `None` on the link
-    /// protocol, where the App reads the serve's envelopes.
-    pub(super) acp_feed: Option<Arc<dyn kage_tui::AcpFeed>>,
+    /// The feed an ACP connection's pump fills.
+    pub(super) acp_feed: Arc<dyn kage_tui::AcpFeed>,
     /// The model the status line shows until the engine reports one.
     pub(super) model: String,
     pub(super) model_choices: Vec<PickItem>,
@@ -184,9 +175,7 @@ impl Frontend {
         }
         app.set_plugin_dialog(self.dialogs);
         app.set_plugin_refresh(self.refresh);
-        if let Some(feed) = self.acp_feed {
-            app.set_acp_feed(feed);
-        }
+        app.set_acp_feed(self.acp_feed);
         app.set_toasts(self.toasts.clone());
         app.set_session_usage(shared_session_usage());
         app.set_status_session_id(self.session.to_string().chars().take(8).collect());

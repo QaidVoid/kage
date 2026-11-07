@@ -36,8 +36,6 @@ mod directory;
 mod folders;
 mod fs;
 pub(crate) mod host;
-#[cfg(unix)]
-pub(crate) mod link;
 mod live;
 mod mcp;
 mod models;

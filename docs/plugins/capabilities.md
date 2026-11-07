@@ -60,7 +60,9 @@ Inspect and reseat the live conversation.
 
 `entries()` returns metadata only (ids, kinds and timestamps, no
 message text) because it is a navigation index, not a transcript
-reader. `switch` and `fork_to` only *request* a reseat. The host
+reader. No client populates it yet, so a plugin sees an empty list
+until a session file reaches the client that runs the plugin.
+`switch` and `fork_to` only *request* a reseat. The host
 applies it between turns, after consulting the `session_before_switch`
 veto, so a plugin can confirm or block its own reseat.
 

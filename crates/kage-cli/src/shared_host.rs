@@ -393,7 +393,7 @@ fn accept_all(
 }
 
 fn accept(stream: UnixStream, host: &Arc<Host>, connections: &Arc<AtomicUsize>, log: &Log) {
-    if !crate::rpc::link::peer_is_us(&stream) {
+    if !peer_is_us(&stream) {
         log("refused a client running as another user");
         return;
     }
@@ -430,6 +430,46 @@ fn accept(stream: UnixStream, host: &Arc<Host>, connections: &Arc<AtomicUsize>, 
     if let Err(e) = spawned {
         log(&format!("cannot serve a client: {e}"));
     }
+}
+
+/// Whether the process at the other end of `stream` runs as this user.
+fn peer_is_us(stream: &UnixStream) -> bool {
+    peer_uid(stream).is_some_and(|uid| uid == nix::unistd::geteuid().as_raw())
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn peer_uid(stream: &UnixStream) -> Option<u32> {
+    use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+    getsockopt(stream, PeerCredentials)
+        .ok()
+        .map(|creds| creds.uid())
+}
+
+#[cfg(any(
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
+fn peer_uid(stream: &UnixStream) -> Option<u32> {
+    nix::unistd::getpeereid(stream)
+        .ok()
+        .map(|(uid, _)| uid.as_raw())
+}
+
+/// No way to tell the peer's user here, so every client is refused.
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+)))]
+fn peer_uid(_stream: &UnixStream) -> Option<u32> {
+    None
 }
 
 // Counts a client from accept until its thread ends.

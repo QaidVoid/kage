@@ -37,8 +37,7 @@ read.
   so Zed, Neovim and other ACP clients can drive it, with sessions,
   approvals and agents intact.
 - **Desktop and browser.** `kage serve` hosts sessions for the desktop
-  app and its browser build, and the TUI can attach to a session it
-  hosts.
+  app and its browser build.
 - **Web search.** A `web_search` tool on DuckDuckGo with no key, or on
   your SearXNG instance or the Brave Search API.
 - **Sessions you can come back to.** Every conversation is saved.

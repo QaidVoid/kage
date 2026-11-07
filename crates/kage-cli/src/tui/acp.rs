@@ -2256,7 +2256,7 @@ pub(crate) fn run(
         eprintln!("kage: cannot start the pump thread: {error}");
         return ExitCode::from(1);
     }
-    let mirror = Arc::new(Mutex::new(Mirror::new(None)));
+    let mirror = Arc::new(Mutex::new(Mirror::new()));
     let model_choices = available_model_items(&registry, &shown_model);
     // The commands the local plugins register; the App completes them
     // and the pump runs them, never the agent.
@@ -2277,7 +2277,7 @@ pub(crate) fn run(
         events: events_rx,
         dialogs: dialog_rx,
         refresh: refresh_rx,
-        acp_feed: Some(feed),
+        acp_feed: feed,
         model: shown_model,
         model_choices,
         plugin_commands,

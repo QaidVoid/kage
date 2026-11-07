@@ -3,9 +3,7 @@
 //! [`run_tui`] runs [`kage_tui::App`] on the main thread against an ACP
 //! agent: the pump in [`acp`] owns the wire, the App's requests become
 //! client calls, and the agent's frames flow back to the App over a
-//! channel. A session a `kage serve` hosts attaches through
-//! [`host::Host`] over the link protocol instead, until that protocol
-//! retires.
+//! channel.
 
 pub(crate) use std::path::PathBuf;
 pub(crate) use std::process::ExitCode;
@@ -20,7 +18,7 @@ pub(crate) use kage_plugin::{
     PluginRuntime, SelectRequest, SwitchTarget,
 };
 pub(crate) use kage_provider::ProviderRegistry;
-pub(crate) use kage_session::{SessionReader, SessionSummary};
+pub(crate) use kage_session::SessionSummary;
 pub(crate) use kage_tui::{
     App, PickItem, PluginDialog, PluginRefresh, RunRequest, Tui, buffer_host_log, shared_buffer,
     shared_session_usage, shared_toasts,
@@ -30,11 +28,7 @@ pub(crate) use crate::plugins::setup_user_runtime;
 
 mod acp;
 mod entry;
-#[cfg(unix)]
-mod host;
 mod pipe;
-#[cfg(unix)]
-mod remote;
 mod support;
 
 pub use entry::run_tui;
@@ -43,8 +37,8 @@ pub(crate) use entry::startup_options;
 
 pub(crate) use support::{
     Mirror, available_model_items, list_session_choices, list_session_nodes,
-    refresh_session_entries, register_block_renderers, resolve_switch_target, run_bridged_command,
-    run_bridged_keymap, snapshot_plugin_commands, start_notices,
+    register_block_renderers, run_bridged_command, run_bridged_keymap, snapshot_plugin_commands,
+    start_notices,
 };
 
 #[cfg(test)]

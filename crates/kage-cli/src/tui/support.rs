@@ -3,7 +3,7 @@
 use super::*;
 
 use chrono::{DateTime, Duration, Local, Utc};
-use kage_core::protocol::{NoticeLevel, SessionState};
+use kage_core::protocol::NoticeLevel;
 
 use crate::auth::AuthStore;
 use crate::state::State;
@@ -374,63 +374,6 @@ pub(crate) fn resolve_switch_target(target: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// Refresh the `session_write` entries snapshot from the active
-/// session file: a metadata-only `{ id, kind, ts, role? }` per entry
-/// in file order, never any message text (the snapshot is a
-/// navigation index, not a transcript reader; see
-/// `docs/plugins/capabilities.md`). Run once per worker request (a
-/// between-turn cadence, never per stream tick) so a granted plugin's
-/// `kage.session.entries()` reflects the latest committed turn. A
-/// missing file (no turn yet) clears the snapshot.
-pub(crate) fn refresh_session_entries(
-    plugin_runtime: Option<&Arc<PluginRuntime>>,
-    session_path: Option<&std::path::Path>,
-) {
-    let (Some(rt), Some(path)) = (plugin_runtime, session_path) else {
-        return;
-    };
-    let Ok(reader) = SessionReader::iter(path) else {
-        rt.set_session_entries(Vec::new());
-        return;
-    };
-    let mut out = Vec::new();
-    for item in reader {
-        let Ok(entry) = item else {
-            break;
-        };
-        let mut obj = serde_json::json!({
-            "id": entry.id().to_string(),
-            "kind": entry_kind(&entry),
-            "ts": entry.ts().to_rfc3339(),
-        });
-        if let kage_session::SessionEntry::Message(m) = &entry
-            && let Ok(role) = serde_json::to_value(m.message.role)
-        {
-            obj["role"] = role;
-        }
-        out.push(obj);
-    }
-    rt.set_session_entries(out);
-}
-
-/// Stable short name for a session entry variant, used as the `kind`
-/// field of the `session_write` entries snapshot. Exhaustive so a new
-/// variant fails to compile here rather than silently going unnamed.
-pub(crate) fn entry_kind(entry: &kage_session::SessionEntry) -> &'static str {
-    use kage_session::SessionEntry as E;
-    match entry {
-        E::Header(_) => "header",
-        E::Message(_) => "message",
-        E::ThinkingLevelChange(_) => "thinking_level_change",
-        E::ModelChange(_) => "model_change",
-        E::Compaction(_) => "compaction",
-        E::Label(_) => "label",
-        E::Title(_) => "title",
-        E::Branch(_) => "branch",
-        E::Custom(_) => "custom",
-    }
-}
-
 /// Build the picker rows the App offers when the user hits `ctrl+p`.
 /// Iterates registered providers and lists the models each one
 /// declares (custom and plugin providers); a provider that declares
@@ -509,26 +452,16 @@ pub(crate) fn register_block_renderers(rt: &PluginRuntime) {
 /// How far ahead an expiring OAuth credential is reported at startup.
 const OAUTH_EXPIRY_WARNING: Duration = Duration::days(3);
 
-/// What the TUI knows about the active session. A session a `kage
-/// serve` hosts through the link protocol fills it from the serve's
-/// envelopes. The ACP pump keeps no mirror: there is no session file
-/// to point at.
+/// What the TUI knows about the active session's file. The ACP pump
+/// cannot point at one yet, so the exit summary and the session tree
+/// read `None` until a session's path reaches the client.
 pub(crate) struct Mirror {
-    /// The session's last known state, kept for run-end bookkeeping.
-    #[cfg_attr(
-        not(unix),
-        allow(dead_code, reason = "read by the unix-only link protocol")
-    )]
-    pub(crate) state: SessionState,
-    pub(crate) path: Option<PathBuf>,
+    path: Option<PathBuf>,
 }
 
 impl Mirror {
-    pub(crate) fn new(path: Option<PathBuf>) -> Self {
-        Self {
-            state: SessionState::default(),
-            path,
-        }
+    pub(crate) fn new() -> Self {
+        Self { path: None }
     }
 
     /// The active session's file.
@@ -946,55 +879,5 @@ mod tests {
         assert!(notice.contains("anthropic/claude-sonnet-4-6"), "{notice}");
         assert!(notice.contains("Using mock/m."), "{notice}");
         assert!(notice.contains("Run /login anthropic"), "{notice}");
-    }
-
-    #[test]
-    fn session_entries_snapshot_carries_metadata_only() {
-        use kage_core::{Content, Message, Role};
-        use kage_session::{
-            EntryId, FORMAT_VERSION, Header, MessageEntry, SessionEntry, SessionWriter,
-        };
-
-        let dir = tempfile::tempdir().unwrap();
-        let id = SessionId::new();
-        let header = Header {
-            version: FORMAT_VERSION,
-            session: id,
-            id: EntryId::new(),
-            ts: Utc::now(),
-            cwd: dir.path().to_path_buf(),
-            model: "mock/m".into(),
-            system_prompt: String::new(),
-            parent_session: None,
-            parent_entry: None,
-        };
-        let path = dir.path().join(format!("{id}.jsonl"));
-        let mut writer = SessionWriter::create(&path, header).unwrap();
-        let message = Message::new(
-            Role::User,
-            vec![Content::Text {
-                text: "secret transcript".into(),
-            }],
-            None,
-        );
-        writer
-            .append(&SessionEntry::Message(MessageEntry {
-                id: EntryId::new(),
-                ts: Utc::now(),
-                message: Arc::new(message),
-                usage: None,
-            }))
-            .unwrap();
-        drop(writer);
-
-        let rt = Arc::new(PluginRuntime::builder().build().unwrap());
-        refresh_session_entries(Some(&rt), Some(path.as_path()));
-        let entries = lock(rt.shared_session_entries().as_ref()).clone();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[1]["kind"], "message");
-        assert_eq!(entries[1]["role"], "user");
-        assert!(entries.iter().all(|e| e.get("text").is_none()));
-        let dumped = serde_json::to_string(&entries).unwrap();
-        assert!(!dumped.contains("secret transcript"), "{dumped}");
     }
 }

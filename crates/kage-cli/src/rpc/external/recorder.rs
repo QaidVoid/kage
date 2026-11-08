@@ -24,7 +24,7 @@ use serde_json::Value;
 use super::lifecycle::Slot;
 
 const MAX_ITEMS: usize = 1024;
-const MAX_BYTES: usize = 4 * 1024 * 1024;
+const MAX_BYTES: usize = 1024 * 1024;
 // Items written with one fsync.
 const BATCH: usize = 64;
 

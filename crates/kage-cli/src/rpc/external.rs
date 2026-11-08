@@ -45,7 +45,7 @@ pub(crate) enum Recording {
 }
 
 /// External agent processes a host runs at once, including ones cleaning up.
-pub(super) const MAX_SESSIONS: usize = 16;
+pub(super) const MAX_SESSIONS: usize = 8;
 
 #[cfg(target_os = "linux")]
 mod unix {
@@ -75,9 +75,9 @@ mod unix {
     use serde_json::{Value, json};
 
     const TIMEOUT: Duration = Duration::from_secs(10);
-    const SESSION_BUDGET: usize = 8 * 1024 * 1024;
+    const SESSION_BUDGET: usize = 4 * 1024 * 1024;
     const ATTACHMENT_BUDGET: usize = 2 * 1024 * 1024;
-    const MAX_ATTACHMENTS: usize = 32;
+    const MAX_ATTACHMENTS: usize = 8;
     // Display history kept in memory for loads, below the attachment budget
     // so live updates still fit behind it.
     const HISTORY_BYTES: usize = 1024 * 1024;
@@ -1991,6 +1991,9 @@ mod unix {
             self.terminate();
         }
     }
+
+    #[cfg(all(test, target_os = "linux"))]
+    mod measure;
 
     #[cfg(all(test, unix))]
     mod tests {

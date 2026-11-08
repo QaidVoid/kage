@@ -111,8 +111,9 @@ jobs:
       # runs kage-desktop's suite, which needs a software GL stack.
       - run: cargo nextest run --profile ci --workspace --exclude kage-desktop --all-targets --no-tests=pass --no-fail-fast
 
-  # The shared host must stay as small as a private engine, and the
-  # standalone TUI near what the engine TUI was. Memory is only
+  # The shared host must stay as small as a private engine, the
+  # standalone TUI near what the engine TUI was, and the external
+  # session backend within its bounds. Memory is only
   # meaningful in a release build, so this measures one on Linux. The
   # session-shedding test waits 66 to 96 seconds for the projects'
   # runtimes to prune, so this job takes minutes after the build.
@@ -126,6 +127,7 @@ jobs:
         with:
           key: memory
       - run: cargo test --locked --release -p kage-cli --test shared_host -- --ignored
+      - run: cargo test --locked --release -p kage-cli --bin kage -- --ignored external_backend
 
   desktop:
     name: desktop (${{ matrix.os }})

@@ -177,6 +177,9 @@ desktop's settings, reloads the providers for every client.
 ## memory
 
 An idle host keeps about 2.5 MiB of private resident memory, and each
-`kage rpc` relay under 2 MiB, measured on a Linux release build. CI
-fails a release build whose idle host goes over 4 MiB or whose relay
-goes over 2 MiB.
+`kage rpc` relay under 2 MiB, measured on a Linux release build. A
+host that served sessions sheds back to within about a mebibyte of
+that once its last client leaves: closed sessions' state drops at
+once, and a project's runtime a minute after its last session. CI
+fails a release build whose idle host goes over 4 MiB, whose relay
+goes over 2 MiB, or that serves sessions and stays over 4 MiB.

@@ -27,7 +27,7 @@ use nix::fcntl::{Flock, FlockArg};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use serde::{Deserialize, Serialize};
 
-use crate::rpc::host::Host;
+use crate::rpc::host::{ASK_HOLD, Host};
 use crate::serve::{Budget, Log};
 
 /// The socket clients connect to, in the runtime directory.
@@ -47,8 +47,6 @@ const TAKEOVER: Duration = Duration::from_secs(10);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 // How long `kage host stop` waits after SIGTERM, and then after SIGKILL.
 const STOP_WAIT: Duration = Duration::from_secs(10);
-// How long an ask may hold the host after its last client left.
-const ASK_HOLD: Duration = Duration::from_secs(12 * 60 * 60);
 const KILL_WAIT: Duration = Duration::from_secs(5);
 // Output queued for one client before it is disconnected. A client that is
 // only paused, such as a suspended terminal editor, keeps its connection

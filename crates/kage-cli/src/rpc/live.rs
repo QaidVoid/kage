@@ -248,7 +248,6 @@ impl Live {
     /// and that still hold an open ask with no client: the host
     /// declines those, so an ask nobody can answer stops holding the
     /// session and the host.
-    #[cfg_attr(not(unix), allow(dead_code, reason = "the shared host is unix only"))]
     pub(super) fn expired_ask_roots(&self, cap: Duration) -> Vec<SessionId> {
         let now = Instant::now();
         self.orphaned
@@ -266,7 +265,6 @@ impl Live {
     }
 
     /// Forgets that `root`'s client left, after its asks were declined.
-    #[cfg_attr(not(unix), allow(dead_code, reason = "the shared host is unix only"))]
     pub(super) fn forget_orphan(&mut self, root: &SessionId) {
         self.orphaned.remove(root);
     }

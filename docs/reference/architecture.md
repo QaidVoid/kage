@@ -345,6 +345,9 @@ serve; on Windows the TCP port is the only guard:
   asked each approval with the first answer winning, a second
   client's prompt during a run fails busy, and a session no connection
   holds is closed once idle.
+- The accept loop also sheds what no client holds every 250 ms,
+  like the shared host's tick: project runtimes past their grace and
+  asks past the ask-hold cap.
 - SIGINT and SIGTERM cancel every run and give the sessions a moment
   to close their files before the process exits; a second signal
   exits at once. The connect URL printed at startup is the only place

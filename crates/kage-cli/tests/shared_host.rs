@@ -1495,6 +1495,57 @@ fn a_standalone_tui_stays_within_its_memory_budget() {
     );
 }
 
+/// A host that served sessions sheds back near its idle size once the
+/// last client leaves: the engine drops closed sessions, and the
+/// projects' runtimes prune after their grace. The measured value
+/// locally was 3.0 MiB against the idle host's 2.1 MiB.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "measures a release build: cargo test --release -p kage-cli --test shared_host -- --ignored"]
+fn a_host_that_served_sessions_sheds_to_near_its_idle_size() {
+    const BUDGET_KIB: u64 = 4 * 1024;
+    let env = Env::new();
+    let config = env.dir.path().join("config/kage");
+    std::fs::create_dir_all(&config).unwrap();
+    // Plugin content, so every project builds a runtime that has to
+    // prune once its sessions are gone.
+    std::fs::write(config.join("init.lua"), "kage.set_status('mood', 'calm')\n").unwrap();
+    let mut host = env.host(600);
+    env.ready(host.id());
+    for _ in 0..3 {
+        let project = tempfile::tempdir().unwrap();
+        let mut rpc = env.rpc(&[]);
+        rpc.request("initialize", json!({"protocolVersion": 1}));
+        let created = rpc.request(
+            "session/new",
+            json!({"cwd": project.path(), "mcpServers": []}),
+        );
+        assert!(created["result"]["sessionId"].is_string(), "{created}");
+        assert!(rpc.close().success());
+    }
+    // Wait past the project runtime's grace, then until two reads two
+    // seconds apart agree, so a slow runner cannot measure while the
+    // final prune is still pending.
+    let deadline = Instant::now() + Duration::from_secs(96);
+    std::thread::sleep(Duration::from_secs(66));
+    let mut used = rss_anon_kib(host.id());
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_secs(2));
+        let next = rss_anon_kib(host.id());
+        let settled = next.abs_diff(used) <= 32;
+        used = next;
+        if settled {
+            break;
+        }
+    }
+    eprintln!("host after sessions RssAnon: {used} KiB");
+    assert!(terminate(&mut host).success());
+    assert!(
+        used <= BUDGET_KIB,
+        "host after sessions uses {used} KiB, over {BUDGET_KIB} KiB"
+    );
+}
+
 #[test]
 fn a_host_that_cannot_start_lets_the_relay_fall_back_quickly() {
     let env = Env::new();

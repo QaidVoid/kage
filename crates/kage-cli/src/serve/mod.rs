@@ -39,7 +39,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kage_remote::head::{self, Auth, Head, HeadError};
 use kage_remote::pipe;
@@ -48,7 +48,7 @@ use signal_hook::consts::{SIGINT, SIGTERM};
 #[cfg(unix)]
 use signal_hook::iterator::Signals;
 
-use crate::rpc::host::Host;
+use crate::rpc::host::{ASK_HOLD, Host};
 
 mod assets;
 mod fetch;
@@ -58,6 +58,10 @@ use assets::WebDir;
 /// How many connections may be served at once. The next one is refused
 /// with `503`.
 pub(crate) const MAX_CONNECTIONS: usize = 16;
+
+/// How often the accept loop sheds what no client holds: project
+/// runtimes past their grace, and asks past the ask-hold cap.
+const HOUSEKEEPING: Duration = Duration::from_millis(250);
 
 /// The TCP port bound when `--port` is not given.
 pub(crate) const DEFAULT_PORT: u16 = 7433;
@@ -364,7 +368,13 @@ pub(crate) fn accept_until(
     log: &Log,
 ) {
     let _ = listener.set_nonblocking(true);
+    let mut ticked = Instant::now();
     while !stop.load(Ordering::SeqCst) {
+        if ticked.elapsed() >= HOUSEKEEPING {
+            host.prune_projects();
+            host.decline_expired_asks(ASK_HOLD);
+            ticked = Instant::now();
+        }
         match listener.accept() {
             Ok((stream, peer)) => {
                 log(&format!("connect {peer}"));

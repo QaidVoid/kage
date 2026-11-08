@@ -30,6 +30,9 @@ use super::{CliAcpAgent, live::Live, mcp};
 use crate::engine::{AgentSetup, Background, Engine, SessionSpec, WithMediaTools as _};
 use crate::permissions::PermissionGate;
 
+/// How long an ask may hold a host after its last client left.
+pub(crate) const ASK_HOLD: Duration = Duration::from_secs(12 * 60 * 60);
+
 /// Builds the engine session for a client session from the providers
 /// in effect, its id, working directory, model, the MCP servers the
 /// client passed, the environment its processes start with, the
@@ -404,7 +407,6 @@ impl Host {
 
     /// Drop the plugin runtimes of projects no session has used for a
     /// while.
-    #[cfg_attr(not(unix), allow(dead_code, reason = "the shared host is unix only"))]
     pub(crate) fn prune_projects(&self) {
         if let Some(projects) = self.projects.get() {
             projects.prune();
@@ -454,7 +456,6 @@ impl Host {
     /// least `cap` ago: a permission ask is denied, a question ask is
     /// answered with no answers. An ask nobody can answer then stops
     /// holding the session and the host after the cap.
-    #[cfg_attr(not(unix), allow(dead_code, reason = "the shared host is unix only"))]
     pub(crate) fn decline_expired_asks(&self, cap: Duration) {
         let expired = lock(&self.live).expired_ask_roots(cap);
         for root in expired {

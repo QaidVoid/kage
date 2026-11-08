@@ -8,6 +8,8 @@
 //! session or restarting a client does not reload every plugin. A session
 //! that opens after a plugin, `init.lua`, the config or the project's trust
 //! changed gets a freshly loaded runtime; sessions already open keep theirs.
+//! A project with nothing to load gets no runtime, for sessions and for the
+//! UI attach alike; see [`has_plugin_content`].
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -15,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use kage_core::config::Config;
+use kage_core::config::{Config, KeybindingsConfig};
 use kage_core::environment::Environment;
 use kage_core::options::OptionStore;
 use kage_core::sync::lock;
@@ -56,6 +58,8 @@ pub(super) struct Projects {
     loading: Mutex<()>,
     load: Loader,
     fingerprint: fn(&Path) -> u64,
+    /// Whether the project at a workdir has anything to load.
+    has_content: fn(&Path) -> bool,
 }
 
 impl Default for Projects {
@@ -65,6 +69,7 @@ impl Default for Projects {
             loading: Mutex::default(),
             load,
             fingerprint,
+            has_content: has_plugin_content,
         }
     }
 }
@@ -74,8 +79,8 @@ impl Projects {
     /// none or what it loads from changed, with `model` and the prompt
     /// `system_prompt` builds as what `kage.config()` reports, and `env`
     /// for work no session asked for. What it loads from is read at most
-    /// every [`RECHECK`]. `None` when the runtime cannot be built; sessions
-    /// then run without plugins.
+    /// every [`RECHECK`]. `None` when the project has no plugin content or
+    /// the runtime cannot be built; sessions then run without plugins.
     pub(super) fn get(
         &self,
         workdir: &Path,
@@ -110,6 +115,9 @@ impl Projects {
         if let Some(project) = current(&mut lock(&self.entries)) {
             return Some(project);
         }
+        if !(self.has_content)(&key) {
+            return None;
+        }
         let project = (self.load)(&key, model, &system_prompt(), env)?;
         lock(&self.entries).insert(
             key,
@@ -121,6 +129,16 @@ impl Projects {
             },
         );
         Some(project)
+    }
+
+    /// A registry that loads with `load` where `has_content` allows.
+    #[cfg(test)]
+    pub(super) fn with_hooks(load: Loader, has_content: fn(&Path) -> bool) -> Self {
+        Self {
+            load,
+            has_content,
+            ..Self::default()
+        }
     }
 
     /// Drop the runtimes no session has held for [`GRACE`].
@@ -203,23 +221,41 @@ fn fingerprint(workdir: &Path) -> u64 {
     hasher.finish()
 }
 
-/// Whether anything would load into a project runtime: an entry under
-/// the plugins directory, the user's `init.lua`, or the user's `lua/`
-/// modules. When none does, nothing a session consumes would register
-/// in one, so sessions skip building it.
-pub(super) fn has_plugin_content() -> bool {
+/// Whether anything would load into the runtime of the project at
+/// `workdir`: an entry under the plugins directory, the user's
+/// `init.lua`, the user's `lua/` modules, or a `[keybindings]` table that
+/// maps a chord or carries keys the loader reports. When none does,
+/// nothing a session consumes would register in one, so no runtime is
+/// built. `[keybindings]` `leader` and `timeoutlen` alone do not count:
+/// they only shape mappings.
+pub(super) fn has_plugin_content(workdir: &Path) -> bool {
+    let keybindings = Config::load_layered(workdir)
+        .map(|config| config.keybindings)
+        .unwrap_or_default();
     has_plugin_content_in(
         crate::plugins_dir().ok().as_deref(),
         crate::config_dir().ok().as_deref(),
+        &keybindings,
     )
 }
 
-/// [`has_plugin_content`] over given directories, so tests need no
-/// environment isolation.
-fn has_plugin_content_in(plugins_dir: Option<&Path>, user_dir: Option<&Path>) -> bool {
-    let occupied =
-        |dir: &Path| std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_some());
-    plugins_dir.is_some_and(occupied)
+/// [`has_plugin_content`] over given directories and keybindings, so
+/// tests need no environment isolation.
+fn has_plugin_content_in(
+    plugins_dir: Option<&Path>,
+    user_dir: Option<&Path>,
+    keybindings: &KeybindingsConfig,
+) -> bool {
+    let occupied = |dir: &Path| {
+        std::fs::read_dir(dir).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+        })
+    };
+    !keybindings.bindings.is_empty()
+        || !keybindings.unknown.is_empty()
+        || plugins_dir.is_some_and(occupied)
         || user_dir.is_some_and(|dir| dir.join("init.lua").is_file() || occupied(&dir.join("lua")))
 }
 
@@ -254,21 +290,70 @@ mod tests {
     #[test]
     fn a_runtime_loads_only_for_plugin_content() {
         let empty = tempfile::tempdir().unwrap();
-        assert!(!has_plugin_content_in(None, None));
-        assert!(!has_plugin_content_in(Some(empty.path()), None));
-        assert!(!has_plugin_content_in(None, Some(empty.path())));
+        let none = KeybindingsConfig::default();
+        assert!(!has_plugin_content_in(None, None, &none));
+        assert!(!has_plugin_content_in(Some(empty.path()), None, &none));
+        assert!(!has_plugin_content_in(None, Some(empty.path()), &none));
 
         let plugins = tempfile::tempdir().unwrap();
         std::fs::write(plugins.path().join("greet.lua"), "").unwrap();
-        assert!(has_plugin_content_in(Some(plugins.path()), None));
+        assert!(has_plugin_content_in(Some(plugins.path()), None, &none));
 
         let user = tempfile::tempdir().unwrap();
         std::fs::write(user.path().join("init.lua"), "").unwrap();
-        assert!(has_plugin_content_in(None, Some(user.path())));
+        assert!(has_plugin_content_in(None, Some(user.path()), &none));
 
         std::fs::create_dir(user.path().join("lua")).unwrap();
         std::fs::write(user.path().join("lua").join("util.lua"), "").unwrap();
-        assert!(has_plugin_content_in(None, Some(user.path())));
+        assert!(has_plugin_content_in(None, Some(user.path()), &none));
+    }
+
+    /// A `[keybindings]` mapping loads a runtime, but a lone leader does
+    /// not, and a stray dotfile does not make a directory occupied.
+    #[test]
+    fn keybindings_count_and_dotfiles_do_not() {
+        let mut keys = KeybindingsConfig::default();
+        let empty = tempfile::tempdir().unwrap();
+        assert!(!has_plugin_content_in(None, None, &keys));
+        keys.leader = ",".to_owned();
+        assert!(!has_plugin_content_in(None, None, &keys));
+        keys.bindings.insert("<leader>x".into(), "quit".into());
+        assert!(has_plugin_content_in(None, None, &keys));
+        let stray = KeybindingsConfig {
+            unknown: [("<leader>y".to_owned(), serde_json::json!("quit"))].into(),
+            ..KeybindingsConfig::default()
+        };
+        assert!(has_plugin_content_in(None, None, &stray));
+
+        let none = KeybindingsConfig::default();
+        std::fs::write(empty.path().join(".DS_Store"), "").unwrap();
+        assert!(!has_plugin_content_in(Some(empty.path()), None, &none));
+        std::fs::write(empty.path().join("greet.lua"), "").unwrap();
+        assert!(has_plugin_content_in(Some(empty.path()), None, &none));
+    }
+
+    /// A project with nothing to load gets no runtime from `get`, whichever
+    /// path asks, and the loader never runs.
+    #[test]
+    fn a_project_without_content_loads_no_runtime() {
+        static LOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = tempfile::tempdir().unwrap();
+        let projects = Projects {
+            entries: Mutex::default(),
+            loading: Mutex::default(),
+            fingerprint: |_| 0,
+            load: |_, _, _, _| {
+                LOADS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Some(Project {
+                    runtime: Arc::new(PluginRuntime::new().unwrap()),
+                    options: SharedOptions::default(),
+                })
+            },
+            has_content: |_| false,
+        };
+        let get = || projects.get(dir.path(), "mock/m", &String::new, &Environment::inherit());
+        assert!(get().is_none());
+        assert_eq!(LOADS.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     /// Sessions in one project share its runtime, another project gets its
@@ -287,6 +372,7 @@ mod tests {
                     options: SharedOptions::default(),
                 })
             },
+            has_content: |_| true,
         };
         let first = projects
             .get(one.path(), "mock/m", &String::new, &Environment::inherit())
@@ -332,6 +418,7 @@ mod tests {
                     options: SharedOptions::default(),
                 })
             },
+            has_content: |_| true,
         };
         let get = || {
             projects

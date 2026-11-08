@@ -15,7 +15,10 @@
 //! `take_pending_session_ops_for` serves the session it names plus the
 //! owner-less ops, and `take_pending_session_ops` drains everything,
 //! which the engine only calls when no session is in scope. An
-//! implementation must keep that split.
+//! implementation must keep that split, except that one serving a
+//! single session over a shared connection (the client-hosted proxy)
+//! drains that session's ops and the owner-less ones for it, so two
+//! sessions on one connection never take each other's ops.
 
 use std::sync::Arc;
 
@@ -68,7 +71,8 @@ pub trait SessionPlugins: Send + Sync {
 
     /// Drain every queued session operation, whatever session it
     /// names, and the owner-less ones. The engine only calls this when
-    /// no session is in scope.
+    /// no session is in scope. An implementation bound to one session
+    /// drains that session's ops and the owner-less ones.
     fn take_pending_session_ops(&self) -> Vec<PendingSessionOp>;
 
     /// Drain the session operations queued for `session`, plus the

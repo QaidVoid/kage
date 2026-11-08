@@ -1506,6 +1506,32 @@ fn swarm_mode_and_shell_count_reach_the_state_snapshot() {
 }
 
 #[test]
+fn a_pinned_output_cap_reaches_the_provider_request() {
+    let mock = MockProvider::replaying(text_turn("ok"));
+    let h = harness(mock.clone());
+    let id = SessionId::new();
+    let mut spec = h.spec(id);
+    spec.cx.max_output_tokens = Some(1_024);
+    h.engine.open(spec);
+    prompt(&h.engine, id, "hi", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+    assert_eq!(mock.requests()[0].max_output_tokens, Some(1_024));
+    h.engine.shutdown();
+}
+
+#[test]
+fn an_unpinned_output_cap_follows_the_model() {
+    let mock = MockProvider::replaying(text_turn("ok"));
+    let h = harness(mock.clone());
+    let id = SessionId::new();
+    h.open(id, None);
+    prompt(&h.engine, id, "hi", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+    assert_eq!(mock.requests()[0].max_output_tokens, None);
+    h.engine.shutdown();
+}
+
+#[test]
 fn shell_output_reaches_the_next_request() {
     let mock = MockProvider::replaying(text_turn("ok"));
     let h = harness(mock.clone());

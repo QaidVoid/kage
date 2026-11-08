@@ -6902,6 +6902,58 @@ fn a_session_bound_attach_pins_its_runtime() {
     assert_eq!(missing.code, -32602);
 }
 
+/// The cwd-based attach follows the same plugin-content gate as a
+/// session open: a project with nothing to load has no runtime to
+/// attach to, and one with content does.
+#[test]
+fn the_cwd_attach_follows_the_plugin_content_gate() {
+    #[expect(clippy::unnecessary_wraps, reason = "the loader's signature")]
+    fn load(_: &Path, _: &str, _: &str, _: &Environment) -> Option<super::projects::Project> {
+        let mut caps = std::collections::BTreeMap::new();
+        caps.insert("p".to_owned(), Vec::<String>::new());
+        let runtime = Arc::new(
+            kage_plugin::PluginRuntime::builder()
+                .capabilities(caps)
+                .build()
+                .unwrap(),
+        );
+        runtime
+            .eval_plugin(
+                "p",
+                "kage.register_command({ name = 'first', description = 'd', \
+                   handler = function() return 'one' end })",
+            )
+            .unwrap();
+        Some(super::projects::Project {
+            runtime,
+            options: kage_plugin::SharedOptions::default(),
+        })
+    }
+    let attach = |has_content: fn(&Path) -> bool| {
+        let dir = tempfile::tempdir().unwrap();
+        let h = serve(Vec::new(), dir.path(), dir.path());
+        h.host
+            .set_projects_for_test(super::projects::Projects::with_hooks(load, has_content));
+        h.client.request(
+            "_kage/ui/attach",
+            serde_json::json!({
+                "cwd": dir.path().display().to_string(),
+                "attachId": 1,
+            }),
+        )
+    };
+    assert_eq!(attach(|_| false).unwrap_err().code, -32603);
+    let ui = attach(|_| true).unwrap();
+    assert!(
+        ui["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["name"] == "first"),
+        "{ui}"
+    );
+}
+
 /// A session without plugins refuses a session-bound attach, and so
 /// does an unknown session id.
 #[test]
@@ -7211,6 +7263,13 @@ fn a_client_plugin_ask_without_the_capability_is_refused() {
     });
     let err = h.client.request("session/new", params).unwrap_err();
     assert!(err.to_string().contains("pluginHost"), "{err}");
+    let probe = h
+        .client
+        .request("_kage/round_trip", serde_json::Value::Null);
+    assert!(
+        probe.is_err(),
+        "an unknown method is answered with an error"
+    );
     let asked_plugin = std::iter::from_fn(|| h.inbox.try_recv().ok()).any(|msg| {
         matches!(
             msg,
@@ -7221,6 +7280,29 @@ fn a_client_plugin_ask_without_the_capability_is_refused() {
         !asked_plugin,
         "no plugin request may reach a client without the capability"
     );
+}
+
+#[test]
+fn session_new_fails_when_the_client_cannot_list_its_plugin_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(vec![text_turn("hi")], dir.path(), dir.path());
+    initialize_plugin_host(&h.client);
+    let client = h.client.clone();
+    std::thread::spawn(move || {
+        for msg in h.inbox {
+            if let Inbound::Request { id, method, .. } = msg {
+                assert_eq!(method, "_kage/plugin/tools");
+                let _ = client.respond(&id, Err(RpcError::internal("plugin host crashed")));
+            }
+        }
+    });
+    let params = serde_json::json!({
+        "cwd": dir.path().display().to_string(),
+        "mcpServers": [],
+        "_meta": { "kage": { "plugins": "client" } },
+    });
+    let err = h.client.request("session/new", params).unwrap_err();
+    assert!(err.to_string().contains("plugin host crashed"), "{err}");
 }
 
 #[test]
@@ -7343,10 +7425,10 @@ fn session_meta_settings_reach_the_spec() {
             max_output_tokens: Some(1_024),
         }),
     };
-    let settings = SessionSettings::of(Some(&meta));
+    let settings = SessionSettings::of(Some(&meta), false).unwrap();
     assert_eq!(settings.system_prompt.as_deref(), Some("be terse"));
     let mut spec = default_spec();
-    settings.apply(&mut spec, false);
+    settings.apply(&mut spec);
     assert_eq!(spec.gate.mode(), Some(PermissionAction::Allow));
     assert!((spec.loop_cfg.compaction_threshold - 0.5).abs() < f32::EPSILON);
     assert_eq!(spec.loop_cfg.max_provider_retries, 2);
@@ -7358,16 +7440,19 @@ fn session_meta_settings_reach_the_spec() {
 
 #[test]
 fn a_session_without_meta_keeps_the_host_defaults() {
-    let settings = SessionSettings::of(None);
+    let settings = SessionSettings::of(None, false).unwrap();
     let mut spec = default_spec();
-    settings.apply(&mut spec, false);
+    settings.apply(&mut spec);
     assert_eq!(spec.gate.mode(), None);
     assert_eq!(spec.cx.max_output_tokens, None);
     assert_eq!(spec.agents.unwrap().background, Background::Hold);
 
     // A kage client's background agents wake it, as before the meta.
     let mut spec = default_spec();
-    SessionSettings::host_defaults(true).apply(&mut spec, true);
+    SessionSettings::of(None, true).unwrap().apply(&mut spec);
+    assert_eq!(spec.agents.unwrap().background, Background::Wake);
+    let mut spec = default_spec();
+    SessionSettings::host_defaults(true).apply(&mut spec);
     assert_eq!(spec.agents.unwrap().background, Background::Wake);
 }
 
@@ -7394,4 +7479,51 @@ fn a_session_new_meta_sets_the_session_up() {
         .find(|option| option["id"] == "thinking")
         .unwrap_or_else(|| panic!("thinking option in {created}"));
     assert_eq!(thinking["currentValue"], "high");
+    let mode = created["configOptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|option| option["id"] == "mode")
+        .unwrap_or_else(|| panic!("mode option in {created}"));
+    assert_eq!(mode["currentValue"], "allow", "yolo opens in allow mode");
+}
+
+fn new_session_with_opt(
+    opt: &serde_json::Value,
+) -> Result<serde_json::Value, kage_jsonrpc::RpcError> {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(vec![text_turn("hi")], dir.path(), dir.path());
+    initialize(&h.client);
+    let params = serde_json::json!({
+        "cwd": dir.path().display().to_string(),
+        "mcpServers": [],
+        "_meta": { "kage": { "opt": opt } },
+    });
+    h.client.request("session/new", params)
+}
+
+#[test]
+fn out_of_range_session_opts_are_invalid_params() {
+    for opt in [
+        serde_json::json!({ "compactionThreshold": 1.5 }),
+        serde_json::json!({ "compactionThreshold": -0.1 }),
+        serde_json::json!({ "maxProviderRetries": -1 }),
+        serde_json::json!({ "maxProviderRetries": 11 }),
+        serde_json::json!({ "thinkingLevel": "bogus" }),
+    ] {
+        let err = new_session_with_opt(&opt).unwrap_err();
+        assert_eq!(err.code, -32602, "{opt}: {err}");
+    }
+}
+
+#[test]
+fn in_range_session_opts_are_accepted() {
+    for opt in [
+        serde_json::json!({ "compactionThreshold": 0.0, "maxProviderRetries": 0 }),
+        serde_json::json!({ "compactionThreshold": 1.0, "maxProviderRetries": 10 }),
+        serde_json::json!({ "thinkingLevel": "auto" }),
+        serde_json::json!({ "thinkingLevel": "default" }),
+    ] {
+        new_session_with_opt(&opt).unwrap_or_else(|e| panic!("{opt}: {e}"));
+    }
 }

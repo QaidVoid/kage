@@ -712,7 +712,12 @@ impl super::Dispatcher {
                 .and_then(kage_core::ThinkingLevel::parse);
             session.swarm_mode = replay.swarm_mode.unwrap_or(false);
             session.gate.set_plan(replay.plan_mode.unwrap_or(false));
-            super::fit_context(&mut cx, &self.registry, &session.state.model);
+            super::fit_context(
+                &mut cx,
+                &self.registry,
+                &session.state.model,
+                session.output_cap,
+            );
             session.usage = super::usage_of(&cx);
             session.state.thinking = cx.thinking_level;
             super::fit_to_model(&mut session.state, &self.registry);
@@ -879,7 +884,12 @@ impl super::Dispatcher {
         self.swarm_requeues.remove(&old);
         self.bus.forget(old);
         self.report_closed(old, instance);
-        super::fit_context(&mut cx, &self.registry, &session.state.model);
+        super::fit_context(
+            &mut cx,
+            &self.registry,
+            &session.state.model,
+            session.output_cap,
+        );
         session.usage = super::usage_of(&cx);
         session.state.thinking = cx.thinking_level;
         super::fit_to_model(&mut session.state, &self.registry);

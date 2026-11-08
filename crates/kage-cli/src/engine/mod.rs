@@ -603,6 +603,10 @@ struct Session {
     /// Whether the session delegates repeated work through `swarm`.
     /// Drives the workflow block injected once per state change.
     swarm_mode: bool,
+    /// An output cap the opener set that differs from the model's own.
+    /// It outlives model switches and run starts, which refit the
+    /// context to the model.
+    output_cap: Option<u32>,
 }
 
 impl Session {
@@ -764,6 +768,7 @@ impl Dispatcher {
             shell,
         } = spec;
         let usage = usage_of(&cx);
+        let output_cap = pinned_output_cap(&cx, &self.registry, &model);
         let mut state = SessionState {
             model: kage_core::canonical_model(&model),
             thinking: cx.thinking_level,
@@ -842,6 +847,7 @@ impl Dispatcher {
                 instance,
                 plugin_env: plugin_session,
                 swarm_mode: false,
+                output_cap,
             },
         );
         self.active.get_or_insert(id);
@@ -1073,7 +1079,12 @@ impl Dispatcher {
                     if let Some(recorder) = idle.recorder.as_mut() {
                         report_write(&self.bus, id, recorder.set_model(&session.state.model));
                     }
-                    fit_context(&mut idle.cx, &self.registry, &session.state.model);
+                    fit_context(
+                        &mut idle.cx,
+                        &self.registry,
+                        &session.state.model,
+                        session.output_cap,
+                    );
                     show_window(&self.bus, id, &mut session.usage, idle.cx.context_window);
                 }
                 None => session.model_changed = true,
@@ -1413,7 +1424,7 @@ impl Dispatcher {
         }
         cx.model = bare_model;
         cx.session = Some(id);
-        fit_context(&mut cx, &self.registry, &model);
+        fit_context(&mut cx, &self.registry, &model, session.output_cap);
         if std::mem::take(&mut session.thinking_changed) {
             cx.thinking_level = session.state.thinking;
             if let Some(recorder) = recorder.as_mut() {
@@ -2498,15 +2509,28 @@ fn requeue_backoff(
 
 pub(crate) const AUTO_THINKING: &str = "default";
 
+/// The output cap `cx` carries when it differs from what `model` allows,
+/// which only an opener that chose one sets.
+fn pinned_output_cap(cx: &AgentContext, registry: &ProviderRegistry, model: &str) -> Option<u32> {
+    cx.max_output_tokens
+        .filter(|cap| crate::runtime_env::max_output_tokens_for(registry, model) != Some(*cap))
+}
+
 /// Set what `cx` takes from `model` (`provider/model`): its prompt
 /// identity, window, output cap, thinking settings and the media it
-/// reads and produces.
-fn fit_context(cx: &mut AgentContext, registry: &ProviderRegistry, model: &str) {
+/// reads and produces. A `pinned` output cap wins over the model's.
+fn fit_context(
+    cx: &mut AgentContext,
+    registry: &ProviderRegistry,
+    model: &str,
+    pinned: Option<u32>,
+) {
     crate::runtime_env::update_model(&mut cx.system_prompt, model);
     if let Some(window) = crate::runtime_env::context_window_for(registry, model) {
         cx.context_window = window;
     }
-    cx.max_output_tokens = crate::runtime_env::max_output_tokens_for(registry, model);
+    cx.max_output_tokens =
+        pinned.or_else(|| crate::runtime_env::max_output_tokens_for(registry, model));
     cx.reasoning = crate::runtime_env::reasoning_for(registry, model);
     cx.produces = crate::runtime_env::produces_for(registry, model);
     cx.accepts = crate::runtime_env::input_for(registry, model);

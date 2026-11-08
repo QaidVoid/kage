@@ -79,6 +79,7 @@ use kage_acp::acp::{UiAttachRequest, UiCommandRequest, UiKeymapRequest, UiOutput
 use kage_acp::agent::{Agent, PromptContext};
 use kage_core::config::{Config, McpServer as McpSpec, PluginsConfig};
 use kage_core::environment::Environment;
+use kage_core::options::OptionValue;
 
 /// How large a client's environment may be when it announces itself in
 /// `_kage/environment`. A larger one is not sent, and that client's
@@ -108,7 +109,7 @@ use mcp::editor_servers;
 use options::{Changed, Settings, Shown, config_options};
 use sessions::list_page;
 
-use crate::engine::{Background, Recorder, SessionSpec, SubscriptionId};
+use crate::engine::{AUTO_THINKING, Background, Recorder, SessionSpec, SubscriptionId};
 
 /// What a redacted config value reads as.
 const REDACTED: &str = "<redacted>";
@@ -134,29 +135,46 @@ pub(crate) struct SessionSettings {
 }
 
 impl SessionSettings {
-    /// What a `session/new`'s `_meta.kage` asked for.
-    fn of(meta: Option<&NewSessionMeta>) -> Self {
+    /// What a `session/new`'s `_meta.kage` asked for, on top of
+    /// [`Self::host_defaults`].
+    ///
+    /// # Errors
+    ///
+    /// `-32602` when a value is out of range: a compaction threshold
+    /// outside the option's bounds, retries outside the option's range,
+    /// or a thinking level that is neither `auto` nor a known level.
+    fn of(meta: Option<&NewSessionMeta>, kage_client: bool) -> Result<Self, RpcError> {
         let kage = meta.and_then(|meta| meta.kage.as_ref());
-        Self {
+        let defaults = Self::host_defaults(kage_client);
+        let opt = kage.and_then(|kage| kage.opt.clone());
+        if let Some(opt) = &opt {
+            validate_opt(opt)?;
+        }
+        Ok(Self {
             system_prompt: kage.and_then(|kage| kage.system_prompt.clone()),
             background: kage
                 .and_then(|kage| kage.background)
                 .map(|background| match background {
                     SessionBackground::Wake => Background::Wake,
                     SessionBackground::Hold => Background::Hold,
-                }),
+                })
+                .or(defaults.background),
             yolo: kage.is_some_and(|kage| kage.yolo),
-            opt: kage.and_then(|kage| kage.opt.clone()),
+            opt,
             max_output_tokens: kage.and_then(|kage| kage.max_output_tokens),
-        }
+        })
     }
 
     /// What a session the wire names no settings for runs with: the
     /// host's own defaults, with a kage client's background agents
-    /// waking it.
+    /// waking it. The one place the background default is derived.
     fn host_defaults(kage_client: bool) -> Self {
         Self {
-            background: kage_client.then_some(Background::Wake),
+            background: Some(if kage_client {
+                Background::Wake
+            } else {
+                Background::Hold
+            }),
             ..Self::default()
         }
     }
@@ -164,13 +182,9 @@ impl SessionSettings {
     /// Applies what acts on the built spec: the background agents, the
     /// allow mode, the loop settings, the thinking level and the
     /// output limit. The system prompt rode along into the spec build.
-    fn apply(&self, spec: &mut SessionSpec, kage_client: bool) {
+    fn apply(&self, spec: &mut SessionSpec) {
         if let Some(agents) = spec.agents.as_mut() {
-            agents.background = self.background.unwrap_or(if kage_client {
-                Background::Wake
-            } else {
-                Background::Hold
-            });
+            agents.background = self.background.unwrap_or(Background::Hold);
         }
         if self.yolo {
             spec.gate.set_mode(Some(PermissionAction::Allow));
@@ -196,6 +210,34 @@ impl SessionSettings {
             spec.cx.max_output_tokens = Some(tokens);
         }
     }
+}
+
+/// Checks the client's loop settings against the bounds the option
+/// store enforces for the same settings.
+fn validate_opt(opt: &SessionOpt) -> Result<(), RpcError> {
+    let invalid = |detail: String| RpcError::new(-32602, detail);
+    if let Some(threshold) = opt.compaction_threshold {
+        let def = kage_core::options::lookup("compaction_threshold")
+            .map_err(|e| RpcError::internal(e.to_string()))?;
+        def.validate(OptionValue::Float(threshold))
+            .map_err(|e| invalid(format!("opt.compactionThreshold: {e}")))?;
+    }
+    if let Some(retries) = opt.max_provider_retries {
+        let def = kage_core::options::lookup("max_provider_retries")
+            .map_err(|e| RpcError::internal(e.to_string()))?;
+        def.validate(OptionValue::Int(retries))
+            .map_err(|e| invalid(format!("opt.maxProviderRetries: {e}")))?;
+    }
+    if let Some(level) = opt.thinking_level.as_deref()
+        && level != "auto"
+        && level != AUTO_THINKING
+        && ThinkingLevel::parse(level).is_none()
+    {
+        return Err(invalid(format!(
+            "opt.thinkingLevel: unknown level `{level}`"
+        )));
+    }
+    Ok(())
 }
 
 /// The plugins in `dir`, scripts and packages, by name, each marked
@@ -552,7 +594,15 @@ impl CliAcpAgent {
         if self.unconfigured_run.load(Ordering::SeqCst) {
             spec.gate = spec.gate.with_fallback(PermissionAction::Allow);
         }
-        settings.apply(&mut spec, self.kage_client.load(Ordering::SeqCst));
+        settings.apply(&mut spec);
+        debug_assert!(
+            runtime.as_ref().is_none_or(|runtime| {
+                spec.plugins.as_ref().is_some_and(|plugins| {
+                    std::ptr::addr_eq(Arc::as_ptr(plugins), Arc::as_ptr(runtime))
+                })
+            }),
+            "a spec's runtime is the one its plugins are"
+        );
         Ok((spec, runtime))
     }
 
@@ -713,7 +763,8 @@ impl Agent for CliAcpAgent {
             crate::plan_session_in(&self.host.sessions, &self.host.default_model, "");
         let id = header.session;
         let plugins = self.hosted_plugins(id, req.meta.as_ref())?;
-        let settings = SessionSettings::of(req.meta.as_ref());
+        let settings =
+            SessionSettings::of(req.meta.as_ref(), self.kage_client.load(Ordering::SeqCst))?;
         let (mut spec, runtime) = self.session_spec(
             id,
             &req.cwd,

@@ -25,8 +25,12 @@ use kage_provider::{Provider, ProviderRegistry};
 use kage_tools::ToolRegistry;
 
 use super::options::{Settings, choice};
-use super::projects::{Project, Projects, has_plugin_content};
-use super::{CliAcpAgent, live::Live, mcp};
+use super::projects::{Project, Projects};
+use super::{
+    CliAcpAgent,
+    live::{AskRef, Live},
+    mcp,
+};
 use crate::engine::{AgentSetup, Background, Engine, SessionSpec, WithMediaTools as _};
 use crate::permissions::PermissionGate;
 
@@ -400,6 +404,12 @@ impl Host {
             .get(workdir, &self.default_model, &prompt, env)
     }
 
+    /// Installs the project registry a test host loads runtimes from.
+    #[cfg(test)]
+    pub(super) fn set_projects_for_test(&self, projects: Projects) {
+        assert!(self.projects.set(Arc::new(projects)).is_ok());
+    }
+
     /// The plugin runtime the session `id` was launched with.
     pub(super) fn session_runtime(&self, id: SessionId) -> Option<Arc<kage_plugin::PluginRuntime>> {
         lock(&self.runtimes).get(&id).cloned()
@@ -457,10 +467,9 @@ impl Host {
     /// answered with no answers. An ask nobody can answer then stops
     /// holding the session and the host after the cap.
     pub(crate) fn decline_expired_asks(&self, cap: Duration) {
-        let expired = lock(&self.live).expired_ask_roots(cap);
-        for root in expired {
-            self.decline_asks_under(root);
-            lock(&self.live).forget_orphan(&root);
+        let expired = lock(&self.live).take_expired_asks(cap);
+        for ask in expired {
+            self.decline(&ask);
         }
     }
 
@@ -469,20 +478,25 @@ impl Host {
     /// connection is left to answer, so runs parked on an ask go on
     /// instead of waiting for a client that is gone.
     pub(super) fn decline_asks_under(&self, root: SessionId) {
-        for ask in lock(&self.live).asks_under(root) {
-            let kind = if ask.question {
-                CommandKind::AnswerQuestion {
-                    request_id: ask.request_id,
-                    answers: None,
-                }
-            } else {
-                CommandKind::ResolvePermission {
-                    request_id: ask.request_id,
-                    decision: PermissionDecision::Deny,
-                }
-            };
-            self.engine.send(Command::to(ask.session, kind));
+        let asks = lock(&self.live).asks_under(root);
+        for ask in asks {
+            self.decline(&ask);
         }
+    }
+
+    fn decline(&self, ask: &AskRef) {
+        let kind = if ask.question {
+            CommandKind::AnswerQuestion {
+                request_id: ask.request_id,
+                answers: None,
+            }
+        } else {
+            CommandKind::ResolvePermission {
+                request_id: ask.request_id,
+                decision: PermissionDecision::Deny,
+            }
+        };
+        self.engine.send(Command::to(ask.session, kind));
     }
 
     /// The next connection's id on this host.
@@ -564,10 +578,8 @@ fn model_choices(registry: &ProviderRegistry) -> Arc<[SessionConfigSelectOption]
         .collect()
 }
 
-/// The project runtime a session opens with, or `None` when the host has
-/// no plugin content: nothing under the plugins directory, no user
-/// `init.lua`, no user `lua/` modules. Nothing a session consumes would
-/// register in one, so none is built.
+/// The project runtime a session opens with, or `None` when the project
+/// has no plugin content or its runtime did not load.
 fn project_runtime(
     projects: &Projects,
     workdir: &Path,
@@ -575,9 +587,6 @@ fn project_runtime(
     system_role: &str,
     env: &Environment,
 ) -> Option<Project> {
-    if !has_plugin_content() {
-        return None;
-    }
     let bare = crate::runtime_env::build_system_prompt(system_role, workdir, model, &[], None);
     projects.get(workdir, model, &|| bare.clone(), env)
 }
@@ -987,20 +996,43 @@ mod tests {
         let id = SessionId::new();
         launched_with(&host, id, &dir, question_event(5));
         host.release(id);
-        std::thread::sleep(Duration::from_millis(60));
-        // The second ask is brand new: its window starts at the ask,
-        // not at the release 30 ms ago, so a cap the old stamp would
-        // already exceed does not expire it.
+        let released = lock(&host.live).orphan_stamp(id).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
         lock(&host.live).observe(&Envelope {
             session: id,
             seq: 2,
             event: Event::Host(question_event(6)),
         });
+        let asked = lock(&host.live).orphan_stamp(id).unwrap();
+        assert!(asked > released, "the new ask restarted the window");
+        host.shutdown();
+    }
+
+    #[test]
+    fn expired_asks_are_taken_once_and_not_from_a_client_that_came_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host_in(&dir);
+        let id = SessionId::new();
+        launched_with(&host, id, &dir, question_event(7));
+        host.release(id);
+
+        host.attach(id, false);
         assert!(
-            !lock(&host.live)
-                .expired_ask_roots(Duration::from_millis(30))
-                .contains(&id),
-            "the new ask refreshed the window"
+            lock(&host.live)
+                .take_expired_asks(Duration::ZERO)
+                .is_empty(),
+            "an attached session keeps its asks"
+        );
+
+        host.release(id);
+        let first = lock(&host.live).take_expired_asks(Duration::ZERO);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].session, id);
+        assert!(
+            lock(&host.live)
+                .take_expired_asks(Duration::ZERO)
+                .is_empty(),
+            "a second housekeeping thread gets nothing"
         );
         host.shutdown();
     }

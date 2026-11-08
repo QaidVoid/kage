@@ -66,6 +66,10 @@ pub(crate) struct Record {
     pub(crate) socket: PathBuf,
     /// When the host started accepting clients.
     pub(crate) started: DateTime<Utc>,
+    /// Why the web endpoint `[host] web` asks for is not running, when
+    /// it could not start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) web_error: Option<String>,
 }
 
 /// Entry point for `kage host run`. A detached host, started by a client,
@@ -106,12 +110,20 @@ fn serve(
     kage_core::reaper::start();
     let host = Host::start(None, "", false)?;
     let budget = Budget::new(MAX_CONNECTIONS);
+    let mut web_error = None;
     let mut web = if host_cfg.web {
-        Some(start_web(host_cfg, &host, budget.clone(), log)?)
+        match start_web(host_cfg, &host, budget.clone(), log) {
+            Ok(web) => Some(web),
+            Err(e) => {
+                log(&format!("web endpoint not started: {e}"));
+                web_error = Some(e);
+                None
+            }
+        }
     } else {
         None
     };
-    published.record(&dir)?;
+    published.record(&dir, web_error)?;
     log(&format!(
         "accepting clients on {}",
         dir.join(SOCKET).display()
@@ -131,14 +143,13 @@ fn serve(
         }
         listener = bind_socket(&published.socket)?;
     }
-    // The web endpoint stops accepting first: a web client that dials
-    // from here on is refused, and a local one starts a new host with
-    // the rest. The socket goes
-    // next: a client either connected before and is served now, or
-    // connects after and starts a new host. The record goes last, once
-    // the lock is about to go: a host holds the lock only while its
-    // socket or its record is present, so a starting instance can tell
-    // a host from a serve, which publishes neither.
+    // The web endpoint stops accepting first, then the socket: a client
+    // either connected before and is served now, or connects after and
+    // starts a new host. The socket and the record go last, while the
+    // lock is still held, so a successor that takes the lock next binds
+    // a socket this host never touches. A host holds the lock only
+    // while its socket or its record is present, so a starting instance
+    // can tell a host from a serve, which publishes neither.
     if let Some(web) = web.as_mut() {
         web.stop();
     }
@@ -148,7 +159,6 @@ fn serve(
     thread::sleep(SHUTDOWN_GRACE);
     published.retire();
     drop(lock);
-    drop(published);
     Ok(())
 }
 
@@ -186,6 +196,9 @@ pub(crate) fn status() -> ExitCode {
             .format("%Y-%m-%d %H:%M:%S")
     );
     println!("socket   {}", record.socket.display());
+    if let Some(error) = &record.web_error {
+        println!("web      not running: {error}");
+    }
     if let Ok(log) = crate::host_client::log_path() {
         println!("log      {} (a host clients started)", log.display());
     }
@@ -211,12 +224,15 @@ pub(crate) fn stop() -> ExitCode {
 }
 
 fn stop_host() -> Result<Option<String>, String> {
+    stop_host_in(&crate::paths::runtime_dir()?)
+}
+
+fn stop_host_in(dir: &Path) -> Result<Option<String>, String> {
     use nix::sys::signal::{Signal, kill};
-    let dir = crate::paths::runtime_dir()?;
-    if !lock_held(&dir) {
+    if !lock_held(dir) {
         return Ok(None);
     }
-    let record = match read_record(&dir) {
+    let record = match read_record(dir) {
         Some(record) => record,
         None if dir.join(SOCKET).exists() => {
             return Err(
@@ -235,13 +251,30 @@ fn stop_host() -> Result<Option<String>, String> {
     let pid = i32::try_from(record.pid)
         .map(nix::unistd::Pid::from_raw)
         .map_err(|e| e.to_string())?;
+    let running = kill(pid, None) != Err(nix::errno::Errno::ESRCH);
+    let host = running.then(|| is_host_process(pid));
+    if host != Some(Some(true)) {
+        if !lock_held(dir) {
+            return Ok(None);
+        }
+        let why = match host {
+            None => format!("pid {pid} is not running"),
+            Some(Some(_)) => format!("pid {pid} is not a kage host"),
+            Some(None) => format!("cannot tell whether pid {pid} is a kage host"),
+        };
+        return Err(format!(
+            "{} is a stale record: {why}, so nothing was signalled; another kage \
+             instance holds the lock, probably a kage serve, to stop in its own terminal",
+            dir.join(RECORD).display()
+        ));
+    }
     let stopped = Ok(Some(format!("stopped the shared host (pid {pid})")));
     match kill(pid, Signal::SIGTERM) {
         Err(nix::errno::Errno::ESRCH) => return stopped,
         Err(e) => return Err(format!("cannot stop pid {pid}: {e}")),
         Ok(()) => {}
     }
-    if gone(&dir, &record, STOP_WAIT) {
+    if gone(dir, &record, STOP_WAIT) {
         return stopped;
     }
     match kill(pid, Signal::SIGKILL) {
@@ -249,10 +282,47 @@ fn stop_host() -> Result<Option<String>, String> {
         Err(e) => return Err(format!("cannot kill pid {pid}: {e}")),
         Ok(()) => {}
     }
-    if gone(&dir, &record, KILL_WAIT) {
+    if gone(dir, &record, KILL_WAIT) {
         return Ok(Some(format!("killed the shared host (pid {pid})")));
     }
     Err(format!("pid {pid} still holds the host lock"))
+}
+
+// Whether `pid` runs `kage host run`, so a record left by a killed host
+// never sends a signal to an unrelated process that reuses its pid.
+// `None` when it cannot be told. It reads the process's arguments, from
+// /proc on Linux and from `ps` elsewhere, so it trusts the command
+// line: a process that was started with `host run` arguments passes.
+fn is_host_process(pid: nix::unistd::Pid) -> Option<bool> {
+    let args = process_args(pid)?;
+    Some(
+        args.windows(2)
+            .any(|pair| pair[0] == "host" && pair[1] == "run"),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn process_args(pid: nix::unistd::Pid) -> Option<Vec<String>> {
+    let raw = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    Some(
+        raw.split(|byte| *byte == 0)
+            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .collect(),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_args(pid: nix::unistd::Pid) -> Option<Vec<String>> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    output.status.success().then(|| {
+        String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect()
+    })
 }
 
 // Waits up to `limit` for the host `record` describes to be gone: the lock
@@ -353,18 +423,33 @@ fn acquire(dir: &Path) -> Result<Option<Flock<File>>, String> {
 pub(crate) fn acquire_for_serve() -> Result<Option<Flock<File>>, String> {
     let dir = crate::paths::runtime_dir()?;
     prepare(&dir)?;
-    acquire(&dir)
+    acquire_for_serve_in(&dir)
 }
 
-/// Removes the socket and the record when the host stops.
+// Holding the lock means a socket or a record left in `dir` belongs to a
+// host that died without cleaning up, as in `bind`. A serve publishes
+// neither, so a stale pair must not make it look like a starting host.
+fn acquire_for_serve_in(dir: &Path) -> Result<Option<Flock<File>>, String> {
+    let lock = acquire(dir)?;
+    if lock.is_some() {
+        let _ = fs::remove_file(dir.join(SOCKET));
+        let _ = fs::remove_file(dir.join(RECORD));
+    }
+    Ok(lock)
+}
+
+/// Removes the socket and the record when the host stops. `retire`
+/// does it while the lock is held; after it, the paths belong to
+/// whichever host takes the lock next and `Drop` leaves them alone.
 struct Published {
     socket: PathBuf,
     record: Option<PathBuf>,
+    retired: bool,
 }
 
 impl Published {
     // The record tells clients the host is ready.
-    fn record(&mut self, dir: &Path) -> Result<(), String> {
+    fn record(&mut self, dir: &Path, web_error: Option<String>) -> Result<(), String> {
         let path = dir.join(RECORD);
         let entry = Record {
             pid: std::process::id(),
@@ -372,6 +457,7 @@ impl Published {
             protocol: PROTOCOL,
             socket: self.socket.clone(),
             started: Utc::now(),
+            web_error,
         };
         let bytes = serde_json::to_vec(&entry).map_err(|e| e.to_string())?;
         self.record = Some(path.clone());
@@ -379,21 +465,22 @@ impl Published {
             .map_err(|e| format!("{}: {e}", path.display()))
     }
 
-    /// Removes the record while the lock is still held, as the last
-    /// thing a host publishes.
+    /// Removes the socket and the record while the lock is still held,
+    /// as the last thing a host publishes.
     fn retire(&mut self) {
+        let _ = fs::remove_file(&self.socket);
         if let Some(record) = self.record.take() {
             let _ = fs::remove_file(record);
         }
+        self.retired = true;
     }
 }
 
 impl Drop for Published {
     fn drop(&mut self) {
-        if let Some(record) = &self.record {
-            let _ = fs::remove_file(record);
+        if !self.retired {
+            self.retire();
         }
-        let _ = fs::remove_file(&self.socket);
     }
 }
 
@@ -405,6 +492,7 @@ fn bind(dir: &Path) -> Result<(UnixListener, Published), String> {
     let published = Published {
         socket: socket.clone(),
         record: None,
+        retired: false,
     };
     let listener = bind_socket(&socket)?;
     Ok((listener, published))
@@ -705,6 +793,151 @@ impl Write for Outgoing {
 mod tests {
     use super::*;
     use std::io::Read as _;
+    use std::process::{Child, Command, Stdio};
+
+    fn hold_lock(dir: &Path) -> Flock<File> {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(LOCK))
+            .unwrap();
+        Flock::lock(file, FlockArg::LockExclusiveNonblock).unwrap()
+    }
+
+    fn plant_record(dir: &Path, pid: u32) {
+        let record = Record {
+            pid,
+            version: "0.0.0".to_owned(),
+            protocol: PROTOCOL,
+            socket: dir.join(SOCKET),
+            started: Utc::now(),
+            web_error: None,
+        };
+        fs::write(dir.join(RECORD), serde_json::to_vec(&record).unwrap()).unwrap();
+    }
+
+    fn sleeper() -> Child {
+        Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_retired_host_leaves_the_socket_of_its_successor_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join(SOCKET);
+        let record = dir.path().join(RECORD);
+        let mut published = Published {
+            socket: socket.clone(),
+            record: None,
+            retired: false,
+        };
+        drop(UnixListener::bind(&socket).unwrap());
+        published.record(dir.path(), None).unwrap();
+        published.retire();
+        assert!(!socket.exists(), "retire left the socket");
+        assert!(!record.exists(), "retire left the record");
+        drop(UnixListener::bind(&socket).unwrap());
+        drop(published);
+        assert!(
+            socket.exists(),
+            "the old host's drop removed the new socket"
+        );
+    }
+
+    #[test]
+    fn a_dropped_host_that_never_retired_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join(SOCKET);
+        let mut published = Published {
+            socket: socket.clone(),
+            record: None,
+            retired: false,
+        };
+        drop(UnixListener::bind(&socket).unwrap());
+        published.record(dir.path(), None).unwrap();
+        drop(published);
+        assert!(!socket.exists());
+        assert!(!dir.path().join(RECORD).exists());
+    }
+
+    #[test]
+    fn a_serve_clears_the_socket_and_record_a_killed_host_left() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(UnixListener::bind(dir.path().join(SOCKET)).unwrap());
+        plant_record(dir.path(), 1);
+        let lock = acquire_for_serve_in(dir.path()).unwrap();
+        assert!(lock.is_some());
+        assert!(!dir.path().join(SOCKET).exists());
+        assert!(!dir.path().join(RECORD).exists());
+    }
+
+    #[test]
+    fn a_stale_record_of_a_live_unrelated_process_is_never_signalled() {
+        let dir = tempfile::tempdir().unwrap();
+        let _lock = hold_lock(dir.path());
+        let mut bystander = sleeper();
+        plant_record(dir.path(), bystander.id());
+        let error = stop_host_in(dir.path()).unwrap_err();
+        assert!(error.contains("stale record"), "{error}");
+        assert!(error.contains("not a kage host"), "{error}");
+        assert_eq!(
+            bystander.try_wait().unwrap(),
+            None,
+            "the bystander was signalled"
+        );
+        bystander.kill().unwrap();
+        bystander.wait().unwrap();
+    }
+
+    #[test]
+    fn a_stale_record_of_a_dead_pid_is_reported_as_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let _lock = hold_lock(dir.path());
+        let mut gone = Command::new("true").spawn().unwrap();
+        gone.wait().unwrap();
+        plant_record(dir.path(), gone.id());
+        let error = stop_host_in(dir.path()).unwrap_err();
+        assert!(error.contains("stale record"), "{error}");
+        assert!(error.contains("is not running"), "{error}");
+    }
+
+    // A child's command line is the parent's until it has exec'd, so
+    // wait for the program the test started.
+    fn exec_done(pid: nix::unistd::Pid, program: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !process_args(pid)
+            .is_some_and(|args| args.first().is_some_and(|a| a.ends_with(program)))
+        {
+            assert!(Instant::now() < deadline, "{program} never started");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_process_started_as_host_run_is_recognised_as_the_host() {
+        let mut host = Command::new("sh")
+            .args(["-c", "read line; true", "host", "run"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut other = sleeper();
+        let host_pid = nix::unistd::Pid::from_raw(i32::try_from(host.id()).unwrap());
+        let other_pid = nix::unistd::Pid::from_raw(i32::try_from(other.id()).unwrap());
+        exec_done(host_pid, "sh");
+        exec_done(other_pid, "sleep");
+        let seen = is_host_process(host_pid);
+        let not_seen = is_host_process(other_pid);
+        host.kill().unwrap();
+        host.wait().unwrap();
+        other.kill().unwrap();
+        other.wait().unwrap();
+        assert_eq!(seen, Some(true));
+        assert_eq!(not_seen, Some(false));
+    }
 
     #[test]
     fn a_client_that_stops_reading_is_cut_off_without_blocking_the_writer() {

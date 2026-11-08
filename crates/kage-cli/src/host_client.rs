@@ -91,17 +91,28 @@ fn failed(started: Option<&mut Child>) -> Option<Unavailable> {
     })
 }
 
+// How far apart two sightings of "no socket, no record" must be, as in
+// `shared_host::acquire`.
+const REFUSAL_GAP: Duration = Duration::from_millis(50);
+
 // The host this client started refused the lock cleanly. That usually
 // means it lost a start race, and the winner binds its socket at once,
 // so the wait goes on while a socket or a record shows up. A serve
 // holding the lock publishes neither, so with no socket and no record
-// one poll later the fallback is a private engine instead of the whole
-// takeover wait.
-fn refused_the_lock(dir: &Path, started: Option<&mut Child>) -> bool {
-    let Some(status) = started.and_then(|child| child.try_wait().ok().flatten()) else {
+// at two sightings `REFUSAL_GAP` apart the fallback is a private engine
+// instead of the whole takeover wait. A winner crosses that look for an
+// instant, between taking its lock and binding, so one sighting only
+// arms the refusal; `told` holds when it was first made.
+fn refused_the_lock(dir: &Path, started: Option<&mut Child>, told: &mut Option<Instant>) -> bool {
+    let exited_cleanly = started
+        .and_then(|child| child.try_wait().ok().flatten())
+        .is_some_and(|status| status.success());
+    if !exited_cleanly || dir.join(SOCKET).exists() || read_record(dir).is_some() {
+        *told = None;
         return false;
-    };
-    status.success() && !dir.join(SOCKET).exists() && read_record(dir).is_none()
+    }
+    let first = *told.get_or_insert_with(Instant::now);
+    first.elapsed() >= REFUSAL_GAP
 }
 
 /// Where a host started by a client writes its output.
@@ -128,6 +139,7 @@ fn log_file() -> io::Result<fs::File> {
 fn wait_for_socket(dir: &Path, mut started: Option<&mut Child>) -> Result<UnixStream, Unavailable> {
     let deadline = Instant::now() + START_WAIT;
     let mut delay = Duration::from_millis(10);
+    let mut told = None;
     loop {
         if let Ok(stream) = UnixStream::connect(dir.join(SOCKET)) {
             return Ok(stream);
@@ -135,7 +147,7 @@ fn wait_for_socket(dir: &Path, mut started: Option<&mut Child>) -> Result<UnixSt
         if let Some(failure) = failed(started.as_deref_mut()) {
             return Err(failure);
         }
-        if refused_the_lock(dir, started.as_deref_mut()) {
+        if refused_the_lock(dir, started.as_deref_mut(), &mut told) {
             return Err(Unavailable::Failed(
                 "another kage host or serve is already running".to_owned(),
             ));
@@ -293,5 +305,50 @@ pub(crate) fn relay(stream: &UnixStream) -> ExitCode {
     } else {
         eprintln!("kage: rpc: the shared host closed the connection");
         ExitCode::from(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exited(code: &str) -> Child {
+        let mut child = Command::new("sh").args(["-c", code]).spawn().unwrap();
+        child.wait().unwrap();
+        child
+    }
+
+    #[test]
+    fn a_clean_exit_with_nothing_published_is_a_refusal_only_on_the_second_sighting() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = exited("exit 0");
+        let mut told = None;
+        assert!(!refused_the_lock(dir.path(), Some(&mut child), &mut told));
+        assert!(told.is_some());
+        assert!(!refused_the_lock(dir.path(), Some(&mut child), &mut told));
+        thread::sleep(REFUSAL_GAP);
+        assert!(refused_the_lock(dir.path(), Some(&mut child), &mut told));
+    }
+
+    #[test]
+    fn a_socket_showing_up_between_sightings_disarms_the_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = exited("exit 0");
+        let mut told = None;
+        assert!(!refused_the_lock(dir.path(), Some(&mut child), &mut told));
+        let _listener = std::os::unix::net::UnixListener::bind(dir.path().join(SOCKET)).unwrap();
+        thread::sleep(REFUSAL_GAP);
+        assert!(!refused_the_lock(dir.path(), Some(&mut child), &mut told));
+        assert!(told.is_none());
+    }
+
+    #[test]
+    fn a_failed_or_missing_child_is_never_a_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut failed = exited("exit 3");
+        let mut told = None;
+        thread::sleep(REFUSAL_GAP);
+        assert!(!refused_the_lock(dir.path(), Some(&mut failed), &mut told));
+        assert!(!refused_the_lock(dir.path(), None, &mut told));
     }
 }

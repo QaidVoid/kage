@@ -105,9 +105,6 @@ pub(crate) fn default_web_dir() -> Result<PathBuf, String> {
     Ok(crate::data_root()?.join("web"))
 }
 
-/// Opens the web bundle at `dir` and logs what serve will do with it:
-/// nothing when it has no page, and a nudge when it was made for
-/// another build.
 /// Opens the web bundle at `dir` and logs what the caller will do
 /// with it: nothing when it has no page, and a nudge when it was made
 /// for another build. `install_hint` and `update_hint` say how this

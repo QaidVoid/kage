@@ -218,7 +218,9 @@ because it is one.
 - **No Streamable HTTP.** The only endpoint is the WebSocket upgrade
   at `/acp`; plain HTTP requests to it are refused with `405`.
 - **16 concurrent connections.** The next connection is refused with
-  `503` until one closes.
+  `503` until one closes. The [shared host](/guide/shared-host#the-web-endpoint)'s
+  web endpoint has no budget of its own: it shares the host's 64
+  connections with the local clients.
 - One shared engine. A runaway prompt in one session does not block
   others, but a very heavy session competes for the same machine.
 

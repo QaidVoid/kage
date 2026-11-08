@@ -22,8 +22,11 @@ client leaves, once no turn is running and no permission or question
 is waiting. A running turn keeps it alive, so work started in an
 editor finishes even if the editor closes. A permission or question
 that turn asks while no client is connected waits for the next client
-that opens the session, and keeps the host running until then. SIGINT
-and SIGTERM stop it.
+that opens the session, and keeps the host running until then. If no
+client comes within 12 hours of the last one leaving, the host declines
+it: a permission is denied and a question is answered with no answers,
+so the turn goes on, and the host can then go idle. SIGINT and SIGTERM
+stop it.
 
 Its files live in the runtime directory (`$XDG_RUNTIME_DIR/kage`, else
 `$XDG_DATA_HOME/kage/run`, mode 0700):
@@ -31,7 +34,7 @@ Its files live in the runtime directory (`$XDG_RUNTIME_DIR/kage`, else
 | File | What it is |
 | --- | --- |
 | `host.sock` | The socket clients connect to, mode 0600. Only processes of the same user are served. |
-| `host.json` | The running host's `pid`, `version`, `protocol`, `socket` and `started` time, written once it accepts clients and removed when it exits. |
+| `host.json` | The running host's `pid`, `version`, `protocol`, `socket` and `started` time, and `web_error` when the web endpoint could not start. Written once it accepts clients and removed when it exits. |
 | `host.lock` | Held for the host's whole life, so only one runs at a time. `kage serve` holds it too, so a serve and a host cannot run alongside each other. |
 
 A background host has no terminal, so it writes to
@@ -41,11 +44,20 @@ A background host has no terminal, so it writes to
 ## managing it
 
 ```sh
-kage host status    # pid, version, start time, socket and log, or exit 1
+kage host status    # pid, version, start time, socket, log and web errors, or exit 1
 kage host stop      # SIGTERM, then SIGKILL after 10 seconds
 kage host logs      # print host.log
 kage host run       # run it in the foreground, to watch its output
 ```
+
+`kage host stop` signals the pid in `host.json` only when that process
+runs `kage host run`, which it reads from the process's command line
+(`/proc` on Linux, `ps` elsewhere). A host killed with SIGKILL or by the
+out-of-memory killer leaves its socket and record behind, and the pid
+can later belong to an unrelated process; the command then reports a
+stale record and signals nothing. The check trusts the command line, so
+it does not tell a host from another process started with the same
+arguments. The next host or `kage serve` removes the stale files.
 
 Stopping the host disconnects its clients and cancels running turns.
 The next `kage rpc` starts a fresh one. `kage host run --idle-secs 60`
@@ -81,10 +93,28 @@ loopback. Setting `bind` to another address serves the endpoint to
 other machines, which the host warns about in its log, and the token
 is all that guards it.
 
+If the endpoint cannot start, because the port is taken or the bind
+address is not usable, the host logs the reason and runs on without it,
+so local clients are not affected. `kage host status` shows
+`web      not running: <reason>`, and so does `web_error` in `host.json`.
+Set `[host] port` to a free port and restart the host to get the
+endpoint.
+
+The endpoint lives only while the host does. Nothing starts a host for
+a web client, and the host still exits after `idle_timeout_secs` with
+no clients and no work, which closes the endpoint. A web client
+connected at that moment counts as a client and keeps the host up, but
+one that dials in as the host exits is refused. To keep the endpoint up,
+start `kage host run` yourself with a long `--idle-secs`, or raise
+`idle_timeout_secs`; `kage serve` has no idle exit.
+
 A web client connects like a serve client: the token lives in
 `$XDG_DATA_HOME/kage/remote-token`, and the ready-to-open URL beside
 it in `connect.txt`. A web client holds the host like a local one, and
-every client, local and web, shares the host's connection budget.
+every client, local and web, shares the host's budget of 64
+connections. That is not the 16 of `kage serve`, which serves web
+clients only. Past the budget the host refuses the next local client,
+and the web endpoint answers `503`.
 
 The web client bundle is not installed by default. The host serves
 whatever lies under `$XDG_DATA_HOME/kage/web`; to fill it, run
@@ -176,8 +206,8 @@ desktop's settings, reloads the providers for every client.
 
 ## memory
 
-An idle host keeps about 2.5 MiB of private resident memory, and each
-`kage rpc` relay under 2 MiB, measured on a Linux release build. A
+An idle host keeps about 2.2 MiB of private resident memory, and each
+`kage rpc` relay under 2 MiB, measured on a Linux x86_64 release build. A
 host that served sessions sheds back to within about a mebibyte of
 that once its last client leaves: closed sessions' state drops at
 once, and a project's runtime a minute after its last session. CI

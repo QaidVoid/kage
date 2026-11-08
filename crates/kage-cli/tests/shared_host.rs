@@ -15,8 +15,10 @@ use serde_json::{Value, json};
 
 const WAIT: Duration = Duration::from_secs(20);
 
-/// A TCP port that was free a moment ago, for a serve that binds it
-/// right after.
+/// A TCP port that was free a moment ago. Only for asserting that
+/// nothing listens on it: a test that needs a bound port asks for port 0
+/// and reads the real one back, because a port freed here can be taken
+/// before the process under test binds it.
 fn free_port() -> u16 {
     std::net::TcpListener::bind(("127.0.0.1", 0))
         .unwrap()
@@ -176,18 +178,21 @@ impl Env {
             .unwrap()
     }
 
-    /// A standalone TUI under `script`, which gives it a pty so the
-    /// terminal enters raw mode and the App idles for input instead of
-    /// exiting at once. The returned writer feeds the pty, so a test
+    /// A standalone TUI under `script`, which gives it a pty of 100 by
+    /// 30 so the terminal enters raw mode, the App idles for input
+    /// instead of exiting at once, and it draws. The returned writer feeds the pty, so a test
     /// can type into the TUI; keep it open until the TUI is done, as
     /// an end of input ends the App. `extra` carries the environment,
     /// notably a provider key so first-run onboarding does not wait on
     /// the pty.
-    fn tui(&self, extra: &[(&str, &str)]) -> (Child, std::process::ChildStdin) {
+    fn tui(&self, extra: &[(&str, &str)]) -> (Child, std::process::ChildStdin, Screen) {
         let root = self.dir.path();
         let mut child = Command::new("script")
             .arg("-qec")
-            .arg(format!("{} --standalone", env!("CARGO_BIN_EXE_kage")))
+            .arg(format!(
+                "stty cols 100 rows 30; exec {} --standalone",
+                env!("CARGO_BIN_EXE_kage")
+            ))
             .arg("/dev/null")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -201,12 +206,13 @@ impl Env {
             .envs(extra.iter().copied())
             .current_dir(root)
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
         let keys = child.stdin.take().unwrap();
-        (child, keys)
+        let screen = Screen::drain(child.stdout.take().unwrap());
+        (child, keys, screen)
     }
 
     /// The standalone TUI's process, found by its command line and its
@@ -281,8 +287,76 @@ impl Env {
         }
     }
 
+    /// The port the host's web endpoint bound, read from the connect URL
+    /// it writes before it publishes its record. A config with port 0
+    /// lets the system pick, so no port is chosen before the bind.
+    fn web_port(&self) -> u16 {
+        let url = std::fs::read_to_string(self.dir.path().join("data/kage/connect.txt")).unwrap();
+        url.trim_start_matches("ws://")
+            .split_once('/')
+            .and_then(|(addr, _)| addr.rsplit_once(':'))
+            .and_then(|(_, port)| port.parse().ok())
+            .unwrap_or_else(|| panic!("no port in the connect URL {url:?}"))
+    }
+
+    /// Writes the user config of a host with its web endpoint on `port`.
+    fn enable_web(&self, port: u16) {
+        let config = self.dir.path().join("config/kage");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            config.join("config.toml"),
+            format!("[host]\nweb = true\nport = {port}\n"),
+        )
+        .unwrap();
+    }
+
     fn connect(&self) -> UnixStream {
         UnixStream::connect(self.runtime().join("host.sock")).unwrap()
+    }
+}
+
+/// What a TUI draws on its pty, drained on its own thread so the TUI
+/// never blocks on a full pty.
+struct Screen {
+    chunks: mpsc::Receiver<Vec<u8>>,
+    seen: Vec<u8>,
+}
+
+/// The input box's placeholder, drawn once the TUI runs its event loop.
+/// The pty has a size (see [`Env::tui`]), because a TUI on a 0x0 pty
+/// draws nothing.
+const TUI_READY: &[u8] = b"Ask kage anything";
+
+impl Screen {
+    fn drain(mut output: std::process::ChildStdout) -> Self {
+        let (send, chunks) = mpsc::channel();
+        thread::spawn(move || {
+            let mut buffer = [0; 4096];
+            while let Ok(n) = std::io::Read::read(&mut output, &mut buffer) {
+                if n == 0 || send.send(buffer[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            chunks,
+            seen: Vec::new(),
+        }
+    }
+
+    /// Waits bounded until the TUI has drawn `needle`.
+    fn wait_for(&mut self, needle: &[u8]) {
+        let deadline = Instant::now() + WAIT;
+        while !self.seen.windows(needle.len()).any(|w| w == needle) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.chunks.recv_timeout(left) {
+                Ok(chunk) => self.seen.extend_from_slice(&chunk),
+                Err(e) => panic!(
+                    "the TUI never drew {needle:?}: {e}; saw {:?}",
+                    String::from_utf8_lossy(&self.seen)
+                ),
+            }
+        }
     }
 }
 
@@ -462,7 +536,7 @@ fn only_one_host_runs_at_a_time() {
 #[test]
 fn a_serve_and_a_host_do_not_run_alongside_each_other() {
     let env = Env::new();
-    let (serve, stderr) = env.serve(free_port());
+    let (serve, stderr) = env.serve(0);
     let mut serve = KillOnDrop(serve);
     let lines = stderr_lines(stderr);
     // The token line comes after the lock is taken and the engine
@@ -487,15 +561,9 @@ fn a_serve_and_a_host_do_not_run_alongside_each_other() {
         "serve exited while holding the lock"
     );
 
-    // A second serve refuses too, on a free port, so only the lock can
+    // A second serve refuses too, on an ephemeral port, so only the lock can
     // be the reason.
-    let second = env.kage(&[
-        "serve",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        &free_port().to_string(),
-    ]);
+    let second = env.kage(&["serve", "--host", "127.0.0.1", "--port", "0"]);
     assert!(!second.status.success(), "{:?}", second.stderr);
     assert!(
         String::from_utf8_lossy(&second.stderr).contains("already running"),
@@ -514,13 +582,7 @@ fn a_serve_refuses_fast_while_a_host_holds_the_lock() {
     let mut host = env.host(60);
     env.ready(host.id());
     let started = Instant::now();
-    let second = env.kage(&[
-        "serve",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        &free_port().to_string(),
-    ]);
+    let second = env.kage(&["serve", "--host", "127.0.0.1", "--port", "0"]);
     assert!(!second.status.success(), "{:?}", second.stderr);
     assert!(
         String::from_utf8_lossy(&second.stderr).contains("already running"),
@@ -537,7 +599,7 @@ fn a_serve_refuses_fast_while_a_host_holds_the_lock() {
 #[test]
 fn a_relay_falls_back_fast_while_a_serve_holds_the_lock() {
     let env = Env::new();
-    let (serve, stderr) = env.serve(free_port());
+    let (serve, stderr) = env.serve(0);
     // Bound for the whole test: its Drop kills the serve.
     let _serve = KillOnDrop(serve);
     let lines = stderr_lines(stderr);
@@ -590,6 +652,43 @@ fn a_stale_socket_and_record_do_not_block_a_new_host() {
     env.ready(host.id());
     assert_eq!(initialize(&env.connect())["id"], 1);
     assert!(terminate(&mut host).success());
+}
+
+#[test]
+fn a_serve_clears_stale_files_and_stop_never_signals_a_reused_pid() {
+    let env = Env::new();
+    let mut bystander = KillOnDrop(Command::new("sleep").arg("60").spawn().unwrap());
+    let plant = || {
+        std::fs::create_dir_all(env.runtime()).unwrap();
+        std::fs::write(
+            env.runtime().join("host.json"),
+            json!({
+                "pid": bystander.0.id(), "version": "0.0.0", "protocol": 1,
+                "socket": "/nowhere", "started": "2020-01-01T00:00:00Z",
+            })
+            .to_string(),
+        )
+        .unwrap();
+    };
+    plant();
+    drop(std::os::unix::net::UnixListener::bind(env.runtime().join("host.sock")).unwrap());
+
+    let (serve, stderr) = env.serve(0);
+    let _serve = KillOnDrop(serve);
+    let lines = stderr_lines(stderr);
+    wait_for_line(&lines, "token file", "serve did not start in time");
+    assert!(!env.runtime().join("host.sock").exists(), "stale socket");
+    assert!(env.record().is_none(), "stale record");
+
+    plant();
+    let stop = env.kage(&["host", "stop"]);
+    assert!(!stop.status.success(), "{:?}", stop.stdout);
+    let message = String::from_utf8_lossy(&stop.stderr);
+    assert!(message.contains("stale record"), "{message}");
+    assert!(
+        bystander.0.try_wait().unwrap().is_none(),
+        "stop signalled a process that is not the host"
+    );
 }
 
 #[test]
@@ -1406,7 +1505,8 @@ fn rss_anon_kib(pid: u32) -> u64 {
 }
 
 /// An idle host with a client connected stays within twice the private
-/// memory measured for it (2.1 MiB). Debug builds are far larger, so this
+/// memory measured for it (2224 KiB in one release run, AMD Ryzen 7
+/// 7700, Linux `x86_64`). Debug builds are far larger, so this
 /// runs only on request against a release build.
 #[cfg(target_os = "linux")]
 #[test]
@@ -1450,42 +1550,78 @@ fn a_relay_stays_within_its_memory_budget() {
 
 /// A standalone TUI runs a private host in its own process: a message
 /// typed into the TUI is served by that host and recorded under this
-/// environment's data directory while the TUI is up.
+/// environment's data directory while the TUI is up. The model is a
+/// keyless custom provider on a local listener, so no prompt leaves the
+/// machine.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_standalone_tui_runs_a_private_host_in_its_process() {
     let env = Env::new();
-    let (tui, mut keys) = env.tui(&[("OPENAI_API_KEY", "sk-standalone-test")]);
+    let provider = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let config = env.dir.path().join("config/kage");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.toml"),
+        format!(
+            "[provider]\ndefault_model = \"fake:small\"\n\n\
+             [providers.custom.fake]\nbase_url = \"http://{}/v1\"\napi_key_env = \"\"\n\n\
+             [[providers.custom.fake.models]]\nid = \"small\"\nname = \"Small\"\n",
+            provider.local_addr().unwrap()
+        ),
+    )
+    .unwrap();
+    let (tui, mut keys, mut screen) = env.tui(&[]);
     let pid = env.kage_pid();
-    // Let the App reach raw mode, then type a message: the host only
-    // writes the session file once a first entry is recorded.
-    std::thread::sleep(Duration::from_secs(2));
+    screen.wait_for(TUI_READY);
     keys.write_all(b"hi\r").unwrap();
     keys.flush().unwrap();
     let session = env.session_file();
-    // A beat more proves the TUI stays up beside the session it opened.
-    std::thread::sleep(Duration::from_secs(1));
-    let header = std::fs::read_to_string(&session).unwrap();
-    assert!(header.contains("\"session\""), "{header}");
+    let deadline = Instant::now() + WAIT;
+    let recorded = loop {
+        let entries: Vec<Value> = std::fs::read_to_string(&session)
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let typed = entries.iter().any(|entry| {
+            entry["type"] == "message"
+                && entry["message"]["role"] == "user"
+                && entry["message"]["content"][0]["text"] == "hi"
+        });
+        if typed {
+            break entries;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the typed message was never recorded: {entries:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(recorded[0]["type"], "header", "{recorded:?}");
+    assert!(
+        std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "the TUI exited"
+    );
     stop_tui(pid, tui);
     drop(keys);
 }
 
 /// A standalone TUI runs a private host in process, so it stays near
-/// what the engine TUI used. The measured value locally was under half
-/// the budget.
+/// what the engine TUI used. One release run on a 100 by 30 pty
+/// measured 4812 KiB (AMD Ryzen 7 7700, Linux `x86_64`).
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "measures a release build: cargo test --release -p kage-cli --test shared_host -- --ignored"]
 fn a_standalone_tui_stays_within_its_memory_budget() {
     const BUDGET_KIB: u64 = 12 * 1024;
     let env = Env::new();
-    let (tui, keys) = env.tui(&[("OPENAI_API_KEY", "sk-standalone-test")]);
+    let (tui, keys, mut screen) = env.tui(&[("OPENAI_API_KEY", "sk-standalone-test")]);
     // The pty feed stays open for the whole run: its end would stop the App.
     let _keep_open = keys;
     let pid = env.kage_pid();
     // Measure an idle TUI that finished starting, pty raw mode included.
-    std::thread::sleep(Duration::from_secs(3));
+    screen.wait_for(TUI_READY);
+    std::thread::sleep(Duration::from_secs(1));
     let used = rss_anon_kib(pid);
     eprintln!("standalone TUI RssAnon: {used} KiB");
     stop_tui(pid, tui);
@@ -1497,8 +1633,9 @@ fn a_standalone_tui_stays_within_its_memory_budget() {
 
 /// A host that served sessions sheds back near its idle size once the
 /// last client leaves: the engine drops closed sessions, and the
-/// projects' runtimes prune after their grace. The measured value
-/// locally was 3.0 MiB against the idle host's 2.1 MiB.
+/// projects' runtimes prune after their grace. One release run
+/// measured 3052 KiB against the idle host's 2224 KiB (AMD Ryzen 7
+/// 7700, Linux `x86_64`).
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "measures a release build: cargo test --release -p kage-cli --test shared_host -- --ignored"]
@@ -1588,16 +1725,10 @@ fn a_stale_record_of_another_version_does_not_turn_clients_away() {
 #[test]
 fn a_host_with_web_enabled_serves_the_web_endpoint() {
     let env = Env::new();
-    let port = free_port();
-    let config = env.dir.path().join("config/kage");
-    std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(
-        config.join("config.toml"),
-        format!("[host]\nweb = true\nport = {port}\n"),
-    )
-    .unwrap();
+    env.enable_web(0);
     let mut host = env.host(60);
     env.ready(host.id());
+    let port = env.web_port();
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let status = http_status(addr, "GET /acp HTTP/1.1\r\nHost: x\r\n\r\n");
     assert!(status.starts_with("HTTP/1.1 401"), "{status}");
@@ -1630,16 +1761,10 @@ fn a_host_with_web_enabled_serves_the_web_endpoint() {
 #[test]
 fn a_web_client_keeps_an_idle_host_alive_until_it_leaves() {
     let env = Env::new();
-    let port = free_port();
-    let config = env.dir.path().join("config/kage");
-    std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(
-        config.join("config.toml"),
-        format!("[host]\nweb = true\nport = {port}\n"),
-    )
-    .unwrap();
+    env.enable_web(0);
     let mut host = env.host(1);
     env.ready(host.id());
+    let port = env.web_port();
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let token = std::fs::read_to_string(env.dir.path().join("data/kage/remote-token")).unwrap();
     let client = web_client(addr, token.trim());
@@ -1652,6 +1777,27 @@ fn a_web_client_keeps_an_idle_host_alive_until_it_leaves() {
     drop(client);
     assert!(exit_within(&mut host, WAIT).success());
     assert!(env.record().is_none());
+}
+
+#[test]
+fn a_taken_web_port_leaves_the_host_serving_local_clients() {
+    let env = Env::new();
+    let taken = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = taken.local_addr().unwrap().port();
+    env.enable_web(port);
+    let mut host = env.host(60);
+    let record = env.ready(host.id());
+    let error = record["web_error"].as_str().unwrap_or_default();
+    assert!(error.contains(&format!("127.0.0.1:{port}")), "{record}");
+    assert_eq!(initialize(&env.connect())["id"], 1);
+    let status = env.kage(&["host", "status"]);
+    assert!(status.status.success());
+    let shown = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        shown.contains("web      not running: cannot bind"),
+        "{shown}"
+    );
+    assert!(terminate(&mut host).success());
 }
 
 #[test]
@@ -1781,9 +1927,10 @@ fn web_client(addr: std::net::SocketAddr, token: &str) -> WebClient {
         }
     }
     assert!(reply.starts_with("HTTP/1.1 101"), "{reply}");
+    let pending = buffered.buffer().to_vec();
     let frames_in = tungstenite::WebSocket::from_partially_read(
         stream.try_clone().unwrap(),
-        Vec::new(),
+        pending,
         tungstenite::protocol::Role::Client,
         None,
     );

@@ -166,7 +166,6 @@ impl Server {
     }
 }
 
-/// Serves `scripts` from a mock host with a fresh token.
 /// kage-core cannot depend on kage-cli, so the host web port's default
 /// is written twice; this pins the two together.
 #[test]
@@ -174,6 +173,7 @@ fn the_host_web_port_default_matches_serve() {
     assert_eq!(kage_core::config::HostConfig::default().port, DEFAULT_PORT);
 }
 
+/// Serves `scripts` from a mock host with a fresh token.
 fn spawn_server(scripts: Vec<Script>) -> Server {
     spawn_server_in(scripts, None)
 }

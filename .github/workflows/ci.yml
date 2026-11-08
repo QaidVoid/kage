@@ -113,7 +113,9 @@ jobs:
 
   # The shared host must stay as small as a private engine, and the
   # standalone TUI near what the engine TUI was. Memory is only
-  # meaningful in a release build, so this measures one on Linux.
+  # meaningful in a release build, so this measures one on Linux. The
+  # session-shedding test waits 66 to 96 seconds for the projects'
+  # runtimes to prune, so this job takes minutes after the build.
   memory:
     name: memory
     runs-on: ubuntu-latest

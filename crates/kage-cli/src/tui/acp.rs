@@ -29,12 +29,12 @@
 //! it, and serves the App's plugin surfaces (commands, keymap,
 //! widgets) locally. The agent learns this at initialize through
 //! `plugin_host` and opens sessions with `_meta.kage.plugins =
-//! "client"`. A Lua call the pump serves runs synchronously on the
-//! pump thread, so frames from the agent stall until it returns; the
-//! engine path pays the same serialization around its Lua mutex. A
-//! resumed session has no such `_meta` on its wire yet, so it runs
-//! without the client's plugins and tools until the load learns to
-//! carry them.
+//! "client"`. The plugin requests run in order on a worker thread
+//! and are answered from there, so the pump keeps serving the App and
+//! the agent's frames while a Lua tool runs; `Esc` raises the
+//! worker's cancel flag. A resumed session has no such `_meta` on its
+//! wire yet, so it runs without the client's plugins and tools until
+//! the load learns to carry them, and the pump says so when one opens.
 //!
 //! Some commands the engine path serves have no ACP counterpart yet:
 //! the pump refuses them with a notice instead of dropping them
@@ -113,7 +113,13 @@ struct Shared {
     child: Mutex<Option<Child>>,
     /// The child's last stderr bytes, kept by the stderr thread.
     stderr: Mutex<Vec<u8>>,
+    /// Shuts a socket down, which a reader blocked on it needs: its
+    /// own handle keeps the connection open past the writer's drop.
+    hangup: Mutex<Option<Hangup>>,
 }
+
+/// What ends a socket transport's blocked read.
+type Hangup = Box<dyn FnOnce() + Send>;
 
 /// The TUI's end of the ACP connection. Its drop kills a spawned
 /// child and hangs up a socket or pipe, so it is passed by ownership,
@@ -142,7 +148,11 @@ impl Transport {
         let reader = stream
             .try_clone()
             .map_err(|error| format!("cannot split the socket: {error}"))?;
-        Self::stream(BufReader::new(reader), stream, None, events)
+        let hangup = shutdown_on_drop(&stream)
+            .map_err(|error| format!("cannot split the socket: {error}"))?;
+        let transport = Self::stream(BufReader::new(reader), stream, None, events)?;
+        *transport.shared.hangup.lock().unwrap() = Some(hangup);
+        Ok(transport)
     }
 
     /// Serves a private `rpc::Host` inside this process and connects
@@ -156,7 +166,7 @@ impl Transport {
         events: mpsc::Sender<Event>,
     ) -> Result<Transport, String> {
         let host = crate::rpc::host::Host::start(model, system, yolo)?;
-        let (client_read, client_write, host_read, host_write) =
+        let (client_read, client_write, host_read, host_write, hangup) =
             private_pair().map_err(|error| format!("cannot open the private pipe: {error}"))?;
         let spawned = thread::Builder::new()
             .name("kage-acp-private-host".to_owned())
@@ -164,7 +174,9 @@ impl Transport {
                 let _ = host.serve_local(host_read, host_write);
             });
         spawned.map_err(|error| format!("cannot start the private host: {error}"))?;
-        Self::stream(BufReader::new(client_read), client_write, None, events)
+        let transport = Self::stream(BufReader::new(client_read), client_write, None, events)?;
+        *transport.shared.hangup.lock().unwrap() = hangup;
+        Ok(transport)
     }
 
     /// Starts the reader and writer threads on a connected byte
@@ -181,6 +193,7 @@ impl Transport {
             writer: Mutex::new(Some(queue)),
             child: Mutex::new(child),
             stderr: Mutex::new(Vec::new()),
+            hangup: Mutex::new(None),
         });
         let transport = Transport {
             shared: Arc::clone(&shared),
@@ -253,27 +266,48 @@ impl Transport {
 }
 
 /// The four halves of the private host's in-memory pipe: the client
-/// reads the first and writes the second, the host the other two. A
-/// Unix stream pair on Unix, a channel pipe elsewhere.
+/// reads the first and writes the second, the host the other two, and
+/// the hangup ends the client's blocked read where the pipe needs one.
+/// A Unix stream pair on Unix, a channel pipe elsewhere.
 type PrivateRead = Box<dyn BufRead + Send>;
 type PrivateWrite = Box<dyn Write + Send>;
+type PrivatePair = (
+    PrivateRead,
+    PrivateWrite,
+    PrivateRead,
+    PrivateWrite,
+    Option<Hangup>,
+);
+
+/// A hangup that stops reads on `stream`, so a reader blocked on a
+/// clone of it returns end of file. Writes already queued still go
+/// out: the writer thread closes its own end once its queue is empty.
+#[cfg(unix)]
+fn shutdown_on_drop(stream: &std::os::unix::net::UnixStream) -> std::io::Result<Hangup> {
+    let handle = stream.try_clone()?;
+    Ok(Box::new(move || {
+        let _ = handle.shutdown(std::net::Shutdown::Read);
+    }))
+}
 
 #[cfg(unix)]
-fn private_pair() -> std::io::Result<(PrivateRead, PrivateWrite, PrivateRead, PrivateWrite)> {
+fn private_pair() -> std::io::Result<PrivatePair> {
     use std::os::unix::net::UnixStream;
     let (client, host_end) = UnixStream::pair()?;
     let host_reader = host_end.try_clone()?;
     let client_reader = client.try_clone()?;
+    let hangup = shutdown_on_drop(&client)?;
     Ok((
         Box::new(BufReader::new(client_reader)),
         Box::new(client),
         Box::new(BufReader::new(host_reader)),
         Box::new(host_end),
+        Some(hangup),
     ))
 }
 
 #[cfg(not(unix))]
-fn private_pair() -> std::io::Result<(PrivateRead, PrivateWrite, PrivateRead, PrivateWrite)> {
+fn private_pair() -> std::io::Result<PrivatePair> {
     let (client_write, host_read) = super::pipe::channel_pair();
     let (host_write, client_read) = super::pipe::channel_pair();
     Ok((
@@ -281,12 +315,16 @@ fn private_pair() -> std::io::Result<(PrivateRead, PrivateWrite, PrivateRead, Pr
         Box::new(client_write),
         Box::new(BufReader::new(host_read)),
         Box::new(host_write),
+        None,
     ))
 }
 
 impl Drop for Transport {
     fn drop(&mut self) {
         *self.shared.writer.lock().unwrap() = None;
+        if let Some(hangup) = self.shared.hangup.lock().unwrap().take() {
+            hangup();
+        }
         if let Some(mut child) = self.shared.child.lock().unwrap().take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -346,6 +384,25 @@ fn spawn(
 /// How long the pump waits on a silent connection before it looks at
 /// the channels it shares with the App again.
 const TICK: Duration = Duration::from_millis(20);
+
+/// Writes the runs the pump reports to the saved state, one at a time
+/// and off the pump thread: the model a completed run used, and the
+/// auth failures the run outcomes clear or add. Ends with its queue.
+fn start_run_recorder(runs: mpsc::Receiver<(String, RunOutcome)>) {
+    let spawned = thread::Builder::new()
+        .name("kage-acp-state".to_owned())
+        .spawn(move || {
+            for (model, outcome) in runs {
+                if outcome == RunOutcome::Completed {
+                    let _ = crate::state::record_last_model(&model);
+                }
+                let _ = crate::state::record_run_outcome(&model, &outcome);
+            }
+        });
+    if let Err(error) = spawned {
+        eprintln!("kage: cannot start the state thread: {error}");
+    }
+}
 
 /// What the App sees once the agent is gone.
 const DETACHED: &str = "the kage agent stopped; this TUI is detached";
@@ -447,6 +504,59 @@ fn session_meta(
     }
 }
 
+/// The wire form of the plugins' MCP servers, and a warning for each
+/// server using a setting the wire cannot carry, `disabled_tools` or
+/// OAuth, which the agent then runs without. A disabled server and one
+/// with neither a command nor a URL, which the config validator
+/// rejects, are left out.
+fn wire_mcp_servers(
+    registered: Vec<(String, kage_core::config::McpServer)>,
+) -> (Vec<McpServer>, Vec<String>) {
+    let mut servers = Vec::new();
+    let mut warnings = Vec::new();
+    for (name, server) in registered {
+        if server.disabled {
+            continue;
+        }
+        let lost = match (server.disabled_tools.is_empty(), server.oauth.is_some()) {
+            (true, false) => None,
+            (false, false) => Some("disabled_tools"),
+            (true, true) => Some("oauth"),
+            (false, true) => Some("disabled_tools and oauth"),
+        };
+        let wire = match (server.command, server.url) {
+            (Some(command), _) => McpServer::Stdio(McpServerStdio {
+                name: name.clone(),
+                command,
+                args: server.args,
+                env: server
+                    .env
+                    .into_iter()
+                    .map(|(name, value)| EnvVariable { name, value })
+                    .collect(),
+            }),
+            (None, Some(url)) => McpServer::Http(McpServerHttp {
+                name: name.clone(),
+                url,
+                headers: server
+                    .headers
+                    .into_iter()
+                    .map(|(name, value)| HttpHeader { name, value })
+                    .collect(),
+            }),
+            (None, None) => continue,
+        };
+        if let Some(lost) = lost {
+            warnings.push(format!(
+                "plugin MCP server `{name}` sets {lost}, which the ACP link cannot carry; \
+                 the agent runs it without"
+            ));
+        }
+        servers.push(wire);
+    }
+    (servers, warnings)
+}
+
 /// The `session/prompt` params of a frame this client sent, for
 /// watching its own prompts go by.
 #[derive(Deserialize)]
@@ -460,17 +570,64 @@ struct OutgoingPrompt {
 /// process hosts: the local runtime answering for it. One surface per
 /// connection, whatever session the agent names, like the engine
 /// serves every session from one runtime.
+#[derive(Clone)]
 struct PluginSurface {
     runtime: Arc<PluginRuntime>,
     /// Where the runtime's tools execute.
     workdir: PathBuf,
-    /// Raised when the connection ends, so a tool call the agent
-    /// abandoned does not start. One already running keeps the pump
-    /// thread until it returns.
+    /// Raised when the connection ends, so no tool call runs on.
     cancel: CancelFlag,
+    /// The flag tool calls run under: raised by `Esc` and cleared as
+    /// each call starts, and it reads cancelled whenever `cancel` is.
+    turn: CancelFlag,
 }
 
+/// One plugin reverse request waiting for the worker.
+struct PluginJob {
+    id: RequestId,
+    method: String,
+    params: Value,
+}
+
+/// What the worker answers a [`PluginJob`] with.
+type PluginAnswer = (RequestId, Result<Value, RpcError>);
+
 impl PluginSurface {
+    fn new(runtime: Arc<PluginRuntime>, workdir: PathBuf) -> Self {
+        let cancel = CancelFlag::new();
+        let turn = cancel.child();
+        Self {
+            runtime,
+            workdir,
+            cancel,
+            turn,
+        }
+    }
+
+    /// Starts the thread that answers plugin requests in arrival
+    /// order, which a Lua tool may hold for as long as it runs. It
+    /// ends with the returned queue.
+    fn start_worker(
+        &self,
+        answers: mpsc::Sender<PluginAnswer>,
+    ) -> Result<mpsc::Sender<PluginJob>, String> {
+        let surface = self.clone();
+        let (jobs, queue) = mpsc::channel::<PluginJob>();
+        thread::Builder::new()
+            .name("kage-acp-plugins".to_owned())
+            .spawn(move || {
+                for job in queue {
+                    surface.turn.reset();
+                    let answer = surface.answer(&job.method, &job.params);
+                    if answers.send((job.id, answer)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|error| format!("cannot start the plugin thread: {error}"))?;
+        Ok(jobs)
+    }
+
     /// Answer one reverse request. Unknown methods cannot reach here:
     /// the pump only routes the `_kage/plugin/` prefix.
     fn answer(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
@@ -565,7 +722,7 @@ impl PluginSurface {
                 request.tool
             )));
         };
-        let cx = kage_tools::ToolContext::new(&self.workdir, &self.cancel);
+        let cx = kage_tools::ToolContext::new(&self.workdir, &self.turn);
         let output = Self::in_session(&request.session_id, || tool.execute(request.input, &cx))?
             .map_err(|e| plugin_internal(format!("plugin tool `{}`: {e}", request.tool)))?;
         let result = PluginCallResult {
@@ -714,6 +871,19 @@ fn environment_frame() -> Option<Frame> {
     })
 }
 
+/// A recorded session being opened over the wire.
+struct PendingOpen {
+    id: String,
+    request: u64,
+}
+
+/// The pending request a frame answers.
+#[derive(Clone, Copy)]
+enum Answer {
+    NewSession,
+    Open,
+}
+
 /// The thread that owns the connection. It turns the store's view of
 /// the wire into the App's engine vocabulary: changes into
 /// [`HostEvent`]s, its own prompts into user bubbles, and everything
@@ -742,10 +912,12 @@ struct Pump {
     app_session: SessionId,
     /// The wire id of the session the App is on.
     wire: String,
-    /// The session being opened, whose answer adopts the wire.
-    pending_open: Option<String>,
-    /// A session/new is in flight: its answer's session adopts.
-    pending_new: bool,
+    /// The recorded session being opened. Its answer adopts it; a
+    /// failed answer leaves the current session as it was.
+    pending_open: Option<PendingOpen>,
+    /// The request id of the `session/new` in flight, whose answer's
+    /// session adopts.
+    pending_new: Option<u64>,
     cwd: String,
     /// The model the session runs, as the config option carries it.
     model: String,
@@ -760,6 +932,19 @@ struct Pump {
     /// the agent's `_kage/plugin/*` reverse requests. `None` leaves
     /// plugin loading to the agent.
     plugins: Option<PluginSurface>,
+    /// Where plugin reverse requests queue for the worker.
+    plugin_jobs: Option<mpsc::Sender<PluginJob>>,
+    /// The worker's answers, to send on the wire.
+    plugin_answers: mpsc::Receiver<PluginAnswer>,
+    plugin_answers_tx: mpsc::Sender<PluginAnswer>,
+    /// Where finished runs go to be written to the saved state, off
+    /// this thread.
+    recorder: mpsc::Sender<(String, RunOutcome)>,
+    /// Ids of the prompts sent for the wire session, so a failed
+    /// answer is told from other failures.
+    prompts: HashSet<RequestId>,
+    /// The error that ended the run being settled.
+    run_error: Option<String>,
     /// The run-wide session settings that do not come from options.
     yolo: bool,
     /// Whether the agent serves sessions for this connection without
@@ -797,54 +982,172 @@ struct Pump {
 }
 
 impl Pump {
-    /// Serves the connection until the App quits or the agent does.
+    /// Serves the connection until the App quits.
     fn serve(mut self) {
-        loop {
+        while self.pass() {}
+    }
+
+    /// One turn of the loop: waits up to a tick for the agent or, once
+    /// it is gone, for the App, then handles what the App and the
+    /// plugin worker have queued. `false` once the App is gone, which
+    /// ends the child with the transport.
+    fn pass(&mut self) -> bool {
+        if self.closed {
+            match self.requests.recv_timeout(TICK) {
+                Ok(request) => self.handle(request),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+            }
+        } else {
             match self.frames.recv_timeout(TICK) {
                 Ok(Event::Frame(frame)) => self.absorb(frame),
                 Ok(Event::Closed)
                 // The reader sends Closed before it drops, so this is
                 // its late echo.
-                | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => self.close(),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                | Err(mpsc::RecvTimeoutError::Disconnected) => self.close(),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
-            loop {
-                match self.requests.try_recv() {
-                    Ok(request) => self.handle(request),
-                    // The App is gone: stop, which ends the child with
-                    // the transport.
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                }
+        }
+        loop {
+            match self.requests.try_recv() {
+                Ok(request) => self.handle(request),
+                Err(mpsc::TryRecvError::Disconnected) => return false,
+                Err(mpsc::TryRecvError::Empty) => break,
             }
-            self.poll_dialogs();
-            self.flush();
+        }
+        while let Ok(answer) = self.plugin_answers.try_recv() {
+            self.send_plugin_answer(answer);
+        }
+        self.poll_dialogs();
+        self.flush();
+        true
+    }
+
+    fn send_plugin_answer(&mut self, (id, answer): PluginAnswer) {
+        match answer {
+            Ok(result) => self.store.client().reply(id, result),
+            Err(error) => self.store.client().fail(id, error),
         }
     }
 
+    /// Starts answering the plugin reverse requests from `surface`.
+    fn host_plugins(&mut self, surface: PluginSurface) -> Result<(), String> {
+        self.plugin_jobs = Some(surface.start_worker(self.plugin_answers_tx.clone())?);
+        self.plugins = Some(surface);
+        Ok(())
+    }
+
     /// Feeds one frame in. The plugin reverse requests never touch the
-    /// store: the local surface answers them at once, because the
-    /// client would otherwise fail them as methods it does not know.
-    /// Hosting nothing leaves them to the store, which fails them the
-    /// same way.
+    /// store: the worker answers them, because the client would
+    /// otherwise fail them as methods it does not know. Hosting
+    /// nothing leaves them to the store, which fails them the same way.
     fn absorb(&mut self, frame: Frame) {
         if let Frame::Request { id, method, params } = &frame
             && method.starts_with("_kage/plugin/")
+            && let Some(jobs) = &self.plugin_jobs
         {
-            let answered = self
-                .plugins
-                .as_ref()
-                .map(|surface| surface.answer(method, params));
-            if let Some(answered) = answered {
-                match answered {
-                    Ok(result) => self.store.client().reply(id.clone(), result),
-                    Err(error) => self.store.client().fail(id.clone(), error),
+            let job = PluginJob {
+                id: id.clone(),
+                method: method.clone(),
+                params: params.clone(),
+            };
+            if jobs.send(job).is_err() {
+                self.store
+                    .client()
+                    .fail(id.clone(), plugin_internal("the plugin thread stopped"));
+            }
+            return;
+        }
+        let answer = self.answer_of(&frame);
+        let failed_prompt = match &frame {
+            Frame::Failure { id, error } if self.prompts.remove(id) => Some(error.message.clone()),
+            Frame::Success { id, .. } => {
+                self.prompts.remove(id);
+                None
+            }
+            _ => None,
+        };
+        let changes = self.store.absorb(frame);
+        match answer {
+            Some(answer) => self.settle(answer, changes),
+            None => {
+                for change in changes {
+                    self.react(change);
                 }
-                return;
             }
         }
-        for change in self.store.absorb(frame) {
-            self.react(change);
+        // A failed prompt moves no session in the client, so the run
+        // it ended is settled here.
+        if let Some(message) = failed_prompt {
+            self.run_error = Some(message);
+            self.session_moved(&self.wire.clone());
+            self.run_error = None;
+        }
+    }
+
+    /// Which pending session request `frame` answers, if any.
+    fn answer_of(&self, frame: &Frame) -> Option<Answer> {
+        let (Frame::Success { id, .. } | Frame::Failure { id, .. }) = frame else {
+            return None;
+        };
+        let RequestId::Number(request) = id else {
+            return None;
+        };
+        if self.pending_new == Some(*request) {
+            return Some(Answer::NewSession);
+        }
+        self.pending_open
+            .as_ref()
+            .is_some_and(|open| open.request == *request)
+            .then_some(Answer::Open)
+    }
+
+    /// Reacts to the changes of the answer to a pending session
+    /// request. A session that answered adopts the wire; a failed
+    /// request clears its pending state and leaves the session the
+    /// App is on as it was, with the failure shown. The client's
+    /// restore of a failed load reports a session change that must
+    /// not adopt.
+    fn settle(&mut self, answer: Answer, changes: Vec<Change>) {
+        let failed = changes
+            .iter()
+            .any(|change| matches!(change, Change::Failed { .. }));
+        let adopted = match answer {
+            Answer::NewSession => {
+                self.pending_new = None;
+                changes.iter().find_map(|change| match change {
+                    Change::Session { id } if !failed => Some((id.clone(), true)),
+                    _ => None,
+                })
+            }
+            Answer::Open => {
+                let open = self.pending_open.take().expect("an open answered");
+                (!failed).then_some((open.id, false))
+            }
+        };
+        for change in changes {
+            if !matches!(change, Change::Session { .. }) {
+                self.react(change);
+            }
+        }
+        if let Some((id, new)) = adopted {
+            self.adopt(id, new);
+            if !new {
+                self.warn_resumed_without_plugins();
+            }
+        }
+    }
+
+    /// Tells the user a resumed session runs without the plugins this
+    /// process hosts, while its commands stay available here.
+    fn warn_resumed_without_plugins(&mut self) {
+        if self.plugins.is_some() {
+            self.notice(
+                NoticeLevel::Warning,
+                "this resumed session runs without your plugins' tools and hooks; \
+                 plugin commands still run in this TUI"
+                    .to_owned(),
+            );
         }
     }
 
@@ -882,16 +1185,23 @@ impl Pump {
             self.feed.send_buffer(fresh);
             self.note_session_file();
             self.store.client().load_session(&id, &self.cwd, &[]);
+            self.warn_resumed_without_plugins();
         } else {
-            self.pending_new = true;
-            let meta = self.session_meta();
-            let servers = self.mcp_servers();
-            self.store
-                .client()
-                .new_session(&self.cwd, &servers, Some(meta));
+            self.request_new_session();
         }
         self.store.client().ui_attach(&self.cwd, None);
         self.flush();
+    }
+
+    /// Asks the agent for a new session, whose answer adopts the wire.
+    fn request_new_session(&mut self) {
+        let meta = self.session_meta();
+        let servers = self.mcp_servers();
+        let request = self
+            .store
+            .client()
+            .new_session(&self.cwd, &servers, Some(meta));
+        self.pending_new = Some(request);
     }
 
     /// The `_meta.kage` a session of this connection opens with: what
@@ -912,47 +1222,16 @@ impl Pump {
     /// The MCP servers the session brings: the hosted plugins' own
     /// registrations, disabled ones left out, like the engine path.
     /// The agent spawns them, so none of this process's MCP runs
-    /// beside the pump.
-    fn mcp_servers(&self) -> Vec<McpServer> {
+    /// beside the pump. A setting the wire cannot carry is warned of.
+    fn mcp_servers(&mut self) -> Vec<McpServer> {
         let Some(surface) = self.plugins.as_ref() else {
             return Vec::new();
         };
-        surface
-            .runtime
-            .registered_mcp_servers()
-            .into_iter()
-            .filter_map(|(name, server)| {
-                if server.disabled {
-                    return None;
-                }
-                match (server.command, server.url) {
-                    (Some(command), _) => Some(McpServer::Stdio(McpServerStdio {
-                        name,
-                        command,
-                        args: server.args,
-                        env: server
-                            .env
-                            .into_iter()
-                            .map(|(name, value)| EnvVariable { name, value })
-                            .collect(),
-                    })),
-                    (None, Some(url)) => Some(McpServer::Http(McpServerHttp {
-                        name,
-                        url,
-                        headers: server
-                            .headers
-                            .into_iter()
-                            .map(|(name, value)| HttpHeader { name, value })
-                            .collect(),
-                    })),
-                    // Neither transport: the config validator rejects
-                    // such a server before it can get here.
-                    (None, None) => None,
-                    // Fields the wire type cannot carry, such as
-                    // `disabled_tools` and OAuth, drop here.
-                }
-            })
-            .collect()
+        let (servers, warnings) = wire_mcp_servers(surface.runtime.registered_mcp_servers());
+        for warning in warnings {
+            self.notice(NoticeLevel::Warning, warning);
+        }
+        servers
     }
 
     /// Sends what the client produced, watching its own prompts go by
@@ -965,7 +1244,7 @@ impl Pump {
     }
 
     fn observe_outgoing(&mut self, frame: &kage_client::Frame) {
-        let kage_client::Frame::Request { method, params, .. } = frame else {
+        let kage_client::Frame::Request { id, method, params } = frame else {
             return;
         };
         if method != "session/prompt" {
@@ -977,6 +1256,7 @@ impl Pump {
         if prompt.session_id != self.wire {
             return;
         }
+        self.prompts.insert(id.clone());
         if !self.running {
             self.running = true;
             self.publish(HostEvent::RunStarted);
@@ -995,7 +1275,7 @@ impl Pump {
     /// Turns one handled frame's changes into the App's signals.
     fn react(&mut self, change: Change) {
         match change {
-            Change::Session { id } => self.session_moved(id),
+            Change::Session { id } => self.session_moved(&id),
             Change::Transcript { id } => {
                 if id == self.wire {
                     let state = self.state_snapshot();
@@ -1055,25 +1335,9 @@ impl Pump {
         }
     }
 
-    /// A session moved. A session whose answer was waited for adopts
-    /// the wire; the active one publishes its state, with the run
-    /// edges its running flag crosses.
-    fn session_moved(&mut self, id: String) {
-        if let Some(open) = self.pending_open.take_if(|pending| *pending == id) {
-            self.adopt(open, false);
-            return;
-        }
-        if self.pending_new && id != self.wire {
-            self.pending_new = false;
-            let old = std::mem::replace(&mut self.wire, id);
-            // A cold start adopts its first session off an empty wire;
-            // there is nothing to close.
-            if !old.is_empty() {
-                self.store.client().close_session(&old);
-            }
-            self.adopt(self.wire.clone(), true);
-            return;
-        }
+    /// A session moved. Only the active one is followed: it publishes
+    /// its state, with the run edges its running flag crosses.
+    fn session_moved(&mut self, id: &str) {
         if id != self.wire {
             return;
         }
@@ -1088,13 +1352,9 @@ impl Pump {
         }
         if !working && self.running {
             self.running = false;
-            // What the link protocol's bus subscriber records: the
-            // model a completed run used, and the run itself.
-            let _ = crate::state::record_last_model(&self.model);
-            let _ = crate::state::record_run_outcome(&self.model, &RunOutcome::Completed);
-            self.publish(HostEvent::RunEnded {
-                outcome: RunOutcome::Completed,
-            });
+            let outcome = self.run_outcome();
+            let _ = self.recorder.send((self.model.clone(), outcome.clone()));
+            self.publish(HostEvent::RunEnded { outcome });
         }
         if let Some(model) = self
             .store
@@ -1128,6 +1388,25 @@ impl Pump {
         self.hand_buffer();
     }
 
+    /// How the run that just ended finished: the error its prompt
+    /// answered with, else the stop reason the agent reported.
+    fn run_outcome(&mut self) -> RunOutcome {
+        if let Some(message) = self.run_error.take() {
+            return RunOutcome::Failed {
+                error: kage_core::LoopError::Provider { message },
+            };
+        }
+        let stop = self
+            .store
+            .state()
+            .session(&self.wire)
+            .and_then(|session| session.last_stop);
+        match stop {
+            Some(kage_client::wire::StopReason::Cancelled) => RunOutcome::Cancelled,
+            _ => RunOutcome::Completed,
+        }
+    }
+
     /// Hands the App the wire session's current buffer when the store
     /// swapped it, as a replaced session does: the replay of the
     /// replacement folds into the new object, so the old one the App
@@ -1145,12 +1424,19 @@ impl Pump {
     }
 
     /// Points the mirror at the wire session's file, which the exit
-    /// summary, the session tree and the agent loader read. A failing
-    /// sessions directory keeps the previous path, and the readers
-    /// degrade on a stale one.
+    /// summary, the session tree and the agent loader read.
     fn note_session_file(&mut self) {
-        if let Ok(dir) = crate::paths::sessions_dir() {
-            lock(&self.mirror).point_at(dir.join(format!("{}.jsonl", self.wire)));
+        self.point_mirror(crate::paths::sessions_dir());
+    }
+
+    /// Points the mirror at `<dir>/<wire id>.jsonl`, or at nothing when
+    /// the sessions directory cannot be resolved: a stale path would
+    /// send the readers to another session's file.
+    fn point_mirror(&mut self, dir: Result<PathBuf, String>) {
+        let mut mirror = lock(&self.mirror);
+        match dir {
+            Ok(dir) => mirror.point_at(dir.join(format!("{}.jsonl", self.wire))),
+            Err(_) => mirror.clear(),
         }
     }
 
@@ -1160,8 +1446,21 @@ impl Pump {
     /// recorded with, as the engine path does.
     fn adopt(&mut self, id: String, carry_model: bool) {
         self.close_ask_cards();
-        self.running = false;
-        self.wire = id;
+        if self.running {
+            self.store.client().cancel(&self.wire);
+            self.running = false;
+            self.publish(HostEvent::RunEnded {
+                outcome: RunOutcome::Cancelled,
+            });
+        }
+        let old = std::mem::replace(&mut self.wire, id);
+        // A cold start adopts its first session off an empty wire;
+        // there is nothing to close. The session the App leaves is
+        // closed on the agent side, so the shared host does not keep
+        // it loaded for a TUI that moved on.
+        if !old.is_empty() {
+            self.store.client().close_session(&old);
+        }
         self.warned_model = None;
         self.handed = None;
         self.hand_buffer();
@@ -1433,7 +1732,12 @@ impl Pump {
                 queue,
                 ..
             } => self.submit(text, images, queue),
-            RunRequest::Cancel { .. } => self.store.client().cancel(&self.wire),
+            RunRequest::Cancel { .. } => {
+                if let Some(surface) = &self.plugins {
+                    surface.turn.cancel();
+                }
+                self.store.client().cancel(&self.wire);
+            }
             RunRequest::RecallPrompt { delivery, .. } => self.recall(delivery),
             RunRequest::SwitchModel(model) => {
                 self.model.clone_from(&model);
@@ -1499,14 +1803,7 @@ impl Pump {
                 self.invoke_plugin_command(&name, &args);
             }
             RunRequest::InvokeKeymap { id } => self.invoke_keymap(id),
-            RunRequest::NewSession => {
-                self.pending_new = true;
-                let meta = self.session_meta();
-                let servers = self.mcp_servers();
-                self.store
-                    .client()
-                    .new_session(&self.cwd, &servers, Some(meta));
-            }
+            RunRequest::NewSession => self.request_new_session(),
             RunRequest::ResumeSession(path) => self.open_recorded(&path),
             RunRequest::SwitchSession(SwitchTarget::Session(target)) => {
                 match super::support::resolve_switch_target(&target) {
@@ -1743,9 +2040,10 @@ impl Pump {
         }
     }
 
-    /// Replays a recorded session: the wire id is the file stem, the
-    /// App gets a fresh buffer, and the replay folds into it once the
-    /// agent answers.
+    /// Replays a recorded session: the wire id is the file stem, and
+    /// the replay folds into a fresh buffer once the agent answers.
+    /// The App stays on its current session until that answer adopts
+    /// the new one, so a failed load loses nothing.
     fn open_recorded(&mut self, path: &Path) {
         let Some(id) = path
             .file_stem()
@@ -1758,29 +2056,12 @@ impl Pump {
             );
             return;
         };
-        if self.pending_open.as_ref().is_some_and(|open| *open == id) || id == self.wire {
+        if self.pending_open.as_ref().is_some_and(|open| open.id == id) || id == self.wire {
             return;
         }
-        if self.running {
-            self.store.client().cancel(&self.wire);
-            self.running = false;
-            self.publish(HostEvent::RunEnded {
-                outcome: RunOutcome::Cancelled,
-            });
-        }
-        // The session the App leaves is closed on the agent side, so
-        // the shared host does not keep it loaded for a TUI that moved
-        // on. The switch is already committed to `id` by now.
-        if !self.wire.is_empty() {
-            self.store.client().close_session(&self.wire);
-        }
-        let fresh = self.store.reset_session(&id);
-        self.handed = Some(Arc::clone(&fresh));
-        self.feed.send_buffer(fresh);
-        self.close_ask_cards();
-        self.pending_open = Some(id);
-        let opening = self.pending_open.clone().expect("just set");
-        self.store.client().load_session(&opening, &self.cwd, &[]);
+        self.store.reset_session(&id);
+        let (request, _) = self.store.client().load_session(&id, &self.cwd, &[]);
+        self.pending_open = Some(PendingOpen { id, request });
     }
 
     fn refuse(&mut self, request: &RunRequest) {
@@ -2012,11 +2293,11 @@ fn plugin_dialog(ask: &DialogAsk, reply: mpsc::Sender<Option<Value>>) -> Option<
     }
 }
 
-/// Which agent the TUI drives: the shared host of this user unless
-/// asked or unable to use it. `--standalone`, `[host] share = false`,
-/// client configuration overrides, a host of another kage version, one that cannot be started, and
-/// platforms without the socket all fall back to a private host in
-/// this process, like `kage rpc` falls back to its private engine.
+/// Which agent the TUI drives: the shared host of this user, or a
+/// private host in this process when `--standalone`, `[host] share =
+/// false`, a client configuration override, a host of another version,
+/// a host that cannot be started, or a platform without the socket
+/// rules the shared one out.
 fn choose_upstream(standalone: bool, workdir: &Path) -> Upstream {
     #[cfg(not(unix))]
     {
@@ -2198,11 +2479,12 @@ pub(crate) fn run(
     let (refresh_tx, refresh_rx) = mpsc::channel::<PluginRefresh>();
     drop(refresh_tx);
     let feed = Arc::new(FeedState::default());
-    let surface = plugins.as_ref().map(|rt| PluginSurface {
-        runtime: Arc::clone(rt),
-        workdir: workdir.clone(),
-        cancel: CancelFlag::new(),
-    });
+    let surface = plugins
+        .as_ref()
+        .map(|rt| PluginSurface::new(Arc::clone(rt), workdir.clone()));
+    let (plugin_answers_tx, plugin_answers) = mpsc::channel();
+    let (recorder, finished_runs) = mpsc::channel();
+    start_run_recorder(finished_runs);
     let mirror = Arc::new(Mutex::new(Mirror::new()));
     let mut pump = Pump {
         store,
@@ -2217,13 +2499,19 @@ pub(crate) fn run(
         app_session,
         wire: String::new(),
         pending_open: None,
-        pending_new: false,
+        pending_new: None,
         cwd: workdir.display().to_string(),
         model: shown_model.clone(),
         warned_model: None,
         options: Arc::clone(&options),
         registry: Arc::clone(&registry),
-        plugins: surface,
+        plugins: None,
+        plugin_jobs: None,
+        plugin_answers,
+        plugin_answers_tx,
+        recorder,
+        prompts: HashSet::new(),
+        run_error: None,
         yolo,
         environment,
         system_prompt: system.to_owned(),
@@ -2239,6 +2527,12 @@ pub(crate) fn run(
         unknown: HashSet::new(),
         closed: false,
     };
+    if let Some(surface) = surface
+        && let Err(error) = pump.host_plugins(surface)
+    {
+        eprintln!("kage: {error}");
+        return ExitCode::from(1);
+    }
     pump.bootstrap(resume);
     // The buffer the App draws first: a resumed session's replay
     // target, or a placeholder until the new session's answer adopts
@@ -2304,10 +2598,9 @@ pub(crate) fn run(
     .run(|| {})
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::time::Duration;
 
@@ -2321,7 +2614,9 @@ mod tests {
     /// just-written file is briefly still open for writing somewhere
     /// in a forking process, and an exec of it loses that race as
     /// text file busy.
+    #[cfg(unix)]
     fn echo_child(dir: &Path) -> String {
+        use std::os::unix::fs::PermissionsExt;
         let script = dir.join("echo-kage-rpc");
         std::fs::write(
             &script,
@@ -2333,6 +2628,7 @@ mod tests {
     }
 
     /// The interpreter the stand-in child runs under.
+    #[cfg(unix)]
     fn echo_child_program() -> std::path::PathBuf {
         PathBuf::from("sh")
     }
@@ -2347,6 +2643,7 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
     #[test]
     fn frames_round_trip_through_the_child() {
         let dir = scratch();
@@ -2380,6 +2677,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn frames_round_trip_through_a_stream_pair() {
         let (mine, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -2444,9 +2742,9 @@ mod tests {
         );
     }
 
-    /// A pump on a stand-in child, with the channels the App would
-    /// hold. The pump is driven method by method, so the child never
-    /// speaks.
+    /// A pump on an in-memory pipe with nobody behind it, with the
+    /// channels the App would hold. The pump is driven method by
+    /// method, so the agent never speaks.
     fn test_pump() -> (
         Pump,
         mpsc::Receiver<Envelope>,
@@ -2456,11 +2754,19 @@ mod tests {
     ) {
         let dir = scratch();
         let (frames_tx, frames_rx) = mpsc::channel();
-        let transport = spawn(&echo_child_program(), &[echo_child(&dir)], frames_tx).unwrap();
+        let (to_agent, unread) = crate::tui::pipe::channel_pair();
+        let (unwritten, from_agent) = crate::tui::pipe::channel_pair();
+        // The silent agent's ends stay open for the life of the test
+        // process, so the connection never reads as closed.
+        Box::leak(Box::new((unread, unwritten)));
+        let transport =
+            Transport::stream(BufReader::new(from_agent), to_agent, None, frames_tx).unwrap();
         let (events, app) = mpsc::channel();
         let (_requests, requests_rx) = mpsc::channel::<RunRequest>();
         let (dialog_tx, dialog_rx) = mpsc::channel::<PluginDialog>();
         let feed = Arc::new(FeedState::default());
+        let (plugin_answers_tx, plugin_answers) = mpsc::channel();
+        let (recorder, _recorded) = mpsc::channel();
         let pump = Pump {
             store: Store::new(),
             transport,
@@ -2474,13 +2780,19 @@ mod tests {
             app_session: SessionId::new(),
             wire: "s1".to_owned(),
             pending_open: None,
-            pending_new: false,
+            pending_new: None,
             cwd: "/w".to_owned(),
             model: "test:model".to_owned(),
             warned_model: None,
             options: Arc::new(Mutex::new(kage_core::options::OptionStore::default())),
             registry: Arc::new(ProviderRegistry::default()),
             plugins: None,
+            plugin_jobs: None,
+            plugin_answers,
+            plugin_answers_tx,
+            recorder,
+            prompts: HashSet::new(),
+            run_error: None,
             yolo: false,
             environment: false,
             system_prompt: String::new(),
@@ -2499,26 +2811,64 @@ mod tests {
         (pump, app, dialog_rx, feed, dir)
     }
 
+    /// The model option a load or session answer carries.
+    fn model_options(model: &str) -> Value {
+        serde_json::json!([{
+            "id": "model", "name": "Model", "category": "model",
+            "type": "select", "currentValue": model, "options": []
+        }])
+    }
+
+    /// The id of the first request of `method` among `frames`.
+    fn request_id(frames: &[Frame], method: &str) -> RequestId {
+        frames
+            .iter()
+            .find_map(|frame| match frame {
+                Frame::Request { id, method: m, .. } if m == method => Some(id.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no {method} request in {frames:?}"))
+    }
+
+    #[cfg(unix)]
+    fn has_notification(frames: &[Frame], method: &str) -> bool {
+        frames
+            .iter()
+            .any(|frame| matches!(frame, Frame::Notification { method: m, .. } if m == method))
+    }
+
+    fn has_request(frames: &[Frame], method: &str) -> bool {
+        frames
+            .iter()
+            .any(|frame| matches!(frame, Frame::Request { method: m, .. } if m == method))
+    }
+
+    /// Opens the recorded session `id` and answers the load with
+    /// `model`.
+    fn resume_as(pump: &mut Pump, id: &str, model: &str) {
+        pump.open_recorded(Path::new(&format!("/sessions/{id}.jsonl")));
+        let load = request_id(&pump.store.take_outgoing(), "session/load");
+        pump.absorb(Frame::Success {
+            id: load,
+            result: serde_json::json!({"configOptions": model_options(model)}),
+        });
+    }
+
+    fn notices(app: &mpsc::Receiver<Envelope>) -> Vec<(NoticeLevel, String)> {
+        app.try_iter()
+            .filter_map(|envelope| match envelope.event {
+                kage_core::protocol::Event::Host(HostEvent::Notice { level, text, .. }) => {
+                    Some((level, text))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn a_resumed_legacy_model_warns_once_and_switching_back_warns_again() {
         let (mut pump, app, _dialogs, _feed, dir) = test_pump();
-        pump.pending_open = Some("resumed".to_owned());
-        pump.store.client().load_session("resumed", "/w", &[]);
-        let request = pump.store.take_outgoing().pop().unwrap();
-        let Frame::Request { id, .. } = request else {
-            panic!("load sends a request");
-        };
-        let changes = pump.store.absorb(Frame::Success {
-            id,
-            result: serde_json::json!({"configOptions": [{
-                "id": "model", "name": "Model", "category": "model",
-                "type": "select", "currentValue": "acp:reviewer", "options": []
-            }]}),
-        });
-        for change in changes {
-            pump.react(change);
-        }
-        pump.session_moved("resumed".to_owned());
+        resume_as(&mut pump, "resumed", "acp:reviewer");
         let warnings = || {
             app.try_iter()
                 .filter(|envelope| {
@@ -2532,43 +2882,274 @@ mod tests {
         };
         assert_eq!(warnings(), 1);
         for model in ["test:model", "acp:reviewer", "acp:reviewer"] {
-            let changes = pump.store.absorb(Frame::Notification {
+            pump.absorb(Frame::Notification {
                 method: "session/update".into(),
                 params: serde_json::json!({"sessionId": "resumed", "update": {
-                    "sessionUpdate": "config_option_update", "configOptions": [{
-                        "id": "model", "name": "Model", "category": "model",
-                        "type": "select", "currentValue": model, "options": []
-                    }]
+                    "sessionUpdate": "config_option_update",
+                    "configOptions": model_options(model)
                 }}),
             });
-            for change in changes {
-                pump.react(change);
-            }
         }
         assert_eq!(warnings(), 1);
-        pump.pending_open = Some("another".to_owned());
-        pump.store.client().load_session("another", "/w", &[]);
-        let request = pump.store.take_outgoing().pop().unwrap();
-        let Frame::Request { id, .. } = request else {
-            panic!("load sends a request");
-        };
-        let changes = pump.store.absorb(Frame::Success {
-            id,
-            result: serde_json::json!({"configOptions": [{
-                "id": "model", "name": "Model", "category": "model",
-                "type": "select", "currentValue": "acp:reviewer", "options": []
-            }]}),
-        });
-        for change in changes {
-            pump.react(change);
-        }
-        pump.session_moved("another".to_owned());
+        resume_as(&mut pump, "another", "acp:reviewer");
         assert_eq!(
             warnings(),
             1,
             "a different transcript needs its own warning"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_session_opens_only_when_its_load_answers() {
+        let (mut pump, app, _dialogs, feed, dir) = test_pump();
+        pump.open_recorded(Path::new("/sessions/next.jsonl"));
+        let sent = pump.store.take_outgoing();
+        let load = request_id(&sent, "session/load");
+        assert!(
+            !has_request(&sent, "session/close"),
+            "the old session stays open while the load is out"
+        );
+        assert_eq!(pump.wire, "s1");
+        assert!(
+            kage_tui::AcpFeed::take(&*feed).root_buffer.is_none(),
+            "the App keeps its buffer until the load answers"
+        );
+        pump.absorb(Frame::Success {
+            id: load,
+            result: serde_json::json!({"configOptions": []}),
+        });
+        assert_eq!(pump.wire, "next");
+        assert!(pump.pending_open.is_none());
+        assert!(
+            kage_tui::AcpFeed::take(&*feed).root_buffer.is_some(),
+            "the adopted session's buffer reaches the App"
+        );
+        assert!(
+            has_request(&pump.store.take_outgoing(), "session/close"),
+            "the session the App left is closed once"
+        );
+        drop(app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_load_keeps_the_session_and_a_retry_loads_again() {
+        let (mut pump, app, _dialogs, feed, dir) = test_pump();
+        pump.open_recorded(Path::new("/sessions/next.jsonl"));
+        let load = request_id(&pump.store.take_outgoing(), "session/load");
+        pump.absorb(Frame::Failure {
+            id: load,
+            error: RpcError::new(-32000, "no such session".to_owned()),
+        });
+        assert_eq!(pump.wire, "s1", "the failed switch never adopts");
+        assert!(pump.pending_open.is_none(), "the failure clears the open");
+        assert!(kage_tui::AcpFeed::take(&*feed).root_buffer.is_none());
+        let sent = pump.store.take_outgoing();
+        assert!(
+            !has_request(&sent, "session/close"),
+            "the old session is still in use"
+        );
+        let shown = notices(&app);
+        assert!(
+            shown
+                .iter()
+                .any(|(level, text)| *level == NoticeLevel::Error
+                    && text.contains("no such session")),
+            "{shown:?}"
+        );
+        pump.open_recorded(Path::new("/sessions/next.jsonl"));
+        let retry = request_id(&pump.store.take_outgoing(), "session/load");
+        pump.absorb(Frame::Success {
+            id: retry,
+            result: serde_json::json!({"configOptions": []}),
+        });
+        assert_eq!(pump.wire, "next", "the retry opens the session");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_new_session_clears_the_pending_request() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::NewSession);
+        let new = request_id(&pump.store.take_outgoing(), "session/new");
+        assert_eq!(new, RequestId::Number(pump.pending_new.expect("in flight")));
+        pump.absorb(Frame::Failure {
+            id: new,
+            error: RpcError::new(-32000, "cannot start".to_owned()),
+        });
+        assert_eq!(pump.pending_new, None);
+        assert_eq!(pump.wire, "s1");
+        assert!(
+            notices(&app)
+                .iter()
+                .any(|(_, text)| text.contains("cannot start"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_answer_to_session_new_adopts_a_new_session() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::NewSession);
+        let new = request_id(&pump.store.take_outgoing(), "session/new");
+        // A session that appears for another reason, such as another
+        // client's `session/new` echo, is not the answer.
+        pump.absorb(Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({"sessionId": "stray", "update": {
+                "sessionUpdate": "config_option_update",
+                "configOptions": model_options("test:model")
+            }}),
+        });
+        assert_eq!(pump.wire, "s1", "an unrelated session does not adopt");
+        assert!(pump.pending_new.is_some());
+        pump.absorb(Frame::Success {
+            id: new,
+            result: serde_json::json!({"sessionId": "fresh"}),
+        });
+        assert_eq!(pump.wire, "fresh");
+        assert_eq!(pump.pending_new, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pump whose run on `s1` is in flight, with the recorder's
+    /// queue to read.
+    fn running_pump() -> (
+        Pump,
+        mpsc::Receiver<Envelope>,
+        mpsc::Receiver<(String, RunOutcome)>,
+        PathBuf,
+    ) {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let (recorder, finished_runs) = mpsc::channel();
+        pump.recorder = recorder;
+        pump.handle(RunRequest::Submit {
+            text: "go".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        pump.flush();
+        let _ = app.try_iter().count();
+        (pump, app, finished_runs, dir)
+    }
+
+    fn run_ended(app: &mpsc::Receiver<Envelope>) -> Vec<RunOutcome> {
+        app.try_iter()
+            .filter_map(|envelope| match envelope.event {
+                kage_core::protocol::Event::Host(HostEvent::RunEnded { outcome }) => Some(outcome),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_run_ends_as_the_stop_reason_says() {
+        for (reason, expected) in [
+            ("end_turn", RunOutcome::Completed),
+            ("cancelled", RunOutcome::Cancelled),
+        ] {
+            let (mut pump, app, recorded, dir) = running_pump();
+            // The prompt is the only request the pump has sent.
+            let prompt = pump
+                .prompts
+                .iter()
+                .next()
+                .cloned()
+                .expect("a prompt is out");
+            pump.absorb(Frame::Success {
+                id: prompt,
+                result: serde_json::json!({"stopReason": reason}),
+            });
+            assert_eq!(run_ended(&app), std::slice::from_ref(&expected), "{reason}");
+            assert_eq!(
+                recorded.try_recv().unwrap(),
+                ("test:model".to_owned(), expected)
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn a_failed_prompt_ends_the_run_as_failed() {
+        let (mut pump, app, recorded, dir) = running_pump();
+        let prompt = pump
+            .prompts
+            .iter()
+            .next()
+            .cloned()
+            .expect("a prompt is out");
+        pump.absorb(Frame::Failure {
+            id: prompt,
+            error: RpcError::new(-32000, "provider down".to_owned()),
+        });
+        let ended = run_ended(&app);
+        assert!(
+            matches!(
+                ended.as_slice(),
+                [RunOutcome::Failed {
+                    error: kage_core::LoopError::Provider { message }
+                }] if message == "provider down"
+            ),
+            "{ended:?}"
+        );
+        assert!(matches!(
+            recorded.try_recv().unwrap().1,
+            RunOutcome::Failed { .. }
+        ));
+        assert!(!pump.running);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_closed_pump_waits_for_the_app_instead_of_spinning() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        // The frames sender is gone, so every read of the channel
+        // fails at once, as after the reader thread ends.
+        let (frames_tx, frames_rx) = mpsc::channel();
+        drop(frames_tx);
+        pump.frames = frames_rx;
+        pump.close();
+        let (requests, requests_rx) = mpsc::channel::<RunRequest>();
+        pump.requests = requests_rx;
+        let start = std::time::Instant::now();
+        for _ in 0..5 {
+            assert!(pump.pass());
+        }
+        assert!(
+            start.elapsed() >= TICK * 4,
+            "five passes took {:?}: the pump spins on the dead connection",
+            start.elapsed()
+        );
+        drop(requests);
+        assert!(!pump.pass(), "a gone App ends the pump");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pump_with_plugins_warns_when_a_session_is_resumed() {
+        let (mut pump, app, dir) = hosted_pump();
+        let _ = app.try_iter().count();
+        resume_as(&mut pump, "resumed", "test:model");
+        let shown = notices(&app);
+        assert!(
+            shown
+                .iter()
+                .any(|(level, text)| *level == NoticeLevel::Warning
+                    && text.contains("resumed session runs without your plugins")),
+            "{shown:?}"
+        );
+        let (mut bare, bare_app, _dialogs, _feed, bare_dir) = test_pump();
+        resume_as(&mut bare, "resumed", "test:model");
+        assert!(
+            !notices(&bare_app)
+                .iter()
+                .any(|(_, text)| text.contains("without your plugins")),
+            "a pump hosting nothing has nothing to warn of"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&bare_dir);
     }
 
     #[cfg(unix)]
@@ -2798,7 +3379,7 @@ mod tests {
                 kage_core::options::OptionSource::Lua,
             )
             .unwrap();
-        let registry = crate::build_provider_registry().unwrap();
+        let registry = ProviderRegistry::default();
         let meta = session_meta(&options, &registry, "test:model", "", false, false);
         let kage = meta.kage.expect("the settings are set");
         assert!(!kage.yolo);
@@ -3009,26 +3590,14 @@ mod tests {
         // The state run() hands the pump on a cold start: no session
         // adopted yet, nothing on the wire.
         pump.wire.clear();
-        pump.pending_new = true;
-        let meta = pump.session_meta();
-        pump.store.client().new_session(&pump.cwd, &[], Some(meta));
-        let outgoing = pump.store.take_outgoing();
-        let new_id = outgoing
-            .iter()
-            .find_map(|frame| match frame {
-                Frame::Request { id, method, .. } if method == "session/new" => Some(id.clone()),
-                _ => None,
-            })
-            .expect("bootstrap asks for a new session");
-        let changes = pump.store.absorb(Frame::Success {
+        pump.request_new_session();
+        let new_id = request_id(&pump.store.take_outgoing(), "session/new");
+        pump.absorb(Frame::Success {
             id: new_id,
             result: serde_json::json!({"sessionId": "agent-1"}),
         });
-        for change in changes {
-            pump.react(change);
-        }
         assert_eq!(pump.wire, "agent-1");
-        assert!(!pump.pending_new);
+        assert_eq!(pump.pending_new, None);
         let sent = pump.store.take_outgoing();
         assert!(
             !sent.iter().any(|frame| matches!(
@@ -3051,50 +3620,44 @@ mod tests {
     }
 
     #[test]
-    fn an_adopted_session_points_the_mirror_at_its_file() {
+    fn the_mirror_names_the_wire_sessions_file() {
         let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
-        pump.wire.clear();
-        pump.pending_new = true;
-        let meta = pump.session_meta();
-        pump.store.client().new_session(&pump.cwd, &[], Some(meta));
-        let outgoing = pump.store.take_outgoing();
-        let new_id = outgoing
-            .iter()
-            .find_map(|frame| match frame {
-                Frame::Request { id, method, .. } if method == "session/new" => Some(id.clone()),
-                _ => None,
-            })
-            .expect("bootstrap asks for a new session");
-        let changes = pump.store.absorb(Frame::Success {
-            id: new_id,
-            result: serde_json::json!({"sessionId": "agent-1"}),
-        });
-        for change in changes {
-            pump.react(change);
-        }
-        let expected = crate::paths::sessions_dir()
-            .expect("the test process has a sessions dir")
-            .join("agent-1.jsonl");
+        pump.wire = "agent-1".to_owned();
+        pump.point_mirror(Ok(dir.clone()));
         assert_eq!(
             lock(pump.mirror.as_ref()).path(),
-            Some(expected.as_path()),
+            Some(dir.join("agent-1.jsonl").as_path()),
             "the exit summary and the tree read the adopted session's file"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_resumed_session_points_the_mirror_at_its_file_before_the_load_answers() {
+    fn an_unresolvable_sessions_dir_clears_the_mirror() {
         let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
-        pump.bootstrap(Some(Path::new("/sessions/abc123.jsonl")));
-        let expected = crate::paths::sessions_dir()
-            .expect("the test process has a sessions dir")
-            .join("abc123.jsonl");
+        pump.point_mirror(Ok(dir.clone()));
+        assert!(lock(pump.mirror.as_ref()).path().is_some());
+        pump.point_mirror(Err("no home directory".to_owned()));
         assert_eq!(
             lock(pump.mirror.as_ref()).path(),
-            Some(expected.as_path()),
-            "adopt never runs on a resume, so bootstrap points the mirror itself"
+            None,
+            "a stale path would send the readers to another session's file"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adopting_a_session_points_the_mirror_at_it() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        resume_as(&mut pump, "abc123", "test:model");
+        // Whatever the environment resolves, the mirror ends on the
+        // adopted session's file name, or on nothing when the
+        // sessions directory cannot be resolved.
+        let path = lock(pump.mirror.as_ref()).path().map(Path::to_path_buf);
+        match crate::paths::sessions_dir() {
+            Ok(sessions) => assert_eq!(path, Some(sessions.join("abc123.jsonl"))),
+            Err(_) => assert_eq!(path, None),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3102,6 +3665,7 @@ mod tests {
     /// an override of it, a failing tool, and notification, transform
     /// and predicate handlers.
     const FIXTURE: &str = r"
+kage.request_capabilities({ 'exec', 'session_write' })
 kage.register_tool({
     name = 'plugin_echo',
     description = 'echoes input.msg',
@@ -3122,6 +3686,28 @@ kage.register_tool({
     schema = { type = 'object' },
     execute = function(input) error('no can do') end,
 })
+kage.register_tool({
+    name = 'plugin_wait',
+    description = 'waits on a process',
+    schema = { type = 'object' },
+    execute = function(input) kage.exec({ cmd = 'sleep', args = { '30' } }) return 'late' end,
+})
+kage.register_tool({
+    name = 'plugin_queue',
+    description = 'queues a message and a session entry',
+    schema = { type = 'object' },
+    execute = function(input)
+        kage.send_message('queued text', { trigger_turn = true })
+        kage.session.append_entry('plugin:note', { n = 1 })
+        return 'queued'
+    end,
+})
+kage.register_command({
+    name = 'hello',
+    description = 'greets',
+    handler = function(args, ctx) return 'hello ' .. args end,
+})
+kage.api.keymap_set('n', 'zz', function() return 'mapped' end)
 kage.on('message_end', function(ev) count = (count or 0) + 1 end)
 kage.on('transform_context', function(messages) return { replaced = true } end)
 kage.on('should_stop_after_turn', function(ev) return true end)
@@ -3139,16 +3725,17 @@ kage.on('should_stop_after_turn', function(ev) return true end)
             .config(serde_json::json!({"model": "mock/m"}))
             .capabilities(std::collections::BTreeMap::from([(
                 "fixture".to_owned(),
-                vec!["context".to_owned()],
+                vec![
+                    "context".to_owned(),
+                    "exec".to_owned(),
+                    "session_write".to_owned(),
+                ],
             )]))
             .build()
             .unwrap();
         kage_plugin::load_all(Some(&dir), &runtime).unwrap();
-        pump.plugins = Some(PluginSurface {
-            runtime: Arc::new(runtime),
-            workdir: dir.clone(),
-            cancel: CancelFlag::new(),
-        });
+        pump.host_plugins(PluginSurface::new(Arc::new(runtime), dir.clone()))
+            .unwrap();
         (pump, app, dir)
     }
 
@@ -3158,18 +3745,24 @@ kage.on('should_stop_after_turn', function(ev) return true end)
         ulid::Ulid::generate().to_string()
     }
 
-    /// Feed one request in and return the reply the surface queued.
+    /// Feed one request in and return the one reply the surface
+    /// queued, waiting for the worker's answer when the pump hosts.
     fn plugin_reply(pump: &mut Pump, id: u64, method: &str, params: Value) -> Frame {
         pump.absorb(Frame::Request {
             id: RequestId::Number(id),
             method: method.to_owned(),
             params,
         });
-        pump.store
-            .take_outgoing()
-            .into_iter()
-            .next()
-            .expect("the surface answers")
+        if pump.plugin_jobs.is_some() {
+            let answer = pump
+                .plugin_answers
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the worker answers");
+            pump.send_plugin_answer(answer);
+        }
+        let mut outgoing = pump.store.take_outgoing();
+        assert_eq!(outgoing.len(), 1, "exactly one reply, got {outgoing:?}");
+        outgoing.remove(0)
     }
 
     #[test]
@@ -3334,5 +3927,304 @@ kage.on('should_stop_after_turn', function(ev) return true end)
             Some(PluginsSource::Client)
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_running_plugin_tool_leaves_the_pump_free_and_esc_cancels_it() {
+        let (mut pump, _app, dir) = hosted_pump();
+        pump.absorb(Frame::Request {
+            id: RequestId::Number(30),
+            method: "_kage/plugin/call".to_owned(),
+            params: serde_json::json!({
+                "sessionId": fixture_session(),
+                "tool": "plugin_wait",
+                "input": {},
+            }),
+        });
+        // The tool waits on a 30 second process, yet the pump is back
+        // here with no answer sent.
+        assert!(pump.store.take_outgoing().is_empty());
+        assert!(pump.plugin_answers.try_recv().is_err());
+        let (_requests, requests_rx) = mpsc::channel::<RunRequest>();
+        pump.requests = requests_rx;
+        assert!(pump.pass(), "the pump keeps serving while the tool runs");
+        let start = std::time::Instant::now();
+        pump.handle(RunRequest::Cancel { session: None });
+        let (id, answer) = pump
+            .plugin_answers
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the cancel ends the tool call");
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "the tool ran on after the cancel: {:?}",
+            start.elapsed()
+        );
+        assert_eq!(id, RequestId::Number(30));
+        let error = answer.expect_err("a cancelled tool fails the request");
+        assert!(error.message.contains("plugin_wait"), "{}", error.message);
+        let sent = pump.store.take_outgoing();
+        assert!(has_notification(&sent, "session/cancel"), "{sent:?}");
+        // The next call is not poisoned by the cancel before it.
+        let reply = plugin_reply(
+            &mut pump,
+            31,
+            "_kage/plugin/call",
+            serde_json::json!({
+                "sessionId": fixture_session(),
+                "tool": "plugin_echo",
+                "input": {"msg": "again"},
+            }),
+        );
+        let Frame::Success { result, .. } = reply else {
+            panic!("the next call runs, got {reply:?}")
+        };
+        assert_eq!(result["text"], "override:again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dead_connection_cancels_the_plugin_calls() {
+        let (mut pump, _app, dir) = hosted_pump();
+        pump.close();
+        let reply = plugin_reply(
+            &mut pump,
+            32,
+            "_kage/plugin/call",
+            serde_json::json!({
+                "sessionId": fixture_session(),
+                "tool": "plugin_wait",
+                "input": {},
+            }),
+        );
+        assert!(
+            matches!(reply, Frame::Failure { .. }),
+            "a call after the close does not start: {reply:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_drain_hands_over_the_queued_messages_and_session_ops() {
+        let (mut pump, _app, dir) = hosted_pump();
+        let session = fixture_session();
+        let queue = |pump: &mut Pump, id: u64| {
+            let reply = plugin_reply(
+                pump,
+                id,
+                "_kage/plugin/call",
+                serde_json::json!({"sessionId": session, "tool": "plugin_queue", "input": {}}),
+            );
+            assert!(matches!(reply, Frame::Success { .. }), "{reply:?}");
+        };
+        let drain = |pump: &mut Pump, id: u64, queue: &str, session: Option<&str>| {
+            let reply = plugin_reply(
+                pump,
+                id,
+                "_kage/plugin/drain",
+                serde_json::json!({"sessionId": session, "queue": queue}),
+            );
+            let Frame::Success { result, .. } = reply else {
+                panic!("the drain answers, got {reply:?}")
+            };
+            result
+        };
+        queue(&mut pump, 40);
+        let messages = drain(&mut pump, 41, "messages", Some(&session));
+        assert_eq!(messages["messages"][0]["text"], "queued text");
+        assert_eq!(messages["messages"][0]["triggerTurn"], true);
+        assert_eq!(messages["messages"][0]["deliverAs"], "user");
+        let again = drain(&mut pump, 42, "messages", Some(&session));
+        assert_eq!(again, serde_json::json!({}), "a drain empties the queue");
+        let ops = drain(&mut pump, 43, "session_ops", None);
+        assert_eq!(ops["ops"][0]["kind"], "plugin:note", "{ops}");
+        queue(&mut pump, 44);
+        let ops = drain(&mut pump, 45, "session_ops_for", Some(&session));
+        assert_eq!(ops["ops"].as_array().map(Vec::len), Some(1), "{ops}");
+        assert_eq!(ops["ops"][0]["kind"], "plugin:note", "{ops}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_session_id_that_is_not_a_ulid_is_refused() {
+        let (mut pump, _app, dir) = hosted_pump();
+        for (id, method, params) in [
+            (
+                50,
+                "_kage/plugin/call",
+                serde_json::json!({"sessionId": "s1", "tool": "plugin_echo", "input": {}}),
+            ),
+            (
+                51,
+                "_kage/plugin/hook",
+                serde_json::json!({
+                    "sessionId": "s1", "event": "transform_context",
+                    "kind": "transform", "payload": [],
+                }),
+            ),
+            (
+                52,
+                "_kage/plugin/drain",
+                serde_json::json!({"sessionId": "s1", "queue": "session_ops_for"}),
+            ),
+            (
+                53,
+                "_kage/plugin/drain",
+                serde_json::json!({"queue": "session_ops_for"}),
+            ),
+        ] {
+            let reply = plugin_reply(&mut pump, id, method, params);
+            let Frame::Failure { error, .. } = reply else {
+                panic!("{method} takes a ULID session, got {reply:?}")
+            };
+            assert_eq!(error.code, -32602, "{method}: {}", error.message);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_hosted_pump_runs_plugin_commands_and_keymaps_itself() {
+        let (mut pump, app, dir) = hosted_pump();
+        let _ = app.try_iter().count();
+        pump.handle(RunRequest::InvokePluginCommand {
+            name: "hello".to_owned(),
+            args: "world".to_owned(),
+        });
+        assert_eq!(
+            notices(&app),
+            [(NoticeLevel::Info, "hello world".to_owned())]
+        );
+        pump.handle(RunRequest::InvokePluginCommand {
+            name: "missing".to_owned(),
+            args: String::new(),
+        });
+        assert_eq!(
+            notices(&app),
+            [(NoticeLevel::Error, "no plugin command: missing".to_owned())]
+        );
+        let handler = {
+            let surface = pump.plugins.as_ref().expect("hosted");
+            let keymap = surface.runtime.keymap();
+            lock(&keymap)
+                .to_data()
+                .into_iter()
+                .find_map(|mapping| match mapping.rhs {
+                    kage_core::keymap::RhsData::Lua { id } if mapping.lhs == "zz" => Some(id),
+                    _ => None,
+                })
+                .expect("the fixture maps zz")
+        };
+        pump.handle(RunRequest::InvokeKeymap { id: handler });
+        assert_eq!(notices(&app), [(NoticeLevel::Info, "mapped".to_owned())]);
+        assert!(
+            pump.store.take_outgoing().is_empty(),
+            "a hosted pump never asks the agent to run them"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pump_without_plugins_asks_the_agent_to_run_commands_and_keymaps() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::InvokePluginCommand {
+            name: "hello".to_owned(),
+            args: "world".to_owned(),
+        });
+        pump.handle(RunRequest::InvokeKeymap { id: 3 });
+        let sent = pump.store.take_outgoing();
+        assert!(has_request(&sent, "_kage/ui/command"), "{sent:?}");
+        assert!(has_request(&sent, "_kage/ui/keymap"), "{sent:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn mcp_server(json: Value) -> kage_core::config::McpServer {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn plugin_mcp_servers_map_to_the_wire_and_warn_of_what_it_drops() {
+        let (servers, warnings) = wire_mcp_servers(vec![
+            (
+                "files".to_owned(),
+                mcp_server(serde_json::json!({
+                    "command": "mcp-files", "args": ["--ro"], "env": {"K": "V"},
+                })),
+            ),
+            (
+                "remote".to_owned(),
+                mcp_server(serde_json::json!({
+                    "url": "https://mcp.test", "headers": {"Authorization": "t"},
+                })),
+            ),
+            (
+                "off".to_owned(),
+                mcp_server(serde_json::json!({"command": "x", "disabled": true})),
+            ),
+            ("empty".to_owned(), mcp_server(serde_json::json!({}))),
+            (
+                "trimmed".to_owned(),
+                mcp_server(serde_json::json!({"command": "t", "disabled_tools": ["rm"]})),
+            ),
+            (
+                "login".to_owned(),
+                mcp_server(serde_json::json!({"url": "https://o.test", "oauth": {}})),
+            ),
+            (
+                "both".to_owned(),
+                mcp_server(serde_json::json!({
+                    "url": "https://b.test", "oauth": {}, "disabled_tools": ["x"],
+                })),
+            ),
+        ]);
+        let names: Vec<&str> = servers
+            .iter()
+            .map(|server| match server {
+                McpServer::Stdio(server) => server.name.as_str(),
+                McpServer::Http(server) | McpServer::Sse(server) => server.name.as_str(),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            ["files", "remote", "trimmed", "login", "both"],
+            "disabled and transport-less servers are left out"
+        );
+        assert!(matches!(
+            &servers[0],
+            McpServer::Stdio(stdio)
+                if stdio.command == "mcp-files" && stdio.args == ["--ro"]
+                    && stdio.env == [EnvVariable { name: "K".into(), value: "V".into() }]
+        ));
+        assert!(matches!(
+            &servers[1],
+            McpServer::Http(http)
+                if http.url == "https://mcp.test"
+                    && http.headers == [HttpHeader { name: "Authorization".into(), value: "t".into() }]
+        ));
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(warnings[0].contains("`trimmed`") && warnings[0].contains("disabled_tools"));
+        assert!(warnings[1].contains("`login`") && warnings[1].contains("oauth"));
+        assert!(
+            warnings[2].contains("disabled_tools and oauth"),
+            "{warnings:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_a_socket_transport_ends_its_reader_and_the_peer_sees_eof() {
+        let (mine, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        theirs
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        let (events, received) = mpsc::channel();
+        let transport = Transport::host(mine, events).unwrap();
+        drop(transport);
+        match received.recv_timeout(Duration::from_secs(30)) {
+            Ok(Event::Closed) => {}
+            other => panic!("the reader must end on the drop, got {other:?}"),
+        }
+        let mut line = String::new();
+        let read = BufReader::new(&theirs).read_line(&mut line).unwrap();
+        assert_eq!(read, 0, "the peer reads end of file, not a timeout");
     }
 }

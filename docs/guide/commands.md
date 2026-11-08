@@ -76,6 +76,17 @@ The table lists every built-in command.
 | `/reload`                 | Reload `init.lua` and plugins now, without waiting for a file change. A toast reports the result, and each error shows in the conversation. |
 | `/quit` / `/q`            | Exit the TUI                                    |
 
+## commands the TUI does not run yet
+
+The TUI talks to its agent over ACP, which has no counterpart yet for
+some of the commands above. These answer with "... is not available
+over the ACP link yet" and change nothing: shell escapes, `/undo`,
+`/rewind`, `/clone`, forking from the `/tree` picker, deleting a
+session from it, `/image` and `/media` (open and save), `/reload`, and
+`/mcp restart`. See [the TUI's ACP
+link](/reference/architecture#the-tuis-acp-link) for how the link
+works.
+
 ## settings
 
 `/settings` opens one list with a row per option: its name, its

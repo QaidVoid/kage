@@ -5,6 +5,12 @@
 //! Windows. The two halves exchange byte chunks through channels:
 //! what one writes, the other reads, and dropping a writer ends the
 //! opposite reader at EOF like a hung-up stream would.
+//!
+//! The channels are unbounded, so a write never blocks and a peer that
+//! stops reading lets the queue grow without limit. Both ends here
+//! read continuously for as long as the connection lives, which is why
+//! a bounded queue, and the deadlock a full one risks between two
+//! threads that each wait to write, is not used.
 
 // Wired only where a `UnixStream` pair is unavailable, but compiled
 // and tested everywhere so the logic cannot rot unseen.

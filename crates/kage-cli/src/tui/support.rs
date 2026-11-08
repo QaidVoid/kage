@@ -8,7 +8,8 @@ use kage_core::protocol::NoticeLevel;
 use crate::auth::AuthStore;
 use crate::state::State;
 
-/// Warn when the local engine uses the legacy one-shot ACP provider.
+/// The warning for `model` when it names the legacy one-shot ACP
+/// provider, whose turns each start a new upstream session.
 pub(crate) fn legacy_acp_warning(model: &str) -> Option<&'static str> {
     kage_core::split_model(model)
         .is_some_and(|(provider, _)| provider == "acp")
@@ -467,6 +468,11 @@ impl Mirror {
     /// Names `path` the active session's file.
     pub(crate) fn point_at(&mut self, path: PathBuf) {
         self.path = Some(path);
+    }
+
+    /// Forgets the active session's file, when it cannot be named.
+    pub(crate) fn clear(&mut self) {
+        self.path = None;
     }
 
     /// The active session's file.

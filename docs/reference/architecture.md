@@ -428,6 +428,24 @@ every `kage rpc` of one user shares one engine. See
   queue drained by its own thread. A client that stops reading is
   disconnected once 16 MiB are queued for it, so it can never stall
   the engine's bus for the others.
+- **Native serving.** On Linux every connection is served over the
+  native Unix peer (`rpc/native.rs`), which external sessions need.
+  The peer writes into a pipe kage owns and one pump thread copies each
+  line to the connection, so a slow client stalls only that thread and
+  the peer's writes time out after 30 seconds. A message the host
+  sends that is over 8 MiB closes the connection.
+- **External sessions.** A `session/new` naming an agent configured in
+  the user's `[acp.agents]` starts it as a child process (`rpc/external.rs`).
+  The host owns the process in one of 8 slots (`external/lifecycle.rs`),
+  reserved with its cleanup thread before the process spawns, so closing
+  or dropping a session never waits for cleanup. Updates from the agent
+  fan out to every attached connection through a bounded queue per
+  attachment. The session file records a display history on a worker
+  of its slot (`external/recorder.rs`) and its header names the agent and
+  the upstream session id, never a command. A reopen starts a fresh
+  process and restores the upstream session with `session/resume` or
+  `session/load`, whichever the agent advertises. The session's engine
+  features (tools, models, forks) do not apply: the agent owns them.
 - **Relay.** `kage rpc` connects, or starts `kage host run --detached`
   (`setsid`, cwd `/`, stderr to `host.log`) and retries with backoff.
   It waits for `host.json`, refuses a host of another version, then

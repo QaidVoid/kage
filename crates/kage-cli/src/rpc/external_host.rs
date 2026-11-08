@@ -1,6 +1,5 @@
 //! Host routing for creating and restoring external ACP sessions.
 //!
-//! Both stay unreachable while the host's external session flag is off.
 //! Agent launch settings come only from trusted configuration, never from a
 //! session file, which holds just the agent's name and upstream identity.
 
@@ -114,12 +113,6 @@ impl CliAcpAgent {
     }
 
     fn external_allowed(&self, servers: &[McpServer]) -> Result<(), RpcError> {
-        if !self.host.external_sessions.load(Ordering::SeqCst) {
-            return Err(RpcError::new(
-                -32602,
-                "external agent sessions are temporarily unavailable",
-            ));
-        }
         if !servers.is_empty() {
             return Err(RpcError::new(
                 -32602,
@@ -161,7 +154,12 @@ impl CliAcpAgent {
             ticket: None,
         };
         let mut sessions = lock(&self.host.external);
+        sessions.retain(|_, live| !live.is_closed());
         let mut ids = lock(&self.ids);
+        ids.external.retain(|id| sessions.contains_key(id));
+        if session.is_closed() {
+            return Err(RpcError::internal("external session ended while opening"));
+        }
         if self.disconnecting.load(Ordering::SeqCst) {
             return Err(RpcError::internal("client is disconnecting"));
         }

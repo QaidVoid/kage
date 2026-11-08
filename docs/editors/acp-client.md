@@ -47,9 +47,48 @@ agent's command yourself, as with an MCP server.
 
 ## external sessions
 
-A persistent external-session backend is under development. It is not yet
-advertised or available for selection. Until it is ready, the CLI and
-standalone TUI use the one-shot provider path described below.
+An agent configured under `[acp.agents.<name>]` can also run as a
+persistent session. The agent keeps its own conversation, tools and
+subagents, and kage shows what it does and routes the controls it
+supports. Kage runs none of the agent's tools itself, so the agent works
+with its own privileges. This is not a sandbox. Unlike the one-shot
+`acp:<name>` provider path, the process stays up between turns and the
+conversation survives them.
+
+External sessions run on Linux. A host that supports them says so in its
+`initialize` result with `_meta.kage.externalSessions: true`. The
+desktop offers them when you pick `acp:<name>` on the new session
+screen. Another ACP client sends `session/new` with
+`_meta.kage.externalAgent` set to the configured name. The request never
+carries a command: the launch settings come from your user config, and a
+project's `[acp]` table is ignored.
+
+- **One process per session.** Every client attached to the session
+  shares it, and the process ends when the last client leaves or the
+  host stops. A host runs at most 8 external sessions and a session
+  takes at most 8 clients.
+- **History.** The session file records the agent's name, its upstream
+  session id and a display history: your prompts, the agent's message and
+  thought text, and tool titles and statuses. Tool output, raw tool
+  input and permission decisions are not recorded.
+- **Reopening.** `session/load` and `session/resume` start a fresh
+  process and restore the upstream session through its `session/resume`
+  or `session/load`, whichever the agent advertises. An agent that
+  offers neither cannot be reopened, and kage says so instead of
+  starting a new conversation under the old id. A load shows the
+  recorded history before it answers.
+- **Permissions.** An upstream permission request goes to the client
+  whose prompt is running, with the options the agent offered. Your
+  choice goes back as offered, so a choice such as "allow always" applies
+  to the whole upstream session, including prompts from other clients.
+  With no running prompt the request is cancelled.
+- **Cancelling.** Only the client whose prompt is running can cancel it.
+- **Not supported.** Downstream MCP servers, forking, steering a running
+  turn and kage's own models, modes, compaction and swarm. The desktop
+  refuses those actions on an external session with a notice.
+- **Memory.** Each session buffers at most 4 MiB of updates for slow
+  clients. A client that falls 2 MiB behind fails the session, which
+  you can reopen.
 
 ## configure from a plugin
 

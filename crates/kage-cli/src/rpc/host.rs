@@ -113,9 +113,6 @@ pub(crate) struct Host {
     pub(super) external: Mutex<HashMap<String, Arc<super::external::External>>>,
     /// Capacity for external agent processes, held until cleanup finishes.
     pub(super) lifecycles: super::external::Lifecycles,
-    /// Whether clients may create and restore external sessions. Off until
-    /// the whole external session flow is complete.
-    pub(super) external_sessions: std::sync::atomic::AtomicBool,
     /// External sessions being restored, so one starts only one process.
     pub(super) restoring: Mutex<std::collections::HashSet<String>>,
     /// The providers in effect, replaced when the config's change.
@@ -254,7 +251,6 @@ impl Host {
             engine,
             external: Mutex::default(),
             lifecycles: super::external::Lifecycles::new(super::external::MAX_SESSIONS),
-            external_sessions: std::sync::atomic::AtomicBool::new(false),
             restoring: Mutex::default(),
             registry: RwLock::new(registry),
             default_model,
@@ -435,18 +431,6 @@ impl Host {
         served
     }
 
-    /// Whether connections are served over the native transport, which
-    /// external sessions need.
-    #[cfg(unix)]
-    fn serves_natively(&self) -> bool {
-        #[cfg(test)]
-        if std::env::var_os("KAGE_TEST_NATIVE_SERVE").is_some() {
-            return true;
-        }
-        self.external_sessions
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
     /// [`Host::serve`] with `prepare` run on the connection's agent
     /// before the first request arrives. The rpc tests open their
     /// standing session there.
@@ -462,7 +446,7 @@ impl Host {
         P: FnOnce(&CliAcpAgent) + Send + 'static,
     {
         #[cfg(unix)]
-        if self.serves_natively() {
+        if super::external::SUPPORTED {
             return self.serve_native_with(reader, writer, prepare);
         }
         serve_agent(reader, writer, |peer| {
@@ -531,12 +515,17 @@ impl Host {
         lock(&self.runtimes).get(&id).cloned()
     }
 
-    /// Drop the plugin runtimes of projects no session has used for a
-    /// while.
+    /// Drop unused project runtimes and terminated external sessions.
     pub(crate) fn prune_projects(&self) {
+        self.prune_external_sessions();
         if let Some(projects) = self.projects.get() {
             projects.prune();
         }
+    }
+
+    /// Release host entries whose upstream process has terminated.
+    pub(super) fn prune_external_sessions(&self) {
+        lock(&self.external).retain(|_, session| !session.is_closed());
     }
 
     /// Whether the project at `workdir` has anything to load, by the

@@ -809,8 +809,10 @@ impl CliAcpAgent {
             id: id.to_owned(),
             ticket: None,
         };
+        self.host.prune_external_sessions();
         let sessions = lock(&self.host.external);
         let Some(session) = sessions.get(id) else {
+            lock(&self.ids).external.remove(id);
             return Ok(None);
         };
         if !servers.is_empty() {
@@ -829,6 +831,7 @@ impl CliAcpAgent {
                 "the session was closed before it finished opening",
             ));
         }
+        ids.external.retain(|id| sessions.contains_key(id));
         open.ticket = Some(if history {
             session.attach_load(self.connection, self.peer.clone())?
         } else {
@@ -987,7 +990,7 @@ impl Agent for CliAcpAgent {
                         .ok()
                         .map(|dir| dir.display().to_string()),
                     config_options: self.default_options(),
-                    external_sessions: self.host.external_sessions.load(Ordering::SeqCst),
+                    external_sessions: external::SUPPORTED,
                 }),
             }),
         }

@@ -44,6 +44,10 @@ pub(crate) enum Recording {
     },
 }
 
+/// Whether this platform runs external sessions. Where it does, the host
+/// serves every connection over the native transport they need.
+pub(super) const SUPPORTED: bool = cfg!(target_os = "linux");
+
 /// External agent processes a host runs at once, including ones cleaning up.
 pub(super) const MAX_SESSIONS: usize = 8;
 
@@ -298,6 +302,8 @@ mod unix {
                 active.abort.cancel();
             }
             self.early.clear();
+            self.history.clear();
+            self.history_bytes = 0;
             for attachment in self.attachments.values_mut() {
                 attachment.detached.store(true, Ordering::Release);
                 attachment.sender.take();
@@ -840,9 +846,19 @@ mod unix {
             }
         }
 
+        /// Whether the upstream session has terminated and cannot accept work.
+        pub(crate) fn is_closed(&self) -> bool {
+            lock(&self.state).closed
+        }
+
         pub(crate) fn register_prompt(&self, owner: u64) -> Result<PromptTicket, RpcError> {
             let state = lock(&self.state);
-            let Some(attachment) = state.attachments.get(&owner).filter(|_| !state.closed) else {
+            if state.closed {
+                return Err(RpcError::internal(
+                    "external session is closed; reopen it to restore",
+                ));
+            }
+            let Some(attachment) = state.attachments.get(&owner) else {
                 return Err(RpcError::new(-32602, "external session is not attached"));
             };
             // Keep one session slot available to already announced attachments.
@@ -4911,6 +4927,10 @@ mod unsupported {
     }
 
     impl External {
+        /// Unsupported platforms cannot have live external sessions.
+        pub(crate) fn is_closed(&self) -> bool {
+            true
+        }
         pub(crate) fn start(
             _: &Lifecycles,
             _: super::Launch<'_>,

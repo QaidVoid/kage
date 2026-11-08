@@ -48,6 +48,8 @@ for line in sys.stdin:
             continue
         result = {}
     elif method == 'session/prompt':
+        if params['prompt'][0]['text'] == 'exit':
+            sys.exit(0)
         store = load()
         store['turns'].append(params['prompt'][0]['text'])
         save(store)

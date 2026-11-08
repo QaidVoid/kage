@@ -252,8 +252,12 @@ pub struct KageAgentInfo {
     pub cwd: Option<String>,
     /// The config options a new session opens with, so a client can
     /// show the default model, thinking level and mode before it opens
-    /// one.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// one. Unfamiliar control types are omitted.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_session_config_options"
+    )]
     pub config_options: Vec<SessionConfigOption>,
     /// Whether the host accepts configured external agents at session creation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -3432,6 +3436,23 @@ mod tests {
                 config_options: vec![model_option()],
             },
             serde_json::json!({"configOptions": [model_option_json()]}),
+        );
+    }
+
+    #[test]
+    fn initialize_ignores_unfamiliar_optional_config() {
+        let response: InitializeResponse = serde_json::from_value(serde_json::json!({
+            "protocolVersion": 1,
+            "agentCapabilities": {},
+            "_meta": {"kage": {"configOptions": [
+                model_option_json(),
+                {"type": "vendor_control", "arbitrary": true}
+            ]}}
+        }))
+        .unwrap();
+        assert_eq!(
+            response.meta.unwrap().kage.unwrap().config_options,
+            [model_option()]
         );
     }
 

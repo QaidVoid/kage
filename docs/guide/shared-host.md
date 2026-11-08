@@ -213,3 +213,16 @@ that once its last client leaves: closed sessions' state drops at
 once, and a project's runtime a minute after its last session. CI
 fails a release build whose idle host goes over 4 MiB, whose relay
 goes over 2 MiB, or that serves sessions and stays over 4 MiB.
+
+If an external agent exits unexpectedly, the host releases its live session
+entry and retains its recording. Reopen the recorded session to restore it
+through the agent's advertised restoration support. CLI `--last` skips
+external recordings because native CLI sessions cannot resume them.
+
+External sessions are bounded. A host runs at most 8 of them, each
+buffers at most 4 MiB of updates for slow clients and keeps 1 MiB of
+history in memory and at most 1 MiB queued for its recording. With
+every slot flooding stalled clients, a release run measured 60 MiB of
+private memory over the host's baseline, and eight slots with eight
+idle clients each measured 15 MiB. CI fails a build that goes over
+twice those figures.

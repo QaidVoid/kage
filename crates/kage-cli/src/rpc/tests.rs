@@ -2398,8 +2398,13 @@ fn set_option(
 fn unknown_external_session_is_refused_instead_of_opening_an_engine_session() {
     let dir = tempfile::tempdir().unwrap();
     let h = serve(Vec::new(), dir.path(), dir.path());
+    let refusal = if external::SUPPORTED {
+        "unknown external agent"
+    } else {
+        "external sessions need the native transport"
+    };
 
-    for name in ["trusted-agent", ""] {
+    for name in ["kage-test-no-such-agent", ""] {
         let params = serde_json::json!({
             "cwd": dir.path(),
             "mcpServers": [],
@@ -2407,8 +2412,7 @@ fn unknown_external_session_is_refused_instead_of_opening_an_engine_session() {
         });
         let err = h.client.request("session/new", params).unwrap_err();
         assert_eq!(err.code, -32602);
-        assert!(err.message.contains("external agent"));
-        assert!(err.message.contains("temporarily unavailable"));
+        assert!(err.message.contains(refusal), "{err:?}");
     }
 
     let params = serde_json::json!({"cwd": dir.path(), "mcpServers": []});
@@ -7630,122 +7634,6 @@ fn in_range_session_opts_are_accepted() {
         new_session_with_opt(&opt).unwrap_or_else(|e| panic!("{opt}: {e}"));
     }
 }
-#[test]
-fn external_host_refuses_configured_agents_in_isolated_process() {
-    use serde_json::{Value, json};
-
-    // The production config intentionally ignores project ACP settings. Run the
-    // server test in a child with its own user config and environment instead.
-    if std::env::var_os("KAGE_TEST_EXTERNAL_CHILD").is_none() {
-        run_external_host_test_in_child();
-        return;
-    }
-
-    let dir = tempfile::tempdir().unwrap();
-    let mock = MockProvider::sequence(vec![text_turn("engine answer"), text_turn("title")]);
-    let host = test_host(
-        Arc::new(Listed::of(mock.clone())),
-        dir.path().to_path_buf(),
-        dir.path().to_path_buf(),
-        false,
-    );
-    let (srv_r, mut cli_w) = std::io::pipe().unwrap();
-    let (cli_r, srv_w) = std::io::pipe().unwrap();
-    let running = Arc::clone(&host);
-    std::thread::spawn(move || running.serve(BufReader::new(srv_r), srv_w).unwrap());
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        for line in BufReader::new(cli_r).lines() {
-            if tx
-                .send(serde_json::from_str::<Value>(&line.unwrap()).unwrap())
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-    let send = |writer: &mut std::io::PipeWriter, value: Value| {
-        writeln!(writer, "{value}").unwrap();
-        writer.flush().unwrap();
-    };
-    let recv = || rx.recv_timeout(WAIT).expect("no RPC message");
-    send(
-        &mut cli_w,
-        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}),
-    );
-    let init = recv();
-    assert_ne!(init["result"]["_meta"]["kage"]["externalSessions"], true);
-    let new = |id, name: &str| json!({"jsonrpc":"2.0","id":id,"method":"session/new","params":{"cwd":dir.path(),"mcpServers":[],"_meta":{"kage":{"externalAgent":name}}}});
-    for (id, name) in [(2, "missing"), (3, "broken"), (4, "fake")] {
-        send(&mut cli_w, new(id, name));
-        let error = recv();
-        assert_eq!(error["id"], id);
-        assert_eq!(error["error"]["code"], -32602);
-        assert!(
-            error["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("temporarily unavailable")
-        );
-        assert!(mock.requests().is_empty());
-        assert!(lock(&host.external).is_empty());
-    }
-    send(
-        &mut cli_w,
-        json!({"jsonrpc":"2.0","id":10,"method":"session/new","params":{"cwd":dir.path(),"mcpServers":[]}}),
-    );
-    let ordinary = loop {
-        let msg = recv();
-        if msg["id"] == 10 {
-            break msg;
-        }
-    };
-    let ordinary_id = ordinary["result"]["sessionId"].as_str().unwrap();
-    send(
-        &mut cli_w,
-        json!({"jsonrpc":"2.0","id":11,"method":"session/prompt","params":{"sessionId":ordinary_id,"prompt":[{"type":"text","text":"engine"}]}}),
-    );
-    loop {
-        let msg = recv();
-        if msg["id"] == 11 {
-            assert_eq!(msg["result"]["stopReason"], "end_turn");
-            break;
-        }
-    }
-    assert!(!mock.requests().is_empty());
-}
-
-fn run_external_host_test_in_child() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join("config/kage");
-    std::fs::create_dir_all(&config).unwrap();
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/external_acp.py");
-    let contents = format!(
-        "[acp.agents.fake]\ncommand = \"python3\"\nargs = [{}]\n\n[acp.agents.broken]\ncommand = \"/nonexistent/kage-fake-agent\"\n",
-        serde_json::to_string(script.to_str().unwrap()).unwrap()
-    );
-    std::fs::write(config.join("config.toml"), contents).unwrap();
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "rpc::tests::external_host_refuses_configured_agents_in_isolated_process",
-            "--nocapture",
-        ])
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", dir.path())
-        .env("XDG_CONFIG_HOME", dir.path().join("config"))
-        .env("KAGE_TEST_EXTERNAL_CHILD", "1")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "child failed:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
-}
 
 #[cfg(target_os = "linux")]
 // The creator's open stays unresolved, as while a creation response is in
@@ -7775,6 +7663,19 @@ fn external_race_fixture() -> (
     lock(&host.external).insert("external".into(), session);
     lock(&owner.ids).external.insert("external".into());
     (dir, host, owner, other, created)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn attaching_an_external_session_forgets_stale_connection_claims() {
+    let (_dir, _host, _owner, other, _created) = external_race_fixture();
+    lock(&other.ids).external.insert("terminated".into());
+    let receipt = other.attach_external("external", &[], None, false).unwrap();
+    let ids = lock(&other.ids);
+    assert!(!ids.external.contains("terminated"));
+    assert!(ids.external.contains("external"));
+    drop(ids);
+    drop(receipt);
 }
 
 #[cfg(target_os = "linux")]
@@ -8799,14 +8700,12 @@ fn recorded_turns(path: &Path) -> Vec<String> {
 
 #[cfg(target_os = "linux")]
 fn enabled_external_host(dir: &Path) -> Arc<Host> {
-    let host = test_host(
+    test_host(
         Arc::new(Listed::of(MockProvider::sequence(vec![]))),
         dir.to_path_buf(),
         dir.to_path_buf(),
         false,
-    );
-    host.external_sessions.store(true, Ordering::SeqCst);
-    host
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -8914,6 +8813,58 @@ fn external_session_is_created_closed_and_restored_from_its_upstream() {
             "end"
         ]
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_terminated_external_session_is_pruned_and_can_be_restored() {
+    const NAME: &str = "rpc::tests::a_terminated_external_session_is_pruned_and_can_be_restored";
+    if std::env::var_os("KAGE_TEST_EXTERNAL_CHILD").is_none() {
+        run_external_restore_test_in_child(NAME);
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().to_str().unwrap();
+    let host = enabled_external_host(dir.path());
+    let mut owner = NativeClient::serve(&host);
+    owner.request("initialize", serde_json::json!({"protocolVersion": 1}));
+    let created = owner.request(
+        "session/new",
+        serde_json::json!({"cwd": cwd, "mcpServers": [], "_meta": {"kage": {"externalAgent": "fake"}}}),
+    );
+    let id = created["result"]["sessionId"].as_str().unwrap();
+    let prompt = |text: &str| serde_json::json!({"sessionId": id, "prompt": [{"type": "text", "text": text}]});
+    let first = owner.request("session/prompt", prompt("one"));
+    assert_eq!(first["result"]["stopReason"], "end_turn", "{first}");
+    let failed = owner.request("session/prompt", prompt("exit"));
+    assert!(failed["error"].is_object(), "{failed}");
+    let until = Instant::now() + WAIT;
+    while host.lifecycles.live() != 0 {
+        assert!(
+            Instant::now() < until,
+            "terminated process was not cleaned up"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    host.prune_projects();
+    assert!(
+        lock(&host.external).is_empty(),
+        "terminated session was retained"
+    );
+    let mut restored = NativeClient::serve(&host);
+    restored.request("initialize", serde_json::json!({"protocolVersion": 1}));
+    let loaded = restored.request(
+        "session/load",
+        serde_json::json!({"sessionId": id, "cwd": cwd, "mcpServers": []}),
+    );
+    assert!(loaded["result"].is_object(), "{loaded}");
+    let second = restored.request("session/prompt", prompt("two"));
+    assert_eq!(second["result"]["stopReason"], "end_turn", "{second}");
+    assert_eq!(
+        lock(&restored.texts).last().map(String::as_str),
+        Some("one|two")
+    );
+    restored.request("session/close", serde_json::json!({"sessionId": id}));
 }
 
 #[cfg(target_os = "linux")]

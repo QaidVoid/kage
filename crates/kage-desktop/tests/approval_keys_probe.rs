@@ -79,8 +79,47 @@ fn harness() -> Harness<'static, Rig> {
         )
 }
 
-/// Hands the shell `frame` and steps until it has been drawn.
-fn push(harness: &mut Harness<'static, Rig>, frame: &serde_json::Value) {
+/// The store the shell drives, once the harness started it.
+fn store<'a>(harness: &'a Harness<'static, Rig>) -> &'a kage_desktop::store::Store {
+    harness
+        .state()
+        .app
+        .as_ref()
+        .expect("the shell started")
+        .shell
+        .store()
+}
+
+/// Steps until `ready` sees the state it waits for. The pump thread
+/// hands each transport event to the shell whenever the runner
+/// schedules it, so the probe observes the frame's effect instead of
+/// assuming a frame count; the deadline only keeps a frame that never
+/// lands from hanging the run.
+fn step_until(
+    harness: &mut Harness<'static, Rig>,
+    ready: impl Fn(&Harness<'static, Rig>) -> bool,
+    what: &str,
+) {
+    let started = std::time::Instant::now();
+    while !ready(harness) {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{what} was never observed"
+        );
+        std::thread::yield_now();
+        harness.step();
+    }
+}
+
+/// Hands the shell `frame` and steps until `ready` reports the frame
+/// absorbed and drawn, so what the probe asserts next is the state
+/// the frame produced, not whatever the pump thread reached.
+fn push_when(
+    harness: &mut Harness<'static, Rig>,
+    frame: &serde_json::Value,
+    ready: impl Fn(&Harness<'static, Rig>) -> bool,
+    what: &str,
+) {
     let frame = kage_client::Frame::parse(frame).expect("a JSON-RPC frame");
     let events = harness
         .state()
@@ -93,8 +132,7 @@ fn push(harness: &mut Harness<'static, Rig>, frame: &serde_json::Value) {
     events
         .try_send(Event::Frame(frame))
         .expect("the inbox is open");
-    harness.step();
-    harness.step();
+    step_until(harness, ready, what);
 }
 
 /// Plays the recorded handshake and session answers, so the parent
@@ -104,11 +142,24 @@ fn opened(harness: &mut Harness<'static, Rig>) {
         harness.step();
     }
     let fixture = include_str!("../../kage-client/tests/fixtures/subagents.jsonl");
-    for line in fixture.lines().take(2) {
-        push(
-            harness,
-            &serde_json::from_str(line).expect("a fixture line"),
-        );
+    for (n, line) in fixture.lines().take(2).enumerate() {
+        let frame = serde_json::from_str(line).expect("a fixture line");
+        match n {
+            // The initialize answer makes the shell live; the session
+            // answer opens the parent the probe talks to.
+            0 => push_when(
+                harness,
+                &frame,
+                |h| store(h).state().protocol_version.is_some(),
+                "the initialize answer",
+            ),
+            _ => push_when(
+                harness,
+                &frame,
+                |h| store(h).active_id() == Some(PARENT),
+                "the session answer",
+            ),
+        }
     }
     for _ in 0..20 {
         harness.step();
@@ -158,7 +209,7 @@ fn a_digit_answers_only_while_no_field_has_the_keys() {
         Some(composer),
         "the composer starts with the keys"
     );
-    push(
+    push_when(
         &mut harness,
         &serde_json::json!({
             "jsonrpc": "2.0", "id": 101, "method": "session/request_permission",
@@ -174,6 +225,8 @@ fn a_digit_answers_only_while_no_field_has_the_keys() {
                 ]
             }
         }),
+        |h| !store(h).active_asks().is_empty(),
+        "the permission ask",
     );
     assert_eq!(focused(&harness), None, "the first ask takes the keys");
 

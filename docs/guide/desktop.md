@@ -83,6 +83,20 @@ character the moment it arrives.
 | Group sessions by project | on | Lists sessions under their project folder in the sidebar. |
 | Ask before enabling swarm | on | Confirms before swarm mode turns on. |
 
+## external agent sessions
+
+When the host supports external sessions (Linux), the new session
+screen's model picker lists each configured
+external agent as `acp:<name>`. Picking one opens a session on that agent
+instead of the kage engine, and the session keeps its conversation
+between turns. See
+[external sessions](/editors/acp-client#external-sessions). The toolbar
+shows the agent's name where the model picker was. Prompts, cancelling
+and permission answers work as usual. Changing the model or mode, forking,
+renaming, compacting, exporting, browsing files and swarms are refused
+with a notice, because the agent owns them. Pressing Ctrl+Enter sends a
+plain prompt, as external agents cannot be steered.
+
 ## where preferences live
 
 The General page's preferences, pinned and archived sessions, starred

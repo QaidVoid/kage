@@ -355,7 +355,7 @@ pub fn find_by_prefix(dir: &Path, prefix: &str) -> Result<Option<PathBuf>, Sessi
 }
 
 /// Find the most recently created session in `dir` that was recorded
-/// in working directory `cwd`, skipping agent sessions. Candidates are
+/// in working directory `cwd`, skipping agent and external sessions. Candidates are
 /// ranked by their header timestamp, so a copied or renamed file whose
 /// name sorts high cannot win over a session that is newer by its
 /// header; stems break ties, newest first.
@@ -419,7 +419,7 @@ fn session_files(dir: &Path) -> Result<Vec<(String, PathBuf)>, SessionError> {
 }
 
 /// The header timestamp when `path` starts with a header recorded in
-/// `cwd` and is not an agent session, through the one
+/// `cwd` and is a native user session, through the one
 /// session-identity scan the summary and `is_agent_session` share.
 /// `None` when it is not a user session for `cwd`.
 fn user_session_header(path: &Path, cwd: &Path) -> Option<DateTime<Utc>> {
@@ -431,7 +431,9 @@ fn user_session_header(path: &Path, cwd: &Path) -> Option<DateTime<Utc>> {
         .and_then(Result::ok)
         .and_then(|line| serde_json::from_str::<SessionEntry>(&line).ok());
     let ts = match header {
-        Some(SessionEntry::Header(header)) if header.cwd == cwd => header.ts,
+        Some(SessionEntry::Header(header)) if header.cwd == cwd && header.backend.is_none() => {
+            header.ts
+        }
         _ => return None,
     };
     (!crate::list::is_agent_session(path)).then_some(ts)
@@ -1274,6 +1276,26 @@ mod tests {
 
         let last = find_last(dir.path(), Path::new("/work")).unwrap().unwrap();
         assert_eq!(last, path_b);
+    }
+
+    #[test]
+    fn find_last_skips_external_sessions() {
+        let dir = tempdir().unwrap();
+        let mut native = fresh_header();
+        native.cwd = dir.path().to_path_buf();
+        let path = dir.path().join("native.jsonl");
+        write(&path, native.clone(), &[]);
+        let mut external = native;
+        external.ts += chrono::Duration::seconds(1);
+        external.backend = Some(crate::SessionBackend::ExternalAcp(
+            crate::ExternalAcpSession {
+                agent_name: "fake".into(),
+                protocol_version: 1,
+                upstream_session_id: "up".into(),
+            },
+        ));
+        write(&dir.path().join("external.jsonl"), external, &[]);
+        assert_eq!(find_last(dir.path(), dir.path()).unwrap(), Some(path));
     }
 
     #[test]

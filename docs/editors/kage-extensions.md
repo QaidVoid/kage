@@ -13,7 +13,8 @@ session opened with an empty `cwd` runs in. A client with no
 directory of its own, such as a browser, names its sessions' project
 by it. `_meta.kage.configOptions` lists the config options a new
 session opens with, so a client can show the default model, thinking
-level and mode before it opens one.
+level and mode before it opens one. `_meta.kage.externalSessions` is
+`true` when the server runs external sessions, which it does on Linux.
 
 A client may send `_meta.kage.unconfiguredTools: "allow"` in its
 `clientCapabilities` to get the TUI's permission rules: tools without
@@ -89,7 +90,14 @@ recorded: `_meta.kage.durationMs` on each `agent_thought_chunk` and on
 the `tool_call_update` that ends each tool call.
 
 `session/list` entries carry `_meta.kage.parentSessionId` for a
-session forked from another, so a client can draw the fork tree.
+session forked from another, so a client can draw the fork tree. An
+external session's entry carries `_meta.kage.externalAgent`, the name of
+its agent.
+
+`session/new` accepts `_meta.kage.externalAgent`, the name of an agent
+configured under `[acp.agents]`, to open the session on that agent
+instead of the kage engine. The server refuses an unknown name and a
+request with `mcpServers`. See [external sessions](./acp-client.md#external-sessions).
 
 Media a model produces, such as the images of a model that draws,
 arrive as standard ACP `image` (or `audio`) blocks in

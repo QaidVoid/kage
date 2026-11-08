@@ -2059,6 +2059,80 @@ fn session_list_pages_with_a_cursor() {
 }
 
 #[test]
+fn a_session_load_meta_sets_the_session_up_like_a_new_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let session = record(
+        dir.path(),
+        &cwd,
+        "mock/recorded",
+        1,
+        &[message(Role::User, vec![text("hello")], None)],
+    );
+    let h = serve(vec![text_turn("ok")], dir.path(), dir.path());
+    let params = serde_json::json!({
+        "sessionId": session,
+        "cwd": cwd,
+        "mcpServers": [],
+        "_meta": { "kage": {
+            "yolo": true,
+            "opt": { "thinkingLevel": "high" },
+        }},
+    });
+    let loaded = h.client.request("session/load", params.clone()).unwrap();
+    let values = |result: &serde_json::Value, id: &str| {
+        result["configOptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|option| option["id"] == id)
+            .unwrap_or_else(|| panic!("{id} option in {result}"))["currentValue"]
+            .clone()
+    };
+    assert_eq!(values(&loaded, "mode"), "allow", "yolo survives a load");
+    assert_eq!(values(&loaded, "thinking"), "high");
+
+    // The same ask rides `session/resume`.
+    let resumed = h
+        .client
+        .request(
+            "session/resume",
+            serde_json::json!({
+                "sessionId": params["sessionId"],
+                "cwd": params["cwd"],
+                "mcpServers": [],
+                "_meta": params["_meta"],
+            }),
+        )
+        .unwrap();
+    assert_eq!(values(&resumed, "mode"), "allow", "yolo survives a resume");
+    assert_eq!(values(&resumed, "thinking"), "high");
+}
+
+#[test]
+fn a_load_without_the_plugin_host_capability_refuses_client_plugins() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let session = record(
+        dir.path(),
+        &cwd,
+        "mock/recorded",
+        1,
+        &[message(Role::User, vec![text("hello")], None)],
+    );
+    let h = serve(vec![text_turn("ok")], dir.path(), dir.path());
+    let params = serde_json::json!({
+        "sessionId": session,
+        "cwd": cwd,
+        "mcpServers": [],
+        "_meta": { "kage": { "plugins": "client" } },
+    });
+    let error = h.client.request("session/load", params).unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert!(error.message.contains("pluginHost"), "{}", error.message);
+}
+
+#[test]
 fn session_load_replays_the_whole_transcript_and_restores_the_session() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().display().to_string();
@@ -3093,6 +3167,15 @@ fn shell_progress_streams_the_latest_tail_and_ends_with_the_exit_code() {
     }
 
     assert!(progress.len() >= 2, "expected several progress ticks");
+    // The producer throttles its updates to one per 100 ms, so a 1.5 s
+    // command yields at most about 15. The bound holds no matter how
+    // long delivery stalls: a queue can only join updates, never split
+    // them.
+    assert!(
+        progress.len() <= 18,
+        "{} updates for a 1.5 s command: the throttle is gone",
+        progress.len()
+    );
     let mut last_end = 0;
     for lines in progress.iter().map(|(_, lines)| lines) {
         for pair in lines.windows(2) {
@@ -3113,14 +3196,6 @@ fn shell_progress_streams_the_latest_tail_and_ends_with_the_exit_code() {
         "progress stopped tracking early: {last_end}"
     );
     assert_eq!(progress.last().unwrap().1.len(), 10);
-    for pair in progress.windows(2) {
-        let gap = pair[1].0 - pair[0].0;
-        assert!(
-            gap >= Duration::from_millis(80),
-            "updates {} ms apart",
-            gap.as_millis()
-        );
-    }
 
     let final_update = final_shell_update(&stream, "call_sh");
     assert_eq!(final_update["status"], "completed");

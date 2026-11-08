@@ -287,25 +287,30 @@ impl Client {
     /// Opens a recorded session and replays its transcript, which
     /// streams as updates before this answer arrives. Returns the
     /// request id and the change the reset of the local session made.
+    /// `meta` carries what a kage client asks of the session, read the
+    /// same way a `session/new`'s is.
     pub fn load_session(
         &mut self,
         session_id: &str,
         cwd: &str,
         mcp_servers: &[McpServer],
+        meta: Option<NewSessionMeta>,
     ) -> (u64, Vec<Change>) {
-        self.open("session/load", session_id, cwd, mcp_servers)
+        self.open("session/load", session_id, cwd, mcp_servers, meta)
     }
 
     /// Opens a recorded session without replaying its history. Returns
     /// the request id and the change the reset of the local session
-    /// made.
+    /// made. `meta` carries what a kage client asks of the session,
+    /// read the same way a `session/new`'s is.
     pub fn resume_session(
         &mut self,
         session_id: &str,
         cwd: &str,
         mcp_servers: &[McpServer],
+        meta: Option<NewSessionMeta>,
     ) -> (u64, Vec<Change>) {
-        self.open("session/resume", session_id, cwd, mcp_servers)
+        self.open("session/resume", session_id, cwd, mcp_servers, meta)
     }
 
     /// Asks for one page of recorded sessions. Pages land in
@@ -1039,18 +1044,21 @@ impl Client {
         session_id: &str,
         cwd: &str,
         mcp_servers: &[McpServer],
+        meta: Option<NewSessionMeta>,
     ) -> (u64, Vec<Change>) {
         let request = if method == "session/load" {
             params(&LoadSessionRequest {
                 session_id: session_id.to_owned(),
                 cwd: cwd.to_owned(),
                 mcp_servers: mcp_servers.to_vec(),
+                meta,
             })
         } else {
             params(&ResumeSessionRequest {
                 session_id: session_id.to_owned(),
                 cwd: cwd.to_owned(),
                 mcp_servers: mcp_servers.to_vec(),
+                meta,
             })
         };
         // The replay that follows streams the whole history again, so
@@ -2149,6 +2157,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn load_session_sends_the_meta_a_kage_client_asks_with() {
+        let mut client = Client::new();
+        let meta = NewSessionMeta {
+            kage: Some(kage_acp_wire::NewSessionKage {
+                yolo: true,
+                ..kage_acp_wire::NewSessionKage::default()
+            }),
+        };
+        client.load_session("s1", "/project", &[], Some(meta));
+        let outgoing = client.take_outgoing();
+        assert_eq!(outgoing[0].to_value()["method"], json!("session/load"));
+        assert_eq!(
+            outgoing[0].to_value()["params"],
+            json!({
+                "sessionId": "s1",
+                "cwd": "/project",
+                "mcpServers": [],
+                "_meta": { "kage": { "yolo": true } },
+            })
+        );
+        // A load without a meta sends none, so agents that do not
+        // know the field see nothing.
+        let mut client = Client::new();
+        client.load_session("s1", "/project", &[], None);
+        let params = client.take_outgoing()[0].to_value()["params"].clone();
+        assert!(params.get("_meta").is_none(), "{params}");
+    }
+
     /// A permission ask whose request id is a string, as agents that
     /// assign string ids send.
     fn string_id_ask() -> Value {
@@ -2438,7 +2475,7 @@ mod tests {
         let held = client.prompt("s1", vec![ContentBlock::text("second ask")]);
         assert_eq!(held, PromptOutcome::Queued);
 
-        let (load_id, _) = client.load_session("s1", "", &[]);
+        let (load_id, _) = client.load_session("s1", "", &[], None);
         assert!(
             client.state().session("s1").unwrap().items.is_empty(),
             "the open replaced the transcript"
@@ -2464,7 +2501,7 @@ mod tests {
     #[test]
     fn a_failed_load_removes_its_pending_entry() {
         let mut client = Client::new();
-        let (load_id, _) = client.load_session("s1", "", &[]);
+        let (load_id, _) = client.load_session("s1", "", &[], None);
         let failure = Frame::Failure {
             id: RequestId::Number(load_id),
             error: RpcError::new(-32000, "no such session"),

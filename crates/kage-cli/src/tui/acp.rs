@@ -1132,22 +1132,6 @@ impl Pump {
         }
         if let Some((id, new)) = adopted {
             self.adopt(id, new);
-            if !new {
-                self.warn_resumed_without_plugins();
-            }
-        }
-    }
-
-    /// Tells the user a resumed session runs without the plugins this
-    /// process hosts, while its commands stay available here.
-    fn warn_resumed_without_plugins(&mut self) {
-        if self.plugins.is_some() {
-            self.notice(
-                NoticeLevel::Warning,
-                "this resumed session runs without your plugins' tools and hooks; \
-                 plugin commands still run in this TUI"
-                    .to_owned(),
-            );
         }
     }
 
@@ -1184,8 +1168,11 @@ impl Pump {
             self.handed = Some(Arc::clone(&fresh));
             self.feed.send_buffer(fresh);
             self.note_session_file();
-            self.store.client().load_session(&id, &self.cwd, &[]);
-            self.warn_resumed_without_plugins();
+            let meta = self.session_meta();
+            let servers = self.mcp_servers();
+            self.store
+                .client()
+                .load_session(&id, &self.cwd, &servers, Some(meta));
         } else {
             self.request_new_session();
         }
@@ -2060,7 +2047,12 @@ impl Pump {
             return;
         }
         self.store.reset_session(&id);
-        let (request, _) = self.store.client().load_session(&id, &self.cwd, &[]);
+        let meta = self.session_meta();
+        let servers = self.mcp_servers();
+        let (request, _) = self
+            .store
+            .client()
+            .load_session(&id, &self.cwd, &servers, Some(meta));
         self.pending_open = Some(PendingOpen { id, request });
     }
 
@@ -3128,28 +3120,24 @@ mod tests {
     }
 
     #[test]
-    fn a_pump_with_plugins_warns_when_a_session_is_resumed() {
-        let (mut pump, app, dir) = hosted_pump();
-        let _ = app.try_iter().count();
-        resume_as(&mut pump, "resumed", "test:model");
-        let shown = notices(&app);
-        assert!(
-            shown
-                .iter()
-                .any(|(level, text)| *level == NoticeLevel::Warning
-                    && text.contains("resumed session runs without your plugins")),
-            "{shown:?}"
+    fn a_resumed_session_rides_the_same_meta_a_new_one_does() {
+        let (mut pump, _app, dir) = hosted_pump();
+        pump.yolo = true;
+        pump.open_recorded(Path::new("/sessions/resumed.jsonl"));
+        let frames = pump.store.take_outgoing();
+        let load = frames
+            .iter()
+            .find(|frame| frame.to_value()["method"] == "session/load")
+            .expect("the load went out");
+        let params = &load.to_value()["params"];
+        let kage = &params["_meta"]["kage"];
+        assert_eq!(
+            kage["plugins"], "client",
+            "a hosted pump hosts the resume too"
         );
-        let (mut bare, bare_app, _dialogs, _feed, bare_dir) = test_pump();
-        resume_as(&mut bare, "resumed", "test:model");
-        assert!(
-            !notices(&bare_app)
-                .iter()
-                .any(|(_, text)| text.contains("without your plugins")),
-            "a pump hosting nothing has nothing to warn of"
-        );
+        assert_eq!(kage["yolo"], pump.yolo);
+        assert_eq!(params["sessionId"], "resumed");
         let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&bare_dir);
     }
 
     #[cfg(unix)]

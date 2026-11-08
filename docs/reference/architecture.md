@@ -328,11 +328,11 @@ The TUI loads the user's plugins itself. At initialize it announces
 `_meta.kage.plugins = "client"`, so the agent asks the TUI for the
 plugin tools, hooks and events with `_kage/plugin/*` requests. A worker
 thread answers them in order, so the pump keeps serving the App while
-a Lua tool runs, and `Esc` cancels the running tool. A resumed session
-has no such `_meta` yet and runs without the TUI's plugins; the TUI
-says so when one opens. A hosted plugin MCP server that sets
-`disabled_tools` or `oauth` is started by the agent without them, and
-the TUI warns when it sends one.
+a Lua tool runs, and `Esc` cancels the running tool. A resumed or
+loaded session carries the same `_meta.kage` a new one does, so its
+settings and the TUI's plugin hosting survive the switch. A hosted
+plugin MCP server that sets `disabled_tools` or `oauth` is started by
+the agent without them, and the TUI warns when it sends one.
 
 The ACP link has no counterpart yet for some commands the engine path
 served. The TUI refuses each with the notice "... is not available over

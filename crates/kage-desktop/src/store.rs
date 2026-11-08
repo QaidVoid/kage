@@ -560,7 +560,7 @@ impl Store {
                 .find(|info| info.session_id == id)
                 .map(|info| info.cwd.clone())
                 .unwrap_or_else(|| self.cwd.clone());
-            let (request, _) = self.client.load_session(&id, &cwd, &[]);
+            let (request, _) = self.client.load_session(&id, &cwd, &[], None);
             self.loads.insert(request, (id.clone(), false));
         }
         self.unread.remove(&id);
@@ -782,7 +782,7 @@ impl Store {
             .find(|info| info.session_id == session)
             .map(|info| info.cwd.clone())
             .unwrap_or_else(|| self.cwd.clone());
-        let (request, _) = self.client.load_session(&session, &cwd, &[]);
+        let (request, _) = self.client.load_session(&session, &cwd, &[], None);
         self.loads.insert(request, (session, true));
     }
 
@@ -898,7 +898,7 @@ impl Store {
             for (id, cwd) in open {
                 let (request, _) =
                     self.client
-                        .load_session(&id, cwd.as_deref().unwrap_or(&self.cwd), &[]);
+                        .load_session(&id, cwd.as_deref().unwrap_or(&self.cwd), &[], None);
                 self.loads.insert(request, (id, false));
             }
         }
@@ -978,7 +978,7 @@ impl Store {
             .active_session()
             .and_then(|session| session.cwd.clone())
             .unwrap_or_else(|| self.cwd.clone());
-        let (request, _) = self.client.load_session(id, &cwd, &[]);
+        let (request, _) = self.client.load_session(id, &cwd, &[], None);
         self.loads.insert(request, (id.to_owned(), false));
     }
 
@@ -1122,7 +1122,7 @@ impl Store {
             .session(from)
             .and_then(|session| session.cwd.clone())
             .unwrap_or_else(|| self.cwd.clone());
-        let (request, _) = self.client.load_session(to, &cwd, &[]);
+        let (request, _) = self.client.load_session(to, &cwd, &[], None);
         self.loads.insert(request, (to.to_owned(), false));
         self.unread.remove(to);
         self.active = Some(to.to_owned());

@@ -106,14 +106,20 @@ Client to agent:
 | method                      | params -> result |
 | --------------------------- | ---------------- |
 | `initialize`                | `{protocolVersion, clientCapabilities}` -> `{protocolVersion, agentCapabilities, agentInfo, authMethods}` |
-| `session/new`               | `{cwd, mcpServers}` -> `{sessionId, configOptions}` |
-| `session/load`              | `{sessionId, cwd, mcpServers}` -> replays history as `session/update`, then `{configOptions}` |
-| `session/resume`            | `{sessionId, cwd, mcpServers}` -> `{configOptions}`, no replay |
+| `session/new`               | `{cwd, mcpServers, _meta?}` -> `{sessionId, configOptions}` |
+| `session/load`              | `{sessionId, cwd, mcpServers, _meta?}` -> replays history as `session/update`, then `{configOptions}` |
+| `session/resume`            | `{sessionId, cwd, mcpServers, _meta?}` -> `{configOptions}`, no replay |
 | `session/list`              | `{cwd?, cursor?}` -> `{sessions: [{sessionId, cwd, title?, updatedAt?}], nextCursor?}` |
 | `session/close`             | `{sessionId}` -> `{}`, releasing the caller's attachment; a session no connection holds and that is idle closes once released |
 | `session/set_config_option` | `{sessionId, configId, value}` -> `{configOptions}` |
 | `session/prompt`            | `{sessionId, prompt: ContentBlock[]}` -> `{stopReason}` |
 | `session/cancel`            | notification `{sessionId}` |
+
+A kage client may pass `_meta.kage` with `session/new`, `session/load`
+or `session/resume` to set the session's system prompt, yolo mode, loop
+options and output cap, and to host the session's plugins itself. The
+fields are the ones `session/new` takes; a load or resume applies them
+the same way.
 
 Agent to client:
 

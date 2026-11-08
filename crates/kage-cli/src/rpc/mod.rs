@@ -788,8 +788,14 @@ impl Agent for CliAcpAgent {
         req: LoadSessionRequest,
         ctx: &PromptContext,
     ) -> Result<LoadSessionResponse, RpcError> {
-        let config_options =
-            self.open_recorded(&req.session_id, &req.cwd, &req.mcp_servers, Some(ctx), true)?;
+        let config_options = self.open_recorded(
+            &req.session_id,
+            &req.cwd,
+            &req.mcp_servers,
+            Some(ctx),
+            true,
+            req.meta.as_ref(),
+        )?;
         Ok(LoadSessionResponse { config_options })
     }
 
@@ -808,6 +814,7 @@ impl Agent for CliAcpAgent {
             &req.mcp_servers,
             Some(ctx),
             false,
+            req.meta.as_ref(),
         )?;
         Ok(ResumeSessionResponse { config_options })
     }

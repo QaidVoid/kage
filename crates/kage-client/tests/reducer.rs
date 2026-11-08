@@ -214,7 +214,7 @@ fn a_reload_replays_history_but_keeps_what_only_the_client_holds() {
     client.prompt("s1", vec![ContentBlock::text("first")]);
     client.prompt("s1", vec![ContentBlock::text("held")]);
     client.set_draft("s1", "typing");
-    client.load_session("s1", "/srv/proj", &[]);
+    client.load_session("s1", "/srv/proj", &[], None);
     let session = client.state().session("s1").unwrap();
     assert!(
         session.items.is_empty(),

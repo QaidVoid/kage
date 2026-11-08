@@ -358,7 +358,7 @@ pub struct NewSessionResponse {
 }
 
 /// `session/load` request params.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadSessionRequest {
     /// Session to replay.
@@ -368,6 +368,10 @@ pub struct LoadSessionRequest {
     /// MCP servers the client wants the session connected to.
     #[serde(default)]
     pub mcp_servers: Vec<McpServer>,
+    /// Extension facts, under `_meta`, read the same way a
+    /// `session/new`'s are.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<NewSessionMeta>,
 }
 
 /// `session/load` result.
@@ -380,7 +384,7 @@ pub struct LoadSessionResponse {
 }
 
 /// `session/resume` request params: reopen a session without replay.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResumeSessionRequest {
     /// Session to reopen.
@@ -390,6 +394,10 @@ pub struct ResumeSessionRequest {
     /// MCP servers the client wants the session connected to.
     #[serde(default)]
     pub mcp_servers: Vec<McpServer>,
+    /// Extension facts, under `_meta`, read the same way a
+    /// `session/new`'s are.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<NewSessionMeta>,
 }
 
 /// `session/resume` result.
@@ -1003,8 +1011,9 @@ pub struct PluginEventRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginDrainRequest {
-    /// The session to serve, absent when the queue drains across every
-    /// session the connection hosts.
+    /// The session to serve, absent only for the cross-session
+    /// `SessionOps` queue. A client that hosts one session's plugins
+    /// answers it with that session's own work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     /// Which queue to drain.
@@ -1019,7 +1028,9 @@ pub enum PluginDrainQueue {
     McpRestarts,
     /// Steering and follow-up messages the plugins queued.
     Messages,
-    /// Session operations queued without a session.
+    /// Session operations queued without a session. The host sends
+    /// this only to a plugin host that serves every session on the
+    /// connection; a per-session host is asked with `SessionOpsFor`.
     SessionOps,
     /// Session operations queued for the request's session, plus those
     /// queued without a session.
@@ -3388,6 +3399,7 @@ mod tests {
                 session_id: "s1".into(),
                 cwd: "/w".into(),
                 mcp_servers: vec![],
+                meta: None,
             },
             serde_json::json!({"sessionId": "s1", "cwd": "/w", "mcpServers": []}),
         );

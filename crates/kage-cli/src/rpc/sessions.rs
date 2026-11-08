@@ -36,6 +36,7 @@ use super::content::source_block;
 use super::mcp::editor_servers;
 use super::options::config_options;
 use crate::engine::{Recorder, render_session_markdown};
+use kage_acp::acp::NewSessionMeta;
 
 /// The memoized [`leading_marker`] verdicts, keyed by file and the
 /// (mtime, size) pair.
@@ -59,8 +60,11 @@ impl super::CliAcpAgent {
     /// level and token totals, and with the client's MCP `servers`. With
     /// `ctx`, streams the turn in flight, the title, the live subagents
     /// and the open asks of a session the host already runs, and with
-    /// `replay_file` also its recorded history. Returns the session's
-    /// config options.
+    /// `replay_file` also its recorded history. `meta` carries what a
+    /// kage client asks of the session, read the same way a
+    /// `session/new`'s is: the settings apply and a `plugins: client`
+    /// ask hosts the session's plugins with the client. Returns the
+    /// session's config options.
     pub(super) fn open_recorded(
         &self,
         client_id: &str,
@@ -68,6 +72,7 @@ impl super::CliAcpAgent {
         servers: &[McpServer],
         ctx: Option<&PromptContext>,
         replay_file: bool,
+        meta: Option<&NewSessionMeta>,
     ) -> Result<Vec<SessionConfigOption>, RpcError> {
         let servers = editor_servers(servers)?;
         let path = self.recorded_path(client_id)?;
@@ -138,8 +143,8 @@ impl super::CliAcpAgent {
             cwd,
             &model,
             servers,
-            None,
-            &SessionSettings::host_defaults(self.kage_client.load(Ordering::SeqCst)),
+            self.hosted_plugins(id, meta)?,
+            &SessionSettings::of(meta, self.kage_client.load(Ordering::SeqCst))?,
         )?;
         spec.cx.history = replay.history.into_iter().map(Arc::new).collect();
         spec.cx.budget = TokenBudget {
@@ -149,10 +154,14 @@ impl super::CliAcpAgent {
             used_cache_write: replay.usage_total.cache_write,
             current_context: replay.usage_total.last_context,
         };
-        spec.cx.thinking_level = replay
-            .thinking_level
-            .as_deref()
-            .and_then(kage_core::ThinkingLevel::parse);
+        // A thinking level the client asked for wins over the one the
+        // session recorded.
+        if spec.cx.thinking_level.is_none() {
+            spec.cx.thinking_level = replay
+                .thinking_level
+                .as_deref()
+                .and_then(kage_core::ThinkingLevel::parse);
+        }
         spec.recorder = Some(Recorder::new(writer, spec.plugins.clone()));
         Ok(self.open(client_id.to_owned(), spec, runtime))
     }

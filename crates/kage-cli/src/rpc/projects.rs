@@ -131,6 +131,13 @@ impl Projects {
         Some(project)
     }
 
+    /// Whether the project at `workdir` has anything to load, by the
+    /// registry's own check, so callers that do not load still agree
+    /// with what a load would do.
+    pub(super) fn has_content(&self, workdir: &Path) -> bool {
+        (self.has_content)(workdir)
+    }
+
     /// A registry that loads with `load` where `has_content` allows.
     #[cfg(test)]
     pub(super) fn with_hooks(load: Loader, has_content: fn(&Path) -> bool) -> Self {

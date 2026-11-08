@@ -44,7 +44,6 @@ mod plugin_files;
 mod plugin_registry;
 pub(crate) mod probe;
 mod projects;
-use projects::has_plugin_content;
 mod registry;
 mod rewind;
 mod sessions;
@@ -526,7 +525,7 @@ impl CliAcpAgent {
         let cwd = Path::new(cwd);
         let project = match self.host.project(cwd, &env) {
             Some(project) => project,
-            None if !has_plugin_content(cwd) => {
+            None if !self.host.project_has_content(cwd) => {
                 return Err(RpcError::new(
                     -32602,
                     format!("the project at {} has no plugins", cwd.display()),
@@ -1096,7 +1095,9 @@ impl Agent for CliAcpAgent {
                 // A project with nothing to load answers the empty
                 // snapshot it would have served, not an error: the
                 // TUI attaches once at startup, plugins or not.
-                None if !has_plugin_content(cwd) => return Ok(UiSnapshot::default()),
+                None if !self.host.project_has_content(cwd) => {
+                    return Ok(UiSnapshot::default());
+                }
                 None => {
                     return Err(RpcError::internal("the project's plugins did not load"));
                 }

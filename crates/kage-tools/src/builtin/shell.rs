@@ -646,6 +646,32 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn a_burst_collapses_to_few_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = CancelFlag::new();
+        let sink = Arc::new(Collect::default());
+        let cx = ToolContext::new(dir.path(), &cancel).with_progress(sink.clone());
+        // Fifty lines in one burst: unthrottled, that is one update
+        // per line. The 100 ms interval folds them into a couple,
+        // however slow the machine, because the burst itself is
+        // builtins and takes no wall time.
+        let out = ShellTool::default()
+            .execute(
+                serde_json::json!({"command":"for i in $(seq 1 50); do echo line$i; done"}),
+                &cx,
+            )
+            .unwrap();
+        assert!(out.text.contains("line50"));
+        let updates = lock(&sink.0);
+        assert!(
+            updates.len() <= 3,
+            "a burst of 50 lines gave {} updates: the throttle is gone",
+            updates.len()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn timeout_returns_timeout_error() {
         let dir = tempfile::tempdir().unwrap();
         let err = run(

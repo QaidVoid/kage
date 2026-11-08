@@ -3167,15 +3167,6 @@ fn shell_progress_streams_the_latest_tail_and_ends_with_the_exit_code() {
     }
 
     assert!(progress.len() >= 2, "expected several progress ticks");
-    // The producer throttles its updates to one per 100 ms, so a 1.5 s
-    // command yields at most about 15. The bound holds no matter how
-    // long delivery stalls: a queue can only join updates, never split
-    // them.
-    assert!(
-        progress.len() <= 18,
-        "{} updates for a 1.5 s command: the throttle is gone",
-        progress.len()
-    );
     let mut last_end = 0;
     for lines in progress.iter().map(|(_, lines)| lines) {
         for pair in lines.windows(2) {
@@ -6862,6 +6853,11 @@ fn a_launch_installs_only_after_a_report_is_consumed() {
     until(|| host.workdir(id).is_none());
 }
 
+/// A load that finds content but fails anyway, for the attach-id test.
+fn failing_load(_: &Path, _: &str, _: &str, _: &Environment) -> Option<super::projects::Project> {
+    None
+}
+
 /// An attach whose id is not newer than the newest one this
 /// connection processed is refused, and a failed attach still counts,
 /// so the bar never moves backwards.
@@ -6869,6 +6865,12 @@ fn a_launch_installs_only_after_a_report_is_consumed() {
 fn an_attach_id_that_is_not_newer_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let h = serve(Vec::new(), dir.path(), dir.path());
+    // A load that finds content but fails anyway, so the first attach
+    // errors after it counted its id.
+    h.host
+        .set_projects_for_test(super::projects::Projects::with_hooks(failing_load, |_| {
+            true
+        }));
     let attach = |id: u64| {
         h.client.request(
             "_kage/ui/attach",
@@ -6878,8 +6880,7 @@ fn an_attach_id_that_is_not_newer_is_refused() {
             }),
         )
     };
-    // No project runtime is configured, so the first attach counts its
-    // id and then fails to load. The failure must not lower the bar.
+    // A failed attach counts its id but must not lower the bar.
     let spent = attach(2);
     assert_eq!(spent.unwrap_err().code, -32603);
     let older = attach(1);
@@ -7017,7 +7018,9 @@ fn the_cwd_attach_follows_the_plugin_content_gate() {
             }),
         )
     };
-    assert_eq!(attach(|_| false).unwrap_err().code, -32603);
+    // Nothing to load answers the empty snapshot it would have served.
+    let empty = attach(|_| false).unwrap();
+    assert_eq!(empty["commands"].as_array().map(Vec::len), Some(0));
     let ui = attach(|_| true).unwrap();
     assert!(
         ui["commands"]

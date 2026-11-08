@@ -1126,6 +1126,11 @@ impl Pump {
             Answer::Open => {
                 let open = self.pending_open.take().expect("an open answered");
                 if failed && open.bootstrap {
+                    // The startup resume never opened: the wire names
+                    // a session the agent does not know. Fall back to
+                    // a new one off an empty wire, so its adoption
+                    // does not close the phantom.
+                    self.wire.clear();
                     self.request_new_session();
                     None
                 } else {
@@ -1139,7 +1144,7 @@ impl Pump {
             }
         }
         if let Some((id, new)) = adopted {
-            self.adopt(id, new);
+            self.adopt(&id, new);
         }
     }
 
@@ -1460,7 +1465,7 @@ impl Pump {
     /// it folds into, no stale cards, and on a brand-new session the
     /// model carried over. A resumed session keeps the model it was
     /// recorded with, as the engine path does.
-    fn adopt(&mut self, id: String, carry_model: bool) {
+    fn adopt(&mut self, id: &str, carry_model: bool) {
         self.close_ask_cards();
         if self.running {
             self.store.client().cancel(&self.wire);
@@ -1469,12 +1474,14 @@ impl Pump {
             let _ = self.recorder.send((self.model.clone(), outcome.clone()));
             self.publish(HostEvent::RunEnded { outcome });
         }
-        let old = std::mem::replace(&mut self.wire, id);
+        let old = std::mem::replace(&mut self.wire, id.to_owned());
         // A cold start adopts its first session off an empty wire;
-        // there is nothing to close. The session the App leaves is
-        // closed on the agent side, so the shared host does not keep
-        // it loaded for a TUI that moved on.
-        if !old.is_empty() {
+        // there is nothing to close. A bootstrap resume adopts the
+        // session `wire` already names: closing it would end the very
+        // session the App just moved onto. The session the App leaves
+        // is closed on the agent side, so the shared host does not
+        // keep it loaded for a TUI that moved on.
+        if !old.is_empty() && old != id {
             self.store.client().close_session(&old);
         }
         self.warned_model = None;
@@ -3154,6 +3161,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn a_bootstrap_resume_does_not_close_the_session_it_adopts() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.bootstrap(Some(Path::new("/sessions/resumed.jsonl")));
+        let _ = std::fs::remove_dir_all(&dir);
+        // bootstrap flushed its frames to the transport, so the load's
+        // request id is read from the pump's pending open.
+        let load = RequestId::Number(
+            pump.pending_open
+                .as_ref()
+                .expect("the load is pending")
+                .request,
+        );
+        pump.absorb(Frame::Success {
+            id: load,
+            result: serde_json::json!({"configOptions": model_options("test:model")}),
+        });
+        assert_eq!(pump.wire, "resumed");
+        let after = pump.store.take_outgoing();
+        assert!(
+            !after.iter().any(|frame| {
+                frame.to_value()["method"] == "session/close"
+                    && frame.to_value()["params"]["sessionId"] == "resumed"
+            }),
+            "the resume was closed on adoption: {after:?}"
+        );
+
+        // A failed startup resume falls back to a new session and
+        // closes neither the phantom nor anything else.
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.bootstrap(Some(Path::new("/sessions/resumed.jsonl")));
+        // bootstrap flushed its frames to the transport, so the load's
+        // request id is read from the pump's pending open.
+        let load = RequestId::Number(
+            pump.pending_open
+                .as_ref()
+                .expect("the load is pending")
+                .request,
+        );
+        pump.absorb(Frame::Failure {
+            id: load,
+            error: kage_client::RpcError::new(-32603, "the session file is gone".to_owned()),
+        });
+        let after = pump.store.take_outgoing();
+        assert!(
+            !after
+                .iter()
+                .any(|frame| frame.to_value()["method"] == "session/close"),
+            "the phantom resume was closed: {after:?}"
+        );
+        assert_eq!(pump.wire, "", "the phantom wire is dropped");
+        assert!(
+            after
+                .iter()
+                .any(|frame| frame.to_value()["method"] == "session/new"),
+            "the fallback asks for a new session: {after:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn a_resumed_session_rides_the_same_meta_a_new_one_does() {
         let (mut pump, _app, dir) = hosted_pump();

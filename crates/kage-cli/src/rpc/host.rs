@@ -423,6 +423,14 @@ impl Host {
         }
     }
 
+    /// Whether the project at `workdir` has anything to load, by the
+    /// same check a runtime load would make.
+    pub(super) fn project_has_content(&self, workdir: &std::path::Path) -> bool {
+        self.projects
+            .get()
+            .is_some_and(|projects| projects.has_content(workdir))
+    }
+
     /// A fresh id for a command a request waits on.
     pub(super) fn command_id(&self) -> CommandId {
         CommandId(self.next_command.fetch_add(1, Ordering::Relaxed))
@@ -599,11 +607,14 @@ fn project_options(
     config: &Config,
 ) -> (LoopConfig, Option<kage_core::ThinkingLevel>) {
     let Some(project) = project else {
+        // The config's own values, through the option store's
+        // validation, so an out-of-range one keeps its default, like a
+        // session with plugins sees.
+        let (store, _) = kage_core::options::OptionStore::from_config(config);
+        let (loop_cfg, _) = crate::tui::startup_options(&Arc::new(Mutex::new(store)));
         let loop_cfg = LoopConfig {
-            compaction_threshold: config.loop_settings.compaction_threshold,
-            max_provider_retries: config.loop_settings.max_provider_retries,
             parallel_tools: false,
-            ..LoopConfig::default()
+            ..loop_cfg
         };
         return (loop_cfg, None);
     };
@@ -759,6 +770,24 @@ mod tests {
     use super::*;
 
     const WAIT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn an_out_of_range_loop_config_keeps_its_default_without_a_runtime() {
+        let mut config = Config::default();
+        config.loop_settings.max_provider_retries = 1_000_000;
+        let (loop_cfg, thinking) = project_options(None, &config);
+        assert_eq!(loop_cfg.max_provider_retries, 4);
+        assert_eq!(thinking, None);
+    }
+
+    #[test]
+    fn an_in_range_loop_config_reaches_the_session_without_a_runtime() {
+        let mut config = Config::default();
+        config.loop_settings.max_provider_retries = 7;
+        let (loop_cfg, thinking) = project_options(None, &config);
+        assert_eq!(loop_cfg.max_provider_retries, 7);
+        assert_eq!(thinking, None);
+    }
 
     /// A host with no plugins and a plain session spec on the mock.
     fn host_in(dir: &tempfile::TempDir) -> Arc<Host> {

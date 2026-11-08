@@ -62,8 +62,11 @@ impl super::CliAcpAgent {
     /// and the open asks of a session the host already runs, and with
     /// `replay_file` also its recorded history. `meta` carries what a
     /// kage client asks of the session, read the same way a
-    /// `session/new`'s is: the settings apply and a `plugins: client`
-    /// ask hosts the session's plugins with the client. Returns the
+    /// `session/new`'s is: when the host opens the session, the
+    /// settings apply and a `plugins: client` ask hosts the session's
+    /// plugins with the client. A session the host already runs keeps
+    /// its own settings and hosting; the ask is still validated, so a
+    /// bad one is refused the same way a new session's is. Returns the
     /// session's config options.
     pub(super) fn open_recorded(
         &self,
@@ -74,6 +77,7 @@ impl super::CliAcpAgent {
         replay_file: bool,
         meta: Option<&NewSessionMeta>,
     ) -> Result<Vec<SessionConfigOption>, RpcError> {
+        SessionSettings::of(meta, self.kage_client.load(Ordering::SeqCst))?;
         let servers = editor_servers(servers)?;
         let path = self.recorded_path(client_id)?;
         if kage_session::is_agent_session(&path) {

@@ -40,6 +40,10 @@ use crate::view::tool_view::ToolPhase;
 pub struct Store {
     client: Client,
     buffers: BTreeMap<String, SharedBuffer>,
+    /// The keymap the attached `_kage/ui` builds into. Kept between
+    /// rebuilds so its generation keeps rising and readers that cache
+    /// on it notice each new snapshot.
+    plugin_keymap: Keymap,
 }
 
 impl Store {
@@ -130,9 +134,10 @@ impl Store {
     /// The keymap the attached `_kage/ui` offers, rebuilt from the
     /// snapshot's mappings. `None` without an attachment, or when the
     /// mappings do not rebuild, so a broken snapshot cannot half
-    /// replace what the App routes with.
-    #[must_use]
-    pub fn plugin_keymap(&self) -> Option<Keymap> {
+    /// replace what the App routes with. The generation rises with
+    /// every rebuilt snapshot, so a changed one never reads as the
+    /// table a consumer already cached.
+    pub fn plugin_keymap(&mut self) -> Option<Keymap> {
         let ui = self.state().plugin_ui.as_ref()?;
         let mappings = ui
             .keymap
@@ -140,9 +145,10 @@ impl Store {
             .map(MappingData::deserialize)
             .collect::<Result<Vec<_>, _>>()
             .ok()?;
-        let mut keymap = Keymap::new();
-        keymap.replace_with(&mappings).ok()?;
-        Some(keymap)
+        // `replace_with` builds the whole table before it swaps it in,
+        // so a mapping that fails leaves the previous state alone.
+        self.plugin_keymap.replace_with(&mappings).ok()?;
+        Some(self.plugin_keymap.clone())
     }
 }
 
@@ -957,6 +963,7 @@ mod tests {
                 },
             ],
         })));
+        let mut store = store;
         let keymap = store.plugin_keymap().expect("the mappings rebuild");
         let data = keymap.to_data();
         assert_eq!(data.len(), 4, "{data:#?}");
@@ -987,6 +994,46 @@ mod tests {
     }
 
     #[test]
+    fn a_rebuilt_keymap_keeps_its_generation_rising() {
+        let mut store = attached(snapshot(&json!({"keymap": [{
+            "mode": "n",
+            "lhs": "zc",
+            "rhs": {"kind": "action", "name": "BeginCommand"},
+            "owner": "greet-plugin",
+        }]})));
+        let first = store.plugin_keymap().expect("the mappings rebuild");
+        let second = store.plugin_keymap().expect("the mappings rebuild");
+        assert_eq!(second.generation(), first.generation() + 1);
+
+        // A snapshot that fails to rebuild answers nothing and leaves
+        // the table, and its generation, where it was: the next good
+        // rebuild takes exactly one step.
+        let attach = store.client().ui_attach("/proj", None);
+        store.absorb(Frame::Success {
+            id: RequestId::Number(attach),
+            result: snapshot(&json!({"keymap": [{
+                "mode": "n",
+                "lhs": "zk",
+                "rhs": {"kind": "action", "name": "no_such_action"},
+                "owner": "p",
+            }]})),
+        });
+        assert!(store.plugin_keymap().is_none());
+        let attach = store.client().ui_attach("/proj", None);
+        store.absorb(Frame::Success {
+            id: RequestId::Number(attach),
+            result: snapshot(&json!({"keymap": [{
+                "mode": "n",
+                "lhs": "zc",
+                "rhs": {"kind": "action", "name": "BeginCommand"},
+                "owner": "greet-plugin",
+            }]})),
+        });
+        let third = store.plugin_keymap().expect("the mappings rebuild");
+        assert_eq!(third.generation(), second.generation() + 1);
+    }
+
+    #[test]
     fn a_broken_snapshot_yields_no_keymap() {
         for keymap in [
             json!([{
@@ -1014,7 +1061,7 @@ mod tests {
             }]),
         ] {
             let body = json!({"keymap": keymap});
-            let store = attached(snapshot(&body));
+            let mut store = attached(snapshot(&body));
             assert!(
                 store.plugin_keymap().is_none(),
                 "a broken mapping cannot rebuild: {body}"
@@ -1024,7 +1071,7 @@ mod tests {
 
     #[test]
     fn without_an_attachment_the_plugin_data_is_empty() {
-        let store = Store::new();
+        let mut store = Store::new();
         assert!(store.plugin_commands().is_empty());
         assert!(store.plugin_keymap().is_none());
     }

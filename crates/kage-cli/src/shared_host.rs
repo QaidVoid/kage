@@ -260,11 +260,11 @@ fn stop_host_in(dir: &Path) -> Result<Option<String>, String> {
         let why = match host {
             None => format!("pid {pid} is not running"),
             Some(Some(_)) => format!("pid {pid} is not a kage host"),
-            Some(None) => format!("cannot tell whether pid {pid} is a kage host"),
+            Some(None) => format!("pid {pid} cannot be identified"),
         };
         return Err(format!(
-            "{} is a stale record: {why}, so nothing was signalled; another kage \
-             instance holds the lock, probably a kage serve, to stop in its own terminal",
+            "{} is a stale record: {why}, so nothing was signalled; if the pid is \
+             a live host you cannot identify, stop it in its own terminal",
             dir.join(RECORD).display()
         ));
     }
@@ -674,6 +674,9 @@ fn start_web(
         log,
     );
     let listener = TcpListener::bind((host_cfg.bind.as_str(), host_cfg.port)).map_err(|e| {
+        // A connect.txt a previous run wrote still points at its old
+        // port; leave the failure, not a working address, on file.
+        let _ = std::fs::remove_file(token_path.with_file_name("connect.txt"));
         format!(
             "cannot bind {}:{}: {e}; set [host] port to a free port",
             host_cfg.bind, host_cfg.port

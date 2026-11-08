@@ -44,6 +44,7 @@ mod plugin_files;
 mod plugin_registry;
 pub(crate) mod probe;
 mod projects;
+use projects::has_plugin_content;
 mod registry;
 mod rewind;
 mod sessions;
@@ -522,10 +523,19 @@ impl CliAcpAgent {
             return Ok((runtime, invocation(Some(id))));
         }
         let env = lock(&self.env).clone();
-        let project = self
-            .host
-            .project(Path::new(cwd), &env)
-            .ok_or_else(|| RpcError::internal("the project's plugins did not load"))?;
+        let cwd = Path::new(cwd);
+        let project = match self.host.project(cwd, &env) {
+            Some(project) => project,
+            None if !has_plugin_content(cwd) => {
+                return Err(RpcError::new(
+                    -32602,
+                    format!("the project at {} has no plugins", cwd.display()),
+                ));
+            }
+            None => {
+                return Err(RpcError::internal("the project's plugins did not load"));
+            }
+        };
         Ok((project.runtime, invocation(None)))
     }
 
@@ -595,6 +605,10 @@ impl CliAcpAgent {
             spec.gate = spec.gate.with_fallback(PermissionAction::Allow);
         }
         settings.apply(&mut spec);
+        // A concrete runtime always stands in the spec. The reverse,
+        // plugins without a concrete runtime, is the client-hosted
+        // case: the spec carries the client's proxy and there is no
+        // project runtime to keep.
         debug_assert!(
             runtime.as_ref().is_none_or(|runtime| {
                 spec.plugins.as_ref().is_some_and(|plugins| {
@@ -1076,11 +1090,17 @@ impl Agent for CliAcpAgent {
                 .ok_or_else(|| RpcError::new(-32602, "the session runs without plugins"))?;
             (runtime, false)
         } else {
-            let project = self
-                .host
-                .project(Path::new(&req.cwd), &env)
-                .ok_or_else(|| RpcError::internal("the project's plugins did not load"))?;
-            (project.runtime, true)
+            let cwd = Path::new(&req.cwd);
+            match self.host.project(cwd, &env) {
+                Some(project) => (project.runtime, true),
+                // A project with nothing to load answers the empty
+                // snapshot it would have served, not an error: the
+                // TUI attaches once at startup, plugins or not.
+                None if !has_plugin_content(cwd) => return Ok(UiSnapshot::default()),
+                None => {
+                    return Err(RpcError::internal("the project's plugins did not load"));
+                }
+            }
         };
         // Marked first, so a change while the snapshot is built is sent.
         let marker = ui::marker(&runtime);

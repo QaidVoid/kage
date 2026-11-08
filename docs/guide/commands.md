@@ -82,10 +82,10 @@ The TUI talks to its agent over ACP, which has no counterpart yet for
 some of the commands above. These answer with "... is not available
 over the ACP link yet" and change nothing: shell escapes, `/undo`,
 `/rewind`, `/clone`, forking from the `/tree` picker, deleting a
-session from it, `/image` and `/media` (open and save), `/reload`, and
-`/mcp restart`. See [the TUI's ACP
-link](/reference/architecture#the-tuis-acp-link) for how the link
-works.
+session from it, `/image` and `/media` (open and save), `/reload`,
+`/mcp restart`, and the provider refresh `/login` ends with. See [the
+TUI's ACP link](/reference/architecture#the-tuis-acp-link) for how the
+link works.
 
 ## settings
 

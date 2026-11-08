@@ -1028,9 +1028,10 @@ pub enum PluginDrainQueue {
     McpRestarts,
     /// Steering and follow-up messages the plugins queued.
     Messages,
-    /// Session operations queued without a session. The host sends
-    /// this only to a plugin host that serves every session on the
-    /// connection; a per-session host is asked with `SessionOpsFor`.
+    /// Session operations queued without a session. No host sends
+    /// this anymore: the recorder names its session with
+    /// `SessionOpsFor`. A client that answers it keeps compatibility
+    /// with an older host.
     SessionOps,
     /// Session operations queued for the request's session, plus those
     /// queued without a session.

@@ -118,8 +118,9 @@ Client to agent:
 A kage client may pass `_meta.kage` with `session/new`, `session/load`
 or `session/resume` to set the session's system prompt, yolo mode, loop
 options and output cap, and to host the session's plugins itself. The
-fields are the ones `session/new` takes; a load or resume applies them
-the same way.
+fields are the ones `session/new` takes, validated the same way. They
+apply when the host opens the session; a session the host already runs
+keeps its own settings, and the ask is refused if it does not validate.
 
 Agent to client:
 

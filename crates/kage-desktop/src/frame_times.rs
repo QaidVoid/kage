@@ -506,8 +506,12 @@ mod tests {
 
     #[test]
     fn a_frame_below_the_rate_fires_once_the_tick_is_due() {
-        let mut ticker = Ticker::hz30(Instant::now());
-        let mut now = Instant::now();
+        // One instant for the ticker and the frames: two reads of the
+        // clock can land a period apart on a loaded runner, which
+        // fires the first tick early.
+        let start = Instant::now();
+        let mut ticker = Ticker::hz30(start);
+        let mut now = start;
         // Two frames inside one period: no tick.
         now += Duration::from_millis(10);
         assert!(!ticker.tick(now));

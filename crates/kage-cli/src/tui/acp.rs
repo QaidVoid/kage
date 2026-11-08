@@ -32,9 +32,9 @@
 //! "client"`. The plugin requests run in order on a worker thread
 //! and are answered from there, so the pump keeps serving the App and
 //! the agent's frames while a Lua tool runs; `Esc` raises the
-//! worker's cancel flag. A resumed session has no such `_meta` on its
-//! wire yet, so it runs without the client's plugins and tools until
-//! the load learns to carry them, and the pump says so when one opens.
+//! worker's cancel flag. A resumed or loaded session carries the same
+//! `_meta.kage` a new one does, so its settings and the plugin
+//! hosting survive the switch.
 //!
 //! Some commands the engine path serves have no ACP counterpart yet:
 //! the pump refuses them with a notice instead of dropping them
@@ -386,16 +386,14 @@ fn spawn(
 const TICK: Duration = Duration::from_millis(20);
 
 /// Writes the runs the pump reports to the saved state, one at a time
-/// and off the pump thread: the model a completed run used, and the
+/// and off the pump thread: the model the last run used, and the
 /// auth failures the run outcomes clear or add. Ends with its queue.
 fn start_run_recorder(runs: mpsc::Receiver<(String, RunOutcome)>) {
     let spawned = thread::Builder::new()
         .name("kage-acp-state".to_owned())
         .spawn(move || {
             for (model, outcome) in runs {
-                if outcome == RunOutcome::Completed {
-                    let _ = crate::state::record_last_model(&model);
-                }
+                let _ = crate::state::record_last_model(&model);
                 let _ = crate::state::record_run_outcome(&model, &outcome);
             }
         });
@@ -875,6 +873,9 @@ fn environment_frame() -> Option<Frame> {
 struct PendingOpen {
     id: String,
     request: u64,
+    /// A resume the App started with: when it fails there is no
+    /// session to fall back to, so the pump asks for a new one.
+    bootstrap: bool,
 }
 
 /// The pending request a frame answers.
@@ -978,6 +979,8 @@ struct Pump {
     pending_export: Option<PathBuf>,
     /// Update kinds this build cannot show, warned of once each.
     unknown: HashSet<String>,
+    /// Dropped MCP server settings, warned of once each.
+    mcp_warnings: HashSet<String>,
     closed: bool,
 }
 
@@ -1122,7 +1125,12 @@ impl Pump {
             }
             Answer::Open => {
                 let open = self.pending_open.take().expect("an open answered");
-                (!failed).then_some((open.id, false))
+                if failed && open.bootstrap {
+                    self.request_new_session();
+                    None
+                } else {
+                    (!failed).then_some((open.id, false))
+                }
             }
         };
         for change in changes {
@@ -1168,11 +1176,17 @@ impl Pump {
             self.handed = Some(Arc::clone(&fresh));
             self.feed.send_buffer(fresh);
             self.note_session_file();
-            let meta = self.session_meta();
+            let meta = self.load_meta();
             let servers = self.mcp_servers();
-            self.store
-                .client()
-                .load_session(&id, &self.cwd, &servers, Some(meta));
+            let (request, _) =
+                self.store
+                    .client()
+                    .load_session(&id, &self.cwd, &servers, Some(meta));
+            self.pending_open = Some(PendingOpen {
+                id,
+                request,
+                bootstrap: true,
+            });
         } else {
             self.request_new_session();
         }
@@ -1206,6 +1220,17 @@ impl Pump {
         )
     }
 
+    /// The `_meta.kage` a load or resume carries. A load opens on the
+    /// session's recorded model, so the output cap is left out: one
+    /// sized for the current model would pin the wrong limit.
+    fn load_meta(&mut self) -> NewSessionMeta {
+        let mut meta = self.session_meta();
+        if let Some(kage) = meta.kage.as_mut() {
+            kage.max_output_tokens = None;
+        }
+        meta
+    }
+
     /// The MCP servers the session brings: the hosted plugins' own
     /// registrations, disabled ones left out, like the engine path.
     /// The agent spawns them, so none of this process's MCP runs
@@ -1216,7 +1241,11 @@ impl Pump {
         };
         let (servers, warnings) = wire_mcp_servers(surface.runtime.registered_mcp_servers());
         for warning in warnings {
-            self.notice(NoticeLevel::Warning, warning);
+            // Every session open recomputes these; one toast each is
+            // enough.
+            if self.mcp_warnings.insert(warning.clone()) {
+                self.notice(NoticeLevel::Warning, warning);
+            }
         }
         servers
     }
@@ -1436,9 +1465,9 @@ impl Pump {
         if self.running {
             self.store.client().cancel(&self.wire);
             self.running = false;
-            self.publish(HostEvent::RunEnded {
-                outcome: RunOutcome::Cancelled,
-            });
+            let outcome = RunOutcome::Cancelled;
+            let _ = self.recorder.send((self.model.clone(), outcome.clone()));
+            self.publish(HostEvent::RunEnded { outcome });
         }
         let old = std::mem::replace(&mut self.wire, id);
         // A cold start adopts its first session off an empty wire;
@@ -2047,13 +2076,17 @@ impl Pump {
             return;
         }
         self.store.reset_session(&id);
-        let meta = self.session_meta();
+        let meta = self.load_meta();
         let servers = self.mcp_servers();
         let (request, _) = self
             .store
             .client()
             .load_session(&id, &self.cwd, &servers, Some(meta));
-        self.pending_open = Some(PendingOpen { id, request });
+        self.pending_open = Some(PendingOpen {
+            id,
+            request,
+            bootstrap: false,
+        });
     }
 
     fn refuse(&mut self, request: &RunRequest) {
@@ -2094,9 +2127,9 @@ impl Pump {
         self.store.interrupt_running();
         if self.running {
             self.running = false;
-            self.publish(HostEvent::RunEnded {
-                outcome: RunOutcome::Cancelled,
-            });
+            let outcome = RunOutcome::Cancelled;
+            let _ = self.recorder.send((self.model.clone(), outcome.clone()));
+            self.publish(HostEvent::RunEnded { outcome });
         }
         // No card survives a dead agent: the asks can never be
         // answered now.
@@ -2517,6 +2550,7 @@ pub(crate) fn run(
         next_ask: 0,
         pending_export: None,
         unknown: HashSet::new(),
+        mcp_warnings: HashSet::new(),
         closed: false,
     };
     if let Some(surface) = surface
@@ -2798,6 +2832,7 @@ mod tests {
             next_ask: 0,
             pending_export: None,
             unknown: HashSet::new(),
+            mcp_warnings: HashSet::new(),
             closed: false,
         };
         (pump, app, dialog_rx, feed, dir)

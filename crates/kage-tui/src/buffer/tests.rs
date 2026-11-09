@@ -1113,3 +1113,39 @@ fn compact_shift_counts_flush_tool_rows() {
     assert_eq!(buf.compact_to(3), 2);
     assert_eq!(buf.scroll(), Some(1));
 }
+
+#[test]
+fn settle_run_tools_finishes_unconfirmed_calls_but_leaves_asks() {
+    let mut buf = Buffer::new();
+    buf.push_tool_call("c1", "read", json!({"path": "a"}));
+    buf.set_tool_phase("c1", ToolPhase::Queued);
+    buf.push_tool_call("c2", "shell", json!({"command": "ls"}));
+    buf.set_tool_phase("c2", ToolPhase::Running);
+    buf.push_tool_call("c3", "write", json!({"path": "b"}));
+    buf.set_tool_phase("c3", ToolPhase::Waiting);
+    buf.push_tool_call("c4", "edit", json!({"path": "c"}));
+    buf.push_tool_result("c4", "ok", false);
+
+    buf.settle_run_tools();
+    let phase = |buf: &Buffer, id: &str| {
+        buf.blocks()
+            .iter()
+            .find_map(|block| match block.as_ref() {
+                Block::ToolCall { call_id, phase, .. } if call_id == id => Some(*phase),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert_eq!(phase(&buf, "c1"), ToolPhase::Done);
+    assert_eq!(phase(&buf, "c2"), ToolPhase::Done);
+    assert_eq!(
+        phase(&buf, "c3"),
+        ToolPhase::Waiting,
+        "a permission-gated row is not called done"
+    );
+    assert_eq!(phase(&buf, "c4"), ToolPhase::Done);
+
+    buf.interrupt_running_tools();
+    assert_eq!(phase(&buf, "c3"), ToolPhase::Interrupted);
+    assert_eq!(phase(&buf, "c4"), ToolPhase::Done);
+}

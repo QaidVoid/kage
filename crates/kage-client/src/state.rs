@@ -590,17 +590,36 @@ pub struct ToolCallItem {
 
 impl ToolCallItem {
     /// The text the call's content blocks contribute: the output tail
-    /// the agent last streamed. Diff and terminal content adds none.
+    /// the agent last streamed, an embedded resource's text, and a
+    /// resource link as its name and uri. Diff and terminal content
+    /// adds none.
     #[must_use]
     pub fn text(&self) -> String {
         self.content
             .iter()
             .filter_map(|content| match content {
-                ToolCallContent::Content(chunk) => chunk.content.as_text(),
+                ToolCallContent::Content(chunk) => Self::block_text(&chunk.content),
                 _ => None,
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The text one content block contributes: text itself, an
+    /// embedded resource's text, and a resource link as its name and
+    /// uri. An embedded resource's blob has no text to show.
+    #[must_use]
+    pub fn block_text(block: &ContentBlock) -> Option<String> {
+        match block {
+            ContentBlock::Text(text) => Some(text.text.clone()),
+            ContentBlock::ResourceLink(link) => Some(format!("{} ({})", link.name, link.uri)),
+            ContentBlock::Resource(embedded) => embedded
+                .resource
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        }
     }
 
     /// Applies the fields `update` carries. Content replaces, so a

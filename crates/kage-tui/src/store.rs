@@ -20,7 +20,7 @@ use kage_client::wire::{
     CompactionPhase, ContentBlock, NoticeTone, SessionNotification, SessionUpdate, ToolCallContent,
     ToolCallMeta, ToolCallStatus, TurnPhase, UiCommand, UiCommandArg,
 };
-use kage_client::{Change, Client, Frame, State};
+use kage_client::{Change, Client, Frame, State, ToolCallItem};
 use kage_core::keymap::{Keymap, MappingData};
 use kage_core::protocol::CompactionCounts;
 use kage_core::sync::lock;
@@ -315,13 +315,14 @@ fn land_result(
     }
 }
 
-/// The text across the content's chunks; diffs and terminals do not
-/// read as text.
+/// The text across the content's chunks: text itself, an embedded
+/// resource's text, and a resource link as its name and uri. Diffs and
+/// terminals do not read as text.
 fn content_text(content: &[ToolCallContent]) -> String {
     content
         .iter()
         .filter_map(|item| match item {
-            ToolCallContent::Content(chunk) => chunk.content.as_text().map(str::to_owned),
+            ToolCallContent::Content(chunk) => ToolCallItem::block_text(&chunk.content),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -469,6 +470,49 @@ mod tests {
             panic!("expected the tool result, got {:#?}", blocks[2]);
         };
         assert_eq!(output, "3 files");
+        assert!(!*is_error);
+    }
+
+    #[test]
+    fn resource_content_shows_in_the_result() {
+        let mut store = Store::new();
+        store.absorb(update(
+            "s1",
+            "tool_call",
+            &json!({
+                "toolCallId": "c1",
+                "title": "Ran fd",
+                "kind": "execute",
+            }),
+        ));
+        store.absorb(update(
+            "s1",
+            "tool_call_update",
+            &json!({
+                "toolCallId": "c1",
+                "status": "completed",
+                "content": [
+                    {"type": "content", "content": {"type": "resource",
+                        "resource": {"uri": "tool://preview", "mimeType": "text/x-shellscript",
+                            "text": "fd -e rs . /tmp | wc -l"}}},
+                    {"type": "content", "content": {"type": "resource_link",
+                        "name": "lib.rs", "uri": "file:///tmp/lib.rs"}},
+                ],
+            }),
+        ));
+        let handle = store.shared_buffer("s1");
+        let buffer = lock(&handle);
+        let blocks = buffer.blocks();
+        let Block::ToolResult {
+            output, is_error, ..
+        } = blocks[1].as_ref()
+        else {
+            panic!("expected the tool result, got {:#?}", blocks[1]);
+        };
+        assert_eq!(
+            output,
+            "fd -e rs . /tmp | wc -l\nlib.rs (file:///tmp/lib.rs)"
+        );
         assert!(!*is_error);
     }
 

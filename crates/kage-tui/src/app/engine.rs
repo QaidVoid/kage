@@ -5,7 +5,7 @@
 use super::*;
 
 use kage_core::protocol::{
-    AgentState, Delivery, Envelope, Event, HostEvent, NoticeLevel, RequestId,
+    AgentState, Delivery, Envelope, Event, HostEvent, NoticeLevel, RequestId, RunOutcome,
 };
 use kage_core::{Content, LoopEvent, MediaSource, Role, SessionId, ToolCallId};
 
@@ -318,11 +318,11 @@ impl App {
                 questions,
             } => self.question_asked(request_id, tool_call_id, &questions),
             HostEvent::RunStarted => self.run_started = Some(Instant::now()),
-            HostEvent::RunEnded { .. } => {
+            HostEvent::RunEnded { outcome } => {
                 self.run_started = None;
                 self.compacting = None;
                 self.pending_compaction_before = None;
-                self.end_run(self.active_session.unwrap_or_default());
+                self.end_run(self.active_session.unwrap_or_default(), &outcome);
                 self.end_swarm_oneshot();
             }
             HostEvent::McpServers { servers } => self.set_mcp_servers(servers),
@@ -501,8 +501,8 @@ impl App {
                 self.set_card_phase(session, ToolPhase::Running);
                 true
             }
-            HostEvent::RunEnded { .. } => {
-                self.end_run(session);
+            HostEvent::RunEnded { outcome } => {
+                self.end_run(session, &outcome);
                 self.set_card_time(session);
                 true
             }
@@ -843,8 +843,9 @@ impl App {
 
     /// Close out a finished run of `session`: drop its approvals and
     /// stop its streaming and its tool rows. Other sessions' approvals
-    /// stay.
-    fn end_run(&mut self, session: SessionId) {
+    /// stay. A run that completed settles the calls its agent never
+    /// confirmed as done; an aborted run marks them interrupted.
+    fn end_run(&mut self, session: SessionId, outcome: &RunOutcome) {
         self.permission_queue.retain(|a| a.session != session);
         if self
             .pending_permission
@@ -856,6 +857,9 @@ impl App {
         let buffer = self.buffer_of(session);
         let mut buf = lock(&buffer);
         buf.finish_streaming();
+        if matches!(outcome, RunOutcome::Completed) {
+            buf.settle_run_tools();
+        }
         buf.interrupt_running_tools();
     }
 

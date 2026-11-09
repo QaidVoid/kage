@@ -1308,38 +1308,7 @@ mod unix {
     // it could not be queued. Fragments of one message are merged. The newest history is kept within half the
     // attachment budget, and a notice marks where older history was cut.
     fn queue_history(state: &mut State, owner: u64, id: &str) -> Option<mpsc::Receiver<()>> {
-        let mut updates: Vec<Value> = Vec::new();
-        let mut last_item: Option<(&'static str, String)> = None;
-        for (event, _) in &state.history {
-            let item = match event {
-                ExternalAcpPresentation::AgentMessage { item_id, .. } => {
-                    Some(("agent_message_chunk", item_id.as_str().to_owned()))
-                }
-                ExternalAcpPresentation::AgentThought { item_id, .. } => {
-                    Some(("agent_thought_chunk", item_id.as_str().to_owned()))
-                }
-                _ => None,
-            };
-            let Some(update) = history_update(event, id) else {
-                last_item = None;
-                continue;
-            };
-            if item.is_some()
-                && item == last_item
-                && let Some(previous) = updates.last_mut()
-                && let (Some(text), Some(more)) = (
-                    previous["update"]["content"]["text"]
-                        .as_str()
-                        .map(str::to_owned),
-                    update["update"]["content"]["text"].as_str(),
-                )
-            {
-                previous["update"]["content"]["text"] = Value::String(text + more);
-                continue;
-            }
-            last_item = item;
-            updates.push(update);
-        }
+        let updates = replay_updates(&state.history, id);
         let mut cut = state.history_cut;
         let State {
             attachments, bytes, ..
@@ -1374,6 +1343,117 @@ mod unix {
         let (done, written) = mpsc::channel();
         sender.try_send(WriteItem::Barrier(done)).ok()?;
         Some(written)
+    }
+
+    // Rewrite a call's announcement update in place with the status its
+    // turn's outcome implies: the agent finished its turn, so the call
+    // is done; any other outcome reads as the cancellation the engine
+    // path renders for an abandoned call.
+    fn settle_call_update(update: &mut Value, outcome: PresentationTurnOutcome) {
+        let status = if outcome == PresentationTurnOutcome::EndTurn {
+            "completed"
+        } else {
+            "failed"
+        };
+        update["update"]["status"] = json!(status);
+        if status == "failed" {
+            update["update"]["content"] = json!([{"type": "content", "content":
+                {"type": "text", "text": kage_core::event::TOOL_CANCELLED_TEXT}}]);
+        }
+    }
+
+    // The updates one replay of the display history sends: each record
+    // as the `session/update` it was shown as, message fragments merged.
+    // Calls announced since the last turn boundary whose terminal status
+    // the agent never reported rewrite that announcement's status with
+    // the turn's outcome, and later in-progress updates lose theirs, so
+    // the settled call cannot fall back to running.
+    fn replay_updates(
+        history: &std::collections::VecDeque<(ExternalAcpPresentation, usize)>,
+        id: &str,
+    ) -> Vec<Value> {
+        let mut updates: Vec<Value> = Vec::new();
+        let mut last_item: Option<(&'static str, String)> = None;
+        let mut open_calls: Vec<(String, usize, Vec<usize>)> = Vec::new();
+        for (event, _) in history {
+            match event {
+                ExternalAcpPresentation::ToolCall {
+                    tool_call_id,
+                    status,
+                    ..
+                } if !matches!(
+                    status,
+                    kage_session::entry::PresentationToolStatus::Completed
+                        | kage_session::entry::PresentationToolStatus::Failed
+                ) =>
+                {
+                    let call = tool_call_id.as_str().to_owned();
+                    if !open_calls.iter().any(|(known, _, _)| *known == call) {
+                        open_calls.push((call, updates.len(), Vec::new()));
+                    }
+                }
+                ExternalAcpPresentation::ToolCallUpdate {
+                    tool_call_id,
+                    status,
+                    ..
+                } => {
+                    if matches!(
+                        status,
+                        Some(
+                            kage_session::entry::PresentationToolStatus::Completed
+                                | kage_session::entry::PresentationToolStatus::Failed
+                        )
+                    ) {
+                        open_calls.retain(|(known, _, _)| known != tool_call_id.as_str());
+                    } else if let Some((_, _, stale)) = open_calls
+                        .iter_mut()
+                        .find(|(known, _, _)| known == tool_call_id.as_str())
+                    {
+                        stale.push(updates.len());
+                    }
+                }
+                ExternalAcpPresentation::TurnEnd { outcome } => {
+                    for (_, index, stale) in open_calls.drain(..) {
+                        settle_call_update(&mut updates[index], *outcome);
+                        for index in stale {
+                            if let Some(update) = updates[index]["update"].as_object_mut() {
+                                update.remove("status");
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            let item = match event {
+                ExternalAcpPresentation::AgentMessage { item_id, .. } => {
+                    Some(("agent_message_chunk", item_id.as_str().to_owned()))
+                }
+                ExternalAcpPresentation::AgentThought { item_id, .. } => {
+                    Some(("agent_thought_chunk", item_id.as_str().to_owned()))
+                }
+                _ => None,
+            };
+            let Some(update) = history_update(event, id) else {
+                last_item = None;
+                continue;
+            };
+            if item.is_some()
+                && item == last_item
+                && let Some(previous) = updates.last_mut()
+                && let (Some(text), Some(more)) = (
+                    previous["update"]["content"]["text"]
+                        .as_str()
+                        .map(str::to_owned),
+                    update["update"]["content"]["text"].as_str(),
+                )
+            {
+                previous["update"]["content"]["text"] = Value::String(text + more);
+                continue;
+            }
+            last_item = item;
+            updates.push(update);
+        }
+        updates
     }
 
     // A recorded display event as the `session/update` it was shown as.
@@ -3922,6 +4002,121 @@ for line in sys.stdin:
             drop(state);
             assert_eq!(texts.recv_timeout(WAIT).unwrap().1, "live");
             assert!(session.attach_load(2, peer_for_test()).is_err());
+        }
+
+        /// The display history the settling test replays: two turns,
+        /// one call left open past the end turn, one with a later
+        /// in-progress update, one settled by the agent and one left
+        /// open past a cancel.
+        fn seed_unsettled_calls(session: &External) {
+            use kage_session::entry::PresentationToolStatus;
+            let mut state = lock(&session.state);
+            state.remember(ExternalAcpPresentation::Prompt {
+                text: bounded("do it"),
+            });
+            state.remember(ExternalAcpPresentation::ToolCall {
+                tool_call_id: bounded("c1"),
+                title: bounded("Ran fd"),
+                status: PresentationToolStatus::Pending,
+            });
+            state.remember(ExternalAcpPresentation::ToolCall {
+                tool_call_id: bounded("c5"),
+                title: bounded("Spawned"),
+                status: PresentationToolStatus::Pending,
+            });
+            state.remember(ExternalAcpPresentation::ToolCallUpdate {
+                tool_call_id: bounded("c5"),
+                title: None,
+                status: Some(PresentationToolStatus::InProgress),
+                text: None,
+            });
+            state.remember(ExternalAcpPresentation::ToolCall {
+                tool_call_id: bounded("c2"),
+                title: bounded("Read"),
+                status: PresentationToolStatus::Pending,
+            });
+            state.remember(ExternalAcpPresentation::ToolCallUpdate {
+                tool_call_id: bounded("c2"),
+                title: None,
+                status: Some(PresentationToolStatus::Completed),
+                text: None,
+            });
+            state.remember(ExternalAcpPresentation::ToolCall {
+                tool_call_id: bounded("c4"),
+                title: bounded("Wrote"),
+                status: PresentationToolStatus::Completed,
+            });
+            state.remember(ExternalAcpPresentation::TurnEnd {
+                outcome: PresentationTurnOutcome::EndTurn,
+            });
+            state.remember(ExternalAcpPresentation::Prompt {
+                text: bounded("more"),
+            });
+            state.remember(ExternalAcpPresentation::ToolCall {
+                tool_call_id: bounded("c3"),
+                title: bounded("Ran ls"),
+                status: PresentationToolStatus::Pending,
+            });
+            state.remember(ExternalAcpPresentation::TurnEnd {
+                outcome: PresentationTurnOutcome::Cancelled,
+            });
+        }
+
+        #[test]
+        fn replayed_history_settles_calls_the_turn_left_unconfirmed() {
+            let session = scripted_session(ADMISSION_SCRIPT);
+            seed_unsettled_calls(&session);
+            let (client, server) = UnixStream::pair().unwrap();
+            let (peer, _, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            session.attach_load(2, peer.into()).unwrap().announce();
+            let (tx, rx) = mpsc::channel();
+            thread::spawn(move || {
+                for line in BufReader::new(client).lines() {
+                    let Ok(line) = line else { break };
+                    let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                        continue;
+                    };
+                    let update = &value["params"]["update"];
+                    if matches!(
+                        update["sessionUpdate"].as_str(),
+                        Some("tool_call" | "tool_call_update")
+                    ) {
+                        let item = (
+                            update["toolCallId"].as_str().unwrap_or("").to_owned(),
+                            update["status"].as_str().unwrap_or("").to_owned(),
+                        );
+                        if tx.send(item).is_err() {
+                            break;
+                        }
+                    }
+                }
+            });
+            let mut seen = Vec::new();
+            let until = Instant::now() + WAIT;
+            while seen.len() < 7 {
+                let remaining = until.saturating_duration_since(Instant::now());
+                let Ok(item) = rx.recv_timeout(remaining) else {
+                    break;
+                };
+                seen.push(item);
+            }
+            assert_eq!(
+                seen,
+                [
+                    ("c1".to_owned(), "completed".to_owned()),
+                    ("c5".to_owned(), "completed".to_owned()),
+                    ("c5".to_owned(), String::new()),
+                    ("c2".to_owned(), "pending".to_owned()),
+                    ("c2".to_owned(), "completed".to_owned()),
+                    ("c4".to_owned(), "completed".to_owned()),
+                    ("c3".to_owned(), "failed".to_owned()),
+                ],
+                "the end turn settles c1 and the c5 that got an \
+                 in-progress update, whose status is dropped so the \
+                 settled call cannot fall back to running; c2 and c4 \
+                 keep their recorded statuses, the cancel settles c3"
+            );
         }
 
         #[test]

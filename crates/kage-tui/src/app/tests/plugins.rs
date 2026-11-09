@@ -184,6 +184,38 @@ fn the_plugin_session_list_carries_the_session_id_not_the_title() {
 }
 
 #[test]
+fn the_plugin_session_list_defers_until_the_startup_scan_warms() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let (mut app, _rx, _events) = app_with_events();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    app.set_session_lister(Box::new(move |_| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Vec::new()
+    }));
+    let list = kage_plugin::sessions::shared_session_list();
+    app.set_plugin_session_list(list.clone());
+    let warmed = Arc::new(AtomicBool::new(false));
+    app.set_sessions_warmed(Arc::clone(&warmed));
+
+    app.refresh_plugin_session_list_if_stale();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a cold startup scan must not be waited on by a frame"
+    );
+    assert!(
+        app.plugin_sessions_stale,
+        "the refresh retries once the scan warms"
+    );
+
+    warmed.store(true, Ordering::Release);
+    app.refresh_plugin_session_list_if_stale();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(!app.plugin_sessions_stale);
+}
+
+#[test]
 fn the_plugin_session_list_refreshes_only_when_sessions_change() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let (mut app, _rx, events) = app_with_events();

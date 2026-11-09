@@ -29,6 +29,7 @@ impl App {
             todo_list_overlay: None,
             session_tree_source: None,
             session_lister: None,
+            sessions_warmed: None,
             cmdline: None,
             status_model: None,
             status_session_id: None,
@@ -478,6 +479,21 @@ impl App {
         self.session_lister = Some(lister);
     }
 
+    /// Flag the startup session scan flips once its cache is warm.
+    /// A listing run before that would scan every session file on the
+    /// UI thread, so the listers defer until it is set.
+    pub fn set_sessions_warmed(&mut self, warmed: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.sessions_warmed = Some(warmed);
+    }
+
+    /// Whether the synchronous session listers may run now. Without a
+    /// wired flag there is no startup scan, so listing is always safe.
+    pub(crate) fn sessions_warmed(&self) -> bool {
+        self.sessions_warmed
+            .as_ref()
+            .is_none_or(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+    }
+
     /// Set what the start card lists: recent sessions, startup notices
     /// and the permission summary. Later session changes list the
     /// sessions again through the session lister.
@@ -500,6 +516,9 @@ impl App {
     /// and list the start card's recent sessions again.
     pub(crate) fn on_session_changed(&mut self) {
         self.search_pattern = None;
+        if !self.sessions_warmed() {
+            return;
+        }
         let (Some(info), Some(lister)) = (self.start_info.as_mut(), &self.session_lister) else {
             return;
         };

@@ -268,4 +268,22 @@ mod tests {
         assert!(report.loaded.is_empty());
         assert!(rec.snapshot().notifications.is_empty());
     }
+
+    /// init.lua is trusted config: it subscribes to context events
+    /// without a grant entry, while an ungranted plugin still cannot.
+    #[test]
+    fn init_subscribes_to_context_events_without_a_grant() {
+        let user = tempdir().unwrap();
+        write(
+            user.path(),
+            "init.lua",
+            "kage.on('transform_context', function(ev) kage.notify('n=' .. ev.n) end)",
+        );
+        let (rec, rt) = user_runtime(user.path());
+        assert_eq!(load_all(None, &rt).unwrap().init, Some(Ok(())));
+        assert_eq!(rt.handler_count("transform_context"), 1);
+        rt.dispatch_event("transform_context", &serde_json::json!({ "n": 7 }))
+            .unwrap();
+        assert_eq!(rec.snapshot().notifications, ["n=7"]);
+    }
 }

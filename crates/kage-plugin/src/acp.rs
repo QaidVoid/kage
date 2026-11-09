@@ -23,7 +23,7 @@ use kage_core::sync::lock;
 use mlua::{Lua, Table, Value};
 
 use crate::api::json_to_lua;
-use crate::capabilities::{Capability, CapabilityRegistry};
+use crate::capabilities::{Capability, CapabilityRegistry, CurrentPlugin};
 use crate::error::PluginError;
 
 /// Shared map of plugin-declared ACP agents. The host merges these
@@ -39,15 +39,22 @@ pub fn shared_acp_agents() -> SharedAcpAgents {
 /// Registry key holding the single `on_acp_permission` handler.
 const PERMISSION_KEY: &str = "kage.acp.permission_handler";
 
+/// Registry key holding the plugin that stored the permission handler.
+const PERMISSION_OWNER_KEY: &str = "kage.acp.permission_owner";
+
 /// Install the base `kage.acp` surface: `on_acp_permission`.
-pub fn install_acp(lua: &Lua) -> Result<(), PluginError> {
+pub fn install_acp(lua: &Lua, current: CurrentPlugin) -> Result<(), PluginError> {
     let kage: Table = lua.globals().get("kage")?;
     let acp = lua.create_table()?;
     kage.set("acp", acp)?;
     kage.set(
         "on_acp_permission",
-        lua.create_function(|lua, handler: mlua::Function| {
+        lua.create_function(move |lua, handler: mlua::Function| {
             lua.set_named_registry_value(PERMISSION_KEY, handler)?;
+            lua.set_named_registry_value(
+                PERMISSION_OWNER_KEY,
+                crate::capabilities::current_owner(&current),
+            )?;
             Ok(())
         })?,
     )?;
@@ -94,19 +101,30 @@ fn add_agent_fn(lua: &Lua, agents: SharedAcpAgents) -> mlua::Result<mlua::Functi
     })
 }
 
+/// The plugin that stored the permission handler, or `None` when it
+/// came from the trusted user config or host eval.
+pub(crate) fn permission_owner(lua: &Lua) -> Option<String> {
+    lua.named_registry_value::<Option<String>>(PERMISSION_OWNER_KEY)
+        .ok()
+        .flatten()
+}
+
 /// Consult the registered permission handler.
 ///
 /// `Some(true)` = allow, `Some(false)` = explicit deny, `None` = no
 /// handler registered (the host applies its own default, which is
 /// deny). A handler that errors or returns a non-boolean denies.
 #[must_use]
-pub fn decide(lua: &Lua, payload: &serde_json::Value) -> Option<bool> {
+pub fn decide(lua: &Lua, current: &CurrentPlugin, payload: &serde_json::Value) -> Option<bool> {
     let handler: mlua::Function = lua.named_registry_value(PERMISSION_KEY).ok()?;
+    let owner = permission_owner(lua);
     let arg = json_to_lua(lua, payload).ok()?;
-    match handler.call::<Value>(arg) {
-        Ok(Value::Boolean(b)) => Some(b),
-        Ok(_) | Err(_) => Some(false),
-    }
+    crate::capabilities::scoped(current, owner.as_deref(), || {
+        match handler.call::<Value>(arg) {
+            Ok(Value::Boolean(b)) => Some(b),
+            Ok(_) | Err(_) => Some(false),
+        }
+    })
 }
 
 /// Drop the registered `on_acp_permission` handler so a stale
@@ -117,6 +135,7 @@ pub fn decide(lua: &Lua, payload: &serde_json::Value) -> Option<bool> {
 /// Returns [`PluginError`] if the registry value cannot be written.
 pub(crate) fn clear_permission_handler(lua: &Lua) -> Result<(), PluginError> {
     lua.set_named_registry_value(PERMISSION_KEY, Value::Nil)?;
+    lua.set_named_registry_value(PERMISSION_OWNER_KEY, Value::Nil)?;
     Ok(())
 }
 
@@ -132,11 +151,15 @@ mod tests {
         lua
     }
 
+    fn test_slot() -> CurrentPlugin {
+        Arc::default()
+    }
+
     /// Install the base surface and run the `exec` installer against
     /// the global `kage` table, which stands in for a granted
     /// plugin's proxy.
     fn install_for_test(lua: &Lua, agents: &SharedAcpAgents) {
-        install_acp(lua).unwrap();
+        install_acp(lua, test_slot()).unwrap();
         let registry = crate::capabilities::capability_registry();
         register(&registry, Arc::clone(agents));
         let kage: Table = lua.globals().get("kage").unwrap();
@@ -189,7 +212,8 @@ mod tests {
     #[test]
     fn add_agent_stays_off_base_surface() {
         let lua = lua_with_kage();
-        install_acp(&lua).unwrap();
+        let slot = test_slot();
+        install_acp(&lua, slot).unwrap();
         let absent: bool = lua.load("return kage.acp.add_agent == nil").eval().unwrap();
         assert!(absent, "add_agent must not resolve without the grant");
     }
@@ -197,40 +221,46 @@ mod tests {
     #[test]
     fn permission_handler_allow_deny_and_absent() {
         let lua = lua_with_kage();
-        install_acp(&lua).unwrap();
+        let slot = test_slot();
+        install_acp(&lua, Arc::clone(&slot)).unwrap();
         let payload = serde_json::json!({"tool": "shell"});
 
-        assert_eq!(decide(&lua, &payload), None, "no handler => None");
+        assert_eq!(decide(&lua, &slot, &payload), None, "no handler => None");
 
         lua.load("kage.on_acp_permission(function(req) return req.tool == 'shell' end)")
             .exec()
             .unwrap();
-        assert_eq!(decide(&lua, &payload), Some(true));
+        assert_eq!(decide(&lua, &slot, &payload), Some(true));
         assert_eq!(
-            decide(&lua, &serde_json::json!({"tool": "rm"})),
+            decide(&lua, &slot, &serde_json::json!({"tool": "rm"})),
             Some(false)
         );
 
         lua.load("kage.on_acp_permission(function() return 'nope' end)")
             .exec()
             .unwrap();
-        assert_eq!(decide(&lua, &payload), Some(false), "non-bool => deny");
+        assert_eq!(
+            decide(&lua, &slot, &payload),
+            Some(false),
+            "non-bool => deny"
+        );
 
         lua.load("kage.on_acp_permission(function() error('boom') end)")
             .exec()
             .unwrap();
-        assert_eq!(decide(&lua, &payload), Some(false), "error => deny");
+        assert_eq!(decide(&lua, &slot, &payload), Some(false), "error => deny");
     }
 
     #[test]
     fn clear_permission_handler_removes_decision() {
         let lua = lua_with_kage();
-        install_acp(&lua).unwrap();
+        let slot = test_slot();
+        install_acp(&lua, Arc::clone(&slot)).unwrap();
         lua.load("kage.on_acp_permission(function() return true end)")
             .exec()
             .unwrap();
-        assert_eq!(decide(&lua, &serde_json::json!({})), Some(true));
+        assert_eq!(decide(&lua, &slot, &serde_json::json!({})), Some(true));
         clear_permission_handler(&lua).unwrap();
-        assert_eq!(decide(&lua, &serde_json::json!({})), None);
+        assert_eq!(decide(&lua, &slot, &serde_json::json!({})), None);
     }
 }

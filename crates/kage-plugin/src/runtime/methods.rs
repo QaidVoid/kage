@@ -112,7 +112,17 @@ impl PluginRuntime {
     /// proxy the capability tier later extends. The host loader calls
     /// this for every script with the file stem as `name`; the
     /// environment is created once per name and reused.
+    ///
+    /// # Errors
+    ///
+    /// When `name` starts with `@`: reserved for kage's own
+    /// environments, which run trusted.
     pub fn eval_plugin(&self, name: &str, source: &str) -> Result<mlua::Value, PluginError> {
+        if name.starts_with('@') {
+            return Err(PluginError::Config(
+                "names starting with '@' are reserved".to_owned(),
+            ));
+        }
         let eval = Arc::clone(&self.eval);
         let name = name.to_owned();
         let source = source.to_owned();
@@ -378,11 +388,27 @@ impl PluginRuntime {
     }
 
     /// Fetch the Lua function a mapping with [`kage_core::keymap::Rhs::Lua`]
-    /// runs. The host calls it through [`Self::bridge_call`] with no
-    /// arguments, so it may open `kage.ui.*` dialogs. Fails when the
-    /// mapping was replaced or a reload dropped it.
+    /// runs. The host resolves the owner with [`Self::keymap_owner`] and
+    /// starts the bridged call with [`Self::bridge_call_for`] or
+    /// [`Self::bridge_start_for`], so the handler runs under the plugin
+    /// that registered it. Fails when the mapping was replaced or a
+    /// reload dropped it.
     pub fn keymap_handler(&self, id: u64) -> Result<mlua::Function, PluginError> {
         Ok(self.host.call(move |lua| keymap::handler(lua, id))??)
+    }
+
+    /// The plugin that registered the Lua keymap handler `id`, so the
+    /// host starts the bridged call under it (see
+    /// [`Self::bridge_call_for`]). Host eval yields `None` and init.lua
+    /// yields `@user`; both are trusted.
+    ///
+    /// # Errors
+    ///
+    /// When the handler `id` is stale (mapping replaced or reload).
+    pub fn keymap_owner(&self, id: u64) -> Result<Option<String>, PluginError> {
+        Ok(self
+            .host
+            .call(move |lua| keymap::handler_owner(lua, id))??)
     }
 
     /// Snapshot the providers registered by plugins so far.
@@ -435,10 +461,11 @@ impl PluginRuntime {
     pub fn acp_permission(&self, payload: &serde_json::Value) -> Option<bool> {
         let payload = payload.clone();
         let budget = self.eval.script_budget;
+        let current = Arc::clone(&self.eval.current_plugin);
         self.host
             .call(move |lua| {
                 watchdog::run(lua, budget, || {
-                    Ok::<_, PluginError>(acp::decide(lua, &payload))
+                    Ok::<_, PluginError>(acp::decide(lua, &current, &payload))
                 })
             })
             .and_then(|decision| decision)
@@ -668,13 +695,33 @@ impl PluginRuntime {
     /// Every step runs on the owner thread; the owner is free while the
     /// coroutine is parked. Fails with [`PluginError::BridgeBusy`] if
     /// another coroutine is already parked.
+    ///
+    /// Runs with no owner, i.e. trusted: for a handler a plugin
+    /// registered use [`Self::bridge_call_for`].
     pub fn bridge_call(
         &self,
         func: &mlua::Function,
         args: &[serde_json::Value],
     ) -> Result<BridgeStep, PluginError> {
-        self.bridge_begin(Some(bridge::SINGLE_CALL), func, args)
+        self.bridge_begin(Some(bridge::SINGLE_CALL), None, func, args)
             .map(|(_, step)| step)
+    }
+
+    /// [`Self::bridge_call`] for a handler a plugin registered, run
+    /// under its `owner` on every step, resumes included.
+    pub fn bridge_call_for(
+        &self,
+        owner: Option<&str>,
+        func: &mlua::Function,
+        args: &[serde_json::Value],
+    ) -> Result<BridgeStep, PluginError> {
+        self.bridge_begin(
+            Some(bridge::SINGLE_CALL),
+            owner.map(str::to_owned),
+            func,
+            args,
+        )
+        .map(|(_, step)| step)
     }
 
     /// Like [`Self::bridge_call`], but under a fresh call id, so calls of
@@ -684,18 +731,32 @@ impl PluginRuntime {
     ///
     /// # Errors
     ///
-    /// As [`Self::bridge_call`], except it is never busy.
+    /// As [`Self::bridge_call`], except it is never busy. Like
+    /// [`Self::bridge_call`], it runs trusted: for a handler a plugin
+    /// registered use [`Self::bridge_start_for`].
     pub fn bridge_start(
         &self,
         func: &mlua::Function,
         args: &[serde_json::Value],
     ) -> Result<(u64, BridgeStep), PluginError> {
-        self.bridge_begin(None, func, args)
+        self.bridge_begin(None, None, func, args)
+    }
+
+    /// [`Self::bridge_start`] for a handler a plugin registered: see
+    /// [`Self::bridge_call_for`].
+    pub fn bridge_start_for(
+        &self,
+        owner: Option<&str>,
+        func: &mlua::Function,
+        args: &[serde_json::Value],
+    ) -> Result<(u64, BridgeStep), PluginError> {
+        self.bridge_begin(None, owner.map(str::to_owned), func, args)
     }
 
     fn bridge_begin(
         &self,
         call: Option<u64>,
+        owner: Option<String>,
         func: &mlua::Function,
         args: &[serde_json::Value],
     ) -> Result<(u64, BridgeStep), PluginError> {
@@ -703,6 +764,7 @@ impl PluginRuntime {
         let args = args.to_vec();
         let bridge = Arc::clone(&self.bridge);
         let budget = self.eval.script_budget;
+        let slot = Arc::clone(&self.eval.current_plugin);
         self.host.call(move |lua| {
             let mut parked = lock(&bridge);
             let call = match call {
@@ -713,9 +775,17 @@ impl PluginRuntime {
             let thread = lua.create_thread(func)?;
             watchdog::install_on_thread(&thread)?;
             let resume_args = bridge::args_to_multi(lua, &args)?;
-            let mut slot = None;
-            let step = watchdog::run(lua, budget, || bridge::step(thread, resume_args, &mut slot));
-            parked.park(call, slot);
+            let mut slot_thread = None;
+            let step = crate::capabilities::scoped(&slot, owner.as_deref(), || {
+                watchdog::run(lua, budget, || {
+                    bridge::step(thread, resume_args, &mut slot_thread)
+                })
+            });
+            let parked_call = slot_thread.map(|thread| bridge::ParkedCall {
+                thread,
+                owner: owner.clone(),
+            });
+            parked.park(call, parked_call);
             step.map(|step| (call, step))
         })?
     }
@@ -766,13 +836,22 @@ impl PluginRuntime {
     ) -> Result<BridgeStep, PluginError> {
         let bridge = Arc::clone(&self.bridge);
         let budget = self.eval.script_budget;
+        let slot = Arc::clone(&self.eval.current_plugin);
         self.host.call(move |lua| {
             let mut parked = lock(&bridge);
-            let thread = parked.take(call).ok_or(PluginError::BridgeIdle)?;
+            let parked_call = parked.take(call).ok_or(PluginError::BridgeIdle)?;
             let resume_args = resume_args(lua)?;
-            let mut slot = None;
-            let step = watchdog::run(lua, budget, || bridge::step(thread, resume_args, &mut slot));
-            parked.park(call, slot);
+            let mut slot_thread = None;
+            let step = crate::capabilities::scoped(&slot, parked_call.owner.as_deref(), || {
+                watchdog::run(lua, budget, || {
+                    bridge::step(parked_call.thread, resume_args, &mut slot_thread)
+                })
+            });
+            let parked_again = slot_thread.map(|thread| bridge::ParkedCall {
+                thread,
+                owner: parked_call.owner,
+            });
+            parked.park(call, parked_again);
             step
         })?
     }

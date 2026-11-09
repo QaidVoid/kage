@@ -78,8 +78,14 @@ pub(crate) const SINGLE_CALL: u64 = 0;
 /// The suspended plugin coroutines, by call.
 #[derive(Default)]
 pub struct Parked {
-    calls: HashMap<u64, Thread>,
+    calls: HashMap<u64, ParkedCall>,
     next: u64,
+}
+
+/// A parked coroutine and the plugin whose handler parked it.
+pub(crate) struct ParkedCall {
+    pub(crate) thread: Thread,
+    pub(crate) owner: Option<String>,
 }
 
 impl Parked {
@@ -95,14 +101,14 @@ impl Parked {
     }
 
     /// Take `call`'s coroutine out to resume it.
-    pub(crate) fn take(&mut self, call: u64) -> Option<Thread> {
+    pub(crate) fn take(&mut self, call: u64) -> Option<ParkedCall> {
         self.calls.remove(&call)
     }
 
     /// Park `thread` as `call`, when it suspended again.
-    pub(crate) fn park(&mut self, call: u64, thread: Option<Thread>) {
-        if let Some(thread) = thread {
-            self.calls.insert(call, thread);
+    pub(crate) fn park(&mut self, call: u64, parked: Option<ParkedCall>) {
+        if let Some(parked) = parked {
+            self.calls.insert(call, parked);
         }
     }
 

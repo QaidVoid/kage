@@ -424,3 +424,24 @@ fn leader_from_toml_seeds_toml_bindings() {
         Lookup::Exact(_)
     ));
 }
+
+#[test]
+fn keymap_owner_tracks_the_handler_through_replacements() {
+    let rt = PluginRuntime::new().unwrap();
+    rt.eval_plugin("p", "kage.register_keybinding('ctrl+q', function() end)")
+        .unwrap();
+    let id = lua_id(&rt.keymap(), Mode::Global, "<C-q>");
+    assert_eq!(rt.keymap_owner(id).unwrap().as_deref(), Some("p"));
+
+    rt.eval_plugin("p", "kage.register_keybinding('ctrl+q', function() end)")
+        .unwrap();
+    assert!(
+        rt.keymap_owner(id).is_err(),
+        "a stale id must error, not report its old owner"
+    );
+
+    rt.eval("kage.register_keybinding('ctrl+x', function() end)")
+        .unwrap();
+    let host_id = lua_id(&rt.keymap(), Mode::Global, "<C-x>");
+    assert_eq!(rt.keymap_owner(host_id).unwrap(), None);
+}

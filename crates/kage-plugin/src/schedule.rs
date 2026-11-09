@@ -54,6 +54,9 @@ struct Timers {
     live: HashMap<i64, Timer>,
     sink: SharedHostLog,
     budget: u64,
+    /// The current-plugin slot, so callbacks run under the owner that
+    /// registered them (see [`crate::capabilities::scoped`]).
+    current: CurrentPlugin,
 }
 
 #[derive(Clone)]
@@ -61,6 +64,9 @@ struct Timer {
     kind: &'static str,
     every: Option<Duration>,
     origin: Arc<str>,
+    /// The plugin that set the callback, as of registration. `None` for
+    /// the trusted host eval and the reserved `@`-environments.
+    owner: Option<String>,
     /// Who the callback runs for: whoever was in effect when it was set. A
     /// repeating timer keeps that session after it closes, and then reads
     /// the runtime's own environment.
@@ -81,6 +87,7 @@ pub(crate) fn install(
         live: HashMap::new(),
         sink,
         budget,
+        current: Arc::clone(&current),
     });
     lua.set_named_registry_value(CALLBACKS_KEY, lua.create_table()?)?;
     let kage: Table = lua.globals().get("kage")?;
@@ -126,9 +133,10 @@ fn add(
     let deadline = Instant::now()
         .checked_add(Duration::from_millis(ms))
         .ok_or_else(|| mlua::Error::external(format!("{kind}: ms is too large")))?;
-    let origin = lock(current)
+    let owner = lock(current).clone();
+    let origin = owner
         .as_deref()
-        .map(|owner| format!(" from '{owner}'"))
+        .map(|name| format!(" from '{name}'"))
         .unwrap_or_default()
         .into();
     let id = {
@@ -144,6 +152,7 @@ fn add(
                 kind,
                 every,
                 origin,
+                owner,
                 invocation: Invocation::current(),
             },
         );
@@ -260,12 +269,18 @@ fn call(lua: &Lua, id: i64, timer: &Timer, budget: u64) -> Result<(), PluginErro
     if timer.every.is_none() {
         callbacks.raw_set(id, Value::Nil)?;
     }
-    match callback {
-        Some(callback) => timer
-            .invocation
-            .scope(|| watchdog::run(lua, budget, || callback.call::<()>(()))),
-        None => Ok(()),
-    }
+    let Some(callback) = callback else {
+        return Ok(());
+    };
+    let slot = lua
+        .app_data_ref::<Timers>()
+        .map(|timers| Arc::clone(&timers.current));
+    timer.invocation.scope(move || match slot {
+        Some(slot) => crate::capabilities::scoped(&slot, timer.owner.as_deref(), || {
+            watchdog::run(lua, budget, || callback.call::<()>(()))
+        }),
+        None => watchdog::run(lua, budget, || callback.call::<()>(())),
+    })
 }
 
 /// Queue the next run of a repeating timer that is still live. A timer

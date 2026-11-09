@@ -801,6 +801,14 @@ impl CliAcpAgent {
         sessions.get(id).cloned()
     }
 
+    // The config options of this connection's live external session,
+    // empty when the session is not one.
+    fn external_options(&self, id: &str) -> Vec<SessionConfigOption> {
+        self.external_session(id)
+            .map(|session| session.config_options())
+            .unwrap_or_default()
+    }
+
     /// Registers a load or resume of `id` that a later close can fence.
     fn open_fence(&self, id: &str) -> OpenFence {
         let closed = Arc::new(AtomicBool::new(false));
@@ -1085,6 +1093,7 @@ impl Agent for CliAcpAgent {
         Ok(NewSessionResponse {
             session_id: id.to_string(),
             config_options,
+            modes: None,
         })
     }
 
@@ -1107,7 +1116,10 @@ impl Agent for CliAcpAgent {
             true,
             req.meta.as_ref(),
         )?;
-        Ok(LoadSessionResponse { config_options })
+        Ok(LoadSessionResponse {
+            config_options,
+            modes: None,
+        })
     }
 
     fn list_sessions(&self, req: ListSessionsRequest) -> Result<ListSessionsResponse, RpcError> {
@@ -1129,7 +1141,10 @@ impl Agent for CliAcpAgent {
             false,
             req.meta.as_ref(),
         )?;
-        Ok(ResumeSessionResponse { config_options })
+        Ok(ResumeSessionResponse {
+            config_options,
+            modes: None,
+        })
     }
 
     /// Unfenced: closes dispatched earlier cannot stop this resume. The
@@ -1166,7 +1181,8 @@ impl Agent for CliAcpAgent {
         if let Some(receipt) = receipt {
             return Ok((
                 LoadSessionResponse {
-                    config_options: Vec::new(),
+                    config_options: self.external_options(id),
+                    modes: None,
                 },
                 Some(receipt),
             ));
@@ -1189,7 +1205,8 @@ impl Agent for CliAcpAgent {
         if let Some(receipt) = receipt {
             return Ok((
                 ResumeSessionResponse {
-                    config_options: Vec::new(),
+                    config_options: self.external_options(id),
+                    modes: None,
                 },
                 Some(receipt),
             ));
@@ -1254,6 +1271,13 @@ impl Agent for CliAcpAgent {
         &self,
         req: SetSessionConfigOptionRequest,
     ) -> Result<SetSessionConfigOptionResponse, RpcError> {
+        if let Some(session) = self.external_session(&req.session_id) {
+            let config_options =
+                session.set_config_option(self.connection, &req.config_id, &req.value)?;
+            return Ok(SetSessionConfigOptionResponse {
+                config_options: Some(config_options),
+            });
+        }
         let id = self.engine_id(&req.session_id)?;
         let (commands, config_options) = {
             let mut shown = lock(&self.shown);
@@ -1274,7 +1298,9 @@ impl Agent for CliAcpAgent {
         for command in commands {
             self.host.engine.send(Command::to(id, command));
         }
-        Ok(SetSessionConfigOptionResponse { config_options })
+        Ok(SetSessionConfigOptionResponse {
+            config_options: Some(config_options),
+        })
     }
 
     fn config_get(&self, req: ConfigGetRequest) -> Result<ConfigGetResult, RpcError> {

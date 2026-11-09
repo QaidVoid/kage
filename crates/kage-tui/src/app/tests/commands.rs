@@ -252,7 +252,7 @@ fn permission_command_rejects_unknown_mode_without_request() {
 }
 
 #[test]
-fn permission_command_without_arg_reports_current_mode() {
+fn permission_command_without_a_session_reports_the_default() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
     let mut app = app_with_defaults(buffer.clone(), tx);
@@ -266,6 +266,211 @@ fn permission_command_without_arg_reports_current_mode() {
         other => panic!("expected a custom block, got {other:?}"),
     };
     assert!(rendered.contains("permission mode: default"), "{rendered}");
+}
+
+#[test]
+fn a_bare_permission_opens_the_engine_permission_picker() {
+    let (mut app, rx, _events) = app_with_events();
+    let registry: Vec<&CommandSpec> = BUILTIN_COMMANDS.iter().collect();
+
+    let result = app.run_command_validated("permission", &registry);
+    assert!(matches!(result, CommandResult::Done(None)), "{result:?}");
+    assert_eq!(app.picker_kind, Some(PickerKind::Permission));
+    assert!(rx_idle(&rx), "opening the picker sends nothing");
+    let rows = rendered(&mut app, 120, 24);
+    let starred: Vec<_> = rows.iter().filter(|row| row.contains(" * ")).collect();
+    assert_eq!(starred.len(), 1, "{rows:#?}");
+    assert!(starred[0].contains("Default"), "{rows:#?}");
+    assert!(
+        rows.iter().any(|row| row.contains("permission mode")),
+        "{rows:#?}"
+    );
+}
+
+/// The picker sorts rows by label: Allow, Ask, Default, Deny. Down
+/// twice from Allow lands on Default, which clears the override.
+#[test]
+fn the_permission_picker_resolves_into_a_permission_override() {
+    let (mut app, rx, _events) = app_with_events();
+    {
+        let mut usage = lock(app.session_usage.as_ref().unwrap());
+        usage.permission_mode = Some(kage_core::permissions::PermissionAction::Ask);
+    }
+    app.run_permission_command("");
+    assert_eq!(app.picker_kind, Some(PickerKind::Permission));
+    let rows = rendered(&mut app, 120, 24);
+    let starred: Vec<_> = rows.iter().filter(|row| row.contains(" * ")).collect();
+    assert_eq!(starred.len(), 1, "{rows:#?}");
+    assert!(starred[0].contains("Ask"), "{rows:#?}");
+    app.dispatch_picker_key(code(KeyCode::Down));
+    app.dispatch_picker_key(code(KeyCode::Down));
+    app.dispatch_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(
+        matches!(rx.try_recv(), Ok(RunRequest::SetPermissionMode(None))),
+        "picking Default sends the engine's own mode"
+    );
+}
+
+#[test]
+fn permission_switches_an_agent_mode_on_an_external_session() {
+    let (mut app, rx, _events) = app_with_events();
+    let registry: Vec<&CommandSpec> = BUILTIN_COMMANDS.iter().collect();
+
+    let result = app.run_command_validated("permission bogus", &registry);
+    assert!(
+        matches!(result, CommandResult::ValidationError(_)),
+        "while the agent publishes no modes the engine's static set \
+         still validates, {result:?}"
+    );
+
+    {
+        let mut usage = lock(app.session_usage.as_ref().unwrap());
+        usage.modes = vec![
+            kage_core::protocol::ModeChoice {
+                value: "code".into(),
+                name: "Code".into(),
+                description: None,
+            },
+            kage_core::protocol::ModeChoice {
+                value: "ask".into(),
+                name: "Ask".into(),
+                description: None,
+            },
+            kage_core::protocol::ModeChoice {
+                value: "plan".into(),
+                name: "Plan".into(),
+                description: None,
+            },
+        ];
+        usage.mode_value = Some("code".into());
+    }
+
+    let result = app.run_command_validated("permission plan", &registry);
+    assert!(
+        matches!(result, CommandResult::Done(None)),
+        "an agent mode id outside the engine's set passes validation, {result:?}"
+    );
+    assert!(
+        matches!(rx.try_recv(), Ok(RunRequest::SetModeValue { value }) if value == "plan"),
+        "the agent's mode id reaches the pump"
+    );
+
+    let _ = app.run_command_validated("permission ASK", &registry);
+    assert!(
+        matches!(rx.try_recv(), Ok(RunRequest::SetModeValue { value }) if value == "ask"),
+        "the mode's name resolves to its id"
+    );
+
+    let result = app.run_command_validated("permission bogus", &registry);
+    assert!(matches!(result, CommandResult::Done(None)), "{result:?}");
+    assert!(rx_idle(&rx), "an unknown agent mode sends nothing");
+    assert!(
+        last_block_text(&app.buffer)
+            .contains("permission: no mode `bogus`; this agent offers: code, ask, plan"),
+        "the unknown mode lists the agent's choices, not the engine's: {}",
+        last_block_text(&app.buffer)
+    );
+
+    let _ = app.run_command_validated("permission", &registry);
+    assert_eq!(
+        app.picker_kind,
+        Some(PickerKind::Mode),
+        "a bare command opens the agent's mode picker"
+    );
+    let rows = rendered(&mut app, 120, 24);
+    let starred: Vec<_> = rows.iter().filter(|row| row.contains(" * ")).collect();
+    assert_eq!(starred.len(), 1, "{rows:#?}");
+    assert!(starred[0].contains("Code"), "{rows:#?}");
+    assert!(
+        rows.iter().any(|row| row.contains("switch mode")),
+        "{rows:#?}"
+    );
+}
+
+/// The picker sorts rows by label, so Down moves from Ask to Code.
+#[test]
+fn the_mode_picker_resolves_a_selection_into_a_mode_switch() {
+    let (mut app, rx, _events) = app_with_events();
+    {
+        let mut usage = lock(app.session_usage.as_ref().unwrap());
+        usage.modes = vec![
+            kage_core::protocol::ModeChoice {
+                value: "ask".into(),
+                name: "Ask".into(),
+                description: None,
+            },
+            kage_core::protocol::ModeChoice {
+                value: "code".into(),
+                name: "Code".into(),
+                description: None,
+            },
+        ];
+        usage.mode_value = Some("ask".into());
+    }
+    app.run_permission_command("");
+    assert_eq!(app.picker_kind, Some(PickerKind::Mode));
+    app.dispatch_picker_key(code(KeyCode::Down));
+    app.dispatch_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(
+        matches!(rx.try_recv(), Ok(RunRequest::SetModeValue { value }) if value == "code"),
+        "the highlighted mode is what the pump is asked to switch to"
+    );
+}
+
+#[test]
+fn typing_a_permission_argument_completes_the_agents_modes() {
+    let (mut app, _rx, _events) = app_with_events();
+    {
+        let mut usage = lock(app.session_usage.as_ref().unwrap());
+        usage.modes = vec![
+            kage_core::protocol::ModeChoice {
+                value: "code".into(),
+                name: "Code".into(),
+                description: None,
+            },
+            kage_core::protocol::ModeChoice {
+                value: "ask".into(),
+                name: "Ask".into(),
+                description: None,
+            },
+            kage_core::protocol::ModeChoice {
+                value: "plan".into(),
+                name: "Plan".into(),
+                description: None,
+            },
+        ];
+    }
+    for c in "/permission a".chars() {
+        app.handle_key(key(c));
+    }
+    let items = app
+        .input_completion
+        .as_ref()
+        .expect("the popup opens on the argument")
+        .items()
+        .to_vec();
+    let values: Vec<&str> = items.iter().map(|item| item.value.as_str()).collect();
+    assert_eq!(
+        values,
+        ["ask"],
+        "the agent's own modes replace the static four"
+    );
+}
+
+#[test]
+fn typing_a_permission_argument_completes_the_engine_modes_without_agent_modes() {
+    let (mut app, _rx, _events) = app_with_events();
+    for c in "/permission a".chars() {
+        app.handle_key(key(c));
+    }
+    let items = app
+        .input_completion
+        .as_ref()
+        .expect("the popup opens on the argument")
+        .items()
+        .to_vec();
+    let values: Vec<&str> = items.iter().map(|item| item.value.as_str()).collect();
+    assert_eq!(values, ["allow", "ask"], "the static set stays");
 }
 
 fn builtin_registry() -> Vec<&'static CommandSpec> {
@@ -651,13 +856,19 @@ fn answers_to_commands_land_in_the_conversation() {
         ("theme current", "theme: "),
         ("mcp", "Add one under [mcp.servers.<name>] in config.toml"),
         ("agents", "no agents in this session yet"),
-        ("permission", "permission mode: default"),
     ] {
         let result = app.run_command_validated(line, &registry);
         assert!(matches!(result, CommandResult::Done(None)), "{line}");
         let text = last_block_text(&app.buffer);
         assert!(text.contains(want), "{line}: {text}");
     }
+    let result = app.run_command_validated("permission", &registry);
+    assert!(matches!(result, CommandResult::Done(None)));
+    assert_eq!(
+        app.picker_kind,
+        Some(PickerKind::Permission),
+        "a bare permission opens the picker instead of reporting"
+    );
 }
 
 #[test]

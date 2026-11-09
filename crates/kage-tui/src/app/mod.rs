@@ -333,6 +333,12 @@ pub enum RunRequest {
         /// The mode to switch to.
         on: bool,
     },
+    /// Switch the session to one of its agent's own modes, from the
+    /// `/permission` picker or an exact id on an external session.
+    SetModeValue {
+        /// The agent's mode id.
+        value: String,
+    },
 }
 
 /// Outcome of [`App::run`].
@@ -355,6 +361,12 @@ enum PickerKind {
     Mcp,
     /// Rewind: value is the entry id of the picked prompt.
     Rewind,
+    /// `/permission` on a session whose agent names its own modes:
+    /// value is the agent's mode id.
+    Mode,
+    /// `/permission` on an engine session: value names the
+    /// allow/ask/deny/default override to send.
+    Permission,
 }
 
 /// A blocking plugin dialog the worker handed to the App to run.
@@ -620,6 +632,7 @@ struct AppResolver<'a> {
     plugin_commands: &'a [(String, String)],
     sessions: Option<&'a SessionLister>,
     themes_dir: Option<&'a std::path::Path>,
+    permission_modes: Option<Vec<String>>,
 }
 
 impl Resolver for AppResolver<'_> {
@@ -649,6 +662,13 @@ impl Resolver for AppResolver<'_> {
             .into_iter()
             .map(|item| item.value)
             .collect()
+    }
+
+    fn choice_values(&self, command: &str, arg: &str) -> Option<Vec<String>> {
+        match (command, arg) {
+            ("permission", "mode") => self.permission_modes.clone(),
+            _ => None,
+        }
     }
 }
 

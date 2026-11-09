@@ -395,3 +395,89 @@ fn an_option_change_shows_at_once_and_a_refusal_restores_it() {
         "the refused value is taken back"
     );
 }
+
+/// An answer that names no options confirms nothing, so the value
+/// shown ahead of it reverts like a refusal does.
+#[test]
+fn an_answer_without_options_reverts_the_shown_value() {
+    let mut client = opened();
+    client.handle(update(
+        "s1",
+        &json!({
+            "sessionUpdate": "config_option_update",
+            "configOptions": [{
+                "id": "mode", "name": "Mode", "type": "select", "currentValue": "default",
+                "options": [{"value": "default", "name": "Default"}, {"value": "plan", "name": "Plan"}],
+            }],
+        }),
+    ));
+    let mode = |client: &Client| {
+        let session = client.state().session("s1").unwrap();
+        (
+            session.config_options[0].current_value.clone(),
+            session.mode.clone(),
+        )
+    };
+    let (id, shown) = client.set_config_option("s1", "mode", "plan");
+    assert_eq!(
+        shown,
+        vec![kage_client::Change::Session { id: "s1".into() }],
+        "the shown value is reported at once"
+    );
+    assert_eq!(mode(&client), ("plan".into(), Some("plan".into())));
+    let changes = client.handle(Frame::Success {
+        id: n(id),
+        result: json!({}),
+    });
+    assert_eq!(
+        changes,
+        vec![kage_client::Change::Session { id: "s1".into() }],
+        "the revert is reported"
+    );
+    assert_eq!(
+        mode(&client),
+        ("default".into(), Some("default".into())),
+        "an answer confirming nothing takes the shown value back"
+    );
+}
+
+/// The mode an agent reports through either surface moves both: a
+/// `config_option_update` moves the current mode, and a
+/// `current_mode_update` moves the mode option.
+#[test]
+fn either_mode_report_keeps_the_mode_and_its_option_together() {
+    let mut client = opened();
+    let options = |current: &str| {
+        json!({
+            "sessionUpdate": "config_option_update",
+            "configOptions": [{
+                "id": "mode", "name": "Mode", "type": "select", "currentValue": current,
+                "options": [{"value": "code", "name": "Code"}, {"value": "plan", "name": "Plan"}],
+            }],
+        })
+    };
+    let mode = |client: &Client| {
+        let session = client.state().session("s1").unwrap();
+        (
+            session.config_options[0].current_value.clone(),
+            session.mode.clone(),
+        )
+    };
+    client.handle(update("s1", &options("plan")));
+    assert_eq!(mode(&client), ("plan".into(), Some("plan".into())));
+    client.handle(update("s1", &options("code")));
+    assert_eq!(
+        mode(&client),
+        ("code".into(), Some("code".into())),
+        "an option report moves the current mode"
+    );
+    client.handle(update(
+        "s1",
+        &json!({"sessionUpdate": "current_mode_update", "currentModeId": "plan"}),
+    ));
+    assert_eq!(
+        mode(&client),
+        ("plan".into(), Some("plan".into())),
+        "a mode report moves the option"
+    );
+}

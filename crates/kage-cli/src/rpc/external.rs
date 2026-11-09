@@ -70,7 +70,9 @@ mod unix {
 
     use kage_acp::acp::{
         ClientCapabilities, ContentBlock, InitializeRequest, NewSessionRequest, PROTOCOL_VERSION,
-        PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse,
+        PromptCapabilities, PromptDelivery, PromptRequest, PromptResponse, SessionConfigCategory,
+        SessionConfigKind, SessionConfigOption, SessionConfigSelectOption, SessionModes,
+        SetModeRequest, SetSessionConfigOptionRequest,
     };
     use kage_acp::agent::AgentPeer;
     use kage_acp::connection::{Message, UnixConnection, UnixPromptCanceller};
@@ -233,6 +235,8 @@ mod unix {
     )]
     struct State {
         upstream: Option<String>,
+        config_options: Vec<SessionConfigOption>,
+        mode_wire: ModeWire,
         early: Vec<Buffered>,
         bytes: Arc<AtomicUsize>,
         attachments: HashMap<u64, Attachment>,
@@ -482,6 +486,55 @@ mod unix {
         capabilities: PromptCapabilities,
         protocol_version: u32,
         upstream: String,
+        config_options: Vec<SessionConfigOption>,
+        mode_wire: ModeWire,
+    }
+
+    /// How a session's mode is switched on its agent: through the
+    /// config option the agent advertised, through the standard
+    /// `session/set_mode`, or not at all.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ModeWire {
+        ConfigOption,
+        SetMode,
+        None,
+    }
+
+    // The config options a session serves its clients: the ones the
+    // agent advertised, plus a mode select synthesized from the
+    // standard `modes` when the agent advertised none of its own. The
+    // wire tells how a mode switch reaches the agent.
+    fn normalize_options(
+        mut options: Vec<SessionConfigOption>,
+        modes: Option<SessionModes>,
+    ) -> (Vec<SessionConfigOption>, ModeWire) {
+        if options
+            .iter()
+            .any(|option| option.id == "mode" && option.kind == SessionConfigKind::Select)
+        {
+            return (options, ModeWire::ConfigOption);
+        }
+        let Some(modes) = modes.filter(|modes| !modes.available_modes.is_empty()) else {
+            return (options, ModeWire::None);
+        };
+        options.push(SessionConfigOption {
+            id: "mode".to_owned(),
+            name: "Mode".to_owned(),
+            description: None,
+            category: Some(SessionConfigCategory::Mode),
+            kind: SessionConfigKind::Select,
+            current_value: modes.current_mode_id,
+            options: modes
+                .available_modes
+                .into_iter()
+                .map(|mode| SessionConfigSelectOption {
+                    value: mode.id,
+                    name: mode.name,
+                    description: mode.description,
+                })
+                .collect(),
+        });
+        (options, ModeWire::SetMode)
     }
 
     /// One unresolved open of an exact attachment, resolved exactly once.
@@ -572,6 +625,8 @@ mod unix {
             let cancels = cancel_worker(slot)?;
             let state = Arc::new(Mutex::new(State {
                 upstream: None,
+                config_options: Vec::new(),
+                mode_wire: ModeWire::None,
                 early: Vec::new(),
                 bytes: Arc::new(AtomicUsize::new(0)),
                 attachments: HashMap::from([(owner, first)]),
@@ -1179,6 +1234,110 @@ mod unix {
             if ticket.attached(&state) {
                 self.close(&mut state);
             }
+        }
+
+        /// The config options the session serves its clients.
+        pub(crate) fn config_options(&self) -> Vec<SessionConfigOption> {
+            lock(&self.state).config_options.clone()
+        }
+
+        /// Switch `config_id` to `value` on the agent, as one of the
+        /// session's attached clients asked. Every option the agent
+        /// advertises is served; a mode on the standard `modes` wire
+        /// goes out as `session/set_mode`. The answer reports what the
+        /// agent confirmed, never the value that was asked for.
+        pub(crate) fn set_config_option(
+            &self,
+            owner: u64,
+            config_id: &str,
+            value: &str,
+        ) -> Result<Vec<SessionConfigOption>, RpcError> {
+            let (upstream, mode_wire) = {
+                let state = lock(&self.state);
+                if state.closed {
+                    return Err(RpcError::internal(
+                        "external session is closed; reopen it to restore",
+                    ));
+                }
+                if !state.attachments.contains_key(&owner) {
+                    return Err(RpcError::new(-32602, "external session is not attached"));
+                }
+                if !state
+                    .config_options
+                    .iter()
+                    .any(|option| option.id == config_id)
+                {
+                    return Err(RpcError::new(
+                        -32602,
+                        format!("the external agent takes no {config_id} option"),
+                    ));
+                }
+                (
+                    state.upstream.clone().expect("initialized upstream"),
+                    state.mode_wire,
+                )
+            };
+            let deadline = Instant::now() + TIMEOUT;
+            let (answer, switched, modes) = if config_id == "mode" && mode_wire == ModeWire::SetMode
+            {
+                let (result, barrier) = self.connection.set_mode(
+                    &SetModeRequest {
+                        session_id: upstream.clone(),
+                        mode_id: value.to_owned(),
+                    },
+                    Some(deadline),
+                    None,
+                );
+                let response: kage_acp::acp::SetModeResponse =
+                    ordered_result(result, barrier, deadline, "session/set_mode")?;
+                match response.modes {
+                    Some(modes) => {
+                        // A modes blob that names no current mode
+                        // confirms nothing about where the session is.
+                        let current =
+                            Some(modes.current_mode_id.clone()).filter(|id| !id.is_empty());
+                        (None, current, Some(modes))
+                    }
+                    None => (None, None, None),
+                }
+            } else {
+                let (result, barrier) = self.connection.set_config_option(
+                    &SetSessionConfigOptionRequest {
+                        session_id: upstream.clone(),
+                        config_id: config_id.to_owned(),
+                        value: value.to_owned(),
+                    },
+                    Some(deadline),
+                    None,
+                );
+                let response: kage_acp::acp::SetSessionConfigOptionResponse =
+                    ordered_result(result, barrier, deadline, "session/set_config_option")?;
+                (response.config_options, None, None)
+            };
+            // A switch the agent did not confirm changes nothing: the
+            // next report of the mode corrects the shown value.
+            let reported = switched.or_else(|| {
+                answer
+                    .as_ref()?
+                    .iter()
+                    .find(|option| option.id == config_id)
+                    .map(|option| option.current_value.clone())
+            });
+            let mut state = lock(&self.state);
+            let before = state.config_options.clone();
+            apply_switch_answer(&mut state, config_id, answer, reported, modes);
+            let served = state.config_options.clone();
+            // An answer is the asking client's alone. Every attachment
+            // learns what it changed through the ordered update queue,
+            // which also lands after any update queued ahead of it.
+            if served != before {
+                let params = serde_json::json!({
+                    "sessionId": upstream,
+                    "update": {"sessionUpdate": "config_option_update", "configOptions": &served},
+                });
+                forward(&mut state, &self.id, params);
+            }
+            Ok(served)
         }
 
         /// Cancel `owner`'s prompts without blocking the inbound path.
@@ -1832,7 +1991,7 @@ mod unix {
             }
             let deadline = Instant::now() + TIMEOUT;
             lock(state).discard_replay = load;
-            let restored = if load {
+            let (config_options, modes) = if load {
                 let (response, barrier) = connection.load_session(
                     &kage_acp::acp::LoadSessionRequest {
                         session_id: restore.upstream.clone(),
@@ -1843,7 +2002,9 @@ mod unix {
                     Some(deadline),
                     None,
                 );
-                ordered_result(response, barrier, deadline, "session/load").map(drop)
+                let restored: kage_acp::acp::LoadSessionResponse =
+                    ordered_result(response, barrier, deadline, "session/load")?;
+                (restored.config_options, restored.modes)
             } else {
                 let (response, barrier) = connection.resume_session(
                     &kage_acp::acp::ResumeSessionRequest {
@@ -1855,13 +2016,17 @@ mod unix {
                     Some(deadline),
                     None,
                 );
-                ordered_result(response, barrier, deadline, "session/resume").map(drop)
+                let restored: kage_acp::acp::ResumeSessionResponse =
+                    ordered_result(response, barrier, deadline, "session/resume")?;
+                (restored.config_options, restored.modes)
             };
-            restored?;
+            let (config_options, mode_wire) = normalize_options(config_options, modes);
             return Ok(Initialized {
                 capabilities: capabilities.prompt_capabilities,
                 protocol_version,
                 upstream: restore.upstream.clone(),
+                config_options,
+                mode_wire,
             });
         }
         let deadline = Instant::now() + TIMEOUT;
@@ -1875,10 +2040,14 @@ mod unix {
             None,
         );
         let response = ordered_result(response, barrier, deadline, "session")?;
+        let (config_options, mode_wire) =
+            normalize_options(response.config_options, response.modes);
         Ok(Initialized {
             capabilities: capabilities.prompt_capabilities,
             protocol_version,
             upstream: response.session_id,
+            config_options,
+            mode_wire,
         })
     }
 
@@ -1921,6 +2090,8 @@ mod unix {
     ) -> Result<Option<mpsc::Receiver<()>>, RpcError> {
         let mut state = lock(state);
         state.upstream = Some(initialized.upstream.clone());
+        state.config_options.clone_from(&initialized.config_options);
+        state.mode_wire = initialized.mode_wire;
         state.discard_replay = false;
         for event in seed {
             state.remember(event);
@@ -2044,6 +2215,131 @@ mod unix {
         }
     }
 
+    // Track the options the agent reports on its own, so a session's
+    // clients read what the agent holds even when kage synthesized
+    // part of the served list. A `config_option_update` never carries
+    // the synthesized mode option, so it is carried over into the
+    // state and the forwarded frame both.
+    fn refresh_mode(state: &mut State, params: &mut Value) {
+        let Some(update) = params.get_mut("update") else {
+            return;
+        };
+        let Some(kind) = update
+            .get("sessionUpdate")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        match kind.as_str() {
+            "config_option_update" => {
+                let Some(raw) = update.get("configOptions") else {
+                    return;
+                };
+                // A list that does not parse is one the client drops
+                // too, so the served options stay as they are.
+                let Some(incoming) = kage_acp::acp::parse_session_config_options(raw.clone())
+                else {
+                    return;
+                };
+                let (served, kept) = keep_synthesized_mode(state, incoming);
+                if kept
+                    && let Ok(value) = serde_json::to_value(&served)
+                    && let Some(object) = update.as_object_mut()
+                {
+                    object.insert("configOptions".to_owned(), value);
+                }
+                state.config_options = served;
+            }
+            "current_mode_update" => {
+                let Some(current) = update
+                    .get("currentModeId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                else {
+                    return;
+                };
+                if let Some(option) = state
+                    .config_options
+                    .iter_mut()
+                    .find(|option| option.id == "mode")
+                {
+                    option.current_value = current;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // An option list the agent reported names its full option state
+    // (the spec's contract, and what the client applies), so it
+    // replaces the served list. The agent never lists the mode option
+    // kage synthesized from its standard `modes`, so that option is
+    // carried over. Returns the list to serve and whether it carried
+    // the synthesized mode.
+    fn keep_synthesized_mode(
+        state: &State,
+        mut incoming: Vec<SessionConfigOption>,
+    ) -> (Vec<SessionConfigOption>, bool) {
+        let synthesized = state
+            .config_options
+            .iter()
+            .find(|option| option.id == "mode")
+            .filter(|_| state.mode_wire == ModeWire::SetMode)
+            .filter(|_| !incoming.iter().any(|option| option.id == "mode"))
+            .cloned();
+        let kept = synthesized.is_some();
+        incoming.extend(synthesized);
+        (incoming, kept)
+    }
+
+    // Settle a switch the agent answered: the options it named replace
+    // the served ones and its mode report becomes the shown value,
+    // while an answer that says nothing changes nothing. The wire the
+    // session chose never changes here.
+    fn apply_switch_answer(
+        state: &mut State,
+        config_id: &str,
+        answer: Option<Vec<SessionConfigOption>>,
+        reported: Option<String>,
+        modes: Option<SessionModes>,
+    ) {
+        if let Some(answer) = answer {
+            state.config_options = keep_synthesized_mode(state, answer).0;
+        }
+        if let Some(modes) = modes
+            && let Some(option) = state
+                .config_options
+                .iter_mut()
+                .find(|option| option.id == "mode")
+        {
+            // A partial modes blob confirms only the half it names:
+            // an empty half leaves the served option alone.
+            if !modes.current_mode_id.is_empty() {
+                option.current_value.clone_from(&modes.current_mode_id);
+            }
+            if !modes.available_modes.is_empty() {
+                option.options = modes
+                    .available_modes
+                    .iter()
+                    .map(|mode| SessionConfigSelectOption {
+                        value: mode.id.clone(),
+                        name: mode.name.clone(),
+                        description: mode.description.clone(),
+                    })
+                    .collect();
+            }
+        }
+        if let Some(current) = reported
+            && let Some(option) = state
+                .config_options
+                .iter_mut()
+                .find(|option| option.id == config_id)
+        {
+            option.current_value = current;
+        }
+    }
+
     fn forward(state: &mut State, id: &str, mut params: Value) {
         if state.closed {
             return;
@@ -2051,6 +2347,7 @@ mod unix {
         if params.get("sessionId").and_then(Value::as_str) != state.upstream.as_deref() {
             return;
         }
+        refresh_mode(state, &mut params);
         let item = format!("{}-{}", state.run, state.turn);
         for event in presentation(&params, &item) {
             state.record(event);
@@ -2443,6 +2740,486 @@ for line in sys.stdin:
                 let ticket = self.register_prompt(owner)?;
                 self.prompt(ticket, req)
             }
+        }
+
+        /// The mode options a session's clients see after one open.
+        fn mode_of(options: &[SessionConfigOption]) -> &SessionConfigOption {
+            let option = options
+                .iter()
+                .find(|option| option.id == "mode")
+                .expect("the session serves a mode option");
+            assert_eq!(option.kind, SessionConfigKind::Select);
+            option
+        }
+
+        #[test]
+        fn a_config_option_mode_switch_reaches_the_agent_and_back() {
+            let script = r"
+import json,sys
+MODE={'id':'mode','name':'Session Mode','category':'mode','type':'select','currentValue':'code','options':[{'value':'code','name':'Code'},{'value':'ask','name':'Ask'}]}
+def send(obj): print(json.dumps(obj),flush=True)
+def update(s, value):
+ send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':s,'update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':value}}}})
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); p=m.get('params',{}); i=m.get('id')
+ if method=='initialize': send({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':1,'agentCapabilities':{}}})
+ elif method=='session/new':
+  send({'jsonrpc':'2.0','id':i,'result':{'sessionId':'up','configOptions':[MODE]}})
+ elif method=='session/set_config_option':
+  MODE['currentValue']=p['value']
+  update('up','set:'+p['configId']+':'+p['value'])
+  send({'jsonrpc':'2.0','id':i,'result':{'configOptions':[MODE]}})
+";
+            let config = kage_core::config::AcpAgent {
+                command: "python3".into(),
+                args: vec!["-u".into(), "-c".into(), script.into()],
+                env: BTreeMap::default(),
+            };
+            let (client, server) = UnixStream::pair().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let (peer, _incoming, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            let cwd = std::env::current_dir().unwrap();
+            let (session, created) = External::start(
+                &Lifecycles::new(1),
+                Launch {
+                    id: "local".into(),
+                    name: "fake",
+                    cwd: cwd.to_str().unwrap(),
+                    config: &config,
+                    owner: 1,
+                    peer: peer.into(),
+                    record: None,
+                    restore: None,
+                },
+            )
+            .unwrap();
+            created.announce();
+            let options = session.config_options();
+            let mode = mode_of(&options);
+            assert_eq!(mode.current_value, "code");
+            assert_eq!(mode.options.len(), 2);
+            let updated = session.set_config_option(1, "mode", "ask").unwrap();
+            assert_eq!(mode_of(&updated).current_value, "ask");
+            let mut reader = BufReader::new(client);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let frame: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(frame["params"]["update"]["content"]["text"], "set:mode:ask");
+            let refused = session.set_config_option(1, "swarm", "on").unwrap_err();
+            assert_eq!(refused.code, -32602);
+            assert!(session.detach(1));
+        }
+
+        #[test]
+        fn a_modes_only_agent_switches_through_set_mode() {
+            let script = r"
+import json,sys
+def send(obj): print(json.dumps(obj),flush=True)
+def mode_update(s, value):
+ send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':s,'update':{'sessionUpdate':'current_mode_update','currentModeId':value}}})
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); p=m.get('params',{}); i=m.get('id')
+ if method=='initialize': send({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':1,'agentCapabilities':{}}})
+ elif method=='session/new':
+  send({'jsonrpc':'2.0','id':i,'result':{'sessionId':'up','modes':{'currentModeId':'code','availableModes':[{'id':'code','name':'Code'},{'id':'plan','name':'Plan'}]}}})
+ elif method=='session/set_mode':
+  mode_update('up', p['modeId'])
+  send({'jsonrpc':'2.0','id':i,'result':{}})
+";
+            let config = kage_core::config::AcpAgent {
+                command: "python3".into(),
+                args: vec!["-u".into(), "-c".into(), script.into()],
+                env: BTreeMap::default(),
+            };
+            let (client, server) = UnixStream::pair().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let (peer, _incoming, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            let cwd = std::env::current_dir().unwrap();
+            let (session, created) = External::start(
+                &Lifecycles::new(1),
+                Launch {
+                    id: "local".into(),
+                    name: "fake",
+                    cwd: cwd.to_str().unwrap(),
+                    config: &config,
+                    owner: 1,
+                    peer: peer.into(),
+                    record: None,
+                    restore: None,
+                },
+            )
+            .unwrap();
+            created.announce();
+            let options = session.config_options();
+            let mode = mode_of(&options);
+            assert_eq!(mode.current_value, "code");
+            assert_eq!(mode.options.len(), 2);
+            assert_eq!(mode.options[1].value, "plan");
+            let updated = session.set_config_option(1, "mode", "plan").unwrap();
+            assert_eq!(mode_of(&updated).current_value, "plan");
+            let mut reader = BufReader::new(client);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let frame: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(
+                frame["params"]["update"]["currentModeId"], "plan",
+                "the agent's own mode report reached the client"
+            );
+            session.detach(1);
+        }
+
+        #[test]
+        fn an_agent_reported_mode_update_refreshes_the_served_options() {
+            let script = r"
+import json,sys,time
+def send(obj): print(json.dumps(obj),flush=True)
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); p=m.get('params',{}); i=m.get('id')
+ if method=='initialize': send({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':1,'agentCapabilities':{}}})
+ elif method=='session/new':
+  send({'jsonrpc':'2.0','id':i,'result':{'sessionId':'up','modes':{'currentModeId':'code','availableModes':[{'id':'code','name':'Code'},{'id':'ask','name':'Ask'}]}}})
+  time.sleep(0.3)
+  send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'up','update':{'sessionUpdate':'current_mode_update','currentModeId':'ask'}}})
+";
+            let config = kage_core::config::AcpAgent {
+                command: "python3".into(),
+                args: vec!["-u".into(), "-c".into(), script.into()],
+                env: BTreeMap::default(),
+            };
+            let (client, server) = UnixStream::pair().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let (peer, _incoming, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            let cwd = std::env::current_dir().unwrap();
+            let (session, created) = External::start(
+                &Lifecycles::new(1),
+                Launch {
+                    id: "local".into(),
+                    name: "fake",
+                    cwd: cwd.to_str().unwrap(),
+                    config: &config,
+                    owner: 1,
+                    peer: peer.into(),
+                    record: None,
+                    restore: None,
+                },
+            )
+            .unwrap();
+            created.announce();
+            let options = session.config_options();
+            assert_eq!(mode_of(&options).current_value, "code");
+            let until = Instant::now() + WAIT;
+            while mode_of(&session.config_options()).current_value != "ask"
+                && Instant::now() < until
+            {
+                thread::sleep(Duration::from_millis(20));
+            }
+            let options = session.config_options();
+            assert_eq!(
+                mode_of(&options).current_value,
+                "ask",
+                "the agent's spontaneous mode report refreshed the option"
+            );
+            session.detach(1);
+        }
+
+        #[test]
+        fn a_set_answer_carries_the_agent_s_word_not_the_request() {
+            let script = r"
+import json,sys
+MODE={'id':'mode','name':'Session Mode','category':'mode','type':'select','currentValue':'code','options':[{'value':'code','name':'Code'},{'value':'ask','name':'Ask'}]}
+def send(obj): print(json.dumps(obj),flush=True)
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); p=m.get('params',{}); i=m.get('id')
+ if method=='initialize': send({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':1,'agentCapabilities':{}}})
+ elif method=='session/new': send({'jsonrpc':'2.0','id':i,'result':{'sessionId':'up','configOptions':[MODE]}})
+ elif method=='session/set_config_option': send({'jsonrpc':'2.0','id':i,'result':{'configOptions':[MODE]}})
+";
+            let config = kage_core::config::AcpAgent {
+                command: "python3".into(),
+                args: vec!["-u".into(), "-c".into(), script.into()],
+                env: BTreeMap::default(),
+            };
+            let (client, server) = UnixStream::pair().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let (peer, _incoming, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            let cwd = std::env::current_dir().unwrap();
+            let (session, created) = External::start(
+                &Lifecycles::new(1),
+                Launch {
+                    id: "local".into(),
+                    name: "fake",
+                    cwd: cwd.to_str().unwrap(),
+                    config: &config,
+                    owner: 1,
+                    peer: peer.into(),
+                    record: None,
+                    restore: None,
+                },
+            )
+            .unwrap();
+            created.announce();
+            let updated = session.set_config_option(1, "mode", "ask").unwrap();
+            assert_eq!(
+                mode_of(&updated).current_value,
+                "code",
+                "the agent reports it stayed in code, whatever was asked"
+            );
+            session.detach(1);
+        }
+
+        #[test]
+        fn an_empty_set_answer_changes_nothing() {
+            let script = r"
+import json,sys
+MODE={'id':'mode','name':'Session Mode','category':'mode','type':'select','currentValue':'code','options':[{'value':'code','name':'Code'},{'value':'ask','name':'Ask'}]}
+def send(obj): print(json.dumps(obj),flush=True)
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); p=m.get('params',{}); i=m.get('id')
+ if method=='initialize': send({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':1,'agentCapabilities':{}}})
+ elif method=='session/new': send({'jsonrpc':'2.0','id':i,'result':{'sessionId':'up','configOptions':[MODE]}})
+ elif method=='session/set_config_option': send({'jsonrpc':'2.0','id':i,'result':{}})
+";
+            let config = kage_core::config::AcpAgent {
+                command: "python3".into(),
+                args: vec!["-u".into(), "-c".into(), script.into()],
+                env: BTreeMap::default(),
+            };
+            let (client, server) = UnixStream::pair().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let (peer, _incoming, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            let cwd = std::env::current_dir().unwrap();
+            let (session, created) = External::start(
+                &Lifecycles::new(1),
+                Launch {
+                    id: "local".into(),
+                    name: "fake",
+                    cwd: cwd.to_str().unwrap(),
+                    config: &config,
+                    owner: 1,
+                    peer: peer.into(),
+                    record: None,
+                    restore: None,
+                },
+            )
+            .unwrap();
+            created.announce();
+            let updated = session.set_config_option(1, "mode", "ask").unwrap();
+            assert_eq!(
+                mode_of(&updated).current_value,
+                "code",
+                "an answer that names no mode leaves the mode as it was"
+            );
+            session.detach(1);
+        }
+
+        #[test]
+        fn an_option_refresh_keeps_the_synthesized_mode() {
+            let script = r"
+import json,sys
+THINK={'id':'thinking','name':'Thinking','category':'thought_level','type':'select','currentValue':'auto','options':[{'value':'auto','name':'Auto'},{'value':'high','name':'High'}]}
+def send(obj): print(json.dumps(obj),flush=True)
+def refreshed(value):
+ think=dict(THINK); think['currentValue']=value
+ send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'up','update':{'sessionUpdate':'config_option_update','configOptions':[think]}}})
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); p=m.get('params',{}); i=m.get('id')
+ if method=='initialize': send({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':1,'agentCapabilities':{}}})
+ elif method=='session/new':
+  send({'jsonrpc':'2.0','id':i,'result':{'sessionId':'up','modes':{'currentModeId':'code','availableModes':[{'id':'code','name':'Code'},{'id':'plan','name':'Plan'}]},'configOptions':[THINK]}})
+ elif method=='session/set_config_option':
+  refreshed(p['value'])
+  send({'jsonrpc':'2.0','id':i,'result':{}})
+";
+            let config = kage_core::config::AcpAgent {
+                command: "python3".into(),
+                args: vec!["-u".into(), "-c".into(), script.into()],
+                env: BTreeMap::default(),
+            };
+            let (client, server) = UnixStream::pair().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let (peer, _incoming, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            let cwd = std::env::current_dir().unwrap();
+            let (session, created) = External::start(
+                &Lifecycles::new(1),
+                Launch {
+                    id: "local".into(),
+                    name: "fake",
+                    cwd: cwd.to_str().unwrap(),
+                    config: &config,
+                    owner: 1,
+                    peer: peer.into(),
+                    record: None,
+                    restore: None,
+                },
+            )
+            .unwrap();
+            created.announce();
+            let options = session.config_options();
+            assert_eq!(mode_of(&options).current_value, "code");
+            let thinking = options
+                .iter()
+                .find(|option| option.id == "thinking")
+                .expect("the agent's own option is served");
+            assert_eq!(thinking.current_value, "auto");
+            let updated = session.set_config_option(1, "thinking", "high").unwrap();
+            let thinking = updated
+                .iter()
+                .find(|option| option.id == "thinking")
+                .expect("the refreshed option stays served");
+            assert_eq!(
+                thinking.current_value, "high",
+                "the agent's own report refreshes the option"
+            );
+            assert_eq!(
+                mode_of(&updated).current_value,
+                "code",
+                "the synthesized mode option survives the refresh"
+            );
+            let mut reader = BufReader::new(client);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let frame: Value = serde_json::from_str(&line).unwrap();
+            let forwarded = frame["params"]["update"]["configOptions"]
+                .as_array()
+                .expect("the forwarded refresh lists options");
+            assert!(
+                forwarded
+                    .iter()
+                    .any(|option| option["id"] == "mode" && option["currentValue"] == "code"),
+                "the client keeps the mode option too: {forwarded:?}"
+            );
+            assert!(
+                forwarded
+                    .iter()
+                    .any(|option| option["id"] == "thinking" && option["currentValue"] == "high"),
+                "the client reads the refreshed option: {forwarded:?}"
+            );
+            session.detach(1);
+        }
+
+        #[test]
+        fn a_set_answer_replaces_the_options_the_agent_dropped() {
+            let session = scripted_session(
+                r"
+import json,sys
+MODE={'id':'mode','name':'Session Mode','category':'mode','type':'select','currentValue':'code','options':[{'value':'code','name':'Code'},{'value':'plan','name':'Plan'}]}
+THINK={'id':'thinking','name':'Thinking','category':'thought_level','type':'select','currentValue':'auto','options':[{'value':'auto','name':'Auto'}]}
+def send(obj): print(json.dumps(obj),flush=True)
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); p=m.get('params',{}); i=m.get('id')
+ if method=='initialize': send({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':1,'agentCapabilities':{}}})
+ elif method=='session/new': send({'jsonrpc':'2.0','id':i,'result':{'sessionId':'up','configOptions':[MODE,THINK]}})
+ elif method=='session/set_config_option':
+  MODE['currentValue']=p['value']
+  send({'jsonrpc':'2.0','id':i,'result':{'configOptions':[MODE]}})
+",
+            );
+            assert!(
+                session
+                    .config_options()
+                    .iter()
+                    .any(|option| option.id == "thinking")
+            );
+            let updated = session.set_config_option(1, "mode", "plan").unwrap();
+            assert_eq!(mode_of(&updated).current_value, "plan");
+            assert!(
+                updated.iter().all(|option| option.id != "thinking"),
+                "an option the answer no longer lists is not served: {updated:?}"
+            );
+            session.detach(1);
+        }
+
+        #[test]
+        fn an_explicit_empty_option_list_clears_the_served_options() {
+            let session = scripted_session(
+                r"
+import json,sys
+MODE={'id':'mode','name':'Session Mode','category':'mode','type':'select','currentValue':'code','options':[{'value':'code','name':'Code'},{'value':'ask','name':'Ask'}]}
+def send(obj): print(json.dumps(obj),flush=True)
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); p=m.get('params',{}); i=m.get('id')
+ if method=='initialize': send({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':1,'agentCapabilities':{}}})
+ elif method=='session/new': send({'jsonrpc':'2.0','id':i,'result':{'sessionId':'up','configOptions':[MODE]}})
+ elif method=='session/set_config_option': send({'jsonrpc':'2.0','id':i,'result':{'configOptions':[]}})
+",
+            );
+            let updated = session.set_config_option(1, "mode", "ask").unwrap();
+            assert!(
+                updated.is_empty(),
+                "an answer listing no options says the agent has none: {updated:?}"
+            );
+            assert!(session.config_options().is_empty());
+            session.detach(1);
+        }
+
+        #[test]
+        fn a_switch_confirmed_only_in_the_answer_reaches_every_attachment() {
+            let session = scripted_session(
+                r"
+import json,sys
+MODE={'id':'mode','name':'Session Mode','category':'mode','type':'select','currentValue':'code','options':[{'value':'code','name':'Code'},{'value':'ask','name':'Ask'}]}
+def send(obj): print(json.dumps(obj),flush=True)
+for line in sys.stdin:
+ m=json.loads(line); method=m.get('method'); p=m.get('params',{}); i=m.get('id')
+ if method=='initialize': send({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':1,'agentCapabilities':{}}})
+ elif method=='session/new': send({'jsonrpc':'2.0','id':i,'result':{'sessionId':'up','configOptions':[MODE]}})
+ elif method=='session/set_config_option':
+  MODE['currentValue']=p['value']
+  send({'jsonrpc':'2.0','id':i,'result':{'configOptions':[MODE]}})
+",
+            );
+            let (client, server) = UnixStream::pair().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let (peer, _, _) =
+                kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
+            session.attach_load(2, peer.into()).unwrap().announce();
+            let updated = session.set_config_option(1, "mode", "ask").unwrap();
+            assert_eq!(mode_of(&updated).current_value, "ask");
+            let mut reader = BufReader::new(client);
+            let mut line = String::new();
+            let update = loop {
+                line.clear();
+                assert!(
+                    reader.read_line(&mut line).unwrap() > 0,
+                    "the other attachment hears of the switch"
+                );
+                let frame: Value = serde_json::from_str(&line).unwrap();
+                if frame["params"]["update"]["sessionUpdate"] == "config_option_update" {
+                    break frame;
+                }
+            };
+            assert_eq!(update["params"]["sessionId"], "local");
+            let options = update["params"]["update"]["configOptions"]
+                .as_array()
+                .expect("the update lists the options");
+            assert!(
+                options
+                    .iter()
+                    .any(|option| option["id"] == "mode" && option["currentValue"] == "ask"),
+                "{options:?}"
+            );
+            session.detach(1);
+            session.detach(2);
         }
 
         fn request(text: &str) -> PromptRequest {
@@ -4479,6 +5256,8 @@ for line in sys.stdin:
                 kage_jsonrpc::connect(BufReader::new(server.try_clone().unwrap()), server);
             let mut state = State {
                 upstream: Some("up".into()),
+                config_options: Vec::new(),
+                mode_wire: ModeWire::None,
                 early: Vec::new(),
                 bytes: session_bytes,
                 attachments: HashMap::from([(1, test_attachment(peer.into()))]),
@@ -4583,6 +5362,8 @@ for line in sys.stdin:
                 .unwrap();
             let mut state = State {
                 upstream: Some("up".into()),
+                config_options: Vec::new(),
+                mode_wire: ModeWire::None,
                 early: Vec::new(),
                 bytes: Arc::clone(&bytes),
                 attachments: HashMap::from([(1, attachment)]),
@@ -4668,6 +5449,8 @@ for line in sys.stdin:
             queued_rx.recv_timeout(Duration::from_secs(3)).unwrap();
             let state = Arc::new(Mutex::new(State {
                 upstream: None,
+                config_options: Vec::new(),
+                mode_wire: ModeWire::None,
                 early: Vec::new(),
                 bytes: Arc::new(AtomicUsize::new(0)),
                 attachments: HashMap::new(),
@@ -4712,6 +5495,8 @@ for line in sys.stdin:
                     .unwrap();
             let state = Arc::new(Mutex::new(State {
                 upstream: None,
+                config_options: Vec::new(),
+                mode_wire: ModeWire::None,
                 early: Vec::new(),
                 bytes: Arc::new(AtomicUsize::new(0)),
                 attachments: HashMap::new(),
@@ -5086,7 +5871,7 @@ pub(super) use unix::{External, OpenTicket, PromptTicket};
 
 #[cfg(not(target_os = "linux"))]
 mod unsupported {
-    use kage_acp::acp::{PromptRequest, PromptResponse};
+    use kage_acp::acp::{PromptRequest, PromptResponse, SessionConfigOption};
     use kage_acp::agent::AgentPeer;
     use kage_jsonrpc::RpcError;
     use std::sync::Arc;
@@ -5160,6 +5945,17 @@ mod unsupported {
             Err(RpcError::internal("external ACP requires Linux"))
         }
         pub(crate) fn cancel(&self, _: u64) {}
+        pub(crate) fn config_options(&self) -> Vec<SessionConfigOption> {
+            Vec::new()
+        }
+        pub(crate) fn set_config_option(
+            &self,
+            _: u64,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<SessionConfigOption>, RpcError> {
+            Err(RpcError::internal("external ACP requires Linux"))
+        }
     }
 }
 #[cfg(not(target_os = "linux"))]

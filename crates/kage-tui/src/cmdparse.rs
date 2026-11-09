@@ -382,6 +382,14 @@ pub trait Resolver {
     fn sessions(&self) -> Vec<String> {
         Vec::new()
     }
+    /// Overrides the static values of a [`ArgSpec::Choice`] argument
+    /// named `arg` of the command `command` as typed, for commands
+    /// whose choices follow the session (an agent's own modes).
+    /// Returning `None` keeps the spec's static values.
+    fn choice_values(&self, command: &str, arg: &str) -> Option<Vec<String>> {
+        let _ = (command, arg);
+        None
+    }
 }
 
 /// A [`Resolver`] that returns empty for every source. Useful in
@@ -400,7 +408,8 @@ impl Resolver for EmptyResolver {}
 ///
 /// - command head: every name and alias in `registry` that starts
 ///   with the prefix.
-/// - `Choice`: the spec's allowed values.
+/// - `Choice`: the spec's allowed values, unless
+///   [`Resolver::choice_values`] overrides them for the session.
 /// - `DynamicChoice`: [`Resolver::dynamic_choice`].
 /// - `Path`: [`Resolver::paths`] (prefix passed through).
 /// - `SessionId`: [`Resolver::sessions`].
@@ -518,7 +527,9 @@ pub fn complete(
 
     if let Some(arg_spec) = spec.args.get(local_arg_idx) {
         let candidates: Vec<String> = match arg_spec {
-            ArgSpec::Choice { values, .. } => values.iter().map(|v| (*v).to_owned()).collect(),
+            ArgSpec::Choice { values, .. } => resolver
+                .choice_values(head_spec.name, arg_spec.name())
+                .unwrap_or_else(|| values.iter().map(|v| (*v).to_owned()).collect()),
             ArgSpec::DynamicChoice { source, .. } => resolver.dynamic_choice(source),
             ArgSpec::Path { .. } => resolver.paths(&prefix),
             ArgSpec::SessionId { .. } => resolver.sessions(),

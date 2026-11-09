@@ -1035,6 +1035,10 @@ struct Pump {
     /// Subagent sessions the agent announced, by wire id, with what
     /// the App has already been told about each.
     children: HashMap<String, ChildTrack>,
+    /// App child session id to the wire id the child's transcript is
+    /// recorded under, shared with the App's agent loader: the App
+    /// only knows its own minted ids, the files use the wire's.
+    child_files: Arc<Mutex<HashMap<SessionId, String>>>,
     /// Where an export writes once the agent answers.
     pending_export: Option<PathBuf>,
     /// Update kinds this build cannot show, warned of once each.
@@ -1662,6 +1666,7 @@ impl Pump {
                         reason: None,
                     },
                 );
+                lock(&self.child_files).insert(app, wire.clone());
                 self.publish_on(
                     app,
                     HostEvent::AgentSpawned {
@@ -1733,6 +1738,8 @@ impl Pump {
         }
         self.children
             .retain(|wire, track| track.parent != parent || agents.contains_key(wire));
+        let live: HashSet<SessionId> = self.children.values().map(|t| t.app).collect();
+        lock(&self.child_files).retain(|app, _| live.contains(app));
     }
 
     /// Publishes a child session's transcript moves on its App
@@ -2073,6 +2080,7 @@ impl Pump {
         self.close_ask_cards();
         // The session the App leaves takes its subagents with it.
         self.children.clear();
+        lock(&self.child_files).clear();
         if self.running {
             self.store.client().cancel(&self.wire);
             self.running = false;
@@ -3210,6 +3218,7 @@ pub(crate) fn run(
     let (recorder, finished_runs) = mpsc::channel();
     start_run_recorder(finished_runs);
     let mirror = Arc::new(Mutex::new(Mirror::new()));
+    let child_files = Arc::new(Mutex::new(HashMap::new()));
     let mut pump = Pump {
         store,
         transport,
@@ -3247,6 +3256,7 @@ pub(crate) fn run(
         dialog_shown: HashSet::new(),
         ask_ids: BTreeMap::new(),
         children: HashMap::new(),
+        child_files: Arc::clone(&child_files),
         next_ask: 0,
         pending_export: None,
         unknown: HashSet::new(),
@@ -3309,6 +3319,7 @@ pub(crate) fn run(
         workdir,
         plugins,
         mirror,
+        child_files,
         requests: requests_tx,
         events: events_rx,
         dialogs: dialog_rx,
@@ -3530,6 +3541,7 @@ mod tests {
             dialog_shown: HashSet::new(),
             ask_ids: BTreeMap::new(),
             children: HashMap::new(),
+            child_files: Arc::new(Mutex::new(HashMap::new())),
             next_ask: 0,
             pending_export: None,
             unknown: HashSet::new(),
@@ -3822,6 +3834,26 @@ mod tests {
         let (mut pump, app, _dialogs, _feed, dir) = test_pump();
         announced_child(&mut pump, &app, &Value::Null);
         assert!(pump.children.contains_key("child"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_announced_child_maps_its_app_session_to_its_wire_file() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let child = announced_child(&mut pump, &app, &Value::Null);
+        assert_eq!(
+            lock(&pump.child_files).get(&child),
+            Some(&"child".to_owned())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adopting_a_session_drops_the_child_file_map() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        announced_child(&mut pump, &app, &Value::Null);
+        pump.adopt("s2", false);
+        assert!(lock(&pump.child_files).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

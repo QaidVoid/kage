@@ -1,5 +1,7 @@
 //! Interactive TUI entry point: `run_tui`.
 
+use std::collections::HashMap;
+
 use super::*;
 
 use kage_core::ThinkingLevel;
@@ -79,6 +81,9 @@ pub(super) struct Frontend {
     pub(super) workdir: PathBuf,
     pub(super) plugins: Option<Arc<PluginRuntime>>,
     pub(super) mirror: Arc<Mutex<Mirror>>,
+    /// App child session id to the wire id the child's transcript is
+    /// recorded under, kept by the ACP pump for the agent loader.
+    pub(super) child_files: Arc<Mutex<HashMap<kage_core::SessionId, String>>>,
     pub(super) requests: mpsc::Sender<RunRequest>,
     pub(super) events: mpsc::Receiver<Envelope>,
     pub(super) dialogs: mpsc::Receiver<PluginDialog>,
@@ -189,7 +194,7 @@ impl Frontend {
             notices: self.notices,
             permissions: permissions.to_owned(),
         };
-        wire_sessions(&mut app, &self.workdir, &self.mirror);
+        wire_sessions(&mut app, &self.workdir, &self.mirror, &self.child_files);
         app.set_start_info(start);
         app
     }
@@ -197,8 +202,15 @@ impl Frontend {
 
 /// Give the App the recorded sessions of `workdir` for its start card,
 /// picker and tree, and a loader for agent transcripts beside the
-/// session file `mirror` points at.
-fn wire_sessions(app: &mut App, workdir: &std::path::Path, mirror: &Arc<Mutex<Mirror>>) {
+/// session file `mirror` points at. Child transcripts are recorded
+/// under their wire id, which `child_files` maps the App's own child
+/// session ids onto.
+fn wire_sessions(
+    app: &mut App,
+    workdir: &std::path::Path,
+    mirror: &Arc<Mutex<Mirror>>,
+    child_files: &Arc<Mutex<HashMap<kage_core::SessionId, String>>>,
+) {
     if let Ok(dir) = crate::sessions_dir() {
         let sessions_cache = Arc::new(Mutex::new(kage_session::SessionCache::default()));
         // The first paint must not wait on the scan: the start card's
@@ -228,9 +240,11 @@ fn wire_sessions(app: &mut App, workdir: &std::path::Path, mirror: &Arc<Mutex<Mi
         app.set_start_sessions(sessions_rx);
     }
     let loader_mirror = Arc::clone(mirror);
+    let loader_children = Arc::clone(child_files);
     app.set_agent_loader(Box::new(move |session| {
+        let wire = lock(&loader_children).get(&session).cloned()?;
         let dir = lock(&loader_mirror).path()?.parent()?.to_path_buf();
-        let replay = kage_session::replay(&dir.join(format!("{session}.jsonl"))).ok()?;
+        let replay = kage_session::replay(&dir.join(format!("{wire}.jsonl"))).ok()?;
         Some(kage_tui::StoredAgent {
             messages: replay.history.into_iter().map(Arc::new).collect(),
             compacted_agents: replay.compacted_agents.into_iter().map(Arc::new).collect(),

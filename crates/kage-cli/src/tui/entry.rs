@@ -220,13 +220,17 @@ fn wire_sessions(
         let scan_dir = dir.clone();
         let scan_workdir = workdir.to_path_buf();
         let scan_cache = Arc::clone(&sessions_cache);
+        let scan_warmed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let warmed = Arc::clone(&scan_warmed);
         thread::spawn(move || {
-            let _ = sessions_tx.send(list_session_choices(
-                &scan_dir,
-                &scan_workdir,
-                false,
-                &mut lock(&scan_cache),
-            ));
+            // Read the directory into a private cache: the shared lock
+            // then only covers the swap, so a listing that runs
+            // mid-scan never waits out the whole directory read.
+            let mut local = kage_session::SessionCache::default();
+            let choices = list_session_choices(&scan_dir, &scan_workdir, false, &mut local);
+            *lock(&scan_cache) = local;
+            warmed.store(true, std::sync::atomic::Ordering::Release);
+            let _ = sessions_tx.send(choices);
         });
         let tree_dir = dir.clone();
         let tree_mirror = Arc::clone(mirror);
@@ -238,6 +242,7 @@ fn wire_sessions(
             list_session_nodes(&tree_dir, lock(&tree_mirror).path())
         }));
         app.set_start_sessions(sessions_rx);
+        app.set_sessions_warmed(scan_warmed);
     }
     let loader_mirror = Arc::clone(mirror);
     let loader_children = Arc::clone(child_files);

@@ -1033,11 +1033,11 @@ struct Pump {
     app_session: SessionId,
     /// The wire id of the session the App is on.
     wire: String,
-    /// Blocks typed before any session adopted, sent once one does.
-    /// The composer is usable while the first `session/new` is still
-    /// in flight, and an early submit would otherwise name an empty
-    /// wire and fail.
-    deferred_prompt: Option<Vec<ContentBlock>>,
+    /// Blocks typed before any session adopted, in submission order,
+    /// sent when one does. The composer is usable while the first
+    /// `session/new` is still in flight, and an early submit would
+    /// otherwise name an empty wire and fail.
+    deferred_prompt: Vec<Vec<ContentBlock>>,
     /// The recorded session being opened. Its answer adopts it; a
     /// failed answer leaves the current session as it was.
     pending_open: Option<PendingOpen>,
@@ -2639,9 +2639,9 @@ impl Pump {
             usage: self.usage_snapshot(),
         });
         self.agents_moved(id);
-        // A prompt typed while this session was still opening rides
-        // it now that it exists.
-        if let Some(blocks) = self.deferred_prompt.take() {
+        // Prompts typed while this session was still opening ride it
+        // now that it exists, in the order they were typed.
+        for blocks in std::mem::take(&mut self.deferred_prompt) {
             self.store.client().prompt(&self.wire, blocks);
         }
     }
@@ -3140,6 +3140,10 @@ impl Pump {
     fn cancel_of(&mut self, session: Option<SessionId>) {
         match self.route_of(session) {
             Some(wire) if wire == self.wire => {
+                // A cancel before adoption also drops what the user
+                // typed into it: the prompt must not start once the
+                // session they cancelled against finally opens.
+                self.deferred_prompt.clear();
                 if let Some(surface) = &self.plugins {
                     surface.turn.cancel();
                 }
@@ -3237,7 +3241,7 @@ impl Pump {
         if self.wire.is_empty() {
             // No session yet: the first `session/new` is still in
             // flight. Hold the blocks; `adopt` sends them.
-            self.deferred_prompt = Some(blocks);
+            self.deferred_prompt.push(blocks);
             return;
         }
         if queue {
@@ -4094,7 +4098,7 @@ pub(crate) fn run(
         mirror: Arc::clone(&mirror),
         app_session,
         wire: String::new(),
-        deferred_prompt: None,
+        deferred_prompt: Vec::new(),
         pending_open: None,
         pending_new: None,
         cwd: workdir.display().to_string(),
@@ -4347,17 +4351,59 @@ mod tests {
             queue: false,
             session: None,
         });
+        pump.handle(RunRequest::Submit {
+            text: "later".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
         assert!(
             pump.store.take_outgoing().is_empty(),
-            "a prompt with no session waits for one"
+            "prompts with no session wait for one"
         );
         pump.adopt("s1", true);
         let sent = pump.store.take_outgoing();
-        assert!(
-            has_request(&sent, "session/prompt"),
-            "the deferred prompt rides the adopted session"
+        let prompts = sent
+            .iter()
+            .filter(|frame| {
+                matches!(
+                    frame,
+                    Frame::Request { method: m, .. } if m == "session/prompt"
+                )
+            })
+            .count();
+        assert_eq!(
+            prompts, 1,
+            "the first deferred prompt starts the adopted session's run"
         );
-        assert!(pump.deferred_prompt.is_none());
+        let session = pump.store.state().session("s1").expect("adopted session");
+        assert_eq!(
+            session.queue.len(),
+            1,
+            "the second deferred prompt queues behind it in order"
+        );
+        assert!(pump.deferred_prompt.is_empty());
+        drop(app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cancel_before_adoption_discards_the_deferred_prompt() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.wire.clear();
+        pump.handle(RunRequest::Submit {
+            text: "early".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        pump.handle(RunRequest::Cancel { session: None });
+        assert!(pump.deferred_prompt.is_empty(), "the cancel drops it");
+        pump.adopt("s1", true);
+        assert!(
+            !has_request(&pump.store.take_outgoing(), "session/prompt"),
+            "a cancelled early prompt must not start on adoption"
+        );
         drop(app);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4412,7 +4458,7 @@ mod tests {
             mirror: Arc::new(Mutex::new(Mirror::new())),
             app_session: SessionId::new(),
             wire: "s1".to_owned(),
-            deferred_prompt: None,
+            deferred_prompt: Vec::new(),
             pending_open: None,
             pending_new: None,
             cwd: "/w".to_owned(),

@@ -704,6 +704,10 @@ pub struct App {
     /// Provider of resumable sessions for the session picker. None
     /// disables the picker (Ctrl+S is a no-op).
     session_lister: Option<SessionLister>,
+    /// Set once the host's startup session scan has warmed the cache
+    /// the lister reads. Until then a listing would walk every session
+    /// file on this thread, so early callers defer instead.
+    sessions_warmed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// The host's startup session scan, still running on its own
     /// thread while the first frames paint. One delivery fills the
     /// start card's recent sessions.

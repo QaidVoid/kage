@@ -433,6 +433,35 @@ fn with_inputs(item: kage_tui::PickItem, input: kage_core::Modalities) -> kage_t
     }
 }
 
+/// The `acp:<name>` rows for the agents `[acp.agents.*]` configures,
+/// appended after the provider models the way the desktop's "External
+/// ACP agents" section does. Picking one opens a persistent external
+/// session, not an engine session on the one-shot `acp` provider.
+/// Linux only: that is the one platform the host serves external
+/// sessions on, and the host resolves names from the user config
+/// alone, so plugin-declared agents are not offered.
+pub(crate) fn external_agent_items(
+    config: &kage_core::config::Config,
+    active: &str,
+) -> Vec<kage_tui::PickItem> {
+    if !cfg!(target_os = "linux") || config.acp.agents.is_empty() {
+        return Vec::new();
+    }
+    let mut names: Vec<&String> = config.acp.agents.keys().collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| {
+            let value = format!("acp:{name}");
+            let badge = if value == active { '*' } else { ' ' };
+            kage_tui::PickItem::simple(value)
+                .with_label(name)
+                .with_badge(badge)
+                .with_group("External ACP agents")
+        })
+        .collect()
+}
+
 /// Point the TUI's block registry at `rt`'s block renderers, replacing any
 /// earlier plugin registrations.
 pub(crate) fn register_block_renderers(rt: &PluginRuntime) {

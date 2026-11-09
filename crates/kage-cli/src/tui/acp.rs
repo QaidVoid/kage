@@ -457,6 +457,14 @@ impl kage_tui::AcpFeed for FeedState {
     }
 }
 
+/// The external ACP agent `model` selects, `acp:<name>`, or `None`
+/// for an engine model. An `acp:` pick opens a persistent external
+/// session through `_meta.kage.externalAgent`; the engine's `acp`
+/// provider stays the one-shot path for `-p`.
+fn external_agent(model: &str) -> Option<&str> {
+    model.strip_prefix("acp:").filter(|name| !name.is_empty())
+}
+
 /// The `_meta.kage` the TUI asks of the session it opens: what this
 /// process would have set up on the engine path, phrased for the
 /// agent to apply instead. Only what the user actually set is sent.
@@ -562,6 +570,21 @@ fn wire_mcp_servers(
         servers.push(wire);
     }
     (servers, warnings)
+}
+
+/// The external agent a recorded session file names in its header,
+/// or `None` for a native session or one whose header does not read.
+fn recorded_external_agent(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut line = String::new();
+    BufReader::new(file).read_line(&mut line).ok()?;
+    match serde_json::from_str::<kage_session::SessionEntry>(line.trim()).ok()? {
+        kage_session::SessionEntry::Header(header) => match header.backend {
+            Some(kage_session::SessionBackend::ExternalAcp(external)) => Some(external.agent_name),
+            None => None,
+        },
+        _ => None,
+    }
 }
 
 /// The `session/prompt` params of a frame this client sent, for
@@ -1038,6 +1061,11 @@ struct Pump {
     /// Subagent sessions the agent announced, by wire id, with what
     /// the App has already been told about each.
     children: HashMap<String, ChildTrack>,
+    /// Wire ids of the sessions an external ACP agent owns, with the
+    /// agent's configured name. The client marks sessions it creates
+    /// itself; this map also covers the ones a recorded file names,
+    /// which the wire list never describes to this connection.
+    external: HashMap<String, String>,
     /// App child session id to the wire id the child's transcript is
     /// recorded under, shared with the App's agent loader: the App
     /// only knows its own minted ids, the files use the wire's.
@@ -1327,7 +1355,13 @@ impl Pump {
     }
 
     /// Asks the agent for a new session, whose answer adopts the wire.
+    /// An `acp:<name>` model opens a persistent external session on the
+    /// configured agent instead of an engine session.
     fn request_new_session(&mut self) {
+        if let Some(agent) = external_agent(&self.model).map(str::to_owned) {
+            self.request_external_session(&agent);
+            return;
+        }
         let meta = self.session_meta();
         let servers = self.mcp_servers();
         let request = self
@@ -1335,6 +1369,74 @@ impl Pump {
             .client()
             .new_session(&self.cwd, &servers, Some(meta));
         self.pending_new = Some(request);
+    }
+
+    /// Opens a persistent session on the configured external ACP agent
+    /// `name`: the host spawns it once and the conversation survives
+    /// turns, unlike the one-shot `acp` provider path. No MCP servers
+    /// ride along: external sessions refuse them.
+    fn request_external_session(&mut self, name: &str) {
+        let request = self
+            .store
+            .client()
+            .new_session_with_external_agent(&self.cwd, &[], name);
+        self.pending_new = Some(request);
+    }
+
+    /// The external ACP agent owning wire session `id`, when known:
+    /// the client marks the sessions it created and the directory
+    /// lists, and [`Self::external`] covers the ones a recorded file
+    /// named before the wire ever described them.
+    fn external_agent_of(&self, id: &str) -> Option<String> {
+        if let Some(agent) = self.external.get(id) {
+            return Some(agent.clone());
+        }
+        self.store
+            .state()
+            .session(id)
+            .and_then(|session| session.external_agent.clone())
+    }
+
+    /// The agent owning the session on screen, when it is external.
+    fn external(&self) -> Option<String> {
+        self.external_agent_of(&self.wire)
+    }
+
+    /// Reports and returns `true` when the session on screen belongs
+    /// to an external ACP agent, whose own agent manages models, modes,
+    /// history and files: kage cannot change them here.
+    fn refuse_external(&mut self) -> bool {
+        let Some(agent) = self.external() else {
+            return false;
+        };
+        self.notice(
+            NoticeLevel::Warning,
+            format!(
+                "{agent} is an external agent session. Its agent manages models, modes, history and files, so kage cannot change them here."
+            ),
+        );
+        true
+    }
+
+    /// Whether `request` asks an external session for something its
+    /// agent owns: engine models and options, thinking, modes, goals,
+    /// compaction, swarm and export. An `acp:` model pick is not one:
+    /// it opens a session of its own. Reports the refusal and returns
+    /// `true` so [`Self::handle`] skips the request.
+    fn refuse_external_request(&mut self, request: &RunRequest) -> bool {
+        let gated = match request {
+            RunRequest::SwitchModel(model) => external_agent(model).is_none(),
+            RunRequest::CycleThinkingLevel
+            | RunRequest::SetThinkingLevel(_)
+            | RunRequest::SetPermissionMode(_)
+            | RunRequest::PlanMode { .. }
+            | RunRequest::SwarmMode { .. }
+            | RunRequest::SetGoal { .. }
+            | RunRequest::CompactNow
+            | RunRequest::ExportSession(_) => true,
+            _ => false,
+        };
+        gated && self.refuse_external()
     }
 
     /// The `_meta.kage` a session of this connection opens with: what
@@ -1525,18 +1627,19 @@ impl Pump {
             let _ = self.recorder.send((self.model.clone(), outcome.clone()));
             self.publish(HostEvent::RunEnded { outcome });
         }
-        if let Some(model) = self
-            .store
-            .state()
-            .session(&self.wire)
-            .and_then(|session| {
-                session
-                    .config_options
-                    .iter()
-                    .find(|option| option.id == "model")
-                    .map(|option| option.current_value.clone())
-            })
-            .filter(|model| !model.is_empty())
+        if self.external_agent_of(&self.wire).is_none()
+            && let Some(model) = self
+                .store
+                .state()
+                .session(&self.wire)
+                .and_then(|session| {
+                    session
+                        .config_options
+                        .iter()
+                        .find(|option| option.id == "model")
+                        .map(|option| option.current_value.clone())
+                })
+                .filter(|model| !model.is_empty())
         {
             self.model = model;
         }
@@ -2172,7 +2275,14 @@ impl Pump {
             ui.session_id.clone_from(&self.wire);
             ui.session_title = None;
         });
-        if carry_model {
+        // An external session carries no engine model option: the
+        // status shows the agent pick instead, and nothing is sent.
+        let external = self.external_agent_of(id);
+        if let Some(agent) = &external {
+            self.external.insert(id.to_owned(), agent.clone());
+            self.model = format!("acp:{agent}");
+        }
+        if carry_model && external.is_none() {
             self.store
                 .client()
                 .set_config_option(&self.wire, "model", &self.model);
@@ -2413,8 +2523,14 @@ impl Pump {
             "deny" => Some(kage_core::permissions::PermissionAction::Deny),
             _ => None,
         });
+        // An external session reports no model option: the status
+        // shows the agent pick the session was opened with.
+        let model = option("model").unwrap_or_else(|| {
+            self.external_agent_of(&self.wire)
+                .map_or_else(String::new, |agent| format!("acp:{agent}"))
+        });
         SessionState {
-            model: option("model").unwrap_or_default(),
+            model,
             thinking,
             thinking_effective: thinking,
             thinking_levels,
@@ -2473,9 +2589,16 @@ impl Pump {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one dispatch over every request the App sends"
+    )]
     fn handle(&mut self, request: RunRequest) {
         if self.closed {
             self.handle_closed(request);
+            return;
+        }
+        if self.refuse_external_request(&request) {
             return;
         }
         match request {
@@ -2496,10 +2619,18 @@ impl Pump {
             RunRequest::Cancel { session } => self.cancel_of(session),
             RunRequest::RecallPrompt { session, delivery } => self.recall_of(session, delivery),
             RunRequest::SwitchModel(model) => {
-                self.model.clone_from(&model);
-                self.store
-                    .client()
-                    .set_config_option(&self.wire, "model", &model);
+                // An external agent is a different backend, not a
+                // model: it opens as a session of its own, like the
+                // desktop's new-session pick.
+                if let Some(agent) = external_agent(&model).map(str::to_owned) {
+                    self.model = model;
+                    self.request_external_session(&agent);
+                } else {
+                    self.model.clone_from(&model);
+                    self.store
+                        .client()
+                        .set_config_option(&self.wire, "model", &model);
+                }
             }
             RunRequest::ResolvePermission {
                 request_id,
@@ -2687,13 +2818,17 @@ impl Pump {
         }
         // Steering joins the run in flight; anything else goes plain,
         // which queues while a run is in flight and starts one
-        // otherwise.
+        // otherwise. An external session cannot be steered: its agent
+        // owns the turn, so the prompt goes plain and the host decides.
         let running = self
             .store
             .state()
             .session(wire)
             .is_some_and(|session| session.running);
-        if running && self.store.client().steer(wire, blocks.clone()).is_ok() {
+        if running
+            && self.external_agent_of(wire).is_none()
+            && self.store.client().steer(wire, blocks.clone()).is_ok()
+        {
             return;
         }
         self.store.client().prompt(wire, blocks);
@@ -2920,6 +3055,12 @@ impl Pump {
         if self.pending_open.as_ref().is_some_and(|open| open.id == id) || id == self.wire {
             return;
         }
+        // The wire list never describes this connection's sessions,
+        // so a recorded external session is recognized by its file's
+        // header before the load answers.
+        if let Some(agent) = recorded_external_agent(path) {
+            self.external.insert(id.clone(), agent);
+        }
         self.store.reset_session(&id);
         let meta = self.load_meta();
         let servers = self.mcp_servers();
@@ -3005,7 +3146,11 @@ impl Pump {
     /// of its subagents.
     fn publish_on(&mut self, session: SessionId, event: impl Into<kage_core::protocol::Event>) {
         let event = event.into();
+        // The one-shot warning is for engine sessions on the `acp`
+        // provider; an external session's `acp:<name>` model is the
+        // agent pick, not that provider.
         let warning = if session == self.app_session
+            && self.external_agent_of(&self.wire).is_none()
             && let kage_core::protocol::Event::Host(HostEvent::StateChanged { state }) = &event
             && self.warned_model.as_deref() != Some(state.model.as_str())
         {
@@ -3433,6 +3578,7 @@ pub(crate) fn run(
         recorder,
         prompts: HashMap::new(),
         run_error: None,
+        external: HashMap::new(),
         yolo,
         environment,
         system_prompt: system.to_owned(),
@@ -3491,7 +3637,8 @@ pub(crate) fn run(
         eprintln!("kage: cannot start the pump thread: {error}");
         return ExitCode::from(1);
     }
-    let model_choices = available_model_items(&registry, &shown_model);
+    let mut model_choices = available_model_items(&registry, &shown_model);
+    model_choices.extend(external_agent_items(&config, &shown_model));
     // The commands the local plugins register; the App completes them
     // and the pump runs them, never the agent.
     let plugin_commands = plugins
@@ -3729,6 +3876,7 @@ mod tests {
             dialog_shown: HashSet::new(),
             ask_ids: BTreeMap::new(),
             children: HashMap::new(),
+            external: HashMap::new(),
             child_files: Arc::new(Mutex::new(HashMap::new())),
             next_ask: 0,
             pending_export: None,
@@ -6297,6 +6445,138 @@ kage.on('should_stop_after_turn', function(ev) return true end)
             warnings[2].contains("disabled_tools and oauth"),
             "{warnings:?}"
         );
+    }
+
+    #[test]
+    fn an_acp_model_opens_an_external_session() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.model = "acp:reviewer".to_owned();
+        pump.request_new_session();
+        let outgoing = pump.store.take_outgoing();
+        let Frame::Request { method, params, .. } = &outgoing[0] else {
+            panic!("session/new is a request, got {:?}", outgoing[0])
+        };
+        assert_eq!(method, "session/new");
+        assert_eq!(params["_meta"]["kage"]["externalAgent"], "reviewer");
+        assert_eq!(params["mcpServers"], serde_json::json!([]));
+        assert!(
+            params["_meta"]["kage"].get("plugins").is_none(),
+            "an external session claims no plugin host"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_external_session_adopts_without_a_model_option() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.model = "acp:reviewer".to_owned();
+        pump.request_new_session();
+        let new = request_id(&pump.store.take_outgoing(), "session/new");
+        pump.absorb(Frame::Success {
+            id: new,
+            result: serde_json::json!({"sessionId": "ext1", "configOptions": []}),
+        });
+        pump.flush();
+        assert_eq!(pump.wire, "ext1");
+        assert_eq!(pump.model, "acp:reviewer");
+        assert_eq!(pump.external_agent_of("ext1").as_deref(), Some("reviewer"));
+        assert_eq!(pump.state_snapshot().model, "acp:reviewer");
+        let outgoing = pump.store.take_outgoing();
+        assert!(
+            !has_request(&outgoing, "session/set_config_option"),
+            "no engine model is pushed onto an external session: {outgoing:?}"
+        );
+        assert!(
+            !notices(&app)
+                .iter()
+                .any(|(_, text)| text.contains("legacy one-shot")),
+            "the one-shot warning is for engine sessions only"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_external_session_refuses_engine_only_requests() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.model = "acp:reviewer".to_owned();
+        pump.request_new_session();
+        let new = request_id(&pump.store.take_outgoing(), "session/new");
+        pump.absorb(Frame::Success {
+            id: new,
+            result: serde_json::json!({"sessionId": "ext1", "configOptions": []}),
+        });
+        pump.handle(RunRequest::SwitchModel("anthropic/claude".to_owned()));
+        pump.handle(RunRequest::CompactNow);
+        pump.handle(RunRequest::SetPermissionMode(Some(
+            kage_core::permissions::PermissionAction::Allow,
+        )));
+        let outgoing = pump.store.take_outgoing();
+        assert!(
+            !has_request(&outgoing, "session/set_config_option")
+                && !has_request(&outgoing, "_kage/session/compact"),
+            "external sessions take prompts and answers only: {outgoing:?}"
+        );
+        let warnings: Vec<String> = notices(&app)
+            .into_iter()
+            .filter(|(level, _)| *level == NoticeLevel::Warning)
+            .map(|(_, text)| text)
+            .collect();
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(warnings.iter().all(|text| text.contains("reviewer")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_acp_pick_in_the_model_picker_opens_an_external_session() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::SwitchModel("acp:reviewer".to_owned()));
+        let outgoing = pump.store.take_outgoing();
+        let Frame::Request { method, params, .. } = &outgoing[0] else {
+            panic!("session/new is a request, got {:?}", outgoing[0])
+        };
+        assert_eq!(method, "session/new");
+        assert_eq!(params["_meta"]["kage"]["externalAgent"], "reviewer");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_recorded_external_session_is_marked_from_its_header() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        let path = dir.join("ext-rec.jsonl");
+        let header = kage_session::entry::Header {
+            version: kage_session::FORMAT_VERSION,
+            session: kage_core::SessionId::new(),
+            id: kage_session::EntryId::new(),
+            ts: chrono::Utc::now(),
+            cwd: dir.clone(),
+            model: "external".to_owned(),
+            system_prompt: String::new(),
+            backend: Some(kage_session::SessionBackend::ExternalAcp(
+                kage_session::entry::ExternalAcpSession {
+                    agent_name: "reviewer".to_owned(),
+                    protocol_version: 1,
+                    upstream_session_id: "up-1".to_owned(),
+                },
+            )),
+            parent_session: None,
+            parent_entry: None,
+        };
+        kage_session::SessionWriter::create(&path, header).unwrap();
+        pump.open_recorded(&path);
+        assert_eq!(
+            pump.external.get("ext-rec").map(String::as_str),
+            Some("reviewer"),
+            "the file's header marks the session external before the load answers"
+        );
+        let load = request_id(&pump.store.take_outgoing(), "session/load");
+        pump.absorb(Frame::Success {
+            id: load,
+            result: serde_json::json!({"configOptions": []}),
+        });
+        assert_eq!(pump.wire, "ext-rec");
+        assert_eq!(pump.model, "acp:reviewer");
+        assert_eq!(pump.state_snapshot().model, "acp:reviewer");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]

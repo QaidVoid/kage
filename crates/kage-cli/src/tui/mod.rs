@@ -36,7 +36,7 @@ pub use entry::run_tui;
 pub(crate) use entry::startup_options;
 
 pub(crate) use support::{
-    Mirror, available_model_items, list_session_choices, list_session_nodes,
+    Mirror, available_model_items, external_agent_items, list_session_choices, list_session_nodes,
     register_block_renderers, run_bridged_command, run_bridged_keymap, snapshot_plugin_commands,
     start_notices,
 };

@@ -151,8 +151,9 @@ impl App {
 
     /// Apply a withdrawn pending prompt: drop the recalled row of
     /// `session` and put its text and images back into the editor,
-    /// above any draft. A `None` content means the engine's queue was
-    /// already empty; the row stays until its delivery lands.
+    /// above any draft. Rejected prompts return even if no row was
+    /// registered. A `None` content means the engine's queue was already
+    /// empty; an existing row stays until its delivery lands.
     fn pending_withdrawn(
         &mut self,
         session: SessionId,
@@ -168,6 +169,9 @@ impl App {
             .iter()
             .rposition(|(s, p)| *s == key && p.queued == queued)
         else {
+            if let Some(content) = content {
+                self.restore_prompt_into_draft(key, content);
+            }
             return;
         };
         let Some(content) = content else {
@@ -178,7 +182,20 @@ impl App {
             return;
         };
         self.pending.remove(at);
+        self.restore_prompt_into_draft(key, content);
+    }
+
+    /// Returns a prompt to its originating draft without changing focus.
+    fn restore_prompt_into_draft(&mut self, session: Option<SessionId>, content: Vec<Content>) {
+        if session == self.focus {
+            self.restore_prompt_into_editor(content);
+            return;
+        }
+        let target = self.drafts.remove(&session).unwrap_or_default();
+        let current = self.input.swap_draft(target);
         self.restore_prompt_into_editor(content);
+        let restored = self.input.swap_draft(current);
+        self.drafts.insert(session, restored);
     }
 
     /// Put a prompt's text and images back into the editor, above any
@@ -339,6 +356,41 @@ impl App {
     /// the card shows.
     fn apply_agent_envelope(&mut self, envelope: Envelope) {
         let session = envelope.session;
+        if let Event::Host(HostEvent::SessionChanged { timeline, .. }) = &envelope.event {
+            self.permission_queue.retain(|a| a.session != session);
+            if self
+                .pending_permission
+                .as_ref()
+                .is_some_and(|a| a.session == session)
+            {
+                self.advance_approvals();
+            }
+            if let Some(buffer) = self.agent_buffers.get(&session).map(Arc::clone) {
+                let messages: Vec<_> = timeline
+                    .iter()
+                    .filter_map(|item| match item {
+                        kage_core::protocol::TimelineItem::Message(message) => {
+                            Some(Arc::clone(message))
+                        }
+                        kage_core::protocol::TimelineItem::Compaction(_) => None,
+                    })
+                    .collect();
+                let durations = crate::events::tool_durations(&messages);
+                {
+                    let mut buf = lock(&buffer);
+                    buf.clear();
+                    crate::events::populate_from_history(&mut buf, timeline, &durations);
+                    buf.trim_scrollback();
+                }
+                self.annotate_edits(&buffer);
+                if self.focus == Some(session) {
+                    self.reset_session_ui();
+                    self.draw_snapshot = None;
+                    lock(&buffer).invalidate_all_heights();
+                }
+            }
+            return;
+        }
         let reopened = self.evicted_agents.contains(&session)
             && matches!(envelope.event, Event::Host(HostEvent::RunStarted));
         if matches!(&envelope.event, Event::Host(HostEvent::AgentSpawned { .. })) || reopened {
@@ -365,6 +417,7 @@ impl App {
                 matches!(
                     event,
                     LoopEvent::ToolCallStart { .. }
+                        | LoopEvent::ToolCallArgsDelta { .. }
                         | LoopEvent::ToolExecutionStart { .. }
                         | LoopEvent::ToolCallEnd { .. }
                 )

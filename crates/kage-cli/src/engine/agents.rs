@@ -1000,14 +1000,8 @@ impl super::Dispatcher {
         self.waiting.retain(|w| *w != id);
         if let Some(session) = self.sessions.get_mut(&id) {
             session.queued.clear();
-            lock(&session.steering).clear();
         }
-        self.bus.publish(
-            id,
-            HostEvent::RunEnded {
-                outcome: RunOutcome::Cancelled,
-            },
-        );
+        self.publish_run_end(id, RunOutcome::Cancelled, false);
         self.deliver(
             id,
             &RunOutcome::Cancelled,
@@ -1033,12 +1027,7 @@ impl super::Dispatcher {
         };
         let history = idle.cx.history.clone();
         let usage = session.usage;
-        self.bus.publish(
-            id,
-            HostEvent::RunEnded {
-                outcome: RunOutcome::Cancelled,
-            },
-        );
+        self.publish_run_end(id, RunOutcome::Cancelled, false);
         self.deliver(id, &RunOutcome::Cancelled, &history, usage, Duration::ZERO);
         self.reap_agent(id);
     }

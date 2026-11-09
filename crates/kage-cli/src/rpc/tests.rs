@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 #[cfg(unix)]
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
@@ -862,6 +863,415 @@ fn subagents_stream_and_ask_on_their_own_sessions() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one permission-blocked child exercises admission through settlement"
+)]
+fn live_child_steering_is_owned_explicit_and_scoped_to_prompts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().display().to_string();
+    let main = MockProvider::sequence(vec![
+        tool_turn(
+            "call_agent",
+            "agent",
+            serde_json::json!({
+                "description": "list files", "prompt": "list"
+            }),
+        ),
+        text_turn("parent done"),
+    ]);
+    let agents = MockProvider::sequence(vec![
+        tool_turn("call_child", "ls", serde_json::json!({ "path": path })),
+        text_turn("child done"),
+    ]);
+    let h = serve_on(
+        Arc::new(Routed {
+            main: Listed::of(main.clone()),
+            agents: Arc::new(agents.clone()),
+        }),
+        main,
+        dir.path(),
+        dir.path(),
+        false,
+        default_agents(),
+        true,
+    );
+    initialize(&h.client);
+    let root_end = prompt_async(&h.client, &h.session, "go");
+    let (ask, params) = until_ask(&h.inbox, &mut Vec::new());
+    let child = params["sessionId"].as_str().unwrap();
+    let child_id = SessionId(child.parse().unwrap());
+    assert_ne!(child, h.session);
+
+    let observer = h.connect();
+    initialize(&observer.client);
+    observer
+        .client
+        .request(
+            "session/load",
+            serde_json::json!({
+                "sessionId": h.session, "cwd": path, "mcpServers": []
+            }),
+        )
+        .unwrap();
+    let announced = drain(&observer.inbox);
+    assert!(
+        announced
+            .iter()
+            .any(|p| p["update"]["subagentSessionId"] == child)
+    );
+    let refused = prompt_async_with(&observer.client, child, "intrude", Some("steer"))
+        .recv_timeout(WAIT)
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(refused.code, -32603);
+    assert!(refused.message.contains("busy"));
+
+    let stranger = h.connect();
+    initialize(&stranger.client);
+    let refused = prompt_async_with(&stranger.client, child, "guess", Some("steer"))
+        .recv_timeout(WAIT)
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(refused.code, -32602);
+    for delivery in [None, Some("queue")] {
+        let refused = prompt_async_with(&h.client, child, "later", delivery)
+            .recv_timeout(WAIT)
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(refused.code, -32602);
+    }
+    for (method, params) in [
+        (
+            "session/set_config_option",
+            serde_json::json!({
+                "sessionId": child, "configId": "model", "value": "mock/other"
+            }),
+        ),
+        (
+            "_kage/prompt/withdraw",
+            serde_json::json!({
+                "sessionId": child, "delivery": "steer"
+            }),
+        ),
+        (
+            "_kage/session/prompts",
+            serde_json::json!({"sessionId": child}),
+        ),
+    ] {
+        let refused = h.client.request(method, params).unwrap_err();
+        assert_eq!(refused.code, -32602, "{method}: {refused}");
+    }
+
+    let child_end = prompt_async_with(&h.client, child, "also inspect names", Some("steer"));
+    until(|| lock(&h.host.live).owner_of(child_id).is_some());
+    h.host.engine.hold_events(|| ());
+    assert!(child_end.recv_timeout(Duration::from_millis(50)).is_err());
+    allow(&h.client, &ask);
+    assert_eq!(
+        child_end.recv_timeout(WAIT).unwrap().unwrap()["stopReason"],
+        "end_turn"
+    );
+    let updates = drain(&h.inbox);
+    assert!(
+        updates.iter().any(|p| is_terminal(p)
+            && p["update"]["subagentSessionId"] == child
+            && p["update"]["state"] == "completed"),
+        "{updates:#?}"
+    );
+    assert_eq!(
+        root_end.recv_timeout(WAIT).unwrap().unwrap()["stopReason"],
+        "end_turn"
+    );
+    let requests = agents.requests();
+    assert_eq!(
+        requests[1].messages.last().unwrap().content,
+        [text("also inspect names")]
+    );
+    let refused = prompt_async_with(&h.client, child, "too late", Some("steer"))
+        .recv_timeout(WAIT)
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(refused.code, -32602);
+}
+
+#[test]
+fn a_live_background_child_accepts_explicit_steering_after_its_parent_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().display().to_string();
+    let main = MockProvider::sequence(vec![
+        tool_turn(
+            "call_agent",
+            "agent",
+            serde_json::json!({
+                "description": "list files", "prompt": "list", "background": true
+            }),
+        ),
+        text_turn("the agent is on it"),
+    ]);
+    let agents = MockProvider::sequence(vec![
+        tool_turn("call_child", "ls", serde_json::json!({ "path": path })),
+        text_turn("child done"),
+    ]);
+    let h = serve_on(
+        Arc::new(Routed {
+            main: Listed::of(main.clone()),
+            agents: Arc::new(agents.clone()),
+        }),
+        main,
+        dir.path(),
+        dir.path(),
+        false,
+        default_agents(),
+        true,
+    );
+    initialize(&h.client);
+    assert_eq!(
+        prompt_async(&h.client, &h.session, "go")
+            .recv_timeout(WAIT)
+            .unwrap()
+            .unwrap()["stopReason"],
+        "end_turn"
+    );
+    let (ask, params) = until_ask(&h.inbox, &mut Vec::new());
+    let child = params["sessionId"].as_str().unwrap();
+    let child_id = SessionId(child.parse().unwrap());
+    let pending = prompt_async_with(&h.client, child, "keep going", Some("steer"));
+    until(|| lock(&h.host.live).owner_of(child_id).is_some());
+    h.host.engine.hold_events(|| ());
+    allow(&h.client, &ask);
+    assert_eq!(
+        pending.recv_timeout(WAIT).unwrap().unwrap()["stopReason"],
+        "end_turn"
+    );
+    let updates = drain(&h.inbox);
+    assert!(
+        updates
+            .iter()
+            .any(|p| is_terminal(p) && p["update"]["subagentSessionId"] == child)
+    );
+    assert_eq!(
+        agents.requests()[1].messages.last().unwrap().content,
+        [text("keep going")]
+    );
+}
+
+#[test]
+fn child_waiters_survive_a_rate_limit_and_settle_without_a_tree_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(Vec::new(), dir.path(), dir.path());
+    let child = SessionId::new();
+    let ids = Arc::new(Mutex::new(Ids::default()));
+    lock(&ids).subagents.insert(child.to_string(), child);
+    let waiters = Waiters::default();
+    let (done, end) = crossbeam_channel::unbounded();
+    lock(&waiters).insert(child, vec![done]);
+    let mut bridge = Bridge {
+        peer: h.client.clone().into(),
+        commander: h.commander.clone(),
+        connection: 0,
+        live: Arc::clone(&h.host.live),
+        ids: Arc::clone(&ids),
+        waiters: Arc::clone(&waiters),
+        models: h.host.models(),
+        shown: ShownBySession::default(),
+        aliases: BTreeMap::new(),
+        seen: HashMap::new(),
+        stops: HashMap::new(),
+        tree: AgentTree::default(),
+        subagents: Arc::new(AtomicBool::new(true)),
+        kage_client: Arc::new(AtomicBool::new(false)),
+        streaming: HashSet::from([child]),
+        ended: HashMap::new(),
+        commands: HashMap::new(),
+        modes: HashMap::new(),
+        names: HashMap::new(),
+        statuses: HashMap::new(),
+        fills: HashMap::new(),
+        pruned_cost: HashMap::new(),
+        compacting: HashMap::new(),
+        compacting_started: HashSet::new(),
+        paused: HashSet::from([child]),
+        held: Held::default(),
+        approving: HashMap::new(),
+        asks: AskSet::default(),
+        seeds: Arc::default(),
+    };
+    let event = |outcome| kage_core::protocol::Envelope {
+        session: child,
+        seq: 0,
+        event: kage_core::protocol::HostEvent::RunEnded { outcome }.into(),
+    };
+    bridge.handle(&event(RunOutcome::Failed {
+        error: LoopError::RateLimited {
+            message: "retry later".into(),
+            retry_after_secs: None,
+        },
+    }));
+    assert!(end.try_recv().is_err());
+    assert!(lock(&waiters).contains_key(&child));
+    assert!(lock(&ids).subagents.contains_key(&child.to_string()));
+    bridge.handle(&event(RunOutcome::Completed));
+    assert_eq!(
+        end.recv_timeout(WAIT).unwrap().outcome,
+        RunOutcome::Completed
+    );
+    assert!(lock(&waiters).is_empty());
+    assert!(lock(&ids).subagents.is_empty());
+}
+
+#[test]
+fn refused_child_admission_removes_only_its_own_waiter_and_owner() {
+    for other_waiter in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let h = serve(Vec::new(), dir.path(), dir.path());
+        let host = Arc::clone(&h.host);
+        let child = SessionId::new();
+        let parent = h.id;
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let (ready, prepared) = mpsc::channel();
+        let (done, unrelated) = crossbeam_channel::unbounded();
+        std::thread::spawn(move || {
+            Arc::clone(&host)
+                .serve_with(BufReader::new(srv_r), srv_w, move |agent| {
+                    let mut live = lock(&host.live);
+                    live.observe(&kage_core::protocol::Envelope {
+                        session: child,
+                        seq: 0,
+                        event: kage_core::protocol::HostEvent::AgentSpawned {
+                            parent,
+                            tool_call_id: ToolCallId::new("missing"),
+                            agent: "general".into(),
+                            description: "not hosted".into(),
+                            swarm: None,
+                            background: false,
+                        }
+                        .into(),
+                    });
+                    lock(&agent.ids).subagents.insert(child.to_string(), child);
+                    if other_waiter {
+                        lock(&agent.waiters).insert(child, vec![done]);
+                        assert!(live.claim_prompt(child, agent.connection));
+                    }
+                    ready
+                        .send((Arc::clone(&agent.waiters), agent.connection))
+                        .unwrap();
+                })
+                .unwrap();
+        });
+        let (client, _inbox, _reader) = kage_jsonrpc::connect(BufReader::new(cli_r), cli_w);
+        let (waiters, connection) = prepared.recv_timeout(WAIT).unwrap();
+        let refused = prompt_async_with(&client, &child.to_string(), "no session", Some("steer"))
+            .recv_timeout(WAIT)
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(refused.code, -32602);
+        assert_eq!(
+            lock(&waiters).get(&child).map_or(0, Vec::len),
+            usize::from(other_waiter)
+        );
+        assert_eq!(
+            lock(&h.host.live).owner_of(child),
+            other_waiter.then_some(connection)
+        );
+        assert!(unrelated.try_recv().is_err());
+        assert_eq!(h.mock.call_count(), 0);
+    }
+}
+
+#[test]
+fn child_prompt_ownership_checks_every_owned_ancestor() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(Vec::new(), dir.path(), dir.path());
+    let root = SessionId::new();
+    let child = SessionId::new();
+    let grandchild = SessionId::new();
+    let mut live = lock(&h.host.live);
+    for (session, parent) in [(child, root), (grandchild, child)] {
+        live.observe(&kage_core::protocol::Envelope {
+            session,
+            seq: 0,
+            event: kage_core::protocol::HostEvent::AgentSpawned {
+                parent,
+                tool_call_id: ToolCallId::new(session.to_string()),
+                agent: "general".into(),
+                description: "work".into(),
+                swarm: None,
+                background: false,
+            }
+            .into(),
+        });
+    }
+    let first_lifetime = live.steering_lifetime(child).unwrap();
+    assert!(live.claim_prompt(root, 1));
+    assert!(!live.claim_prompt(grandchild, 2));
+    assert!(live.claim_prompt(grandchild, 1));
+    live.release_prompts_of(1);
+    assert!(live.claim_prompt(child, 1));
+    assert!(!live.claim_prompt(grandchild, 2));
+    assert!(live.claim_prompt(SessionId::new(), 2));
+    for event in [
+        kage_core::protocol::HostEvent::AgentPaused {
+            reason: "rate limited".into(),
+        },
+        kage_core::protocol::HostEvent::RunEnded {
+            outcome: RunOutcome::Failed {
+                error: LoopError::RateLimited {
+                    message: "retry later".into(),
+                    retry_after_secs: None,
+                },
+            },
+        },
+    ] {
+        live.observe(&kage_core::protocol::Envelope {
+            session: child,
+            seq: 0,
+            event: event.into(),
+        });
+    }
+    assert_eq!(live.owner_of(child), Some(1));
+    assert!(live.steerable_subagent(child));
+    assert!(!live.claim_prompt(child, 2));
+    live.observe(&kage_core::protocol::Envelope {
+        session: child,
+        seq: 0,
+        event: kage_core::protocol::HostEvent::RunStarted.into(),
+    });
+    assert!(live.steerable_subagent(child));
+    live.observe(&kage_core::protocol::Envelope {
+        session: child,
+        seq: 0,
+        event: kage_core::protocol::HostEvent::RunEnded {
+            outcome: RunOutcome::Completed,
+        }
+        .into(),
+    });
+    assert!(!live.steerable_subagent(child));
+    assert_eq!(live.owner_of(child), None);
+    assert!(first_lifetime.load(Ordering::SeqCst));
+    live.observe(&kage_core::protocol::Envelope {
+        session: child,
+        seq: 0,
+        event: kage_core::protocol::HostEvent::AgentSpawned {
+            parent: root,
+            tool_call_id: ToolCallId::new("again"),
+            agent: "general".into(),
+            description: "resume".into(),
+            swarm: None,
+            background: false,
+        }
+        .into(),
+    });
+    let next_lifetime = live.steering_lifetime(child).unwrap();
+    assert!(!Arc::ptr_eq(&first_lifetime, &next_lifetime));
+    assert!(!next_lifetime.load(Ordering::SeqCst));
+    assert!(live.claim_prompt(child, 2));
+    live.release_child_prompt(child, 2, &first_lifetime);
+    assert_eq!(live.owner_of(child), Some(2));
+}
+
+#[test]
 fn cancelling_a_subagent_withdraws_its_ask_and_the_parent_goes_on() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().display().to_string();
@@ -881,6 +1291,10 @@ fn cancelling_a_subagent_withdraws_its_ask_and_the_parent_goes_on() {
     let (ask, params) = until_ask(&h.inbox, &mut Vec::new());
     let child = params["sessionId"].clone();
     assert_ne!(child, h.session);
+    let child_id = SessionId(child.as_str().unwrap().parse().unwrap());
+    let child_end = prompt_async_with(&h.client, child.as_str().unwrap(), "more", Some("steer"));
+    until(|| lock(&h.host.live).owner_of(child_id).is_some());
+    h.host.engine.hold_events(|| ());
     h.client
         .notify("session/cancel", serde_json::json!({"sessionId": child}))
         .unwrap();
@@ -894,6 +1308,10 @@ fn cancelling_a_subagent_withdraws_its_ask_and_the_parent_goes_on() {
     assert_eq!(terminal["sessionId"], h.session);
     assert_eq!(terminal["update"]["subagentSessionId"], child);
     assert_eq!(terminal["update"]["state"], "cancelled");
+    assert_eq!(
+        child_end.recv_timeout(WAIT).unwrap().unwrap()["stopReason"],
+        "cancelled"
+    );
     let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
     assert_eq!(response["stopReason"], "end_turn");
 }
@@ -5603,12 +6021,14 @@ fn an_agent_session_loads_to_read_and_refuses_prompts() {
     );
     let calls = h.mock.call_count();
 
-    let params = serde_json::json!({
-        "sessionId": child,
-        "prompt": [{"type": "text", "text": "more"}],
-    });
-    let refused = h.client.request("session/prompt", params).unwrap_err();
-    assert!(refused.to_string().contains("read-only"), "{refused}");
+    for delivery in [None, Some("steer"), Some("queue")] {
+        let refused = prompt_async_with(&h.client, &child, "more", delivery)
+            .recv_timeout(WAIT)
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(refused.code, -32602);
+        assert!(refused.to_string().contains("read-only"), "{refused}");
+    }
     assert_eq!(h.mock.call_count(), calls, "nothing ran");
     let hosted: Vec<String> = h
         .host

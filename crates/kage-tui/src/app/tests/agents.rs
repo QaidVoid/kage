@@ -739,7 +739,7 @@ fn agent_deltas_repaint_while_focused() {
 }
 
 #[test]
-fn enter_steers_the_focused_agent_and_tab_queues() {
+fn enter_steers_the_focused_agent_and_tab_keeps_its_draft() {
     let (mut app, rx, _events, child) = focused_app();
     type_text(&mut app, "also defaults");
     app.handle_key(code(KeyCode::Enter));
@@ -747,21 +747,14 @@ fn enter_steers_the_focused_agent_and_tab_queues() {
     app.handle_key(code(KeyCode::Tab));
     assert_eq!(
         resolutions(&rx),
-        [
-            RunRequest::Submit {
-                text: "also defaults".into(),
-                images: Vec::new(),
-                queue: false,
-                session: Some(child),
-            },
-            RunRequest::Submit {
-                text: "then routes".into(),
-                images: Vec::new(),
-                queue: true,
-                session: Some(child),
-            },
-        ]
+        [RunRequest::Submit {
+            text: "also defaults".into(),
+            images: Vec::new(),
+            queue: false,
+            session: Some(child),
+        }]
     );
+    assert_eq!(app.input.text(), "then routes");
 }
 
 #[test]
@@ -2030,4 +2023,363 @@ fn without_a_loader_every_agent_keeps_its_buffer() {
         ],
     );
     assert!(app.agent_buffers.contains_key(&child));
+}
+
+fn child_replacement(
+    timeline: Vec<kage_core::protocol::TimelineItem>,
+) -> kage_core::protocol::Event {
+    kage_core::protocol::HostEvent::SessionChanged {
+        path: "/tmp/replaced-child.jsonl".into(),
+        title: None,
+        timeline,
+        compacted_agents: Vec::new(),
+    }
+    .into()
+}
+
+#[test]
+fn child_replacement_clears_in_place_without_changing_other_views() {
+    let (mut app, _rx, events, child) = focused_app();
+    app.set_focus(None);
+    type_text(&mut app, "main draft");
+    let sibling = spawn_agent(&mut app, &events, "a2", "general");
+    app.focus_agent(sibling);
+    type_text(&mut app, "sibling draft");
+    send_to(
+        &mut app,
+        &events,
+        sibling,
+        vec![text_delta("sibling reply")],
+    );
+    app.focus_agent(child);
+    type_text(&mut app, "child draft");
+    send_to(&mut app, &events, child, vec![text_delta("old reply")]);
+    app.search_pattern = Some("old".into());
+    app.refresh_search_matches();
+    assert!(!app.search_matches().is_empty());
+    let _ = rendered(&mut app, 80, 24);
+    assert!(app.draw_snapshot.is_some());
+    let focused = Arc::clone(&app.buffer);
+    let root = Arc::clone(&app.root_buffer);
+    let sibling_buffer = Arc::clone(&app.agent_buffers[&sibling]);
+    let root_blocks = lock(&root).blocks().to_vec();
+    let sibling_blocks = lock(&sibling_buffer).blocks().to_vec();
+    let node = app.agents.get(child).unwrap().clone();
+    let main = app.active_session;
+
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![child_replacement(Vec::new())],
+    );
+
+    assert_eq!(app.active_session, main);
+    assert_eq!(app.focus, Some(child));
+    assert!(Arc::ptr_eq(&app.buffer, &focused));
+    assert!(Arc::ptr_eq(&app.agent_buffers[&child], &focused));
+    assert!(Arc::ptr_eq(&app.root_buffer, &root));
+    assert!(Arc::ptr_eq(&app.agent_buffers[&sibling], &sibling_buffer));
+    assert_eq!(lock(&root).blocks().len(), root_blocks.len());
+    assert!(
+        lock(&root)
+            .blocks()
+            .iter()
+            .zip(&root_blocks)
+            .all(|(a, b)| Arc::ptr_eq(a, b))
+    );
+    assert!(
+        lock(&sibling_buffer)
+            .blocks()
+            .iter()
+            .zip(&sibling_blocks)
+            .all(|(a, b)| Arc::ptr_eq(a, b))
+    );
+    assert!(lock(&focused).blocks().is_empty());
+    assert_eq!(app.input.text(), "child draft");
+    assert!(app.search_pattern.is_none());
+    assert!(app.search_matches().is_empty());
+    assert!(app.draw_snapshot.is_none());
+    let replaced = app.agents.get(child).unwrap();
+    assert_eq!(replaced.parent, node.parent);
+    assert_eq!(replaced.tool_call_id, node.tool_call_id);
+    assert_eq!(replaced.agent, node.agent);
+    assert_eq!(replaced.description, node.description);
+    assert_eq!(replaced.state, node.state);
+    assert_eq!(replaced.started, node.started);
+
+    send_to(&mut app, &events, child, vec![text_delta("replayed reply")]);
+    let buf = lock(&focused);
+    assert_eq!(buf.blocks().len(), 1);
+    assert!(
+        matches!(buf.blocks()[0].as_ref(), crate::Block::Assistant { text, .. } if text == "replayed reply")
+    );
+    drop(buf);
+    app.set_focus(None);
+    assert_eq!(app.input.text(), "main draft");
+    app.focus_agent(sibling);
+    assert_eq!(app.input.text(), "sibling draft");
+    app.focus_agent(child);
+    assert_eq!(app.input.text(), "child draft");
+}
+
+#[test]
+fn child_replacement_rebuilds_a_nonempty_timeline_with_tool_durations() {
+    use kage_core::protocol::{CompactionRecord, TimelineItem};
+    let (mut app, _rx, events, child) = focused_app();
+    send_to(&mut app, &events, child, vec![text_delta("old reply")]);
+    let call = kage_core::Message::new(
+        kage_core::Role::Assistant,
+        vec![kage_core::Content::ToolCall {
+            id: kage_core::ToolCallId::new("replayed-tool"),
+            name: "shell".into(),
+            input: serde_json::json!({ "command": "ls" }),
+        }],
+        None,
+    );
+    let mut result = kage_core::Message::new(
+        kage_core::Role::ToolResult,
+        vec![kage_core::Content::ToolResultBlock {
+            call_id: kage_core::ToolCallId::new("replayed-tool"),
+            output: "fresh output".into(),
+            is_error: false,
+        }],
+        None,
+    );
+    result.ts = call.ts + chrono::Duration::milliseconds(250);
+    let mut timeline: Vec<_> = stored_prompt("fresh prompt")
+        .messages
+        .into_iter()
+        .map(TimelineItem::Message)
+        .collect();
+    timeline.extend([
+        TimelineItem::Compaction(CompactionRecord {
+            summarized: 2,
+            kept: 1,
+            before: Some(100),
+            after: Some(50),
+            summary: "fresh summary".into(),
+        }),
+        TimelineItem::Message(Arc::new(call)),
+        TimelineItem::Message(Arc::new(result)),
+    ]);
+    send_to(&mut app, &events, child, vec![child_replacement(timeline)]);
+    assert_eq!(result_duration(&app.buffer, "replayed-tool"), Some(250));
+    let buf = lock(&app.buffer);
+    assert_eq!(buf.blocks().len(), 4);
+    assert!(
+        matches!(buf.blocks()[0].as_ref(), crate::Block::User { text } if text == "fresh prompt")
+    );
+    assert!(
+        matches!(buf.blocks()[1].as_ref(), crate::Block::Custom { kind, text, .. } if kind == "kage:compaction" && text.contains("fresh summary"))
+    );
+    assert!(!buf.blocks().iter().any(
+        |b| matches!(b.as_ref(), crate::Block::Assistant { text, .. } if text.contains("old reply"))
+    ));
+}
+
+#[test]
+fn an_evicted_child_replacement_stays_evicted_and_focus_loads_fresh_history() {
+    let (mut app, _rx, events) = app_with_events();
+    let stored = Arc::new(Mutex::new("old disk prompt".to_owned()));
+    let loader = Arc::clone(&stored);
+    app.set_agent_loader(Box::new(move |_| Some(stored_prompt(&lock(&loader)))));
+    let child = spawn_agent(&mut app, &events, "a1", "explore");
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![run_ended(kage_core::protocol::RunOutcome::Completed)],
+    );
+    assert!(app.evicted_agents.contains(&child));
+    *lock(&stored) = "fresh disk prompt".into();
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![child_replacement(Vec::new())],
+    );
+    assert!(app.evicted_agents.contains(&child));
+    assert!(!app.agent_buffers.contains_key(&child));
+    assert_eq!(
+        app.agents.get(child).unwrap().state,
+        kage_core::protocol::AgentState::Done
+    );
+    app.focus_agent(child);
+    assert_eq!(app.focus, Some(child));
+    assert!(!app.evicted_agents.contains(&child));
+    let buf = lock(&app.buffer);
+    assert_eq!(buf.blocks().len(), 1);
+    assert!(
+        matches!(buf.blocks()[0].as_ref(), crate::Block::User { text } if text == "fresh disk prompt")
+    );
+}
+
+#[test]
+fn a_reopened_child_keeps_replay_after_run_started_before_catch_up() {
+    let (mut app, _rx, events) = app_with_events();
+    app.set_agent_loader(Box::new(|_| Some(stored_prompt("disk prompt"))));
+    let child = spawn_agent(&mut app, &events, "a1", "explore");
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![run_ended(kage_core::protocol::RunOutcome::Completed)],
+    );
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![kage_core::protocol::HostEvent::RunStarted.into()],
+    );
+    let buffer = Arc::clone(&app.agent_buffers[&child]);
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![child_replacement(Vec::new()), text_delta("catch-up reply")],
+    );
+    assert!(!app.evicted_agents.contains(&child));
+    assert!(Arc::ptr_eq(&app.agent_buffers[&child], &buffer));
+    assert_eq!(
+        app.agents.get(child).unwrap().state,
+        kage_core::protocol::AgentState::Running
+    );
+    app.focus_agent(child);
+    let buf = lock(&app.buffer);
+    assert_eq!(buf.blocks().len(), 1);
+    assert!(
+        matches!(buf.blocks()[0].as_ref(), crate::Block::Assistant { text, .. } if text == "catch-up reply")
+    );
+}
+
+#[test]
+fn child_replacement_drops_only_its_own_approvals_and_keeps_pending_prompts() {
+    let (mut app, _rx, events, child) = focused_app();
+    let sibling = spawn_agent(&mut app, &events, "a2", "general");
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![shell_start("c1"), permission_request("c1", 1)],
+    );
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![shell_start("c2"), permission_request("c2", 2)],
+    );
+    send_to(
+        &mut app,
+        &events,
+        sibling,
+        vec![shell_start("c3"), permission_request("c3", 3)],
+    );
+    app.handle_submit("child steer".into(), false);
+    let pending = app.pending.len();
+    assert!(pending > 0);
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![child_replacement(Vec::new())],
+    );
+    assert_eq!(app.pending.len(), pending);
+    assert_eq!(
+        app.pending_permission.as_ref().map(|a| a.session),
+        Some(sibling)
+    );
+    assert!(app.permission_queue.is_empty());
+}
+
+#[test]
+fn a_rejected_child_prompt_without_a_pending_row_returns_above_the_draft() {
+    let (mut app, _rx, events, child) = focused_app();
+    type_text(&mut app, "existing draft");
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![run_ended(kage_core::protocol::RunOutcome::Completed)],
+    );
+    assert!(app.pending.is_empty());
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![
+            kage_core::protocol::HostEvent::PromptWithdrawn {
+                delivery: kage_core::protocol::Delivery::Steer,
+                content: Some(vec![kage_core::Content::Text {
+                    text: "rejected steer".into(),
+                }]),
+            }
+            .into(),
+        ],
+    );
+    assert_eq!(app.input.text(), "rejected steer\n\nexisting draft");
+    assert!(app.pending.is_empty());
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![
+            kage_core::protocol::HostEvent::PromptWithdrawn {
+                delivery: kage_core::protocol::Delivery::Steer,
+                content: None,
+            }
+            .into(),
+        ],
+    );
+    assert_eq!(app.input.text(), "rejected steer\n\nexisting draft");
+}
+
+#[test]
+fn rejected_steering_returns_to_its_child_draft_after_focus_changes() {
+    let (mut app, _rx, events, child) = focused_app();
+    type_text(&mut app, "child draft");
+    app.send_prompt("rejected steer".into(), Vec::new(), false, Some(child));
+    let sibling = spawn_agent(&mut app, &events, "a2", "general");
+    app.focus_agent(sibling);
+    type_text(&mut app, "sibling draft");
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![
+            kage_core::protocol::HostEvent::PromptWithdrawn {
+                delivery: kage_core::protocol::Delivery::Steer,
+                content: Some(vec![
+                    kage_core::Content::Text {
+                        text: "rejected steer".into(),
+                    },
+                    kage_core::Content::Image {
+                        source: kage_core::MediaSource::Url {
+                            url: "https://example.test/image.png".into(),
+                        },
+                        mime: "image/png".into(),
+                    },
+                ]),
+            }
+            .into(),
+        ],
+    );
+    assert_eq!(app.focus, Some(sibling));
+    assert_eq!(app.input.text(), "sibling draft");
+    assert!(app.input.attached().is_empty());
+    assert!(
+        app.pending
+            .iter()
+            .all(|(session, _)| *session != Some(child))
+    );
+    app.focus_agent(child);
+    assert!(
+        app.input
+            .text()
+            .starts_with("rejected steer\n\nchild draft")
+    );
+    assert_eq!(app.input.attached().len(), 1);
+    app.focus_agent(sibling);
+    assert_eq!(app.input.text(), "sibling draft");
+    assert!(app.input.attached().is_empty());
 }

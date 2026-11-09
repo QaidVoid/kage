@@ -632,7 +632,7 @@ impl Host {
     }
 
     /// Records `connection` as the owner of `id`'s running prompt, or
-    /// returns false when another connection owns it.
+    /// returns false when another connection owns it or an ancestor.
     pub(super) fn claim_prompt(&self, id: SessionId, connection: u64) -> bool {
         lock(&self.live).claim_prompt(id, connection)
     }

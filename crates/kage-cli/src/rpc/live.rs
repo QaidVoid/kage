@@ -12,6 +12,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use kage_acp::acp::{
@@ -220,6 +222,8 @@ pub(super) struct Live {
     /// reason they gave.
     paused: HashMap<SessionId, String>,
     owners: HashMap<SessionId, u64>,
+    /// One admission lifetime per announcement, expired at its true terminal end.
+    steering_lifetimes: HashMap<SessionId, Arc<AtomicBool>>,
     working: HashSet<SessionId>,
     /// Connections holding each session open.
     attached: HashMap<SessionId, usize>,
@@ -304,6 +308,7 @@ impl Live {
             running: HashSet::new(),
             paused: HashMap::new(),
             owners: HashMap::new(),
+            steering_lifetimes: HashMap::new(),
             working: HashSet::new(),
             attached: HashMap::new(),
             closing: HashSet::new(),
@@ -438,7 +443,12 @@ impl Live {
                     self.paused.remove(&session);
                 }
                 self.flight.remove(&session);
-                self.owners.remove(&session);
+                if !(is_agent && requeued && self.paused.contains_key(&session)) {
+                    self.owners.remove(&session);
+                    if let Some(expired) = self.steering_lifetimes.remove(&session) {
+                        expired.store(true, Ordering::SeqCst);
+                    }
+                }
                 self.running.remove(&session);
                 if !is_agent {
                     self.prune_ended_agents(session);
@@ -457,6 +467,12 @@ impl Live {
                 }
             }
             HostEvent::AgentSpawned { .. } => {
+                if let Some(expired) = self
+                    .steering_lifetimes
+                    .insert(session, Arc::new(AtomicBool::new(false)))
+                {
+                    expired.store(true, Ordering::SeqCst);
+                }
                 self.running.insert(session);
                 if let HostEvent::AgentSpawned { parent, .. } = event {
                     let root = self.tree.root_of(*parent);
@@ -711,16 +727,57 @@ impl Live {
         }
     }
 
-    /// Records `connection` as the owner of `id`'s running prompt, or
-    /// returns false when another connection owns it.
-    pub(super) fn claim_prompt(&mut self, id: SessionId, connection: u64) -> bool {
-        match self.owners.get(&id) {
-            Some(owner) if *owner != connection => false,
-            _ => {
-                self.owners.insert(id, connection);
-                true
-            }
+    /// Whether an announced child can still receive live steering.
+    pub(super) fn steerable_subagent(&self, id: SessionId) -> bool {
+        self.tree
+            .get(id)
+            .is_some_and(|node| matches!(node.state, AgentState::Queued | AgentState::Running))
+            || self.paused.contains_key(&id)
+    }
+
+    /// The admission token for the child's current live announcement.
+    pub(super) fn steering_lifetime(&self, id: SessionId) -> Option<Arc<AtomicBool>> {
+        self.steerable_subagent(id)
+            .then(|| self.steering_lifetimes.get(&id).cloned())
+            .flatten()
+    }
+
+    /// Releases a refused admission without changing a newer announcement's owner.
+    pub(super) fn release_child_prompt(
+        &mut self,
+        id: SessionId,
+        connection: u64,
+        expired: &Arc<AtomicBool>,
+    ) {
+        if self.owners.get(&id) == Some(&connection)
+            && self
+                .steering_lifetimes
+                .get(&id)
+                .is_some_and(|current| Arc::ptr_eq(current, expired))
+        {
+            self.owners.remove(&id);
         }
+    }
+
+    /// Records `connection` as the owner of `id`'s running prompt, or
+    /// returns false when another connection owns it or an ancestor.
+    pub(super) fn claim_prompt(&mut self, id: SessionId, connection: u64) -> bool {
+        let mut ancestor = id;
+        loop {
+            if self
+                .owners
+                .get(&ancestor)
+                .is_some_and(|owner| *owner != connection)
+            {
+                return false;
+            }
+            let Some(node) = self.tree.get(ancestor) else {
+                break;
+            };
+            ancestor = node.parent;
+        }
+        self.owners.insert(id, connection);
+        true
     }
 
     /// Forgets every prompt `connection` owns, after it disconnected.

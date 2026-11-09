@@ -54,7 +54,8 @@ use kage_client::wire::{
     PluginCallRequest, PluginCallResult, PluginDrainQueue, PluginDrainRequest, PluginDrainResult,
     PluginEventRequest, PluginHookKind, PluginHookRequest, PluginPendingMessage, PluginPendingRole,
     PluginSessionOp, PluginToolRename, PluginToolSpec, PluginToolsRequest, PluginToolsResult,
-    PluginsSource, SessionOpt, SubagentState, TextContent, ToolCallStatus, UnconfiguredTools,
+    PluginsSource, PromptDelivery, SessionNotification, SessionOpt, SessionUpdate, SubagentState,
+    TextContent, ToolCallStatus, UnconfiguredTools,
 };
 use kage_client::{Change, DialogAsk, Frame, PermissionDecision, RequestId, RpcError};
 use kage_core::keymap::{Keymap, MappingData};
@@ -893,7 +894,6 @@ enum Answer {
     Open,
 }
 
-/// The thread that owns the connection. It turns the store's view of
 /// How much of a child tool call the App has already heard of.
 #[derive(Clone, Copy, PartialEq)]
 enum ToolSent {
@@ -903,6 +903,15 @@ enum ToolSent {
     Executing,
     /// Its result went out as `ToolCallEnd`.
     Ended,
+}
+
+/// The latest tool state delivered to a child view.
+#[derive(Clone)]
+struct ChildTool {
+    phase: ToolSent,
+    name: String,
+    input: Value,
+    progress: String,
 }
 
 /// Which kind of child message is streaming into the App.
@@ -923,26 +932,20 @@ struct ChildTrack {
     /// Transcript items fully handed over. The streaming tail stays
     /// uncommitted until it stops being the last item.
     committed: usize,
-    /// Tool calls and how far the App has heard of each, with the
-    /// output length the last progress update carried.
-    tools: BTreeMap<String, (ToolSent, usize)>,
+    /// Tool phases, arguments and progress already delivered to the App.
+    tools: BTreeMap<String, ChildTool>,
     /// The streaming tail: its kind, transcript index and the text
     /// length already sent. The item stays uncommitted while it is
     /// still the last one.
     tail: Option<(TailKind, usize, usize)>,
     /// Whether the child's run is in flight, for the run edges.
     running: bool,
-    /// Whether a run edge has already settled this child: a real turn
-    /// end, or a terminal announcement. Terminal announcements after
-    /// a real end emit nothing.
+    /// Whether the last announced run has already settled.
     ended: bool,
-    /// The last lifecycle state the announcement carried.
-    state: Option<SubagentState>,
-    /// Why a paused or failed child paused or failed.
-    reason: Option<String>,
 }
 
-/// the wire into the App's engine vocabulary: changes into
+/// The thread that turns the store's view of the wire into the App's
+/// engine vocabulary: changes into
 /// [`HostEvent`]s, its own prompts into user bubbles, and everything
 /// the App asks into client calls. One connection, one pump.
 #[expect(
@@ -997,9 +1000,9 @@ struct Pump {
     /// Where finished runs go to be written to the saved state, off
     /// this thread.
     recorder: mpsc::Sender<(String, RunOutcome)>,
-    /// Ids of the prompts sent for the wire session, so a failed
-    /// answer is told from other failures.
-    prompts: HashSet<RequestId>,
+    /// Sent prompts and their owning sessions, so failures can settle
+    /// the main run or return a rejected child submission to its draft.
+    prompts: HashMap<RequestId, (String, Vec<ContentBlock>)>,
     /// The error that ended the run being settled.
     run_error: Option<String>,
     /// The run-wide session settings that do not come from options.
@@ -1125,16 +1128,32 @@ impl Pump {
             }
             return;
         }
+        self.withdrawn_child_prompt(&frame);
         let answer = self.answer_of(&frame);
         let failed_prompt = match &frame {
-            Frame::Failure { id, error } if self.prompts.remove(id) => Some(error.message.clone()),
+            Frame::Failure { id, error } => self
+                .prompts
+                .remove(id)
+                .map(|(wire, blocks)| (wire, blocks, error.message.clone())),
             Frame::Success { id, .. } => {
                 self.prompts.remove(id);
                 None
             }
             _ => None,
         };
+        let replaced = match &frame {
+            Frame::Notification { method, params }
+                if method == "session/update"
+                    && params["update"]["sessionUpdate"] == "_kage/session_replaced" =>
+            {
+                params["sessionId"].as_str().map(str::to_owned)
+            }
+            _ => None,
+        };
         let changes = self.store.absorb(frame);
+        if let Some(wire) = replaced {
+            self.reset_child_transcript(&wire);
+        }
         match answer {
             Some(answer) => self.settle(answer, changes),
             None => {
@@ -1145,11 +1164,51 @@ impl Pump {
         }
         // A failed prompt moves no session in the client, so the run
         // it ended is settled here.
-        if let Some(message) = failed_prompt {
-            self.run_error = Some(message);
-            self.session_moved(&self.wire.clone());
-            self.run_error = None;
+        if let Some((wire, blocks, message)) = failed_prompt {
+            if wire == self.wire {
+                self.run_error = Some(message);
+                self.session_moved(&wire);
+                self.run_error = None;
+            } else {
+                self.return_prompt(self.app_of(&wire), content_of(&blocks), false, message);
+            }
         }
+    }
+
+    /// Returns live steering that the child finished without consuming.
+    fn withdrawn_child_prompt(&mut self, frame: &Frame) {
+        let Frame::Notification { method, params } = frame else {
+            return;
+        };
+        if method != "session/update"
+            || params["update"]["sessionUpdate"] != "_kage/prompt_withdrawn"
+        {
+            return;
+        }
+        let Ok(SessionNotification {
+            session_id,
+            update: SessionUpdate::PromptWithdrawn(prompt),
+        }) = serde_json::from_value::<SessionNotification>(params.clone())
+        else {
+            return;
+        };
+        let Some(track) = self.children.get(&session_id) else {
+            return;
+        };
+        let app = track.app;
+        let content = content_of(&prompt.content);
+        self.prompts
+            .retain(|_, (wire, blocks)| wire != &session_id || content_of(blocks) != content);
+        self.publish_on(
+            app,
+            HostEvent::PromptWithdrawn {
+                delivery: match prompt.delivery {
+                    PromptDelivery::Steer => Delivery::Steer,
+                    PromptDelivery::Queue => Delivery::Queue,
+                },
+                content: Some(content),
+            },
+        );
     }
 
     /// Which pending session request `frame` answers, if any.
@@ -1342,10 +1401,17 @@ impl Pump {
         let Ok(prompt) = serde_json::from_value::<OutgoingPrompt>(params.clone()) else {
             return;
         };
-        if prompt.session_id != self.wire {
+        if prompt.session_id != self.wire && !self.children.contains_key(&prompt.session_id) {
             return;
         }
-        self.prompts.insert(id.clone());
+        self.prompts.insert(
+            id.clone(),
+            (prompt.session_id.clone(), prompt.prompt.clone()),
+        );
+        if prompt.session_id != self.wire {
+            self.child_transcript(&prompt.session_id);
+            return;
+        }
         if !self.running {
             self.running = true;
             self.publish(HostEvent::RunStarted);
@@ -1534,41 +1600,21 @@ impl Pump {
             .map(|(wire, _)| wire.clone())
     }
 
-    /// How the run that just ended on a child finished: failed when
-    /// the announcement said so, cancelled on a cancel stop, else done.
-    fn child_outcome(&self, wire: &str) -> RunOutcome {
-        let track = self.children.get(wire);
-        if track.is_some_and(|track| track.state == Some(SubagentState::Failed)) {
-            return RunOutcome::Failed {
-                error: kage_core::LoopError::Provider {
-                    message: track
-                        .and_then(|track| track.reason.clone())
-                        .unwrap_or_else(|| "subagent failed".to_owned()),
-                },
-            };
-        }
-        let stop = self
-            .store
-            .state()
-            .session(wire)
-            .and_then(|session| session.last_stop);
-        match stop {
-            Some(kage_client::wire::StopReason::Cancelled) => RunOutcome::Cancelled,
-            _ => RunOutcome::Completed,
-        }
-    }
-
-    /// A subagent's session moved: refreshes its App view. The main
-    /// session's moves are [`Self::session_moved`].
+    /// A subagent's session moved: refreshes its App view without
+    /// treating provider turns as child-run boundaries.
     fn child_moved(&mut self, wire: &str) {
         if self.children.contains_key(wire) {
             self.child_sync(wire);
         }
     }
 
-    /// Brings one child's App view up to date: model, usage,
-    /// transcript, then the run edges its working flag crosses.
+    /// Refreshes a child's model, usage and transcript. Its parent
+    /// announces the run lifetime independently of provider turns.
     fn child_sync(&mut self, wire: &str) {
+        let Some(track) = self.children.get(wire) else {
+            return;
+        };
+        let (app, working) = (track.app, track.running);
         let snapshot = self.store.state().session(wire).map(|session| {
             (
                 session
@@ -1577,15 +1623,11 @@ impl Pump {
                     .find(|option| option.id == "model")
                     .map(|option| option.current_value.clone()),
                 session.usage.clone(),
-                // A child runs on the agent's own prompt: the live
-                // signal is its turn flag, not a prompt this side sent.
-                session.running || session.compacting || session.in_turn,
             )
         });
-        let Some((model, usage, working)) = snapshot else {
+        let Some((model, usage)) = snapshot else {
             return;
         };
-        let app = self.app_of(wire);
         if let Some(model) = model {
             self.publish_on(
                 app,
@@ -1605,22 +1647,43 @@ impl Pump {
             },
         );
         self.child_transcript(wire);
-        let was = self.children.get(wire).is_some_and(|track| track.running);
-        if working && !was {
-            if let Some(track) = self.children.get_mut(wire) {
-                track.running = true;
-                track.ended = false;
-            }
-            self.publish_on(app, HostEvent::RunStarted);
-        } else if !working && was {
-            if let Some(track) = self.children.get_mut(wire) {
-                track.running = false;
-                track.ended = true;
-            }
-            let outcome = self.child_outcome(wire);
-            self.publish_on(app, HostEvent::RunEnded { outcome });
-            self.child_close_tail(wire);
+    }
+
+    /// Resets a replaced child's tracking and displayed conversation
+    /// before the replacement replay arrives.
+    fn reset_child_transcript(&mut self, wire: &str) {
+        let Some(track) = self.children.get_mut(wire) else {
+            return;
+        };
+        track.committed = 0;
+        track.tools.clear();
+        track.tail = None;
+        let app = track.app;
+        self.publish_on(
+            app,
+            HostEvent::SessionChanged {
+                path: PathBuf::from(format!("{wire}.jsonl")),
+                title: None,
+                timeline: Vec::new(),
+                compacted_agents: Vec::new(),
+            },
+        );
+    }
+
+    /// Settles a child exactly once, finalizing its stream before the
+    /// App may evict the finished view.
+    fn end_child(&mut self, wire: &str, outcome: RunOutcome) {
+        let Some(track) = self.children.get_mut(wire) else {
+            return;
+        };
+        if track.ended {
+            return;
         }
+        track.running = false;
+        track.ended = true;
+        let app = track.app;
+        self.child_close_tail(wire);
+        self.publish_on(app, HostEvent::RunEnded { outcome });
     }
 
     /// Finalizes a child's streaming bubble and counts its item as
@@ -1636,11 +1699,12 @@ impl Pump {
         }
     }
 
-    /// The agent tree of `parent` moved. Announces children the App
-    /// has not seen, catches each one up, maps announcements that
-    /// arrived terminal onto run edges, and forgets children the tree
-    /// dropped.
+    /// Reconciles the children announced by a mapped parent. Incoming
+    /// session trees wait in the store until that session is adopted.
     fn agents_moved(&mut self, parent: &str) {
+        if parent != self.wire && !self.children.contains_key(parent) {
+            return;
+        }
         let agents = self
             .store
             .state()
@@ -1648,9 +1712,9 @@ impl Pump {
             .map(|session| session.agents.clone())
             .unwrap_or_default();
         let parent_app = self.app_of(parent);
-        let mut fresh: Vec<String> = Vec::new();
         for (wire, sub) in &agents {
-            if !self.children.contains_key(wire) {
+            let fresh = !self.children.contains_key(wire);
+            if fresh {
                 let app = SessionId::new();
                 self.children.insert(
                     wire.clone(),
@@ -1662,8 +1726,6 @@ impl Pump {
                         tail: None,
                         running: false,
                         ended: false,
-                        state: None,
-                        reason: None,
                     },
                 );
                 lock(&self.child_files).insert(app, wire.clone());
@@ -1683,62 +1745,52 @@ impl Pump {
                         background: sub.background,
                     },
                 );
-                fresh.push(wire.clone());
             }
+            let terminal = matches!(
+                sub.state,
+                Some(
+                    SubagentState::Completed
+                        | SubagentState::Failed
+                        | SubagentState::Cancelled
+                        | SubagentState::Unknown
+                )
+            );
             let track = self.children.get_mut(wire).expect("mapped above");
-            track.state = sub.state;
-            track.reason.clone_from(&sub.reason);
-        }
-        for wire in &fresh {
+            let app = track.app;
+            let starting = !track.running && (!terminal || !track.ended);
+            let restarting = starting && track.ended;
+            if starting {
+                track.running = true;
+                track.ended = false;
+                self.publish_on(app, HostEvent::RunStarted);
+                if restarting {
+                    self.reset_child_transcript(wire);
+                }
+            }
             self.child_sync(wire);
-        }
-        // A child announced already terminal never runs again: its run
-        // edges come from the announcement, not from a turn.
-        let mut terminal: Vec<(SessionId, SubagentState, Option<String>)> = Vec::new();
-        for (wire, sub) in &agents {
-            let Some(state) = sub.state else {
-                continue;
-            };
-            if matches!(state, SubagentState::Running | SubagentState::Paused) {
-                continue;
-            }
-            let Some(track) = self.children.get(wire) else {
-                continue;
-            };
-            if !track.running && !track.ended {
-                terminal.push((track.app, state, sub.reason.clone()));
-            }
-        }
-        for (app, state, reason) in terminal {
-            self.publish_on(app, HostEvent::RunStarted);
-            let outcome = match state {
-                SubagentState::Failed => RunOutcome::Failed {
-                    error: kage_core::LoopError::Provider {
-                        message: reason.unwrap_or_else(|| "subagent failed".to_owned()),
+            if terminal {
+                let outcome = match sub.state {
+                    Some(SubagentState::Failed | SubagentState::Unknown) => RunOutcome::Failed {
+                        error: kage_core::LoopError::Provider {
+                            message: sub
+                                .reason
+                                .clone()
+                                .unwrap_or_else(|| "subagent failed".to_owned()),
+                        },
                     },
-                },
-                SubagentState::Cancelled => RunOutcome::Cancelled,
-                _ => RunOutcome::Completed,
-            };
-            self.publish_on(app, HostEvent::RunEnded { outcome });
-            if let Some(track) = self.children.values_mut().find(|track| track.app == app) {
-                track.ended = true;
+                    Some(SubagentState::Cancelled) => RunOutcome::Cancelled,
+                    _ => RunOutcome::Completed,
+                };
+                self.end_child(wire, outcome);
             }
-            let wire = agents
-                .keys()
-                .find(|wire| {
-                    self.children
-                        .get(*wire)
-                        .is_some_and(|track| track.app == app)
-                })
-                .cloned();
-            if let Some(wire) = wire {
-                self.child_close_tail(&wire);
+            if fresh {
+                self.child_asks(wire);
+                self.agents_moved(wire);
             }
         }
         self.children
             .retain(|wire, track| track.parent != parent || agents.contains_key(wire));
-        let live: HashSet<SessionId> = self.children.values().map(|t| t.app).collect();
+        let live: HashSet<SessionId> = self.children.values().map(|track| track.app).collect();
         lock(&self.child_files).retain(|app, _| live.contains(app));
     }
 
@@ -1754,31 +1806,22 @@ impl Pump {
         else {
             return;
         };
-        let Some(track) = self.children.get(wire) else {
+        let Some(track) = self.children.get_mut(wire) else {
             return;
         };
         let app = track.app;
-        let mut tools = track.tools.clone();
+        let mut tools = std::mem::take(&mut track.tools);
         let mut committed = track.committed;
         let mut tail = track.tail;
-        // A replaced session replays from empty: everything tracked is
-        // stale, and the old cursor would slice past the transcript.
-        if committed > items.len() {
-            if tail.take().is_some() {
-                self.message_end(app);
-            }
-            committed = 0;
-            tools.clear();
-        }
         self.child_tool_phases(app, &items, &mut tools);
         // The streaming tail: the item still last grows by suffix;
         // once anything else ends the transcript, what streamed counts
         // as handed over and the tail moves on.
         let streaming = match items.last() {
-            Some(kage_client::TranscriptItem::Assistant { text }) => {
+            Some(kage_client::TranscriptItem::Assistant { text }) if items.len() > committed => {
                 Some((TailKind::Assistant, text.as_str()))
             }
-            Some(kage_client::TranscriptItem::Thinking { text, .. }) => {
+            Some(kage_client::TranscriptItem::Thinking { text, .. }) if items.len() > committed => {
                 Some((TailKind::Thinking, text.as_str()))
             }
             _ => None,
@@ -1848,48 +1891,67 @@ impl Pump {
         &mut self,
         app: SessionId,
         items: &[kage_client::TranscriptItem],
-        tools: &mut BTreeMap<String, (ToolSent, usize)>,
+        tools: &mut BTreeMap<String, ChildTool>,
     ) {
         for item in items {
             let kage_client::TranscriptItem::ToolCall(call) = item else {
                 continue;
             };
             let id = ToolCallId::new(&call.tool_call_id);
-            if !tools.contains_key(&call.tool_call_id) {
+            let name = call.name.as_ref().unwrap_or(&call.title);
+            let input = call.input.clone().unwrap_or_else(|| serde_json::json!({}));
+            let sent = tools.entry(call.tool_call_id.clone()).or_insert_with(|| {
                 self.publish_on(
                     app,
                     LoopEvent::ToolCallStart {
                         id: id.clone(),
-                        name: call.name.clone().unwrap_or_else(|| call.title.clone()),
-                        input_partial: call.input.clone().unwrap_or_else(|| serde_json::json!({})),
+                        name: name.clone(),
+                        input_partial: input.clone(),
                     },
                 );
-                tools.insert(call.tool_call_id.clone(), (ToolSent::Started, 0));
+                ChildTool {
+                    phase: ToolSent::Started,
+                    name: name.clone(),
+                    input: input.clone(),
+                    progress: String::new(),
+                }
+            });
+            if sent.name != *name || sent.input != input {
+                self.publish_on(
+                    app,
+                    LoopEvent::ToolCallArgsDelta {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input_partial: input.clone(),
+                    },
+                );
+                sent.name.clone_from(name);
+                sent.input = input;
             }
             let text = call.text();
-            let (sent, seen_len) = tools[&call.tool_call_id];
             match call.status {
-                ToolCallStatus::InProgress if sent == ToolSent::Started => {
-                    self.publish_on(app, LoopEvent::ToolExecutionStart { id });
-                    tools.insert(call.tool_call_id.clone(), (ToolSent::Executing, text.len()));
-                }
-                ToolCallStatus::InProgress
-                    if sent == ToolSent::Executing && text.len() != seen_len =>
-                {
-                    let progress = text.len();
-                    self.publish_on(
-                        app,
-                        LoopEvent::ToolUpdate {
-                            id,
-                            update: kage_core::ToolUpdate {
-                                content: text,
-                                structured: None,
+                ToolCallStatus::InProgress if sent.phase != ToolSent::Ended => {
+                    if sent.phase == ToolSent::Started {
+                        self.publish_on(app, LoopEvent::ToolExecutionStart { id: id.clone() });
+                        sent.phase = ToolSent::Executing;
+                    }
+                    if text != sent.progress {
+                        self.publish_on(
+                            app,
+                            LoopEvent::ToolUpdate {
+                                id,
+                                update: kage_core::ToolUpdate {
+                                    content: text.clone(),
+                                    structured: None,
+                                },
                             },
-                        },
-                    );
-                    tools.insert(call.tool_call_id.clone(), (ToolSent::Executing, progress));
+                        );
+                        sent.progress = text;
+                    }
                 }
-                ToolCallStatus::Completed | ToolCallStatus::Failed if sent != ToolSent::Ended => {
+                ToolCallStatus::Completed | ToolCallStatus::Failed
+                    if sent.phase != ToolSent::Ended =>
+                {
                     self.publish_on(
                         app,
                         LoopEvent::ToolCallEnd {
@@ -1901,7 +1963,7 @@ impl Pump {
                             },
                         },
                     );
-                    tools.insert(call.tool_call_id.clone(), (ToolSent::Ended, 0));
+                    sent.phase = ToolSent::Ended;
                 }
                 _ => {}
             }
@@ -2002,6 +2064,9 @@ impl Pump {
     /// A subagent's permission asks moved. Children ask no questions,
     /// so only tool approvals forward.
     fn child_asks(&mut self, wire: &str) {
+        if !self.children.contains_key(wire) {
+            return;
+        }
         let (open, asks) = {
             let Some(session) = self.store.state().session(wire) else {
                 return;
@@ -2077,10 +2142,11 @@ impl Pump {
     /// model carried over. A resumed session keeps the model it was
     /// recorded with, as the engine path does.
     fn adopt(&mut self, id: &str, carry_model: bool) {
-        self.close_ask_cards();
-        // The session the App leaves takes its subagents with it.
-        self.children.clear();
-        lock(&self.child_files).clear();
+        if self.wire != id {
+            self.close_ask_cards();
+            self.children.clear();
+            lock(&self.child_files).clear();
+        }
         if self.running {
             self.store.client().cancel(&self.wire);
             self.running = false;
@@ -2117,6 +2183,7 @@ impl Pump {
         self.publish(HostEvent::UsageUpdated {
             usage: self.usage_snapshot(),
         });
+        self.agents_moved(id);
     }
 
     fn asks_moved(&mut self, id: &str) {
@@ -2386,9 +2453,29 @@ impl Pump {
         }
     }
 
+    /// Returns submissions that raced with transport shutdown.
+    fn handle_closed(&mut self, request: RunRequest) {
+        if let RunRequest::Submit {
+            text,
+            images,
+            queue,
+            session,
+        } = request
+        {
+            self.return_prompt(
+                session.unwrap_or(self.app_session),
+                submission_content(text, &images),
+                queue,
+                DETACHED.to_owned(),
+            );
+        } else {
+            self.notice(NoticeLevel::Error, DETACHED.to_owned());
+        }
+    }
+
     fn handle(&mut self, request: RunRequest) {
         if self.closed {
-            self.notice(NoticeLevel::Error, DETACHED.to_owned());
+            self.handle_closed(request);
             return;
         }
         match request {
@@ -2399,10 +2486,15 @@ impl Pump {
                 session,
             } => match self.route_of(session) {
                 Some(wire) => self.submit_to(&wire, text, images, queue),
-                None => self.notice(NoticeLevel::Warning, GONE_AGENT.to_owned()),
+                None => self.return_prompt(
+                    session.unwrap_or(self.app_session),
+                    submission_content(text, &images),
+                    queue,
+                    GONE_AGENT.to_owned(),
+                ),
             },
             RunRequest::Cancel { session } => self.cancel_of(session),
-            RunRequest::RecallPrompt { delivery, .. } => self.recall(delivery),
+            RunRequest::RecallPrompt { session, delivery } => self.recall_of(session, delivery),
             RunRequest::SwitchModel(model) => {
                 self.model.clone_from(&model);
                 self.store
@@ -2515,6 +2607,28 @@ impl Pump {
         images: Vec<kage_tui::image::AttachedImage>,
         queue: bool,
     ) {
+        if wire != self.wire {
+            let live = self
+                .children
+                .get(wire)
+                .is_some_and(|track| track.running && !track.ended);
+            let refusal = if queue {
+                Some("subagents accept live steering only; queued prompts are not supported")
+            } else if !live {
+                Some("that agent has finished; only a running agent can be steered")
+            } else {
+                None
+            };
+            if let Some(message) = refusal {
+                self.return_prompt(
+                    self.app_of(wire),
+                    submission_content(text, &images),
+                    queue,
+                    message.to_owned(),
+                );
+                return;
+            }
+        }
         let _ = crate::history::append(&text);
         let mut blocks = Vec::new();
         if !text.is_empty() || images.is_empty() {
@@ -2549,6 +2663,24 @@ impl Pump {
                 format!("{dropped} {noun} cannot ride the ACP link and {verb} dropped"),
             );
         }
+        if wire != self.wire {
+            if let Err(error) = self.store.client().steer(wire, blocks.clone()) {
+                self.return_prompt(
+                    self.app_of(wire),
+                    content_of(&blocks),
+                    false,
+                    match error {
+                        kage_client::SteerError::NotRunning => {
+                            "that agent is no longer running".to_owned()
+                        }
+                        kage_client::SteerError::NotAdvertised => {
+                            "the host does not support live steering".to_owned()
+                        }
+                    },
+                );
+            }
+            return;
+        }
         if queue {
             self.store.client().prompt(wire, blocks);
             return;
@@ -2565,6 +2697,42 @@ impl Pump {
             return;
         }
         self.store.client().prompt(wire, blocks);
+    }
+
+    /// Returns a refused submission to the composer instead of silently
+    /// dropping it when its child session cannot accept the prompt.
+    fn return_prompt(
+        &mut self,
+        app: SessionId,
+        content: Vec<kage_core::Content>,
+        queue: bool,
+        message: String,
+    ) {
+        self.publish_on(
+            app,
+            HostEvent::PromptWithdrawn {
+                delivery: if queue {
+                    Delivery::Queue
+                } else {
+                    Delivery::Steer
+                },
+                content: Some(content),
+            },
+        );
+        self.notice(NoticeLevel::Warning, message);
+    }
+
+    /// Recalls only main-session prompts. Child steering is live-only
+    /// and cannot withdraw an unrelated prompt from the main session.
+    fn recall_of(&mut self, session: Option<SessionId>, delivery: Delivery) {
+        if self.route_of(session).is_some_and(|wire| wire == self.wire) {
+            self.recall(delivery);
+        } else {
+            self.notice(
+                NoticeLevel::Warning,
+                "subagent steering cannot be recalled".to_owned(),
+            );
+        }
     }
 
     fn recall(&mut self, delivery: Delivery) {
@@ -2802,6 +2970,10 @@ impl Pump {
             surface.cancel.cancel();
         }
         self.store.interrupt_running();
+        let children: Vec<String> = self.children.keys().cloned().collect();
+        for wire in children {
+            self.end_child(&wire, RunOutcome::Cancelled);
+        }
         if self.running {
             self.running = false;
             let outcome = RunOutcome::Cancelled;
@@ -2960,6 +3132,22 @@ fn media_source(blob: &BlobContent) -> MediaSource {
             data: blob.data.clone(),
         },
     }
+}
+
+/// The original draft content of a submission that could not be sent.
+fn submission_content(
+    text: String,
+    images: &[kage_tui::image::AttachedImage],
+) -> Vec<kage_core::Content> {
+    let mut content = Vec::new();
+    if !text.is_empty() || images.is_empty() {
+        content.push(kage_core::Content::Text { text });
+    }
+    content.extend(images.iter().map(|image| kage_core::Content::Image {
+        source: image.source.clone(),
+        mime: image.mime.clone(),
+    }));
+    content
 }
 
 /// The modality a child's media item carries, by MIME type.
@@ -3243,7 +3431,7 @@ pub(crate) fn run(
         plugin_answers,
         plugin_answers_tx,
         recorder,
-        prompts: HashSet::new(),
+        prompts: HashMap::new(),
         run_error: None,
         yolo,
         environment,
@@ -3528,7 +3716,7 @@ mod tests {
             plugin_answers,
             plugin_answers_tx,
             recorder,
-            prompts: HashSet::new(),
+            prompts: HashMap::new(),
             run_error: None,
             yolo: false,
             environment: false,
@@ -3753,6 +3941,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn advertise_steering(pump: &mut Pump) {
+        let request = pump
+            .store
+            .client()
+            .initialize(ClientCapabilities::default(), None);
+        pump.store.take_outgoing();
+        pump.absorb(Frame::Success {
+            id: RequestId::Number(request),
+            result: serde_json::json!({
+                "protocolVersion": 1,
+                "agentCapabilities": {"steer": true}
+            }),
+        });
+    }
+
     /// Announces a subagent of the wire session and returns the App
     /// session its envelopes ride. `extra` folds into the update, as
     /// a terminal `state` does.
@@ -3817,6 +4020,9 @@ mod tests {
                 }
                 kage_core::protocol::Event::Loop(LoopEvent::MessageEnd { .. }) => {
                     Some("msgend".to_owned())
+                }
+                kage_core::protocol::Event::Host(HostEvent::SessionChanged { .. }) => {
+                    Some("reset".to_owned())
                 }
                 kage_core::protocol::Event::Host(HostEvent::RunStarted) => {
                     Some("runstart".to_owned())
@@ -3894,15 +4100,641 @@ mod tests {
         );
         assert_eq!(
             agent_events(&app, child),
-            [
-                "start:ls",
-                "runstart",
-                "text:Listed.",
-                "msgend",
-                "runend:Completed"
-            ],
+            ["start:ls", "text:Listed.", "msgend"]
+        );
+        pump.absorb(Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({"sessionId": "s1", "update": {
+                "sessionUpdate": "subagent_update", "subagentSessionId": "child", "state": "completed"
+            }}),
+        });
+        assert_eq!(agent_events(&app, child), ["runend:Completed"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn tool_calling_child_turn(pump: &mut Pump) {
+        for update in [
+            serde_json::json!({
+                "sessionUpdate": "_kage/turn", "phase": "start"
+            }),
+            serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call-child",
+                "title": "ls",
+                "kind": "read",
+                "status": "pending",
+                "rawInput": {"path": "/w"}
+            }),
+            serde_json::json!({
+                "sessionUpdate": "_kage/turn", "phase": "end", "reason": "tool_calls"
+            }),
+        ] {
+            child_update(pump, &update);
+        }
+    }
+
+    #[test]
+    fn a_child_stays_running_between_provider_turns() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let child = announced_child(&mut pump, &app, &serde_json::json!({"state": "running"}));
+        tool_calling_child_turn(&mut pump);
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-child",
+                "status": "in_progress"
+            }),
+        );
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-child",
+                "status": "completed",
+                "content": [{"type": "content", "content": {"type": "text", "text": "main.rs"}}]
+            }),
+        );
+        assert_eq!(
+            pump.store.state().session("s1").unwrap().agents["child"].state,
+            Some(SubagentState::Running)
+        );
+        let events = agent_events(&app, child);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            events,
+            ["runstart", "start:ls", "end:main.rs"],
+            "a tool-calling provider turn ends before tool execution, not the child run; the parent still announces Running"
+        );
+    }
+
+    #[test]
+    fn a_terminal_announcement_reports_the_actual_child_failure() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let child = announced_child(&mut pump, &app, &serde_json::json!({"state": "running"}));
+        tool_calling_child_turn(&mut pump);
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-child",
+                "status": "failed",
+                "content": [{"type": "content", "content": {"type": "text", "text": "permission denied"}}]
+            }),
+        );
+        pump.absorb(Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "subagent_update",
+                    "subagentSessionId": "child",
+                    "state": "failed"
+                }
+            }),
+        });
+        assert_eq!(
+            pump.store.state().session("s1").unwrap().agents["child"].state,
+            Some(SubagentState::Failed)
+        );
+        let outcomes: Vec<_> = app
+            .try_iter()
+            .filter(|envelope| envelope.session == child)
+            .filter_map(|envelope| match envelope.event {
+                kage_core::protocol::Event::Host(HostEvent::RunEnded { outcome }) => Some(outcome),
+                _ => None,
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            outcomes,
+            [RunOutcome::Failed {
+                error: kage_core::LoopError::Provider {
+                    message: "subagent failed".to_owned(),
+                },
+            }],
+            "the terminal parent announcement, not the earlier provider turn, determines the child outcome"
+        );
+    }
+
+    #[test]
+    fn a_bootstrap_resume_keeps_its_restored_child_mappings() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.bootstrap(Some(Path::new("/sessions/s1.jsonl")));
+        let load = RequestId::Number(
+            pump.pending_open
+                .as_ref()
+                .expect("the load is pending")
+                .request,
+        );
+        let child = announced_child(&mut pump, &app, &serde_json::json!({"state": "completed"}));
+        assert_eq!(pump.wire, "s1");
+        assert_eq!(pump.children["child"].app, child);
+        assert_eq!(
+            lock(&pump.child_files).get(&child).map(String::as_str),
+            Some("child")
+        );
+        pump.absorb(Frame::Success {
+            id: load,
+            result: serde_json::json!({"configOptions": model_options("test:model")}),
+        });
+        let mapping = (
+            pump.children.get("child").map(|track| track.app),
+            lock(&pump.child_files).get(&child).cloned(),
         );
         let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            mapping,
+            (Some(child), Some("child".to_owned())),
+            "session/load announces restored children before its response; adopting that same session must retain their routing and file mappings"
+        );
+    }
+
+    #[test]
+    fn replacing_a_childs_first_streaming_message_resets_before_replay() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let child = announced_child(&mut pump, &app, &Value::Null);
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "old answer"}
+            }),
+        );
+        assert_eq!(pump.children["child"].committed, 0);
+        assert!(pump.children["child"].tail.is_some());
+        child_update(
+            &mut pump,
+            &serde_json::json!({"sessionUpdate": "_kage/session_replaced"}),
+        );
+        assert_eq!(pump.children["child"].committed, 0);
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "new answer"}
+            }),
+        );
+        let events = agent_events(&app, child);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            events,
+            ["runstart", "text:old answer", "reset", "text:new answer"]
+        );
+    }
+
+    #[test]
+    fn terminal_announcements_settle_open_child_turns_once() {
+        for (state, outcome) in [
+            ("completed", "Completed"),
+            ("cancelled", "Cancelled"),
+            (
+                "failed",
+                "Failed { error: Provider { message: \"subagent failed\" } }",
+            ),
+        ] {
+            let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+            let child = announced_child(&mut pump, &app, &Value::Null);
+            let _ = app.try_iter().count();
+            child_update(
+                &mut pump,
+                &serde_json::json!({
+                    "sessionUpdate": "_kage/turn", "phase": "start"
+                }),
+            );
+            child_update(
+                &mut pump,
+                &serde_json::json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "partial"}
+                }),
+            );
+            let terminal = Frame::Notification {
+                method: "session/update".into(),
+                params: serde_json::json!({"sessionId": "s1", "update": {
+                    "sessionUpdate": "subagent_update", "subagentSessionId": "child", "state": state
+                }}),
+            };
+            pump.absorb(terminal.clone());
+            assert_eq!(
+                agent_events(&app, child),
+                [
+                    "text:partial".to_owned(),
+                    "msgend".to_owned(),
+                    format!("runend:{outcome}")
+                ]
+            );
+            pump.absorb(terminal);
+            assert!(
+                agent_events(&app, child).is_empty(),
+                "a terminal announcement cannot replay or settle twice"
+            );
+            assert!(!pump.children["child"].running);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn replacing_a_first_thinking_tail_clears_tracking_before_replay() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let child = announced_child(&mut pump, &app, &Value::Null);
+        let _ = app.try_iter().count();
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "old reasoning"}
+            }),
+        );
+        let _ = app.try_iter().count();
+        child_update(
+            &mut pump,
+            &serde_json::json!({"sessionUpdate": "_kage/session_replaced"}),
+        );
+        assert_eq!(agent_events(&app, child), ["reset"]);
+        assert!(pump.children["child"].tail.is_none());
+        assert_eq!(pump.children["child"].committed, 0);
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "new answer"}
+            }),
+        );
+        assert_eq!(agent_events(&app, child), ["text:new answer"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn child_tool_updates_deliver_arguments_and_replaced_progress() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let child = announced_child(&mut pump, &app, &Value::Null);
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "tool_call", "toolCallId": "call-child", "title": "read", "status": "pending", "rawInput": {}
+            }),
+        );
+        let _ = app.try_iter().count();
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "tool_call_update", "toolCallId": "call-child", "rawInput": {"path": "file.rs"}
+            }),
+        );
+        for progress in ["step 1", "step 2", "step 2"] {
+            child_update(
+                &mut pump,
+                &serde_json::json!({
+                    "sessionUpdate": "tool_call_update", "toolCallId": "call-child", "status": "in_progress",
+                    "content": [{"type": "content", "content": {"type": "text", "text": progress}}]
+                }),
+            );
+        }
+        let delivered: Vec<String> = app
+            .try_iter()
+            .filter(|event| event.session == child)
+            .filter_map(|envelope| match envelope.event {
+                kage_core::protocol::Event::Loop(LoopEvent::ToolCallArgsDelta {
+                    input_partial,
+                    ..
+                }) => Some(format!("args:{input_partial}")),
+                kage_core::protocol::Event::Loop(LoopEvent::ToolExecutionStart { .. }) => {
+                    Some("executing".to_owned())
+                }
+                kage_core::protocol::Event::Loop(LoopEvent::ToolUpdate { update, .. }) => {
+                    Some(format!("progress:{}", update.content))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            delivered,
+            [
+                "args:{\"path\":\"file.rs\"}",
+                "executing",
+                "progress:step 1",
+                "progress:step 2"
+            ]
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn adopting_an_incoming_session_rebuilds_its_nested_child_mappings() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let old = announced_child(&mut pump, &app, &Value::Null);
+        pump.open_recorded(Path::new("/sessions/next.jsonl"));
+        let load = request_id(&pump.store.take_outgoing(), "session/load");
+        let _ = app.try_iter().count();
+        for (parent, child) in [("next", "incoming"), ("incoming", "nested")] {
+            pump.absorb(Frame::Notification {
+                method: "session/update".into(),
+                params: serde_json::json!({"sessionId": parent, "update": {
+                    "sessionUpdate": "subagent_update", "subagentSessionId": child, "toolCallId": child, "state": "running"
+                }}),
+            });
+        }
+        assert!(
+            !pump.children.contains_key("incoming"),
+            "the outgoing view must not adopt incoming agents early"
+        );
+        pump.absorb(Frame::Success {
+            id: load,
+            result: serde_json::json!({"configOptions": []}),
+        });
+        let incoming = pump.children["incoming"].app;
+        let nested = pump.children["nested"].app;
+        assert_eq!(pump.children.len(), 2);
+        assert_eq!(pump.children["nested"].parent, "incoming");
+        let files = lock(&pump.child_files);
+        assert!(!files.contains_key(&old));
+        assert_eq!(files.get(&incoming).map(String::as_str), Some("incoming"));
+        assert_eq!(files.get(&nested).map(String::as_str), Some("nested"));
+        drop(files);
+        assert!(app.try_iter().any(|envelope| envelope.session == nested && matches!(
+            envelope.event, kage_core::protocol::Event::Host(HostEvent::AgentSpawned { parent, .. }) if parent == incoming
+        )));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn disconnect_settles_nested_children_and_closes_their_streams() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let child = announced_child(&mut pump, &app, &Value::Null);
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "subagent_update", "subagentSessionId": "nested", "toolCallId": "nested", "state": "running"
+            }),
+        );
+        let nested = pump.children["nested"].app;
+        let _ = app.try_iter().count();
+        for wire in ["child", "nested"] {
+            pump.absorb(Frame::Notification {
+                method: "session/update".into(),
+                params: serde_json::json!({"sessionId": wire, "update": {
+                    "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "partial"}
+                }}),
+            });
+        }
+        let _ = app.try_iter().count();
+        pump.close();
+        let envelopes: Vec<_> = app.try_iter().collect();
+        for session in [child, nested] {
+            let events: Vec<_> = envelopes
+                .iter()
+                .filter(|event| event.session == session)
+                .map(|event| &event.event)
+                .collect();
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [
+                        kage_core::protocol::Event::Loop(LoopEvent::MessageEnd { .. }),
+                        kage_core::protocol::Event::Host(HostEvent::RunEnded {
+                            outcome: RunOutcome::Cancelled
+                        })
+                    ]
+                ),
+                "each live child closes its stream before it can be evicted: {events:?}"
+            );
+        }
+        pump.close();
+        assert!(app.try_iter().next().is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_refused_child_prompt_returns_the_original_draft() {
+        for (state, queue) in [("running", true), ("completed", false)] {
+            let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+            let child = announced_child(&mut pump, &app, &serde_json::json!({"state": state}));
+            let _ = app.try_iter().count();
+            pump.handle(RunRequest::Submit {
+                text: "keep this draft".to_owned(),
+                images: Vec::new(),
+                queue,
+                session: Some(child),
+            });
+            assert!(!has_request(&pump.store.take_outgoing(), "session/prompt"));
+            let returned = app.try_iter().find_map(|envelope| match envelope.event {
+                kage_core::protocol::Event::Host(HostEvent::PromptWithdrawn {
+                    content, ..
+                }) if envelope.session == child => content,
+                _ => None,
+            });
+            assert_eq!(
+                returned,
+                Some(vec![kage_core::Content::Text {
+                    text: "keep this draft".to_owned()
+                }])
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn child_steering_echoes_on_the_child_and_returns_a_rejected_prompt() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        advertise_steering(&mut pump);
+        let child = announced_child(&mut pump, &app, &Value::Null);
+        let _ = app.try_iter().count();
+        pump.handle(RunRequest::Submit {
+            text: "steer this child".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: Some(child),
+        });
+        let sent = pump.store.take_outgoing();
+        let prompt = request_id(&sent, "session/prompt");
+        for frame in &sent {
+            pump.observe_outgoing(frame);
+        }
+        let echoes: Vec<_> = app
+            .try_iter()
+            .filter(|envelope| {
+                matches!(
+                    envelope.event,
+                    kage_core::protocol::Event::Loop(LoopEvent::MessageAppended { .. })
+                )
+            })
+            .collect();
+        assert_eq!(echoes.len(), 1);
+        assert_eq!(echoes[0].session, child);
+        pump.absorb(Frame::Failure {
+            id: prompt,
+            error: RpcError::new(-32603, "child busy"),
+        });
+        let returned =
+            app.try_iter().find_map(|envelope| match envelope.event {
+                kage_core::protocol::Event::Host(HostEvent::PromptWithdrawn {
+                    content, ..
+                }) if envelope.session == child => content,
+                _ => None,
+            });
+        assert_eq!(
+            returned,
+            Some(vec![kage_core::Content::Text {
+                text: "steer this child".to_owned()
+            }])
+        );
+        assert!(
+            pump.children["child"].running,
+            "a rejected steer must not settle the independent child run"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bootstrap_adoption_preserves_an_outstanding_child_approval() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.bootstrap(Some(Path::new("/sessions/s1.jsonl")));
+        let load = RequestId::Number(pump.pending_open.as_ref().unwrap().request);
+        let child = announced_child(&mut pump, &app, &Value::Null);
+        pump.absorb(Frame::Request {
+            id: RequestId::Number(101),
+            method: "session/request_permission".into(),
+            params: serde_json::json!({
+                "sessionId": "child",
+                "toolCall": {"toolCallId": "child-call", "title": "ls", "status": "pending", "rawInput": {}},
+                "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]
+            }),
+        });
+        let ask = app
+            .try_iter()
+            .find_map(|event| match event.event {
+                kage_core::protocol::Event::Host(HostEvent::PermissionRequested {
+                    request_id,
+                    ..
+                }) if event.session == child => Some(request_id),
+                _ => None,
+            })
+            .expect("the resumed child asks before the load response");
+        pump.absorb(Frame::Success {
+            id: load,
+            result: serde_json::json!({"configOptions": []}),
+        });
+        assert!(pump.ask_ids.contains_key(&ask.0));
+        assert!(!app.try_iter().any(|event| matches!(event.event,
+            kage_core::protocol::Event::Host(HostEvent::PermissionResolved { request_id }) if request_id == ask
+        )));
+        pump.resolve_permission(ask, kage_tui::PermissionDecision::AllowOnce);
+        assert!(pump.store.take_outgoing().iter().any(|frame| matches!(
+            frame,
+            Frame::Success {
+                id: RequestId::Number(101),
+                ..
+            }
+        )));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_submission_racing_with_disconnect_returns_text_and_attachments() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let child = announced_child(&mut pump, &app, &Value::Null);
+        pump.close();
+        let _ = app.try_iter().count();
+        pump.handle(RunRequest::Submit {
+            text: "not delivered".into(),
+            images: vec![kage_tui::image::AttachedImage {
+                source: MediaSource::Url {
+                    url: "https://example.test/image.png".into(),
+                },
+                mime: "image/png".into(),
+                label: "image".into(),
+                bytes: 0,
+            }],
+            queue: false,
+            session: Some(child),
+        });
+        assert!(!has_request(&pump.store.take_outgoing(), "session/prompt"));
+        let content = app
+            .try_iter()
+            .find_map(|event| match event.event {
+                kage_core::protocol::Event::Host(HostEvent::PromptWithdrawn {
+                    content, ..
+                }) if event.session == child => content,
+                _ => None,
+            })
+            .expect("a disconnected submission returns to its draft");
+        assert_eq!(
+            content,
+            vec![
+                kage_core::Content::Text {
+                    text: "not delivered".into()
+                },
+                kage_core::Content::Image {
+                    source: MediaSource::Url {
+                        url: "https://example.test/image.png".into()
+                    },
+                    mime: "image/png".into()
+                },
+            ]
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn recalling_a_child_prompt_does_not_withdraw_from_the_main_session() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let child = announced_child(&mut pump, &app, &Value::Null);
+        pump.handle(RunRequest::RecallPrompt {
+            session: Some(child),
+            delivery: Delivery::Steer,
+        });
+        assert!(pump.store.take_outgoing().is_empty());
+        assert!(
+            notices(&app)
+                .iter()
+                .any(|(_, message)| message.contains("cannot be recalled"))
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_unconsumed_child_steer_returns_once_even_if_the_run_failed() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        advertise_steering(&mut pump);
+        let child = announced_child(&mut pump, &app, &Value::Null);
+        pump.handle(RunRequest::Submit {
+            text: "unconsumed".into(),
+            images: Vec::new(),
+            queue: false,
+            session: Some(child),
+        });
+        let outgoing = pump.store.take_outgoing();
+        let prompt = request_id(&outgoing, "session/prompt");
+        for frame in &outgoing {
+            pump.observe_outgoing(frame);
+        }
+        let _ = app.try_iter().count();
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "_kage/prompt_withdrawn", "delivery": "steer",
+                "content": [{"type": "text", "text": "unconsumed"}]
+            }),
+        );
+        pump.absorb(Frame::Failure {
+            id: prompt,
+            error: RpcError::new(-32603, "provider failed"),
+        });
+        let returned: Vec<_> = app
+            .try_iter()
+            .filter_map(|event| match event.event {
+                kage_core::protocol::Event::Host(HostEvent::PromptWithdrawn {
+                    content, ..
+                }) if event.session == child => content,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            returned,
+            vec![vec![kage_core::Content::Text {
+                text: "unconsumed".into()
+            }]]
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -3956,6 +4788,7 @@ mod tests {
     #[test]
     fn a_prompt_addressed_to_an_agent_reaches_its_session() {
         let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        advertise_steering(&mut pump);
         let child = announced_child(&mut pump, &app, &Value::Null);
         let _ = app.try_iter().count();
         pump.handle(RunRequest::Submit {
@@ -3968,6 +4801,7 @@ mod tests {
         let to_child = sent.iter().any(|frame| match frame {
             Frame::Request { method, params, .. } if method == "session/prompt" => {
                 params.get("sessionId").and_then(Value::as_str) == Some("child")
+                    && params["delivery"] == "steer"
             }
             _ => false,
         });
@@ -4030,12 +4864,12 @@ mod tests {
         assert_eq!(
             agent_events(&app, child),
             [
+                "runstart",
                 "start:ls",
                 "end:main.rs\nlib.rs",
                 "text:Listed both.",
-                "runstart",
-                "runend:Completed",
                 "msgend",
+                "runend:Completed",
             ],
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -4121,7 +4955,7 @@ mod tests {
         );
         assert_eq!(
             agent_events(&app, child),
-            ["start:ls", "start:rm", "end:done"]
+            ["start:ls", "reset", "start:rm", "end:done"]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4253,7 +5087,7 @@ mod tests {
             // The prompt is the only request the pump has sent.
             let prompt = pump
                 .prompts
-                .iter()
+                .keys()
                 .next()
                 .cloned()
                 .expect("a prompt is out");
@@ -4275,7 +5109,7 @@ mod tests {
         let (mut pump, app, recorded, dir) = running_pump();
         let prompt = pump
             .prompts
-            .iter()
+            .keys()
             .next()
             .cloned()
             .expect("a prompt is out");

@@ -24,6 +24,9 @@
 //! sessions (draft RFD PR #1992) to a client that advertises the
 //! `subagents` capability: announced with `subagent_update` on their
 //! parent's session, streaming on their own session, and asking there.
+//! An announced live child accepts explicit `steer` prompts, subject to
+//! its ancestors' prompt ownership. Queued or unmarked child prompts
+//! and prompts to finished or read-only children are rejected.
 //! For every other client they are not ACP sessions. Their permission
 //! requests and progress go to the client session at the root of their
 //! tree, on that session's top-level `agent` call.
@@ -64,7 +67,7 @@ use std::io::BufReader;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 
 use kage_acp::acp::{
     AgentCapabilities, AgentMeta, AuthSetRequest, CloseSessionRequest, CloseSessionResponse,
@@ -354,7 +357,7 @@ fn resolve_system(inline: &str, file: Option<&Path>) -> Result<String, String> {
 struct Ids {
     by_client: HashMap<String, SessionId>,
     by_engine: HashMap<SessionId, String>,
-    /// Running subagents, which the client may only cancel.
+    /// Announced live subagents, which the client may steer or cancel.
     subagents: HashMap<String, SessionId>,
     /// Agent sessions the client loaded to read. The engine never
     /// hosts them for the client, so they take no prompts.
@@ -459,7 +462,7 @@ struct PreparedExternalPrompt {
     ticket: external::PromptTicket,
 }
 
-type Waiters = Arc<Mutex<HashMap<SessionId, Vec<mpsc::Sender<PromptEnd>>>>>;
+type Waiters = Arc<Mutex<HashMap<SessionId, Vec<crossbeam_channel::Sender<PromptEnd>>>>>;
 
 type ShownBySession = Arc<Mutex<HashMap<SessionId, Shown>>>;
 
@@ -752,6 +755,42 @@ impl CliAcpAgent {
             .get(client_id)
             .copied()
             .ok_or_else(|| RpcError::new(-32602, format!("unknown session {client_id}")))
+    }
+
+    /// Resolves a prompt without granting subagents root-session operations.
+    /// Called under the bus lock so child settlement cannot pass admission.
+    fn prompt_id(
+        &self,
+        req: &PromptRequest,
+    ) -> Result<(SessionId, Option<Arc<AtomicBool>>), RpcError> {
+        let ids = lock(&self.ids);
+        if ids.read_only.contains(&req.session_id) {
+            return Err(RpcError::new(
+                -32602,
+                format!(
+                    "{} is an agent's session; agent sessions are read-only",
+                    req.session_id
+                ),
+            ));
+        }
+        if let Some(id) = ids.by_client.get(&req.session_id) {
+            return Ok((*id, None));
+        }
+        let id =
+            ids.subagents.get(&req.session_id).copied().ok_or_else(|| {
+                RpcError::new(-32602, format!("unknown session {}", req.session_id))
+            })?;
+        drop(ids);
+        if req.delivery != Some(PromptDelivery::Steer) {
+            return Err(RpcError::new(
+                -32602,
+                "live subagents only accept explicit steer delivery",
+            ));
+        }
+        let expired = lock(&self.host.live)
+            .steering_lifetime(id)
+            .ok_or_else(|| RpcError::new(-32602, "subagent is no longer live"))?;
+        Ok((id, Some(expired)))
     }
 
     fn external_session(&self, id: &str) -> Option<Arc<external::External>> {
@@ -1609,35 +1648,41 @@ impl Agent for CliAcpAgent {
     }
 
     fn prompt(&self, req: PromptRequest, ctx: &PromptContext) -> Result<PromptResponse, RpcError> {
-        if lock(&self.ids).read_only.contains(&req.session_id) {
-            return Err(RpcError::new(
-                -32602,
-                format!(
-                    "{} is an agent's session; agent sessions are read-only",
-                    req.session_id
-                ),
-            ));
-        }
-        let id = self.engine_id(&req.session_id)?;
-        let content = req.prompt.into_iter().map(prompt_content).collect();
-        let delivery = match req.delivery {
-            Some(PromptDelivery::Steer) => Delivery::Steer,
-            _ => Delivery::Queue,
-        };
-        let end = match ctx.start(|| {
-            if !self.host.claim_prompt(id, self.connection) {
-                return Err(RpcError::new(
-                    -32603,
-                    "session is busy; wait for the running prompt to finish",
-                ));
-            }
-            let (done, end) = mpsc::channel();
-            lock(&self.waiters).entry(id).or_default().push(done);
-            self.host
-                .engine
-                .send(Command::to(id, CommandKind::Prompt { content, delivery }));
-            Ok(end)
-        }) {
+        let end = self.host.engine.hold_events(|| {
+            let (id, expired) = self.prompt_id(&req)?;
+            let content = req.prompt.into_iter().map(prompt_content).collect();
+            let delivery = match req.delivery {
+                Some(PromptDelivery::Steer) => Delivery::Steer,
+                _ => Delivery::Queue,
+            };
+            Ok::<_, RpcError>(ctx.start(|| {
+                if !self.host.claim_prompt(id, self.connection) {
+                    return Err(RpcError::new(
+                        -32603,
+                        "session is busy; wait for the running prompt to finish",
+                    ));
+                }
+                let (done, end) = crossbeam_channel::unbounded();
+                lock(&self.waiters)
+                    .entry(id)
+                    .or_default()
+                    .push(done.clone());
+                let admission = if let Some(expired) = expired {
+                    let accepted = self
+                        .host
+                        .engine
+                        .steer_child(id, content, Arc::clone(&expired));
+                    Some((id, expired, done, accepted))
+                } else {
+                    self.host
+                        .engine
+                        .send(Command::to(id, CommandKind::Prompt { content, delivery }));
+                    None
+                };
+                Ok((end, admission))
+            }))
+        })?;
+        let end = match end {
             Some(result) => result?,
             None => {
                 return Ok(PromptResponse {
@@ -1645,6 +1690,29 @@ impl Agent for CliAcpAgent {
                 });
             }
         };
+        let (end, admission) = end;
+        if let Some((id, expired, done, accepted)) = admission {
+            let accepted = accepted.recv();
+            if accepted != Ok(true) {
+                self.host.engine.hold_events(|| {
+                    let mut waiters = lock(&self.waiters);
+                    if let Some(pending) = waiters.get_mut(&id) {
+                        pending.retain(|waiter| !waiter.same_channel(&done));
+                        if pending.is_empty() {
+                            waiters.remove(&id);
+                        }
+                    }
+                    if !waiters.contains_key(&id) {
+                        lock(&self.host.live).release_child_prompt(id, self.connection, &expired);
+                    }
+                });
+                return Err(if accepted.is_err() {
+                    RpcError::internal("engine stopped")
+                } else {
+                    RpcError::new(-32602, "subagent no longer accepts live steering")
+                });
+            }
+        }
         let end = end
             .recv()
             .map_err(|_| RpcError::internal("engine stopped"))?;

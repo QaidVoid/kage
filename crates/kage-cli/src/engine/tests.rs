@@ -2512,6 +2512,293 @@ fn steering_a_running_child_reaches_it() {
 }
 
 #[test]
+fn live_child_steering_rejects_completion_that_wins_dispatch() {
+    let mock = MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("work"))]),
+        tool_turn("gate"),
+        text_turn("child done"),
+        text_turn("parent done"),
+    ]);
+    let h = harness(mock.clone());
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let child = wait_for(&h.events, is_tool_start_outside(parent))
+        .last()
+        .unwrap()
+        .session;
+    let expired = Arc::new(AtomicBool::new(false));
+    let terminal = Arc::clone(&expired);
+    let (entered, entering) = channel();
+    let (release, resume) = channel();
+    h.engine.subscribe(Box::new(move |envelope| {
+        if envelope.session == child
+            && matches!(envelope.event, Event::Host(HostEvent::RunEnded { .. }))
+        {
+            entered.send(()).unwrap();
+            resume.recv_timeout(WAIT).unwrap();
+            terminal.store(true, Ordering::SeqCst);
+        }
+    }));
+    h.release.send(()).unwrap();
+    entering.recv_timeout(WAIT).unwrap();
+    let accepted = h.engine.steer_child(child, vec![text("too late")], expired);
+    let pending = accepted.recv_timeout(Duration::from_millis(50)).is_err();
+    release.send(()).unwrap();
+    assert!(pending, "the dispatcher is still publishing completion");
+    assert!(!accepted.recv_timeout(WAIT).unwrap());
+    let events = until_runs_end(&h.events, 2);
+    h.engine.shutdown();
+    assert_eq!(
+        outcomes(&events),
+        [RunOutcome::Completed, RunOutcome::Completed]
+    );
+    assert_eq!(mock.call_count(), 4, "no new child run started");
+    assert!(!mock.requests().iter().any(|request| {
+        request
+            .messages
+            .iter()
+            .any(|message| message.content == [text("too late")])
+    }));
+}
+
+#[test]
+fn unconsumed_live_child_steering_is_withdrawn_before_terminal() {
+    let mock = MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("work"))]),
+        tool_turn("gate"),
+        text_turn("child done"),
+        text_turn("parent done"),
+    ]);
+    let h = harness(mock.clone());
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let child = wait_for(&h.events, is_tool_start_outside(parent))
+        .last()
+        .unwrap()
+        .session;
+    let (entered, entering) = channel();
+    let (release, resume) = channel();
+    h.engine.subscribe(Box::new(move |envelope| {
+        if envelope.session == child
+            && matches!(
+                envelope.event,
+                Event::Loop(LoopEvent::TurnEnded {
+                    had_tool_calls: false,
+                    ..
+                })
+            )
+        {
+            entered.send(()).unwrap();
+            resume.recv_timeout(WAIT).unwrap();
+        }
+    }));
+    h.release.send(()).unwrap();
+    entering.recv_timeout(WAIT).unwrap();
+    let accepted = h
+        .engine
+        .steer_child(
+            child,
+            vec![text("missed boundary")],
+            Arc::new(AtomicBool::new(false)),
+        )
+        .recv_timeout(WAIT);
+    release.send(()).unwrap();
+    assert!(accepted.unwrap());
+    let events = until_runs_end(&h.events, 2);
+    h.engine.shutdown();
+    let withdrawn = events.iter().position(|event| {
+        event.session == child
+            && matches!(&event.event, Event::Host(HostEvent::PromptWithdrawn {
+            delivery: Delivery::Steer, content: Some(content),
+        }) if content == &[text("missed boundary")])
+    });
+    let terminal = events.iter().position(|event| {
+        event.session == child && matches!(event.event, Event::Host(HostEvent::RunEnded { .. }))
+    });
+    assert!(withdrawn.is_some() && withdrawn < terminal, "{events:#?}");
+    assert_eq!(mock.call_count(), 4, "leftover steer did not start a run");
+}
+
+#[test]
+fn live_child_steering_waits_for_its_paused_swarm_retry() {
+    let mut scripts = vec![swarm_turn(&[("call_s", swarm_task(&["a", "b"]))])];
+    scripts.extend(std::iter::repeat_n(rate_limited(), 5));
+    scripts.push(text_turn("b done"));
+    scripts.push(text_turn("a retry done"));
+    scripts.push(text_turn("parent done"));
+    let mock = MockProvider::sequence(scripts);
+    let h = harness(mock.clone());
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(swarm_setup(1, 60_000)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let child = wait_for(&h.events, |event| {
+        matches!(event.event, Event::Host(HostEvent::AgentPaused { .. }))
+    })
+    .last()
+    .unwrap()
+    .session;
+    wait_for(&h.events, |event| {
+        event.session == child && matches!(event.event, Event::Host(HostEvent::RunEnded { .. }))
+    });
+    assert!(
+        h.engine
+            .steer_child(
+                child,
+                vec![text("retry with names")],
+                Arc::new(AtomicBool::new(false)),
+            )
+            .recv_timeout(WAIT)
+            .unwrap()
+    );
+    let events = until_runs_end(&h.events, 3);
+    h.engine.shutdown();
+    assert_eq!(outcome_of(&events, child), [RunOutcome::Completed]);
+    assert!(mock.requests().iter().any(|request| {
+        request
+            .messages
+            .iter()
+            .any(|message| message.content == [text("retry with names")])
+    }));
+    assert!(!events.iter().any(|event| event.session == child
+        && matches!(event.event, Event::Host(HostEvent::PromptWithdrawn { .. }))));
+}
+
+/// A swarm with one child waiting for a slot or backing off a rate limit.
+fn pre_run_child_steering_fixture(paused: bool) -> (Harness, MockProvider, SessionId, SessionId) {
+    let mut scripts = vec![swarm_turn(&[("call_s", swarm_task(&["a", "b"]))])];
+    if paused {
+        scripts.extend(std::iter::repeat_n(rate_limited(), 5));
+    }
+    scripts.extend([
+        tool_turn("gate"),
+        text_turn("child done"),
+        text_turn("parent done"),
+        text_turn("fresh done"),
+    ]);
+    let mock = MockProvider::sequence(scripts);
+    let h = harness(mock.clone());
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(swarm_setup(1, 60_000)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let mut seen = wait_for(&h.events, is_tool_start_outside(parent));
+    let active = seen.last().unwrap().session;
+    if spawned(&seen).len() < 2 {
+        seen.extend(wait_for(&h.events, |event| {
+            matches!(event.event, Event::Host(HostEvent::AgentSpawned { .. }))
+        }));
+    }
+    let target = if paused {
+        seen.iter()
+            .find(|event| matches!(event.event, Event::Host(HostEvent::AgentPaused { .. })))
+            .unwrap()
+            .session
+    } else {
+        spawned(&seen)
+            .into_iter()
+            .find(|(id, _)| *id != active)
+            .unwrap()
+            .0
+    };
+    (h, mock, parent, target)
+}
+
+/// Accepted pre-run steering is returned once, and cannot leak to another run.
+fn assert_pre_run_child_steering_withdrawn(paused: bool, budget: bool) {
+    let (h, mock, parent, child) = pre_run_child_steering_fixture(paused);
+    assert!(
+        h.engine
+            .steer_child(
+                child,
+                vec![text("return this draft")],
+                Arc::new(AtomicBool::new(false)),
+            )
+            .recv_timeout(WAIT)
+            .unwrap()
+    );
+    if budget {
+        h.engine
+            .commander
+            .0
+            .send(Input::BudgetSpent { root: parent })
+            .unwrap();
+    } else {
+        h.engine.send(Command::to(child, CommandKind::Cancel));
+        h.release.send(()).unwrap();
+    }
+    let events = until_runs_end(&h.events, 3);
+    let withdrawn: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            (event.session == child
+                && matches!(&event.event,
+            Event::Host(HostEvent::PromptWithdrawn {
+                delivery: Delivery::Steer, content: Some(content),
+            }) if content == &[text("return this draft")]))
+            .then_some(index)
+        })
+        .collect();
+    let terminal = events
+        .iter()
+        .position(|event| {
+            event.session == child
+                && matches!(
+                    event.event,
+                    Event::Host(HostEvent::RunEnded {
+                        outcome: RunOutcome::Cancelled,
+                    })
+                )
+        })
+        .unwrap();
+    assert_eq!(withdrawn.len(), 1, "{events:#?}");
+    assert!(withdrawn[0] < terminal, "{events:#?}");
+    prompt(&h.engine, child, "fresh generation", Delivery::Steer);
+    let fresh = until_runs_end(&h.events, 1);
+    h.engine.shutdown();
+    assert_eq!(outcome_of(&fresh, child), [RunOutcome::Completed]);
+    assert!(!mock.requests().iter().any(|request| {
+        request
+            .messages
+            .iter()
+            .any(|message| message.content == [text("return this draft")])
+    }));
+}
+
+#[test]
+fn cancelling_a_waiting_child_withdraws_accepted_steering() {
+    assert_pre_run_child_steering_withdrawn(false, false);
+}
+
+#[test]
+fn cancelling_a_paused_child_withdraws_accepted_steering() {
+    assert_pre_run_child_steering_withdrawn(true, false);
+}
+
+#[test]
+fn budgeting_a_waiting_child_withdraws_accepted_steering() {
+    assert_pre_run_child_steering_withdrawn(false, true);
+}
+
+#[test]
+fn budgeting_a_paused_child_withdraws_accepted_steering() {
+    assert_pre_run_child_steering_withdrawn(true, true);
+}
+
+#[test]
 fn prompting_an_idle_child_leaves_the_parent_alone() {
     let h = harness(MockProvider::sequence(vec![
         agent_turn(&[("call_a", task("work"))]),

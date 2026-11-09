@@ -21,8 +21,8 @@ use kage_acp_wire::{
     PromptResponse, QuestionMeta, RequestMeta, RequestPermissionRequest, RequestPermissionResult,
     ResumeSessionRequest, SelectedOption, SessionExportResponse, SessionForkRequest,
     SessionForkResponse, SessionNotification, SessionRenameRequest, SessionRequest, SessionUpdate,
-    SetSessionConfigOptionRequest, SwarmResumeRequest, UiCommandRequest, UiDialogRequest,
-    UiKeymapRequest, UiSnapshot, UiUpdate,
+    SetSessionConfigOptionRequest, SubagentState, SwarmResumeRequest, UiCommandRequest,
+    UiDialogRequest, UiKeymapRequest, UiSnapshot, UiUpdate,
 };
 
 use crate::change::Change;
@@ -41,8 +41,8 @@ const DIALOG_METHOD: &str = "_kage/ui/dialog";
 /// Why a steer did not go out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SteerError {
-    /// No run is in flight on the session, so there is nothing to
-    /// steer. Send the prompt plain instead.
+    /// No run is in flight, or the parent announced a final child
+    /// state. An idle root session can start a run with a plain prompt.
     NotRunning,
     /// The agent did not advertise the steering capability, so the
     /// wire cannot join a run in flight. The prompt queues instead.
@@ -376,18 +376,33 @@ impl Client {
     }
 
     /// Steers the run in flight on `session_id` with `prompt`, joining
-    /// it at its next turn boundary. Only when a run is in flight and
-    /// the agent advertised the steering capability.
+    /// it at its next turn boundary. Requires the advertised steering
+    /// capability and either a client-owned run or a child announced
+    /// by its parent as running or paused. A child announced without
+    /// a lifecycle state is also considered running. Child steering
+    /// stays available between provider turns, but not after a final
+    /// lifecycle update.
     pub fn steer(
         &mut self,
         session_id: &str,
         prompt: Vec<ContentBlock>,
     ) -> Result<u64, SteerError> {
-        let running = self
-            .state
-            .sessions
-            .get(session_id)
-            .is_some_and(|session| session.running);
+        let running = self.state.sessions.get(session_id).is_some_and(|session| {
+            if let Some(parent) = &session.parent {
+                self.state
+                    .sessions
+                    .get(parent)
+                    .and_then(|parent| parent.agents.get(session_id))
+                    .is_some_and(|agent| {
+                        matches!(
+                            agent.state,
+                            None | Some(SubagentState::Running | SubagentState::Paused)
+                        )
+                    })
+            } else {
+                session.running
+            }
+        });
         if !running {
             return Err(SteerError::NotRunning);
         }
@@ -1141,7 +1156,9 @@ impl Client {
             },
         );
         let session = self.session_mut(session_id);
-        session.running = true;
+        if owns_run {
+            session.running = true;
+        }
         // The agent echoes a prompt only to the other clients, so the
         // transcript gets its own copy here.
         session.items.push(TranscriptItem::User {

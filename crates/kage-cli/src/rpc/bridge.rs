@@ -917,8 +917,9 @@ impl Bridge {
 
     /// Finishes the ended run of `session` once none of its foreground
     /// subagents is live: a subagent sends its terminal state to its
-    /// parent, and a client session answers its waiting prompt. The RFD
-    /// wants every subagent to end before its parent does; a background
+    /// parent before answering its steering prompts. A client session
+    /// answers its waiting prompts too. The RFD wants every subagent to
+    /// end before its parent does; a background
     /// agent outlives the run that started it, and its end reaches the
     /// parent later.
     fn settle(&mut self, session: SessionId) {
@@ -945,37 +946,40 @@ impl Bridge {
             return;
         }
         self.paused.remove(&session);
-        if !self.streaming.remove(&session) {
-            for waiter in lock(&self.waiters).remove(&session).unwrap_or_default() {
-                let _ = waiter.send(end.clone());
+        let child = self.streaming.remove(&session);
+        let mut parent = None;
+        if child {
+            lock(&self.ids).subagents.remove(&session.to_string());
+            if let Some(node) = self.tree.get(session) {
+                parent = Some(node.parent);
+                if let Some(parent_id) = self.client_of(node.parent) {
+                    let update = SubagentUpdate {
+                        subagent_session_id: session.to_string(),
+                        state: Some(match &end.outcome {
+                            RunOutcome::Completed => SubagentState::Completed,
+                            RunOutcome::Cancelled => SubagentState::Cancelled,
+                            RunOutcome::Failed { .. } => SubagentState::Failed,
+                        }),
+                        usage: agent_usage(node),
+                        model: agent_model(node),
+                        ..SubagentUpdate::default()
+                    };
+                    let _ = send_update(
+                        &self.peer,
+                        &parent_id,
+                        SessionUpdate::SubagentUpdate(update),
+                    );
+                }
             }
+        }
+        for waiter in lock(&self.waiters).remove(&session).unwrap_or_default() {
+            let _ = waiter.send(end.clone());
+        }
+        if let Some(parent) = parent {
+            self.settle(parent);
+        } else if !child {
             self.prune_tree(session);
-            return;
         }
-        lock(&self.ids).subagents.remove(&session.to_string());
-        let Some(node) = self.tree.get(session) else {
-            return;
-        };
-        let (parent, usage, model) = (node.parent, agent_usage(node), agent_model(node));
-        if let Some(parent_id) = self.client_of(parent) {
-            let update = SubagentUpdate {
-                subagent_session_id: session.to_string(),
-                state: Some(match end.outcome {
-                    RunOutcome::Completed => SubagentState::Completed,
-                    RunOutcome::Cancelled => SubagentState::Cancelled,
-                    RunOutcome::Failed { .. } => SubagentState::Failed,
-                }),
-                usage,
-                model,
-                ..SubagentUpdate::default()
-            };
-            let _ = send_update(
-                &self.peer,
-                &parent_id,
-                SessionUpdate::SubagentUpdate(update),
-            );
-        }
-        self.settle(parent);
     }
 
     /// Forgets the finished agents under a client session whose run

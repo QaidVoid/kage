@@ -166,6 +166,13 @@ impl AgentTree {
                 node.tool_calls += 1;
                 node.last_tool = Some((name.clone(), input_partial.clone()));
             }
+            Event::Loop(LoopEvent::ToolCallArgsDelta {
+                name,
+                input_partial,
+                ..
+            }) => {
+                node.last_tool = Some((name.clone(), input_partial.clone()));
+            }
             _ => {}
         }
         true
@@ -486,6 +493,32 @@ mod tests {
         tree.apply(&envelope(session, HostEvent::RunStarted));
         tree.apply(&envelope(session, HostEvent::RunEnded { outcome }));
         tree.get(session).unwrap().state
+    }
+
+    #[test]
+    fn streamed_tool_arguments_refresh_the_agent_without_counting_another_call() {
+        let mut tree = AgentTree::default();
+        let child = spawn(&mut tree, SessionId::new(), "explore");
+        let id = ToolCallId("call_1".into());
+        tree.apply(&envelope(
+            child,
+            LoopEvent::ToolCallStart {
+                id: id.clone(),
+                name: "read".into(),
+                input_partial: serde_json::json!({}),
+            },
+        ));
+        tree.apply(&envelope(
+            child,
+            LoopEvent::ToolCallArgsDelta {
+                id,
+                name: "read".into(),
+                input_partial: serde_json::json!({"path": "src/lib.rs"}),
+            },
+        ));
+        let node = tree.get(child).unwrap();
+        assert_eq!(node.tool_calls, 1);
+        assert_eq!(node.last_tool.as_ref().unwrap().1["path"], "src/lib.rs");
     }
 
     #[test]

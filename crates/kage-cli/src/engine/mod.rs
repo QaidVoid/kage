@@ -244,6 +244,13 @@ impl Commander {
 
 enum Input {
     Command(Command),
+    /// A steer scoped to one announced child lifetime, never a new idle run.
+    SteerChild {
+        id: SessionId,
+        content: Vec<Content>,
+        expired: Arc<AtomicBool>,
+        reply: mpsc::Sender<bool>,
+    },
     Open {
         spec: Box<SessionSpec>,
         /// The host launch token this open carries, so its close
@@ -470,6 +477,24 @@ impl Engine {
         self.commander.send(command);
     }
 
+    /// Enqueues steering only while this announced child lifetime is live.
+    /// The caller must release the event bus before waiting for acceptance.
+    pub(crate) fn steer_child(
+        &self,
+        id: SessionId,
+        content: Vec<Content>,
+        expired: Arc<AtomicBool>,
+    ) -> mpsc::Receiver<bool> {
+        let (reply, accepted) = mpsc::channel();
+        let _ = self.commander.0.send(Input::SteerChild {
+            id,
+            content,
+            expired,
+            reply,
+        });
+        accepted
+    }
+
     /// Continue swarm children of `parent` with their follow-up
     /// prompts, the answer to a client's `_kage/swarm/resume`. Returns
     /// the accepted children once each is checked and attached, or the
@@ -676,6 +701,14 @@ impl Dispatcher {
         while let Ok(input) = rx.recv() {
             match input {
                 Input::Command(command) => self.command(command),
+                Input::SteerChild {
+                    id,
+                    content,
+                    expired,
+                    reply,
+                } => {
+                    let _ = reply.send(self.steer_child(id, content, &expired));
+                }
                 Input::Open { spec, instance } => {
                     self.open(*spec, CancelFlag::new(), None, instance);
                 }
@@ -1334,6 +1367,29 @@ impl Dispatcher {
         self.bus.publish(id, HostEvent::StateChanged { state });
     }
 
+    /// Accepts a steer without reopening a child that has already reported.
+    fn steer_child(&mut self, id: SessionId, content: Vec<Content>, expired: &AtomicBool) -> bool {
+        if expired.load(Ordering::SeqCst) || self.shutting_down {
+            return false;
+        }
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return false;
+        };
+        let pending = session
+            .link
+            .as_ref()
+            .is_some_and(|link| link.report.is_some());
+        let live = session.idle.is_none()
+            || self.waiting.contains(&id)
+            || self.swarm_requeues.contains_key(&id);
+        if !(pending && live) {
+            return false;
+        }
+        session.goal_turns = 0;
+        lock(&session.steering).push_back(content);
+        true
+    }
+
     fn prompt(&mut self, id: SessionId, mut content: Vec<Content>, delivery: Delivery) {
         let session = self.sessions.get_mut(&id).expect("session checked");
         let is_image = |c: &Content| matches!(c, Content::Image { .. });
@@ -1610,16 +1666,16 @@ impl Dispatcher {
         // A set flag on an idle session would cancel any run its agents
         // start, through the tree.
         session.cancel.reset();
-        let withdrawn = settle_steering(session, outcome == RunOutcome::Cancelled);
         session.sync_state();
         let state = session.state.clone();
+        self.publish_run_end(id, outcome, requeued);
         let next = if self.shutting_down {
             None
         } else {
-            session.queued.pop_front()
+            self.sessions
+                .get_mut(&id)
+                .and_then(|session| session.queued.pop_front())
         };
-        self.bus.publish(id, HostEvent::RunEnded { outcome });
-        hand_back_steers(&self.bus, id, withdrawn);
         self.deny_asks_of(id);
         self.bus.publish(id, HostEvent::StateChanged { state });
         if let Some(taken) = reply {
@@ -1639,6 +1695,30 @@ impl Dispatcher {
         }
         self.start_waiting();
         self.reap_agent(id);
+    }
+
+    /// Settles pending steering and publishes a run's end in client order.
+    /// Child withdrawals precede settlement; retrying children retain steering.
+    fn publish_run_end(&mut self, id: SessionId, outcome: RunOutcome, requeued: bool) {
+        let (child, withdrawn) = self.sessions.get_mut(&id).map_or_else(
+            || (false, Vec::new()),
+            |session| {
+                let child = session.link.is_some();
+                let withdrawn = if requeued {
+                    Vec::new()
+                } else {
+                    settle_steering(session, child || outcome == RunOutcome::Cancelled)
+                };
+                (child, withdrawn)
+            },
+        );
+        if child {
+            hand_back_steers(&self.bus, id, withdrawn);
+            self.bus.publish(id, HostEvent::RunEnded { outcome });
+        } else {
+            self.bus.publish(id, HostEvent::RunEnded { outcome });
+            hand_back_steers(&self.bus, id, withdrawn);
+        }
     }
 
     /// Stop every agent under `root`, whose agents used their budget,
@@ -1665,6 +1745,13 @@ impl Dispatcher {
             } else if session.idle.is_none() {
                 session.limit = Some(AgentLimit::Budget);
                 session.cancel.cancel();
+            } else if session
+                .link
+                .as_ref()
+                .is_some_and(|link| link.report.is_some())
+            {
+                session.limit = Some(AgentLimit::Budget);
+                self.end_paused(id);
             }
         }
         notice(
@@ -1689,12 +1776,7 @@ impl Dispatcher {
             return false;
         }
         session.limit = Some(AgentLimit::Budget);
-        self.bus.publish(
-            id,
-            HostEvent::RunEnded {
-                outcome: RunOutcome::Cancelled,
-            },
-        );
+        self.publish_run_end(id, RunOutcome::Cancelled, false);
         self.deliver(
             id,
             &RunOutcome::Cancelled,
@@ -1915,9 +1997,7 @@ impl Dispatcher {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
-        let idle = session.idle.is_some()
-            && session.queued.is_empty()
-            && lock(&session.steering).is_empty();
+        let idle = session.idle.is_some() && session.queued.is_empty();
         let content = vec![Content::Text {
             text: CONTINUE_PROMPT.to_owned(),
         }];
@@ -2299,15 +2379,16 @@ fn title_entry(title: String) -> kage_session::SessionEntry {
 }
 
 /// Move the steers `session`'s run never took to the front of its
-/// queue, or, when the run was `cancelled`, take them out and return
+/// queue, or, when they must be `withdrawn`, take them out and return
 /// them, oldest first.
 ///
 /// A steer was meant for the run it arrived during. Running it after a
 /// cancel would undo the cancel, and over RPC its prompt has already
-/// been answered, so nobody would be waiting on that run.
-fn settle_steering(session: &mut Session, cancelled: bool) -> Vec<Vec<Content>> {
+/// been answered, so nobody would be waiting on that run. A live-only
+/// child's leftovers also return instead of starting another run.
+fn settle_steering(session: &mut Session, withdrawn: bool) -> Vec<Vec<Content>> {
     let leftover: Vec<Vec<Content>> = lock(&session.steering).drain(..).collect();
-    if cancelled {
+    if withdrawn {
         return leftover;
     }
     for content in leftover.into_iter().rev() {

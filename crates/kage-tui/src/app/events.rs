@@ -33,8 +33,13 @@ impl App {
             self.notify(text);
             return;
         }
-        let images = self.input.take_attached();
         let queue = queue || self.mcp_expands(&text);
+        if self.focus.is_some() && queue {
+            self.input.splice(0, 0, &text);
+            self.notify("subagents accept live steering only; queued prompts are not supported");
+            return;
+        }
+        let images = self.input.take_attached();
         self.send_prompt(text, images, queue, self.focus);
     }
 

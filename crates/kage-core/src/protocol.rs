@@ -200,8 +200,10 @@ pub enum HostEvent {
         transient: bool,
     },
     /// The session now points at a different file, for example after a
-    /// resume, fork, or new session. Carries the full transcript so a
-    /// client can rebuild its view. Durable.
+    /// resume, fork, or new session, or its transcript was replaced in
+    /// place. Rebuild only this session's view, preserving an existing
+    /// child session's identity and run state. An empty timeline clears
+    /// the view before subsequent replay events. Durable.
     SessionChanged {
         /// Session file path.
         path: PathBuf,

@@ -465,6 +465,23 @@ fn external_agent(model: &str) -> Option<&str> {
     model.strip_prefix("acp:").filter(|name| !name.is_empty())
 }
 
+/// The thinking option value a requested level sends: an empty level
+/// leaves the choice to the agent.
+fn thinking_value(level: &str) -> &str {
+    if level.is_empty() { "auto" } else { level }
+}
+
+/// The values a select option offers, comma separated, for a refusal
+/// that lists them.
+fn choice_values(option: &kage_acp::acp::SessionConfigOption) -> String {
+    option
+        .options
+        .iter()
+        .map(|choice| choice.value.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The `_meta.kage` the TUI asks of the session it opens: what this
 /// process would have set up on the engine path, phrased for the
 /// agent to apply instead. Only what the user actually set is sent.
@@ -910,6 +927,18 @@ struct PendingOpen {
     bootstrap: bool,
 }
 
+/// A mode switch of an external session the agent has not answered
+/// yet, with the prompts held until it does.
+struct ModeSwitch {
+    /// The `session/set_config_option` request id.
+    request: u64,
+    /// The mode the switch asked for.
+    value: String,
+    /// Prompts sent while the switch was in flight. They run in the
+    /// mode they were sent for, so they wait for the agent's answer.
+    held: Vec<RunRequest>,
+}
+
 /// The pending request a frame answers.
 #[derive(Clone, Copy)]
 enum Answer {
@@ -1076,6 +1105,15 @@ struct Pump {
     unknown: HashSet<String>,
     /// Dropped MCP server settings, warned of once each.
     mcp_warnings: HashSet<String>,
+    /// The mode the wire session was in before it entered plan mode,
+    /// so `/plan off` restores it. Cleared once the agent reports a
+    /// mode other than plan.
+    pre_plan_mode: Option<String>,
+    /// The mode value last seen for the wire session, for the
+    /// plan-mode edges.
+    last_mode: Option<String>,
+    /// The external mode switch in flight, if any.
+    mode_switch: Option<ModeSwitch>,
     closed: bool,
 }
 
@@ -1158,6 +1196,14 @@ impl Pump {
         }
         self.withdrawn_child_prompt(&frame);
         let answer = self.answer_of(&frame);
+        let switched = matches!(
+            (&frame, &self.mode_switch),
+            (
+                Frame::Success { id: RequestId::Number(id), .. }
+                    | Frame::Failure { id: RequestId::Number(id), .. },
+                Some(switch),
+            ) if *id == switch.request
+        );
         let failed_prompt = match &frame {
             Frame::Failure { id, error } => self
                 .prompts
@@ -1189,6 +1235,9 @@ impl Pump {
                     self.react(change);
                 }
             }
+        }
+        if switched {
+            self.finish_mode_switch();
         }
         // A failed prompt moves no session in the client, so the run
         // it ended is settled here.
@@ -1419,24 +1468,231 @@ impl Pump {
     }
 
     /// Whether `request` asks an external session for something its
-    /// agent owns: engine models and options, thinking, modes, goals,
-    /// compaction, swarm and export. An `acp:` model pick is not one:
-    /// it opens a session of its own. Reports the refusal and returns
-    /// `true` so [`Self::handle`] skips the request.
+    /// agent owns. An `acp:` model pick is not one: it opens a session
+    /// of its own. Thinking follows the options the agent advertises,
+    /// modes translate onto the agent's own values, and the rest of
+    /// kage's engine settings have no external meaning. Reports the
+    /// refusal and returns `true` so [`Self::handle`] skips the request.
     fn refuse_external_request(&mut self, request: &RunRequest) -> bool {
-        let gated = match request {
-            RunRequest::SwitchModel(model) => external_agent(model).is_none(),
-            RunRequest::CycleThinkingLevel
-            | RunRequest::SetThinkingLevel(_)
-            | RunRequest::SetPermissionMode(_)
-            | RunRequest::PlanMode { .. }
-            | RunRequest::SwarmMode { .. }
+        if self.external().is_none() {
+            return false;
+        }
+        match request {
+            RunRequest::SwitchModel(model) => {
+                external_agent(model).is_none() && self.refuse_external()
+            }
+            RunRequest::SetThinkingLevel(level) => {
+                let Some(option) = self.config_option("thinking") else {
+                    return self.refuse_external();
+                };
+                let value = thinking_value(level);
+                if option.options.iter().any(|choice| choice.value == value) {
+                    return false;
+                }
+                let agent = self.external().unwrap_or_default();
+                self.notice(
+                    NoticeLevel::Warning,
+                    format!(
+                        "{agent} has no thinking level {value:?}; its levels are: {}",
+                        choice_values(&option)
+                    ),
+                );
+                true
+            }
+            RunRequest::SetPermissionMode(_) => {
+                if self
+                    .config_option("mode")
+                    .is_some_and(|option| option.kind == kage_acp::acp::SessionConfigKind::Select)
+                {
+                    let agent = self.external().unwrap_or_default();
+                    self.notice(
+                        NoticeLevel::Warning,
+                        format!("{agent} names its own modes; run /permission to pick one"),
+                    );
+                    true
+                } else {
+                    self.refuse_external()
+                }
+            }
+            RunRequest::PlanMode { on } => {
+                self.plan_external(*on);
+                true
+            }
+            RunRequest::SetModeValue { value } => {
+                self.set_mode_value(value);
+                true
+            }
+            RunRequest::SwarmMode { .. }
             | RunRequest::SetGoal { .. }
             | RunRequest::CompactNow
-            | RunRequest::ExportSession(_) => true,
+            | RunRequest::ExportSession(_) => self.refuse_external(),
             _ => false,
+        }
+    }
+
+    /// The session's advertised config option of `id`, when it has one.
+    fn config_option(&self, id: &str) -> Option<kage_acp::acp::SessionConfigOption> {
+        self.store.state().session(&self.wire).and_then(|session| {
+            session
+                .config_options
+                .iter()
+                .find(|option| option.id == id)
+                .cloned()
+        })
+    }
+
+    /// The mode the session is in, as the agent names it: what the
+    /// agent last reported, else the mode option's value.
+    fn mode_value(&self) -> Option<String> {
+        let session = self.store.state().session(&self.wire)?;
+        let reported = session.mode.clone().filter(|mode| !mode.is_empty());
+        reported.or_else(|| {
+            session
+                .config_options
+                .iter()
+                .find(|option| option.id == "mode")
+                .map(|option| option.current_value.clone())
+                .filter(|value| !value.is_empty())
+        })
+    }
+
+    /// The mode value the agent names `value` moves to. Records the
+    /// mode it leaves so `/plan off` can restore it.
+    fn set_mode_value(&mut self, value: &str) {
+        let Some(agent) = self.external() else {
+            return;
         };
-        gated && self.refuse_external()
+        let Some(option) = self.config_option("mode") else {
+            self.notice(
+                NoticeLevel::Warning,
+                format!("{agent} offers no modes to switch"),
+            );
+            return;
+        };
+        if !option.options.iter().any(|choice| choice.value == value) {
+            self.notice(
+                NoticeLevel::Warning,
+                format!(
+                    "{agent} has no mode {value:?}; its modes are: {}",
+                    choice_values(&option)
+                ),
+            );
+            return;
+        }
+        let previous = self.mode_value();
+        if value == "plan" && previous.as_deref() != Some("plan") {
+            self.pre_plan_mode = previous;
+        }
+        let (request, _) = self
+            .store
+            .client()
+            .set_config_option(&self.wire, "mode", value);
+        let held = self
+            .mode_switch
+            .take()
+            .map(|switch| switch.held)
+            .unwrap_or_default();
+        self.mode_switch = Some(ModeSwitch {
+            request,
+            value: value.to_owned(),
+            held,
+        });
+    }
+
+    /// Settles the mode switch the agent just answered: the prompts
+    /// held for it run when the agent confirmed the mode, and go back
+    /// to the App otherwise, so a `/plan <task>` never runs outside
+    /// plan mode.
+    fn finish_mode_switch(&mut self) {
+        let Some(switch) = self.mode_switch.take() else {
+            return;
+        };
+        let mode = self.mode_value();
+        if mode.as_deref().is_some_and(|mode| mode != "plan") {
+            self.pre_plan_mode = None;
+        }
+        if mode.as_deref() == Some(switch.value.as_str()) {
+            for request in switch.held {
+                self.handle(request);
+            }
+            return;
+        }
+        let agent = self.external().unwrap_or_default();
+        let message = format!(
+            "{agent} did not switch to {:?}; the prompt was not sent",
+            switch.value
+        );
+        self.return_held(switch.held, &message);
+    }
+
+    /// Hands prompts held for a mode switch back to the App.
+    fn return_held(&mut self, held: Vec<RunRequest>, message: &str) {
+        for request in held {
+            if let RunRequest::Submit {
+                text,
+                images,
+                queue,
+                session,
+            } = request
+            {
+                self.return_prompt(
+                    session.unwrap_or(self.app_session),
+                    submission_content(text, &images),
+                    queue,
+                    message.to_owned(),
+                );
+            }
+        }
+    }
+
+    /// `/plan` on an external session: to the agent's own plan mode
+    /// when it has one, and back to the mode the session came from
+    /// when switching off.
+    fn plan_external(&mut self, on: bool) {
+        if on {
+            if self
+                .config_option("mode")
+                .is_some_and(|option| option.options.iter().any(|choice| choice.value == "plan"))
+            {
+                self.set_mode_value("plan");
+            } else {
+                self.notice(
+                    NoticeLevel::Warning,
+                    "this agent has no plan mode; run /permission to pick one".to_owned(),
+                );
+            }
+            return;
+        }
+        let Some(restore) = self.pre_plan_mode.clone() else {
+            // A session the mode is known for and that is not in plan
+            // mode has nothing to switch off; the warning is only for
+            // a session in plan with no mode before it to go back to.
+            if self.mode_value().is_none_or(|mode| mode == "plan") {
+                let agent = self.external().unwrap_or_default();
+                self.notice(
+                    NoticeLevel::Warning,
+                    format!("nothing to restore {agent} from; run /permission to pick a mode"),
+                );
+            }
+            return;
+        };
+        // The restore target stays saved until the switch is possible:
+        // an agent that dropped the mode since keeps the question open
+        // instead of a `/plan off` that silently does nothing.
+        if !self
+            .config_option("mode")
+            .is_some_and(|option| option.options.iter().any(|choice| choice.value == restore))
+        {
+            let agent = self.external().unwrap_or_default();
+            self.notice(
+                NoticeLevel::Warning,
+                format!("{agent} no longer offers {restore:?}; run /permission to pick a mode"),
+            );
+            return;
+        }
+        // The target is dropped only once the agent reports a mode
+        // other than plan, so a refused switch can be retried.
+        self.set_mode_value(&restore);
     }
 
     /// The `_meta.kage` a session of this connection opens with: what
@@ -1611,6 +1867,17 @@ impl Pump {
     fn session_moved(&mut self, id: &str) {
         if id != self.wire {
             return;
+        }
+        let mode = self.mode_value();
+        if mode != self.last_mode {
+            match (&mode, &self.last_mode) {
+                (Some(new), Some(old)) if new == "plan" && old != "plan" => {
+                    self.pre_plan_mode = Some(old.clone());
+                }
+                (Some(new), _) if new != "plan" => self.pre_plan_mode = None,
+                _ => {}
+            }
+            self.last_mode = mode;
         }
         let working = self
             .store
@@ -2269,6 +2536,17 @@ impl Pump {
         }
         self.warned_model = None;
         self.handed = None;
+        self.pre_plan_mode = None;
+        if let Some(switch) = self.mode_switch.take() {
+            self.return_held(
+                switch.held,
+                "the session changed before its mode switch was answered",
+            );
+        }
+        // The mode the session opens in seeds the plan-edge tracking:
+        // `/plan off` restores the mode the session came from only if
+        // the open reported one.
+        self.last_mode = self.mode_value();
         self.hand_buffer();
         self.note_session_file();
         self.update_ui_slot(|ui| {
@@ -2529,6 +2807,33 @@ impl Pump {
             self.external_agent_of(&self.wire)
                 .map_or_else(String::new, |agent| format!("acp:{agent}"))
         });
+        let external = self.external_agent_of(&self.wire).is_some();
+        let mode_value = session
+            .mode
+            .clone()
+            .filter(|mode| !mode.is_empty())
+            .or(mode);
+        let agent_modes = if external {
+            session
+                .config_options
+                .iter()
+                .find(|option| option.id == "mode")
+                .filter(|option| !option.options.is_empty())
+                .map(|option| {
+                    option
+                        .options
+                        .iter()
+                        .map(|choice| kage_core::protocol::ModeChoice {
+                            value: choice.value.clone(),
+                            name: choice.name.clone(),
+                            description: choice.description.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         SessionState {
             model,
             thinking,
@@ -2539,8 +2844,10 @@ impl Pump {
             working: session.running || session.compacting,
             swarm: option("swarm").as_deref() == Some("on"),
             goal: option("goal").filter(|goal| !goal.is_empty()),
-            plan: mode.as_deref() == Some("plan"),
+            plan: mode_value.as_deref() == Some("plan"),
             shells: 0,
+            modes: agent_modes,
+            mode_value: mode_value.filter(|_| external),
         }
     }
 
@@ -2598,6 +2905,13 @@ impl Pump {
             self.handle_closed(request);
             return;
         }
+        if let RunRequest::Submit { session, .. } = &request
+            && self.route_of(*session).as_deref() == Some(self.wire.as_str())
+            && let Some(switch) = self.mode_switch.as_mut()
+        {
+            switch.held.push(request);
+            return;
+        }
         if self.refuse_external_request(&request) {
             return;
         }
@@ -2642,10 +2956,11 @@ impl Pump {
             } => self.answer_question(request_id, answers),
             RunRequest::CycleThinkingLevel => self.cycle_thinking(),
             RunRequest::SetThinkingLevel(level) => {
-                let value: &str = if level.is_empty() { "auto" } else { &level };
-                self.store
-                    .client()
-                    .set_config_option(&self.wire, "thinking", value);
+                self.store.client().set_config_option(
+                    &self.wire,
+                    "thinking",
+                    thinking_value(&level),
+                );
             }
             RunRequest::SetPermissionMode(mode) => {
                 let value = match mode {
@@ -2665,6 +2980,9 @@ impl Pump {
                     if on { "plan" } else { "default" },
                 );
             }
+            // Reached only when the session stopped being external
+            // between the App's request and this dispatch.
+            RunRequest::SetModeValue { .. } => {}
             RunRequest::SwarmMode { on } => {
                 self.store.client().set_config_option(
                     &self.wire,
@@ -3595,6 +3913,9 @@ pub(crate) fn run(
         pending_export: None,
         unknown: HashSet::new(),
         mcp_warnings: HashSet::new(),
+        pre_plan_mode: None,
+        last_mode: None,
+        mode_switch: None,
         closed: false,
     };
     if let Some(surface) = surface
@@ -3882,6 +4203,9 @@ mod tests {
             pending_export: None,
             unknown: HashSet::new(),
             mcp_warnings: HashSet::new(),
+            pre_plan_mode: None,
+            last_mode: None,
+            mode_switch: None,
             closed: false,
         };
         (pump, app, dialog_rx, feed, dir)
@@ -6523,6 +6847,437 @@ kage.on('should_stop_after_turn', function(ev) return true end)
             .collect();
         assert_eq!(warnings.len(), 3, "{warnings:?}");
         assert!(warnings.iter().all(|text| text.contains("reviewer")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The mode select an external agent advertises: `current` is the
+    /// value the agent reports it is in.
+    fn mode_select(current: &str) -> Value {
+        serde_json::json!([{
+            "id": "mode", "name": "Session Mode", "category": "mode",
+            "type": "select", "currentValue": current,
+            "options": [
+                {"value": "code", "name": "Code"},
+                {"value": "ask", "name": "Ask"},
+                {"value": "plan", "name": "Plan"}
+            ]
+        }])
+    }
+
+    /// Opens an external session whose agent advertises `options`.
+    /// Adoption queues the close of the session the pump left, which
+    /// the drain swallows so the test asserts on its own requests only.
+    fn external_with(pump: &mut Pump, config_options: &Value) {
+        pump.model = "acp:reviewer".to_owned();
+        pump.request_new_session();
+        let new = request_id(&pump.store.take_outgoing(), "session/new");
+        pump.absorb(Frame::Success {
+            id: new,
+            result: serde_json::json!({"sessionId": "ext1", "configOptions": config_options}),
+        });
+        let _ = pump.store.take_outgoing();
+    }
+
+    #[test]
+    fn an_external_session_serves_its_agent_modes() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        external_with(&mut pump, &mode_select("code"));
+        let state = pump.state_snapshot();
+        assert_eq!(
+            state
+                .modes
+                .iter()
+                .map(|mode| mode.value.as_str())
+                .collect::<Vec<_>>(),
+            ["code", "ask", "plan"]
+        );
+        assert_eq!(state.mode_value.as_deref(), Some("code"));
+        assert!(!state.plan);
+        pump.absorb(Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({"sessionId": "ext1", "update": {
+                "sessionUpdate": "current_mode_update", "currentModeId": "plan"
+            }}),
+        });
+        let state = pump.state_snapshot();
+        assert_eq!(state.mode_value.as_deref(), Some("plan"));
+        assert!(state.plan, "the agent's report moves the plan flag");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_engine_session_serves_no_agent_modes() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.open_recorded(Path::new("/sessions/recorded.jsonl"));
+        let load = request_id(&pump.store.take_outgoing(), "session/load");
+        pump.absorb(Frame::Success {
+            id: load,
+            result: serde_json::json!({"configOptions": mode_select("code")}),
+        });
+        let state = pump.state_snapshot();
+        assert!(
+            state.modes.is_empty(),
+            "the engine picker stays /permission's own: {state:?}"
+        );
+        assert_eq!(state.mode_value, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_mode_switch_for_an_external_session_reaches_the_agent() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        external_with(&mut pump, &mode_select("code"));
+        pump.handle(RunRequest::SetModeValue {
+            value: "ask".to_owned(),
+        });
+        let outgoing = pump.store.take_outgoing();
+        let Frame::Request { method, params, .. } = &outgoing[0] else {
+            panic!("the switch is a request, got {:?}", outgoing[0])
+        };
+        assert_eq!(method, "session/set_config_option");
+        assert_eq!(params["configId"], "mode");
+        assert_eq!(params["value"], "ask");
+        assert!(
+            notices(&app).is_empty(),
+            "a known mode switches silently: {app:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unknown_mode_value_is_refused_with_the_agent_choices() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        external_with(&mut pump, &mode_select("code"));
+        pump.handle(RunRequest::SetModeValue {
+            value: "nope".to_owned(),
+        });
+        assert!(
+            !has_request(&pump.store.take_outgoing(), "session/set_config_option"),
+            "an unknown mode sends nothing"
+        );
+        let warnings: Vec<String> = notices(&app)
+            .into_iter()
+            .filter(|(level, _)| *level == NoticeLevel::Warning)
+            .map(|(_, text)| text)
+            .collect();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("reviewer") && warnings[0].contains("nope"));
+        assert!(warnings[0].contains("code, ask, plan"), "{warnings:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_mode_switches_the_agent_and_restores_on_the_way_back() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        external_with(&mut pump, &mode_select("code"));
+        pump.handle(RunRequest::PlanMode { on: true });
+        pump.store
+            .take_outgoing()
+            .iter()
+            .for_each(|frame| match frame {
+                Frame::Request { params, .. } => assert_eq!(params["value"], "plan"),
+                other => panic!("plan on switches the agent, got {other:?}"),
+            });
+        assert_eq!(pump.pre_plan_mode.as_deref(), Some("code"));
+        pump.handle(RunRequest::PlanMode { on: false });
+        let outgoing = pump.store.take_outgoing();
+        let Frame::Request { id, params, .. } = &outgoing[0] else {
+            panic!("plan off restores, got {:?}", outgoing[0])
+        };
+        assert_eq!(params["value"], "code");
+        assert_eq!(
+            pump.pre_plan_mode.as_deref(),
+            Some("code"),
+            "the target stays until the agent leaves plan"
+        );
+        pump.absorb(Frame::Success {
+            id: id.clone(),
+            result: serde_json::json!({"configOptions": mode_select("code")}),
+        });
+        assert_eq!(pump.pre_plan_mode, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Enters plan mode with the agent's confirmation, leaving `code`
+    /// as the restore target.
+    fn confirmed_plan(pump: &mut Pump) {
+        pump.handle(RunRequest::PlanMode { on: true });
+        let id = request_id(&pump.store.take_outgoing(), "session/set_config_option");
+        pump.absorb(Frame::Success {
+            id,
+            result: serde_json::json!({"configOptions": mode_select("plan")}),
+        });
+        assert_eq!(pump.mode_value().as_deref(), Some("plan"));
+    }
+
+    #[test]
+    fn a_refused_plan_off_keeps_the_restore_target() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        external_with(&mut pump, &mode_select("code"));
+        confirmed_plan(&mut pump);
+        pump.handle(RunRequest::PlanMode { on: false });
+        let id = request_id(&pump.store.take_outgoing(), "session/set_config_option");
+        pump.absorb(Frame::Failure {
+            id,
+            error: RpcError::new(-32602, "not now"),
+        });
+        assert_eq!(pump.mode_value().as_deref(), Some("plan"));
+        assert_eq!(pump.pre_plan_mode.as_deref(), Some("code"));
+        pump.handle(RunRequest::PlanMode { on: false });
+        let outgoing = pump.store.take_outgoing();
+        let Frame::Request { params, .. } = &outgoing[0] else {
+            panic!("a second plan off retries, got {:?}", outgoing[0])
+        };
+        assert_eq!(params["value"], "code");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_plan_task_waits_for_the_agent_to_enter_plan() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        external_with(&mut pump, &mode_select("code"));
+        pump.handle(RunRequest::PlanMode { on: true });
+        pump.handle(RunRequest::Submit {
+            text: "design it".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        let outgoing = pump.store.take_outgoing();
+        assert!(
+            !has_request(&outgoing, "session/prompt"),
+            "the task waits for the switch"
+        );
+        pump.absorb(Frame::Success {
+            id: request_id(&outgoing, "session/set_config_option"),
+            result: serde_json::json!({"configOptions": mode_select("plan")}),
+        });
+        assert!(
+            has_request(&pump.store.take_outgoing(), "session/prompt"),
+            "the confirmed switch releases the task"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_plan_task_returns_when_the_agent_stays_out_of_plan() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        external_with(&mut pump, &mode_select("code"));
+        pump.handle(RunRequest::PlanMode { on: true });
+        pump.handle(RunRequest::Submit {
+            text: "design it".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        let outgoing = pump.store.take_outgoing();
+        pump.absorb(Frame::Success {
+            id: request_id(&outgoing, "session/set_config_option"),
+            result: serde_json::json!({"configOptions": mode_select("code")}),
+        });
+        assert!(
+            !has_request(&pump.store.take_outgoing(), "session/prompt"),
+            "a task for plan mode does not run outside it"
+        );
+        assert_eq!(pump.pre_plan_mode, None, "the agent never left code");
+        let events: Vec<_> = app.try_iter().map(|envelope| envelope.event).collect();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                kage_core::protocol::Event::Host(HostEvent::PromptWithdrawn { content: Some(content), .. })
+                    if *content == vec![kage_core::Content::Text { text: "design it".to_owned() }]
+            )),
+            "the task goes back to the composer: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                kage_core::protocol::Event::Host(HostEvent::Notice { text, .. })
+                    if text.contains("did not switch")
+            )),
+            "{events:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_off_restores_the_mode_the_agent_entered_plan_from() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        external_with(&mut pump, &mode_select("code"));
+        pump.absorb(Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({"sessionId": "ext1", "update": {
+                "sessionUpdate": "current_mode_update", "currentModeId": "plan"
+            }}),
+        });
+        assert_eq!(pump.pre_plan_mode.as_deref(), Some("code"));
+        pump.handle(RunRequest::PlanMode { on: false });
+        let outgoing = pump.store.take_outgoing();
+        let Frame::Request { params, .. } = &outgoing[0] else {
+            panic!("plan off restores, got {:?}", outgoing[0])
+        };
+        assert_eq!(params["value"], "code");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The agent opened the session already in plan: no mode came
+    /// before it, so there is nothing to restore.
+    #[test]
+    fn plan_off_without_a_previous_mode_reports_nothing_to_restore() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        external_with(&mut pump, &mode_select("plan"));
+        pump.handle(RunRequest::PlanMode { on: false });
+        assert!(
+            !has_request(&pump.store.take_outgoing(), "session/set_config_option"),
+            "nothing to restore sends nothing"
+        );
+        let warnings: Vec<String> = notices(&app)
+            .into_iter()
+            .filter(|(level, _)| *level == NoticeLevel::Warning)
+            .map(|(_, text)| text)
+            .collect();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("nothing to restore"), "{warnings:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An agent that leaves plan mode on its own and reports it only
+    /// through its options takes the plan flag with it.
+    #[test]
+    fn an_agent_leaving_plan_through_its_options_clears_the_plan_flag() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        external_with(&mut pump, &mode_select("code"));
+        pump.handle(RunRequest::PlanMode { on: true });
+        let _ = pump.store.take_outgoing();
+        assert!(pump.state_snapshot().plan);
+        pump.absorb(Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({"sessionId": "ext1", "update": {
+                "sessionUpdate": "config_option_update",
+                "configOptions": mode_select("code")
+            }}),
+        });
+        let state = pump.state_snapshot();
+        assert_eq!(state.mode_value.as_deref(), Some("code"));
+        assert!(!state.plan, "the agent's option report ends plan mode");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_thinking_level_the_agent_lacks_is_refused_with_its_levels() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        external_with(
+            &mut pump,
+            &serde_json::json!([{
+                "id": "thinking", "name": "Thinking", "category": "thought_level",
+                "type": "select", "currentValue": "low",
+                "options": [{"value": "low", "name": "Low"}, {"value": "high", "name": "High"}]
+            }]),
+        );
+        pump.handle(RunRequest::SetThinkingLevel(String::new()));
+        assert!(
+            !has_request(&pump.store.take_outgoing(), "session/set_config_option"),
+            "a level the agent lacks sends nothing"
+        );
+        let warnings: Vec<String> = notices(&app)
+            .into_iter()
+            .filter(|(level, _)| *level == NoticeLevel::Warning)
+            .map(|(_, text)| text)
+            .collect();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("\"auto\"") && warnings[0].contains("low, high"),
+            "{warnings:?}"
+        );
+        pump.handle(RunRequest::SetThinkingLevel("high".to_owned()));
+        let outgoing = pump.store.take_outgoing();
+        let Frame::Request { params, .. } = &outgoing[0] else {
+            panic!("a level the agent offers switches, got {:?}", outgoing[0])
+        };
+        assert_eq!(params["configId"], "thinking");
+        assert_eq!(params["value"], "high");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_off_outside_plan_mode_stays_silent() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        external_with(&mut pump, &mode_select("code"));
+        pump.handle(RunRequest::PlanMode { on: false });
+        assert!(
+            !has_request(&pump.store.take_outgoing(), "session/set_config_option"),
+            "nothing to switch off sends nothing"
+        );
+        assert!(
+            notices(&app).is_empty(),
+            "a session not in plan mode has nothing to report, {:?}",
+            notices(&app)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The agent rewrites its own modes after the switch, so the
+    /// restore target `code` no longer exists.
+    #[test]
+    fn plan_off_when_the_restore_mode_is_gone_keeps_the_target() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        external_with(&mut pump, &mode_select("code"));
+        pump.handle(RunRequest::PlanMode { on: true });
+        let _ = pump.store.take_outgoing();
+        pump.absorb(Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({"sessionId": "ext1", "update": {
+                "sessionUpdate": "config_option_update",
+                "configOptions": [{
+                    "id": "mode", "name": "Session Mode", "category": "mode",
+                    "type": "select", "currentValue": "plan",
+                    "options": [{"value": "plan", "name": "Plan"}, {"value": "ask", "name": "Ask"}]
+                }]
+            }}),
+        });
+        pump.handle(RunRequest::PlanMode { on: false });
+        assert!(
+            !has_request(&pump.store.take_outgoing(), "session/set_config_option"),
+            "a restore with no target sends nothing"
+        );
+        let warnings: Vec<String> = notices(&app)
+            .into_iter()
+            .filter(|(level, _)| *level == NoticeLevel::Warning)
+            .map(|(_, text)| text)
+            .collect();
+        assert!(
+            warnings
+                .iter()
+                .any(|text| text.contains("no longer offers")),
+            "{warnings:?}"
+        );
+        assert_eq!(
+            pump.pre_plan_mode.as_deref(),
+            Some("code"),
+            "the restore target stays until a switch is possible"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn adopting_a_session_leaves_the_previous_plan_target_behind() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        external_with(&mut pump, &mode_select("code"));
+        pump.handle(RunRequest::PlanMode { on: true });
+        let _ = pump.store.take_outgoing();
+        pump.request_new_session();
+        let new = request_id(&pump.store.take_outgoing(), "session/new");
+        pump.absorb(Frame::Success {
+            id: new,
+            result: serde_json::json!({"sessionId": "ext2", "configOptions": mode_select("code")}),
+        });
+        let _ = pump.store.take_outgoing();
+        pump.handle(RunRequest::PlanMode { on: false });
+        assert!(
+            !has_request(&pump.store.take_outgoing(), "session/set_config_option"),
+            "a session that never went to plan sends nothing"
+        );
+        assert_eq!(pump.pre_plan_mode, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

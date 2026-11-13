@@ -623,6 +623,7 @@ impl App {
             models: self.model_choices.iter().map(|p| p.value.clone()).collect(),
             themes: crate::theme::Theme::available_names(self.themes_dir.as_deref()),
             plugin_commands: self.plugin_commands.clone(),
+            permission_modes: self.agent_mode_values(),
         }
     }
 
@@ -763,6 +764,7 @@ impl App {
             plugin_commands: &self.plugin_commands,
             sessions: self.session_lister.as_ref(),
             themes_dir: self.themes_dir.as_deref(),
+            permission_modes: self.agent_mode_values(),
         };
         let event = self
             .cmdline
@@ -808,6 +810,7 @@ struct InputResolver {
     models: Vec<String>,
     themes: Vec<String>,
     plugin_commands: Vec<(String, String)>,
+    permission_modes: Option<Vec<String>>,
 }
 
 impl crate::cmdparse::Resolver for InputResolver {
@@ -821,6 +824,13 @@ impl crate::cmdparse::Resolver for InputResolver {
                 .map(|(n, _)| n.clone())
                 .collect(),
             crate::command::ArgSource::Sessions => Vec::new(),
+        }
+    }
+
+    fn choice_values(&self, command: &str, arg: &str) -> Option<Vec<String>> {
+        match (command, arg) {
+            ("permission", "mode") => self.permission_modes.clone(),
+            _ => None,
         }
     }
 }

@@ -180,12 +180,14 @@ impl App {
             return;
         }
         let registry = self.command_registry();
+        let permission_modes = self.agent_mode_values();
         if let Some(cl) = self.cmdline.as_mut() {
             let resolver = AppResolver {
                 models: &self.model_choices,
                 plugin_commands: &self.plugin_commands,
                 sessions: self.session_lister.as_ref(),
                 themes_dir: self.themes_dir.as_deref(),
+                permission_modes,
             };
             cl.paste_str(text, &registry, &resolver);
             return;
@@ -307,6 +309,65 @@ impl App {
         self.picker =
             Some(OverlayPicker::new("switch model", items).with_note("/login to add a provider"));
         self.picker_kind = Some(PickerKind::Model);
+    }
+
+    /// Open the permission picker: the agent's own modes on an
+    /// external session, the engine's allow/ask/deny otherwise, with
+    /// the session's current pick marked `*`.
+    pub(crate) fn open_permission_picker(&mut self) {
+        let Some(usage) = &self.session_usage else {
+            return;
+        };
+        let (modes, active, permission) = {
+            let usage = lock(usage);
+            (
+                usage.modes.clone(),
+                usage.mode_value.clone(),
+                usage.permission_mode,
+            )
+        };
+        if !modes.is_empty() {
+            let items = modes
+                .into_iter()
+                .map(|mode| crate::picker::PickItem {
+                    badge: Some(if Some(&mode.value) == active.as_ref() {
+                        '*'
+                    } else {
+                        ' '
+                    }),
+                    value: mode.value,
+                    label: mode.name,
+                    group: None,
+                    right: None,
+                })
+                .collect();
+            self.picker = Some(OverlayPicker::new("switch mode", items));
+            self.picker_kind = Some(PickerKind::Mode);
+            return;
+        }
+        let current = match permission {
+            Some(kage_core::permissions::PermissionAction::Allow) => "allow",
+            Some(kage_core::permissions::PermissionAction::Ask) => "ask",
+            Some(kage_core::permissions::PermissionAction::Deny) => "deny",
+            None => "default",
+        };
+        let items = [
+            ("allow", "Allow"),
+            ("ask", "Ask"),
+            ("deny", "Deny"),
+            ("default", "Default"),
+        ]
+        .into_iter()
+        .map(|(value, label)| crate::picker::PickItem {
+            badge: Some(if value == current { '*' } else { ' ' }),
+            value: value.to_owned(),
+            label: label.to_owned(),
+            group: None,
+            right: None,
+        })
+        .collect();
+        self.picker = Some(OverlayPicker::new("permission mode", items));
+        self.picker_kind = Some(PickerKind::Permission);
     }
 
     /// Title for the session picker, encoding the active scope and
@@ -531,6 +592,18 @@ impl App {
                     }
                     Some(PickerKind::Rewind) => {
                         let _ = self.send_request(RunRequest::Rewind { at: value });
+                    }
+                    Some(PickerKind::Mode) => {
+                        let _ = self.send_request(RunRequest::SetModeValue { value });
+                    }
+                    Some(PickerKind::Permission) => {
+                        let mode = match value.as_str() {
+                            "allow" => Some(kage_core::permissions::PermissionAction::Allow),
+                            "ask" => Some(kage_core::permissions::PermissionAction::Ask),
+                            "deny" => Some(kage_core::permissions::PermissionAction::Deny),
+                            _ => None,
+                        };
+                        let _ = self.send_request(RunRequest::SetPermissionMode(mode));
                     }
                     None => {}
                 }

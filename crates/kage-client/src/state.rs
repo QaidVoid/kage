@@ -205,7 +205,8 @@ pub struct Session {
     pub items: Vec<TranscriptItem>,
     /// Context fill and cost, as `usage_update` last reported it.
     pub usage: Usage,
-    /// The active mode id, as `current_mode_update` last reported it.
+    /// The active mode id, as `current_mode_update` or the mode config
+    /// option last reported it.
     pub mode: Option<String>,
     /// The session's config options, as the agent last reported them.
     pub config_options: Vec<SessionConfigOption>,
@@ -244,6 +245,20 @@ impl Session {
         Self {
             id: id.into(),
             ..Session::default()
+        }
+    }
+
+    /// Replaces the session's config options. A mode option among them
+    /// names the active mode, so [`Self::mode`] follows its value.
+    pub(crate) fn replace_config_options(&mut self, options: Vec<SessionConfigOption>) {
+        self.config_options = options;
+        if let Some(option) = self
+            .config_options
+            .iter()
+            .find(|option| option.id == "mode")
+            .filter(|option| !option.current_value.is_empty())
+        {
+            self.mode = Some(option.current_value.clone());
         }
     }
 

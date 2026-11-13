@@ -52,14 +52,15 @@ pub use kage_acp_wire::schema::{
     SelectedOption, SessionBackground, SessionCapabilities, SessionConfigCategory,
     SessionConfigKind, SessionConfigOption, SessionConfigSelectOption, SessionExportResponse,
     SessionForkRequest, SessionForkResponse, SessionInfo, SessionInfoKage, SessionInfoMeta,
-    SessionInfoUpdate, SessionNotification, SessionOpt, SessionPromptsResponse,
-    SessionRenameRequest, SessionReplacedUpdate, SessionRequest, SessionRewindRequest,
-    SessionUndoResponse, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
-    ShellRequest, ShellUpdate, StopReason, SubagentSessionCapabilities, SubagentState,
-    SubagentSwarm, SubagentUpdate, SubagentUsage, Supported, SwarmMeta, SwarmResumeRequest,
-    SwarmResumeResponse, TerminalRef, TextContent, ThemesRequest, ThemesResult, ToolCall,
-    ToolCallContent, ToolCallMeta, ToolCallStatus, ToolCallUpdate, ToolKind, TurnPhase, TurnReason,
-    TurnUpdate, UsageMeta, UsageTokens, UsageUpdate, UserTheme, WithdrawRequest,
+    SessionInfoUpdate, SessionMode, SessionModes, SessionNotification, SessionOpt,
+    SessionPromptsResponse, SessionRenameRequest, SessionReplacedUpdate, SessionRequest,
+    SessionRewindRequest, SessionUndoResponse, SetModeRequest, SetModeResponse,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, ShellRequest, ShellUpdate,
+    StopReason, SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate,
+    SubagentUsage, Supported, SwarmMeta, SwarmResumeRequest, SwarmResumeResponse, TerminalRef,
+    TextContent, ThemesRequest, ThemesResult, ToolCall, ToolCallContent, ToolCallMeta,
+    ToolCallStatus, ToolCallUpdate, ToolKind, TurnPhase, TurnReason, TurnUpdate, UsageMeta,
+    UsageTokens, UsageUpdate, UserTheme, WithdrawRequest, parse_session_config_options,
 };
 
 /// `_kage/config/get` result: the read-only sections a settings page

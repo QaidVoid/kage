@@ -439,6 +439,26 @@ pub struct SessionState {
     /// Background shell commands still running.
     #[serde(default)]
     pub shells: u32,
+    /// The modes the session's agent offers, when it offers any, in
+    /// its own order. Empty when the session has no mode switch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<ModeChoice>,
+    /// The id of the mode the session is in, as the agent names it.
+    /// `None` when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_value: Option<String>,
+}
+
+/// One mode a session's agent offers, phrased as the agent named it.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ModeChoice {
+    /// The id a mode switch sends back.
+    pub value: String,
+    /// Human label.
+    pub name: String,
+    /// Optional longer explanation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// Message counts of one history compaction.
@@ -1098,6 +1118,8 @@ mod tests {
                     goal: Some("ship it".into()),
                     plan: true,
                     shells: 2,
+                    modes: Vec::new(),
+                    mode_value: None,
                 },
             },
             HostEvent::UsageUpdated {

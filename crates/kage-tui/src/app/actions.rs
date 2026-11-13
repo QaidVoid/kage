@@ -63,7 +63,15 @@ impl App {
             let (target_spec, target_rest) = Self::resolve_subcommand_tree(spec, rest);
             let args = match crate::cmdparse::parse_input(target_spec, target_rest) {
                 Ok(args) => args,
-                Err(e) => return CommandResult::ValidationError(e.to_string()),
+                Err(e) => {
+                    // An agent that names its own modes validates
+                    // `/permission` itself: its mode ids are not the
+                    // engine's static set.
+                    if spec.name != "permission" || !self.has_agent_modes() {
+                        return CommandResult::ValidationError(e.to_string());
+                    }
+                    crate::command::ParsedArgs::new()
+                }
             };
             let exit = self.dispatch_builtin(spec.name, rest, &args);
             return CommandResult::Done(exit);
@@ -412,38 +420,77 @@ impl App {
         })
     }
 
-    /// Handle `:permission [mode]`: dispatch the override request,
-    /// or report the current mode when called with no argument.
+    /// Whether the session's agent publishes modes of its own.
+    fn has_agent_modes(&self) -> bool {
+        self.session_usage
+            .as_ref()
+            .is_some_and(|usage| !lock(usage).modes.is_empty())
+    }
+
+    /// The agent's own mode ids when the session has any, so the
+    /// permission argument completes against what the agent offers.
+    pub(crate) fn agent_mode_values(&self) -> Option<Vec<String>> {
+        self.session_usage.as_ref().and_then(|usage| {
+            let modes = lock(usage).modes.clone();
+            (!modes.is_empty()).then(|| modes.into_iter().map(|mode| mode.value).collect())
+        })
+    }
+
+    /// Handle `:permission [mode]`: dispatch the override request. A
+    /// bare `/permission` opens the session's picker: the agent's own
+    /// modes on an external session, allow/ask/deny/default otherwise.
+    /// With an argument on an agent session, the argument is that
+    /// agent's mode id.
     pub(crate) fn run_permission_command(&mut self, rest: &str) {
         let arg = rest.trim();
-        let parsed = match arg {
-            "" => None,
-            "allow" => Some(Some(kage_core::permissions::PermissionAction::Allow)),
-            "default" => Some(None),
-            "ask" => Some(Some(kage_core::permissions::PermissionAction::Ask)),
-            "deny" => Some(Some(kage_core::permissions::PermissionAction::Deny)),
+        let modes = self
+            .session_usage
+            .as_ref()
+            .map(|usage| lock(usage).modes.clone())
+            .unwrap_or_default();
+        if !modes.is_empty() {
+            if arg.is_empty() {
+                self.open_permission_picker();
+                return;
+            }
+            if let Some(mode) = modes
+                .iter()
+                .find(|mode| mode.value == arg || mode.name.eq_ignore_ascii_case(arg))
+            {
+                let _ = self.send_request(RunRequest::SetModeValue {
+                    value: mode.value.clone(),
+                });
+            } else {
+                let values = modes
+                    .iter()
+                    .map(|mode| mode.value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.push_error(format!(
+                    "permission: no mode `{arg}`; this agent offers: {values}"
+                ));
+            }
+            return;
+        }
+        let mode = match arg {
+            "" => {
+                if self.session_usage.is_some() {
+                    self.open_permission_picker();
+                } else {
+                    self.push_info("permission mode: default (configured rules)".to_owned());
+                }
+                return;
+            }
+            "allow" => Some(kage_core::permissions::PermissionAction::Allow),
+            "default" => None,
+            "ask" => Some(kage_core::permissions::PermissionAction::Ask),
+            "deny" => Some(kage_core::permissions::PermissionAction::Deny),
             other => {
                 self.push_error(format!(
                     "permission: unknown mode `{other}` (try allow, ask, deny or default)"
                 ));
                 return;
             }
-        };
-        let Some(mode) = parsed else {
-            let current = self
-                .session_usage
-                .as_ref()
-                .and_then(|u| lock(u).permission_mode);
-            let label = match current {
-                Some(kage_core::permissions::PermissionAction::Allow) => {
-                    "allow (yolo: every call runs, configured denies still deny)".to_owned()
-                }
-                Some(kage_core::permissions::PermissionAction::Ask) => "ask".to_owned(),
-                Some(kage_core::permissions::PermissionAction::Deny) => "deny".to_owned(),
-                _ => "default (configured rules)".to_owned(),
-            };
-            self.push_info(format!("permission mode: {label}"));
-            return;
         };
         let _ = self.send_request(RunRequest::SetPermissionMode(mode));
     }

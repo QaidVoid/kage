@@ -492,6 +492,38 @@ impl Client {
         (id, shown.into_iter().collect())
     }
 
+    /// Applies a set answer: options the answer names replace the shown
+    /// ones, and a mode switch yields the mode it showed ahead of the
+    /// answer to the answer's word. An answer naming no options confirms
+    /// nothing, so the value shown ahead of it reverts.
+    fn apply_set_config_answer(
+        &mut self,
+        session_id: &str,
+        config_id: &str,
+        previous: Option<String>,
+        response: kage_acp_wire::SetSessionConfigOptionResponse,
+    ) -> Vec<Change> {
+        let Some(config_options) = response.config_options else {
+            let Some(previous) = previous else {
+                return Vec::new();
+            };
+            let restored = self
+                .set_shown_option(session_id, config_id, &previous)
+                .is_some();
+            return restored
+                .then(|| Change::Session {
+                    id: session_id.to_owned(),
+                })
+                .into_iter()
+                .collect();
+        };
+        self.session_mut(session_id)
+            .replace_config_options(config_options);
+        vec![Change::Session {
+            id: session_id.to_owned(),
+        }]
+    }
+
     /// Shows `value` for option `config_id` of `session_id` at once,
     /// ahead of the agent's answer, and returns the value it replaced.
     /// The mode option moves the current mode with it.
@@ -1391,7 +1423,11 @@ impl Client {
                 session_id,
                 owns_run,
             } => self.apply_prompt_answer(session_id, owns_run, result),
-            Pending::SetConfigOption { session_id, .. } => {
+            Pending::SetConfigOption {
+                session_id,
+                config_id,
+                previous,
+            } => {
                 match answer::<kage_acp_wire::SetSessionConfigOptionResponse>(
                     id,
                     result,
@@ -1399,8 +1435,7 @@ impl Client {
                 ) {
                     Err(failed) => failed,
                     Ok(response) => {
-                        self.session_mut(&session_id).config_options = response.config_options;
-                        vec![Change::Session { id: session_id }]
+                        self.apply_set_config_answer(&session_id, &config_id, previous, response)
                     }
                 }
             }
@@ -1561,7 +1596,7 @@ impl Client {
                     .and_then(|listed| listed.meta.as_ref()?.kage.as_ref()?.external_agent.clone());
                 let session = self.session_mut(&session_id);
                 session.opened = true;
-                session.config_options = response.config_options;
+                session.replace_config_options(response.config_options);
                 if external_agent.is_some() {
                     session.external_agent = external_agent;
                 }
@@ -1589,7 +1624,7 @@ impl Client {
                 } else {
                     Some(cwd)
                 };
-                session.config_options = response.config_options;
+                session.replace_config_options(response.config_options);
                 session.external_agent = external_agent;
                 let session_id = session.id.clone();
                 self.state.sessions.insert(session_id.clone(), session);
@@ -1715,7 +1750,15 @@ impl Client {
                 }]
             }
             SessionUpdate::CurrentModeUpdate(update) => {
-                self.session_mut(session_id).mode = Some(update.current_mode_id);
+                let session = self.session_mut(session_id);
+                if let Some(option) = session
+                    .config_options
+                    .iter_mut()
+                    .find(|option| option.id == "mode")
+                {
+                    option.current_value.clone_from(&update.current_mode_id);
+                }
+                session.mode = Some(update.current_mode_id);
                 vec![Change::Session {
                     id: session_id.into(),
                 }]
@@ -1744,7 +1787,8 @@ impl Client {
                 }]
             }
             SessionUpdate::ConfigOptionUpdate(update) => {
-                self.session_mut(session_id).config_options = update.config_options;
+                self.session_mut(session_id)
+                    .replace_config_options(update.config_options);
                 vec![Change::Session {
                     id: session_id.into(),
                 }]

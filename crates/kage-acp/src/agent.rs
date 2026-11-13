@@ -1610,6 +1610,7 @@ mod tests {
             Ok(NewSessionResponse {
                 session_id: "sess-1".into(),
                 config_options: vec![],
+                modes: None,
             })
         }
 
@@ -2368,6 +2369,7 @@ mod tests {
             Ok(NewSessionResponse {
                 session_id: "s1".into(),
                 config_options: vec![],
+                modes: None,
             })
         }
 

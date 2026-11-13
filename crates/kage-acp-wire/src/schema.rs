@@ -370,6 +370,9 @@ pub struct NewSessionResponse {
         deserialize_with = "deserialize_session_config_options"
     )]
     pub config_options: Vec<SessionConfigOption>,
+    /// The session's modes, when the agent offers the standard surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modes: Option<SessionModes>,
 }
 
 /// `session/load` request params.
@@ -401,6 +404,9 @@ pub struct LoadSessionResponse {
         deserialize_with = "deserialize_session_config_options"
     )]
     pub config_options: Vec<SessionConfigOption>,
+    /// The session's modes, when the agent offers the standard surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modes: Option<SessionModes>,
 }
 
 /// `session/resume` request params: reopen a session without replay.
@@ -432,6 +438,9 @@ pub struct ResumeSessionResponse {
         deserialize_with = "deserialize_session_config_options"
     )]
     pub config_options: Vec<SessionConfigOption>,
+    /// The session's modes, when the agent offers the standard surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modes: Option<SessionModes>,
 }
 
 /// `session/close` request params.
@@ -525,10 +534,16 @@ pub struct SetSessionConfigOptionRequest {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetSessionConfigOptionResponse {
-    /// Config options after the change. Unfamiliar control types are omitted
-    /// and unfamiliar categories are treated as absent.
-    #[serde(deserialize_with = "deserialize_session_config_options")]
-    pub config_options: Vec<SessionConfigOption>,
+    /// Config options after the change, when the answer names any. An
+    /// answer without the field confirms nothing about the options.
+    /// Unfamiliar control types are omitted and unfamiliar categories
+    /// are treated as absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_session_config_options"
+    )]
+    pub config_options: Option<Vec<SessionConfigOption>>,
 }
 
 /// `_kage/config/get` and `_kage/options/list` request params.
@@ -1931,6 +1946,54 @@ pub struct SessionConfigOption {
     pub options: Vec<SessionConfigSelectOption>,
 }
 
+/// The modes an agent offers for one session, as the standard
+/// `session/new` and `session/load` results carry them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionModes {
+    /// The id of the mode the session is in. An agent that does not
+    /// name one leaves the session's own report in charge.
+    #[serde(default)]
+    pub current_mode_id: String,
+    /// The modes the session can switch to.
+    #[serde(default)]
+    pub available_modes: Vec<SessionMode>,
+}
+
+/// One mode of a [`SessionModes`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMode {
+    /// The id `session/set_mode` takes.
+    pub id: String,
+    /// Human label.
+    pub name: String,
+    /// Optional longer explanation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// `session/set_mode` request params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetModeRequest {
+    /// Session to switch.
+    pub session_id: String,
+    /// The mode to switch to, one of the advertised
+    /// [`SessionMode::id`]s.
+    pub mode_id: String,
+}
+
+/// `session/set_mode` result.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetModeResponse {
+    /// The modes as the session holds them after the switch, when the
+    /// agent reports them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modes: Option<SessionModes>,
+}
+
 /// The control type of a [`SessionConfigOption`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1951,6 +2014,16 @@ pub enum SessionConfigCategory {
     Model,
     /// The thinking level.
     ThoughtLevel,
+}
+
+/// The config options one wire value holds, with unfamiliar control
+/// types and categories dropped the way the open responses treat them.
+/// `None` when the value is not an option list at all.
+#[must_use]
+pub fn parse_session_config_options(value: serde_json::Value) -> Option<Vec<SessionConfigOption>> {
+    use serde::de::IntoDeserializer;
+
+    deserialize_session_config_options(value.into_deserializer()).ok()
 }
 
 // Response options with unfamiliar controls cannot be represented by the
@@ -1981,6 +2054,21 @@ where
         options.push(serde_json::from_value(value).map_err(D::Error::custom)?);
     }
     Ok(options)
+}
+
+// An absent field reads as None, an explicit list as Some: an answer
+// that names no options is not an answer naming none.
+fn deserialize_optional_session_config_options<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<SessionConfigOption>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct Wrapper(
+        #[serde(deserialize_with = "deserialize_session_config_options")] Vec<SessionConfigOption>,
+    );
+    Ok(Option::<Wrapper>::deserialize(deserializer)?.map(|Wrapper(options)| options))
 }
 
 /// One value of a select [`SessionConfigOption`].
@@ -3433,7 +3521,7 @@ mod tests {
         );
         roundtrip(
             &SetSessionConfigOptionResponse {
-                config_options: vec![model_option()],
+                config_options: Some(vec![model_option()]),
             },
             serde_json::json!({"configOptions": [model_option_json()]}),
         );
@@ -3488,7 +3576,7 @@ mod tests {
         .unwrap();
         assert_eq!(load.config_options, new.config_options);
         assert_eq!(resume.config_options, new.config_options);
-        assert_eq!(set.config_options, new.config_options);
+        assert_eq!(set.config_options, Some(new.config_options.clone()));
         assert_eq!(
             update,
             SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate {
@@ -3515,10 +3603,9 @@ mod tests {
             update["sessionUpdate"] = serde_json::json!("config_option_update");
             assert!(serde_json::from_value::<SessionUpdate>(update).is_err());
         }
-        assert!(
-            serde_json::from_value::<SetSessionConfigOptionResponse>(serde_json::json!({}))
-                .is_err()
-        );
+        let empty = serde_json::from_value::<SetSessionConfigOptionResponse>(serde_json::json!({}))
+            .unwrap();
+        assert!(empty.config_options.is_none());
         assert!(
             serde_json::from_value::<SessionUpdate>(serde_json::json!({
                 "sessionUpdate": "config_option_update"
@@ -3539,6 +3626,7 @@ mod tests {
             &NewSessionResponse {
                 session_id: "s1".into(),
                 config_options: vec![model_option()],
+                modes: None,
             },
             serde_json::json!({"sessionId": "s1", "configOptions": [model_option_json()]}),
         );
@@ -3546,13 +3634,23 @@ mod tests {
             &NewSessionResponse {
                 session_id: "s1".into(),
                 config_options: vec![],
+                modes: Some(SessionModes {
+                    current_mode_id: "code".into(),
+                    available_modes: vec![SessionMode {
+                        id: "code".into(),
+                        name: "Code".into(),
+                        description: None,
+                    }],
+                }),
             },
-            serde_json::json!({"sessionId": "s1"}),
+            serde_json::json!({"sessionId": "s1", "modes": {"currentModeId": "code",
+                "availableModes": [{"id": "code", "name": "Code"}]}}),
         );
         roundtrip(&LoadSessionResponse::default(), serde_json::json!({}));
         roundtrip(
             &LoadSessionResponse {
                 config_options: vec![model_option()],
+                modes: None,
             },
             serde_json::json!({"configOptions": [model_option_json()]}),
         );

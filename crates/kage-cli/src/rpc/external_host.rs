@@ -51,11 +51,13 @@ impl CliAcpAgent {
                 restore: None,
             },
         )?;
+        let config_options = started.0.config_options();
         let receipt = self.register_external(&id, started, None)?;
         Ok((
             NewSessionResponse {
                 session_id: id,
-                config_options: Vec::new(),
+                config_options,
+                modes: None,
             },
             receipt,
         ))

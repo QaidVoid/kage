@@ -254,6 +254,8 @@ impl App {
                     usage.plan = state.plan;
                     usage.shells = state.shells;
                     usage.working = state.working;
+                    usage.modes = state.modes;
+                    usage.mode_value = state.mode_value;
                 }
             }
             HostEvent::UsageUpdated { usage: totals } => {

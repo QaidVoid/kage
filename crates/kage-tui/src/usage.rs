@@ -77,6 +77,11 @@ pub struct SessionUsage {
     pub plan: bool,
     /// Background shell commands still running.
     pub shells: u32,
+    /// The modes the session's agent offers, when it offers any. Empty
+    /// when the session has no mode switch.
+    pub modes: Vec<kage_core::protocol::ModeChoice>,
+    /// The id of the mode the session is in, as the agent names it.
+    pub mode_value: Option<String>,
 }
 
 impl SessionUsage {

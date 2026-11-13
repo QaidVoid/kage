@@ -118,6 +118,19 @@ const CHOICE_THEN_REST: CommandSpec = CommandSpec {
     subcommands: &[],
 };
 
+const PERMISSION_MODES: CommandSpec = CommandSpec {
+    name: "permission",
+    aliases: &["perm"],
+    description: "permission mode",
+    category: CommandCategory::Both,
+    args: &[ArgSpec::Choice {
+        name: "mode",
+        values: &["allow", "ask", "deny", "default"],
+        optional: true,
+    }],
+    subcommands: &[],
+};
+
 fn registry() -> Vec<&'static CommandSpec> {
     vec![
         &NO_ARGS,
@@ -153,6 +166,12 @@ impl Resolver for TestResolver {
     }
     fn sessions(&self) -> Vec<String> {
         vec!["sess-1".into(), "sess-2".into()]
+    }
+    fn choice_values(&self, command: &str, arg: &str) -> Option<Vec<String>> {
+        match (command, arg) {
+            ("permission", "mode") => Some(vec!["code".into(), "ask".into()]),
+            _ => None,
+        }
     }
 }
 
@@ -492,6 +511,27 @@ fn complete_dynamic_choice_uses_resolver() {
     let names: Vec<String> = c.items.iter().map(|i| i.value.clone()).collect();
     assert_eq!(names.len(), 2);
     assert!(names[0].starts_with("anthropic:"));
+}
+
+#[test]
+fn complete_choice_uses_a_resolver_override() {
+    let r = TestResolver;
+    let registry = [&PERMISSION_MODES];
+    let c = complete(&registry, "permission ", 11, &r);
+    let names: Vec<String> = c.items.iter().map(|i| i.value.clone()).collect();
+    assert_eq!(
+        names,
+        vec!["code", "ask"],
+        "the agent's own modes replace the static set"
+    );
+}
+
+#[test]
+fn complete_choice_keeps_static_values_without_an_override() {
+    let r = TestResolver;
+    let c = complete(&registry(), "mouse ", 6, &r);
+    let names: Vec<String> = c.items.iter().map(|i| i.value.clone()).collect();
+    assert_eq!(names, vec!["on", "off", "toggle"]);
 }
 
 #[test]

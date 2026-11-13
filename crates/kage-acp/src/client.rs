@@ -725,6 +725,7 @@ mod tests {
             Ok(NewSessionResponse {
                 session_id: "s1".to_owned(),
                 config_options: vec![],
+                modes: None,
             })
         }
 
@@ -1106,6 +1107,7 @@ mod tests {
             Ok(NewSessionResponse {
                 session_id: "s1".to_owned(),
                 config_options: vec![],
+                modes: None,
             })
         }
 

@@ -40,6 +40,7 @@ use crate::acp::{
 #[cfg(unix)]
 use crate::acp::{
     LoadSessionRequest, LoadSessionResponse, ResumeSessionRequest, ResumeSessionResponse,
+    SetModeRequest, SetModeResponse, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
 };
 
 /// A reusable ACP client. Blocking operations require the incoming stream to
@@ -1441,6 +1442,41 @@ impl UnixConnection {
             Ok(handle) => handle.wait(deadline, cancel),
             Err(error) => (Err(error), None),
         }
+    }
+
+    /// Switch the session's mode on the initialized connection. The
+    /// result and barrier follow the ordering rules of
+    /// [`Self::new_session`].
+    pub fn set_mode(
+        &self,
+        request: &SetModeRequest,
+        deadline: Option<Instant>,
+        cancel: Option<&CancelFlag>,
+    ) -> (Result<SetModeResponse, RpcError>, Option<ResponseBarrier>) {
+        if !self.initialized {
+            return (Err(RpcError::internal("connection not initialized")), None);
+        }
+        let (result, barrier) = self.call("session/set_mode", request, deadline, cancel);
+        (result.and_then(decode), barrier)
+    }
+
+    /// Change one of the session's config options on the initialized
+    /// connection. The result and barrier follow the ordering rules of
+    /// [`Self::new_session`].
+    pub fn set_config_option(
+        &self,
+        request: &SetSessionConfigOptionRequest,
+        deadline: Option<Instant>,
+        cancel: Option<&CancelFlag>,
+    ) -> (
+        Result<SetSessionConfigOptionResponse, RpcError>,
+        Option<ResponseBarrier>,
+    ) {
+        if !self.initialized {
+            return (Err(RpcError::internal("connection not initialized")), None);
+        }
+        let (result, barrier) = self.call("session/set_config_option", request, deadline, cancel);
+        (result.and_then(decode), barrier)
     }
 
     /// Commit a prompt before returning a handle that can send cancellation.

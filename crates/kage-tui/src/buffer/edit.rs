@@ -317,6 +317,34 @@ impl Buffer {
         }
     }
 
+    /// Settle every call the agent never confirmed as
+    /// [`ToolPhase::Done`], leaving permission-gated rows (waiting,
+    /// approved) alone: the run ended on its own, so a call it
+    /// announced but never closed out finished with it. An agent that
+    /// reports no terminal status for a call would otherwise read as
+    /// interrupted on a run that completed.
+    pub fn settle_run_tools(&mut self) {
+        let mut changed = Vec::new();
+        for (i, block) in self.blocks.iter_mut().enumerate() {
+            if !matches!(
+                block.as_ref(),
+                Block::ToolCall {
+                    phase: ToolPhase::Streaming | ToolPhase::Queued | ToolPhase::Running,
+                    ..
+                }
+            ) {
+                continue;
+            }
+            if let Block::ToolCall { phase, .. } = Arc::make_mut(block) {
+                *phase = ToolPhase::Done;
+                changed.push(i);
+            }
+        }
+        for i in changed {
+            self.invalidate_height(i);
+        }
+    }
+
     /// Give every finished `edit` call without a line diff one, from
     /// its file as `read` returns it by path. Each file is read once.
     /// A call whose file does not hold its new text shows the change

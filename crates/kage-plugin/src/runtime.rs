@@ -267,8 +267,11 @@ impl EvalState {
 
     /// Evaluate `source` in `env` under the watchdog, with `name` as the
     /// current plugin and `chunk` as the chunk name. The slot is
-    /// restored on every exit path, so a contained panic cannot leave a
-    /// stale plugin name for the next `kage.request_capabilities`.
+    /// restored to its previous value on every exit path, so a panic
+    /// cannot leave a stale plugin name for the next
+    /// `kage.request_capabilities`, and an eval nested in a scoped
+    /// callback (host-driven reload) does not clear the callback's
+    /// owner.
     pub(crate) fn eval_in(
         &self,
         lua: &Lua,
@@ -277,19 +280,17 @@ impl EvalState {
         env: Table,
         source: &str,
     ) -> Result<mlua::Value, PluginError> {
-        *lock(&self.current_plugin) = Some(name.to_owned());
-        let guard = RestoreOnDrop::arm(|| {
-            *lock(&self.current_plugin) = None;
+        let previous = lock(&self.current_plugin).replace(name.to_owned());
+        let slot = Arc::clone(&self.current_plugin);
+        let _guard = RestoreOnDrop::arm(move || {
+            lock(&slot).clone_from(&previous);
         });
-        let result = watchdog::run(lua, self.script_budget, || {
+        watchdog::run(lua, self.script_budget, || {
             lua.load(source)
                 .set_name(chunk)
                 .set_environment(env)
                 .eval::<mlua::Value>()
-        });
-        *lock(&self.current_plugin) = None;
-        guard.defuse();
-        result
+        })
     }
 
     /// Evaluate `_defaults.lua` in its own environment. Runs before the

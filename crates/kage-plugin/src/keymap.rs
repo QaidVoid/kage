@@ -48,15 +48,17 @@ use crate::options::SharedOptions;
 /// can never run another runtime's handler under the same id.
 static NEXT_HANDLER: AtomicU64 = AtomicU64::new(0);
 
-fn store_handler(lua: &Lua, handler: Function) -> mlua::Result<u64> {
+fn store_handler(lua: &Lua, handler: Function, owner: Option<String>) -> mlua::Result<u64> {
     let id = NEXT_HANDLER.fetch_add(1, Ordering::Relaxed) + 1;
     handlers(lua)?.raw_set(id, handler)?;
+    handler_owners(lua)?.raw_set(id, owner)?;
     Ok(id)
 }
 
 /// The rhs of `kage.keymap.set`: a `kage.action` value, a `":command"`
-/// string, a Lua function stored by id, or `"<Nop>"`.
-fn parse_rhs(lua: &Lua, value: Value) -> mlua::Result<Rhs> {
+/// string, a Lua function stored by id, or `"<Nop>"`. `scope_owner` is
+/// the plugin the function runs for, recorded alongside its handler id.
+fn parse_rhs(lua: &Lua, value: Value, scope_owner: Option<String>) -> mlua::Result<Rhs> {
     let bad = || {
         fail(
             "keymap_set: rhs must be a kage.action value, a \":command\" string, \
@@ -82,7 +84,7 @@ fn parse_rhs(lua: &Lua, value: Value) -> mlua::Result<Rhs> {
                 _ => Err(bad()),
             }
         }
-        Value::Function(f) => Ok(Rhs::Lua(store_handler(lua, f)?)),
+        Value::Function(f) => Ok(Rhs::Lua(store_handler(lua, f, scope_owner)?)),
         _ => Err(bad()),
     }
 }
@@ -92,6 +94,12 @@ pub type SharedKeymap = Arc<Mutex<Keymap>>;
 
 /// Named registry slot of the table holding Lua handlers by id.
 const HANDLERS_KEY: &str = "kage.keymap.handlers";
+
+/// Named registry slot of the table holding each handler's registering
+/// plugin by id, so the host runs the handler under its owner through
+/// the bridge. Host eval stores `nil`; init.lua records `@user`; both
+/// are trusted.
+const HANDLER_OWNERS_KEY: &str = "kage.keymap.handler_owners";
 
 /// Keys that the quit and interrupt hatches take before any mapping
 /// that `init.lua` or `config.toml` does not own.
@@ -215,7 +223,8 @@ impl Keymaps {
     /// Remove every mapping and drop every Lua handler.
     pub(crate) fn clear(&self, lua: &Lua) -> mlua::Result<()> {
         lock(&self.table).clear();
-        lua.set_named_registry_value(HANDLERS_KEY, lua.create_table()?)
+        lua.set_named_registry_value(HANDLERS_KEY, lua.create_table()?)?;
+        lua.set_named_registry_value(HANDLER_OWNERS_KEY, lua.create_table()?)
     }
 }
 
@@ -223,6 +232,7 @@ impl Keymaps {
 /// and `kage.register_keybinding`.
 pub(crate) fn install(lua: &Lua, keymaps: &Keymaps) -> Result<(), PluginError> {
     lua.set_named_registry_value(HANDLERS_KEY, lua.create_table()?)?;
+    lua.set_named_registry_value(HANDLER_OWNERS_KEY, lua.create_table()?)?;
     let kage: Table = lua.globals().get("kage")?;
     let api: Table = kage.get("api")?;
 
@@ -237,7 +247,8 @@ pub(crate) fn install(lua: &Lua, keymaps: &Keymaps) -> Result<(), PluginError> {
                     Some(opts) => (opts.get("desc")?, opts.get("group")?),
                     None => (None, None),
                 };
-                let rhs = parse_rhs(lua, rhs)?;
+                let scope_owner = crate::capabilities::current_owner(&this.current);
+                let rhs = parse_rhs(lua, rhs, scope_owner)?;
                 let owner = this.owner();
                 this.warn_hatch(&keys, &owner);
                 let mapping = Mapping {
@@ -313,7 +324,8 @@ fn register_fn(lua: &Lua, this: Keymaps) -> mlua::Result<Function> {
         let keys = this.keys(NAME, &chord)?;
         let owner = this.owner();
         this.warn_hatch(&keys, &owner);
-        let id = store_handler(lua, handler)?;
+        let scope_owner = crate::capabilities::current_owner(&this.current);
+        let id = store_handler(lua, handler, scope_owner)?;
         let mapping = Mapping {
             rhs: Rhs::Lua(id),
             desc,
@@ -348,8 +360,26 @@ pub(crate) fn handler(lua: &Lua, id: u64) -> mlua::Result<Function> {
     }
 }
 
+/// The plugin that stored the handler `id`, or `None` when it came from
+/// the trusted user config or host eval. Fails when the handler is
+/// absent (stale id).
+pub(crate) fn handler_owner(lua: &Lua, id: u64) -> mlua::Result<Option<String>> {
+    if !matches!(handlers(lua)?.raw_get::<Value>(id)?, Value::Function(_)) {
+        return Err(fail(format!("no keymap handler {id}")));
+    }
+    match handler_owners(lua)?.raw_get::<Value>(id)? {
+        Value::Nil => Ok(None),
+        Value::String(s) => Ok(Some(s.to_str()?.to_owned())),
+        _ => Err(fail(format!("no keymap handler {id}"))),
+    }
+}
+
 fn handlers(lua: &Lua) -> mlua::Result<Table> {
     lua.named_registry_value(HANDLERS_KEY)
+}
+
+fn handler_owners(lua: &Lua) -> mlua::Result<Table> {
+    lua.named_registry_value(HANDLER_OWNERS_KEY)
 }
 
 fn drop_handler(lua: &Lua, mapping: Option<&Mapping>) -> mlua::Result<()> {
@@ -358,6 +388,7 @@ fn drop_handler(lua: &Lua, mapping: Option<&Mapping>) -> mlua::Result<()> {
     }) = mapping
     {
         handlers(lua)?.raw_set(*id, Value::Nil)?;
+        handler_owners(lua)?.raw_set(*id, Value::Nil)?;
     }
     Ok(())
 }

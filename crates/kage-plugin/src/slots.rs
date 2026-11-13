@@ -307,6 +307,8 @@ pub struct LuaComponent {
     interval: Option<u64>,
     hl: Option<String>,
     origin: Arc<str>,
+    /// The plugin that set the component.
+    owner: Option<String>,
     lines: Mutex<Arc<[ChromeLine]>>,
 }
 
@@ -533,7 +535,7 @@ fn slot_set(lua: &Lua, shared: &Arc<Shared>, name: &str, spec: Value) -> mlua::R
                 .unwrap_or_default()
                 .into();
             let spec = Arc::new(
-                parse_spec(lua, slot, &table, &origin)
+                parse_spec(lua, slot, &table, &origin, owner.as_deref())
                     .map_err(|e| fail(format!("kage.api.slot_set: {e}")))?,
             );
             if owner.as_deref() == Some(DEFAULTS_ENV) {
@@ -564,13 +566,14 @@ fn parse_spec(
     slot: SlotName,
     table: &Table,
     origin: &Arc<str>,
+    owner: Option<&str>,
 ) -> Result<SlotSpec, String> {
     let items = |table: &Table, key: &str| -> Result<Vec<SlotItem>, String> {
         match table.get::<Value>(key).map_err(|e| e.to_string())? {
             Value::Nil => Ok(Vec::new()),
             Value::Table(list) => list
                 .sequence_values::<Value>()
-                .map(|item| parse_item(lua, &item.map_err(|e| e.to_string())?, origin))
+                .map(|item| parse_item(lua, &item.map_err(|e| e.to_string())?, origin, owner))
                 .collect(),
             _ => Err(format!("`{key}` must be a list")),
         }
@@ -643,7 +646,12 @@ fn parse_sep(table: &Table) -> Result<String, String> {
     }
 }
 
-fn parse_item(lua: &Lua, item: &Value, origin: &Arc<str>) -> Result<SlotItem, String> {
+fn parse_item(
+    lua: &Lua,
+    item: &Value,
+    origin: &Arc<str>,
+    owner: Option<&str>,
+) -> Result<SlotItem, String> {
     match item {
         Value::String(name) => {
             let name = name.to_str().map_err(|e| e.to_string())?;
@@ -654,7 +662,7 @@ fn parse_item(lua: &Lua, item: &Value, origin: &Arc<str>) -> Result<SlotItem, St
                 .ok_or_else(|| format!("unknown component '{}'", &*name))
         }
         Value::Table(table) if table.contains_key("render").unwrap_or(false) => {
-            parse_component(lua, table, origin).map(|c| SlotItem::Lua(Arc::new(c)))
+            parse_component(lua, table, origin, owner).map(|c| SlotItem::Lua(Arc::new(c)))
         }
         Value::Table(table) if table.contains_key("text").unwrap_or(false) => {
             Ok(SlotItem::Text(parse_span_table(table)))
@@ -663,7 +671,12 @@ fn parse_item(lua: &Lua, item: &Value, origin: &Arc<str>) -> Result<SlotItem, St
     }
 }
 
-fn parse_component(lua: &Lua, table: &Table, origin: &Arc<str>) -> Result<LuaComponent, String> {
+fn parse_component(
+    lua: &Lua,
+    table: &Table,
+    origin: &Arc<str>,
+    owner: Option<&str>,
+) -> Result<LuaComponent, String> {
     let str_err = |e: mlua::Error| e.to_string();
     let Value::Function(render) = table.get::<Value>("render").map_err(str_err)? else {
         return Err("`render` must be a function".to_owned());
@@ -700,11 +713,13 @@ fn parse_component(lua: &Lua, table: &Table, origin: &Arc<str>) -> Result<LuaCom
         interval,
         hl,
         origin: Arc::clone(origin),
+        owner: owner.map(str::to_owned),
         lines: Mutex::new(Arc::from(Vec::new())),
     })
 }
 
 fn hook(lua: &Lua, shared: &Arc<Shared>, slot: SlotName, spec: &SlotSpec) -> mlua::Result<()> {
+    let owner = lock(&shared.current).clone();
     let mut hooks = Vec::new();
     for component in spec.components() {
         let weak = Arc::downgrade(component);
@@ -723,6 +738,7 @@ fn hook(lua: &Lua, shared: &Arc<Shared>, slot: SlotName, spec: &SlotSpec) -> mlu
                 patterns.clone(),
                 callback.clone(),
                 Arc::clone(&origin),
+                owner.clone(),
             )?;
             hooks.push(Hook::Autocmd(id));
         }
@@ -764,7 +780,10 @@ fn recompute_slots(lua: &Lua, shared: &Shared, slots: &[SlotName]) {
 
 fn recompute(lua: &Lua, shared: &Shared, component: &LuaComponent) {
     let ui = lock(&shared.ui).clone();
-    match render(lua, component, &ui) {
+    let matched = crate::capabilities::scoped(&shared.current, component.owner.as_deref(), || {
+        render(lua, component, &ui)
+    });
+    match matched {
         Ok(lines) => {
             let mut current = lock(&component.lines);
             if **current != *lines {

@@ -266,6 +266,7 @@ impl PluginRuntimeBuilder {
             &cap_registry,
             weak_host.clone(),
             self.sink.clone(),
+            Arc::clone(&current_plugin),
             &provider_registry,
         );
         api::register(&cap_registry, self.config);
@@ -279,11 +280,18 @@ impl PluginRuntimeBuilder {
             Arc::clone(&cap_registry),
         )?;
         ui::install_ui(&lua)?;
-        tools::install_register_tool(&lua, weak_host.clone(), self.sink.clone(), &tool_registry)?;
+        tools::install_register_tool(
+            &lua,
+            weak_host.clone(),
+            self.sink.clone(),
+            Arc::clone(&current_plugin),
+            &tool_registry,
+        )?;
         tools::install_override_tool(
             &lua,
             weak_host.clone(),
             self.sink.clone(),
+            Arc::clone(&current_plugin),
             &tool_override_registry,
         )?;
         tools::install_rename_tool(&lua, &rename_registry)?;
@@ -291,22 +299,25 @@ impl PluginRuntimeBuilder {
             &lua,
             weak_host.clone(),
             self.sink.clone(),
+            Arc::clone(&current_plugin),
             &command_registry,
         )?;
         commands::install_override_command(
             &lua,
             weak_host.clone(),
             self.sink.clone(),
+            Arc::clone(&current_plugin),
             &command_override_registry,
         )?;
         widgets::install_register_widget(
             &lua,
             weak_host.clone(),
             self.sink.clone(),
+            Arc::clone(&current_plugin),
             &widget_registry,
         )?;
         status::install_status(&lua, Arc::clone(&status_map))?;
-        acp::install_acp(&lua)?;
+        acp::install_acp(&lua, Arc::clone(&current_plugin))?;
         mcp::install_mcp(&lua, Arc::clone(&mcp_servers))?;
         lifecycle::install_lifecycle(&lua, Arc::clone(&usage_snapshot), Arc::clone(&compact_slot))?;
         sessions::install_sessions(
@@ -321,18 +332,21 @@ impl PluginRuntimeBuilder {
             &lua,
             weak_host.clone(),
             self.sink.clone(),
+            Arc::clone(&current_plugin),
             &block_renderer_map,
         )?;
         autocomplete::install_add_autocomplete_provider(
             &lua,
             weak_host.clone(),
             self.sink.clone(),
+            Arc::clone(&current_plugin),
             &autocomplete_registry,
         )?;
         terminal_input::install_on_terminal_input(
             &lua,
             weak_host,
             self.sink.clone(),
+            Arc::clone(&current_plugin),
             &terminal_hook_registry,
         )?;
         stdlib::install(&lua)?;

@@ -28,6 +28,7 @@ use kage_core::sync::lock;
 use mlua::{Function, Lua, RegistryKey, Table};
 
 use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
+use crate::capabilities::CurrentPlugin;
 use crate::error::PluginError;
 use crate::host::{self, LuaHost, WeakHost};
 use crate::watchdog;
@@ -87,6 +88,9 @@ pub struct LuaCommand {
     host: LuaHost,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
+    /// The plugin that registered the command.
+    owner: Option<String>,
+    current: CurrentPlugin,
 }
 
 impl std::fmt::Debug for LuaCommand {
@@ -143,6 +147,8 @@ impl LuaCommand {
         let schema = self.args.clone();
         let sink = Arc::clone(&self.sink);
         let key = Arc::clone(&self.handler_key);
+        let owner = self.owner.clone();
+        let current = Arc::clone(&self.current);
         let args = args.to_owned();
         let ctx = ctx.clone();
         self.host.call(move |lua| {
@@ -159,7 +165,9 @@ impl LuaCommand {
                 }
             };
             match watchdog::run(lua, watchdog::BUDGET, || {
-                handler.call::<mlua::Value>((args, lua_ctx, parsed_args))
+                crate::capabilities::scoped(&current, owner.as_deref(), || {
+                    handler.call::<mlua::Value>((args, lua_ctx, parsed_args))
+                })
             }) {
                 Ok(v) => Ok(CommandOutput::from_value(v)),
                 Err(err) => {
@@ -180,7 +188,8 @@ impl LuaCommand {
 
     /// Prepare a bridged invocation: parse args against the schema and
     /// fetch the handler on the owner thread, returning owned values the
-    /// caller hands to [`crate::PluginRuntime::bridge_call`].
+    /// caller hands to [`crate::PluginRuntime::bridge_call_for`] with
+    /// [`BridgeArgs::owner`].
     ///
     /// Unlike [`Self::invoke`], the handler runs inside a coroutine, so
     /// it may call blocking `kage.ui.*` APIs. Argument-parse failures
@@ -194,6 +203,7 @@ impl LuaCommand {
         let name = self.name.clone();
         let schema = self.args.clone();
         let key = Arc::clone(&self.handler_key);
+        let owner = self.owner.clone();
         let raw = raw.to_owned();
         let ctx = ctx.clone();
         self.host.call(move |lua| {
@@ -212,6 +222,7 @@ impl LuaCommand {
             Ok(BridgePrep::Ready(BridgeArgs {
                 handler,
                 args: vec![serde_json::Value::String(raw), ctx, parsed_json],
+                owner,
             }))
         })?
     }
@@ -444,14 +455,19 @@ impl CommandOutput {
 }
 
 /// Handler plus positional JSON arguments ready to run through the
-/// coroutine bridge ([`crate::PluginRuntime::bridge_call`]). The args
-/// are `[raw_arg_string, host_ctx, parsed_args]`, matching the
-/// `(args, ctx, parsed_args)` shape [`LuaCommand::invoke`] passes.
+/// coroutine bridge ([`crate::PluginRuntime::bridge_call_for`] under
+/// `owner`). The args are `[raw_arg_string, host_ctx, parsed_args]`,
+/// matching the `(args, ctx, parsed_args)` shape [`LuaCommand::invoke`]
+/// passes.
 pub struct BridgeArgs {
     /// The plugin's Lua handler, fetched from the registry.
     pub handler: Function,
     /// Positional arguments for the handler, in order.
     pub args: Vec<serde_json::Value>,
+    /// The plugin that registered the command; the host starts the
+    /// bridged call under it (see
+    /// [`crate::PluginRuntime::bridge_call_for`]).
+    pub owner: Option<String>,
 }
 
 impl std::fmt::Debug for BridgeArgs {
@@ -491,6 +507,7 @@ fn install_command_fn(
     lua: &Lua,
     host: WeakHost,
     sink: SharedHostLog,
+    current: CurrentPlugin,
     registered: &RegisteredCommands,
     fn_name: &'static str,
 ) -> Result<(), PluginError> {
@@ -499,6 +516,7 @@ fn install_command_fn(
     kage.set(
         fn_name,
         lua.create_function(move |lua, spec: Table| {
+            let owner = crate::capabilities::current_owner(&current);
             let name: String = spec.get("name")?;
             let description: String = spec.get("description")?;
             let handler: Function = spec.get("handler")?;
@@ -529,6 +547,8 @@ fn install_command_fn(
                 host: host.upgrade()?,
                 sink: sink.clone(),
                 handler_key: Arc::new(key),
+                owner,
+                current: Arc::clone(&current),
             };
             host::upgrade(&registered)?
                 .lock()
@@ -549,9 +569,10 @@ pub(crate) fn install_register_command(
     lua: &Lua,
     host: WeakHost,
     sink: SharedHostLog,
+    current: CurrentPlugin,
     registered: &RegisteredCommands,
 ) -> Result<(), PluginError> {
-    install_command_fn(lua, host, sink, registered, "register_command")
+    install_command_fn(lua, host, sink, current, registered, "register_command")
 }
 
 /// Install `kage.override_command` on the running Lua state.
@@ -566,9 +587,10 @@ pub(crate) fn install_override_command(
     lua: &Lua,
     host: WeakHost,
     sink: SharedHostLog,
+    current: CurrentPlugin,
     overrides: &RegisteredCommands,
 ) -> Result<(), PluginError> {
-    install_command_fn(lua, host, sink, overrides, "override_command")
+    install_command_fn(lua, host, sink, current, overrides, "override_command")
 }
 
 #[cfg(test)]

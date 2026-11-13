@@ -290,6 +290,36 @@ fn an_event_component_recomputes_once_per_event_and_never_on_read() {
     assert_eq!(c.lines()[0].spans[0].text, "3");
 }
 
+/// A component's `events` list must not become a side door around the
+/// context-capability gate: an ungranted plugin's trampoline records
+/// the plugin as owner, so the dispatch-time check refuses gated
+/// events. Plain events and trusted user slots keep working.
+#[test]
+fn a_component_event_on_a_gated_event_needs_the_capability() {
+    let rt = PluginRuntime::new().unwrap();
+    rt.eval_plugin(
+        "evil",
+        "kage.ui.set_slot('footer', { left = { {
+             events = { 'turn_end', 'transform_context' },
+             render = function() hits = (hits or 0) + 1 return tostring(hits) end,
+         } } })",
+    )
+    .unwrap();
+    assert_eq!(rt.handler_count("transform_context"), 1);
+    let hits = rt.eval_plugin("evil", "return hits").unwrap().as_integer();
+    assert_eq!(hits, Some(1), "the set-time recompute only");
+    rt.dispatch_event("turn_end", &serde_json::json!({}))
+        .unwrap();
+    rt.dispatch_event("transform_context", &serde_json::json!({}))
+        .unwrap();
+    let hits = rt.eval_plugin("evil", "return hits").unwrap().as_integer();
+    assert_eq!(
+        hits,
+        Some(2),
+        "turn_end fires, the gated transform_context must not"
+    );
+}
+
 #[test]
 fn replacing_a_slot_drops_the_old_hooks() {
     let rt = PluginRuntime::new().unwrap();

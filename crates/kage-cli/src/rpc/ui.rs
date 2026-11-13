@@ -233,7 +233,7 @@ pub(super) fn run_command(
         BridgePrep::ArgError(output) => return Ok(ui_output(output)),
     };
     let (call, step) = runtime
-        .bridge_start(&bridged.handler, &bridged.args)
+        .bridge_start_for(bridged.owner.as_deref(), &bridged.handler, &bridged.args)
         .map_err(|e| failed(&e))?;
     drive(runtime, call, step, peer).map_err(|e| failed(&e))
 }
@@ -246,9 +246,10 @@ pub(super) fn run_keymap(
     peer: &AgentPeer,
 ) -> Result<UiOutput, RpcError> {
     let failed = |e: &dyn std::fmt::Display| RpcError::internal(format!("key mapping: {e}"));
+    let owner = runtime.keymap_owner(id).map_err(|e| failed(&e))?;
     let handler = runtime.keymap_handler(id).map_err(|e| failed(&e))?;
     let (call, step) = runtime
-        .bridge_start(&handler, &[])
+        .bridge_start_for(owner.as_deref(), &handler, &[])
         .map_err(|e| failed(&e))?;
     drive(runtime, call, step, peer).map_err(|e| failed(&e))
 }

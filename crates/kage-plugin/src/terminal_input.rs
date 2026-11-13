@@ -41,6 +41,7 @@ use kage_core::sync::lock;
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog, json_to_lua};
+use crate::capabilities::{CurrentPlugin, OwnerScope};
 use crate::error::PluginError;
 use crate::host::{self, LuaHost, WeakHost};
 use crate::watchdog;
@@ -66,6 +67,8 @@ pub struct LuaTerminalHook {
     host: LuaHost,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
+    /// The plugin that registered the hook.
+    scope: OwnerScope,
     warned: AtomicBool,
 }
 
@@ -97,9 +100,10 @@ impl LuaTerminalHook {
         let id = self.id;
         let sink = Arc::clone(&self.sink);
         let handler = Arc::clone(&self.handler_key);
+        let scope = self.scope.clone();
         let event = event.clone();
         let verdict = self.host.call_within(deadline, move |lua| {
-            run_hook(lua, id, &sink, &handler, &event)
+            run_hook(lua, id, &sink, &handler, &scope, &event)
         });
         verdict.unwrap_or_else(|| {
             if !self.warned.swap(true, Ordering::SeqCst) {
@@ -123,6 +127,7 @@ fn run_hook(
     id: u64,
     sink: &SharedHostLog,
     handler_key: &RegistryKey,
+    scope: &OwnerScope,
     event: &serde_json::Value,
 ) -> bool {
     let fail = |e: &dyn std::fmt::Display| {
@@ -141,8 +146,10 @@ fn run_hook(
         Ok(v) => v,
         Err(e) => return fail(&e),
     };
-    match watchdog::run(lua, watchdog::TERMINAL_INPUT_BUDGET, || {
-        func.call::<Value>(payload)
+    match scope.run(|| {
+        watchdog::run(lua, watchdog::TERMINAL_INPUT_BUDGET, || {
+            func.call::<Value>(payload)
+        })
     }) {
         Ok(Value::Boolean(b)) => b,
         Ok(_) => false,
@@ -157,6 +164,7 @@ pub(crate) fn install_on_terminal_input(
     lua: &Lua,
     host: WeakHost,
     sink: SharedHostLog,
+    current: CurrentPlugin,
     registered: &RegisteredTerminalHooks,
 ) -> Result<(), PluginError> {
     let registered = Arc::downgrade(registered);
@@ -172,6 +180,7 @@ pub(crate) fn install_on_terminal_input(
                 host: host.upgrade()?,
                 sink: sink.clone(),
                 handler_key: Arc::new(handler_key),
+                scope: OwnerScope::grab(&current),
                 warned: AtomicBool::new(false),
             });
             host::upgrade(&registered)?

@@ -1,4 +1,71 @@
 # Changelog
+## [0.6.1](https://github.com/QaidVoid/kage/compare/v0.6.0...v0.6.1) - 2026-11-13
+
+### Features
+
+- *(acp)* Measure bounds and enable external sessions ([#332](https://github.com/QaidVoid/kage/pull/332)) - ([fbd1b09](https://github.com/QaidVoid/kage/commit/fbd1b09f41f4d427701a99e64e172af2d6d14542))
+- *(acp)* Reopen external sessions in the desktop ([#330](https://github.com/QaidVoid/kage/pull/330)) - ([ed6f4be](https://github.com/QaidVoid/kage/commit/ed6f4bef2cc74f6d9e15b2e724da86ea8d14e05c))
+- *(acp)* Restore external sessions through the host ([#329](https://github.com/QaidVoid/kage/pull/329)) - ([d9e9ff5](https://github.com/QaidVoid/kage/commit/d9e9ff52974372510da8a449dd9ea4d008bcc04e))
+- *(acp)* Forward permissions and record external sessions ([#328](https://github.com/QaidVoid/kage/pull/328)) - ([8625cce](https://github.com/QaidVoid/kage/commit/8625cce15f245c7802be689b8ae128d2745f7a73))
+- *(acp)* Own external session lifecycles in bounded slots ([#327](https://github.com/QaidVoid/kage/pull/327)) - ([bcad551](https://github.com/QaidVoid/kage/commit/bcad551ad961a30aac29de001f8c4285de1098b2))
+- *(acp)* Bound external prompts and cancellation ([#326](https://github.com/QaidVoid/kage/pull/326)) - ([d68ecfd](https://github.com/QaidVoid/kage/commit/d68ecfdd5f9d1b34b2f8eb9eb60c9731d226f870))
+- *(acp)* Prepare persistent external sessions ([#325](https://github.com/QaidVoid/kage/pull/325)) - ([0de315b](https://github.com/QaidVoid/kage/commit/0de315b89524cea9dd1f805a6ea1ed984857e48d))
+- *(acp)* Host session plugins in the ACP client ([#311](https://github.com/QaidVoid/kage/pull/311)) - ([0f1010d](https://github.com/QaidVoid/kage/commit/0f1010d5fa9ff71b656a85dda691f6a09793c75b))
+- *(acp)* Add shell, prompt withdraw and mcp restart requests ([#301](https://github.com/QaidVoid/kage/pull/301)) - ([fb5d3a8](https://github.com/QaidVoid/kage/commit/fb5d3a888aee31e139d5d66d66990521bb8a8291))
+- *(acp)* Add session undo, rewind, prompts and delete ([#300](https://github.com/QaidVoid/kage/pull/300)) - ([b197bab](https://github.com/QaidVoid/kage/commit/b197bab4dc218927c4e316fdc3e04031390061f4))
+- *(client)* Mirror the plugin UI of a project ([#307](https://github.com/QaidVoid/kage/pull/307)) - ([aec7d13](https://github.com/QaidVoid/kage/commit/aec7d13883f315e4a98277bb3e0724598069ab97))
+- *(config)* Trust project dirs from [trust] config ([#275](https://github.com/QaidVoid/kage/pull/275)) - ([f168185](https://github.com/QaidVoid/kage/commit/f16818594430b51f8e36a58048fbbecb8c9eafaa))
+- *(core)* Expose loop.max_provider_retries as a config option - ([4db46dd](https://github.com/QaidVoid/kage/commit/4db46dd2ff852fab7b00883d35cdbad6c68344bd))
+- *(engine)* Put session plugins behind a trait ([#310](https://github.com/QaidVoid/kage/pull/310)) - ([5ea73ce](https://github.com/QaidVoid/kage/commit/5ea73ceea6dd7fcc4dde53b0ad1f0cebfd07bb5e))
+- *(engine)* Tell plugins which session their work is for ([#303](https://github.com/QaidVoid/kage/pull/303)) - ([7101413](https://github.com/QaidVoid/kage/commit/71014135e8ce471e293d5ca2de4ea9d39a2842a3))
+- *(host)* Serve the web endpoint from config ([#320](https://github.com/QaidVoid/kage/pull/320)) - ([7208ddd](https://github.com/QaidVoid/kage/commit/7208dddd192de0390001eec648a391981a5d7668))
+- *(host)* Cap how long an orphaned ask holds the host ([#318](https://github.com/QaidVoid/kage/pull/318)) - ([ec9474e](https://github.com/QaidVoid/kage/commit/ec9474e080a49512b43547f2c791bbaf7bb30af2))
+- *(host)* Serve a project's plugin UI over ACP ([#305](https://github.com/QaidVoid/kage/pull/305)) - ([52bfe2d](https://github.com/QaidVoid/kage/commit/52bfe2d8f0ccd7d035b1a696d64bbac32445b05e))
+- *(host)* Share one plugin runtime per project ([#304](https://github.com/QaidVoid/kage/pull/304)) - ([b02221e](https://github.com/QaidVoid/kage/commit/b02221ee04dc7bb370933c1fea9628bc2cc28a8b))
+- *(host)* Add host management commands and config ([#298](https://github.com/QaidVoid/kage/pull/298)) - ([5ca8834](https://github.com/QaidVoid/kage/commit/5ca8834d84d61c1ae4f9a38a950a42ef793a75d0))
+- *(host)* Share one kage engine between rpc clients ([#297](https://github.com/QaidVoid/kage/pull/297)) - ([d6e5285](https://github.com/QaidVoid/kage/commit/d6e52853dbf50704d2a067d506fe9b3bb24f6057))
+- *(jsonrpc)* Expose typed Unix transport outcomes ([#295](https://github.com/QaidVoid/kage/pull/295)) - ([2a29328](https://github.com/QaidVoid/kage/commit/2a29328ea7958d071b7400de4fdf0150fe6706d4))
+- *(jsonrpc)* Add bounded Unix pipe peer ([#293](https://github.com/QaidVoid/kage/pull/293)) - ([4b43ffc](https://github.com/QaidVoid/kage/commit/4b43ffc60c8323c521d133ef91fdd9b528fcc5f6))
+- *(jsonrpc)* Add interruptible Unix pipe writer ([#291](https://github.com/QaidVoid/kage/pull/291)) - ([dfad78e](https://github.com/QaidVoid/kage/commit/dfad78ea6626e843d4081aca45d671fe1ade07e0))
+- *(jsonrpc)* Add ordered response barriers ([#290](https://github.com/QaidVoid/kage/pull/290)) - ([01d24e2](https://github.com/QaidVoid/kage/commit/01d24e2557631e387997604a9463f695cf8fb08b))
+- *(plugin)* Run plugin work in an invocation context ([#302](https://github.com/QaidVoid/kage/pull/302)) - ([665112e](https://github.com/QaidVoid/kage/commit/665112e601e3b42e0bdb9ccefa7a0a87dd2dc6fb))
+- *(serve)* Join the shared host's single-instance lock ([#319](https://github.com/QaidVoid/kage/pull/319)) - ([95620d2](https://github.com/QaidVoid/kage/commit/95620d23750455dfa905c73510b9f60c22a74578))
+- *(tools)* Configure every tool under [tools.<name>] ([#184](https://github.com/QaidVoid/kage/pull/184)) - ([e705cfe](https://github.com/QaidVoid/kage/commit/e705cfe0560e68215ff70ac303ac1a2b5dc57616))
+- *(trust)* Store hashes and show what changed since trust ([#276](https://github.com/QaidVoid/kage/pull/276)) - ([82fca9c](https://github.com/QaidVoid/kage/commit/82fca9c82beb583e6acee63cc41e66392351ab2c))
+- *(tui)* Unify permission modes across engine and acp ([#338](https://github.com/QaidVoid/kage/pull/338)) - ([7853a46](https://github.com/QaidVoid/kage/commit/7853a464ea726215278f58b1548a9f5d9da1ca1a))
+- *(tui)* Open persistent external ACP sessions from the model picker ([#335](https://github.com/QaidVoid/kage/pull/335)) - ([95e2451](https://github.com/QaidVoid/kage/commit/95e2451b4a29b8a915d1ebdd82f7492ae9cd28fc))
+- *(tui)* Stream subagents into the agents view ([#334](https://github.com/QaidVoid/kage/pull/334)) - ([b2482cb](https://github.com/QaidVoid/kage/commit/b2482cb2d8bf03733e8a17e5b0055a63eb75e101))
+- *(tui)* Point the session mirror at the wire session ([#317](https://github.com/QaidVoid/kage/pull/317)) - ([fee3306](https://github.com/QaidVoid/kage/commit/fee3306f46bb57d7f940906ed5775f968393328c))
+- *(tui)* Retire the link protocol ([#316](https://github.com/QaidVoid/kage/pull/316)) - ([b1a26a0](https://github.com/QaidVoid/kage/commit/b1a26a05167fab22b721f1838007f368eef866fb))
+- *(tui)* Run against the shared host in memory ([#315](https://github.com/QaidVoid/kage/pull/315)) - ([4692403](https://github.com/QaidVoid/kage/commit/4692403122bfa768d4df2010cae9b55d654daae6))
+- *(tui)* Host plugins over the ACP link ([#313](https://github.com/QaidVoid/kage/pull/313)) - ([61a9000](https://github.com/QaidVoid/kage/commit/61a90001455ab82827b50e0a597da933ec44c9d0))
+- *(tui)* Run the TUI on an ACP link ([#312](https://github.com/QaidVoid/kage/pull/312)) - ([cebf0b2](https://github.com/QaidVoid/kage/commit/cebf0b27065e4e7bac2648ccc4af397d3987a7a5))
+- *(tui)* Carry _kage/ui plugin data in the store ([#309](https://github.com/QaidVoid/kage/pull/309)) - ([f8c53df](https://github.com/QaidVoid/kage/commit/f8c53dfe69d28a06997a6f1a726549e2550f7d20))
+- *(tui)* Add the ACP store and its stdio transport ([#308](https://github.com/QaidVoid/kage/pull/308)) - ([326df88](https://github.com/QaidVoid/kage/commit/326df88396a8ee1d6a325f2db686467de10a9a3e))
+
+### Bug Fixes
+
+- *(acp)* Improve client compatibility and safety ([#283](https://github.com/QaidVoid/kage/pull/283)) - ([b66ef8d](https://github.com/QaidVoid/kage/commit/b66ef8dcd4cf438be10b0511c14d3c3b900041b7))
+- *(config)* Gate every untrusted project table but a safe list ([#274](https://github.com/QaidVoid/kage/pull/274)) - ([70fe305](https://github.com/QaidVoid/kage/commit/70fe30531f33823bba9ace5dd8797e5206efc6bb))
+- *(engine)* Hand back pending steers when a run is cancelled - ([7d8b96f](https://github.com/QaidVoid/kage/commit/7d8b96fe16eb323f16e6d9c92dc523da8410f9c5))
+- *(jsonrpc)* Validate responses and omit null params ([#294](https://github.com/QaidVoid/kage/pull/294)) - ([841bad8](https://github.com/QaidVoid/kage/commit/841bad80ec34bdc6e1d2646e78e90c34cbfab8cc))
+- *(plugin)* Lock kage.store writes across processes ([#299](https://github.com/QaidVoid/kage/pull/299)) - ([efa1730](https://github.com/QaidVoid/kage/commit/efa1730aa9fdc6620df2639319f99c116e628b3c))
+- *(plugin)* Route Lua print through the host log ([#287](https://github.com/QaidVoid/kage/pull/287)) - ([127ed78](https://github.com/QaidVoid/kage/commit/127ed785d9d76c306fd3e5cbc543a9150b2aefdd))
+- *(plugin)* Gate tool_update behind the context capability - ([7778bf2](https://github.com/QaidVoid/kage/commit/7778bf28278251431e8b5b2a64d7afb31676303f))
+- *(provider)* Shut down sockets registered after shutdown_all ([#278](https://github.com/QaidVoid/kage/pull/278)) - ([3f3e510](https://github.com/QaidVoid/kage/commit/3f3e51064be86685ee4867aa02818276fd1800c9))
+- *(remote)* Bound WebSocket transport lifecycle ([#288](https://github.com/QaidVoid/kage/pull/288)) - ([a4e36b2](https://github.com/QaidVoid/kage/commit/a4e36b204b0073655c1796af0d177586358b3bd1))
+- *(serve)* Shed idle project runtimes and expired asks ([#322](https://github.com/QaidVoid/kage/pull/322)) - ([3b0bd92](https://github.com/QaidVoid/kage/commit/3b0bd92153048f82608af873ef50cf7e0e67500c))
+- *(session)* Preserve valid unterminated entries ([#292](https://github.com/QaidVoid/kage/pull/292)) - ([8dd9ca8](https://github.com/QaidVoid/kage/commit/8dd9ca8bce8d58307daec47d6a5f764ac8eec2bf))
+- *(session)* Reject duplicate entry identifiers ([#289](https://github.com/QaidVoid/kage/pull/289)) - ([1f4f71a](https://github.com/QaidVoid/kage/commit/1f4f71a05de1615fb81566f44da55abfd1a3b8ae))
+- *(tui)* Settle external acp tool calls honestly at run end ([#337](https://github.com/QaidVoid/kage/pull/337)) - ([092acd1](https://github.com/QaidVoid/kage/commit/092acd1c301d4410e1f96cb4bbadcca87356f6f4))
+- Preserve agent text and truncate UTF-8 reads safely ([#272](https://github.com/QaidVoid/kage/pull/272)) - ([553f7a6](https://github.com/QaidVoid/kage/commit/553f7a6b97f7228cef2921e240ae640bc6559ef0))
+- Resolve CI lint and generated type failures ([#282](https://github.com/QaidVoid/kage/pull/282)) - ([1bc151c](https://github.com/QaidVoid/kage/commit/1bc151ccfddfc33d02730182569463795e3e97b2))
+
+### Performance
+
+- *(host)* Build a project runtime only for plugin content ([#321](https://github.com/QaidVoid/kage/pull/321)) - ([d183af0](https://github.com/QaidVoid/kage/commit/d183af06ce732cdb725a949aa4890481775e85b4))
+- Keep mimalloc off transparent huge pages ([#296](https://github.com/QaidVoid/kage/pull/296)) - ([f8d7a73](https://github.com/QaidVoid/kage/commit/f8d7a733cf3736eaf3f60ffa8a7d9b6dcf68c611))
+
 ## [0.6.0](https://github.com/QaidVoid/kage/compare/v0.5.1...v0.6.0) - 2026-10-29
 
 ### Features

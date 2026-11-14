@@ -402,6 +402,67 @@ fn merge_render_state_copies_renderer_state_and_keeps_appends() {
     assert_eq!(live.blocks().len(), 2);
 }
 
+/// A tool call that starts running while a frame is drawn: the frame
+/// rendered it queued, and handing those lines back would keep it
+/// queued until the next invalidation, which for a long command is its
+/// end.
+#[test]
+fn merge_render_state_keeps_caches_invalidated_mid_draw() {
+    let mut live = Buffer::new();
+    live.push_tool_call("c1", "shell", json!({"command": "sleep 8"}));
+    live.set_tool_phase("c1", ToolPhase::Queued);
+    let mut snap = live.clone();
+    snap.set_cached_height(0, 80, 1);
+    snap.set_cached_render_lines(0, 80, Arc::new(Vec::new()));
+    snap.set_scroll(3);
+    live.set_tool_phase("c1", ToolPhase::Running);
+    live.merge_render_state(&snap);
+    assert_eq!(
+        live.cached_height(0, 80),
+        None,
+        "the queued render is not handed back"
+    );
+    assert!(live.cached_render_lines(0, 80).is_none());
+    assert_eq!(
+        live.scroll(),
+        Some(3),
+        "the rest of the render state still is"
+    );
+
+    live.set_tool_phase("c1", ToolPhase::Done);
+    let mut next = live.clone();
+    next.set_cached_height(0, 80, 1);
+    live.merge_render_state(&next);
+    assert_eq!(
+        live.cached_height(0, 80),
+        Some(1),
+        "a quiet draw hands its caches back"
+    );
+}
+
+/// A draw that rebuilt a streaming reply consumed its pending edits,
+/// but when its caches stay behind the live buffer must keep the
+/// pending flag, or its old lines would be served as current.
+#[test]
+fn merge_render_state_keeps_pending_stream_edits_with_the_caches() {
+    let mut live = Buffer::new();
+    live.push_tool_call("c1", "shell", json!({"command": "sleep 8"}));
+    live.set_tool_phase("c1", ToolPhase::Queued);
+    live.append_assistant_delta("hello");
+    live.set_cached_render_lines(1, 80, Arc::new(vec![Line::from("hello")]));
+    live.append_assistant_delta(" world");
+    assert!(live.stream_edits_pending());
+    let mut snap = live.clone();
+    snap.set_cached_render_lines(1, 80, Arc::new(vec![Line::from("hello world")]));
+    assert!(!snap.stream_edits_pending());
+    live.set_tool_phase("c1", ToolPhase::Running);
+    live.merge_render_state(&snap);
+    assert!(
+        live.stream_edits_pending(),
+        "the reply's old lines still need their reparse"
+    );
+}
+
 #[test]
 fn merge_render_state_skips_when_live_has_fewer_blocks() {
     let mut live = Buffer::new();

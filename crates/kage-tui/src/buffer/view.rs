@@ -283,6 +283,7 @@ impl Buffer {
     /// palette change. Bumps the version so the renderer does not
     /// reuse a snapshot that still holds the old caches.
     pub fn invalidate_all_heights(&mut self) {
+        self.cache_clears = self.cache_clears.wrapping_add(1);
         for slot in &mut self.block_heights {
             *slot = None;
         }
@@ -403,24 +404,41 @@ impl Buffer {
     /// snapshot was taken, because stale cache indices would
     /// mislabel. (Structural mutations are UI-thread only, so they
     /// cannot overlap a draw on that same thread; the guard is
-    /// defensive.)
+    /// defensive.) In-place edits are not: a connection thread can
+    /// change a tool call's phase or input mid-draw, so the per-block
+    /// caches are handed back only when none was invalidated since
+    /// the snapshot was taken.
     pub fn merge_render_state(&mut self, snapshot: &Self) {
         if snapshot.epoch != self.epoch || snapshot.blocks.len() > self.blocks.len() {
             return;
         }
-        for (slot, entry) in self
-            .block_heights
-            .iter_mut()
-            .zip(snapshot.block_heights.iter())
-        {
-            *slot = *entry;
-        }
-        for (slot, entry) in self
-            .block_render_lines
-            .iter_mut()
-            .zip(snapshot.block_render_lines.iter())
-        {
-            slot.clone_from(entry);
+        // A cache invalidated while the snapshot was drawn belongs to
+        // a block that changed since: the snapshot's entry for it
+        // shows the old content, so the caches stay as they are.
+        if snapshot.cache_clears == self.cache_clears {
+            for (slot, entry) in self
+                .block_heights
+                .iter_mut()
+                .zip(snapshot.block_heights.iter())
+            {
+                *slot = *entry;
+            }
+            for (slot, entry) in self
+                .block_render_lines
+                .iter_mut()
+                .zip(snapshot.block_render_lines.iter())
+            {
+                slot.clone_from(entry);
+            }
+            // The dirty flag is consumed by the rebuild that produced
+            // the snapshot's fresh caches, so it travels with them:
+            // copying it back keeps the live buffer from re-serving a
+            // window that already rebuilt. When the caches stay behind,
+            // so does the flag, or the live buffer would keep its old
+            // lines with nothing left to force their reparse. A delta
+            // landing mid-draw re-arms on the next frame at the cost
+            // of one extra window of staleness, at worst.
+            self.stream_dirty_since = snapshot.stream_dirty_since;
         }
         self.scroll = snapshot.scroll;
         self.last_drawn_focus = snapshot.last_drawn_focus;
@@ -435,12 +453,6 @@ impl Buffer {
         self.last_area_height = snapshot.last_area_height;
         self.last_virtual_top = snapshot.last_virtual_top;
         self.last_mark_hit = snapshot.last_mark_hit;
-        // The dirty flag is consumed by the rebuild that produced the
-        // snapshot's fresh caches; copying it back keeps the live
-        // buffer from re-serving a window that already rebuilt. A
-        // delta landing mid-draw re-arms on the next frame at the
-        // cost of one extra window of staleness, at worst.
-        self.stream_dirty_since = snapshot.stream_dirty_since;
         self.detached_at = snapshot.detached_at;
         // The pairing cache is shared, not copied: the snapshot's
         // build key travels with it so a length mismatch here
@@ -540,6 +552,7 @@ impl Buffer {
     }
 
     pub(crate) fn invalidate_last_block_caches(&mut self) {
+        self.cache_clears = self.cache_clears.wrapping_add(1);
         if let Some(slot) = self.block_heights.last_mut() {
             *slot = None;
         }
@@ -561,6 +574,7 @@ impl Buffer {
     }
 
     pub(crate) fn invalidate_height(&mut self, idx: usize) {
+        self.cache_clears = self.cache_clears.wrapping_add(1);
         self.clear_caches_at(idx);
         self.bump_version();
     }
@@ -575,6 +589,7 @@ impl Buffer {
     }
 
     pub(crate) fn invalidate_pair_height(&mut self, call_id: &str) {
+        self.cache_clears = self.cache_clears.wrapping_add(1);
         let pair: Vec<usize> = self
             .blocks
             .iter()

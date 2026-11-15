@@ -483,6 +483,13 @@ pub struct Buffer {
     /// Stored behind `Arc` so the mutex isn't holding a clone of a
     /// possibly-huge vector while the renderer is still using it.
     block_render_lines: Vec<Option<(u16, Arc<Vec<Line<'static>>>)>>,
+    /// Bumped by every invalidation of the per-block caches. A draw
+    /// works on a snapshot while another thread can still change the
+    /// live buffer, so [`Self::merge_render_state`] hands the
+    /// snapshot's caches back only when no cache was invalidated
+    /// meanwhile; otherwise a call that started running mid-draw would
+    /// keep the lines rendered before it did.
+    cache_clears: u64,
     /// Cached call/result block pairing together with the
     /// [`TopologyKey`] it was built at, shared behind an [`Arc`]. See
     /// [`ToolTopology`]. `None` until the first render; rebuilt

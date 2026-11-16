@@ -472,7 +472,7 @@ fn convert_user_parts(blocks: &[Content], audio: bool) -> Vec<Value> {
         .iter()
         .filter_map(|c| match c {
             Content::Text { text } => Some(serde_json::json!({"text": text})),
-            Content::Image { source, mime } => Some(media_part(source, mime)),
+            Content::Image { source, mime } => Some(image_part(source, mime)),
             Content::Audio { source, mime } if audio => Some(media_part(source, mime)),
             Content::Audio { mime, .. } => {
                 Some(serde_json::json!({"text": Content::audio_note(mime)}))
@@ -528,7 +528,7 @@ fn convert_assistant_parts(
                 parts.push(part);
             }
             Content::Image { source, mime } if images => {
-                let mut part = media_part(source, mime);
+                let mut part = image_part(source, mime);
                 if let Some(sig) = signature.take()
                     && part.get("inlineData").is_some()
                 {
@@ -588,6 +588,24 @@ fn tool_name_from_call_id<'a>(id: &'a ToolCallId, declared: &'a [ToolSpec]) -> &
         }
         _ => rest,
     }
+}
+
+/// An image as a part, under the type its bytes are rather than the one
+/// declared, which the API refuses when they differ. Gemini also takes
+/// HEIC and HEIF, which kage does not recognise from the bytes, so those
+/// keep their declared type. Inline bytes in any other format would be
+/// refused on every turn after, so a line says what was left out instead.
+fn image_part(source: &kage_core::MediaSource, mime: &str) -> Value {
+    if let Some(media_type) = source.sniffed_image_mime() {
+        return media_part(source, media_type);
+    }
+    let inline = matches!(source, kage_core::MediaSource::Base64 { .. });
+    if inline && !matches!(mime, "image/heic" | "image/heif") {
+        return serde_json::json!({
+            "text": kage_core::image::unsupported_image_note(mime),
+        });
+    }
+    media_part(source, mime)
 }
 
 /// An image or clip as a part: its bytes inline, a link as file data,
@@ -843,6 +861,41 @@ mod tests {
 
     use super::*;
     use crate::testing::{collect_ok, user_msg};
+
+    /// An image goes under the type its bytes are. HEIC, which Gemini takes
+    /// but kage does not recognise, keeps its declared type, and any other
+    /// unknown format becomes a line saying what was left out. A clip is
+    /// never relabelled as a picture.
+    #[test]
+    fn an_image_goes_as_the_type_its_bytes_are_and_a_clip_as_declared() {
+        let png = kage_core::MediaSource::Base64 {
+            data: "iVBORw0KGgoAAAANSUhEUg==".into(),
+        };
+        let heic = kage_core::MediaSource::Base64 {
+            data: "AAAAGGZ0eXBoZWlj".into(),
+        };
+        assert_eq!(
+            image_part(&png, "image/webp")["inlineData"]["mimeType"],
+            "image/png"
+        );
+        assert_eq!(
+            image_part(&heic, "image/heic")["inlineData"]["mimeType"],
+            "image/heic"
+        );
+        let avif = kage_core::MediaSource::Base64 {
+            data: "AAAAHGZ0eXBhdmlm".into(),
+        };
+        assert!(
+            image_part(&avif, "image/png")["text"]
+                .as_str()
+                .unwrap()
+                .contains("left out")
+        );
+        assert_eq!(
+            media_part(&png, "audio/mpeg")["inlineData"]["mimeType"],
+            "audio/mpeg"
+        );
+    }
 
     #[test]
     fn body_has_contents_and_generation_config() {
@@ -1400,7 +1453,7 @@ mod tests {
             },
             Content::Image {
                 source: kage_core::MediaSource::Base64 {
-                    data: "iVBO".into(),
+                    data: "iVBORw0KGgoAAAANSUhEUg==".into(),
                 },
                 mime: "image/png".into(),
             },
@@ -1411,7 +1464,7 @@ mod tests {
             },
         ];
         let drawn = convert_assistant_parts(&reply, "draw", false, true);
-        assert_eq!(drawn[0]["inlineData"]["data"], "iVBO");
+        assert_eq!(drawn[0]["inlineData"]["data"], "iVBORw0KGgoAAAANSUhEUg==");
         assert_eq!(drawn[0]["thoughtSignature"], "isig");
         assert!(drawn[1].get("thoughtSignature").is_none());
 

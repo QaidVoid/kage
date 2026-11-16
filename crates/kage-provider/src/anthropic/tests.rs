@@ -932,7 +932,7 @@ fn a_tool_s_images_go_inside_its_tool_result() {
             },
             Content::Image {
                 source: kage_core::MediaSource::Base64 {
-                    data: "iVBO".into(),
+                    data: "iVBORw0KGgoAAAANSUhEUg==".into(),
                 },
                 mime: "image/png".into(),
             },
@@ -947,7 +947,34 @@ fn a_tool_s_images_go_inside_its_tool_result() {
         serde_json::json!({"type": "text", "text": "drawn"})
     );
     assert_eq!(content[1]["type"], "image");
-    assert_eq!(content[1]["source"]["data"], "iVBO");
+    assert_eq!(content[1]["source"]["data"], "iVBORw0KGgoAAAANSUhEUg==");
+}
+
+/// The API refuses a picture whose declared media type is not what its
+/// bytes are, and the picture stays in the history, so every later turn
+/// would be refused too. The bytes decide when the request is built, which
+/// also mends a history that already holds one. Bytes in no format the API
+/// takes become a line saying what was left out.
+#[test]
+fn an_image_goes_as_the_type_its_bytes_are_whatever_was_declared() {
+    let image = |data: &str, mime: &str| Content::Image {
+        source: kage_core::MediaSource::Base64 { data: data.into() },
+        mime: mime.into(),
+    };
+    let msg = Message::new(
+        Role::User,
+        vec![
+            image("iVBORw0KGgoAAAANSUhEUg==", "image/webp"),
+            image("AAAAHGZ0eXBhdmlm", "image/avif"),
+        ],
+        None,
+    );
+    let req = StreamRequest::new("claude-sonnet-4-6", vec![Arc::new(msg)]);
+    let body = build_request_body(&req, false);
+    let content = &body["messages"][0]["content"];
+    assert_eq!(content[0]["source"]["media_type"], "image/png");
+    assert_eq!(content[1]["type"], "text");
+    assert!(content[1]["text"].as_str().unwrap().contains("image/avif"));
 }
 
 /// Audio history goes back as its note text in every position, and no

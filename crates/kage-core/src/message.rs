@@ -216,6 +216,23 @@ pub enum MediaSource {
 }
 
 impl MediaSource {
+    /// The picture format inline bytes are, read from the bytes: PNG,
+    /// JPEG, GIF or WebP. Nothing for a link, a missing blob, or bytes that
+    /// are none of these.
+    ///
+    /// A declared type is only a sender's claim. A model refuses a picture
+    /// whose declared type is not what its bytes are, and a session that
+    /// holds one would be refused on every turn after, so the bytes decide
+    /// wherever a picture is sent. Read when a request is built, so a
+    /// history that already holds a mislabelled picture recovers.
+    #[must_use]
+    pub fn sniffed_image_mime(&self) -> Option<&'static str> {
+        match self {
+            Self::Base64 { data } => crate::image::sniff_base64(data),
+            Self::Url { .. } | Self::Blob { .. } => None,
+        }
+    }
+
     /// The text that stands in for media whose bytes are gone: a
     /// [`Self::Blob`] the blob store no longer holds. `None` for a
     /// source that still names its bytes.

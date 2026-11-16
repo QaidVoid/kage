@@ -500,13 +500,19 @@ fn image_part(source: &kage_core::MediaSource, mime: &str) -> Value {
             "type": "input_image",
             "image_url": url,
         }),
-        kage_core::MediaSource::Base64 { data } => {
-            let mime = if mime.is_empty() { "image/png" } else { mime };
-            serde_json::json!({
+        // The type the bytes are, never the declared one. Bytes in no
+        // format the API takes would be refused, so a line says what was
+        // left out instead.
+        kage_core::MediaSource::Base64 { data } => match source.sniffed_image_mime() {
+            Some(media_type) => serde_json::json!({
                 "type": "input_image",
-                "image_url": format!("data:{mime};base64,{data}"),
-            })
-        }
+                "image_url": format!("data:{media_type};base64,{data}"),
+            }),
+            None => serde_json::json!({
+                "type": "input_text",
+                "text": kage_core::image::unsupported_image_note(mime),
+            }),
+        },
         kage_core::MediaSource::Blob { .. } => serde_json::json!({
             "type": "input_text",
             "text": source.missing_note(mime),
@@ -1398,23 +1404,27 @@ mod tests {
         block["image_url"].as_str().expect("image url").to_owned()
     }
 
+    /// The API refuses a picture whose declared type is not what its bytes
+    /// are, so the bytes decide, and bytes in no format it takes become a
+    /// line saying what was left out.
     #[test]
-    fn base64_images_forward_their_mime() {
-        let image = |mime: &str| Content::Image {
-            source: kage_core::MediaSource::Base64 {
-                data: "QUJD".into(),
-            },
+    fn base64_images_are_sent_as_the_type_their_bytes_are() {
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUg==";
+        let image = |data: &str, mime: &str| Content::Image {
+            source: kage_core::MediaSource::Base64 { data: data.into() },
             mime: mime.to_owned(),
         };
         assert_eq!(
-            data_url(&[image("image/jpeg")]),
-            "data:image/jpeg;base64,QUJD"
+            data_url(&[image(PNG, "image/webp")]),
+            format!("data:image/png;base64,{PNG}")
         );
         assert_eq!(
-            data_url(&[image("image/webp")]),
-            "data:image/webp;base64,QUJD"
+            data_url(&[image(PNG, "")]),
+            format!("data:image/png;base64,{PNG}")
         );
-        assert_eq!(data_url(&[image("")]), "data:image/png;base64,QUJD");
+        let note = convert_user_parts(&[image("AAAAHGZ0eXBhdmlm", "image/avif")]).remove(0);
+        assert_eq!(note["type"], "input_text");
+        assert!(note["text"].as_str().unwrap().contains("image/avif"));
     }
 
     /// Audio history goes back as its note text in every position, and

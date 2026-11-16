@@ -22,6 +22,33 @@ pub fn sniff_mime(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// Sniff any image MIME kage recognises from the leading bytes: those
+/// [`sniff_mime`] knows, and HEIC and HEIF, which only some providers
+/// take. Those two are named from the major brand of their `ftyp` box.
+/// The generic HEIF brands also start AVIF files, which say so among the
+/// compatible brands, so those are read too.
+#[must_use]
+pub fn sniff_any_mime(bytes: &[u8]) -> Option<&'static str> {
+    if let Some(mime) = sniff_mime(bytes) {
+        return Some(mime);
+    }
+    if bytes.get(4..8) != Some(b"ftyp") {
+        return None;
+    }
+    match bytes.get(8..12)? {
+        b"heic" | b"heix" | b"heim" | b"heis" | b"hevc" | b"hevx" => Some("image/heic"),
+        b"mif1" | b"msf1" => {
+            let size = u32::from_be_bytes(bytes[0..4].try_into().ok()?) as usize;
+            let compatible = bytes.get(16..size.min(bytes.len())).unwrap_or_default();
+            let avif = compatible
+                .chunks_exact(4)
+                .any(|brand| matches!(brand, b"avif" | b"avis"));
+            (!avif).then_some("image/heif")
+        }
+        _ => None,
+    }
+}
+
 /// What a model is told in place of a picture whose bytes are none of the
 /// formats [`sniff_mime`] knows, which a provider would refuse.
 #[must_use]
@@ -67,6 +94,23 @@ pub fn human_bytes(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sniffs_heic_and_heif_from_their_brand_and_leaves_avif_out() {
+        let ftyp = |brand: &[u8; 4]| [b"\0\0\0\x18ftyp".as_slice(), brand].concat();
+        assert_eq!(sniff_any_mime(&ftyp(b"heic")), Some("image/heic"));
+        assert_eq!(sniff_any_mime(&ftyp(b"hevc")), Some("image/heic"));
+        assert_eq!(sniff_any_mime(&ftyp(b"mif1")), Some("image/heif"));
+        let heif = b"\0\0\0\x18ftypmif1\0\0\0\0mif1heic";
+        assert_eq!(sniff_any_mime(heif), Some("image/heif"));
+        let avif = b"\0\0\0\x1cftypmif1\0\0\0\0mif1avifmiaf";
+        assert_eq!(sniff_any_mime(avif), None);
+        assert_eq!(sniff_any_mime(&ftyp(b"avif")), None);
+        assert_eq!(sniff_any_mime(&ftyp(b"isom")), None);
+        assert_eq!(sniff_mime(&ftyp(b"heic")), None);
+        assert_eq!(sniff_any_mime(b"\x89PNG\r\n\x1a\n"), Some("image/png"));
+        assert_eq!(sniff_any_mime(b"\0\0\0\x18ftyp"), None);
+    }
 
     /// The note names the declared type when there was one, and reads as
     /// a sentence when there was none.

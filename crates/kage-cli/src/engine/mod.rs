@@ -2221,7 +2221,7 @@ fn asker(bus: &Arc<Bus>, asks: &Asks, next: &Arc<AtomicU64>, session: SessionId)
 fn apply_forked_snapshot(bus: &Bus, id: SessionId, path: &Path, cx: &mut AgentContext) {
     match kage_session::replay(path) {
         Ok(replay) => {
-            cx.history = replay.history.into_iter().map(Arc::new).collect();
+            cx.history = replay.history;
             cx.budget = kage_loop::TokenBudget {
                 used_input: replay.usage_total.input,
                 used_output: replay.usage_total.output,

@@ -1847,11 +1847,10 @@ fn a_compacted_session_replays_the_live_history() {
 
     let live = mock.requests().pop().unwrap().messages;
     let replayed = kage_session::replay(&path).unwrap().history;
-    let shape = |m: &Message| (m.role, m.content.clone());
-    let live_shape = |m: &Arc<Message>| (m.role, m.content.clone());
+    let shape = |m: &Arc<Message>| (m.role, m.content.clone());
     assert_eq!(
         replayed[..live.len()].iter().map(shape).collect::<Vec<_>>(),
-        live.iter().map(live_shape).collect::<Vec<_>>()
+        live.iter().map(shape).collect::<Vec<_>>()
     );
     let mut calls = std::collections::HashSet::new();
     for block in replayed.iter().flat_map(|m| &m.content) {

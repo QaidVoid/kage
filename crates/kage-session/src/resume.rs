@@ -33,12 +33,13 @@ use crate::tree::SessionTree;
 pub struct ReplayResult {
     /// The session's header, carrying provenance and the original model.
     pub header: Header,
-    /// Reconstructed conversation history, post-compaction.
-    pub history: Vec<Message>,
+    /// Reconstructed conversation history, post-compaction. Each message
+    /// is shared with its [`TimelineItem::Message`].
+    pub history: Vec<Arc<Message>>,
     /// The messages compaction summarized out of `history` that hold an
     /// `agent` or `swarm` call or an agent's result, in file order. The
     /// agents they record still ran, so a resume lists them.
-    pub compacted_agents: Vec<Message>,
+    pub compacted_agents: Vec<Arc<Message>>,
     /// Active model id at the end of the session, taking any
     /// [`SessionEntry::ModelChange`] entries into account.
     pub model: String,
@@ -85,7 +86,10 @@ impl ReplayResult {
     /// Every message that records an agent the session started: the
     /// ones compaction summarized away, then the history, in order.
     pub fn agent_messages(&self) -> impl Iterator<Item = &Message> {
-        self.compacted_agents.iter().chain(&self.history)
+        self.compacted_agents
+            .iter()
+            .chain(&self.history)
+            .map(AsRef::as_ref)
     }
 }
 
@@ -112,12 +116,18 @@ pub struct ReplayUsage {
 /// Sessions recorded before tool results were capped can hold results
 /// of many megabytes. Agent and swarm results stay whole, since a
 /// resume reads every child back out of them.
-fn capped(mut message: Message) -> Message {
-    for block in &mut message.content {
-        if let Content::ToolResultBlock { output, .. } = block
-            && !kage_core::is_agent_result(output)
-        {
-            *output = kage_core::cap_tool_result(std::mem::take(output));
+fn capped(mut message: Arc<Message>) -> Arc<Message> {
+    let over = |block: &Content| {
+        matches!(block, Content::ToolResultBlock { output, .. }
+            if output.len() > kage_core::MAX_TOOL_RESULT_BYTES && !kage_core::is_agent_result(output))
+    };
+    if message.content.iter().any(over) {
+        for block in &mut Arc::make_mut(&mut message).content {
+            if let Content::ToolResultBlock { output, .. } = block
+                && !kage_core::is_agent_result(output)
+            {
+                *output = kage_core::cap_tool_result(std::mem::take(output));
+            }
         }
     }
     message
@@ -127,11 +137,11 @@ fn capped(mut message: Message) -> Message {
 /// the user's `timeline` share the capped message, and the entry's
 /// timestamps feed the tool-call durations.
 fn record_message(
-    entry: &MessageEntry,
+    entry: MessageEntry,
     call_starts: &mut HashMap<String, DateTime<Utc>>,
     tool_durations: &mut HashMap<String, u64>,
     timeline: &mut Vec<TimelineItem>,
-    history: &mut Vec<Message>,
+    history: &mut Vec<Arc<Message>>,
 ) {
     let ts = entry.ts;
     for block in &entry.message.content {
@@ -153,9 +163,9 @@ fn record_message(
             _ => {}
         }
     }
-    let message = Arc::new(capped(Arc::unwrap_or_clone(Arc::clone(&entry.message))));
+    let message = capped(entry.message);
     timeline.push(TimelineItem::Message(Arc::clone(&message)));
-    history.push(Arc::unwrap_or_clone(message));
+    history.push(message);
 }
 
 /// Replay the active chain of a native session, returning the final history.
@@ -163,16 +173,22 @@ fn record_message(
 /// External sessions cannot be restored from their local presentation history
 /// and return an error instead.
 pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
-    replay_tree(path, &SessionTree::read(path)?)
+    replay_tree(path, SessionTree::read(path)?)
 }
 
 pub(crate) fn replay_file(path: &Path, file: std::fs::File) -> Result<ReplayResult, SessionError> {
     let reader = crate::reader::SessionReader::from_file(path.to_path_buf(), file)?;
-    replay_tree(path, &SessionTree::read_reader(path, reader)?)
+    replay_tree(path, SessionTree::read_reader(path, reader)?)
 }
 
-fn replay_tree(path: &Path, tree: &SessionTree) -> Result<ReplayResult, SessionError> {
-    let header = tree.header().clone();
+/// [`replay`] of a tree already read from `path`, taking its entries
+/// rather than copying them. `path` only names the file in errors.
+///
+/// # Errors
+///
+/// As [`replay`], for an external session.
+pub fn replay_tree(path: &Path, tree: SessionTree) -> Result<ReplayResult, SessionError> {
+    let (header, entries) = tree.into_active();
     if header.backend.is_some() {
         return Err(SessionError::Io {
             path: path.to_path_buf(),
@@ -189,8 +205,8 @@ fn replay_tree(path: &Path, tree: &SessionTree) -> Result<ReplayResult, SessionE
     let mut swarm_mode: Option<bool> = None;
     let mut agent = false;
     let mut plan_mode: Option<bool> = None;
-    let mut history: Vec<Message> = Vec::new();
-    let mut compacted_agents: Vec<Message> = Vec::new();
+    let mut history: Vec<Arc<Message>> = Vec::new();
+    let mut compacted_agents: Vec<Arc<Message>> = Vec::new();
     // `call_starts` tracks the wall-clock time each ToolCall was
     // appended; on a matching ToolResult we compute the elapsed
     // duration so resumed sessions can show real `Took Xms` instead
@@ -205,10 +221,7 @@ fn replay_tree(path: &Path, tree: &SessionTree) -> Result<ReplayResult, SessionE
     // is the post-compaction context fill, so the next usage-carrying
     // message fills it in.
     let mut pending_after: Option<usize> = None;
-    for (node, entry) in tree.iter() {
-        if !tree.is_active(node.id) {
-            continue;
-        }
+    for entry in entries {
         match entry {
             SessionEntry::Header(_) | SessionEntry::Branch(_) | SessionEntry::Label(_) => {}
             SessionEntry::Message(m) => {
@@ -239,9 +252,9 @@ fn replay_tree(path: &Path, tree: &SessionTree) -> Result<ReplayResult, SessionE
             }
             SessionEntry::Compaction(c) => {
                 compacted_agents.extend(
-                    apply_compaction(&mut history, c.clone())
+                    apply_compaction(&mut history, &c)
                         .into_iter()
-                        .filter(records_agents),
+                        .filter(|message| records_agents(message)),
                 );
                 // The entry sits where the compaction ran, after every
                 // turn it could see, so the card goes there too and a
@@ -251,17 +264,17 @@ fn replay_tree(path: &Path, tree: &SessionTree) -> Result<ReplayResult, SessionE
                     kept: c.kept,
                     before: c.before,
                     after: None,
-                    summary: c.summary.clone(),
+                    summary: c.summary,
                 }));
                 let at = timeline.len() - 1;
                 pending_after = Some(at);
             }
             SessionEntry::ModelChange(mc) => model = kage_core::canonical_model(&mc.model),
-            SessionEntry::ThinkingLevelChange(t) => thinking_level = Some(t.level.clone()),
-            SessionEntry::Title(t) => title = Some(t.title.clone()),
+            SessionEntry::ThinkingLevelChange(t) => thinking_level = Some(t.level),
+            SessionEntry::Title(t) => title = Some(t.title),
             SessionEntry::Custom(c) => {
-                agent |= crate::list::is_agent_marker(c);
-                read_mode(c, &mut swarm_mode, &mut plan_mode);
+                agent |= crate::list::is_agent_marker(&c);
+                read_mode(&c, &mut swarm_mode, &mut plan_mode);
             }
         }
     }
@@ -304,7 +317,7 @@ fn records_agents(message: &Message) -> bool {
 /// Replace the messages `compaction` summarized at the front of
 /// `history` with its summary, as the loop did, and give back the
 /// messages it replaced.
-fn apply_compaction(history: &mut Vec<Message>, compaction: Compaction) -> Vec<Message> {
+fn apply_compaction(history: &mut Vec<Arc<Message>>, compaction: &Compaction) -> Vec<Arc<Message>> {
     // Files from before shell output was recorded can count more
     // summarized messages than they hold, which would leave a result
     // without its call at the front.
@@ -318,15 +331,15 @@ fn apply_compaction(history: &mut Vec<Message>, compaction: Compaction) -> Vec<M
     history
         .splice(
             ..split,
-            std::iter::once(Message {
+            std::iter::once(Arc::new(Message {
                 role: Role::User,
                 content: vec![Content::Text {
-                    text: compaction.summary,
+                    text: compaction.summary.clone(),
                 }],
                 id: MessageId::new(),
                 parent: None,
                 ts: compaction.ts,
-            }),
+            })),
         )
         .collect()
 }

@@ -66,7 +66,7 @@ fn render_session_markdown_covers_roles_and_blocks() {
         .collect();
     let replay = kage_session::ReplayResult {
         header,
-        history,
+        history: history.into_iter().map(std::sync::Arc::new).collect(),
         compacted_agents: Vec::new(),
         model: "anthropic:claude".into(),
         tool_durations: std::collections::HashMap::new(),

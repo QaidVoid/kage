@@ -6844,7 +6844,11 @@ fn an_interrupted_swarm_gets_its_members_back_from_their_files() {
         }],
         None,
     )];
-    let members = super::sessions::orphaned_agents(dir.path(), root, &history);
+    let members = super::sessions::orphaned_agents(
+        dir.path(),
+        root,
+        &history.into_iter().map(Arc::new).collect::<Vec<_>>(),
+    );
     let states: Vec<_> = members
         .iter()
         .map(|m| (m.swarm.as_ref().unwrap().index, m.state))

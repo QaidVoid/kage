@@ -149,7 +149,7 @@ impl super::CliAcpAgent {
             self.hosted_plugins(id, meta)?,
             &SessionSettings::of(meta, self.kage_client.load(Ordering::SeqCst))?,
         )?;
-        spec.cx.history = replay.history.into_iter().map(Arc::new).collect();
+        spec.cx.history = replay.history;
         spec.cx.budget = TokenBudget {
             used_input: replay.usage_total.input,
             used_output: replay.usage_total.output,
@@ -521,7 +521,7 @@ pub(super) fn replay_updates(timeline: &[TimelineItem]) -> Vec<SessionUpdate> {
 /// A failed update for each tool call in `history` with no recorded
 /// result: the engine stopped before the call finished, such as a
 /// desktop app that quit mid-run, so nothing will ever answer it.
-pub(super) fn interrupted_calls(history: &[Message]) -> Vec<SessionUpdate> {
+pub(super) fn interrupted_calls(history: &[Arc<Message>]) -> Vec<SessionUpdate> {
     let answered: HashSet<String> = history
         .iter()
         .flat_map(|message| &message.content)
@@ -558,7 +558,7 @@ pub(super) fn interrupted_calls(history: &[Message]) -> Vec<SessionUpdate> {
 pub(super) fn orphaned_agents(
     dir: &Path,
     root: SessionId,
-    history: &[Message],
+    history: &[Arc<Message>],
 ) -> Vec<SubagentUpdate> {
     let answered: HashSet<String> = history
         .iter()
@@ -700,7 +700,7 @@ fn leading_marker(path: &Path) -> Option<serde_json::Value> {
 
 /// Whether `history` ends on a reply that calls no tool: the agent
 /// finished its run.
-fn replied(history: &[Message]) -> bool {
+fn replied(history: &[Arc<Message>]) -> bool {
     history.last().is_some_and(|message| {
         message.role == Role::Assistant
             && !message
@@ -986,7 +986,7 @@ mod tests {
                 None,
             ),
         ];
-        let updates = interrupted_calls(&history);
+        let updates = interrupted_calls(&history.into_iter().map(Arc::new).collect::<Vec<_>>());
         assert_eq!(updates.len(), 1);
         let SessionUpdate::ToolCallUpdate(update) = &updates[0] else {
             panic!("{updates:?}");

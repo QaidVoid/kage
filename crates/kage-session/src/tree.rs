@@ -184,6 +184,44 @@ impl SessionTree {
         })
     }
 
+    /// Continue the conversation from `at`, as a [`SessionEntry::Branch`]
+    /// marker naming it does once appended to the file: `at` becomes the
+    /// head and its ancestry the active chain. A writer that appended
+    /// that marker can then replay this tree instead of reading the file
+    /// again.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::BranchTarget`] when the tree holds no entry `at`,
+    /// as reading a file with that marker would.
+    pub fn branch_to(&mut self, path: &Path, at: EntryId) -> Result<(), SessionError> {
+        if at != self.header.id && !self.index.contains_key(&at) {
+            return Err(SessionError::BranchTarget {
+                path: path.to_path_buf(),
+                at,
+            });
+        }
+        self.head = at;
+        self.active.fill(false);
+        let mut cursor = at;
+        while let Some(&i) = self.index.get(&cursor) {
+            self.active[i] = true;
+            cursor = self.nodes[i].0.parent;
+        }
+        Ok(())
+    }
+
+    /// The header and the entries of the active chain, in file order,
+    /// moved out of the tree so a replay keeps them without copying.
+    pub(crate) fn into_active(self) -> (Header, impl Iterator<Item = SessionEntry>) {
+        let entries = self
+            .nodes
+            .into_iter()
+            .zip(self.active)
+            .filter_map(|((_, entry), active)| active.then_some(entry));
+        (self.header, entries)
+    }
+
     /// The file's header.
     #[must_use]
     pub fn header(&self) -> &Header {
@@ -599,6 +637,38 @@ mod tests {
         let tree = SessionTree::read(&path).unwrap();
         assert_eq!(tree.head(), a.id(), "the file ends on a marker");
         assert!(tree.is_active(a.id()));
+    }
+
+    #[test]
+    fn branching_in_memory_replays_like_the_file_with_the_marker() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let (_, entries) = branched(&path);
+        let at = entries[1].id();
+        let mut tree = SessionTree::read(&path).unwrap();
+        tree.branch_to(&path, at).unwrap();
+        assert_eq!(tree.head(), at);
+        let in_memory = crate::replay_tree(&path, tree).unwrap();
+
+        let mut w = SessionWriter::open(&path).unwrap();
+        w.append(&branch(at)).unwrap();
+        drop(w);
+        let from_file = crate::replay(&path).unwrap();
+        let texts = |history: &[Arc<Message>]| {
+            history
+                .iter()
+                .map(|m| (m.id, m.content.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(texts(&in_memory.history), texts(&from_file.history));
+        assert_eq!(in_memory.history.len(), 2, "a and b, nothing after");
+        assert!(
+            SessionTree::read(&path)
+                .unwrap()
+                .branch_to(&path, EntryId::new())
+                .is_err(),
+            "an unknown target is refused as a marker naming it would be"
+        );
     }
 
     #[test]

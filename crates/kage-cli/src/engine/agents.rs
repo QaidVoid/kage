@@ -1475,7 +1475,7 @@ fn resumed_spec(
         Some(Recorder::new(writer, None)),
         setup,
     );
-    spec.cx.history = replay.history.into_iter().map(Arc::new).collect();
+    spec.cx.history = replay.history;
     spec.cx.budget = TokenBudget {
         used_input: replay.usage_total.input,
         used_output: replay.usage_total.output,

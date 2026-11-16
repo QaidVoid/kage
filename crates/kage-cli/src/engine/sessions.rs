@@ -48,8 +48,7 @@ struct PromptEntry {
 /// the original thread sits at `0` and a re-prompted branch indents
 /// one level under the thread it forked from. `active` marks exactly
 /// one row: the head prompt the conversation would continue from.
-fn prompt_tree(path: &std::path::Path) -> Result<Vec<PromptEntry>, kage_session::SessionError> {
-    let tree = SessionTree::read(path)?;
+fn prompt_tree(tree: &SessionTree) -> Vec<PromptEntry> {
     let mut head = None;
     let mut cursor = tree.head();
     loop {
@@ -107,7 +106,7 @@ fn prompt_tree(path: &std::path::Path) -> Result<Vec<PromptEntry>, kage_session:
             active: Some(step.node.id) == head,
         });
     }
-    Ok(found)
+    found
 }
 
 /// Copy `src` up through entry `at` (an id prefix, or the latest entry)
@@ -488,7 +487,7 @@ impl super::Dispatcher {
                 replay.model, session.state.model
             ));
         }
-        cx.history = replay.history.into_iter().map(Arc::new).collect();
+        cx.history = replay.history;
         session.swarm_mode = replay.swarm_mode.unwrap_or(false);
         session.gate.set_plan(replay.plan_mode.unwrap_or(false));
         cx.budget = kage_loop::TokenBudget {
@@ -516,7 +515,7 @@ impl super::Dispatcher {
             recorder,
             replay.title,
             replay.timeline,
-            replay.compacted_agents.into_iter().map(Arc::new).collect(),
+            replay.compacted_agents,
             message,
         );
         if let Some(note) = fallback {
@@ -563,9 +562,7 @@ impl super::Dispatcher {
                 .as_ref()
                 .map(|s| s.timeline.clone())
                 .unwrap_or_default(),
-            stored
-                .map(|s| s.compacted_agents.into_iter().map(Arc::new).collect())
-                .unwrap_or_default(),
+            stored.map(|s| s.compacted_agents).unwrap_or_default(),
             format!("cloned session: {}", short_id(new_id)),
         );
     }
@@ -597,15 +594,19 @@ impl super::Dispatcher {
             self.error(id, "undo: the session is not recorded".to_owned());
             return;
         };
-        match prompt_tree(&src).map(|prompts| prompts.into_iter().find(|prompt| prompt.active)) {
-            Ok(Some(prompt)) => {
-                self.rewind_to(id, "undo", prompt.cut, Some(prompt.content));
-            }
-            Ok(None) => {
-                self.error(id, "undo: nothing to undo".to_owned());
-            }
+        let tree = match SessionTree::read(&src) {
+            Ok(tree) => tree,
             Err(err) => {
                 self.error(id, format!("undo: {err}"));
+                return;
+            }
+        };
+        match prompt_tree(&tree).into_iter().find(|prompt| prompt.active) {
+            Some(prompt) => {
+                self.rewind_to(id, "undo", tree, prompt.cut, Some(prompt.content));
+            }
+            None => {
+                self.error(id, "undo: nothing to undo".to_owned());
             }
         }
     }
@@ -623,13 +624,14 @@ impl super::Dispatcher {
             self.error(id, "rewind: the session is not recorded".to_owned());
             return;
         };
-        let prompts = match prompt_tree(&src) {
-            Ok(prompts) => prompts,
+        let tree = match SessionTree::read(&src) {
+            Ok(tree) => tree,
             Err(err) => {
                 self.error(id, format!("rewind: {err}"));
                 return;
             }
         };
+        let prompts = prompt_tree(&tree);
         let matches: Vec<&PromptEntry> = prompts
             .iter()
             .filter(|prompt| prompt.at.to_string().starts_with(at))
@@ -645,12 +647,14 @@ impl super::Dispatcher {
                 return;
             }
         };
-        self.rewind_to(id, "rewind", prompt.turn_end, None);
+        let turn_end = prompt.turn_end;
+        self.rewind_to(id, "rewind", tree, turn_end, None);
     }
 
     /// Shared tail of [`Self::undo`] and [`Self::rewind`]: append a
     /// branch marker that continues the session from `at`, reload the
-    /// session in place from its own file, and for [`Self::undo`]
+    /// session in place from `tree`, the file as read before the marker
+    /// with the marker applied, and for [`Self::undo`]
     /// hand the dropped `prompt` back to the client for the editor.
     /// The session keeps its id and its file; the abandoned entries
     /// stay in the file as an abandoned branch.
@@ -658,11 +662,24 @@ impl super::Dispatcher {
         clippy::too_many_lines,
         reason = "one linear reload: marker append, replay, then the same state reseat applies"
     )]
-    fn rewind_to(&mut self, id: SessionId, what: &str, at: EntryId, prompt: Option<Vec<Content>>) {
+    fn rewind_to(
+        &mut self,
+        id: SessionId,
+        what: &str,
+        mut tree: SessionTree,
+        at: EntryId,
+        prompt: Option<Vec<Content>>,
+    ) {
         let Some(path) = self.sessions[&id].path.clone() else {
             self.error(id, format!("{what}: the session is not recorded"));
             return;
         };
+        // A torn last line means an earlier append failed: a marker
+        // written after it would be glued onto it.
+        if tree.truncated() {
+            self.error(id, format!("{what}: the session file ends in a torn line"));
+            return;
+        }
         let (state, usage, title, timeline, compacted_agents, fallback) = {
             let Some(session) = self.sessions.get_mut(&id) else {
                 return;
@@ -684,7 +701,12 @@ impl super::Dispatcher {
                 self.error(id, format!("{what}: {err}"));
                 return;
             }
-            let replay = match kage_session::replay(&path) {
+            // The session is idle and this engine its only writer, so the
+            // tree read before the marker is the file, marker aside.
+            let replay = match tree
+                .branch_to(&path, at)
+                .and_then(|()| kage_session::replay_tree(&path, tree))
+            {
                 Ok(replay) => replay,
                 Err(err) => {
                     session.idle = Some(idle);
@@ -702,7 +724,7 @@ impl super::Dispatcher {
                 ));
             }
             let mut cx = super::clone_shallow(&idle.cx);
-            cx.history = replay.history.into_iter().map(Arc::new).collect();
+            cx.history = replay.history;
             cx.budget = kage_loop::TokenBudget {
                 used_input: replay.usage_total.input,
                 used_output: replay.usage_total.output,
@@ -740,11 +762,7 @@ impl super::Dispatcher {
             let usage = session.usage;
             let title = replay.title;
             let timeline = replay.timeline;
-            let compacted_agents = replay
-                .compacted_agents
-                .into_iter()
-                .map(Arc::new)
-                .collect::<Vec<_>>();
+            let compacted_agents = replay.compacted_agents;
             (state, usage, title, timeline, compacted_agents, fallback)
         };
         // The agents of this session forked from a history the rewind
@@ -798,9 +816,9 @@ impl super::Dispatcher {
             self.error(id, "rewind: the session is not recorded".to_owned());
             return;
         };
-        match prompt_tree(&src) {
-            Ok(prompts) => {
-                let prompts = prompts
+        match SessionTree::read(&src) {
+            Ok(tree) => {
+                let prompts = prompt_tree(&tree)
                     .into_iter()
                     .map(|prompt| PastPrompt {
                         at: prompt.at.to_string(),

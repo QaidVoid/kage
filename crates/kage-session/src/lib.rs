@@ -34,7 +34,7 @@ pub use error::SessionError;
 pub use fork::{Snapshot, fork, fork_as, resolve_entry_prefix, snapshot};
 pub use list::{SessionCache, SessionSummary, is_agent_session, list};
 pub use reader::SessionReader;
-pub use resume::{ReplayResult, ReplayUsage, find_by_prefix, find_last, replay};
+pub use resume::{ReplayResult, ReplayUsage, find_by_prefix, find_last, replay, replay_tree};
 pub use search::{SearchHit, search};
 pub use tree::{SessionTree, TreeNode, TreeWalk};
 pub use writer::{SessionWriter, delete_locked, is_locked};

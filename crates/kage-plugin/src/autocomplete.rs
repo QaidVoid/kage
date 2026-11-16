@@ -42,6 +42,7 @@ use kage_core::sync::lock;
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog};
+use crate::capabilities::{CurrentPlugin, OwnerScope};
 use crate::error::PluginError;
 use crate::host::{self, LuaHost, WeakHost};
 use crate::watchdog;
@@ -81,6 +82,8 @@ pub struct LuaAutocompleteProvider {
     host: LuaHost,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
+    /// The plugin that registered the provider.
+    scope: OwnerScope,
 }
 
 impl std::fmt::Debug for LuaAutocompleteProvider {
@@ -113,13 +116,34 @@ impl LuaAutocompleteProvider {
         let name = self.name.clone();
         let sink = Arc::clone(&self.sink);
         let handler = Arc::clone(&self.handler_key);
+        let scope = self.scope.clone();
         let (prefix, text) = (prefix.to_owned(), text.to_owned());
         self.host
             .call_within(COMPLETE_DEADLINE, move |lua| {
-                complete_on(lua, &name, &sink, &handler, &prefix, &text, cursor)
+                complete_on(
+                    lua,
+                    &name,
+                    &sink,
+                    &handler,
+                    &scope,
+                    Query {
+                        prefix: &prefix,
+                        text: &text,
+                        cursor,
+                    },
+                )
             })
             .unwrap_or_default()
     }
+}
+
+/// The input state a completion runs against, mirroring the `ctx` table
+/// the Lua handler receives.
+#[derive(Clone, Copy)]
+struct Query<'a> {
+    prefix: &'a str,
+    text: &'a str,
+    cursor: usize,
 }
 
 fn complete_on(
@@ -127,9 +151,8 @@ fn complete_on(
     name: &str,
     sink: &SharedHostLog,
     handler_key: &RegistryKey,
-    prefix: &str,
-    text: &str,
-    cursor: usize,
+    scope: &OwnerScope,
+    query: Query<'_>,
 ) -> Vec<AutocompleteItem> {
     let fail = |e: &dyn std::fmt::Display| {
         let mut s = lock(sink);
@@ -148,13 +171,15 @@ fn complete_on(
         Err(e) => return fail(&e),
     };
     if let Err(e) = ctx
-        .set("text", text)
-        .and_then(|()| ctx.set("cursor", cursor))
+        .set("text", query.text)
+        .and_then(|()| ctx.set("cursor", query.cursor))
     {
         return fail(&e);
     }
-    match watchdog::run(lua, watchdog::AUTOCOMPLETE_BUDGET, || {
-        func.call::<Value>((prefix.to_owned(), ctx))
+    match scope.run(|| {
+        watchdog::run(lua, watchdog::AUTOCOMPLETE_BUDGET, || {
+            func.call::<Value>((query.prefix.to_owned(), ctx))
+        })
     }) {
         Ok(Value::Table(items)) => parse_items(&items),
         Ok(_) => Vec::new(),
@@ -229,6 +254,7 @@ pub(crate) fn install_add_autocomplete_provider(
     lua: &Lua,
     host: WeakHost,
     sink: SharedHostLog,
+    current: CurrentPlugin,
     registered: &RegisteredAutocompleteProviders,
 ) -> Result<(), PluginError> {
     let registered = Arc::downgrade(registered);
@@ -244,6 +270,7 @@ pub(crate) fn install_add_autocomplete_provider(
                 host: host.upgrade()?,
                 sink: sink.clone(),
                 handler_key: Arc::new(handler_key),
+                scope: OwnerScope::grab(&current),
             });
             let registered = host::upgrade(&registered)?;
             let mut list = registered

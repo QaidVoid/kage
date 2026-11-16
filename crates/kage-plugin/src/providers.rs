@@ -70,7 +70,7 @@ use kage_provider::{
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
-use crate::capabilities::{Capability, CapabilityRegistry};
+use crate::capabilities::{Capability, CapabilityRegistry, CurrentPlugin, OwnerScope};
 use crate::error::PluginError;
 use crate::host::{self, LuaHost, WeakHost};
 use crate::tasks;
@@ -218,6 +218,8 @@ pub struct LuaProvider {
     host: LuaHost,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
+    /// The plugin that registered the provider.
+    scope: OwnerScope,
 }
 
 impl std::fmt::Debug for LuaProvider {
@@ -266,13 +268,20 @@ impl Provider for LuaProvider {
             mpsc::sync_channel::<Result<ProviderEvent, ProviderError>>(STREAM_CHANNEL_CAP);
         let handler_key = self.handler_key.clone();
         let sink = self.sink.clone();
+        let scope = self.scope.clone();
         let worker_cancel = cancel.clone();
         self.host
             .submit(move |lua| {
                 let tx_err = tx.clone();
-                if let Err(e) =
-                    run_handler(lua, &handler_key, &sink, &req_value, &worker_cancel, tx)
-                {
+                if let Err(e) = run_handler(
+                    lua,
+                    &handler_key,
+                    &sink,
+                    &req_value,
+                    &worker_cancel,
+                    &scope,
+                    tx,
+                ) {
                     let _ = tx_err.send(Err(classify_plugin_error(&e)));
                 }
             })
@@ -335,6 +344,7 @@ fn run_handler(
     sink: &SharedHostLog,
     req: &serde_json::Value,
     cancel: &CancelFlag,
+    scope: &OwnerScope,
     tx: mpsc::SyncSender<Result<ProviderEvent, ProviderError>>,
 ) -> Result<(), PluginError> {
     let handler: Function = lua.registry_value(handler_key)?;
@@ -344,15 +354,23 @@ fn run_handler(
     let run = tasks::drive::<Value>(lua, handler, (lua_req, emit))?;
     let sink = sink.clone();
     let cancel = cancel.clone();
-    tasks::spawn(lua, async move {
-        let finished = match run.await {
-            Ok(result) => forward_result(result, &tx, &sink, &cancel),
-            Err(err) => Err(err),
-        };
-        if let Err(err) = finished {
-            let _ = tx.send(Err(classify_raised(&err)));
-        }
-    });
+    let scope = scope.clone();
+    tasks::spawn(
+        lua,
+        crate::capabilities::OwnerScoped::new(
+            scope.current,
+            scope.owner,
+            Box::pin(async move {
+                let finished = match run.await {
+                    Ok(result) => forward_result(result, &tx, &sink, &cancel),
+                    Err(err) => Err(err),
+                };
+                if let Err(err) = finished {
+                    let _ = tx.send(Err(classify_raised(&err)));
+                }
+            }),
+        ),
+    );
     Ok(())
 }
 
@@ -514,6 +532,7 @@ pub(crate) fn register(
     registry: &CapabilityRegistry,
     host: WeakHost,
     sink: SharedHostLog,
+    current: CurrentPlugin,
     registered: &RegisteredProviders,
 ) {
     let registered = Arc::downgrade(registered);
@@ -523,6 +542,7 @@ pub(crate) fn register(
         .push(Box::new(move |lua: &Lua, pkage: &Table| {
             let weak_host = host.clone();
             let sink = sink.clone();
+            let current = Arc::clone(&current);
             let registered = registered.clone();
             pkage.set(
                 "register_provider",
@@ -550,6 +570,7 @@ pub(crate) fn register(
                         host: weak_host.upgrade()?,
                         sink: sink.clone(),
                         handler_key: Arc::new(key),
+                        scope: OwnerScope::grab(&current),
                     };
                     host::upgrade(&registered)?
                         .lock()

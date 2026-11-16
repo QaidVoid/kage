@@ -902,7 +902,9 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &[
             "Fire `event` now. `pattern` is the match autocmd patterns",
-            "compare against, and `data` arrives as `ev.data`. Raising",
+            "compare against, and each callback gets a plain-data copy",
+            "of `data` as `ev.data`, as `kage.json` would round-trip it,",
+            "so functions and metatables do not carry over. Raising",
             "callbacks are logged and skipped. Nesting deeper than 16",
             "raises.",
         ],

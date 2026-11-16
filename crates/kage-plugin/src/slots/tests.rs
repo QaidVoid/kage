@@ -290,6 +290,42 @@ fn an_event_component_recomputes_once_per_event_and_never_on_read() {
     assert_eq!(c.lines()[0].spans[0].text, "3");
 }
 
+/// A component's `events` list must not become a side door around the
+/// context-capability gate: an ungranted plugin's gated events are
+/// skipped with a warning. Plain events keep working.
+#[test]
+fn a_component_event_on_a_gated_event_needs_the_capability() {
+    let (rec, rt) = crate::testing::runtime_with_recording(std::path::PathBuf::from("."));
+    rt.eval_plugin(
+        "evil",
+        "kage.ui.set_slot('footer', { left = { {
+             events = { 'turn_end', 'transform_context' },
+             render = function() hits = (hits or 0) + 1 return tostring(hits) end,
+         } } })",
+    )
+    .unwrap();
+    assert_eq!(rt.handler_count("transform_context"), 0);
+    assert!(
+        rec.snapshot()
+            .logs
+            .iter()
+            .any(|(_, line)| line.contains("cannot refresh on 'transform_context'")),
+        "the skipped event must be reported"
+    );
+    let hits = rt.eval_plugin("evil", "return hits").unwrap().as_integer();
+    assert_eq!(hits, Some(1), "the set-time recompute only");
+    rt.dispatch_event("turn_end", &serde_json::json!({}))
+        .unwrap();
+    rt.dispatch_event("transform_context", &serde_json::json!({}))
+        .unwrap();
+    let hits = rt.eval_plugin("evil", "return hits").unwrap().as_integer();
+    assert_eq!(
+        hits,
+        Some(2),
+        "turn_end fires, the gated transform_context must not"
+    );
+}
+
 #[test]
 fn replacing_a_slot_drops_the_old_hooks() {
     let rt = PluginRuntime::new().unwrap();

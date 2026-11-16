@@ -28,6 +28,7 @@ use kage_tools::{ExecMode, ProgressSink, Tool, ToolContext, ToolError};
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
+use crate::capabilities::CurrentPlugin;
 use crate::error::PluginError;
 use crate::host::{self, LuaHost, WeakHost};
 use crate::tasks::{self, Abort};
@@ -62,6 +63,9 @@ pub struct LuaTool {
     host: LuaHost,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
+    /// The plugin that registered the tool.
+    owner: Option<String>,
+    current: CurrentPlugin,
 }
 
 impl std::fmt::Debug for LuaTool {
@@ -118,6 +122,8 @@ impl Tool for LuaTool {
             key: Arc::clone(&self.handler_key),
             abort: Arc::clone(&abort),
             progress: Arc::new(Mutex::new(cx.progress_sink())),
+            owner: self.owner.clone(),
+            current: Arc::clone(&self.current),
             tx,
         };
         match self
@@ -148,6 +154,8 @@ struct Call {
     abort: Arc<Abort>,
     /// Where `ctx.update` reports, until the call ends.
     progress: Arc<Mutex<Option<Arc<dyn ProgressSink>>>>,
+    owner: Option<String>,
+    current: CurrentPlugin,
     tx: crossbeam_channel::Sender<ToolOutput>,
 }
 
@@ -161,6 +169,8 @@ impl Call {
             key,
             abort,
             progress,
+            owner,
+            current,
             tx,
         } = self;
         let failed = |e: mlua::Error| ToolError::Other(format!("plugin tool '{name}': {e}"));
@@ -169,30 +179,37 @@ impl Call {
         let ctx = context_table(lua, &progress).map_err(failed)?;
         let run = tasks::drive_until::<Value>(lua, func, (input, ctx), Arc::clone(&abort))
             .map_err(failed)?;
-        tasks::spawn(lua, async move {
-            let returned = tasks::abortable(run, abort).await;
-            lock(&progress).take();
-            let Some(returned) = returned else {
-                return;
-            };
-            let output = match returned {
-                Ok(value) => value_to_output(value),
-                Err(err) => {
-                    lock(&sink).log(
-                        LogLevel::Error,
-                        &format!("plugin tool '{name}' raised: {err}"),
-                    );
-                    ToolOutput {
-                        is_error: true,
-                        text: err.to_string(),
-                        structured: None,
-                        terminate: false,
-                        media: Vec::new(),
-                    }
-                }
-            };
-            let _ = tx.send(output);
-        });
+        tasks::spawn(
+            lua,
+            crate::capabilities::OwnerScoped::new(
+                current,
+                owner,
+                Box::pin(async move {
+                    let returned = tasks::abortable(run, abort).await;
+                    lock(&progress).take();
+                    let Some(returned) = returned else {
+                        return;
+                    };
+                    let output = match returned {
+                        Ok(value) => value_to_output(value),
+                        Err(err) => {
+                            lock(&sink).log(
+                                LogLevel::Error,
+                                &format!("plugin tool '{name}' raised: {err}"),
+                            );
+                            ToolOutput {
+                                is_error: true,
+                                text: err.to_string(),
+                                structured: None,
+                                terminate: false,
+                                media: Vec::new(),
+                            }
+                        }
+                    };
+                    let _ = tx.send(output);
+                }),
+            ),
+        );
         Ok(())
     }
 }
@@ -319,9 +336,10 @@ pub(crate) fn install_register_tool(
     lua: &Lua,
     host: WeakHost,
     sink: SharedHostLog,
+    current: CurrentPlugin,
     registered: &RegisteredTools,
 ) -> Result<(), PluginError> {
-    install_tool_fn(lua, host, sink, registered, "register_tool")
+    install_tool_fn(lua, host, sink, current, registered, "register_tool")
 }
 
 /// Install `kage.override_tool` on the running Lua state. Semantically
@@ -334,15 +352,17 @@ pub(crate) fn install_override_tool(
     lua: &Lua,
     host: WeakHost,
     sink: SharedHostLog,
+    current: CurrentPlugin,
     overrides: &RegisteredTools,
 ) -> Result<(), PluginError> {
-    install_tool_fn(lua, host, sink, overrides, "override_tool")
+    install_tool_fn(lua, host, sink, current, overrides, "override_tool")
 }
 
 fn install_tool_fn(
     lua: &Lua,
     host: WeakHost,
     sink: SharedHostLog,
+    current: CurrentPlugin,
     bucket: &RegisteredTools,
     fn_name: &'static str,
 ) -> Result<(), PluginError> {
@@ -351,6 +371,7 @@ fn install_tool_fn(
     kage.set(
         fn_name,
         lua.create_function(move |lua, spec: Table| {
+            let owner = crate::capabilities::current_owner(&current);
             let name: String = spec.get("name")?;
             let description: String = spec.get("description")?;
             let risk_str: Option<String> = spec.get("risk")?;
@@ -369,6 +390,8 @@ fn install_tool_fn(
                 host: host.upgrade()?,
                 sink: sink.clone(),
                 handler_key: Arc::new(key),
+                owner,
+                current: Arc::clone(&current),
             };
             host::upgrade(&bucket)?
                 .lock()

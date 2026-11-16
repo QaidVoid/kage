@@ -32,6 +32,7 @@ use kage_core::sync::lock;
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog, json_to_lua};
+use crate::capabilities::{CurrentPlugin, OwnerScope};
 use crate::chrome::{ChromeLine, parse_lines};
 use crate::error::PluginError;
 use crate::host::{self, LuaHost, WeakHost};
@@ -59,6 +60,8 @@ pub struct LuaBlockRenderer {
     host: LuaHost,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
+    /// The plugin that registered the renderer.
+    scope: OwnerScope,
     cache: Arc<Mutex<BlockCache>>,
 }
 
@@ -109,10 +112,11 @@ impl LuaBlockRenderer {
         let kind = self.kind.clone();
         let sink = Arc::clone(&self.sink);
         let handler = Arc::clone(&self.handler_key);
+        let scope = self.scope.clone();
         let payload = payload.clone();
         let job_key = key.clone();
         let queued = self.host.queue(move |lua| {
-            let lines = render_block(lua, &kind, &sink, &handler, &payload);
+            let lines = render_block(lua, &kind, &sink, &handler, &scope, &payload);
             let mut cache = lock(&target);
             cache.pending.remove(&job_key);
             cache.insert(job_key, lines);
@@ -133,6 +137,7 @@ fn render_block(
     kind: &str,
     sink: &SharedHostLog,
     handler_key: &RegistryKey,
+    scope: &OwnerScope,
     payload: &serde_json::Value,
 ) -> Vec<ChromeLine> {
     let fail = |e: &dyn std::fmt::Display| {
@@ -151,7 +156,7 @@ fn render_block(
         Ok(v) => v,
         Err(e) => return fail(&e),
     };
-    match watchdog::run(lua, watchdog::RENDER_BUDGET, || func.call::<Value>(block)) {
+    match scope.run(|| watchdog::run(lua, watchdog::RENDER_BUDGET, || func.call::<Value>(block))) {
         Ok(value) => parse_lines(&value),
         Err(e) => fail(&e),
     }
@@ -196,6 +201,7 @@ pub(crate) fn install_block_renderers(
     lua: &Lua,
     host: WeakHost,
     sink: SharedHostLog,
+    current: CurrentPlugin,
     registered: &SharedBlockRenderers,
 ) -> Result<(), PluginError> {
     let registered = Arc::downgrade(registered);
@@ -226,6 +232,7 @@ pub(crate) fn install_block_renderers(
                             host: host.upgrade()?,
                             sink: sink.clone(),
                             handler_key: Arc::new(key),
+                            scope: OwnerScope::grab(&current),
                             cache: Arc::default(),
                         }),
                     );

@@ -70,6 +70,12 @@ pub(crate) struct Autocmds {
     by_event: HashMap<String, Vec<Autocmd>>,
     groups: HashMap<String, i64>,
     exec_depth: usize,
+    /// The current-plugin slot, so dispatch runs every target under its
+    /// recorded owner ([`Target::call`]).
+    current: CurrentPlugin,
+    /// Grants in force, consulted at dispatch time against each target's
+    /// recorded owner.
+    grants: crate::capabilities::Grants,
 }
 
 struct Autocmd {
@@ -78,6 +84,9 @@ struct Autocmd {
     patterns: Vec<String>,
     once: bool,
     origin: Arc<str>,
+    /// The plugin or reserved `@`-environment that registered the hook,
+    /// as of registration. `None` when nothing vouched for it.
+    owner: Option<Arc<str>>,
 }
 
 impl Autocmd {
@@ -125,26 +134,50 @@ impl Autocmds {
         }
     }
 
+    /// Whether a hook registered by `owner` may still receive `event`:
+    /// context-capability events are checked against the grants in force
+    /// now, so a revoked grant silences the hook at dispatch.
+    fn granted_at_dispatch(&self, event: &str, owner: Option<&str>) -> bool {
+        let Some(cap) = crate::events::required_capability(event) else {
+            return true;
+        };
+        crate::capabilities::is_trusted(owner)
+            || owner
+                .is_some_and(|owner| self.grants.get(owner).is_some_and(|set| set.contains(&cap)))
+    }
+
     /// Snapshot the autocmds for `event` that accept `matched`, and
     /// drop the `once` ones from the table.
     fn take_matching(&mut self, event: &str, matched: Option<&str>) -> Vec<Picked> {
-        let Some(list) = self.by_event.get_mut(event) else {
-            return Vec::new();
+        let picked: Vec<Picked> = {
+            let Some(list) = self.by_event.get(event) else {
+                return Vec::new();
+            };
+            list.iter()
+                .filter(|a| a.matches(matched))
+                .filter(|a| self.granted_at_dispatch(event, a.owner.as_deref()))
+                .map(|a| Picked {
+                    id: a.id,
+                    group: a.group,
+                    once: a.once,
+                    origin: Arc::clone(&a.origin),
+                    owner: a.owner.clone(),
+                })
+                .collect()
         };
-        let picked: Vec<Picked> = list
-            .iter()
-            .filter(|a| a.matches(matched))
-            .map(|a| Picked {
-                id: a.id,
-                group: a.group,
-                once: a.once,
-                origin: Arc::clone(&a.origin),
-            })
-            .collect();
-        if picked.iter().any(|p| p.once) {
+        if let Some(list) = self.by_event.get_mut(event)
+            && picked.iter().any(|p| p.once)
+        {
             list.retain(|a| !(a.once && a.matches(matched)));
         }
         picked
+    }
+
+    /// Replace the grants consulted at dispatch time. Test hook for
+    /// grant revocation.
+    #[cfg(test)]
+    fn set_grants(&mut self, grants: crate::capabilities::Grants) {
+        self.grants = grants;
     }
 }
 
@@ -153,6 +186,7 @@ struct Picked {
     group: Option<i64>,
     once: bool,
     origin: Arc<str>,
+    owner: Option<Arc<str>>,
 }
 
 /// One autocmd selected for a dispatch, with its callback resolved.
@@ -160,11 +194,13 @@ pub(crate) struct Target {
     id: i64,
     group: Option<i64>,
     origin: Arc<str>,
+    owner: Option<Arc<str>>,
     callback: Function,
 }
 
 impl Target {
-    /// Call the callback with `ev = { id, event, match, group, data }`.
+    /// Call the callback with `ev = { id, event, match, group, data }`,
+    /// under the registering plugin's owner.
     pub(crate) fn call<R: FromLuaMulti>(
         &self,
         lua: &Lua,
@@ -172,13 +208,21 @@ impl Target {
         matched: Option<&str>,
         data: Value,
     ) -> mlua::Result<R> {
+        let slot = lua
+            .app_data_ref::<SharedAutocmds>()
+            .map(|shared| lock(&shared).current.clone());
         let ev = lua.create_table()?;
         ev.raw_set("id", self.id)?;
         ev.raw_set("event", event)?;
         ev.raw_set("match", matched)?;
         ev.raw_set("group", self.group)?;
         ev.raw_set("data", data)?;
-        self.callback.call(ev)
+        match slot {
+            Some(slot) => {
+                crate::capabilities::scoped(&slot, self.owner.as_deref(), || self.callback.call(ev))
+            }
+            None => self.callback.call(ev),
+        }
     }
 
     /// Log that this callback raised while handling `event`.
@@ -234,24 +278,29 @@ pub(crate) fn targets(lua: &Lua, event: &str, matched: Option<&str>) -> mlua::Re
             id: p.id,
             group: p.group,
             origin: p.origin,
+            owner: p.owner,
             callback,
         });
     }
     Ok(out)
 }
 
-/// Call every target with the same `data`, logging and skipping the
-/// ones that raise.
+/// Call every target with its own copy of `data`, logging and skipping
+/// the ones that raise or whose copy fails. A shared table would let one
+/// handler plant a metatable that runs its code under a later handler's
+/// owner.
 pub(crate) fn notify(
     lua: &Lua,
     sink: &SharedHostLog,
     event: &str,
     matched: Option<&str>,
     targets: &[Target],
-    data: &Value,
+    data: &serde_json::Value,
 ) {
     for target in targets {
-        if let Err(err) = target.call::<()>(lua, event, matched, data.clone()) {
+        let result = crate::api::json_to_lua(lua, data)
+            .and_then(|copy| target.call::<()>(lua, event, matched, copy));
+        if let Err(err) = result {
             target.log_error(sink, event, err);
         }
     }
@@ -317,14 +366,24 @@ pub(crate) fn check_patterns(event: &str, patterns: Vec<String>) -> Result<Vec<S
     Ok(patterns)
 }
 
+/// Whether a hook `owner` registers for `event` would be delivered:
+/// see [`Autocmds::granted_at_dispatch`].
+pub(crate) fn granted(lua: &Lua, event: &str, owner: Option<&str>) -> bool {
+    lua.app_data_ref::<SharedAutocmds>()
+        .is_some_and(|shared| lock(&shared).granted_at_dispatch(event, owner))
+}
+
 /// Subscribe `callback` to `event` for a host-side consumer. `patterns`
-/// must already have passed [`check_patterns`]. Returns the autocmd id.
+/// must already have passed [`check_patterns`]. `owner` is the plugin
+/// the callback runs for (`None` grants it no capabilities). Returns the
+/// autocmd id.
 pub(crate) fn add(
     lua: &Lua,
     event: &str,
     patterns: Vec<String>,
     callback: Function,
     origin: Arc<str>,
+    owner: Option<String>,
 ) -> mlua::Result<i64> {
     let Some(autocmds) = lua.app_data_ref::<SharedAutocmds>().map(|a| Arc::clone(&a)) else {
         return Err(fail("autocmds are not installed".to_owned()));
@@ -342,6 +401,7 @@ pub(crate) fn add(
                 patterns,
                 once: false,
                 origin,
+                owner: owner.map(Arc::<str>::from),
             });
         id
     };
@@ -378,7 +438,11 @@ pub(crate) fn install(
     grants: crate::capabilities::Grants,
     ceilings: crate::capabilities::Ceilings,
 ) -> Result<SharedAutocmds, PluginError> {
-    let shared = SharedAutocmds::default();
+    let shared: SharedAutocmds = Arc::new(Mutex::new(Autocmds {
+        current: Arc::clone(&current),
+        grants: Arc::clone(&grants),
+        ..Autocmds::default()
+    }));
     lua.set_app_data(Arc::clone(&shared));
     lua.set_named_registry_value(CALLBACKS_KEY, lua.create_table()?)?;
     let api: Table = lua.globals().get::<Table>("kage")?.get("api")?;
@@ -469,16 +533,11 @@ fn create_fn(
         }
         let owner = lock(&current).clone();
         if let Some(cap) = crate::events::required_capability(&event) {
-            // Outside a plugin chunk (user `init.lua`, host eval) there
-            // is no grant to consult: that caller is the trusted user,
-            // mirroring `install_trusted`.
-            let granted = match owner.as_deref() {
-                None => true,
-                Some(plugin) => {
+            let granted = crate::capabilities::is_trusted(owner.as_deref())
+                || owner.as_deref().is_some_and(|plugin| {
                     grants.get(plugin).is_some_and(|set| set.contains(&cap))
                         && crate::capabilities::declared(&ceilings, plugin, cap)
-                }
-            };
+                });
             if !granted {
                 let subject = owner.as_deref().unwrap_or("?");
                 lock(&sink).log(
@@ -517,6 +576,7 @@ fn create_fn(
                 patterns,
                 once,
                 origin: origin(desc.as_deref(), owner.as_deref()),
+                owner: owner.as_deref().map(Arc::from),
             });
             id
         };
@@ -538,6 +598,9 @@ fn exec_fn(lua: &Lua, sink: SharedHostLog) -> mlua::Result<Function> {
             ),
             None => (None, Value::Nil),
         };
+        // Handlers of other owners read `data`, so they get plain data:
+        // a caller's metatable must not run their code as its own.
+        let data = crate::api::lua_to_json(data)?;
         exec(lua, &sink, &event, pattern.as_deref(), &data)
     })
 }
@@ -552,7 +615,7 @@ pub(crate) fn exec(
     sink: &SharedHostLog,
     event: &str,
     matched: Option<&str>,
-    data: &Value,
+    data: &serde_json::Value,
 ) -> mlua::Result<()> {
     let Some(autocmds) = lua.app_data_ref::<SharedAutocmds>().map(|a| Arc::clone(&a)) else {
         return Ok(());

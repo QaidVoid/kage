@@ -373,7 +373,8 @@ Other functions:
   twice.
 - `kage.api.augroup_del(group)` deletes a group and its autocmds.
 - `kage.api.autocmd_exec(event, { pattern, data })` fires any event now.
-  Nesting deeper than 16 levels raises.
+  Handlers get a plain-data copy of `data`, so functions and metatables
+  do not carry over. Nesting deeper than 16 levels raises.
 
 `kage.on(event, fn)` is the short form: `fn` receives the payload
 alone, and the call returns an `off` function. Unknown event names

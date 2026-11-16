@@ -267,8 +267,11 @@ impl EvalState {
 
     /// Evaluate `source` in `env` under the watchdog, with `name` as the
     /// current plugin and `chunk` as the chunk name. The slot is
-    /// restored on every exit path, so a contained panic cannot leave a
-    /// stale plugin name for the next `kage.request_capabilities`.
+    /// restored to its previous value on every exit path, so a panic
+    /// cannot leave a stale plugin name for the next
+    /// `kage.request_capabilities`, and an eval nested in a scoped
+    /// callback (host-driven reload) does not clear the callback's
+    /// owner.
     pub(crate) fn eval_in(
         &self,
         lua: &Lua,
@@ -277,19 +280,17 @@ impl EvalState {
         env: Table,
         source: &str,
     ) -> Result<mlua::Value, PluginError> {
-        *lock(&self.current_plugin) = Some(name.to_owned());
-        let guard = RestoreOnDrop::arm(|| {
-            *lock(&self.current_plugin) = None;
+        let previous = lock(&self.current_plugin).replace(name.to_owned());
+        let slot = Arc::clone(&self.current_plugin);
+        let _guard = RestoreOnDrop::arm(move || {
+            lock(&slot).clone_from(&previous);
         });
-        let result = watchdog::run(lua, self.script_budget, || {
+        watchdog::run(lua, self.script_budget, || {
             lua.load(source)
                 .set_name(chunk)
                 .set_environment(env)
                 .eval::<mlua::Value>()
-        });
-        *lock(&self.current_plugin) = None;
-        guard.defuse();
-        result
+        })
     }
 
     /// Evaluate `_defaults.lua` in its own environment. Runs before the
@@ -532,7 +533,32 @@ fn apply_sandbox(lua: &Lua, sink: SharedHostLog) -> Result<(), PluginError> {
             Ok(())
         })?,
     )?;
+    refuse_finalizers(lua)?;
     guard_coroutines(lua)
+}
+
+/// Replace `setmetatable` with one that refuses a metatable carrying
+/// `__gc`. A finalizer runs during whatever allocation triggers the
+/// collection, under whichever owner holds the slot then, so it would
+/// let a plugin's code act as another plugin or the user. Any non-nil
+/// `__gc` is refused, since a placeholder could be swapped for a
+/// function after the object is marked.
+fn refuse_finalizers(lua: &Lua) -> mlua::Result<()> {
+    let globals = lua.globals();
+    let setmetatable: mlua::Function = globals.get("setmetatable")?;
+    globals.set(
+        "setmetatable",
+        lua.create_function(move |_, (table, mt): (mlua::Value, mlua::Value)| {
+            if let mlua::Value::Table(mt) = &mt
+                && !mt.raw_get::<mlua::Value>("__gc")?.is_nil()
+            {
+                return Err(mlua::Error::runtime(
+                    "setmetatable: __gc finalizers are not allowed",
+                ));
+            }
+            setmetatable.call::<mlua::Value>((table, mt))
+        })?,
+    )
 }
 
 /// Replace `coroutine.create` and `coroutine.wrap` so every coroutine a

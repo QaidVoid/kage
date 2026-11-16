@@ -34,7 +34,7 @@ use kage_core::options::{self, OptionChange, OptionError, OptionSource, OptionSt
 use kage_core::sync::lock;
 use mlua::{Lua, MetaMethod, Table, UserData, UserDataMethods, Value};
 
-use crate::api::{LogLevel, SharedHostLog, json_to_lua};
+use crate::api::{LogLevel, SharedHostLog};
 use crate::autocmd;
 use crate::error::PluginError;
 use crate::highlight::{self, SharedHighlights, SharedThemeResolver, ThemeBase};
@@ -108,8 +108,7 @@ impl Options {
             "new": to_json(&change.new),
             "source": change.source.as_str(),
         });
-        let data = json_to_lua(lua, &payload)?;
-        autocmd::exec(lua, &self.sink, "option_set", Some(change.name), &data)
+        autocmd::exec(lua, &self.sink, "option_set", Some(change.name), &payload)
     }
 
     /// The base groups to switch to when setting `name` to `value`

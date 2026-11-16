@@ -26,7 +26,10 @@
 //! agnostic about what each one does.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use kage_core::sync::lock;
 use mlua::{Lua, RegistryKey, Table, Value};
@@ -154,10 +157,102 @@ pub(crate) fn declared(ceilings: &Ceilings, plugin: &str, cap: Capability) -> bo
         .is_none_or(|ceiling| ceiling.contains(&cap))
 }
 
-/// The name of the plugin currently being evaluated, if any. Set by
-/// [`crate::runtime::PluginRuntime::eval_plugin`] for the duration of
-/// that plugin's chunk so `request_capabilities` knows who is asking.
+/// The name of the plugin currently being evaluated or running a
+/// callback, if any. Set by [`crate::runtime::EvalState::eval_in`] for
+/// the duration of that plugin's chunk, and by [`scoped`] for the
+/// duration of every callback the host runs on a plugin's behalf, so
+/// capability-gated surfaces (`request_capabilities`, event
+/// registration) know who is asking. Host eval runs as [`HOST_OWNER`].
+/// `None` means no one vouches for the running code, such as a
+/// metamethod or finalizer the host triggered outside any scope, so it
+/// is denied every capability.
 pub(crate) type CurrentPlugin = Arc<Mutex<Option<String>>>;
+
+/// The owner host eval runs under.
+pub(crate) const HOST_OWNER: &str = "@host";
+
+/// Whether `owner` is a trusted host context rather than a plugin: a
+/// reserved `@`-prefixed environment (`@host`, `@user`, `@defaults`).
+/// The loader and [`crate::PluginRuntime::eval_plugin`] refuse names
+/// starting with `@`, so the prefix cannot be forged.
+pub(crate) fn is_trusted(owner: Option<&str>) -> bool {
+    owner.is_some_and(|name| name.starts_with('@'))
+}
+
+/// The owner currently in the slot, cloned out.
+pub(crate) fn current_owner(slot: &CurrentPlugin) -> Option<String> {
+    lock(slot).clone()
+}
+
+/// Run `f` with `owner` set as the current plugin, restoring the
+/// previous value afterwards (also when `f` panics).
+pub(crate) fn scoped<R>(slot: &CurrentPlugin, owner: Option<&str>, f: impl FnOnce() -> R) -> R {
+    let value = owner.map(str::to_owned);
+    let prev = {
+        let mut guard = lock(slot);
+        std::mem::replace(&mut *guard, value)
+    };
+    let _guard = crate::guard::RestoreOnDrop::arm(move || {
+        lock(slot).clone_from(&prev);
+    });
+    f()
+}
+
+/// An owner token and the slot it scopes, grabbed at registration and
+/// carried to every invocation site.
+#[derive(Clone, Default)]
+pub(crate) struct OwnerScope {
+    /// The plugin or reserved environment that registered the
+    /// callback, or `None` when nothing vouched for it.
+    pub(crate) owner: Option<String>,
+    pub(crate) current: CurrentPlugin,
+}
+
+impl OwnerScope {
+    /// Snapshot the slot's current owner together with the slot.
+    pub(crate) fn grab(slot: &CurrentPlugin) -> Self {
+        Self {
+            owner: current_owner(slot),
+            current: Arc::clone(slot),
+        }
+    }
+
+    /// Run `f` with the recorded owner set on the slot.
+    pub(crate) fn run<R>(&self, f: impl FnOnce() -> R) -> R {
+        scoped(&self.current, self.owner.as_deref(), f)
+    }
+}
+
+/// A future that sets the owner slot around every poll of `inner`, so a
+/// coroutine the owner thread drives between jobs keeps its plugin's
+/// identity across yields. Held-across-await state would leak the owner
+/// into unrelated jobs, so the slot is set and restored per poll.
+pub(crate) struct OwnerScoped {
+    slot: CurrentPlugin,
+    owner: Option<String>,
+    inner: Pin<Box<dyn Future<Output = ()> + Send>>,
+}
+
+impl OwnerScoped {
+    pub(crate) fn new(
+        slot: CurrentPlugin,
+        owner: Option<String>,
+        inner: Pin<Box<dyn Future<Output = ()> + Send>>,
+    ) -> Self {
+        Self { slot, owner, inner }
+    }
+}
+
+impl Future for OwnerScoped {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = self.get_mut();
+        scoped(&this.slot, this.owner.as_deref(), || {
+            this.inner.as_mut().poll(cx)
+        })
+    }
+}
 
 /// Attaches a granted capability's API onto a single plugin's `kage`
 /// proxy table. Capabilities register one of these so this module
@@ -227,7 +322,7 @@ pub(crate) fn install_request_capabilities(
                 .map_err(|_| mlua::Error::external("current-plugin mutex poisoned"))?
                 .clone();
             let result = lua.create_table()?;
-            // No plugin context (host-side eval): nothing is granted.
+            // No owner: nothing is granted.
             let granted = plugin
                 .as_deref()
                 .and_then(|p| grants.get(p))
@@ -470,5 +565,73 @@ mod tests {
             err.to_string().contains("capability net has no installer"),
             "the error names the capability: {err}"
         );
+    }
+
+    #[test]
+    fn only_reserved_envs_are_trusted() {
+        assert!(!is_trusted(None));
+        assert!(is_trusted(Some(HOST_OWNER)));
+        assert!(is_trusted(Some("@user")));
+        assert!(is_trusted(Some("@defaults")));
+        assert!(!is_trusted(Some("p")));
+    }
+
+    #[test]
+    fn scoped_sets_the_owner_and_restores_the_previous_one() {
+        let slot: CurrentPlugin = Arc::default();
+        scoped(&slot, Some("outer"), || {
+            assert_eq!(lock(&slot).as_deref(), Some("outer"));
+            scoped(&slot, Some("inner"), || {
+                assert_eq!(lock(&slot).as_deref(), Some("inner"));
+            });
+            assert_eq!(lock(&slot).as_deref(), Some("outer"));
+            scoped(&slot, None, || assert!(lock(&slot).is_none()));
+            assert_eq!(lock(&slot).as_deref(), Some("outer"));
+        });
+        assert!(lock(&slot).is_none());
+    }
+
+    #[test]
+    fn scoped_restores_the_owner_when_the_body_panics() {
+        let slot: CurrentPlugin = Arc::default();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            scoped(&slot, Some("p"), || panic!("boom"));
+        }));
+        assert!(outcome.is_err());
+        assert!(lock(&slot).is_none());
+    }
+
+    #[test]
+    fn owner_scoped_sets_the_slot_on_every_poll() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Poll, Waker};
+
+        let slot: CurrentPlugin = Arc::default();
+        let inner_polls = Arc::new(AtomicUsize::new(0));
+        let slot_for_inner = Arc::clone(&slot);
+        let polls_for_inner = Arc::clone(&inner_polls);
+        let inner = {
+            let mut first = true;
+            std::future::poll_fn(move |_| {
+                polls_for_inner.fetch_add(1, Ordering::SeqCst);
+                let owner = lock(&slot_for_inner).clone();
+                if first {
+                    first = false;
+                    assert_eq!(owner.as_deref(), Some("p"), "first poll sees the owner");
+                    return Poll::Pending;
+                }
+                assert_eq!(owner.as_deref(), Some("p"), "resumed poll sees the owner");
+                Poll::Ready(())
+            })
+        };
+        let task = OwnerScoped::new(Arc::clone(&slot), Some("p".to_owned()), Box::pin(inner));
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut pinned = std::pin::pin!(task);
+        assert_eq!(pinned.as_mut().poll(&mut cx), Poll::Pending);
+        assert!(lock(&slot).is_none());
+        assert_eq!(pinned.as_mut().poll(&mut cx), Poll::Ready(()));
+        assert_eq!(inner_polls.load(Ordering::SeqCst), 2);
+        assert!(lock(&slot).is_none());
     }
 }

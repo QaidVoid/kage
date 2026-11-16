@@ -18,7 +18,7 @@ use kage_core::highlight::{Highlights, HlSpec};
 use kage_core::sync::lock;
 use mlua::{Lua, Table, Value};
 
-use crate::api::{SharedHostLog, json_to_lua};
+use crate::api::SharedHostLog;
 use crate::autocmd;
 use crate::error::PluginError;
 
@@ -60,8 +60,13 @@ pub(crate) fn fire_color_scheme(lua: &Lua, sink: &SharedHostLog, theme: &str) ->
     if autocmd::count(lua, "color_scheme") == 0 {
         return Ok(());
     }
-    let data = json_to_lua(lua, &serde_json::json!({ "name": theme }))?;
-    autocmd::exec(lua, sink, "color_scheme", Some(theme), &data)
+    autocmd::exec(
+        lua,
+        sink,
+        "color_scheme",
+        Some(theme),
+        &serde_json::json!({ "name": theme }),
+    )
 }
 
 /// Install `kage.api.hl_set` and `kage.api.hl_get`.

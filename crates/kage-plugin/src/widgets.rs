@@ -27,6 +27,7 @@ use kage_core::sync::lock;
 use mlua::{Function, Lua, RegistryKey, Table};
 
 use crate::api::{LogLevel, SharedHostLog};
+use crate::capabilities::{CurrentPlugin, OwnerScope};
 use crate::error::PluginError;
 use crate::host::{self, LuaHost, WeakHost};
 use crate::retained::Retained;
@@ -47,6 +48,8 @@ pub struct LuaWidget {
     host: LuaHost,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
+    /// The plugin that registered the widget.
+    scope: OwnerScope,
     output: Retained<String>,
 }
 
@@ -75,8 +78,9 @@ impl LuaWidget {
         let key = self.key.clone();
         let sink = Arc::clone(&self.sink);
         let handler = Arc::clone(&self.handler_key);
+        let scope = self.scope.clone();
         self.output.get(&self.host, width, move |lua, width| {
-            render_widget(lua, &key, &sink, &handler, width)
+            render_widget(lua, &key, &sink, &handler, &scope, width)
         })
     }
 }
@@ -86,6 +90,7 @@ fn render_widget(
     key: &str,
     sink: &SharedHostLog,
     handler_key: &RegistryKey,
+    scope: &OwnerScope,
     width: u16,
 ) -> Option<String> {
     let fail = |e: &dyn std::fmt::Display| {
@@ -97,8 +102,10 @@ fn render_widget(
         Ok(f) => f,
         Err(e) => return fail(&e),
     };
-    match watchdog::run(lua, watchdog::RENDER_BUDGET, || {
-        func.call::<mlua::Value>(width)
+    match scope.run(|| {
+        watchdog::run(lua, watchdog::RENDER_BUDGET, || {
+            func.call::<mlua::Value>(width)
+        })
     }) {
         Ok(mlua::Value::String(s)) => Some(s.to_str().map(|s| s.to_owned()).unwrap_or_default()),
         Ok(mlua::Value::Nil) => Some(String::new()),
@@ -115,6 +122,7 @@ pub(crate) fn install_register_widget(
     lua: &Lua,
     host: WeakHost,
     sink: SharedHostLog,
+    current: CurrentPlugin,
     registered: &RegisteredWidgets,
 ) -> Result<(), PluginError> {
     let registered = Arc::downgrade(registered);
@@ -130,6 +138,7 @@ pub(crate) fn install_register_widget(
                 host: host.upgrade()?,
                 sink: sink.clone(),
                 handler_key: Arc::new(handler_key),
+                scope: OwnerScope::grab(&current),
                 output: Retained::new(),
             });
             let registered = host::upgrade(&registered)?;

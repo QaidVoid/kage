@@ -56,7 +56,7 @@ pub(crate) fn run_bridged_command(
         BridgePrep::Ready(bargs) => bargs,
         BridgePrep::ArgError(out) => return Some(out),
     };
-    let step = match rt.bridge_call(&bargs.handler, &bargs.args) {
+    let step = match rt.bridge_call_for(bargs.owner.as_deref(), &bargs.handler, &bargs.args) {
         Ok(step) => step,
         Err(e) => return Some(error_output(&label, &e.to_string())),
     };
@@ -74,11 +74,15 @@ pub(crate) fn run_bridged_keymap(
     errors: &mut dyn FnMut(String),
 ) -> Option<CommandOutput> {
     let label = "key mapping";
+    let owner = match rt.keymap_owner(id) {
+        Ok(owner) => owner,
+        Err(e) => return Some(error_output(label, &e.to_string())),
+    };
     let handler = match rt.keymap_handler(id) {
         Ok(handler) => handler,
         Err(e) => return Some(error_output(label, &e.to_string())),
     };
-    let step = match rt.bridge_call(&handler, &[]) {
+    let step = match rt.bridge_call_for(owner.as_deref(), &handler, &[]) {
         Ok(step) => step,
         Err(e) => return Some(error_output(label, &e.to_string())),
     };

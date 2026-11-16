@@ -78,6 +78,15 @@ fn eval_returns_lua_values() {
 }
 
 #[test]
+fn eval_plugin_rejects_reserved_names() {
+    let rt = PluginRuntime::new().unwrap();
+    for name in ["@evil", "@user", "@defaults"] {
+        let err = rt.eval_plugin(name, "return 1").unwrap_err().to_string();
+        assert!(err.contains("reserved"), "{name}: {err}");
+    }
+}
+
+#[test]
 fn plugin_config_is_per_plugin_and_isolated() {
     let mut cfg = BTreeMap::new();
     cfg.insert(

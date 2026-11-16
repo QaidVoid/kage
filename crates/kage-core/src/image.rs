@@ -22,18 +22,6 @@ pub fn sniff_mime(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// [`sniff_mime`] of base64 `data`, decoding only the head the magic
-/// bytes sit in, so a large image is not decoded to be named.
-#[must_use]
-pub fn sniff_base64(data: &str) -> Option<&'static str> {
-    use base64::Engine as _;
-    let head = &data.as_bytes()[..data.len().min(16) / 4 * 4];
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(head)
-        .ok()?;
-    sniff_mime(&bytes)
-}
-
 /// What a model is told in place of a picture whose bytes are none of the
 /// formats [`sniff_mime`] knows, which a provider would refuse.
 #[must_use]
@@ -79,20 +67,6 @@ pub fn human_bytes(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Base64 is named from its head alone, and a payload too short or
-    /// not base64 is no image rather than an error.
-    #[test]
-    fn base64_is_named_from_its_head() {
-        assert_eq!(sniff_base64("iVBORw0KGgoAAAANSUhEUg=="), Some("image/png"));
-        assert_eq!(sniff_base64("/9j/4A=="), Some("image/jpeg"));
-        assert_eq!(sniff_base64("UklGRgAAAABXRUJQVlA4IA=="), Some("image/webp"));
-        assert_eq!(sniff_base64("AAAAHGZ0eXBhdmlm"), None);
-        assert_eq!(sniff_base64("iVBO"), None);
-        assert_eq!(sniff_base64("not base64 at all!"), None);
-        assert_eq!(sniff_base64(""), None);
-        assert_eq!(sniff_base64("a\u{e9}\u{e9}"), None);
-    }
 
     /// The note names the declared type when there was one, and reads as
     /// a sentence when there was none.

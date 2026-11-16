@@ -4486,7 +4486,7 @@ for line in sys.stdin:
             };
             let (client, b) = UnixStream::pair().unwrap();
             let (peer, _, _) = kage_jsonrpc::connect(BufReader::new(b.try_clone().unwrap()), b);
-            let (path, mut header) = crate::plan_session_in(dir, "external", "");
+            let (path, mut header) = crate::plan_session_in(dir, dir, "external", "");
             header.cwd = dir.to_path_buf();
             let (session, created) = External::start(
                 &Lifecycles::new(1),
@@ -4611,7 +4611,7 @@ for line in sys.stdin:
         );
 
         fn restored_session(dir: &std::path::Path, capability: &str, replay: bool) -> Restored {
-            let (path, mut header) = crate::plan_session_in(dir, "external", "");
+            let (path, mut header) = crate::plan_session_in(dir, dir, "external", "");
             header.cwd = dir.to_path_buf();
             header.backend = Some(kage_session::entry::SessionBackend::ExternalAcp(
                 kage_session::entry::ExternalAcpSession {

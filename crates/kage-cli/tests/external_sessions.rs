@@ -87,10 +87,9 @@ impl Env {
     }
 
     fn session_file(&self, id: &str) -> PathBuf {
-        self.dir
-            .path()
-            .join("data/kage/sessions")
-            .join(format!("{id}.jsonl"))
+        kage_session::find_by_prefix(&self.dir.path().join("data/kage/sessions"), id)
+            .unwrap()
+            .unwrap_or_else(|| panic!("no file for session {id}"))
     }
 }
 

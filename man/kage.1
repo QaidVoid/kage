@@ -21,7 +21,7 @@ Provider\-qualified model id (`provider/model`). Defaults to `[provider] default
 System prompt to prepend
 .TP
 \fB\-\-no\-session\fR
-Disable session recording. By default every run writes a JSONL session file under `$XDG_DATA_HOME/kage/sessions/<session\-id>.jsonl`
+Disable session recording. By default every run writes a JSONL session file under `$XDG_DATA_HOME/kage/sessions/`, in a directory for its project: `<project>/<session\-id>.jsonl`
 .TP
 \fB\-\-yolo\fR
 Start the session in allow mode: every tool call runs without asking, MCP servers included. A configured deny still denies. Same effect as `/permission allow`, applied at startup

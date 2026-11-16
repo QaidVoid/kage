@@ -123,9 +123,8 @@ pub(super) fn fork_session(src: &Path, at: Option<&str>) -> Result<(PathBuf, Ses
             .map_err(|e| e.to_string())?
             .ok_or("the session has no entries to fork at")?,
     };
-    let dir = src.parent().ok_or("session path has no parent directory")?;
     let id = SessionId::new();
-    let dst = dir.join(format!("{id}.jsonl"));
+    let dst = kage_session::layout::project_of(src).join(format!("{id}.jsonl"));
     kage_session::fork(src, &dst, id, entry).map_err(|e| e.to_string())?;
     Ok((dst, id))
 }
@@ -400,19 +399,20 @@ impl super::Dispatcher {
         let Some(idle) = session.idle.as_ref() else {
             return;
         };
-        // The new session goes next to the one it replaces.
-        let dir = idle
-            .recorder
-            .as_ref()
-            .and_then(|recorder| recorder.path().parent().map(Path::to_path_buf));
-        let planned = match dir {
-            Some(dir) => Ok(crate::plan_session_in(
-                &dir,
+        // The new session goes under the sessions directory of the one it
+        // replaces, in the project of its working directory.
+        let root = match idle.recorder.as_ref() {
+            Some(recorder) => Ok(kage_session::layout::root_of(recorder.path())),
+            None => crate::paths::sessions_dir(),
+        };
+        let planned = root.map(|root| {
+            crate::plan_session_in(
+                &root,
+                &session.workdir,
                 &session.state.model,
                 &idle.cx.system_prompt,
-            )),
-            None => crate::plan_session(&session.state.model, &idle.cx.system_prompt),
-        };
+            )
+        });
         let (path, mut header) = match planned {
             Ok(planned) => planned,
             Err(err) => {

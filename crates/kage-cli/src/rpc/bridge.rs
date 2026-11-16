@@ -729,12 +729,12 @@ impl Bridge {
         let _ = std::thread::Builder::new()
             .name("kage-rpc-agents".to_owned())
             .spawn(move || {
-                let (Ok(replay), Some(dir)) = (kage_session::replay(&path), path.parent()) else {
+                let Ok(replay) = kage_session::replay(&path) else {
                     return;
                 };
                 let restored = {
                     let live = lock(&live);
-                    super::sessions::restored_subagents(dir, session, &replay, &live)
+                    super::sessions::restored_subagents(&path, session, &replay, &live)
                 };
                 for (parent, update) in restored {
                     let to = if parent == session {

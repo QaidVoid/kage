@@ -187,8 +187,11 @@ or to `none` to print only the session lines (see
 
 ## recording and resuming
 
-Every session is recorded to `~/.local/share/kage/sessions/<id>.jsonl`
-unless you pass `--no-session`. Resume one in the TUI by id (or a
+Every session is recorded to
+`~/.local/share/kage/sessions/<project>/<id>.jsonl` unless you pass
+`--no-session`. `<project>` is named for the repository the session
+started in, such as `kage-personal-1a2b3c4d5e` (see `[sessions]` in
+the [configuration](/guide/config)). Resume one in the TUI by id (or a
 unique prefix), or the most recent one started in the current directory
 with `--last`:
 

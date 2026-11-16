@@ -121,7 +121,8 @@ struct Cli {
     system: String,
 
     /// Disable session recording. By default every run writes a JSONL
-    /// session file under `$XDG_DATA_HOME/kage/sessions/<session-id>.jsonl`.
+    /// session file under `$XDG_DATA_HOME/kage/sessions/`, in a directory
+    /// for its project: `<project>/<session-id>.jsonl`.
     #[arg(long = "no-session")]
     no_session: bool,
 
@@ -1627,14 +1628,26 @@ pub(crate) fn open_session(model: &str, system_prompt: &str) -> Result<SessionWr
 /// quitting (or resuming a different session) doesn't litter the
 /// sessions directory with empty header-only stubs.
 pub(crate) fn plan_session(model: &str, system_prompt: &str) -> Result<(PathBuf, Header), String> {
-    Ok(plan_session_in(&sessions_dir()?, model, system_prompt))
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    Ok(plan_session_in(
+        &sessions_dir()?,
+        &cwd,
+        model,
+        system_prompt,
+    ))
 }
 
-/// [`plan_session`] in the sessions directory `dir`.
-pub(crate) fn plan_session_in(dir: &Path, model: &str, system_prompt: &str) -> (PathBuf, Header) {
+/// [`plan_session`] under the sessions directory `dir`, for a session
+/// started in `cwd`, which names its project directory.
+pub(crate) fn plan_session_in(
+    dir: &Path,
+    cwd: &Path,
+    model: &str,
+    system_prompt: &str,
+) -> (PathBuf, Header) {
     let session = SessionId::new();
-    let path = build_session_path(dir, session);
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let path = crate::paths::new_session_path(dir, cwd, session);
+    let cwd = cwd.to_path_buf();
     let header = Header {
         version: FORMAT_VERSION,
         session,
@@ -1658,10 +1671,6 @@ pub(crate) fn plan_session_in(dir: &Path, model: &str, system_prompt: &str) -> (
 )]
 fn model_arg(value: &str) -> Result<String, String> {
     Ok(kage_core::canonical_model(value))
-}
-
-pub(crate) fn build_session_path(dir: &std::path::Path, session: SessionId) -> PathBuf {
-    dir.join(format!("{session}.jsonl"))
 }
 
 /// The config and the tool registry a host runs with: `[tools]` and

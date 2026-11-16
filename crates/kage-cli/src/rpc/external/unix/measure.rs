@@ -100,7 +100,7 @@ fn flood_sessions(config: &kage_core::config::AcpAgent, clients: u64, flood: boo
     let peers: Vec<_> = (0..clients).map(|_| stalled_peer(&mut kept)).collect();
     let mut sessions = Vec::new();
     for n in 0..MAX_SESSIONS {
-        let (path, mut header) = crate::plan_session_in(dir.path(), "external", "");
+        let (path, mut header) = crate::plan_session_in(dir.path(), dir.path(), "external", "");
         header.cwd = dir.path().to_path_buf();
         let (session, created) = External::start(
             &lifecycles,

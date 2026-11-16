@@ -418,6 +418,10 @@ const GONE_AGENT: &str = "that agent is gone";
 /// which the buffer shows its last 512 blocks.
 const HISTORY_WINDOW: u32 = 1024;
 
+/// How many runs may end before the TUI stops looking for a wire
+/// session's file the host has not recorded where it expected.
+const MIRROR_RECHECKS: u8 = 3;
+
 /// How many stderr bytes the child's last words are kept in, for the
 /// notice when it dies.
 const STDERR_TAIL: usize = 2000;
@@ -1119,6 +1123,10 @@ struct Pump {
     last_mode: Option<String>,
     /// The external mode switch in flight, if any.
     mode_switch: Option<ModeSwitch>,
+    /// How often the mirror of the wire session was looked for again after
+    /// a run, up to [`MIRROR_RECHECKS`]: a session the host never records
+    /// would otherwise rescan after every run.
+    mirror_rechecks: u8,
     /// The user shell commands running in each session, which keep it
     /// working: a cancel stops them. A session that opens hears its
     /// running commands again, so its list starts over then.
@@ -1920,6 +1928,15 @@ impl Pump {
             let outcome = self.run_outcome();
             let _ = self.recorder.send((self.model.clone(), outcome.clone()));
             self.publish(HostEvent::RunEnded { outcome });
+            // A run records the session, so a mirror that named a file
+            // the host did not write (it groups sessions another way)
+            // finds the real one now.
+            if self.mirror_rechecks < MIRROR_RECHECKS
+                && lock(&self.mirror).path().is_some_and(|path| !path.exists())
+            {
+                self.mirror_rechecks += 1;
+                self.note_session_file();
+            }
         }
         if self.external_agent_of(&self.wire).is_none()
             && let Some(model) = self
@@ -2520,18 +2537,35 @@ impl Pump {
     /// Points the mirror at the wire session's file, which the exit
     /// summary, the session tree and the agent loader read.
     fn note_session_file(&mut self) {
-        self.point_mirror(crate::paths::sessions_dir());
+        self.point_mirror(crate::paths::sessions_dir(), true);
     }
 
-    /// Points the mirror at `<dir>/<wire id>.jsonl`, or at nothing when
-    /// the sessions directory cannot be resolved: a stale path would
-    /// send the readers to another session's file.
-    fn point_mirror(&mut self, dir: Result<PathBuf, String>) {
-        let mut mirror = lock(&self.mirror);
-        match dir {
-            Ok(dir) => mirror.point_at(dir.join(format!("{}.jsonl", self.wire))),
-            Err(_) => mirror.clear(),
-        }
+    /// Points the mirror at the wire session's file under the sessions
+    /// directory `root`: where a session started here is recorded, else
+    /// wherever the session's id is found, which covers a session from
+    /// another project or one recorded before the layout. Points at
+    /// nothing when the sessions directory cannot be resolved: a stale
+    /// path would send the readers to another session's file.
+    /// `search` looks the id up when the session is not where it would be
+    /// recorded here; a session the host is only now creating cannot be
+    /// found yet, so its mirror skips the scan.
+    fn point_mirror(&mut self, root: Result<PathBuf, String>, search: bool) {
+        let Ok(root) = root else {
+            lock(&self.mirror).clear();
+            return;
+        };
+        let here = kage_session::layout::project_dir(
+            &root,
+            Path::new(&self.cwd),
+            crate::paths::session_grouping(),
+        )
+        .join(format!("{}.jsonl", self.wire));
+        let path = if here.exists() || !search {
+            here
+        } else {
+            kage_session::layout::find_session(&root, &self.wire).unwrap_or(here)
+        };
+        lock(&self.mirror).point_at(path);
     }
 
     /// Draws from the freshly opened session from now on: the buffer
@@ -2575,7 +2609,8 @@ impl Pump {
         // the open reported one.
         self.last_mode = self.mode_value();
         self.hand_buffer();
-        self.note_session_file();
+        self.mirror_rechecks = 0;
+        self.point_mirror(crate::paths::sessions_dir(), !carry_model);
         self.update_ui_slot(|ui| {
             ui.session_id.clone_from(&self.wire);
             ui.session_title = None;
@@ -4078,6 +4113,7 @@ pub(crate) fn run(
         last_mode: None,
         mode_switch: None,
         shells: HashMap::new(),
+        mirror_rechecks: 0,
         closed: false,
     };
     if let Some(surface) = surface
@@ -4369,6 +4405,7 @@ mod tests {
             last_mode: None,
             mode_switch: None,
             shells: HashMap::new(),
+            mirror_rechecks: 0,
             closed: false,
         };
         (pump, app, dialog_rx, feed, dir)
@@ -6348,11 +6385,25 @@ mod tests {
     fn the_mirror_names_the_wire_sessions_file() {
         let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
         pump.wire = "agent-1".to_owned();
-        pump.point_mirror(Ok(dir.clone()));
+        pump.point_mirror(Ok(dir.clone()), true);
+        let here = kage_session::layout::project_dir(
+            &dir,
+            Path::new(&pump.cwd),
+            crate::paths::session_grouping(),
+        );
         assert_eq!(
             lock(pump.mirror.as_ref()).path(),
-            Some(dir.join("agent-1.jsonl").as_path()),
-            "the exit summary and the tree read the adopted session's file"
+            Some(here.join("agent-1.jsonl").as_path()),
+            "a session not recorded yet goes where the host will record it"
+        );
+
+        pump.wire = "01OLD".to_owned();
+        std::fs::write(dir.join("01OLD.jsonl"), b"").unwrap();
+        pump.point_mirror(Ok(dir.clone()), true);
+        assert_eq!(
+            lock(pump.mirror.as_ref()).path(),
+            Some(dir.join("01OLD.jsonl").as_path()),
+            "a session recorded elsewhere is found by its id"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -6360,9 +6411,9 @@ mod tests {
     #[test]
     fn an_unresolvable_sessions_dir_clears_the_mirror() {
         let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
-        pump.point_mirror(Ok(dir.clone()));
+        pump.point_mirror(Ok(dir.clone()), true);
         assert!(lock(pump.mirror.as_ref()).path().is_some());
-        pump.point_mirror(Err("no home directory".to_owned()));
+        pump.point_mirror(Err("no home directory".to_owned()), true);
         assert_eq!(
             lock(pump.mirror.as_ref()).path(),
             None,
@@ -6380,7 +6431,17 @@ mod tests {
         // sessions directory cannot be resolved.
         let path = lock(pump.mirror.as_ref()).path().map(Path::to_path_buf);
         match crate::paths::sessions_dir() {
-            Ok(sessions) => assert_eq!(path, Some(sessions.join("abc123.jsonl"))),
+            Ok(sessions) => assert_eq!(
+                path,
+                Some(
+                    kage_session::layout::project_dir(
+                        &sessions,
+                        Path::new(&pump.cwd),
+                        crate::paths::session_grouping(),
+                    )
+                    .join("abc123.jsonl")
+                )
+            ),
             Err(_) => assert_eq!(path, None),
         }
         let _ = std::fs::remove_dir_all(&dir);

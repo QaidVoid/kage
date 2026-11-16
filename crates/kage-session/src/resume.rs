@@ -383,35 +383,15 @@ pub fn find_last(dir: &Path, cwd: &Path) -> Result<Option<PathBuf>, SessionError
     Ok(ranked.into_iter().next().map(|(_, _, path)| path))
 }
 
-/// The `*.jsonl` files of `dir`, matching the extension without case,
-/// so a `SESSION.JSONL` copy is a candidate too. A missing directory
-/// has none.
+/// The `*.jsonl` files under the sessions directory `dir`, in every place
+/// the layout puts them ([`crate::layout`]), matching the extension
+/// without case, so a `SESSION.JSONL` copy is a candidate too. A missing
+/// directory has none.
 pub(crate) fn jsonl_candidates(dir: &Path) -> Result<Vec<PathBuf>, SessionError> {
-    let read_dir = match std::fs::read_dir(dir) {
-        Ok(read_dir) => read_dir,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => {
-            return Err(SessionError::Io {
-                path: dir.to_path_buf(),
-                source: err,
-            });
-        }
-    };
-    let mut candidates = Vec::new();
-    for entry in read_dir {
-        let entry = entry.map_err(|err| SessionError::Io {
-            path: dir.to_path_buf(),
-            source: err,
-        })?;
-        let path = entry.path();
-        if path
-            .extension()
-            .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("jsonl"))
-        {
-            candidates.push(path);
-        }
-    }
-    Ok(candidates)
+    crate::layout::session_files(dir).map_err(|err| SessionError::Io {
+        path: dir.to_path_buf(),
+        source: err,
+    })
 }
 
 /// The candidate session files of `dir` with their file stems, which

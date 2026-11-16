@@ -24,6 +24,28 @@ const MAX_TITLE_CHARS: usize = 60;
 const TITLE_SYSTEM: &str = "You write terse conversation titles. Reply with ONLY the title: \
  at most 6 words, no quotes, no trailing punctuation, no preamble.";
 
+/// The user message a title is drawn from: the first prompt the user
+/// typed. What the engine adds as a user message says nothing about
+/// the session: a note such as the plan mode instructions a `/plan on`
+/// before the first prompt leaves, a `!` command's output, or a
+/// compaction summary. A history with no typed prompt, such as one
+/// opened with a goal, falls back to its first user message.
+pub(crate) fn source_text(history: &[Arc<Message>]) -> String {
+    let mut users = history.iter().filter(|m| m.role == Role::User);
+    let typed = |m: &&Arc<Message>| {
+        let text = crate::cli_loop_run::first_user_text(m);
+        kage_tui::events::typed_by_the_user(m)
+            && kage_core::message::ShellRun::parse(&text).is_none()
+            && !text.starts_with(kage_core::message::COMPACTION_SUMMARY_PREFIX)
+    };
+    users
+        .clone()
+        .find(typed)
+        .or_else(|| users.next())
+        .map(|m| crate::cli_loop_run::first_user_text(m))
+        .unwrap_or_default()
+}
+
 /// Produce a title for the session whose first exchange is
 /// `user_text` -> `assistant_text`. A blank `assistant_text`, as when the
 /// first reply only calls tools, is left out of the request. Tries the
@@ -137,6 +159,46 @@ fn clip(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn user(text: &str) -> Arc<Message> {
+        Arc::new(Message::new(
+            Role::User,
+            vec![Content::Text {
+                text: text.to_owned(),
+            }],
+            None,
+        ))
+    }
+
+    #[test]
+    fn a_title_skips_the_notes_the_engine_adds() {
+        let history = [
+            user("[plan mode on] Plan before changing anything."),
+            user("plan the fix"),
+        ];
+        assert_eq!(source_text(&history), "plan the fix");
+        let shell = kage_core::message::ShellRun {
+            command: "git status".to_owned(),
+            exit_code: Some(0),
+            output: "clean".to_owned(),
+        }
+        .to_text();
+        let summary = format!(
+            "{}earlier work{}",
+            kage_core::message::COMPACTION_SUMMARY_PREFIX,
+            kage_core::message::COMPACTION_SUMMARY_SUFFIX
+        );
+        assert_eq!(
+            source_text(&[user(&summary), user(&shell), user("fix the build")]),
+            "fix the build",
+            "a summary and a command's output are not the prompt"
+        );
+        assert_eq!(
+            source_text(&[user("[goal] Work toward this goal: ship it.")]),
+            "[goal] Work toward this goal: ship it.",
+            "with nothing typed, the first user message still names it"
+        );
+    }
 
     #[test]
     fn sanitize_strips_quotes_punctuation_and_collapses_ws() {

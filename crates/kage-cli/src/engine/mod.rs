@@ -2050,14 +2050,13 @@ impl Dispatcher {
         };
         let provider = Arc::clone(resolved.provider);
         let bare_model = resolved.model;
-        let first_text = |role: Role| {
-            cx.history
-                .iter()
-                .find(|m| m.role == role)
-                .map(|m| crate::cli_loop_run::first_user_text(m))
-                .unwrap_or_default()
-        };
-        let (user, reply) = (first_text(Role::User), first_text(Role::Assistant));
+        let user = crate::title::source_text(&cx.history);
+        let reply = cx
+            .history
+            .iter()
+            .find(|m| m.role == Role::Assistant)
+            .map(|m| crate::cli_loop_run::first_user_text(m))
+            .unwrap_or_default();
         let workdir = cx.workdir.clone();
         let env = cx.env.clone();
         let tx = self.tx.clone();

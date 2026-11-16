@@ -232,7 +232,7 @@ impl MediaSource {
         let Self::Base64 { data } = self else {
             return None;
         };
-        let head = &data.as_bytes()[..data.len().min(24) / 4 * 4];
+        let head = &data.as_bytes()[..data.len().min(64) / 4 * 4];
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(head)
             .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(head))

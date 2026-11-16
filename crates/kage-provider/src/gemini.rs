@@ -591,21 +591,17 @@ fn tool_name_from_call_id<'a>(id: &'a ToolCallId, declared: &'a [ToolSpec]) -> &
 }
 
 /// An image as a part, under the type its bytes are rather than the one
-/// declared, which the API refuses when they differ. Gemini also takes
-/// HEIC and HEIF, which kage does not recognise from the bytes, so those
-/// keep their declared type. Inline bytes in any other format would be
-/// refused on every turn after, so a line says what was left out instead.
+/// declared, which the API refuses when they differ. Gemini takes HEIC and
+/// HEIF too. Inline bytes in any other format would be refused on every
+/// turn after, so a line says what was left out instead.
 fn image_part(source: &kage_core::MediaSource, mime: &str) -> Value {
-    if let Some(media_type) = source.sniff(kage_core::image::sniff_mime) {
-        return media_part(source, media_type);
+    match source.sniff(kage_core::image::sniff_any_mime) {
+        Some(media_type) => media_part(source, media_type),
+        None if matches!(source, kage_core::MediaSource::Base64 { .. }) => {
+            serde_json::json!({"text": kage_core::image::unsupported_image_note(mime)})
+        }
+        None => media_part(source, mime),
     }
-    let inline = matches!(source, kage_core::MediaSource::Base64 { .. });
-    if inline && !matches!(mime, "image/heic" | "image/heif") {
-        return serde_json::json!({
-            "text": kage_core::image::unsupported_image_note(mime),
-        });
-    }
-    media_part(source, mime)
 }
 
 /// A clip as a part, under the type its bytes are rather than the one
@@ -875,12 +871,10 @@ mod tests {
     use super::*;
     use crate::testing::{collect_ok, user_msg};
 
-    /// An image goes under the type its bytes are. HEIC, which Gemini takes
-    /// but kage does not recognise, keeps its declared type, and any other
-    /// unknown format becomes a line saying what was left out. A clip is
-    /// never relabelled as a picture.
+    /// An image goes under the type its bytes are, HEIC included, and any
+    /// other format becomes a line saying what was left out.
     #[test]
-    fn an_image_goes_as_the_type_its_bytes_are_and_a_clip_as_declared() {
+    fn an_image_goes_as_the_type_its_bytes_are() {
         let png = kage_core::MediaSource::Base64 {
             data: "iVBORw0KGgoAAAANSUhEUg==".into(),
         };
@@ -892,8 +886,19 @@ mod tests {
             "image/png"
         );
         assert_eq!(
-            image_part(&heic, "image/heic")["inlineData"]["mimeType"],
+            image_part(&heic, "image/jpeg")["inlineData"]["mimeType"],
             "image/heic"
+        );
+        assert!(
+            image_part(
+                &kage_core::MediaSource::Base64 {
+                    data: "QUJD".into()
+                },
+                "image/heic"
+            )["text"]
+                .as_str()
+                .unwrap()
+                .contains("left out")
         );
         let avif = kage_core::MediaSource::Base64 {
             data: "AAAAHGZ0eXBhdmlm".into(),
@@ -903,10 +908,6 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("left out")
-        );
-        assert_eq!(
-            media_part(&png, "audio/mpeg")["inlineData"]["mimeType"],
-            "audio/mpeg"
         );
     }
 

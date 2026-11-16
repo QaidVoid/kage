@@ -1239,9 +1239,10 @@ impl Client {
                 meta,
             })
         };
-        // The replay that follows streams the whole history again, so
-        // what it carries starts over; what only this client holds (the
-        // draft, the held queue, the place in the forest) stays. A run
+        // The replay that follows streams the history again, or its
+        // latest window, so what it carries starts over; what only
+        // this client holds (the draft, the held queue, the place in
+        // the forest) stays. A run
         // that was in flight answers on the old connection, which is
         // gone, so the session reads idle until the replay says
         // otherwise. A failed open puts the replaced session back,

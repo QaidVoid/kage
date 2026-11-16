@@ -66,7 +66,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufReader;
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use kage_acp::acp::{
@@ -499,6 +499,9 @@ struct CliAcpAgent {
     /// Whether the client is a kage client, which shows runs it did not
     /// prompt, so an idle session wakes for a background agent's result.
     kage_client: Arc<AtomicBool>,
+    /// The most transcript items the client shows, `0` for all of them:
+    /// see [`sessions::window`].
+    history_window: Arc<AtomicU32>,
     /// Whether the client hosts session plugins and answers the
     /// `_kage/plugin/*` reverse requests for them.
     plugin_host: AtomicBool,
@@ -529,6 +532,7 @@ impl CliAcpAgent {
         let shown = ShownBySession::default();
         let subagents = Arc::new(AtomicBool::new(false));
         let kage_client = Arc::new(AtomicBool::new(false));
+        let history_window = Arc::new(AtomicU32::new(0));
         let held = Held::default();
         let asks = AskSet::default();
         let seeds = Arc::default();
@@ -548,6 +552,7 @@ impl CliAcpAgent {
             tree: AgentTree::default(),
             subagents: Arc::clone(&subagents),
             kage_client: Arc::clone(&kage_client),
+            history_window: Arc::clone(&history_window),
             streaming: HashSet::new(),
             ended: HashMap::new(),
             commands: HashMap::new(),
@@ -577,6 +582,7 @@ impl CliAcpAgent {
             unconfigured_run: AtomicBool::new(false),
             plugin_host: AtomicBool::new(false),
             kage_client,
+            history_window,
             env: Mutex::new(Environment::inherit()),
             takes_env: AtomicBool::new(false),
             ui_watch: Mutex::new(UiWatch {
@@ -1005,6 +1011,10 @@ impl Agent for CliAcpAgent {
         );
         self.plugin_host
             .store(req.client_capabilities.hosts_plugins(), Ordering::SeqCst);
+        self.history_window.store(
+            req.client_capabilities.history_window().unwrap_or(0),
+            Ordering::SeqCst,
+        );
         InitializeResponse {
             protocol_version: PROTOCOL_VERSION,
             agent_capabilities: AgentCapabilities {

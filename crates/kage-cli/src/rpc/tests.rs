@@ -1081,6 +1081,7 @@ fn child_waiters_survive_a_rate_limit_and_settle_without_a_tree_node() {
         tree: AgentTree::default(),
         subagents: Arc::new(AtomicBool::new(true)),
         kage_client: Arc::new(AtomicBool::new(false)),
+        history_window: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         streaming: HashSet::from([child]),
         ended: HashMap::new(),
         commands: HashMap::new(),
@@ -7107,6 +7108,57 @@ fn a_whole_fork_of_an_undone_session_copies_the_branch_it_is_on() {
         )
         .expect("the prompt after the marker is counted on the live branch only");
     assert_eq!(history(before), 2);
+}
+
+#[test]
+fn a_client_with_a_history_window_gets_the_latest_turns_and_a_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = dir.path();
+    let mut entries = Vec::new();
+    for turn in 0..6 {
+        entries.push(message(
+            Role::User,
+            vec![text(&format!("prompt {turn}"))],
+            None,
+        ));
+        entries.push(message(Role::Assistant, vec![text("reply")], None));
+    }
+    let source = record(
+        sessions,
+        &sessions.display().to_string(),
+        "mock/m",
+        1,
+        &entries,
+    );
+    let h = serve(Vec::new(), sessions, sessions);
+    let windowed = h.connect();
+    windowed
+        .client
+        .request(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": 1,
+                "clientCapabilities": {"_meta": {"kage": {"historyWindow": 4}}},
+            }),
+        )
+        .unwrap();
+    let params = serde_json::json!({"sessionId": source, "cwd": sessions, "mcpServers": []});
+    windowed
+        .client
+        .request("session/load", params.clone())
+        .unwrap();
+    let seen = drain_quiet(&windowed.inbox, &source);
+    assert_eq!(user_texts(&seen), ["prompt 4", "prompt 5"]);
+    assert!(
+        seen.iter()
+            .any(|u| u["update"]["sessionUpdate"] == "_kage/notice"
+                && u["update"]["text"] == "4 earlier prompts and their replies are not shown")
+    );
+
+    let whole = h.connect();
+    as_kage_client(&whole);
+    whole.client.request("session/load", params).unwrap();
+    assert_eq!(user_texts(&drain_quiet(&whole.inbox, &source)).len(), 6);
 }
 
 /// Initializes `c` as a kage client, which understands kage-only updates.

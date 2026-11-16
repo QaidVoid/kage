@@ -894,6 +894,7 @@ impl Store {
                     kage: Some(kage_client::wire::KageClientCapabilities {
                         unconfigured_tools: Some(kage_client::wire::UnconfiguredTools::Allow),
                         plugin_host: false,
+                        history_window: None,
                     }),
                 }),
                 ..kage_client::wire::ClientCapabilities::default()

@@ -86,6 +86,13 @@ pub struct KageClientCapabilities {
     /// `_meta.kage.plugins = "client"`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub plugin_host: bool,
+    /// The most transcript items the client shows. Opening a recorded
+    /// session then replays only its latest items, at most this many and
+    /// never starting on a tool result, after a `_kage/notice` saying how
+    /// many earlier prompts were left out. Unset replays the whole
+    /// transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_window: Option<u32>,
 }
 
 /// How a session judges a tool with no `[permissions]` rule.
@@ -128,6 +135,15 @@ impl ClientCapabilities {
             .as_ref()
             .and_then(|meta| meta.kage.as_ref())
             .is_some_and(|kage| kage.plugin_host)
+    }
+
+    /// The most transcript items the client shows, when it says.
+    #[must_use]
+    pub fn history_window(&self) -> Option<u32> {
+        self.meta
+            .as_ref()
+            .and_then(|meta| meta.kage.as_ref())
+            .and_then(|kage| kage.history_window)
     }
 }
 
@@ -3397,6 +3413,7 @@ mod tests {
                 kage: Some(KageClientCapabilities {
                     unconfigured_tools: Some(UnconfiguredTools::Allow),
                     plugin_host: false,
+                    history_window: None,
                 }),
             }),
             ..ClientCapabilities::default()

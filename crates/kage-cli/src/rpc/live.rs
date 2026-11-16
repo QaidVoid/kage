@@ -17,8 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use kage_acp::acp::{
-    SessionConfigOption, SessionInfoUpdate, SessionUpdate, SubagentSessionCapabilities,
-    SubagentState, SubagentSwarm, SubagentUpdate, SubagentUsage, ToolCallUpdate,
+    SessionConfigOption, SessionInfoUpdate, SessionUpdate, ShellUpdate,
+    SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate, SubagentUsage,
+    ToolCallUpdate,
 };
 use kage_acp::agent::{PromptContext, send_update};
 use kage_core::protocol::{
@@ -56,6 +57,9 @@ pub(super) struct Snapshot {
     pub(super) asks: Vec<AskSeed>,
     /// The `agent` calls the attached session's tree was built from.
     pub(super) spawns: Vec<Spawn>,
+    /// The user shell commands running in the attached session, each
+    /// with the tail of its output so far.
+    pub(super) shells: Vec<(String, String)>,
 }
 
 /// One subagent an attaching client hears of.
@@ -225,6 +229,9 @@ pub(super) struct Live {
     /// One admission lifetime per announcement, expired at its true terminal end.
     steering_lifetimes: HashMap<SessionId, Arc<AtomicBool>>,
     working: HashSet<SessionId>,
+    /// The user shell commands running in each session, with the tail
+    /// of their output so far, for a client that attaches mid-command.
+    shells: HashMap<SessionId, Vec<(String, String)>>,
     /// Connections holding each session open.
     attached: HashMap<SessionId, usize>,
     /// Sessions a close was sent for and not refused.
@@ -318,6 +325,7 @@ impl Live {
             owners: HashMap::new(),
             steering_lifetimes: HashMap::new(),
             working: HashSet::new(),
+            shells: HashMap::new(),
             attached: HashMap::new(),
             closing: HashSet::new(),
             orphaned: HashMap::new(),
@@ -423,8 +431,34 @@ impl Live {
         self.asks.insert(ask.request_id, ask);
     }
 
+    /// Keeps the running user shell commands of `session` and the tail
+    /// of each, which a client attaching mid-command is shown.
+    fn observe_shell(&mut self, session: SessionId, event: &HostEvent) {
+        match event {
+            HostEvent::ShellOutput { command, tail } => {
+                let shells = self.shells.entry(session).or_default();
+                match shells.iter_mut().find(|(running, _)| running == command) {
+                    Some((_, last)) => last.clone_from(tail),
+                    None => shells.push((command.clone(), tail.clone())),
+                }
+            }
+            HostEvent::ShellFinished { command, .. } => {
+                if let Some(shells) = self.shells.get_mut(&session) {
+                    shells.retain(|(running, _)| running != command);
+                    if shells.is_empty() {
+                        self.shells.remove(&session);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn observe_host(&mut self, session: SessionId, event: &HostEvent, is_agent: bool) {
         match event {
+            HostEvent::ShellOutput { .. } | HostEvent::ShellFinished { .. } => {
+                self.observe_shell(session, event);
+            }
             HostEvent::PermissionRequested { .. } | HostEvent::QuestionAsked { .. } => {
                 self.track_ask(session, event);
             }
@@ -697,6 +731,7 @@ impl Live {
             asks,
             subagents,
             spawns: self.spawns.get(&attached).cloned().unwrap_or_default(),
+            shells: self.shells.get(&attached).cloned().unwrap_or_default(),
         }
     }
 
@@ -708,6 +743,7 @@ impl Live {
             self.titles.remove(&id);
             self.owners.remove(&id);
             self.working.remove(&id);
+            self.shells.remove(&id);
             let roots: Vec<SessionId> = self
                 .tree
                 .under(id)
@@ -895,6 +931,17 @@ impl CliAcpAgent {
                 if let Some(update) = to_update(&mut seen, event) {
                     let _ = ctx.update(update);
                 }
+            }
+        }
+        if let Some(ctx) = ctx {
+            for (command, tail) in &snap.shells {
+                let _ = ctx.update(SessionUpdate::Shell(ShellUpdate {
+                    command: command.clone(),
+                    finished: false,
+                    tail: Some(tail.clone()),
+                    output: None,
+                    exit_code: None,
+                }));
             }
         }
         lock(&self.shown).insert(id, Shown::fresh(settings.clone()));

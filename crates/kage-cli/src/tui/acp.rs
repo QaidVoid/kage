@@ -1114,6 +1114,10 @@ struct Pump {
     last_mode: Option<String>,
     /// The external mode switch in flight, if any.
     mode_switch: Option<ModeSwitch>,
+    /// The user shell commands running in each session, which keep it
+    /// working: a cancel stops them. A session that opens hears its
+    /// running commands again, so its list starts over then.
+    shells: HashMap<String, Vec<String>>,
     closed: bool,
 }
 
@@ -1224,9 +1228,13 @@ impl Pump {
             }
             _ => None,
         };
+        let shell = shell_update(&frame);
         let changes = self.store.absorb(frame);
         if let Some(wire) = replaced {
             self.reset_child_transcript(&wire);
+        }
+        if let Some((wire, update)) = shell {
+            self.track_shell(&wire, &update);
         }
         match answer {
             Some(answer) => self.settle(answer, changes),
@@ -1382,6 +1390,7 @@ impl Pump {
         if let Some(id) = resume.and_then(|path| path.file_stem()?.to_str().map(str::to_owned)) {
             self.wire.clone_from(&id);
             let fresh = self.store.reset_session(&id);
+            self.shells.remove(&id);
             self.handed = Some(Arc::clone(&fresh));
             self.feed.send_buffer(fresh);
             self.note_session_file();
@@ -1525,7 +1534,13 @@ impl Pump {
             RunRequest::SwarmMode { .. }
             | RunRequest::SetGoal { .. }
             | RunRequest::CompactNow
-            | RunRequest::ExportSession(_) => self.refuse_external(),
+            | RunRequest::ExportSession(_)
+            | RunRequest::RunShell(_)
+            | RunRequest::UndoSession
+            | RunRequest::ListPrompts
+            | RunRequest::Rewind { .. }
+            | RunRequest::ForkSession { .. }
+            | RunRequest::RestartMcp(_) => self.refuse_external(),
             _ => false,
         }
     }
@@ -1843,12 +1858,16 @@ impl Pump {
                 self.notice(NoticeLevel::Error, format!("kage agent: {}", error.message));
             }
             Change::Exported { markdown, .. } => self.export(markdown),
+            change @ (Change::Undone { .. }
+            | Change::Rewound { .. }
+            | Change::Prompts { .. }
+            | Change::Forked { .. }
+            | Change::Deleted { .. }) => self.session_op_answered(change),
             Change::Agents { id } => self.agents_moved(&id),
             Change::Config { .. }
             | Change::Connection
             | Change::Directory
             | Change::Folders { .. }
-            | Change::Forked { .. }
             | Change::Fs { .. }
             | Change::KeySaved { .. }
             | Change::Models { .. }
@@ -2773,6 +2792,7 @@ impl Pump {
         let Some(session) = self.store.state().session(&self.wire) else {
             return SessionState::default();
         };
+        let shells = self.shells.get(&self.wire).map_or(0, Vec::len);
         let option = |id: &str| {
             session
                 .config_options
@@ -2841,11 +2861,11 @@ impl Pump {
             thinking_levels,
             input: kage_core::Modalities::default(),
             permission_mode,
-            working: session.running || session.compacting,
+            working: session.running || session.compacting || shells > 0,
             swarm: option("swarm").as_deref() == Some("on"),
             goal: option("goal").filter(|goal| !goal.is_empty()),
             plan: mode_value.as_deref() == Some("plan"),
-            shells: 0,
+            shells: u32::try_from(shells).unwrap_or(u32::MAX),
             modes: agent_modes,
             mode_value: mode_value.filter(|_| external),
         }
@@ -3008,6 +3028,37 @@ impl Pump {
                 self.invoke_plugin_command(&name, &args);
             }
             RunRequest::InvokeKeymap { id } => self.invoke_keymap(id),
+            RunRequest::RunShell(command) => {
+                self.store.client().shell(&self.wire, &command);
+            }
+            RunRequest::UndoSession => {
+                self.store.client().undo_session(&self.wire);
+            }
+            RunRequest::ListPrompts => {
+                self.store.client().session_prompts(&self.wire);
+            }
+            RunRequest::Rewind { at } => {
+                self.store.client().rewind_session(&self.wire, &at);
+            }
+            RunRequest::ForkSession { at } => {
+                let at = (!at.is_empty()).then_some(at);
+                self.store.client().fork_session(&self.wire, None, at);
+            }
+            RunRequest::ForkSessionFile(path) => match recorded_id(&path) {
+                Some(id) => {
+                    self.store.client().fork_session(&id, None, None);
+                }
+                None => self.notice(NoticeLevel::Error, format!("fork: {}", path.display())),
+            },
+            RunRequest::DeleteSession(path) => match recorded_id(&path) {
+                Some(id) => {
+                    self.store.client().delete_session(&id);
+                }
+                None => self.notice(NoticeLevel::Error, format!("delete: {}", path.display())),
+            },
+            RunRequest::RestartMcp(server) => {
+                self.store.client().restart_mcp(&self.wire, &server);
+            }
             RunRequest::NewSession => self.request_new_session(),
             RunRequest::ResumeSession(path) => self.open_recorded(&path),
             RunRequest::SwitchSession(SwitchTarget::Session(target)) => {
@@ -3380,6 +3431,7 @@ impl Pump {
             self.external.insert(id.clone(), agent);
         }
         self.store.reset_session(&id);
+        self.shells.remove(&id);
         let meta = self.load_meta();
         let servers = self.mcp_servers();
         let (request, _) = self
@@ -3395,19 +3447,11 @@ impl Pump {
 
     fn refuse(&mut self, request: &RunRequest) {
         let what = match request {
-            RunRequest::RunShell(_) => "shell escapes",
-            RunRequest::ForkSession { .. }
-            | RunRequest::Rewind { .. }
-            | RunRequest::UndoSession
-            | RunRequest::ListPrompts => "rewinding and forking the live session",
             RunRequest::CloneSession => "cloning the session",
             RunRequest::Image { .. } => "opening or saving images",
             RunRequest::Media { .. } => "opening or saving media",
-            RunRequest::RefreshProviders
-            | RunRequest::ReloadPlugins
-            | RunRequest::RestartMcp(_) => "reloading providers, plugins and MCP servers",
-            RunRequest::ForkSessionFile(_) | RunRequest::DeleteSession(_) => {
-                "forking or deleting session files"
+            RunRequest::RefreshProviders | RunRequest::ReloadPlugins => {
+                "reloading providers and plugins"
             }
             RunRequest::SwitchSession(SwitchTarget::PendingFork(_)) => "that switch",
             _ => "that command",
@@ -3438,6 +3482,13 @@ impl Pump {
             let outcome = RunOutcome::Cancelled;
             let _ = self.recorder.send((self.model.clone(), outcome.clone()));
             self.publish(HostEvent::RunEnded { outcome });
+        }
+        // No update will finish a shell command the agent was running.
+        if self.shells.values().any(|running| !running.is_empty()) {
+            self.shells.clear();
+            let state = self.state_snapshot();
+            self.update_ui_slot(|ui| ui.state = state.clone());
+            self.publish(HostEvent::StateChanged { state });
         }
         // No card survives a dead agent: the asks can never be
         // answered now.
@@ -3507,6 +3558,86 @@ impl Pump {
         });
     }
 
+    /// Counts a user shell command of `wire` in while it runs and out
+    /// once it finished, and shows the App the state it leaves when
+    /// `wire` is the session on screen.
+    fn track_shell(&mut self, wire: &str, update: &kage_acp::acp::ShellUpdate) {
+        let shells = self.shells.entry(wire.to_owned()).or_default();
+        let running = shells.iter().position(|command| *command == update.command);
+        match (update.finished, running) {
+            (true, Some(index)) => {
+                shells.remove(index);
+            }
+            (false, None) => shells.push(update.command.clone()),
+            _ => return,
+        }
+        if wire != self.wire {
+            return;
+        }
+        let state = self.state_snapshot();
+        self.update_ui_slot(|ui| ui.state = state.clone());
+        self.publish(HostEvent::StateChanged { state });
+    }
+
+    /// Answers the App's undo, rewind, prompt list, fork and delete as
+    /// the engine path did. A rewind or prompt list about a session the
+    /// App left is dropped, but the prompt an undo removed there still
+    /// goes back to the editor: it is the user's text.
+    fn session_op_answered(&mut self, change: Change) {
+        match change {
+            Change::Undone { session_id, prompt } => {
+                let prompt = (!prompt.is_empty()).then(|| content_of(&prompt));
+                if session_id == self.wire {
+                    self.publish(HostEvent::Undone { prompt });
+                } else if prompt.is_some() {
+                    self.publish(HostEvent::Undone { prompt });
+                    self.notice(
+                        NoticeLevel::Info,
+                        format!(
+                            "the undo of session {} finished after you left it; \
+                             its prompt is in the editor",
+                            session_id.get(..8).unwrap_or(&session_id)
+                        ),
+                    );
+                }
+            }
+            Change::Rewound { session_id } if session_id == self.wire => {
+                self.publish(HostEvent::Undone { prompt: None });
+            }
+            Change::Prompts {
+                session_id,
+                prompts,
+            } if session_id == self.wire => {
+                let prompts = prompts
+                    .into_iter()
+                    .map(|prompt| kage_core::protocol::PastPrompt {
+                        at: prompt.at,
+                        prompt: content_of(&prompt.prompt),
+                        depth: prompt.depth,
+                        active: prompt.active,
+                    })
+                    .collect();
+                self.publish(HostEvent::PromptList { prompts });
+            }
+            Change::Forked { to, .. } => self.toast(
+                NoticeLevel::Success,
+                format!("forked into {}", to.get(..8).unwrap_or(&to)),
+            ),
+            Change::Deleted { .. } => {
+                self.toast(NoticeLevel::Success, "session deleted".to_owned());
+            }
+            _ => {}
+        }
+    }
+
+    fn toast(&mut self, level: NoticeLevel, text: String) {
+        self.publish(HostEvent::Notice {
+            level,
+            text,
+            transient: true,
+        });
+    }
+
     /// Runs a plugin command the App asked for. Hosting the plugins
     /// runs it here, where its handler's dialogs ride the App's dialog
     /// channel and the output lands as a notice; otherwise the agent,
@@ -3562,6 +3693,28 @@ impl Pump {
         };
         self.notice(level, output.text);
     }
+}
+
+/// The session and progress of a user shell command update.
+fn shell_update(frame: &Frame) -> Option<(String, kage_acp::acp::ShellUpdate)> {
+    let Frame::Notification { method, params } = frame else {
+        return None;
+    };
+    if method != "session/update" || params["update"]["sessionUpdate"] != "_kage/shell" {
+        return None;
+    }
+    match serde_json::from_value::<SessionNotification>(params.clone()).ok()? {
+        SessionNotification {
+            session_id,
+            update: SessionUpdate::Shell(update),
+        } => Some((session_id, update)),
+        _ => None,
+    }
+}
+
+/// The id of the recorded session at `path`: its file stem.
+fn recorded_id(path: &Path) -> Option<String> {
+    path.file_stem()?.to_str().map(str::to_owned)
 }
 
 /// The wire blocks of a prompt as the App's messages: text and the
@@ -3916,6 +4069,7 @@ pub(crate) fn run(
         pre_plan_mode: None,
         last_mode: None,
         mode_switch: None,
+        shells: HashMap::new(),
         closed: false,
     };
     if let Some(surface) = surface
@@ -4206,6 +4360,7 @@ mod tests {
             pre_plan_mode: None,
             last_mode: None,
             mode_switch: None,
+            shells: HashMap::new(),
             closed: false,
         };
         (pump, app, dialog_rx, feed, dir)
@@ -7351,5 +7506,296 @@ kage.on('should_stop_after_turn', function(ev) return true end)
         let mut line = String::new();
         let read = BufReader::new(&theirs).read_line(&mut line).unwrap();
         assert_eq!(read, 0, "the peer reads end of file, not a timeout");
+    }
+
+    /// The params of the first request of `method` among `frames`.
+    fn request_params(frames: &[Frame], method: &str) -> Value {
+        frames
+            .iter()
+            .find_map(|frame| match frame {
+                Frame::Request {
+                    method: m, params, ..
+                } if m == method => Some(params.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no {method} request in {frames:?}"))
+    }
+
+    fn host_events(app: &mpsc::Receiver<Envelope>) -> Vec<HostEvent> {
+        app.try_iter()
+            .filter_map(|envelope| match envelope.event {
+                kage_core::protocol::Event::Host(event) => Some(event),
+                kage_core::protocol::Event::Loop(_) => None,
+            })
+            .collect()
+    }
+
+    fn shell_note(command: &str, finished: bool) -> Frame {
+        shell_note_on("s1", command, finished)
+    }
+
+    fn shell_note_on(session: &str, command: &str, finished: bool) -> Frame {
+        let mut update = serde_json::json!({
+            "sessionUpdate": "_kage/shell", "command": command, "finished": finished,
+        });
+        if finished {
+            update["output"] = "a\nb".into();
+            update["exitCode"] = 0.into();
+        } else {
+            update["tail"] = "".into();
+        }
+        Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({"sessionId": session, "update": update}),
+        }
+    }
+
+    fn working(app: &mpsc::Receiver<Envelope>) -> Option<(bool, u32)> {
+        host_events(app)
+            .into_iter()
+            .rev()
+            .find_map(|event| match event {
+                HostEvent::StateChanged { state } => Some((state.working, state.shells)),
+                _ => None,
+            })
+    }
+
+    #[test]
+    fn a_shell_command_runs_on_the_host_and_keeps_the_session_working() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.wire.clear();
+        resume_as(&mut pump, "s1", "test:model");
+        pump.handle(RunRequest::RunShell("ls".to_owned()));
+        let params = request_params(&pump.store.take_outgoing(), "_kage/shell");
+        assert_eq!(
+            params,
+            serde_json::json!({"sessionId": "s1", "command": "ls"})
+        );
+
+        pump.absorb(shell_note("ls", false));
+        assert_eq!(working(&app), Some((true, 1)), "a cancel must reach it");
+        let shown = |pump: &mut Pump| {
+            lock(&pump.store.shared_buffer("s1"))
+                .blocks()
+                .iter()
+                .filter_map(|block| match block.as_ref() {
+                    kage_tui::Block::Custom { kind, text, .. } if kind == "kage:shell" => {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shown(&mut pump), ["$ ls\n"]);
+
+        pump.absorb(shell_note("ls", true));
+        assert_eq!(working(&app), Some((false, 0)));
+        let shown = shown(&mut pump);
+        assert_eq!(
+            shown.len(),
+            1,
+            "the finished block replaces the running one"
+        );
+        assert!(shown[0].starts_with("$ ls\na\nb"), "{shown:?}");
+        pump.absorb(shell_note("sleep 9", false));
+        assert_eq!(working(&app), Some((true, 1)));
+        pump.close();
+        assert_eq!(
+            working(&app),
+            Some((false, 0)),
+            "no update finishes a shell once the link closed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_session_that_opens_mid_command_shows_it_running() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.open_recorded(Path::new("/sessions/r2.jsonl"));
+        let load = request_id(&pump.store.take_outgoing(), "session/load");
+        pump.absorb(shell_note_on("r2", "sleep 9", false));
+        pump.absorb(Frame::Success {
+            id: load,
+            result: serde_json::json!({"configOptions": model_options("test:model")}),
+        });
+        assert_eq!(working(&app), Some((true, 1)), "a cancel must reach it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_and_rewind_answer_the_app_as_the_engine_did() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::UndoSession);
+        let frames = pump.store.take_outgoing();
+        assert_eq!(
+            request_params(&frames, "_kage/session/undo"),
+            serde_json::json!({"sessionId": "s1"})
+        );
+        pump.absorb(Frame::Success {
+            id: request_id(&frames, "_kage/session/undo"),
+            result: serde_json::json!({"prompt": [{"type": "text", "text": "second"}]}),
+        });
+        let undone = host_events(&app).into_iter().find_map(|event| match event {
+            HostEvent::Undone { prompt } => Some(prompt),
+            _ => None,
+        });
+        assert_eq!(
+            undone,
+            Some(Some(vec![Content::Text {
+                text: "second".to_owned()
+            }]))
+        );
+
+        pump.handle(RunRequest::Rewind {
+            at: "01ab".to_owned(),
+        });
+        let frames = pump.store.take_outgoing();
+        assert_eq!(
+            request_params(&frames, "_kage/session/rewind"),
+            serde_json::json!({"sessionId": "s1", "at": "01ab"})
+        );
+        pump.absorb(Frame::Success {
+            id: request_id(&frames, "_kage/session/rewind"),
+            result: serde_json::json!({}),
+        });
+        assert!(
+            host_events(&app)
+                .iter()
+                .any(|event| matches!(event, HostEvent::Undone { prompt: None }))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_undo_that_lands_after_a_switch_still_returns_its_prompt() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::UndoSession);
+        let undo = request_id(&pump.store.take_outgoing(), "_kage/session/undo");
+        pump.wire = "other".to_owned();
+        pump.absorb(Frame::Success {
+            id: undo,
+            result: serde_json::json!({"prompt": [{"type": "text", "text": "kept"}]}),
+        });
+        let events = host_events(&app);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HostEvent::Undone { prompt: Some(prompt) }
+                if prompt == &[Content::Text { text: "kept".to_owned() }]
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HostEvent::Notice { text, .. } if text.contains("finished after you left it")
+        )));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_prompt_list_opens_the_rewind_picker() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::ListPrompts);
+        let frames = pump.store.take_outgoing();
+        pump.absorb(Frame::Success {
+            id: request_id(&frames, "_kage/session/prompts"),
+            result: serde_json::json!({"prompts": [
+                {"at": "01aa", "prompt": [{"type": "text", "text": "first"}], "depth": 0, "active": false},
+                {"at": "01bb", "prompt": [{"type": "text", "text": "again"}], "depth": 1, "active": true},
+            ]}),
+        });
+        let listed = host_events(&app).into_iter().find_map(|event| match event {
+            HostEvent::PromptList { prompts } => Some(prompts),
+            _ => None,
+        });
+        let listed = listed.expect("the picker opens");
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[1].at, "01bb");
+        assert_eq!(listed[1].depth, 1);
+        assert!(listed[1].active);
+        assert_eq!(
+            listed[0].prompt,
+            [Content::Text {
+                text: "first".to_owned()
+            }]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forks_deletes_and_mcp_restarts_go_to_the_host() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::ForkSession { at: String::new() });
+        pump.handle(RunRequest::ForkSessionFile(PathBuf::from("/s/other.jsonl")));
+        pump.handle(RunRequest::DeleteSession(PathBuf::from("/s/gone.jsonl")));
+        pump.handle(RunRequest::RestartMcp("fs".to_owned()));
+        let frames = pump.store.take_outgoing();
+        let forks: Vec<Value> = frames
+            .iter()
+            .filter_map(|frame| match frame {
+                Frame::Request { method, params, .. } if method == "_kage/session/fork" => {
+                    Some(params.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            forks,
+            [
+                serde_json::json!({"sessionId": "s1"}),
+                serde_json::json!({"sessionId": "other"}),
+            ]
+        );
+        assert_eq!(
+            request_params(&frames, "_kage/session/delete"),
+            serde_json::json!({"sessionId": "gone"})
+        );
+        assert_eq!(
+            request_params(&frames, "_kage/mcp/restart"),
+            serde_json::json!({"sessionId": "s1", "server": "fs"})
+        );
+        pump.handle(RunRequest::ForkSession {
+            at: "01cc".to_owned(),
+        });
+        assert_eq!(
+            request_params(&pump.store.take_outgoing(), "_kage/session/fork"),
+            serde_json::json!({"sessionId": "s1", "at": "01cc"})
+        );
+
+        pump.absorb(Frame::Success {
+            id: request_id(&frames, "_kage/session/fork"),
+            result: serde_json::json!({"sessionId": "0123456789"}),
+        });
+        pump.absorb(Frame::Success {
+            id: request_id(&frames, "_kage/session/delete"),
+            result: serde_json::json!({}),
+        });
+        let texts: Vec<String> = notices(&app).into_iter().map(|(_, text)| text).collect();
+        assert_eq!(texts, ["forked into 01234567", "session deleted"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_external_session_refuses_the_engine_session_commands() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.external.insert("s1".to_owned(), "devin".to_owned());
+        for request in [
+            RunRequest::RunShell("ls".to_owned()),
+            RunRequest::UndoSession,
+            RunRequest::ListPrompts,
+            RunRequest::Rewind {
+                at: "01ab".to_owned(),
+            },
+            RunRequest::ForkSession { at: String::new() },
+            RunRequest::RestartMcp("fs".to_owned()),
+        ] {
+            pump.handle(request);
+        }
+        let frames = pump.store.take_outgoing();
+        assert!(
+            frames
+                .iter()
+                .all(|frame| !matches!(frame, Frame::Request { method, .. } if method.starts_with("_kage/"))),
+            "{frames:?}"
+        );
+        assert_eq!(notices(&app).len(), 6);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -52,14 +52,19 @@ impl super::Dispatcher {
     /// Run a user shell command on a worker thread. On an idle session it
     /// holds the session like a run, so prompts wait for it and a cancel
     /// stops it. During a run it runs alongside, and the run's cancel
-    /// stops it too.
+    /// stops it too. A command already running in the session is
+    /// refused: two runs of one command line would read as one.
     pub(super) fn shell(&mut self, id: SessionId, command: String) {
+        if self.sessions[&id].shells.contains(&command) {
+            self.error(id, format!("`{command}` is already running"));
+            return;
+        }
         let session = self.sessions.get_mut(&id).expect("session checked");
         let idle = session.idle.take();
         if idle.is_some() {
             session.cancel.reset();
         }
-        session.shells += 1;
+        session.shells.push(command.clone());
         session.state.working = true;
         session.sync_state();
         let state = session.state.clone();
@@ -118,7 +123,13 @@ impl super::Dispatcher {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
-        session.shells -= 1;
+        if let Some(index) = session
+            .shells
+            .iter()
+            .position(|running| *running == command)
+        {
+            session.shells.remove(index);
+        }
         session.sync_state();
         let text = ShellRun {
             command: command.clone(),

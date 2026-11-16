@@ -1139,7 +1139,7 @@ impl Store {
         };
         let id = session.id.clone();
         self.forking.insert(id.clone(), ForkPlan::Fork);
-        self.client.fork_session(&id, before);
+        self.client.fork_session(&id, before, None);
         true
     }
 
@@ -1168,7 +1168,7 @@ impl Store {
             prompt: before.text.clone().unwrap_or_default(),
         };
         self.forking.insert(id.clone(), plan);
-        self.client.fork_session(&id, Some(before));
+        self.client.fork_session(&id, Some(before), None);
         true
     }
 

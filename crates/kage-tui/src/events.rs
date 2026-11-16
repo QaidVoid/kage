@@ -310,6 +310,33 @@ const SHELL_CANCELLED: &str = "(cancelled)";
 /// Last line of a shell block whose command a signal ended.
 const SHELL_KILLED: &str = "(killed by a signal)";
 
+/// Show a finished shell command in place of its running block.
+pub(crate) fn finish_shell(buf: &mut Buffer, command: &str, output: &str, exit_code: Option<i32>) {
+    buf.replace_custom_where(
+        "kage:shell",
+        |text| is_running_shell(text, command),
+        shell_block(command, output, exit_code),
+    );
+}
+
+/// Show `command` running with the last lines of its output so far.
+pub(crate) fn show_running_shell(buf: &mut Buffer, command: &str, tail: &str) {
+    buf.replace_custom_where(
+        "kage:shell",
+        |text| is_running_shell(text, command),
+        format!("$ {command}\n{tail}"),
+    );
+}
+
+/// Whether a `kage:shell` block shows `command` still running: its
+/// header without a status line.
+fn is_running_shell(text: &str, command: &str) -> bool {
+    text.strip_prefix("$ ")
+        .and_then(|rest| rest.strip_prefix(command))
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('\n'))
+        && !text.lines().last().is_some_and(is_shell_status)
+}
+
 /// The text of a finished `kage:shell` block: the `$ command` header,
 /// the output and a status line. The engine ends the output of a
 /// cancelled command with a `cancelled` line, which becomes the status.
@@ -412,12 +439,7 @@ fn push_replayed_message(buf: &mut Buffer, msg: &Arc<Message>, tool_durations: &
     match msg.role {
         Role::User => {
             if let Some(text) = user_text(msg) {
-                if let Some(run) = kage_core::message::ShellRun::parse(&text) {
-                    let body = shell_block(&run.command, &run.output, run.exit_code);
-                    buf.push_custom("kage:shell", body, false);
-                } else {
-                    push_user_text(buf, text);
-                }
+                push_user_text(buf, text);
             }
             push_user_image_rows(buf, msg);
         }
@@ -476,11 +498,17 @@ fn push_replayed_message(buf: &mut Buffer, msg: &Arc<Message>, tool_durations: &
     }
 }
 
-/// Push the text of a user message: the person's own words as a
-/// bubble, then each agent report as a folded report block and each
-/// message from another session as a one-line row, then any human
-/// words the burst interleaved between them as bubbles.
+/// Push the text of a user message: a recorded shell run as its shell
+/// block, else the person's own words as a bubble, then each agent
+/// report as a folded report block and each message from another
+/// session as a one-line row, then any human words the burst
+/// interleaved between them as bubbles.
 pub(crate) fn push_user_text(buf: &mut Buffer, text: String) {
+    if let Some(run) = kage_core::message::ShellRun::parse(&text) {
+        let body = shell_block(&run.command, &run.output, run.exit_code);
+        buf.push_custom("kage:shell", body, false);
+        return;
+    }
     if let Some(note) = engine_note(&text) {
         buf.push_custom("kage:mode", note, false);
         return;

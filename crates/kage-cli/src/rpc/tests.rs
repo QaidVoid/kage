@@ -7666,6 +7666,41 @@ fn a_user_shell_command_streams_to_the_session_and_finishes() {
 }
 
 #[test]
+#[cfg(unix)]
+fn a_client_that_attaches_mid_command_hears_it_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = dir.path();
+    let source = two_turns(sessions);
+    let h = serve(Vec::new(), sessions, sessions);
+    let params = serde_json::json!({"sessionId": source, "cwd": sessions, "mcpServers": []});
+    h.client.request("session/resume", params.clone()).unwrap();
+    h.client
+        .request(
+            "_kage/shell",
+            serde_json::json!({"sessionId": source, "command": "echo up; sleep 5"}),
+        )
+        .unwrap();
+    loop {
+        let updates = updates_until(&h.inbox, &source, "_kage/shell");
+        if updates.last().unwrap()["update"]["tail"] == "up" {
+            break;
+        }
+    }
+    let c2 = h.connect();
+    c2.client.request("session/load", params).unwrap();
+    let running = updates_until(&c2.inbox, &source, "_kage/shell");
+    let running = &running.last().unwrap()["update"];
+    assert_eq!(running["command"], "echo up; sleep 5");
+    assert_eq!(running["finished"], false);
+    assert_eq!(running["tail"], "up");
+    h.client
+        .notify("session/cancel", serde_json::json!({"sessionId": source}))
+        .unwrap();
+    let finished = updates_until(&c2.inbox, &source, "_kage/shell");
+    assert_eq!(finished.last().unwrap()["update"]["finished"], true);
+}
+
+#[test]
 fn withdrawing_from_an_empty_queue_answers_with_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let h = serve(Vec::new(), dir.path(), dir.path());

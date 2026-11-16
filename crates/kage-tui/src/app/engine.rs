@@ -1108,34 +1108,12 @@ fn push_notice(buffer: &SharedBuffer, level: NoticeLevel, text: String) {
     lock(buffer).push_custom(kind, text, false);
 }
 
-/// Show a finished shell command in place of its running block.
 fn push_shell(buffer: &SharedBuffer, command: &str, output: &str, exit_code: Option<i32>) {
-    lock(buffer).replace_custom_where(
-        "kage:shell",
-        |text| is_running_shell(text, command),
-        crate::events::shell_block(command, output, exit_code),
-    );
+    crate::events::finish_shell(&mut lock(buffer), command, output, exit_code);
 }
 
-/// Show `command` running with the last lines of its output so far.
 fn show_running_shell(buffer: &SharedBuffer, command: &str, tail: &str) {
-    lock(buffer).replace_custom_where(
-        "kage:shell",
-        |text| is_running_shell(text, command),
-        format!("$ {command}\n{tail}"),
-    );
-}
-
-/// Whether a `kage:shell` block shows `command` still running: its
-/// header without a status line.
-fn is_running_shell(text: &str, command: &str) -> bool {
-    text.strip_prefix("$ ")
-        .and_then(|rest| rest.strip_prefix(command))
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with('\n'))
-        && !text
-            .lines()
-            .last()
-            .is_some_and(crate::events::is_shell_status)
+    crate::events::show_running_shell(&mut lock(buffer), command, tail);
 }
 
 /// What an agent's card says it does: its running tool, else its latest

@@ -297,7 +297,7 @@ impl super::Dispatcher {
         if self
             .sessions
             .get(&id)
-            .is_some_and(|s| s.idle.is_some() && s.shells == 0)
+            .is_some_and(|s| s.idle.is_some() && s.shells.is_empty())
         {
             return true;
         }
@@ -334,7 +334,7 @@ impl super::Dispatcher {
                 .filter(|agent| {
                     self.sessions
                         .get(agent)
-                        .is_some_and(|s| s.idle.is_some() && s.shells == 0)
+                        .is_some_and(|s| s.idle.is_some() && s.shells.is_empty())
                 }),
         );
         for dropped in &dropped {

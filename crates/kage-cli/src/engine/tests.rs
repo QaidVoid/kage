@@ -1667,6 +1667,48 @@ fn shell_output_reaches_the_next_request() {
 
 #[test]
 #[cfg(unix)]
+fn a_command_already_running_is_refused() {
+    let h = harness(MockProvider::replaying(text_turn("ok")));
+    let id = SessionId::new();
+    h.open(id, None);
+    let shell = || {
+        Command::to(
+            id,
+            CommandKind::Shell {
+                command: "echo up; sleep 5".into(),
+            },
+        )
+    };
+    h.engine.send(shell());
+    wait_for(
+        &h.events,
+        |e| matches!(&e.event, Event::Host(HostEvent::ShellOutput { tail, .. }) if tail == "up"),
+    );
+    h.engine.send(shell());
+    let seen = wait_for(&h.events, |e| {
+        matches!(&e.event, Event::Host(HostEvent::Notice { .. }))
+    });
+    assert!(
+        host_events(&seen).iter().any(|e| matches!(
+            e,
+            HostEvent::Notice { text, .. } if text == "`echo up; sleep 5` is already running"
+        )),
+        "{seen:?}"
+    );
+    h.engine.send(Command::to(id, CommandKind::Cancel));
+    let seen = wait_for(
+        &h.events,
+        |e| matches!(&e.event, Event::Host(HostEvent::StateChanged { state }) if !state.working),
+    );
+    let finished = host_events(&seen)
+        .iter()
+        .filter(|e| matches!(e, HostEvent::ShellFinished { .. }))
+        .count();
+    assert_eq!(finished, 1, "only the first run ever started");
+}
+
+#[test]
+#[cfg(unix)]
 fn a_shell_command_streams_its_output_and_a_cancel_kills_it() {
     let h = harness(MockProvider::replaying(text_turn("ok")));
     let id = SessionId::new();

@@ -13,7 +13,7 @@
 //!
 //! Even so, reading a head and a tail of every file costs seconds once a
 //! directory holds thousands of sessions. The summaries are therefore
-//! kept in an index file beside the sessions ([`INDEX_FILE`]), keyed by
+//! kept in a catalog beside the sessions ([`crate::catalog`]), keyed by
 //! each file's length and mtime, so a listing re-reads only the files
 //! that changed since any process last listed.
 
@@ -35,11 +35,20 @@ pub const AGENT_ENTRY_KIND: &str = "kage:agent";
 /// Whether the session file at `path` records an agent an `agent` or
 /// `swarm` call started: it carries an [`AGENT_ENTRY_KIND`] entry,
 /// right after the header, or after the history a forked child
-/// copied. Only custom entry lines are decoded. An unreadable file is
-/// not one.
+/// copied. The catalog answers when its row for the file is current;
+/// otherwise only the file's custom entry lines are decoded. An
+/// unreadable file is not one.
 #[must_use]
 pub fn is_agent_session(path: &Path) -> bool {
-    agent_session_name(path).is_some()
+    let cataloged = || {
+        let meta = metadata(path).ok()?;
+        crate::catalog::Catalog::open_existing(path.parent()?)?.is_agent(
+            path,
+            meta.len(),
+            meta.modified().ok(),
+        )
+    };
+    cataloged().unwrap_or_else(|| agent_session_name(path).is_some())
 }
 
 /// The one session-identity predicate. `Some` names the agent
@@ -128,12 +137,13 @@ pub struct SessionSummary {
     pub external_agent: Option<String>,
 }
 
-/// The index of summaries kept in the sessions directory. Its extension
-/// is not `jsonl`, so listings never mistake it for a session.
-pub const INDEX_FILE: &str = ".index.json";
+/// The JSON index of summaries older builds kept in the sessions
+/// directory. The first listing imports it into the catalog and removes
+/// it.
+const LEGACY_INDEX_FILE: &str = ".index.json";
 
-/// The index format; an index written with another is ignored.
-const INDEX_VERSION: u32 = 2;
+/// The legacy index format this build imports.
+const LEGACY_INDEX_VERSION: u32 = 2;
 
 /// The most characters of the latest prompt a summary keeps: enough for
 /// any label, without carrying a pasted document per session.
@@ -160,23 +170,24 @@ pub fn list(dir: &Path) -> Result<Vec<SessionSummary>, SessionError> {
 /// read time. [`SessionCache::list`] re-reads only the files that
 /// changed since the previous call, so repeated listings of a mostly
 /// static directory cost one stat per file. The first listing starts
-/// from the directory's [`INDEX_FILE`], and a listing that summarized
-/// anything anew writes the index back.
+/// from the directory's catalog ([`crate::catalog`]), and each listing
+/// writes back the rows of the files it summarized anew or saw go.
 #[derive(Default)]
 pub struct SessionCache {
-    by_path: HashMap<PathBuf, (u64, Option<SystemTime>, SessionSummary)>,
-    /// Whether the index file was read for this cache yet.
+    by_path: HashMap<PathBuf, crate::catalog::Row>,
+    /// Whether the catalog was read for this cache yet.
     loaded: bool,
+    catalog: Option<crate::catalog::Catalog>,
 }
 
-/// The on-disk form of a [`SessionCache`].
-#[derive(serde::Serialize, serde::Deserialize)]
+/// The legacy JSON index.
+#[derive(serde::Deserialize)]
 struct Index {
     version: u32,
     entries: Vec<IndexEntry>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 struct IndexEntry {
     size: u64,
     modified: Option<SystemTime>,
@@ -188,29 +199,77 @@ impl SessionCache {
     /// [`list`], reusing cached summaries for files whose length and
     /// mtime are unchanged.
     pub fn list(&mut self, dir: &Path) -> Result<Vec<SessionSummary>, SessionError> {
+        let mut changed = Vec::new();
+        let mut imported = false;
         if !self.loaded {
             self.loaded = true;
-            self.load_index(dir);
+            self.catalog = crate::catalog::Catalog::open(dir);
+            match self.catalog.as_ref().map(crate::catalog::Catalog::rows) {
+                Some(Ok(rows)) => self.by_path = rows,
+                Some(Err(err)) if crate::catalog::is_corrupt(&err) => {
+                    drop(self.catalog.take());
+                    self.catalog = crate::catalog::Catalog::rebuild(dir);
+                }
+                Some(Err(_)) | None => {}
+            }
+            if self.by_path.is_empty() && self.import_legacy_index(dir) {
+                imported = true;
+                changed.extend(self.by_path.keys().cloned());
+            }
         }
         let mut summaries = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        let mut fresh = false;
         for path in crate::resume::jsonl_candidates(dir)? {
-            if let Some(summary) = self.summarize(&path, &mut fresh) {
+            if let Some(summary) = self.summarize(&path, &mut changed) {
                 summaries.push(summary);
             }
             seen.insert(path);
         }
-        let before = self.by_path.len();
-        self.by_path.retain(|path, _| seen.contains(path));
-        if fresh || self.by_path.len() != before {
-            self.save_index(dir);
+        let removed: Vec<PathBuf> = self
+            .by_path
+            .keys()
+            .filter(|path| !seen.contains(*path))
+            .cloned()
+            .collect();
+        for path in &removed {
+            self.by_path.remove(path);
+        }
+        if !changed.is_empty() || !removed.is_empty() {
+            self.store(dir, &changed, &removed, imported);
         }
         summaries.sort_by_key(|s| std::cmp::Reverse(s.created_at));
         Ok(summaries)
     }
 
-    fn summarize(&mut self, path: &Path, fresh: &mut bool) -> Option<SessionSummary> {
+    /// Writes the rows of `changed` and drops those of `removed` in the
+    /// catalog. A catalog found corrupt is rebuilt with every row this
+    /// cache holds. Any other failure only costs the next process a
+    /// rescan. The legacy index goes once the rows `imported` from it are
+    /// stored.
+    fn store(&mut self, dir: &Path, changed: &[PathBuf], removed: &[PathBuf], imported: bool) {
+        let Some(catalog) = self.catalog.as_mut() else {
+            return;
+        };
+        let rows = changed
+            .iter()
+            .filter_map(|path| self.by_path.get(path).map(|row| (path.as_path(), row)));
+        let mut stored = catalog.write(rows, removed.iter().map(PathBuf::as_path));
+        if let Err(err) = &stored
+            && crate::catalog::is_corrupt(err)
+        {
+            drop(self.catalog.take());
+            self.catalog = crate::catalog::Catalog::rebuild(dir);
+            if let Some(catalog) = self.catalog.as_mut() {
+                let all = self.by_path.iter().map(|(path, row)| (path.as_path(), row));
+                stored = catalog.write(all, std::iter::empty());
+            }
+        }
+        if imported && stored.is_ok() {
+            let _ = std::fs::remove_file(dir.join(LEGACY_INDEX_FILE));
+        }
+    }
+
+    fn summarize(&mut self, path: &Path, changed: &mut Vec<PathBuf>) -> Option<SessionSummary> {
         let meta = metadata(path).ok()?;
         let size = meta.len();
         let modified = meta.modified().ok();
@@ -228,23 +287,24 @@ impl SessionCache {
             .filter(|(old, _, _)| *old <= size)
             .map(|(old, _, summary)| (*old, summary.title.clone()));
         let summary = summarize_from(path, before)?;
-        *fresh = true;
+        changed.push(path.to_owned());
         self.by_path
             .insert(path.to_owned(), (size, modified, summary.clone()));
         Some(summary)
     }
 
-    /// Seeds the memo from the directory's index. A missing, unreadable
-    /// or other-version index seeds nothing.
-    fn load_index(&mut self, dir: &Path) {
-        let Ok(bytes) = std::fs::read(dir.join(INDEX_FILE)) else {
-            return;
+    /// Seeds the memo from the legacy JSON index older builds wrote,
+    /// reporting whether it held anything. A missing, unreadable or
+    /// other-version index seeds nothing.
+    fn import_legacy_index(&mut self, dir: &Path) -> bool {
+        let Ok(bytes) = std::fs::read(dir.join(LEGACY_INDEX_FILE)) else {
+            return false;
         };
         let Ok(index) = serde_json::from_slice::<Index>(&bytes) else {
-            return;
+            return false;
         };
-        if index.version != INDEX_VERSION {
-            return;
+        if index.version != LEGACY_INDEX_VERSION {
+            return false;
         }
         for entry in index.entries {
             self.by_path.insert(
@@ -252,29 +312,7 @@ impl SessionCache {
                 (entry.size, entry.modified, entry.summary),
             );
         }
-    }
-
-    /// Writes the memo back as the directory's index, atomically, so a
-    /// concurrent listing reads either the old index or the new one, and
-    /// readable by the owner only, as it quotes prompts. A failed write
-    /// only costs the next process a rescan.
-    fn save_index(&self, dir: &Path) {
-        let index = Index {
-            version: INDEX_VERSION,
-            entries: self
-                .by_path
-                .values()
-                .map(|(size, modified, summary)| IndexEntry {
-                    size: *size,
-                    modified: *modified,
-                    summary: summary.clone(),
-                })
-                .collect(),
-        };
-        let Ok(bytes) = serde_json::to_vec(&index) else {
-            return;
-        };
-        let _ = kage_core::fsutil::atomic_write_private(&dir.join(INDEX_FILE), &bytes);
+        !self.by_path.is_empty()
     }
 }
 
@@ -628,32 +666,155 @@ mod tests {
         );
     }
 
+    fn catalog_rows(dir: &Path) -> HashMap<PathBuf, crate::catalog::Row> {
+        crate::catalog::Catalog::open(dir).unwrap().rows().unwrap()
+    }
+
     #[test]
-    fn the_index_carries_summaries_across_caches_and_drops_deleted_files() {
+    fn the_catalog_carries_summaries_across_caches_and_drops_deleted_files() {
         let dir = tempdir().unwrap();
         let a = write_session(dir.path(), "a.jsonl", "ask one");
         write_session(dir.path(), "b.jsonl", "ask two");
         let first = list(dir.path()).unwrap();
-        let index = dir.path().join(INDEX_FILE);
-        assert!(index.exists(), "a listing writes the index");
+        let catalog = dir.path().join(crate::CATALOG_FILE);
+        assert!(catalog.exists(), "a listing writes the catalog");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&index).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600, "the index quotes prompts");
+            let mode = std::fs::metadata(&catalog).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "the catalog quotes prompts");
         }
-
-        let mut fresh = SessionCache::default();
-        fresh.load_index(dir.path());
-        assert_eq!(fresh.by_path.len(), 2, "a new cache starts from the index");
-        assert_eq!(fresh.list(dir.path()).unwrap(), first);
+        assert_eq!(catalog_rows(dir.path()).len(), 2);
+        assert_eq!(
+            SessionCache::default().list(dir.path()).unwrap(),
+            first,
+            "a new cache starts from the catalog"
+        );
 
         std::fs::remove_file(&a).unwrap();
-        let after = list(dir.path()).unwrap();
-        assert_eq!(after.len(), 1);
-        let mut reread = SessionCache::default();
-        reread.load_index(dir.path());
-        assert_eq!(reread.by_path.len(), 1, "the deleted file left the index");
+        assert_eq!(list(dir.path()).unwrap().len(), 1);
+        assert_eq!(
+            catalog_rows(dir.path()).len(),
+            1,
+            "the deleted file left the catalog"
+        );
+    }
+
+    #[test]
+    fn a_legacy_index_is_imported_then_removed() {
+        let dir = tempdir().unwrap();
+        let path = write_session(dir.path(), "a.jsonl", "ask one");
+        let meta = std::fs::metadata(&path).unwrap();
+        let mut summary = summarize_one(&path).unwrap();
+        summary.title = Some("from the old index".to_owned());
+        let index = serde_json::json!({
+            "version": LEGACY_INDEX_VERSION,
+            "entries": [{"size": meta.len(), "modified": meta.modified().unwrap(), "summary": summary}],
+        });
+        let legacy = dir.path().join(LEGACY_INDEX_FILE);
+        std::fs::write(&legacy, serde_json::to_vec(&index).unwrap()).unwrap();
+
+        let listed = list(dir.path()).unwrap();
+        assert_eq!(
+            listed[0].title.as_deref(),
+            Some("from the old index"),
+            "an unchanged file keeps its imported summary"
+        );
+        assert!(!legacy.exists(), "the import removes the old index");
+        assert_eq!(catalog_rows(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn a_corrupt_catalog_is_rebuilt() {
+        let dir = tempdir().unwrap();
+        write_session(dir.path(), "a.jsonl", "ask one");
+        std::fs::write(dir.path().join(crate::CATALOG_FILE), b"not a database").unwrap();
+        assert_eq!(list(dir.path()).unwrap().len(), 1);
+        assert_eq!(catalog_rows(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn a_catalog_damaged_past_its_header_is_rebuilt() {
+        let dir = tempdir().unwrap();
+        for n in 0..200 {
+            write_session(dir.path(), &format!("s{n}.jsonl"), &"ask ".repeat(50));
+        }
+        list(dir.path()).unwrap();
+        let catalog = dir.path().join(crate::CATALOG_FILE);
+        let mut bytes = std::fs::read(&catalog).unwrap();
+        assert!(bytes.len() > 16 * 4096, "the rows span many pages");
+        bytes[8 * 4096..12 * 4096].fill(0xA5);
+        std::fs::write(&catalog, bytes).unwrap();
+
+        let mut cache = SessionCache::default();
+        assert_eq!(cache.list(dir.path()).unwrap().len(), 200);
+        let mut wal = catalog.clone().into_os_string();
+        wal.push("-wal");
+        assert!(
+            std::path::Path::new(&wal).exists(),
+            "closing the corrupt connection must not delete the new catalog's WAL"
+        );
+        assert_eq!(
+            catalog_rows(dir.path()).len(),
+            200,
+            "another connection reads the rebuilt catalog while the cache holds it"
+        );
+        drop(cache);
+    }
+
+    #[test]
+    fn only_damage_counts_as_corruption() {
+        let failure = |code| rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);
+        assert!(crate::catalog::is_corrupt(&failure(
+            rusqlite::ffi::SQLITE_CORRUPT
+        )));
+        assert!(crate::catalog::is_corrupt(&failure(
+            rusqlite::ffi::SQLITE_NOTADB
+        )));
+        for code in [
+            rusqlite::ffi::SQLITE_BUSY,
+            rusqlite::ffi::SQLITE_FULL,
+            rusqlite::ffi::SQLITE_CANTOPEN,
+            rusqlite::ffi::SQLITE_READONLY,
+        ] {
+            assert!(
+                !crate::catalog::is_corrupt(&failure(code)),
+                "code {code} must not delete a catalog in use"
+            );
+        }
+    }
+
+    #[test]
+    fn an_older_kages_index_survives_once_the_catalog_exists() {
+        let dir = tempdir().unwrap();
+        let path = write_session(dir.path(), "a.jsonl", "ask one");
+        list(dir.path()).unwrap();
+        let legacy = dir.path().join(LEGACY_INDEX_FILE);
+        std::fs::write(&legacy, b"{}").unwrap();
+        append_raw(&path, "\n");
+        list(dir.path()).unwrap();
+        assert!(legacy.exists(), "only an import removes the old index");
+    }
+
+    #[test]
+    fn the_agent_check_trusts_only_a_current_row() {
+        let dir = tempdir().unwrap();
+        let path = write_session(dir.path(), "a.jsonl", "ask one");
+        assert!(!is_agent_session(&path), "no catalog yet: the file is read");
+        list(dir.path()).unwrap();
+        let mut rows = catalog_rows(dir.path());
+        let (size, mtime, mut summary) = rows.remove(&path).unwrap();
+        summary.agent = Some("planted".to_owned());
+        crate::catalog::Catalog::open(dir.path())
+            .unwrap()
+            .write([(path.as_path(), &(size, mtime, summary))], [])
+            .unwrap();
+        assert!(is_agent_session(&path), "a current row answers");
+        append_raw(&path, "\n");
+        assert!(
+            !is_agent_session(&path),
+            "a stale row is ignored and the file is read"
+        );
     }
 
     #[test]

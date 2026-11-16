@@ -13,7 +13,7 @@ use std::borrow::Borrow;
 use crate::buffer::Block;
 
 /// Tool name this reads from.
-const TODO_TOOL: &str = "todo_list";
+pub(crate) const TODO_TOOL: &str = "todo_list";
 
 /// Marker of a task the model marked `in_progress`, and of a task not
 /// started yet. A view test matches painted rows on these.
@@ -74,12 +74,16 @@ where
         if name != TODO_TOOL {
             continue;
         }
-        let Some(list) = todo_list_arg(input) else {
-            continue;
-        };
-        strip = parse(list);
+        if let Some(input_strip) = from_input(input) {
+            strip = input_strip;
+        }
     }
     strip
+}
+
+/// The strip one `todo_list` call's input writes, or `None` for a read.
+pub(crate) fn from_input(input: &Value) -> Option<TodoStrip> {
+    todo_list_arg(input).map(parse)
 }
 
 /// The list a `todo_list` call carried, or `None` for a read. An empty

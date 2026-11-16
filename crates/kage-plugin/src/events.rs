@@ -240,8 +240,7 @@ pub fn dispatch(
     if targets.is_empty() {
         return Ok(());
     }
-    let data = json_to_lua(lua, payload)?;
-    autocmd::notify(lua, sink, event_name, matched, &targets, &data);
+    autocmd::notify(lua, sink, event_name, matched, &targets, payload);
     Ok(())
 }
 
@@ -422,9 +421,10 @@ pub fn dispatch_predicate(
     if targets.is_empty() {
         return Ok(false);
     }
-    let data = json_to_lua(lua, payload)?;
     for target in targets {
-        match target.call::<Value>(lua, event_name, matched, data.clone()) {
+        let result = json_to_lua(lua, payload)
+            .and_then(|data| target.call::<Value>(lua, event_name, matched, data));
+        match result {
             Ok(Value::Boolean(true)) => return Ok(true),
             Ok(_) => {}
             Err(err) => target.log_error(sink, event_name, err),

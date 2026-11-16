@@ -125,7 +125,7 @@
 --- handler receives, and `ev.data` of an autocmd callback. Which
 --- member fires follows the event name; each `*Payload` class
 --- below documents the event named after it. `user` delivers
---- whatever `data` `kage.api.autocmd_exec` was passed,
+--- a plain-data copy of the `data` `kage.api.autocmd_exec` was passed,
 --- `session_before_switch` and `session_before_fork` the target
 --- string, `transform_context` the message history, and
 --- `resources_discover` nothing at all.
@@ -1060,7 +1060,9 @@ function kage.api.augroup_create(name, opts) end
 function kage.api.augroup_del(group) end
 
 --- Fire `event` now. `pattern` is the match autocmd patterns
---- compare against, and `data` arrives as `ev.data`. Raising
+--- compare against, and each callback gets a plain-data copy
+--- of `data` as `ev.data`, as `kage.json` would round-trip it,
+--- so functions and metatables do not carry over. Raising
 --- callbacks are logged and skipped. Nesting deeper than 16
 --- raises.
 --- Since API 2.

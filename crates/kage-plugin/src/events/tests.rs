@@ -17,7 +17,7 @@ fn lua_with_kage(sink: SharedHostLog) -> Lua {
     crate::autocmd::install(
         &lua,
         sink,
-        Arc::new(Mutex::new(None)),
+        Arc::new(Mutex::new(Some(crate::capabilities::HOST_OWNER.to_owned()))),
         Arc::new(std::collections::HashMap::new()),
         crate::capabilities::Ceilings::default(),
     )

@@ -805,7 +805,9 @@ autocmds the same way, reading the callback's return value.
 - `kage.api.augroup_del(group)` removes a group, by id or name, and
   its autocmds.
 - `kage.api.autocmd_exec(event, { pattern, data })` fires an event
-  now. Nesting deeper than 16 levels raises.
+  now. Handlers get a plain-data copy of `data`, as `kage.json` would
+  round-trip it, so functions and metatables do not carry over.
+  Nesting deeper than 16 levels raises.
 
 ## options
 

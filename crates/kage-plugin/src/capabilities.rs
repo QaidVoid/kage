@@ -162,15 +162,21 @@ pub(crate) fn declared(ceilings: &Ceilings, plugin: &str, cap: Capability) -> bo
 /// the duration of that plugin's chunk, and by [`scoped`] for the
 /// duration of every callback the host runs on a plugin's behalf, so
 /// capability-gated surfaces (`request_capabilities`, event
-/// registration) know who is asking. `None` means trusted host eval.
+/// registration) know who is asking. Host eval runs as [`HOST_OWNER`].
+/// `None` means no one vouches for the running code, such as a
+/// metamethod or finalizer the host triggered outside any scope, so it
+/// is denied every capability.
 pub(crate) type CurrentPlugin = Arc<Mutex<Option<String>>>;
 
-/// Whether `owner` is a trusted host context rather than a plugin: no
-/// owner (host eval) or a reserved `@`-prefixed environment (`@user`,
-/// `@defaults`). The loader refuses plugin stems starting with `@`, so
-/// the prefix cannot be forged.
+/// The owner host eval runs under.
+pub(crate) const HOST_OWNER: &str = "@host";
+
+/// Whether `owner` is a trusted host context rather than a plugin: a
+/// reserved `@`-prefixed environment (`@host`, `@user`, `@defaults`).
+/// The loader and [`crate::PluginRuntime::eval_plugin`] refuse names
+/// starting with `@`, so the prefix cannot be forged.
 pub(crate) fn is_trusted(owner: Option<&str>) -> bool {
-    owner.is_none_or(|name| name.starts_with('@'))
+    owner.is_some_and(|name| name.starts_with('@'))
 }
 
 /// The owner currently in the slot, cloned out.
@@ -196,8 +202,8 @@ pub(crate) fn scoped<R>(slot: &CurrentPlugin, owner: Option<&str>, f: impl FnOnc
 /// carried to every invocation site.
 #[derive(Clone, Default)]
 pub(crate) struct OwnerScope {
-    /// The plugin that registered the callback, or `None` for the
-    /// trusted user config and host eval.
+    /// The plugin or reserved environment that registered the
+    /// callback, or `None` when nothing vouched for it.
     pub(crate) owner: Option<String>,
     pub(crate) current: CurrentPlugin,
 }
@@ -316,7 +322,7 @@ pub(crate) fn install_request_capabilities(
                 .map_err(|_| mlua::Error::external("current-plugin mutex poisoned"))?
                 .clone();
             let result = lua.create_table()?;
-            // No plugin context (host-side eval): nothing is granted.
+            // No owner: nothing is granted.
             let granted = plugin
                 .as_deref()
                 .and_then(|p| grants.get(p))
@@ -562,8 +568,9 @@ mod tests {
     }
 
     #[test]
-    fn trusted_owners_are_host_eval_and_reserved_envs() {
-        assert!(is_trusted(None));
+    fn only_reserved_envs_are_trusted() {
+        assert!(!is_trusted(None));
+        assert!(is_trusted(Some(HOST_OWNER)));
         assert!(is_trusted(Some("@user")));
         assert!(is_trusted(Some("@defaults")));
         assert!(!is_trusted(Some("p")));

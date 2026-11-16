@@ -97,8 +97,8 @@ const HANDLERS_KEY: &str = "kage.keymap.handlers";
 
 /// Named registry slot of the table holding each handler's registering
 /// plugin by id, so the host runs the handler under its owner through
-/// the bridge. Host eval stores `nil`; init.lua records `@user`; both
-/// are trusted.
+/// the bridge. Host eval records `@host` and init.lua records `@user`;
+/// both are trusted.
 const HANDLER_OWNERS_KEY: &str = "kage.keymap.handler_owners";
 
 /// Keys that the quit and interrupt hatches take before any mapping
@@ -146,8 +146,8 @@ impl Keymaps {
         match lock(&self.current).as_deref() {
             Some(crate::stdlib::DEFAULTS_ENV) => OWNER_DEFAULTS.to_owned(),
             Some(crate::user::USER_ENV) => OWNER_USER.to_owned(),
+            Some(crate::capabilities::HOST_OWNER) | None => "lua".to_owned(),
             Some(name) => name.to_owned(),
-            None => "lua".to_owned(),
         }
     }
 
@@ -360,9 +360,8 @@ pub(crate) fn handler(lua: &Lua, id: u64) -> mlua::Result<Function> {
     }
 }
 
-/// The plugin that stored the handler `id`, or `None` when it came from
-/// the trusted user config or host eval. Fails when the handler is
-/// absent (stale id).
+/// The plugin or reserved environment that stored the handler `id`.
+/// Fails when the handler is absent (stale id).
 pub(crate) fn handler_owner(lua: &Lua, id: u64) -> mlua::Result<Option<String>> {
     if !matches!(handlers(lua)?.raw_get::<Value>(id)?, Value::Function(_)) {
         return Err(fail(format!("no keymap handler {id}")));

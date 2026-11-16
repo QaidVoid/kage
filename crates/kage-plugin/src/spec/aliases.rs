@@ -11,7 +11,7 @@ pub(super) const TYPE_ALIASES: &[TypeAlias] = &[TypeAlias {
         "handler receives, and `ev.data` of an autocmd callback. Which",
         "member fires follows the event name; each `*Payload` class",
         "below documents the event named after it. `user` delivers",
-        "whatever `data` `kage.api.autocmd_exec` was passed,",
+        "a plain-data copy of the `data` `kage.api.autocmd_exec` was passed,",
         "`session_before_switch` and `session_before_fork` the target",
         "string, `transform_context` the message history, and",
         "`resources_discover` nothing at all.",

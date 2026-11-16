@@ -84,8 +84,8 @@ struct Autocmd {
     patterns: Vec<String>,
     once: bool,
     origin: Arc<str>,
-    /// The plugin that registered the hook, as of registration. `None`
-    /// for the trusted host eval and the reserved `@`-environments.
+    /// The plugin or reserved `@`-environment that registered the hook,
+    /// as of registration. `None` when nothing vouched for it.
     owner: Option<Arc<str>>,
 }
 
@@ -141,13 +141,9 @@ impl Autocmds {
         let Some(cap) = crate::events::required_capability(event) else {
             return true;
         };
-        let Some(owner) = owner else {
-            return true;
-        };
-        if crate::capabilities::is_trusted(Some(owner)) {
-            return true;
-        }
-        self.grants.get(owner).is_some_and(|set| set.contains(&cap))
+        crate::capabilities::is_trusted(owner)
+            || owner
+                .is_some_and(|owner| self.grants.get(owner).is_some_and(|set| set.contains(&cap)))
     }
 
     /// Snapshot the autocmds for `event` that accept `matched`, and
@@ -289,18 +285,22 @@ pub(crate) fn targets(lua: &Lua, event: &str, matched: Option<&str>) -> mlua::Re
     Ok(out)
 }
 
-/// Call every target with the same `data`, logging and skipping the
-/// ones that raise.
+/// Call every target with its own copy of `data`, logging and skipping
+/// the ones that raise or whose copy fails. A shared table would let one
+/// handler plant a metatable that runs its code under a later handler's
+/// owner.
 pub(crate) fn notify(
     lua: &Lua,
     sink: &SharedHostLog,
     event: &str,
     matched: Option<&str>,
     targets: &[Target],
-    data: &Value,
+    data: &serde_json::Value,
 ) {
     for target in targets {
-        if let Err(err) = target.call::<()>(lua, event, matched, data.clone()) {
+        let result = crate::api::json_to_lua(lua, data)
+            .and_then(|copy| target.call::<()>(lua, event, matched, copy));
+        if let Err(err) = result {
             target.log_error(sink, event, err);
         }
     }
@@ -366,9 +366,16 @@ pub(crate) fn check_patterns(event: &str, patterns: Vec<String>) -> Result<Vec<S
     Ok(patterns)
 }
 
+/// Whether a hook `owner` registers for `event` would be delivered:
+/// see [`Autocmds::granted_at_dispatch`].
+pub(crate) fn granted(lua: &Lua, event: &str, owner: Option<&str>) -> bool {
+    lua.app_data_ref::<SharedAutocmds>()
+        .is_some_and(|shared| lock(&shared).granted_at_dispatch(event, owner))
+}
+
 /// Subscribe `callback` to `event` for a host-side consumer. `patterns`
 /// must already have passed [`check_patterns`]. `owner` is the plugin
-/// the callback runs for (`None` for trusted host code). Returns the
+/// the callback runs for (`None` grants it no capabilities). Returns the
 /// autocmd id.
 pub(crate) fn add(
     lua: &Lua,
@@ -591,6 +598,9 @@ fn exec_fn(lua: &Lua, sink: SharedHostLog) -> mlua::Result<Function> {
             ),
             None => (None, Value::Nil),
         };
+        // Handlers of other owners read `data`, so they get plain data:
+        // a caller's metatable must not run their code as its own.
+        let data = crate::api::lua_to_json(data)?;
         exec(lua, &sink, &event, pattern.as_deref(), &data)
     })
 }
@@ -605,7 +615,7 @@ pub(crate) fn exec(
     sink: &SharedHostLog,
     event: &str,
     matched: Option<&str>,
-    data: &Value,
+    data: &serde_json::Value,
 ) -> mlua::Result<()> {
     let Some(autocmds) = lua.app_data_ref::<SharedAutocmds>().map(|a| Arc::clone(&a)) else {
         return Ok(());

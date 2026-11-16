@@ -64,8 +64,8 @@ struct Timer {
     kind: &'static str,
     every: Option<Duration>,
     origin: Arc<str>,
-    /// The plugin that set the callback, as of registration. `None` for
-    /// the trusted host eval and the reserved `@`-environments.
+    /// The plugin or reserved `@`-environment that set the callback, as
+    /// of registration. `None` when nothing vouched for it.
     owner: Option<String>,
     /// Who the callback runs for: whoever was in effect when it was set. A
     /// repeating timer keeps that session after it closes, and then reads

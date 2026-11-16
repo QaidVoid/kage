@@ -92,14 +92,19 @@ impl PluginRuntime {
 
     /// Execute a chunk of Lua source against the shared globals.
     ///
-    /// Used by the host for one-off evaluation and by tests. Plugin
-    /// files are loaded through [`eval_plugin`](Self::eval_plugin)
-    /// instead, so their top-level definitions stay private.
+    /// Used by the host for one-off evaluation and by tests. The chunk
+    /// runs trusted, as [`crate::capabilities::HOST_OWNER`], and so do
+    /// the callbacks it registers. Plugin files are loaded through
+    /// [`eval_plugin`](Self::eval_plugin) instead, so their top-level
+    /// definitions stay private.
     pub fn eval(&self, source: &str) -> Result<mlua::Value, PluginError> {
         let source = source.to_owned();
         let budget = self.eval.script_budget;
+        let slot = Arc::clone(&self.eval.current_plugin);
         self.host.call(move |lua| {
-            watchdog::run(lua, budget, || lua.load(&source).eval::<mlua::Value>())
+            crate::capabilities::scoped(&slot, Some(crate::capabilities::HOST_OWNER), || {
+                watchdog::run(lua, budget, || lua.load(&source).eval::<mlua::Value>())
+            })
         })?
     }
 
@@ -399,7 +404,7 @@ impl PluginRuntime {
 
     /// The plugin that registered the Lua keymap handler `id`, so the
     /// host starts the bridged call under it (see
-    /// [`Self::bridge_call_for`]). Host eval yields `None` and init.lua
+    /// [`Self::bridge_call_for`]). Host eval yields `@host` and init.lua
     /// yields `@user`; both are trusted.
     ///
     /// # Errors
@@ -696,7 +701,8 @@ impl PluginRuntime {
     /// coroutine is parked. Fails with [`PluginError::BridgeBusy`] if
     /// another coroutine is already parked.
     ///
-    /// Runs with no owner, i.e. trusted: for a handler a plugin
+    /// Runs with no owner, so owner-gated surfaces (event registration,
+    /// `request_capabilities`) refuse it: for a handler a plugin
     /// registered use [`Self::bridge_call_for`].
     pub fn bridge_call(
         &self,
@@ -732,8 +738,8 @@ impl PluginRuntime {
     /// # Errors
     ///
     /// As [`Self::bridge_call`], except it is never busy. Like
-    /// [`Self::bridge_call`], it runs trusted: for a handler a plugin
-    /// registered use [`Self::bridge_start_for`].
+    /// [`Self::bridge_call`], it runs with no owner: for a handler a
+    /// plugin registered use [`Self::bridge_start_for`].
     pub fn bridge_start(
         &self,
         func: &mlua::Function,

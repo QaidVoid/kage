@@ -732,6 +732,18 @@ fn hook(lua: &Lua, shared: &Arc<Shared>, slot: SlotName, spec: &SlotSpec) -> mlu
         })?;
         let origin: Arc<str> = format!(" \"{} slot\"{}", slot.name(), component.origin).into();
         for (event, patterns) in &component.events {
+            if !autocmd::granted(lua, event, owner.as_deref()) {
+                let subject = owner.as_deref().unwrap_or("?");
+                lock(&shared.sink).log(
+                    LogLevel::Warn,
+                    &format!(
+                        "plugin {subject}: {} slot component cannot refresh on '{event}' \
+                         without the context capability, grant it in [plugins.capabilities]",
+                        slot.name()
+                    ),
+                );
+                continue;
+            }
             let id = autocmd::add(
                 lua,
                 event,

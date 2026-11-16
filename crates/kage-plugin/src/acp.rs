@@ -101,8 +101,8 @@ fn add_agent_fn(lua: &Lua, agents: SharedAcpAgents) -> mlua::Result<mlua::Functi
     })
 }
 
-/// The plugin that stored the permission handler, or `None` when it
-/// came from the trusted user config or host eval.
+/// The plugin or reserved environment that stored the permission
+/// handler, or `None` when nothing vouched for it.
 pub(crate) fn permission_owner(lua: &Lua) -> Option<String> {
     lua.named_registry_value::<Option<String>>(PERMISSION_OWNER_KEY)
         .ok()

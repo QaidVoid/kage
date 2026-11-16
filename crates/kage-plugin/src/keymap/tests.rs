@@ -443,5 +443,8 @@ fn keymap_owner_tracks_the_handler_through_replacements() {
     rt.eval("kage.register_keybinding('ctrl+x', function() end)")
         .unwrap();
     let host_id = lua_id(&rt.keymap(), Mode::Global, "<C-x>");
-    assert_eq!(rt.keymap_owner(host_id).unwrap(), None);
+    assert_eq!(
+        rt.keymap_owner(host_id).unwrap().as_deref(),
+        Some(crate::capabilities::HOST_OWNER)
+    );
 }

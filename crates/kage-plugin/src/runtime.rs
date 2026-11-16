@@ -533,7 +533,32 @@ fn apply_sandbox(lua: &Lua, sink: SharedHostLog) -> Result<(), PluginError> {
             Ok(())
         })?,
     )?;
+    refuse_finalizers(lua)?;
     guard_coroutines(lua)
+}
+
+/// Replace `setmetatable` with one that refuses a metatable carrying
+/// `__gc`. A finalizer runs during whatever allocation triggers the
+/// collection, under whichever owner holds the slot then, so it would
+/// let a plugin's code act as another plugin or the user. Any non-nil
+/// `__gc` is refused, since a placeholder could be swapped for a
+/// function after the object is marked.
+fn refuse_finalizers(lua: &Lua) -> mlua::Result<()> {
+    let globals = lua.globals();
+    let setmetatable: mlua::Function = globals.get("setmetatable")?;
+    globals.set(
+        "setmetatable",
+        lua.create_function(move |_, (table, mt): (mlua::Value, mlua::Value)| {
+            if let mlua::Value::Table(mt) = &mt
+                && !mt.raw_get::<mlua::Value>("__gc")?.is_nil()
+            {
+                return Err(mlua::Error::runtime(
+                    "setmetatable: __gc finalizers are not allowed",
+                ));
+            }
+            setmetatable.call::<mlua::Value>((table, mt))
+        })?,
+    )
 }
 
 /// Replace `coroutine.create` and `coroutine.wrap` so every coroutine a

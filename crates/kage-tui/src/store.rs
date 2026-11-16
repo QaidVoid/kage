@@ -209,16 +209,7 @@ fn apply_update(buf: &mut Buffer, update: &SessionUpdate) {
                 meta_duration(update.meta.as_ref()),
             );
         }
-        SessionUpdate::Plan(plan) => {
-            let lines = plan
-                .entries
-                .iter()
-                .filter_map(|entry| entry.get("content").and_then(Value::as_str))
-                .collect::<Vec<_>>();
-            if !lines.is_empty() {
-                buf.replace_or_push_custom("kage:plan", lines.join("\n"));
-            }
-        }
+        SessionUpdate::Plan(plan) => push_plan(buf, &plan.entries),
         SessionUpdate::Turn(turn) if turn.phase == TurnPhase::End => {
             buf.finish_streaming();
         }
@@ -249,6 +240,54 @@ fn apply_update(buf: &mut Buffer, update: &SessionUpdate) {
         }
         _ => {}
     }
+}
+
+/// The call id prefix of the `todo_list` rows [`push_plan`] adds.
+const PLAN_CALL_PREFIX: &str = "acp-plan-";
+
+/// An ACP `plan` is the agent's todo list, so it shows as one: a
+/// `todo_list` row the todo strip reads, the way kage's own calls
+/// render. kage's engine mirrors each of its `todo_list` calls as a
+/// plan, so a session with such calls already shows every list it
+/// sends. Otherwise a plan that changes nothing on the strip, or an
+/// empty one before any list was shown, adds nothing.
+fn push_plan(buf: &mut Buffer, entries: &[Value]) {
+    let own_calls = buf.blocks().iter().any(|block| {
+        matches!(
+            block.as_ref(),
+            crate::buffer::Block::ToolCall { name, call_id, .. }
+                if name == crate::view::todo::TODO_TOOL && !call_id.starts_with(PLAN_CALL_PREFIX)
+        )
+    });
+    if own_calls {
+        return;
+    }
+    let todos: Vec<Value> = entries
+        .iter()
+        .filter_map(|entry| {
+            let title = entry.get("content")?.as_str()?.trim();
+            if title.is_empty() {
+                return None;
+            }
+            let status = match entry.get("status").and_then(Value::as_str) {
+                Some("completed") => "done",
+                Some("in_progress") => "in_progress",
+                _ => "pending",
+            };
+            Some(serde_json::json!({"title": title, "status": status}))
+        })
+        .collect();
+    let shown = crate::view::todo::from_blocks(buf.blocks());
+    if todos.is_empty() && shown.progress().is_none() {
+        return;
+    }
+    let input = serde_json::json!({ "todos": todos });
+    if crate::view::todo::from_input(&input).is_some_and(|strip| strip == shown) {
+        return;
+    }
+    let id = format!("{PLAN_CALL_PREFIX}{}", buf.blocks().len());
+    buf.push_tool_call(id.clone(), crate::view::todo::TODO_TOOL, input);
+    buf.set_tool_phase(&id, ToolPhase::Done);
 }
 
 /// A user chunk: text becomes the user bubble, anything else falls to
@@ -473,6 +512,65 @@ mod tests {
         assert!(!*is_error);
     }
 
+    /// kage's engine mirrors every `todo_list` call as an ACP plan,
+    /// built from the tool's stored list. That list cuts long titles,
+    /// and two writes in one message send two plans after both calls
+    /// are shown, so the plans are told apart by the session's own
+    /// calls, not by their contents.
+    #[test]
+    fn plans_mirroring_the_sessions_own_todo_calls_add_nothing() {
+        let mut store = Store::new();
+        let long = "x".repeat(250);
+        for (id, title) in [("c1", long.as_str()), ("c2", "second")] {
+            store.absorb(update(
+                "s1",
+                "tool_call",
+                &json!({"toolCallId": id, "title": "todo_list", "status": "pending",
+                    "rawInput": {"todos": [{"title": title, "status": "pending"}]}}),
+            ));
+        }
+        let before = kinds(&lock(&store.shared_buffer("s1")));
+        for title in [&long[..200], "second"] {
+            store.absorb(update(
+                "s1",
+                "plan",
+                &json!({"entries": [{"content": title, "status": "pending"}]}),
+            ));
+        }
+        assert_eq!(kinds(&lock(&store.shared_buffer("s1"))), before);
+    }
+
+    /// An external agent's plans are its only todo list: each change
+    /// adds a row the strip reads, a resent plan or an empty one before
+    /// any list adds nothing, and entries without a title are dropped.
+    #[test]
+    fn an_external_agents_plans_become_its_todo_list() {
+        let mut store = Store::new();
+        let plan = |entries: Value| update("s1", "plan", &json!({ "entries": entries }));
+        store.absorb(plan(json!([])));
+        assert!(kinds(&lock(&store.shared_buffer("s1"))).is_empty());
+        let first = json!([{"content": "read", "status": "completed"},
+            {"content": "  ", "status": "pending"},
+            {"content": "fix", "status": "in_progress"}]);
+        store.absorb(plan(first.clone()));
+        store.absorb(plan(first));
+        assert_eq!(
+            kinds(&lock(&store.shared_buffer("s1"))),
+            ["call:todo_list"],
+            "a resent plan adds no second row"
+        );
+        store.absorb(plan(json!([{"content": "read", "status": "completed"},
+            {"content": "fix", "status": "completed"}])));
+        let handle = store.shared_buffer("s1");
+        let buffer = lock(&handle);
+        assert_eq!(kinds(&buffer), ["call:todo_list", "call:todo_list"]);
+        assert_eq!(
+            crate::view::todo::from_blocks(buffer.blocks()).progress(),
+            Some((2, 2)),
+            "the strip shows the latest plan"
+        );
+    }
+
     #[test]
     fn resource_content_shows_in_the_result() {
         let mut store = Store::new();
@@ -608,16 +706,18 @@ mod tests {
                 "thinking",
                 "kage:notify",
                 "kage:error",
-                "kage:plan",
+                "call:todo_list",
                 "kage:compaction",
             ],
             "{buffer:#?}"
         );
         let blocks = buffer.blocks();
-        let Block::Custom { text, .. } = blocks[3].as_ref() else {
-            panic!("expected the plan, got {:#?}", blocks[3]);
-        };
-        assert_eq!(text, "read the code\nwrite the fix");
+        let strip = crate::view::todo::from_blocks(blocks);
+        assert_eq!(
+            strip.progress(),
+            Some((0, 2)),
+            "the plan reads as the todo list: {strip:?}"
+        );
         let Block::Custom { text, .. } = blocks[4].as_ref() else {
             panic!("expected the compaction, got {:#?}", blocks[4]);
         };

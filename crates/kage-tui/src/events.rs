@@ -538,7 +538,8 @@ fn engine_note(text: &str) -> Option<String> {
 /// Whether a user message carries words someone typed, rather than
 /// only agent reports and messages the engine delivered. Words typed
 /// between the elements count too.
-pub(crate) fn typed_by_the_user(message: &Message) -> bool {
+#[must_use]
+pub fn typed_by_the_user(message: &Message) -> bool {
     user_text(message).is_none_or(|text| {
         engine_note(&text).is_none()
             && split_agent_text(&text)

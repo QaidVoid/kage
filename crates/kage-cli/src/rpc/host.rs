@@ -1162,6 +1162,15 @@ mod tests {
         let first = lock(&host.live).take_expired_asks(Duration::ZERO);
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].session, id);
+        // The engine's state lands after the take and orphans the
+        // session again, before the decline closes the ask.
+        lock(&host.live).observe(&Envelope {
+            session: id,
+            seq: 9,
+            event: Event::Host(HostEvent::StateChanged {
+                state: kage_core::protocol::SessionState::default(),
+            }),
+        });
         assert!(
             lock(&host.live)
                 .take_expired_asks(Duration::ZERO)

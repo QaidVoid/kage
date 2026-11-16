@@ -308,29 +308,33 @@ fn require_native_backend(path: &Path) -> Result<(), RpcError> {
     }
 }
 
-/// The entry a fork of `path` copies through: the one just before the
-/// prompt `before` names, or the last entry when `before` is absent.
+/// The entry a fork of `path` copies through, on the branch the
+/// conversation is on: the one just before the prompt `before` names,
+/// or the branch's tip when `before` is absent. Prompts of abandoned
+/// branches are not counted, as a client shows only the live one, and
+/// an undone session's last line is a branch marker no fork can copy
+/// through.
 fn fork_point(path: &Path, before: Option<&PromptRef>) -> Result<EntryId, RpcError> {
-    let internal = |e: kage_session::SessionError| RpcError::internal(e.to_string());
-    let mut last = None;
+    let tree =
+        kage_session::SessionTree::read(path).map_err(|e| RpcError::internal(e.to_string()))?;
+    let Some(before) = before else {
+        return Ok(tree.head());
+    };
     let mut seen = 0;
-    for entry in SessionReader::iter(path).map_err(internal)? {
-        let entry = entry.map_err(internal)?;
-        if let (Some(before), SessionEntry::Message(m)) = (before, &entry)
+    for entry in tree.ancestry(tree.head()) {
+        if let SessionEntry::Message(m) = entry
             && m.message.role == Role::User
             && prompt_text(&m.message) == before.text.as_deref()
         {
             if seen == before.occurrence {
-                return last.ok_or_else(|| RpcError::internal("the prompt has no entry before it"));
+                return tree
+                    .parent(entry.id())
+                    .ok_or_else(|| RpcError::internal("the prompt has no entry before it"));
             }
             seen += 1;
         }
-        last = Some(entry.id());
     }
-    match before {
-        Some(_) => Err(RpcError::new(-32602, "the session has no such prompt")),
-        None => last.ok_or_else(|| RpcError::internal("the session has no entries")),
-    }
+    Err(RpcError::new(-32602, "the session has no such prompt"))
 }
 
 /// The first text block of a user message: the prompt as typed, ahead

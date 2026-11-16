@@ -996,14 +996,9 @@ fn undo_and_rewind_navigate_the_branch_tree() {
 fn undo_on_a_session_without_prompts_reports_nothing_to_undo() {
     let dir = tempfile::tempdir().unwrap();
     let h = harness(MockProvider::replaying(text_turn("reply")));
-    let (id, path) = recorded_session(&h, dir.path());
-    // Strip the recorded exchange: only the header stays.
-    let header = kage_session::replay(&path).unwrap().header;
-    std::fs::write(
-        &path,
-        serde_json::to_string(&{ kage_session::SessionEntry::Header(header) }).unwrap() + "\n",
-    )
-    .unwrap();
+    let id = SessionId::new();
+    let (recorder, path) = recorder_in(dir.path(), id);
+    h.open(id, Some(recorder));
 
     h.engine.send(Command::to(id, CommandKind::Undo));
     let seen = wait_for(&h.events, |e| {

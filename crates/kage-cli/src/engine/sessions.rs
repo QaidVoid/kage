@@ -854,7 +854,7 @@ impl super::Dispatcher {
             self.info(id, "cannot delete an open session".to_owned());
             return;
         }
-        match kage_session::delete_locked(path) {
+        match kage_session::delete_with_agents(path) {
             Ok(()) => {
                 let short: String = path
                     .file_stem()

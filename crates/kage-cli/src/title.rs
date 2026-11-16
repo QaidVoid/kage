@@ -24,6 +24,18 @@ const MAX_TITLE_CHARS: usize = 60;
 const TITLE_SYSTEM: &str = "You write terse conversation titles. Reply with ONLY the title: \
  at most 6 words, no quotes, no trailing punctuation, no preamble.";
 
+/// Whether `message` is a prompt the user typed, rather than a user
+/// message the engine added: a mode or goal note, agent reports, a
+/// recorded shell run or a compaction summary.
+pub(crate) fn typed_prompt(message: &Message) -> bool {
+    if message.role != Role::User || !kage_tui::events::typed_by_the_user(message) {
+        return false;
+    }
+    let text = crate::cli_loop_run::first_user_text(message);
+    kage_core::message::ShellRun::parse(&text).is_none()
+        && !text.starts_with(kage_core::message::COMPACTION_SUMMARY_PREFIX)
+}
+
 /// The user message a title is drawn from: the first prompt the user
 /// typed. What the engine adds as a user message says nothing about
 /// the session: a note such as the plan mode instructions a `/plan on`
@@ -32,15 +44,9 @@ const TITLE_SYSTEM: &str = "You write terse conversation titles. Reply with ONLY
 /// opened with a goal, falls back to its first user message.
 pub(crate) fn source_text(history: &[Arc<Message>]) -> String {
     let mut users = history.iter().filter(|m| m.role == Role::User);
-    let typed = |m: &&Arc<Message>| {
-        let text = crate::cli_loop_run::first_user_text(m);
-        kage_tui::events::typed_by_the_user(m)
-            && kage_core::message::ShellRun::parse(&text).is_none()
-            && !text.starts_with(kage_core::message::COMPACTION_SUMMARY_PREFIX)
-    };
     users
         .clone()
-        .find(typed)
+        .find(|m| typed_prompt(m))
         .or_else(|| users.next())
         .map(|m| crate::cli_loop_run::first_user_text(m))
         .unwrap_or_default()

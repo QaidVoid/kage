@@ -38,9 +38,12 @@ struct PromptEntry {
     active: bool,
 }
 
-/// Every user prompt in the branch tree of `path`, depth-first: a
-/// branch's descendants before its next sibling, siblings in file
-/// order, so the list reads oldest first with the active head last.
+/// Every prompt the user typed in the branch tree of `path`,
+/// depth-first: a branch's descendants before its next sibling,
+/// siblings in file order, so the list reads oldest first with the
+/// active head last. The user messages the engine adds, such as shell
+/// runs and mode notes, are not prompts: they belong to the turn
+/// before them.
 /// Depth counts the branch edges above a prompt, so every prompt on
 /// the original thread sits at `0` and a re-prompted branch indents
 /// one level under the thread it forked from. `active` marks exactly
@@ -52,7 +55,7 @@ fn prompt_tree(path: &std::path::Path) -> Result<Vec<PromptEntry>, kage_session:
     loop {
         if matches!(
             tree.entry(cursor),
-            Some(kage_session::SessionEntry::Message(m)) if m.message.role == Role::User
+            Some(kage_session::SessionEntry::Message(m)) if crate::title::typed_prompt(&m.message)
         ) {
             head = Some(cursor);
             break;
@@ -71,13 +74,13 @@ fn prompt_tree(path: &std::path::Path) -> Result<Vec<PromptEntry>, kage_session:
             natural.insert(node.parent, node.id);
         }
     }
-    let is_prompt = |id: EntryId| matches!(tree.entry(id), Some(kage_session::SessionEntry::Message(m)) if m.message.role == Role::User);
+    let is_prompt = |id: EntryId| matches!(tree.entry(id), Some(kage_session::SessionEntry::Message(m)) if crate::title::typed_prompt(&m.message));
     let mut found = Vec::new();
     for step in tree.walk() {
         let kage_session::SessionEntry::Message(message) = step.entry else {
             continue;
         };
-        if message.message.role != Role::User {
+        if !crate::title::typed_prompt(&message.message) {
             continue;
         }
         let mut depth = 0u32;
@@ -728,8 +731,6 @@ impl super::Dispatcher {
             session.pending_history.clear();
             session.queued.clear();
             kage_core::sync::lock(&session.inbox).clear();
-            session.gate.reset_session();
-            session.state.permission_mode = None;
             session.idle = Some(super::Idle {
                 cx,
                 recorder: idle.recorder,

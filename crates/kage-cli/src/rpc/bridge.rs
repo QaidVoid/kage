@@ -1,7 +1,7 @@
 //! Engine events as ACP traffic.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use kage_acp::acp::{
@@ -82,6 +82,8 @@ pub(super) struct Bridge {
     /// Whether the client is a kage client, which understands
     /// `_kage/session_replaced`.
     pub(super) kage_client: Arc<AtomicBool>,
+    /// The most transcript items the client shows, `0` for all of them.
+    pub(super) history_window: Arc<AtomicU32>,
     /// Announced subagents whose terminal state is not sent yet.
     pub(super) streaming: HashSet<SessionId>,
     /// Ended runs held back until their live subagents end.
@@ -714,7 +716,8 @@ impl Bridge {
         let replaced =
             SessionUpdate::SessionReplaced(kage_acp::acp::SessionReplacedUpdate { title });
         self.send(session, client_id, replaced);
-        for update in super::sessions::replay_updates(timeline) {
+        let window = self.history_window.load(Ordering::SeqCst);
+        for update in super::sessions::windowed_updates(timeline, window) {
             self.send(session, client_id, update);
         }
         // Reading the session's agent files is slow next to the bus, whose

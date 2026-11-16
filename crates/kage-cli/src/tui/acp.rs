@@ -413,6 +413,11 @@ const DETACHED: &str = "the kage agent stopped; this TUI is detached";
 /// longer maps, such as one left open past its eviction.
 const GONE_AGENT: &str = "that agent is gone";
 
+/// The most transcript items opening a session replays here: the same
+/// generous tail the engine path keeps (`2 * MAX_BLOCKS` messages), of
+/// which the buffer shows its last 512 blocks.
+const HISTORY_WINDOW: u32 = 1024;
+
 /// How many stderr bytes the child's last words are kept in, for the
 /// notice when it dies.
 const STDERR_TAIL: usize = 2000;
@@ -1373,6 +1378,9 @@ impl Pump {
                     // engine path of a default configuration.
                     unconfigured_tools: Some(UnconfiguredTools::Allow),
                     plugin_host: self.plugins.is_some(),
+                    // Opening a long session replays its latest items
+                    // only, about what the buffer keeps.
+                    history_window: Some(HISTORY_WINDOW),
                 }),
             }),
             // Subagents announce on their parent and stream on their

@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 
 use kage_acp::acp::{
     CompactionPhase, CompactionUpdate, ContentBlock, ListSessionsRequest, ListSessionsResponse,
-    McpServer, PromptRef, SessionConfigOption, SessionExportResponse, SessionForkRequest,
-    SessionForkResponse, SessionInfo, SessionInfoKage, SessionInfoMeta, SessionInfoUpdate,
-    SessionUpdate, SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate,
-    ToolCallStatus, ToolCallUpdate, TurnPhase, TurnReason, TurnUpdate,
+    McpServer, NoticeTone, NoticeUpdate, PromptRef, SessionConfigOption, SessionExportResponse,
+    SessionForkRequest, SessionForkResponse, SessionInfo, SessionInfoKage, SessionInfoMeta,
+    SessionInfoUpdate, SessionUpdate, SubagentSessionCapabilities, SubagentState, SubagentSwarm,
+    SubagentUpdate, ToolCallStatus, ToolCallUpdate, TurnPhase, TurnReason, TurnUpdate,
 };
 use kage_acp::agent::{PromptContext, send_update};
 use kage_core::protocol::{AgentNode, AgentState, AgentTree, SwarmMember, TimelineItem};
@@ -90,7 +90,9 @@ impl super::CliAcpAgent {
         if lock(&self.ids).by_engine.contains_key(&id) {
             if replay_file && let Some(ctx) = ctx {
                 let replay = replay_native(&path)?;
-                for update in replay_updates(&replay.timeline) {
+                for update in
+                    windowed_updates(&replay.timeline, self.history_window.load(Ordering::SeqCst))
+                {
                     let _ = ctx.update(update);
                 }
                 self.announce_restored(id, &replay, ctx);
@@ -115,9 +117,10 @@ impl super::CliAcpAgent {
         if replay_file && let Some(ctx) = ctx {
             // Nothing runs this session, so a call the file never closed
             // ended with the engine that made it.
-            for update in replay_updates(&replay.timeline)
-                .into_iter()
-                .chain(interrupted_calls(&replay.history))
+            for update in
+                windowed_updates(&replay.timeline, self.history_window.load(Ordering::SeqCst))
+                    .into_iter()
+                    .chain(interrupted_calls(&replay.history))
             {
                 let _ = ctx.update(update);
             }
@@ -201,7 +204,9 @@ impl super::CliAcpAgent {
     ) -> Result<Vec<SessionConfigOption>, RpcError> {
         if replay_file && let Some(ctx) = ctx {
             let replay = replay_native(path)?;
-            for update in replay_updates(&replay.timeline) {
+            for update in
+                windowed_updates(&replay.timeline, self.history_window.load(Ordering::SeqCst))
+            {
                 let _ = ctx.update(update);
             }
             self.announce_restored(replay.header.session, &replay, ctx);
@@ -418,6 +423,70 @@ fn restored_update(node: &AgentNode) -> SubagentUpdate {
     }
 }
 
+/// The tail of `timeline` a client showing at most `limit` items gets:
+/// the latest items, at most `limit` of them, never starting on a tool
+/// result, whose call would be left out. `0` means no limit. Returns
+/// the tail and how many prompts the user typed before it, which it
+/// leaves out with their replies.
+pub(super) fn window(timeline: &[TimelineItem], limit: u32) -> (&[TimelineItem], Option<usize>) {
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    if limit == 0 || timeline.len() <= limit {
+        return (timeline, None);
+    }
+    let floor = timeline.len() - limit;
+    let opens = |at: &usize| !matches!(&timeline[*at], TimelineItem::Message(m) if m.role == Role::ToolResult);
+    let start = (floor..timeline.len())
+        .find(opens)
+        .or_else(|| (0..floor).rev().find(opens))
+        .unwrap_or(0);
+    let prompts = timeline[..start]
+        .iter()
+        .filter(|item| matches!(item, TimelineItem::Message(m) if crate::title::typed_prompt(m)))
+        .count();
+    (&timeline[start..], Some(prompts))
+}
+
+/// The updates replaying `timeline` to a client showing at most `limit`
+/// items: the [`window`], after a notice saying what it leaves out.
+pub(super) fn windowed_updates(timeline: &[TimelineItem], limit: u32) -> Vec<SessionUpdate> {
+    let (tail, left_out) = window(timeline, limit);
+    // A tail that starts inside a run still ends it, timed from the
+    // prompt that opened it.
+    let opener = timeline[..timeline.len() - tail.len()]
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            TimelineItem::Message(m) if opens_run(m) => Some(m.as_ref()),
+            _ => None,
+        });
+    let mut updates = Vec::new();
+    if let Some(prompts) = left_out {
+        let text = match prompts {
+            0 => "the start of this conversation is not shown".to_owned(),
+            1 => "1 earlier prompt and its replies are not shown".to_owned(),
+            n => format!("{n} earlier prompts and their replies are not shown"),
+        };
+        updates.push(SessionUpdate::Notice(NoticeUpdate {
+            tone: NoticeTone::Info,
+            text,
+        }));
+    }
+    updates.extend(replay_updates(tail, opener));
+    updates
+}
+
+/// Whether `message` starts a run: a user message with words, an image
+/// or audio.
+fn opens_run(message: &Message) -> bool {
+    message.role == Role::User
+        && message.content.iter().any(|block| {
+            matches!(
+                block,
+                Content::Text { .. } | Content::Image { .. } | Content::Audio { .. }
+            )
+        })
+}
+
 /// The `session/update`s that show `timeline` as the live bridge showed
 /// it: user chunks, then each assistant block and tool result mapped
 /// through [`to_update`], and at each compaction a `_kage/compaction`
@@ -428,10 +497,16 @@ fn restored_update(node: &AgentNode) -> SubagentUpdate {
 /// each run that ended closes with a `_kage/turn` end saying when and
 /// how long. No `plan` update: the todo list lives in memory only, so
 /// a resumed session starts with an empty plan.
-pub(super) fn replay_updates(timeline: &[TimelineItem]) -> Vec<SessionUpdate> {
+///
+/// A `timeline` that starts inside a run names the prompt that opened it
+/// as `opener`, so the run still ends as it would in the whole replay.
+pub(super) fn replay_updates<'a>(
+    timeline: &'a [TimelineItem],
+    opener: Option<&'a Message>,
+) -> Vec<SessionUpdate> {
     let mut seen = HashMap::new();
     let mut called = HashMap::new();
-    let mut run: Option<(&Message, Option<&Message>)> = None;
+    let mut run: Option<(&Message, Option<&Message>)> = opener.map(|start| (start, None));
     let mut updates = Vec::new();
     for item in timeline {
         let message = match item {
@@ -464,14 +539,7 @@ pub(super) fn replay_updates(timeline: &[TimelineItem]) -> Vec<SessionUpdate> {
             }
             TimelineItem::Message(message) => message,
         };
-        let prompt = message.role == Role::User
-            && message.content.iter().any(|block| {
-                matches!(
-                    block,
-                    Content::Text { .. } | Content::Image { .. } | Content::Audio { .. }
-                )
-            });
-        if prompt {
+        if opens_run(message) {
             updates.extend(run.and_then(|(start, last)| run_end(start, last?)));
             run = Some((message, None));
         } else if let Some((_, last)) = &mut run {
@@ -905,7 +973,9 @@ mod tests {
     use kage_core::protocol::{CompactionRecord, TimelineItem};
     use kage_core::{Content, Message, Role, ToolCallId};
 
-    use super::{SessionUpdate, interrupted_calls, replay_updates};
+    use super::{
+        NoticeUpdate, SessionUpdate, interrupted_calls, replay_updates, window, windowed_updates,
+    };
 
     #[test]
     fn recorded_backend_guard_rejects_external_and_invalid_headers_without_identity() {
@@ -1015,7 +1085,7 @@ mod tests {
             vec![image, gone],
             None,
         )))];
-        let chunks: Vec<_> = replay_updates(&timeline)
+        let chunks: Vec<_> = replay_updates(&timeline, None)
             .into_iter()
             .filter_map(|update| match update {
                 SessionUpdate::AgentMessageChunk(chunk) => Some(chunk.content),
@@ -1060,7 +1130,7 @@ mod tests {
                 None,
             ))),
         ];
-        let updates = replay_updates(&timeline);
+        let updates = replay_updates(&timeline, None);
         assert!(
             !updates
                 .iter()
@@ -1096,7 +1166,7 @@ mod tests {
             }],
             None,
         )))];
-        let chunks: Vec<_> = replay_updates(&timeline)
+        let chunks: Vec<_> = replay_updates(&timeline, None)
             .into_iter()
             .filter_map(|update| match update {
                 SessionUpdate::AgentMessageChunk(chunk) => Some(chunk.content),
@@ -1122,7 +1192,7 @@ mod tests {
             }],
             None,
         )))];
-        let chunks: Vec<_> = replay_updates(&timeline)
+        let chunks: Vec<_> = replay_updates(&timeline, None)
             .into_iter()
             .filter_map(|update| match update {
                 SessionUpdate::UserMessageChunk(chunk) => Some(chunk.content),
@@ -1148,7 +1218,7 @@ mod tests {
             }],
             None,
         )))];
-        let chunks: Vec<_> = replay_updates(&timeline)
+        let chunks: Vec<_> = replay_updates(&timeline, None)
             .into_iter()
             .filter_map(|update| match update {
                 SessionUpdate::AgentMessageChunk(chunk) => Some(chunk.content),
@@ -1188,7 +1258,7 @@ mod tests {
                 None,
             ))),
         ];
-        let updates = replay_updates(&timeline);
+        let updates = replay_updates(&timeline, None);
         assert!(
             !updates
                 .iter()
@@ -1220,6 +1290,76 @@ mod tests {
             after: None,
             summary: "summary".to_owned(),
         })
+    }
+
+    #[test]
+    fn a_window_fills_its_budget_and_counts_the_prompts_it_left_out() {
+        let mut timeline = Vec::new();
+        for turn in 0..5 {
+            timeline.push(text(Role::User, &format!("prompt {turn}")));
+            timeline.push(text(Role::Assistant, "calling"));
+            timeline.push(text(Role::ToolResult, "result"));
+            timeline.push(text(Role::Assistant, "done"));
+        }
+        let (tail, left_out) = window(&timeline, 7);
+        assert_eq!(tail.len(), 7, "the end of a long turn, then the last turn");
+        assert!(matches!(&tail[0], TimelineItem::Message(m) if m.role == Role::Assistant));
+        assert_eq!(
+            left_out,
+            Some(4),
+            "the cut turn's prompt counts as left out"
+        );
+        let (tail, left_out) = window(&timeline, 6);
+        assert_eq!(
+            tail.len(),
+            5,
+            "a window never opens on a tool result, whose call is cut"
+        );
+        assert_eq!(left_out, Some(4));
+        assert_eq!(window(&timeline, 0).1, None, "0 is no limit");
+        assert_eq!(window(&timeline, 20).1, None, "a short timeline is whole");
+        let (tail, left_out) = window(&timeline, 2);
+        assert_eq!(tail.len(), 1);
+        assert_eq!(left_out, Some(5));
+
+        let updates = windowed_updates(&timeline, 6);
+        assert!(matches!(
+            &updates[0],
+            SessionUpdate::Notice(NoticeUpdate { text, .. })
+                if text == "4 earlier prompts and their replies are not shown"
+        ));
+        assert!(
+            !windowed_updates(&timeline, 0)
+                .iter()
+                .any(|update| matches!(update, SessionUpdate::Notice(_))),
+            "a whole replay says nothing"
+        );
+    }
+
+    #[test]
+    fn a_window_inside_the_last_run_still_ends_it() {
+        let timeline = vec![
+            text(Role::User, "go"),
+            text(Role::Assistant, "calling"),
+            text(Role::ToolResult, "result"),
+            text(Role::Assistant, "done"),
+        ];
+        let ends = |updates: &[SessionUpdate]| {
+            updates
+                .iter()
+                .filter(|update| {
+                    matches!(update, SessionUpdate::Turn(turn) if turn.phase == TurnPhase::End)
+                })
+                .count()
+        };
+        assert_eq!(ends(&replay_updates(&timeline, None)), 1);
+        let windowed = windowed_updates(&timeline, 2);
+        assert_eq!(ends(&windowed), 1, "the cut run still ends");
+        assert!(matches!(
+            &windowed[0],
+            SessionUpdate::Notice(NoticeUpdate { text, .. })
+                if text == "1 earlier prompt and its replies are not shown"
+        ));
     }
 
     fn text(role: Role, text: &str) -> TimelineItem {
@@ -1256,7 +1396,7 @@ mod tests {
             card(),
             text(Role::Assistant, "done"),
         ];
-        let updates = replay_updates(&timeline);
+        let updates = replay_updates(&timeline, None);
         let ends = updates
             .iter()
             .filter(|update| matches!(update, SessionUpdate::Turn(t) if t.phase == TurnPhase::End))
@@ -1285,7 +1425,7 @@ mod tests {
             card(),
             text(Role::User, "next"),
         ];
-        let updates = replay_updates(&timeline);
+        let updates = replay_updates(&timeline, None);
         let card_at = updates
             .iter()
             .position(|update| matches!(update, SessionUpdate::Compaction(_)))

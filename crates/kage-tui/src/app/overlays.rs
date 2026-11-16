@@ -908,7 +908,6 @@ impl App {
                 if let Some(path) = self.pending_tree_delete.take() {
                     if value.as_bool() == Some(true) {
                         let _ = self.send_request(RunRequest::DeleteSession(path));
-                        self.notify("session deleted");
                     }
                     return None;
                 }

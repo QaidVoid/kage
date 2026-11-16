@@ -7,7 +7,7 @@
 use serde_json::Value;
 
 use crate::frame::{RequestId, RpcError};
-use kage_acp_wire::{FsResult, ModelProvider, OptionEntry};
+use kage_acp_wire::{ContentBlock, FsResult, ModelProvider, OptionEntry, PastPrompt};
 
 /// The scopes and one-shot answers a handled frame produced.
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +87,36 @@ pub enum Change {
         from: String,
         /// The copy.
         to: String,
+    },
+    /// A `_kage/session/undo` answer arrived: the session's last prompt
+    /// and everything after it are gone. The conversation as it now
+    /// stands arrives as the session's replacement updates.
+    Undone {
+        /// The session that was undone.
+        session_id: String,
+        /// The dropped prompt, for the editor.
+        prompt: Vec<ContentBlock>,
+    },
+    /// A `_kage/session/prompts` answer arrived.
+    Prompts {
+        /// The session asked about.
+        session_id: String,
+        /// Every prompt of the session's branch tree, depth-first,
+        /// oldest first.
+        prompts: Vec<PastPrompt>,
+    },
+    /// A `_kage/session/rewind` answer arrived: the session continues
+    /// from the end of the picked prompt's turn. The conversation as it
+    /// now stands arrives as the session's replacement updates.
+    Rewound {
+        /// The session that was rewound.
+        session_id: String,
+    },
+    /// A `_kage/session/delete` answer arrived: the recorded session is
+    /// gone.
+    Deleted {
+        /// The deleted session.
+        session_id: String,
     },
     /// A `_kage/session/export` answer arrived. The Markdown is
     /// delivered here and not kept in state.
@@ -198,7 +228,12 @@ impl Change {
             | Self::AnsweredElsewhere { id, .. }
             | Self::Agents { id } => Some(id),
             Self::Unknown { session_id, .. } => session_id.as_deref(),
-            Self::Fs { session_id, .. } | Self::Exported { session_id, .. } => Some(session_id),
+            Self::Fs { session_id, .. }
+            | Self::Exported { session_id, .. }
+            | Self::Undone { session_id, .. }
+            | Self::Prompts { session_id, .. }
+            | Self::Rewound { session_id }
+            | Self::Deleted { session_id } => Some(session_id),
             Self::Forked { from, .. } => Some(from),
             Self::Connection
             | Self::Directory

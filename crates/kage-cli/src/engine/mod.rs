@@ -589,8 +589,8 @@ struct Session {
     /// Custom entries to append once the recorder is back, so a swarm
     /// mode toggle during a run is still persisted.
     pending_entries: Vec<kage_session::Custom>,
-    /// User shell commands still running.
-    shells: usize,
+    /// The user shell commands still running, by command line.
+    shells: Vec<String>,
     /// Program shell commands run with (`[shell] program`).
     shell: Option<String>,
     title: bool,
@@ -641,7 +641,7 @@ impl Session {
     fn sync_state(&mut self) {
         self.state.swarm = self.swarm_mode;
         self.state.plan = self.gate.plan();
-        self.state.shells = u32::try_from(self.shells).unwrap_or(u32::MAX);
+        self.state.shells = u32::try_from(self.shells.len()).unwrap_or(u32::MAX);
     }
 }
 
@@ -771,7 +771,7 @@ impl Dispatcher {
                 && self
                     .sessions
                     .values()
-                    .all(|s| s.idle.is_some() && s.shells == 0)
+                    .all(|s| s.idle.is_some() && s.shells.is_empty())
             {
                 return;
             }
@@ -863,7 +863,7 @@ impl Dispatcher {
                 workdir,
                 pending_history: Vec::new(),
                 pending_entries: Vec::new(),
-                shells: 0,
+                shells: Vec::new(),
                 title,
                 title_pending,
                 goal_met: false,
@@ -1020,7 +1020,7 @@ impl Dispatcher {
             // run its agents start, so only a run or a shell command
             // in flight takes it.
             CommandKind::Cancel
-                if self.sessions[&id].idle.is_none() || self.sessions[&id].shells > 0 =>
+                if self.sessions[&id].idle.is_none() || !self.sessions[&id].shells.is_empty() =>
             {
                 self.sessions[&id].cancel.cancel();
             }
@@ -1662,7 +1662,7 @@ impl Dispatcher {
         session.idle = Some(Idle { cx, recorder });
         record_late_title(&self.bus, id, session);
         session.usage = usage;
-        session.state.working = session.shells > 0;
+        session.state.working = !session.shells.is_empty();
         // A set flag on an idle session would cancel any run its agents
         // start, through the tree.
         session.cancel.reset();
@@ -1875,7 +1875,7 @@ impl Dispatcher {
             && session.queued.is_empty()
             && session.pending_history.is_empty()
             && session.pending_entries.is_empty()
-            && session.shells == 0
+            && session.shells.is_empty()
             && session.late_title.is_none()
             && !self.swarm_requeues.contains_key(&id)
             && !self.waiting.contains(&id)
@@ -2514,7 +2514,7 @@ fn flush_pending(bus: &Bus, id: SessionId, session: &mut Session) {
 /// Clear the working flag of an idle session once no shell command runs
 /// any more, and publish the change.
 fn settle_working(bus: &Bus, id: SessionId, session: &mut Session) {
-    let working = session.idle.is_none() || session.shells > 0;
+    let working = session.idle.is_none() || !session.shells.is_empty();
     session.state.working = working;
     session.sync_state();
     let state = session.state.clone();

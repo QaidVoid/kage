@@ -15,14 +15,15 @@ use serde_json::Value;
 use kage_acp_wire::{
     CancelNotification, ClientCapabilities, CloseSessionRequest, CompactionPhase, ConfigGetRequest,
     ContentBlock, FsOp, FsRequest, Implementation, InitializeRequest, KageMeta,
-    ListSessionsRequest, LoadSessionRequest, McpServer, ModelsResponse, NewSessionKage,
-    NewSessionMeta, NewSessionRequest, OptionSetRequest, OptionsResponse, PROTOCOL_VERSION,
-    PermissionOptionKind, PermissionOutcome, PlanReview, PromptDelivery, PromptRef, PromptRequest,
-    PromptResponse, QuestionMeta, RequestMeta, RequestPermissionRequest, RequestPermissionResult,
-    ResumeSessionRequest, SelectedOption, SessionExportResponse, SessionForkRequest,
-    SessionForkResponse, SessionNotification, SessionRenameRequest, SessionRequest, SessionUpdate,
-    SetSessionConfigOptionRequest, SubagentState, SwarmResumeRequest, UiCommandRequest,
-    UiDialogRequest, UiKeymapRequest, UiSnapshot, UiUpdate,
+    ListSessionsRequest, LoadSessionRequest, McpRestartRequest, McpServer, ModelsResponse,
+    NewSessionKage, NewSessionMeta, NewSessionRequest, OptionSetRequest, OptionsResponse,
+    PROTOCOL_VERSION, PermissionOptionKind, PermissionOutcome, PlanReview, PromptDelivery,
+    PromptRef, PromptRequest, PromptResponse, QuestionMeta, RequestMeta, RequestPermissionRequest,
+    RequestPermissionResult, ResumeSessionRequest, SelectedOption, SessionExportResponse,
+    SessionForkRequest, SessionForkResponse, SessionNotification, SessionPromptsResponse,
+    SessionRenameRequest, SessionRequest, SessionRewindRequest, SessionUndoResponse, SessionUpdate,
+    SetSessionConfigOptionRequest, ShellRequest, SubagentState, SwarmResumeRequest,
+    UiCommandRequest, UiDialogRequest, UiKeymapRequest, UiSnapshot, UiUpdate,
 };
 
 use crate::change::Change;
@@ -149,6 +150,21 @@ enum Pending {
     Fork {
         session_id: String,
     },
+    Undo {
+        session_id: String,
+    },
+    Prompts {
+        session_id: String,
+    },
+    Rewind {
+        session_id: String,
+    },
+    Delete {
+        session_id: String,
+    },
+    /// A request whose success moves nothing: what it starts reports
+    /// through the session's updates.
+    Started,
     Export {
         session_id: String,
     },
@@ -976,20 +992,110 @@ impl Client {
         )
     }
 
-    /// Copies `session_id` into a new recorded session, whole or up to
-    /// the prompt `before` names. The copy's id arrives as
+    /// Copies `session_id` into a new recorded session: up to the
+    /// prompt `before` names, else through the entry whose id starts
+    /// with `at`, else whole. The copy's id arrives as
     /// [`Change::Forked`]; the copy is not opened.
-    pub fn fork_session(&mut self, session_id: &str, before: Option<PromptRef>) -> u64 {
+    pub fn fork_session(
+        &mut self,
+        session_id: &str,
+        before: Option<PromptRef>,
+        at: Option<String>,
+    ) -> u64 {
         self.request(
             "_kage/session/fork",
             params(&SessionForkRequest {
                 session_id: session_id.to_owned(),
                 before,
-                at: None,
+                at,
             }),
             Pending::Fork {
                 session_id: session_id.to_owned(),
             },
+        )
+    }
+
+    /// Runs the user shell command `command` in `session_id`. Its
+    /// progress arrives as the session's shell updates.
+    pub fn shell(&mut self, session_id: &str, command: &str) -> u64 {
+        self.request(
+            "_kage/shell",
+            params(&ShellRequest {
+                session_id: session_id.to_owned(),
+                command: command.to_owned(),
+            }),
+            Pending::Started,
+        )
+    }
+
+    /// Drops the last prompt of `session_id` and everything after it.
+    /// The dropped prompt arrives as [`Change::Undone`].
+    pub fn undo_session(&mut self, session_id: &str) -> u64 {
+        self.request(
+            "_kage/session/undo",
+            params(&SessionRequest {
+                session_id: session_id.to_owned(),
+            }),
+            Pending::Undo {
+                session_id: session_id.to_owned(),
+            },
+        )
+    }
+
+    /// Asks for every prompt of `session_id` it can be rewound to. The
+    /// list arrives as [`Change::Prompts`].
+    pub fn session_prompts(&mut self, session_id: &str) -> u64 {
+        self.request(
+            "_kage/session/prompts",
+            params(&SessionRequest {
+                session_id: session_id.to_owned(),
+            }),
+            Pending::Prompts {
+                session_id: session_id.to_owned(),
+            },
+        )
+    }
+
+    /// Continues `session_id` from the end of the turn of the prompt
+    /// `at` names, an `at` from [`Change::Prompts`]. The answer arrives
+    /// as [`Change::Rewound`].
+    pub fn rewind_session(&mut self, session_id: &str, at: &str) -> u64 {
+        self.request(
+            "_kage/session/rewind",
+            params(&SessionRewindRequest {
+                session_id: session_id.to_owned(),
+                at: at.to_owned(),
+            }),
+            Pending::Rewind {
+                session_id: session_id.to_owned(),
+            },
+        )
+    }
+
+    /// Deletes the recorded `session_id`, which must not be in use. The
+    /// answer arrives as [`Change::Deleted`].
+    pub fn delete_session(&mut self, session_id: &str) -> u64 {
+        self.request(
+            "_kage/session/delete",
+            params(&SessionRequest {
+                session_id: session_id.to_owned(),
+            }),
+            Pending::Delete {
+                session_id: session_id.to_owned(),
+            },
+        )
+    }
+
+    /// Restarts the MCP server `server` of `session_id`. Its state
+    /// arrives as the session's MCP status updates.
+    pub fn restart_mcp(&mut self, session_id: &str, server: &str) -> u64 {
+        self.request(
+            "_kage/mcp/restart",
+            params(&McpRestartRequest {
+                session_id: session_id.to_owned(),
+                server: server.to_owned(),
+            }),
+            Pending::Started,
         )
     }
 
@@ -1460,24 +1566,13 @@ impl Client {
             | Pending::Rename { session_id } => {
                 vec![Change::Session { id: session_id }]
             }
-            Pending::Fork { session_id } => {
-                match answer::<SessionForkResponse>(id, result, "_kage/session/fork result") {
-                    Err(failed) => failed,
-                    Ok(fork) => vec![Change::Forked {
-                        from: session_id,
-                        to: fork.session_id,
-                    }],
-                }
-            }
-            Pending::Export { session_id } => {
-                match answer::<SessionExportResponse>(id, result, "_kage/session/export result") {
-                    Err(failed) => failed,
-                    Ok(export) => vec![Change::Exported {
-                        session_id,
-                        markdown: export.markdown,
-                    }],
-                }
-            }
+            pending @ (Pending::Started
+            | Pending::Undo { .. }
+            | Pending::Prompts { .. }
+            | Pending::Rewind { .. }
+            | Pending::Delete { .. }
+            | Pending::Fork { .. }
+            | Pending::Export { .. }) => session_op_answer(id, pending, result),
             Pending::Fs { session_id } => {
                 match answer::<kage_acp_wire::FsResult>(id, result, "_kage/fs result") {
                     Err(failed) => failed,
@@ -2098,6 +2193,54 @@ fn apply_update_fields(ui: &mut PluginUi, update: &UiUpdate) {
 /// caller's input.
 fn params<T: serde::Serialize>(value: &T) -> Value {
     serde_json::to_value(value).expect("wire type serializes")
+}
+
+/// Lands the answer to a session operation: the change it makes, or
+/// the failure of a malformed answer.
+fn session_op_answer(id: u64, pending: Pending, result: Value) -> Vec<Change> {
+    match pending {
+        Pending::Undo { session_id } => {
+            match answer::<SessionUndoResponse>(id, result, "_kage/session/undo result") {
+                Err(failed) => failed,
+                Ok(undone) => vec![Change::Undone {
+                    session_id,
+                    prompt: undone.prompt,
+                }],
+            }
+        }
+        Pending::Prompts { session_id } => {
+            match answer::<SessionPromptsResponse>(id, result, "_kage/session/prompts result") {
+                Err(failed) => failed,
+                Ok(listed) => vec![Change::Prompts {
+                    session_id,
+                    prompts: listed.prompts,
+                }],
+            }
+        }
+        Pending::Rewind { session_id } => vec![Change::Rewound { session_id }],
+        Pending::Delete { session_id } => vec![Change::Deleted { session_id }],
+        Pending::Fork { session_id } => {
+            match answer::<SessionForkResponse>(id, result, "_kage/session/fork result") {
+                Err(failed) => failed,
+                Ok(fork) => vec![Change::Forked {
+                    from: session_id,
+                    to: fork.session_id,
+                }],
+            }
+        }
+        Pending::Export { session_id } => {
+            match answer::<SessionExportResponse>(id, result, "_kage/session/export result") {
+                Err(failed) => failed,
+                Ok(export) => vec![Change::Exported {
+                    session_id,
+                    markdown: export.markdown,
+                }],
+            }
+        }
+        // A shell command or MCP restart answers nothing: what it
+        // started reports through the session's updates.
+        _ => Vec::new(),
+    }
 }
 
 /// The change a settings answer makes: a config snapshot, a provider

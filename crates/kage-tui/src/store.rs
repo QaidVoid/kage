@@ -210,6 +210,17 @@ fn apply_update(buf: &mut Buffer, update: &SessionUpdate) {
             );
         }
         SessionUpdate::Plan(plan) => push_plan(buf, &plan.entries),
+        SessionUpdate::Shell(shell) if shell.finished => crate::events::finish_shell(
+            buf,
+            &shell.command,
+            shell.output.as_deref().unwrap_or_default(),
+            shell.exit_code,
+        ),
+        SessionUpdate::Shell(shell) => crate::events::show_running_shell(
+            buf,
+            &shell.command,
+            shell.tail.as_deref().unwrap_or_default(),
+        ),
         SessionUpdate::Turn(turn) if turn.phase == TurnPhase::End => {
             buf.finish_streaming();
         }
@@ -569,6 +580,22 @@ mod tests {
             Some((2, 2)),
             "the strip shows the latest plan"
         );
+    }
+
+    #[test]
+    fn a_replayed_shell_run_shows_as_its_shell_block() {
+        let mut store = Store::new();
+        let run = kage_core::message::ShellRun {
+            command: "ls".to_owned(),
+            exit_code: Some(0),
+            output: "a".to_owned(),
+        };
+        store.absorb(update(
+            "s1",
+            "user_message_chunk",
+            &json!({"content": {"type": "text", "text": run.to_text()}}),
+        ));
+        assert_eq!(kinds(&lock(&store.shared_buffer("s1"))), ["kage:shell"]);
     }
 
     #[test]

@@ -1416,7 +1416,7 @@ fn a_fork_names_its_prompt_by_text_and_occurrence() {
     );
     assert_eq!(session.prompt_ref(last + 1), None);
 
-    let id = client.fork_session("s1", Some(before));
+    let id = client.fork_session("s1", Some(before), None);
     let outgoing = client.take_outgoing();
     let Frame::Request { method, params, .. } = &outgoing[0] else {
         panic!("a fork is a request: {outgoing:?}");

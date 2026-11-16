@@ -417,10 +417,19 @@ fn image_to_anthropic(source: &kage_core::MediaSource, mime: &str) -> Value {
             "type":"image",
             "source": {"type":"url", "url": url},
         }),
-        kage_core::MediaSource::Base64 { data } => serde_json::json!({
-            "type":"image",
-            "source": {"type":"base64", "media_type": mime, "data": data},
-        }),
+        // The type the bytes are, never the declared one, which the API
+        // refuses when it differs. Bytes in no format it takes would be
+        // refused too, so a line says what was left out instead.
+        kage_core::MediaSource::Base64 { data } => match source.sniffed_image_mime() {
+            Some(media_type) => serde_json::json!({
+                "type":"image",
+                "source": {"type":"base64", "media_type": media_type, "data": data},
+            }),
+            None => serde_json::json!({
+                "type": "text",
+                "text": kage_core::image::unsupported_image_note(mime),
+            }),
+        },
         kage_core::MediaSource::Blob { .. } => serde_json::json!({
             "type": "text",
             "text": source.missing_note(mime),

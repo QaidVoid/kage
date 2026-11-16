@@ -517,13 +517,19 @@ fn image_to_openai(source: &kage_core::MediaSource, mime: &str) -> Value {
             "type": "image_url",
             "image_url": {"url": url},
         }),
-        kage_core::MediaSource::Base64 { data } => {
-            let mime = if mime.is_empty() { "image/png" } else { mime };
-            serde_json::json!({
+        // The type the bytes are, never the declared one. Bytes in no
+        // format the API takes would be refused, so a line says what was
+        // left out instead.
+        kage_core::MediaSource::Base64 { data } => match source.sniffed_image_mime() {
+            Some(media_type) => serde_json::json!({
                 "type": "image_url",
-                "image_url": {"url": format!("data:{mime};base64,{data}")},
-            })
-        }
+                "image_url": {"url": format!("data:{media_type};base64,{data}")},
+            }),
+            None => serde_json::json!({
+                "type": "text",
+                "text": kage_core::image::unsupported_image_note(mime),
+            }),
+        },
         kage_core::MediaSource::Blob { .. } => serde_json::json!({
             "type": "text",
             "text": source.missing_note(mime),
@@ -2046,11 +2052,12 @@ data: [DONE]\n\n";
         assert!(OpenAiProvider::new("k").models().is_empty());
     }
 
-    fn image_content(mime: &str) -> Content {
+    /// A PNG's signature and the start of its header chunk, as base64.
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUg==";
+
+    fn image_content(data: &str, mime: &str) -> Content {
         Content::Image {
-            source: kage_core::MediaSource::Base64 {
-                data: "QUJD".into(),
-            },
+            source: kage_core::MediaSource::Base64 { data: data.into() },
             mime: mime.to_owned(),
         }
     }
@@ -2063,21 +2070,32 @@ data: [DONE]\n\n";
             .to_owned()
     }
 
+    /// The API refuses a picture whose declared type is not what its bytes
+    /// are, so the bytes decide, whatever was declared or left out.
     #[test]
-    fn base64_images_forward_their_mime() {
+    fn base64_images_are_sent_as_the_type_their_bytes_are() {
         assert_eq!(
-            data_url(&[image_content("image/jpeg")]),
-            "data:image/jpeg;base64,QUJD"
+            data_url(&[image_content(PNG, "image/webp")]),
+            format!("data:image/png;base64,{PNG}")
         );
         assert_eq!(
-            data_url(&[image_content("image/webp")]),
-            "data:image/webp;base64,QUJD"
+            data_url(&[image_content(PNG, "")]),
+            format!("data:image/png;base64,{PNG}")
+        );
+        assert_eq!(
+            data_url(&[image_content("/9j/4A==", "image/png")]),
+            "data:image/jpeg;base64,/9j/4A=="
         );
     }
 
+    /// Bytes in no format the API takes would be refused on every turn
+    /// after, so a line says what was left out instead.
     #[test]
-    fn base64_images_without_a_mime_fall_back_to_png() {
-        assert_eq!(data_url(&[image_content("")]), "data:image/png;base64,QUJD");
+    fn base64_images_in_no_format_the_api_takes_become_a_note() {
+        let block = convert_user_blocks(&[image_content("AAAAHGZ0eXBhdmlm", "image/avif")], false)
+            .remove(0);
+        assert_eq!(block["type"], "text");
+        assert!(block["text"].as_str().unwrap().contains("image/avif"));
     }
 
     #[test]

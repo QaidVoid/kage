@@ -15,6 +15,7 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
+base64.workspace = true
 chrono.workspace = true
 crossbeam-channel.workspace = true
 dirs.workspace = true

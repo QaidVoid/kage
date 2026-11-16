@@ -216,21 +216,28 @@ pub enum MediaSource {
 }
 
 impl MediaSource {
-    /// The picture format inline bytes are, read from the bytes: PNG,
-    /// JPEG, GIF or WebP. Nothing for a link, a missing blob, or bytes that
-    /// are none of these.
+    /// The type inline bytes are, as `sniff` (such as
+    /// [`crate::image::sniff_mime`]) reads it from the head of their
+    /// standard or URL-safe base64. Nothing for a link, a missing blob, or
+    /// bytes `sniff` does not know.
     ///
-    /// A declared type is only a sender's claim. A model refuses a picture
+    /// A declared type is only a sender's claim. A model refuses media
     /// whose declared type is not what its bytes are, and a session that
-    /// holds one would be refused on every turn after, so the bytes decide
-    /// wherever a picture is sent. Read when a request is built, so a
-    /// history that already holds a mislabelled picture recovers.
+    /// holds some would be refused on every turn after, so the bytes decide
+    /// wherever media is sent. Read when a request is built, so a history
+    /// that already holds mislabelled media recovers.
     #[must_use]
-    pub fn sniffed_image_mime(&self) -> Option<&'static str> {
-        match self {
-            Self::Base64 { data } => crate::image::sniff_base64(data),
-            Self::Url { .. } | Self::Blob { .. } => None,
-        }
+    pub fn sniff(&self, sniff: fn(&[u8]) -> Option<&'static str>) -> Option<&'static str> {
+        use base64::Engine as _;
+        let Self::Base64 { data } = self else {
+            return None;
+        };
+        let head = &data.as_bytes()[..data.len().min(24) / 4 * 4];
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(head)
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(head))
+            .ok()?;
+        sniff(&bytes)
     }
 
     /// The text that stands in for media whose bytes are gone: a
@@ -632,6 +639,29 @@ mod tests {
             Some("<thinking>\nwhy\n</thinking>")
         );
         assert_eq!(Content::flattened_thinking("  "), None);
+    }
+
+    #[test]
+    fn inline_bytes_are_named_from_their_head() {
+        let inline = |data: &str| MediaSource::Base64 { data: data.into() };
+        let image = |data: &str| inline(data).sniff(crate::image::sniff_mime);
+        assert_eq!(image("iVBORw0KGgoAAAANSUhEUg=="), Some("image/png"));
+        assert_eq!(image("/9j/4A=="), Some("image/jpeg"));
+        assert_eq!(image("_9j_4A=="), Some("image/jpeg"));
+        assert_eq!(image("UklGRgAAAABXRUJQVlA4IA=="), Some("image/webp"));
+        assert_eq!(image("AAAAHGZ0eXBhdmlm"), None);
+        assert_eq!(image("iVBO"), None);
+        assert_eq!(image("not base64 at all!"), None);
+        assert_eq!(image(""), None);
+        assert_eq!(image("a\u{e9}\u{e9}"), None);
+        assert_eq!(
+            inline("T2dnUwACAAAAAAAA").sniff(crate::audio::sniff_any_mime),
+            Some("audio/ogg")
+        );
+        let link = MediaSource::Url {
+            url: "https://example.com/a.png".into(),
+        };
+        assert_eq!(link.sniff(crate::image::sniff_mime), None);
     }
 
     #[test]

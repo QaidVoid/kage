@@ -395,9 +395,10 @@ fn internal_message_to_openai(
     }
 }
 
-/// A user message's blocks as content parts. With `audio`, an MP3 or WAV
-/// clip goes as `input_audio`, the only formats Chat Completions takes;
-/// otherwise, and for any other clip, as a short note.
+/// A user message's blocks as content parts. With `audio`, a clip whose
+/// bytes are MP3 or WAV goes as `input_audio` under that format, the only
+/// ones Chat Completions takes; otherwise, and for any other clip, as a
+/// short note.
 fn convert_user_blocks(blocks: &[Content], audio: bool) -> Vec<Value> {
     blocks
         .iter()
@@ -405,7 +406,10 @@ fn convert_user_blocks(blocks: &[Content], audio: bool) -> Vec<Value> {
             Content::Text { text } => Some(serde_json::json!({"type":"text","text":text})),
             Content::Image { source, mime } => Some(image_to_openai(source, mime)),
             Content::Audio { source, mime } => {
-                Some(match (source, kage_core::audio::extension_for(mime)) {
+                let format = source
+                    .sniff(kage_core::audio::sniff_mime)
+                    .and_then(kage_core::audio::extension_for);
+                Some(match (source, format) {
                     (kage_core::MediaSource::Base64 { data }, Some(format)) if audio => {
                         serde_json::json!({
                             "type": "input_audio",
@@ -520,7 +524,8 @@ fn image_to_openai(source: &kage_core::MediaSource, mime: &str) -> Value {
         // The type the bytes are, never the declared one. Bytes in no
         // format the API takes would be refused, so a line says what was
         // left out instead.
-        kage_core::MediaSource::Base64 { data } => match source.sniffed_image_mime() {
+        kage_core::MediaSource::Base64 { data } => match source.sniff(kage_core::image::sniff_mime)
+        {
             Some(media_type) => serde_json::json!({
                 "type": "image_url",
                 "image_url": {"url": format!("data:{media_type};base64,{data}")},
@@ -1124,15 +1129,17 @@ mod tests {
         );
     }
 
-    /// A model that hears gets the user's MP3 or WAV clip as
-    /// `input_audio`; a clip of another type, and the model's own and its
+    /// A model that hears gets the user's clip as `input_audio` under the
+    /// format its bytes are, MP3 or WAV, whatever type was declared. A clip
+    /// of another format or of unknown bytes, and the model's own and its
     /// tools' clips, still go as notes.
     #[test]
     fn a_model_that_hears_gets_the_users_clip_as_input_audio() {
-        let clip = |mime: &str| Content::Audio {
-            source: kage_core::MediaSource::Base64 {
-                data: "QUJD".into(),
-            },
+        const MP3: &str = "SUQzBAAAAAAAAAAA";
+        const WAV: &str = "UklGRgAAAABXQVZFZm10IA==";
+        const OGG: &str = "T2dnUwACAAAAAAAA";
+        let clip = |data: &str, mime: &str| Content::Audio {
+            source: kage_core::MediaSource::Base64 { data: data.into() },
             mime: mime.into(),
         };
         let mut req = StreamRequest::new(
@@ -1140,12 +1147,17 @@ mod tests {
             vec![
                 Arc::new(Message::new(
                     Role::User,
-                    vec![clip("audio/mpeg"), clip("audio/wav"), clip("audio/ogg")],
+                    vec![
+                        clip(MP3, "audio/mpeg"),
+                        clip(WAV, "audio/mpeg"),
+                        clip(OGG, "audio/ogg"),
+                        clip("QUJD", "audio/wav"),
+                    ],
                     None,
                 )),
                 Arc::new(Message::new(
                     Role::Assistant,
-                    vec![clip("audio/mpeg")],
+                    vec![clip(MP3, "audio/mpeg")],
                     None,
                 )),
             ],
@@ -1156,12 +1168,16 @@ mod tests {
         let user = &body["messages"][0]["content"];
         assert_eq!(
             user[0],
-            serde_json::json!({"type": "input_audio", "input_audio": {"data": "QUJD", "format": "mp3"}})
+            serde_json::json!({"type": "input_audio", "input_audio": {"data": MP3, "format": "mp3"}})
         );
         assert_eq!(user[1]["input_audio"]["format"], "wav");
         assert_eq!(
             user[2],
             serde_json::json!({"type": "text", "text": Content::audio_note("audio/ogg")})
+        );
+        assert_eq!(
+            user[3],
+            serde_json::json!({"type": "text", "text": Content::audio_note("audio/wav")})
         );
         assert_eq!(
             body["messages"][1]["content"],

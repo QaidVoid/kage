@@ -5,14 +5,32 @@
 //! file extension, a `Content-Type`) is never trusted where these can
 //! answer instead.
 
-/// Sniff a provider-supported audio MIME from the leading bytes.
+/// Sniff a provider-supported audio MIME from the leading bytes: MP3 or
+/// WAV, which every provider that hears takes.
 /// `None` for anything else (callers reject it rather than guess).
 #[must_use]
 pub fn sniff_mime(bytes: &[u8]) -> Option<&'static str> {
+    sniff_any_mime(bytes).filter(|mime| matches!(*mime, "audio/mpeg" | "audio/wav"))
+}
+
+/// Sniff any audio MIME kage recognises from the leading bytes: those
+/// [`sniff_mime`] knows, and OGG, FLAC, AIFF and ADTS AAC, which only
+/// some providers take.
+#[must_use]
+pub fn sniff_any_mime(bytes: &[u8]) -> Option<&'static str> {
+    let at = |range: std::ops::Range<usize>| bytes.get(range);
     if bytes.starts_with(b"ID3") || is_mpeg_frame(bytes) {
         Some("audio/mpeg")
-    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
+    } else if at(0..4) == Some(b"RIFF") && at(8..12) == Some(b"WAVE") {
         Some("audio/wav")
+    } else if bytes.starts_with(b"OggS") {
+        Some("audio/ogg")
+    } else if bytes.starts_with(b"fLaC") {
+        Some("audio/flac")
+    } else if at(0..4) == Some(b"FORM") && matches!(at(8..12), Some(b"AIFF" | b"AIFC")) {
+        Some("audio/aiff")
+    } else if is_adts_frame(bytes) {
+        Some("audio/aac")
     } else {
         None
     }
@@ -48,6 +66,12 @@ fn is_mpeg_frame(bytes: &[u8]) -> bool {
         && (b2 >> 2) & 0b11 != 0b11
 }
 
+/// Whether the bytes begin with an ADTS AAC frame header: the sync, then
+/// layer `00`, which an MPEG audio frame never has.
+fn is_adts_frame(bytes: &[u8]) -> bool {
+    matches!(bytes, [0xFF, b1, ..] if b1 & 0xF6 == 0xF0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,6 +102,27 @@ mod tests {
         let webp = b"RIFF\0\0\0\0WEBPVP8 ";
         assert_eq!(sniff_mime(webp), None);
         assert_eq!(crate::image::sniff_mime(webp), Some("image/webp"));
+    }
+
+    #[test]
+    fn sniffs_the_formats_only_some_providers_take() {
+        let samples: [(&[u8], &str); 5] = [
+            (b"OggS\x00\x02\x00\x00", "audio/ogg"),
+            (b"fLaC\x00\x00\x00\x22", "audio/flac"),
+            (b"FORM\0\0\0\0AIFFCOMM", "audio/aiff"),
+            (b"FORM\0\0\0\0AIFCFVER", "audio/aiff"),
+            (&[0xFF, 0xF1, 0x50, 0x80], "audio/aac"),
+        ];
+        for (bytes, mime) in samples {
+            assert_eq!(sniff_any_mime(bytes), Some(mime), "{mime}");
+            assert_eq!(sniff_mime(bytes), None, "{mime}");
+        }
+        assert_eq!(
+            sniff_any_mime(&[0xFF, 0xFB, 0x90, 0x64]),
+            Some("audio/mpeg")
+        );
+        assert_eq!(sniff_any_mime(&[0xFF, 0xD8, 0xFF, 0xE0]), None);
+        assert_eq!(sniff_any_mime(b"FORM\0\0\0\0ILBM"), None);
     }
 
     #[test]

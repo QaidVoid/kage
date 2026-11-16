@@ -7060,6 +7060,51 @@ fn undo_returns_the_prompt_and_replaces_the_session_for_every_client() {
     );
 }
 
+#[test]
+fn a_whole_fork_of_an_undone_session_copies_the_branch_it_is_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = dir.path();
+    let source = two_turns(sessions);
+    let h = serve(vec![text_turn("again")], sessions, sessions);
+    let params = serde_json::json!({"sessionId": source, "cwd": sessions, "mcpServers": []});
+    h.client.request("session/resume", params).unwrap();
+    h.client
+        .request(
+            "_kage/session/undo",
+            serde_json::json!({"sessionId": source}),
+        )
+        .unwrap();
+    let history = |fork: serde_json::Value| {
+        let copy = kage_session::find_by_prefix(sessions, fork["sessionId"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        kage_session::replay(&copy).unwrap().history.len()
+    };
+    let whole = h
+        .client
+        .request(
+            "_kage/session/fork",
+            serde_json::json!({"sessionId": source}),
+        )
+        .expect("the branch marker the undo appended is not a fork point");
+    assert_eq!(history(whole), 2);
+
+    h.client
+        .request(
+            "session/prompt",
+            serde_json::json!({"sessionId": source, "prompt": [{"type": "text", "text": "third"}]}),
+        )
+        .unwrap();
+    let before = h
+        .client
+        .request(
+            "_kage/session/fork",
+            serde_json::json!({"sessionId": source, "before": {"text": "third", "occurrence": 0}}),
+        )
+        .expect("the prompt after the marker is counted on the live branch only");
+    assert_eq!(history(before), 2);
+}
+
 /// Initializes `c` as a kage client, which understands kage-only updates.
 fn as_kage_client(c: &Connection) {
     let params = serde_json::json!({

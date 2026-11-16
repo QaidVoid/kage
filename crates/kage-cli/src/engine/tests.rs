@@ -838,6 +838,59 @@ fn undo_branches_the_session_in_place_and_returns_its_prompt() {
 }
 
 #[test]
+fn undo_skips_engine_notes_and_keeps_the_permission_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::replaying(text_turn("reply")));
+    let (id, path) = recorded_exchanges(&h, dir.path(), 2);
+    h.engine.send(Command::to(
+        id,
+        CommandKind::Shell {
+            command: "echo from-shell".into(),
+        },
+    ));
+    wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::ShellFinished { .. }))
+    });
+    wait_for(&h.events, |e| state_of(e).is_some_and(|s| s.shells == 0));
+    h.engine.send(Command::to(
+        id,
+        CommandKind::SetPermissionMode {
+            mode: Some(PermissionAction::Allow),
+        },
+    ));
+    wait_for(&h.events, |e| {
+        state_of(e).is_some_and(|s| s.permission_mode == Some(PermissionAction::Allow))
+    });
+
+    h.engine.send(Command::to(id, CommandKind::Undo));
+    let seen = wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::Undone { .. }))
+    });
+    let undone = seen.iter().find_map(|e| match &e.event {
+        Event::Host(HostEvent::Undone { prompt }) => prompt.clone(),
+        _ => None,
+    });
+    assert_eq!(
+        undone.as_deref().and_then(<[Content]>::first),
+        Some(&Content::Text {
+            text: "round 1".into()
+        }),
+        "the shell run is not a prompt"
+    );
+    assert_eq!(
+        kage_session::replay(&path).unwrap().history.len(),
+        2,
+        "the shell run went with round 1's turn"
+    );
+    let mode = seen
+        .iter()
+        .rev()
+        .find_map(state_of)
+        .map(|state| state.permission_mode);
+    assert_eq!(mode, Some(Some(PermissionAction::Allow)));
+}
+
+#[test]
 fn undo_and_rewind_navigate_the_branch_tree() {
     fn text(prompt: &kage_core::protocol::PastPrompt) -> &str {
         match &prompt.prompt[0] {

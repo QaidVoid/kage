@@ -235,6 +235,10 @@ pub(super) struct Live {
     /// declines it. A new ask on a clientless session starts its
     /// own window.
     orphaned: HashMap<SessionId, Instant>,
+    /// The open asks an expired window already handed out to be
+    /// declined. A session can be orphaned again before the engine
+    /// closes them, and a second window must not hand them out again.
+    handed: HashSet<RequestId>,
 }
 
 impl Live {
@@ -259,10 +263,10 @@ impl Live {
             .filter(|(root, since)| {
                 now.duration_since(**since) >= cap
                     && !self.attached.contains_key(root)
-                    && self
-                        .asks
-                        .values()
-                        .any(|ask| self.tree.root_of(ask.session) == **root)
+                    && self.asks.values().any(|ask| {
+                        self.tree.root_of(ask.session) == **root
+                            && !self.handed.contains(&ask.request_id)
+                    })
             })
             .map(|(root, _)| *root)
             .collect()
@@ -275,7 +279,11 @@ impl Live {
     pub(super) fn take_expired_asks(&mut self, cap: Duration) -> Vec<AskRef> {
         let mut taken = Vec::new();
         for root in self.expired_ask_roots(cap) {
-            taken.extend(self.asks_under(root));
+            let asks = self.asks_under(root);
+            taken.extend(
+                asks.into_iter()
+                    .filter(|ask| self.handed.insert(ask.request_id)),
+            );
             self.orphaned.remove(&root);
         }
         taken
@@ -313,6 +321,7 @@ impl Live {
             attached: HashMap::new(),
             closing: HashSet::new(),
             orphaned: HashMap::new(),
+            handed: HashSet::new(),
         }
     }
 
@@ -422,6 +431,7 @@ impl Live {
             HostEvent::PermissionResolved { request_id }
             | HostEvent::QuestionClosed { request_id } => {
                 self.asks.remove(request_id);
+                self.handed.remove(request_id);
                 if !is_agent {
                     self.maybe_close(session);
                 }

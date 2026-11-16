@@ -473,7 +473,7 @@ fn convert_user_parts(blocks: &[Content], audio: bool) -> Vec<Value> {
         .filter_map(|c| match c {
             Content::Text { text } => Some(serde_json::json!({"text": text})),
             Content::Image { source, mime } => Some(image_part(source, mime)),
-            Content::Audio { source, mime } if audio => Some(media_part(source, mime)),
+            Content::Audio { source, mime } if audio => Some(audio_part(source, mime)),
             Content::Audio { mime, .. } => {
                 Some(serde_json::json!({"text": Content::audio_note(mime)}))
             }
@@ -596,7 +596,7 @@ fn tool_name_from_call_id<'a>(id: &'a ToolCallId, declared: &'a [ToolSpec]) -> &
 /// keep their declared type. Inline bytes in any other format would be
 /// refused on every turn after, so a line says what was left out instead.
 fn image_part(source: &kage_core::MediaSource, mime: &str) -> Value {
-    if let Some(media_type) = source.sniffed_image_mime() {
+    if let Some(media_type) = source.sniff(kage_core::image::sniff_mime) {
         return media_part(source, media_type);
     }
     let inline = matches!(source, kage_core::MediaSource::Base64 { .. });
@@ -606,6 +606,19 @@ fn image_part(source: &kage_core::MediaSource, mime: &str) -> Value {
         });
     }
     media_part(source, mime)
+}
+
+/// A clip as a part, under the type its bytes are rather than the one
+/// declared. Inline bytes in no format kage recognises go as the clip's
+/// note, since Gemini would refuse them on every turn after.
+fn audio_part(source: &kage_core::MediaSource, mime: &str) -> Value {
+    match source.sniff(kage_core::audio::sniff_any_mime) {
+        Some(media_type) => media_part(source, media_type),
+        None if matches!(source, kage_core::MediaSource::Base64 { .. }) => {
+            serde_json::json!({"text": Content::audio_note(mime)})
+        }
+        None => media_part(source, mime),
+    }
 }
 
 /// An image or clip as a part: its bytes inline, a link as file data,
@@ -1555,31 +1568,47 @@ mod tests {
         );
     }
 
-    /// A model that hears gets the user's clip inline; its own clip
-    /// still goes as a note.
+    /// A model that hears gets the user's clip inline under the type its
+    /// bytes are, whatever type was declared, and a clip of unknown bytes
+    /// as its note. Its own clip still goes as a note.
     #[test]
     fn a_model_that_hears_gets_the_users_clip_inline() {
-        let audio = || kage_core::Content::Audio {
-            source: kage_core::MediaSource::Base64 {
-                data: "QUJD".into(),
-            },
-            mime: "audio/mpeg".into(),
+        const MP3: &str = "SUQzBAAAAAAAAAAA";
+        const OGG: &str = "T2dnUwACAAAAAAAA";
+        let clip = |data: &str, mime: &str| kage_core::Content::Audio {
+            source: kage_core::MediaSource::Base64 { data: data.into() },
+            mime: mime.into(),
         };
         let mut req = StreamRequest::new(
             "gemini-2.5-pro",
             vec![
-                Arc::new(Message::new(Role::User, vec![audio()], None)),
-                Arc::new(Message::new(Role::Assistant, vec![audio()], None)),
+                Arc::new(Message::new(
+                    Role::User,
+                    vec![
+                        clip(MP3, "audio/wav"),
+                        clip(OGG, "audio/ogg"),
+                        clip("QUJD", "audio/mpeg"),
+                    ],
+                    None,
+                )),
+                Arc::new(Message::new(
+                    Role::Assistant,
+                    vec![clip(MP3, "audio/mpeg")],
+                    None,
+                )),
             ],
         );
         req.accepts =
             kage_core::Modalities::of(&[kage_core::Modality::Text, kage_core::Modality::Audio]);
         let body = build_request_body(&req);
         let contents = body["contents"].as_array().unwrap();
+        let user = &contents[0]["parts"];
         assert_eq!(
-            contents[0]["parts"][0],
-            serde_json::json!({"inlineData": {"mimeType": "audio/mpeg", "data": "QUJD"}})
+            user[0],
+            serde_json::json!({"inlineData": {"mimeType": "audio/mpeg", "data": MP3}})
         );
+        assert_eq!(user[1]["inlineData"]["mimeType"], "audio/ogg");
+        assert_eq!(user[2]["text"], Content::audio_note("audio/mpeg"));
         assert_eq!(
             contents[1]["parts"][0]["text"],
             Content::produced_media_note("audio/mpeg")

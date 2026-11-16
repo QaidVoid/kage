@@ -503,7 +503,8 @@ fn image_part(source: &kage_core::MediaSource, mime: &str) -> Value {
         // The type the bytes are, never the declared one. Bytes in no
         // format the API takes would be refused, so a line says what was
         // left out instead.
-        kage_core::MediaSource::Base64 { data } => match source.sniffed_image_mime() {
+        kage_core::MediaSource::Base64 { data } => match source.sniff(kage_core::image::sniff_mime)
+        {
             Some(media_type) => serde_json::json!({
                 "type": "input_image",
                 "image_url": format!("data:{media_type};base64,{data}"),

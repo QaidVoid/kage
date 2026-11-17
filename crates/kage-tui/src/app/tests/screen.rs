@@ -301,6 +301,32 @@ fn start_sessions_are_listed_on_session_changes_only() {
 }
 
 #[test]
+fn a_session_change_during_the_startup_scan_lists_once_it_is_done() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (mut app, _rx, _events) = app_with_events();
+    app.set_session_lister(Box::new(|_| vec![PickItem::simple("fresh")]));
+    app.set_start_info(view::StartInfo::default());
+    let warmed = Arc::new(AtomicBool::new(false));
+    app.set_sessions_warmed(Arc::clone(&warmed));
+    let (tx, rx) = mpsc::channel();
+    app.set_start_sessions(rx);
+
+    app.on_session_changed();
+    assert!(!app.drain_start_sessions(), "the scan is still running");
+    assert!(app.start_info.as_ref().unwrap().sessions.is_empty());
+
+    assert!(
+        tx.send(vec![PickItem::simple("scanned")]).is_err(),
+        "the change is newer than the scan's result, which is dropped"
+    );
+    warmed.store(true, Ordering::Release);
+    assert!(app.drain_start_sessions());
+    assert_eq!(app.start_info.as_ref().unwrap().sessions[0].value, "fresh");
+    assert!(!app.drain_start_sessions(), "listed once");
+}
+
+#[test]
 fn the_startup_session_scan_fills_the_start_card_when_it_lands() {
     let (mut app, _rx, _events) = app_with_events();
     let (tx, rx) = mpsc::channel();

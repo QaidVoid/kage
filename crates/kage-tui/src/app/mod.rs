@@ -341,6 +341,16 @@ pub enum RunRequest {
     },
 }
 
+/// What the start card's recent sessions wait for while the startup
+/// session scan runs.
+enum StartSessions {
+    /// The scan's result, on its way.
+    Scan(std::sync::mpsc::Receiver<Vec<crate::picker::PickItem>>),
+    /// A session changed meanwhile: listed again once the scan is
+    /// done, newer than its result.
+    Relist,
+}
+
 /// Outcome of [`App::run`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AppExit {
@@ -724,10 +734,14 @@ pub struct App {
     /// Provider of resumable sessions for the session picker. None
     /// disables the picker (Ctrl+S is a no-op).
     session_lister: Option<SessionLister>,
-    /// The host's startup session scan, still running on its own
-    /// thread while the first frames paint. One delivery fills the
-    /// start card's recent sessions.
-    start_sessions: Option<std::sync::mpsc::Receiver<Vec<crate::picker::PickItem>>>,
+    /// Set once the host's startup session scan has warmed the cache
+    /// the lister reads. Until then a listing would walk every session
+    /// file on this thread, so early callers defer instead.
+    sessions_warmed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The start card's recent sessions while the host's startup
+    /// session scan still runs on its own thread, as the first frames
+    /// paint. `None` once they are listed.
+    start_sessions: Option<StartSessions>,
     /// Open `:` command line, if any. While present it owns key input
     /// and paints over the footer row.
     cmdline: Option<CommandLine>,

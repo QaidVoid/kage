@@ -244,6 +244,12 @@ impl App {
         if !self.plugin_sessions_stale {
             return;
         }
+        // The startup scan holds the session cache until it has read
+        // every session file; listing now would block a frame on it.
+        // Stay stale and retry on a later pass instead.
+        if !self.sessions_warmed() {
+            return;
+        }
         self.plugin_sessions_stale = false;
         let Some(slot) = self.plugin_session_list.as_ref() else {
             return;

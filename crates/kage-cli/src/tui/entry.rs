@@ -200,6 +200,16 @@ impl Frontend {
     }
 }
 
+/// Sets its flag when dropped: the startup scan is done, or panicked,
+/// and the App's listings need not wait on it any more.
+struct Warmed(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for Warmed {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// Give the App the recorded sessions of `workdir` for its start card,
 /// picker and tree, and a loader for agent transcripts beside the
 /// session file `mirror` points at. Child transcripts are recorded
@@ -220,13 +230,16 @@ fn wire_sessions(
         let scan_dir = dir.clone();
         let scan_workdir = workdir.to_path_buf();
         let scan_cache = Arc::clone(&sessions_cache);
+        let scan_warmed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let warmed = Warmed(Arc::clone(&scan_warmed));
         thread::spawn(move || {
-            let _ = sessions_tx.send(list_session_choices(
-                &scan_dir,
-                &scan_workdir,
-                false,
-                &mut lock(&scan_cache),
-            ));
+            // The scan holds the shared cache, so a picker opened
+            // meanwhile waits for it rather than reading every file
+            // again; the App defers its own listings until `warmed`.
+            let choices =
+                list_session_choices(&scan_dir, &scan_workdir, false, &mut lock(&scan_cache));
+            drop(warmed);
+            let _ = sessions_tx.send(choices);
         });
         let tree_dir = dir.clone();
         let tree_mirror = Arc::clone(mirror);
@@ -238,6 +251,7 @@ fn wire_sessions(
             list_session_nodes(&tree_dir, lock(&tree_mirror).path())
         }));
         app.set_start_sessions(sessions_rx);
+        app.set_sessions_warmed(scan_warmed);
     }
     let loader_mirror = Arc::clone(mirror);
     let loader_children = Arc::clone(child_files);

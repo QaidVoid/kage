@@ -13,6 +13,7 @@
 //! transported by ordinary file copy.
 
 pub mod blobs;
+pub mod catalog;
 pub mod entry;
 pub mod error;
 pub mod external_replay;
@@ -25,6 +26,7 @@ pub mod tree;
 pub mod writer;
 
 pub use blobs::BlobStore;
+pub use catalog::CATALOG_FILE;
 pub use entry::{
     BranchEntry, Compaction, Custom, EntryId, ExternalAcpSession, FORMAT_VERSION, Header, Label,
     MessageEntry, ModelChange, SessionBackend, SessionEntry, SessionId, SessionTitle,

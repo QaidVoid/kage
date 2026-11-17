@@ -2169,6 +2169,30 @@ fn record_as(
         parent_session: None,
         parent_entry: None,
     };
+    record_header(dir, header, entries)
+}
+
+/// [`record`] with its header naming `parent`: an agent `parent`
+/// started, or a fork of `parent`.
+fn record_agent(dir: &Path, parent: SessionId, entries: &[SessionEntry]) -> String {
+    let header = Header {
+        version: FORMAT_VERSION,
+        session: SessionId::new(),
+        id: EntryId::new(),
+        ts: chrono::Utc::now(),
+        cwd: "/p".into(),
+        model: "mock/m".into(),
+        backend: None,
+        system_prompt: String::new(),
+        parent_session: Some(parent),
+        parent_entry: None,
+    };
+    record_header(dir, header, entries)
+}
+
+/// Writes a session file of `header` and `entries` into `dir`.
+fn record_header(dir: &Path, header: Header, entries: &[SessionEntry]) -> String {
+    let session = header.session;
     let path = dir.join(format!("{session}.jsonl"));
     let mut writer = SessionWriter::create(&path, header).unwrap();
     for entry in entries {
@@ -2244,6 +2268,7 @@ fn listed(client: &Peer, params: serde_json::Value) -> (Vec<String>, serde_json:
 fn session_list_hides_agents_filters_by_cwd_and_orders_newest_first() {
     let dir = tempfile::tempdir().unwrap();
     let sessions = dir.path();
+    let parent = SessionId::new();
     let title = SessionEntry::Title(kage_session::SessionTitle {
         id: EntryId::new(),
         ts: chrono::Utc::now() - chrono::Duration::minutes(1),
@@ -2253,11 +2278,11 @@ fn session_list_hides_agents_filters_by_cwd_and_orders_newest_first() {
         id: EntryId::new(),
         ts: chrono::Utc::now(),
         kind: kage_session::list::AGENT_ENTRY_KIND.into(),
-        data: serde_json::json!({ "agent": "explore" }),
+        data: serde_json::json!({ "parent": parent.to_string(), "agent": "explore" }),
     });
     let recent = record(sessions, "/p", "mock/m", 30, &[title]);
     let old = record(sessions, "/p", "mock/m", 10, &[]);
-    record(sessions, "/p", "mock/m", 0, &[marker]);
+    record_agent(sessions, parent, &[marker]);
     let elsewhere = record(sessions, "/q", "mock/m", 5, &[]);
     let h = serve(Vec::new(), sessions, sessions);
 
@@ -2279,6 +2304,26 @@ fn session_list_hides_agents_filters_by_cwd_and_orders_newest_first() {
     assert!(next.is_null());
     let (ids, _) = listed(&h.client, serde_json::json!({}));
     assert_eq!(ids, [recent, elsewhere, old]);
+}
+
+#[test]
+fn session_list_shows_a_fork_of_an_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = dir.path();
+    let (root, agent) = (SessionId::new(), SessionId::new());
+    // The agent's marker, copied with its history, names the session
+    // that started the agent, not the fork's source.
+    let copied = SessionEntry::Custom(kage_session::Custom {
+        id: EntryId::new(),
+        ts: chrono::Utc::now(),
+        kind: kage_session::list::AGENT_ENTRY_KIND.into(),
+        data: serde_json::json!({ "parent": root.to_string(), "agent": "explore" }),
+    });
+    let fork = record_agent(sessions, agent, &[copied]);
+    let h = serve(Vec::new(), sessions, sessions);
+
+    let (ids, _) = listed(&h.client, serde_json::json!({}));
+    assert_eq!(ids, [fork]);
 }
 
 #[test]
@@ -6847,8 +6892,8 @@ fn an_interrupted_swarm_gets_its_members_back_from_their_files() {
         }],
         None,
     );
-    record(dir.path(), "/p", "mock/m", 0, &[member(0), reply]);
-    record(dir.path(), "/p", "mock/m", 0, &[member(1), busy]);
+    record_agent(dir.path(), root, &[member(0), reply]);
+    record_agent(dir.path(), root, &[member(1), busy]);
     let history = vec![Message::new(
         Role::Assistant,
         vec![Content::ToolCall {
@@ -6882,6 +6927,73 @@ fn an_interrupted_swarm_gets_its_members_back_from_their_files() {
 }
 
 #[test]
+fn an_interrupted_agent_is_found_by_its_own_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = SessionId::new();
+    let root_path = dir.path().join(format!("{root}.jsonl"));
+    let agents = kage_session::layout::agents_dir(&root_path);
+    std::fs::create_dir_all(&agents).unwrap();
+    let marker = |parent: &str, call: &str| {
+        SessionEntry::Custom(kage_session::Custom {
+            id: EntryId::new(),
+            ts: chrono::Utc::now(),
+            kind: kage_session::list::AGENT_ENTRY_KIND.into(),
+            data: serde_json::json!({
+                "parent": parent,
+                "tool_call_id": call,
+                "agent": "general",
+                "description": "audit",
+            }),
+        })
+    };
+    let said = |text: &str| message(Role::User, vec![Content::Text { text: text.into() }], None);
+    let outer = record_agent(&agents, root, &[marker(&root.to_string(), "call_a")]);
+    // An agent the outer agent started with its context: the outer
+    // agent's marker is copied first.
+    record_agent(
+        &agents,
+        SessionId(ulid::Ulid::from_string(&outer).unwrap()),
+        &[
+            marker(&root.to_string(), "call_a"),
+            said("copied"),
+            marker(&outer, "call_n"),
+        ],
+    );
+    // An agent the root started with its context, its marker past the
+    // copied history.
+    let forked = record_agent(
+        &agents,
+        root,
+        &[
+            said("one"),
+            said("two"),
+            said("three"),
+            said("four"),
+            marker(&root.to_string(), "call_f"),
+        ],
+    );
+    let call = |id: &str| Content::ToolCall {
+        id: kage_core::ToolCallId::new(id),
+        name: "agent".into(),
+        input: serde_json::json!({}),
+    };
+    let history = [Arc::new(Message::new(
+        Role::Assistant,
+        vec![call("call_a"), call("call_f")],
+        None,
+    ))];
+    let mut found: Vec<_> = super::sessions::orphaned_agents(&root_path, root, &history)
+        .into_iter()
+        .map(|m| (m.tool_call_id.unwrap_or_default(), m.subagent_session_id))
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        [("call_a".to_owned(), outer), ("call_f".to_owned(), forked)]
+    );
+}
+
+#[test]
 fn an_interrupted_agent_is_found_in_its_agents_directory_only() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("p-0123456789");
@@ -6902,8 +7014,8 @@ fn an_interrupted_agent_is_found_in_its_agents_directory_only() {
             }),
         })
     };
-    let nested = record(&agents, "/p", "mock/m", 0, &[marker("call_a")]);
-    record(&project, "/p", "mock/m", 0, &[marker("call_b")]);
+    let nested = record_agent(&agents, root, &[marker("call_a")]);
+    record_agent(&project, root, &[marker("call_b")]);
     let call = |id: &str| Content::ToolCall {
         id: kage_core::ToolCallId::new(id),
         name: "agent".into(),

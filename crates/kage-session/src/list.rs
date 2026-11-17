@@ -33,11 +33,10 @@ use crate::error::SessionError;
 pub const AGENT_ENTRY_KIND: &str = "kage:agent";
 
 /// Whether the session file at `path` records an agent an `agent` or
-/// `swarm` call started: it carries an [`AGENT_ENTRY_KIND`] entry,
-/// right after the header, or after the history a forked child
-/// copied. The catalog answers when its row for the file is current;
-/// otherwise only the file's custom entry lines are decoded. An
-/// unreadable file is not one.
+/// `swarm` call started: it carries that call's [`AGENT_ENTRY_KIND`]
+/// entry, as [`agent_marker`] reads it. The catalog answers when its
+/// row for the file is current; otherwise only the file's header and
+/// custom entry lines are decoded. An unreadable file is not one.
 #[must_use]
 pub fn is_agent_session(path: &Path) -> bool {
     let cataloged = || {
@@ -53,56 +52,51 @@ pub fn is_agent_session(path: &Path) -> bool {
 
 /// The one session-identity predicate. `Some` names the agent
 /// definition when a session file records an `agent` or `swarm` call
-/// start: its [`AGENT_ENTRY_KIND`] entry, wherever the entry sits,
-/// late in a forked child's copied history included. `None` when the
-/// file records a user session or cannot be read. The summary,
-/// [`is_agent_session`] and `find_last` all read identity through
-/// this one scan.
+/// start, as [`agent_marker`] reads it. `None` when the file records a
+/// user session or cannot be read. The summary, [`is_agent_session`]
+/// and `find_last` all read identity through this one scan.
 pub(crate) fn agent_session_name(path: &Path) -> Option<String> {
-    agent_markers(path)?.next().map(|custom| {
-        custom
-            .data
-            .get("agent")
+    agent_marker(path).map(|data| {
+        data.get("agent")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_owned()
     })
 }
 
-/// Whether the session file at `path` records an agent `parent`
-/// started: a marker naming `parent`, not only one its history copied
-/// from another agent, as a fork of an agent carries.
-pub(crate) fn is_agent_of(path: &Path, parent: SessionId) -> bool {
-    let parent = parent.to_string();
-    agent_markers(path).is_some_and(|mut markers| {
-        markers.any(|custom| {
-            custom
-                .data
-                .get("parent")
-                .and_then(serde_json::Value::as_str)
-                == Some(&parent)
-        })
-    })
-}
-
-/// The agent markers of the session file at `path`, in file order.
-/// `None` when the file cannot be opened.
-fn agent_markers(path: &Path) -> Option<impl Iterator<Item = crate::Custom>> {
+/// The data of the [`AGENT_ENTRY_KIND`] entry the call that started the
+/// session at `path` wrote: the one naming the session the header names
+/// as parent. It sits right after the header, or after the history a
+/// forked child copied. A fork copies its source's markers, which name
+/// another session, so a fork of an agent records none and is a user
+/// session. `None` too when the file cannot be read.
+#[must_use]
+pub fn agent_marker(path: &Path) -> Option<serde_json::Value> {
     let file = File::open(path).ok()?;
+    let mut lines = BufReader::new(file).split(b'\n').map_while(Result::ok);
+    let parent = match serde_json::from_slice(&lines.next()?) {
+        Ok(SessionEntry::Header(header)) => header.parent_session?.to_string(),
+        _ => return None,
+    };
     // A foreign or hand-edited file can reorder keys or add spacing,
     // so the scan prefilters on the quoted kind alone and decodes only
     // the lines that carry it.
     let needle = format!("\"{AGENT_ENTRY_KIND}\"").into_bytes();
-    Some(
-        BufReader::new(file)
-            .split(b'\n')
-            .map_while(Result::ok)
-            .filter(move |line| line.windows(needle.len()).any(|at| at == needle.as_slice()))
-            .filter_map(|line| match serde_json::from_slice::<SessionEntry>(&line) {
-                Ok(SessionEntry::Custom(custom)) if is_agent_marker(&custom) => Some(custom),
-                _ => None,
-            }),
-    )
+    lines
+        .filter(|line| line.windows(needle.len()).any(|at| at == needle.as_slice()))
+        .find_map(|line| match serde_json::from_slice::<SessionEntry>(&line) {
+            Ok(SessionEntry::Custom(custom))
+                if is_agent_marker(&custom)
+                    && custom
+                        .data
+                        .get("parent")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(parent.as_str()) =>
+            {
+                Some(custom.data)
+            }
+            _ => None,
+        })
 }
 
 /// Whether one custom entry marks the session an `agent` or `swarm`
@@ -316,7 +310,7 @@ impl SessionCache {
     }
 
     /// Seeds the memo from the legacy JSON index older builds wrote,
-    /// reporting whether it held anything. A missing, unreadable or
+    /// reporting whether it was read. A missing, unreadable or
     /// other-version index seeds nothing.
     fn import_legacy_index(&mut self, dir: &Path) -> bool {
         let Ok(bytes) = std::fs::read(dir.join(LEGACY_INDEX_FILE)) else {
@@ -328,13 +322,19 @@ impl SessionCache {
         if index.version != LEGACY_INDEX_VERSION {
             return false;
         }
-        for entry in index.entries {
+        // An index row read an agent from any marker, which a fork of an
+        // agent copies, so its agent rows are read again.
+        for entry in index
+            .entries
+            .into_iter()
+            .filter(|e| e.summary.agent.is_none())
+        {
             self.by_path.insert(
                 entry.summary.path.clone(),
                 (entry.size, entry.modified, entry.summary),
             );
         }
-        !self.by_path.is_empty()
+        true
     }
 }
 
@@ -815,6 +815,25 @@ mod tests {
     }
 
     #[test]
+    fn a_legacy_index_row_of_an_agent_is_read_again() {
+        let dir = tempdir().unwrap();
+        let path = write_session(dir.path(), "fork.jsonl", "ask one");
+        let meta = std::fs::metadata(&path).unwrap();
+        let mut summary = summarize_one(&path).unwrap();
+        // What an older build recorded for a fork of an agent.
+        summary.agent = Some("explore".to_owned());
+        let index = serde_json::json!({
+            "version": LEGACY_INDEX_VERSION,
+            "entries": [{"size": meta.len(), "modified": meta.modified().unwrap(), "summary": summary}],
+        });
+        let legacy = dir.path().join(LEGACY_INDEX_FILE);
+        std::fs::write(&legacy, serde_json::to_vec(&index).unwrap()).unwrap();
+
+        assert_eq!(list(dir.path()).unwrap()[0].agent, None);
+        assert!(!legacy.exists(), "the import removes the old index");
+    }
+
+    #[test]
     fn a_corrupt_catalog_is_rebuilt() {
         let dir = tempdir().unwrap();
         write_session(dir.path(), "a.jsonl", "ask one");
@@ -1057,6 +1076,7 @@ mod tests {
 
     fn write_agent_session(dir: &Path, name: &str, first_is_agent: bool) -> PathBuf {
         let path = dir.join(name);
+        let parent = SessionId::new();
         let header = Header {
             version: FORMAT_VERSION,
             session: SessionId::new(),
@@ -1065,7 +1085,7 @@ mod tests {
             cwd: PathBuf::from("/work"),
             model: "anthropic:claude".into(),
             system_prompt: "explore".into(),
-            parent_session: Some(SessionId::new()),
+            parent_session: Some(parent),
             backend: None,
             parent_entry: None,
         };
@@ -1073,7 +1093,11 @@ mod tests {
             id: EntryId::new(),
             ts: Utc::now(),
             kind: AGENT_ENTRY_KIND.into(),
-            data: serde_json::json!({ "agent": "explore", "description": "map exports" }),
+            data: serde_json::json!({
+                "parent": parent.to_string(),
+                "agent": "explore",
+                "description": "map exports",
+            }),
         });
         let title = SessionEntry::Title(crate::SessionTitle {
             id: EntryId::new(),
@@ -1136,6 +1160,7 @@ mod tests {
     fn a_fork_child_s_late_marker_names_its_agent_and_marks_the_session() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("forked.jsonl");
+        let parent = SessionId::new();
         let header = Header {
             version: FORMAT_VERSION,
             session: SessionId::new(),
@@ -1144,7 +1169,7 @@ mod tests {
             cwd: PathBuf::from("/work"),
             model: "anthropic:claude".into(),
             system_prompt: "explore".into(),
-            parent_session: Some(SessionId::new()),
+            parent_session: Some(parent),
             backend: None,
             parent_entry: None,
         };
@@ -1152,7 +1177,11 @@ mod tests {
             id: EntryId::new(),
             ts: Utc::now(),
             kind: AGENT_ENTRY_KIND.into(),
-            data: serde_json::json!({ "agent": "explore", "description": "map exports" }),
+            data: serde_json::json!({
+                "parent": parent.to_string(),
+                "agent": "explore",
+                "description": "map exports",
+            }),
         });
         let mut writer = SessionWriter::create(&path, header).unwrap();
         // The shape a forked child is written in: the copied history
@@ -1323,8 +1352,52 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_forked_from_an_agent_is_named_by_its_own_marker() {
+        let dir = tempdir().unwrap();
+        let root = SessionId::new();
+        let outer = SessionId::new();
+        let header = Header {
+            version: FORMAT_VERSION,
+            session: SessionId::new(),
+            id: EntryId::new(),
+            ts: Utc::now(),
+            cwd: PathBuf::from("/work"),
+            model: "anthropic:claude".into(),
+            system_prompt: "general".into(),
+            parent_session: Some(outer),
+            backend: None,
+            parent_entry: None,
+        };
+        let marker = |parent: SessionId, agent: &str| {
+            SessionEntry::Custom(Custom {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                kind: AGENT_ENTRY_KIND.into(),
+                data: serde_json::json!({ "parent": parent.to_string(), "agent": agent }),
+            })
+        };
+        let path = dir.path().join("nested.jsonl");
+        let mut writer = SessionWriter::create(&path, header).unwrap();
+        // The outer agent's history, its marker included, then this
+        // agent's own marker.
+        writer.append(&marker(root, "explore")).unwrap();
+        writer
+            .append(&message(Role::User, text("copied ask")))
+            .unwrap();
+        writer.append(&marker(outer, "general")).unwrap();
+        drop(writer);
+
+        assert_eq!(agent_session_name(&path).as_deref(), Some("general"));
+        assert_eq!(
+            agent_marker(&path).unwrap()["parent"],
+            outer.to_string().as_str()
+        );
+    }
+
+    #[test]
     fn a_marker_with_reordered_keys_or_spaces_still_names_the_agent() {
         let dir = tempdir().unwrap();
+        let parent = SessionId::new();
         let header = Header {
             version: FORMAT_VERSION,
             session: SessionId::new(),
@@ -1333,17 +1406,17 @@ mod tests {
             cwd: PathBuf::from("/work"),
             model: "anthropic:claude".into(),
             system_prompt: "explore".into(),
-            parent_session: Some(SessionId::new()),
+            parent_session: Some(parent),
             backend: None,
             parent_entry: None,
         };
         let ts = serde_json::to_string(&Utc::now()).unwrap();
         let id = serde_json::to_string(&EntryId::new()).unwrap();
         let reordered = format!(
-            "{{\"data\":{{\"agent\":\"reordered\"}},\"kind\":\"kage:agent\",\"ts\":{ts},\"id\":{id},\"type\":\"custom\"}}\n"
+            "{{\"data\":{{\"agent\":\"reordered\",\"parent\":\"{parent}\"}},\"kind\":\"kage:agent\",\"ts\":{ts},\"id\":{id},\"type\":\"custom\"}}\n"
         );
         let spaced = format!(
-            "{{\"type\": \"custom\", \"id\": {id}, \"ts\": {ts}, \"kind\": \"kage:agent\", \"data\": {{\"agent\": \"spaced\"}}}}\n"
+            "{{\"type\": \"custom\", \"id\": {id}, \"ts\": {ts}, \"kind\": \"kage:agent\", \"data\": {{ \"parent\" : \"{parent}\", \"agent\": \"spaced\"}}}}\n"
         );
 
         for (name, raw, agent) in [

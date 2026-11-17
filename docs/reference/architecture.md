@@ -502,10 +502,14 @@ Tool calls and results are not separate entries: they ride inside
 `thinking_level_change`, `model_change`, `label`, `title`, and the
 plugin-defined `custom`.
 
-An agent's file sits next to its parent's. Its header's
-`parent_session` names the parent, and its first entry is a `custom`
-entry of kind `kage:agent` with the parent, the `agent` call id, the
-agent name and the task description, followed by a `title` entry.
+An agent's header's `parent_session` names the session whose call
+started it, and a `custom` entry of kind `kage:agent` names the same
+session, with the `agent` call id, the agent name and the task
+description. The entry comes right after the header, followed by a
+`title` entry, or after the history an agent given its parent's context
+copied. A fork copies its source's lines, those entries included, but
+its header names the source, so only an entry naming the header's
+parent makes a file an agent, and a fork of an agent is a user session.
 Session listings read that entry to hide agent files from `kage list`
 and the pickers, and `/tree` shows them under their parent.
 

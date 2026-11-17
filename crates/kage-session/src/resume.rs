@@ -72,9 +72,6 @@ pub struct ReplayResult {
     /// Latest plan mode recorded by a `kage:plan_mode` custom entry, or
     /// `None` if the session never toggled it.
     pub plan_mode: Option<bool>,
-    /// Whether the file carries a `kage:agent` marker: it records an
-    /// agent an `agent` or `swarm` call started, not a user's session.
-    pub agent: bool,
     /// The conversation as the user saw it, oldest first: every
     /// message in order with each compaction as a card at the point
     /// it ran, carrying the counts and tokens the file records. A
@@ -203,7 +200,6 @@ pub fn replay_tree(path: &Path, tree: SessionTree) -> Result<ReplayResult, Sessi
     let mut thinking_level: Option<String> = None;
     let mut title: Option<String> = None;
     let mut swarm_mode: Option<bool> = None;
-    let mut agent = false;
     let mut plan_mode: Option<bool> = None;
     let mut history: Vec<Arc<Message>> = Vec::new();
     let mut compacted_agents: Vec<Arc<Message>> = Vec::new();
@@ -272,10 +268,7 @@ pub fn replay_tree(path: &Path, tree: SessionTree) -> Result<ReplayResult, Sessi
             SessionEntry::ModelChange(mc) => model = kage_core::canonical_model(&mc.model),
             SessionEntry::ThinkingLevelChange(t) => thinking_level = Some(t.level),
             SessionEntry::Title(t) => title = Some(t.title),
-            SessionEntry::Custom(c) => {
-                agent |= crate::list::is_agent_marker(&c);
-                read_mode(&c, &mut swarm_mode, &mut plan_mode);
-            }
+            SessionEntry::Custom(c) => read_mode(&c, &mut swarm_mode, &mut plan_mode),
         }
     }
     Ok(ReplayResult {
@@ -289,7 +282,6 @@ pub fn replay_tree(path: &Path, tree: SessionTree) -> Result<ReplayResult, Sessi
         title,
         swarm_mode,
         plan_mode,
-        agent,
         timeline,
     })
 }
@@ -1312,15 +1304,18 @@ mod tests {
     fn find_last_skips_agent_sessions() {
         let dir = tempdir().unwrap();
         let main = dir.path().join("a.jsonl");
+        let parent = SessionId::new();
+        let mut agent = fresh_header();
+        agent.parent_session = Some(parent);
         write(&main, fresh_header(), &[]);
         std::thread::sleep(std::time::Duration::from_millis(5));
         let marker = SessionEntry::Custom(crate::entry::Custom {
             id: EntryId::new(),
             ts: Utc::now(),
             kind: crate::list::AGENT_ENTRY_KIND.into(),
-            data: serde_json::json!({ "agent": "explore" }),
+            data: serde_json::json!({ "parent": parent.to_string(), "agent": "explore" }),
         });
-        write(&dir.path().join("b.jsonl"), fresh_header(), &[marker]);
+        write(&dir.path().join("b.jsonl"), agent, &[marker]);
 
         assert_eq!(
             find_last(dir.path(), Path::new("/work")).unwrap().unwrap(),
@@ -1332,20 +1327,23 @@ mod tests {
     fn find_last_skips_a_fork_shaped_late_marker() {
         let dir = tempdir().unwrap();
         let main = dir.path().join("a.jsonl");
+        let parent = SessionId::new();
+        let mut agent = fresh_header();
+        agent.parent_session = Some(parent);
         write(&main, fresh_header(), &[]);
         std::thread::sleep(std::time::Duration::from_millis(5));
         let marker = SessionEntry::Custom(crate::entry::Custom {
             id: EntryId::new(),
             ts: Utc::now(),
             kind: crate::list::AGENT_ENTRY_KIND.into(),
-            data: serde_json::json!({ "agent": "explore" }),
+            data: serde_json::json!({ "parent": parent.to_string(), "agent": "explore" }),
         });
         // The shape a forked child is written in: the copied history
         // first, then the marker appended after.
         let forked = dir.path().join("b.jsonl");
         write(
             &forked,
-            fresh_header(),
+            agent,
             &[
                 message_entry(Role::User, "copied ask"),
                 message_entry(Role::Assistant, "copied reply"),

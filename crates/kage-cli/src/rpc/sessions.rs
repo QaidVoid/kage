@@ -38,8 +38,8 @@ use super::options::config_options;
 use crate::engine::{Recorder, render_session_markdown};
 use kage_acp::acp::NewSessionMeta;
 
-/// The memoized [`leading_marker`] verdicts, keyed by file and the
-/// (mtime, size) pair.
+/// The memoized [`agent_marker_cached`] verdicts, keyed by file and
+/// the (mtime, size) pair.
 type MarkerCache = Mutex<
     HashMap<
         PathBuf,
@@ -673,7 +673,7 @@ pub(super) fn orphaned_agents(
         .filter_map(|entry| {
             let path = entry.path();
             let session = crate::engine::session_id_of(&path)?;
-            let marker = leading_marker_cached(&path)?;
+            let marker = agent_marker_cached(&path)?;
             let text = |key: &str| {
                 marker
                     .get(key)
@@ -732,20 +732,19 @@ pub(super) fn orphaned_agents(
     nodes.iter().map(restored_update).collect()
 }
 
-/// The memoized [`leading_marker`] verdicts, keyed by file and the
-/// (mtime, size) pair, so a session listing re-reads a file's head
-/// only when the file changed. The cap keeps restored sessions of a
+/// The memoized [`agent_marker_cached`] verdicts, keyed by file and
+/// the (mtime, size) pair, so a session listing re-reads a file only
+/// when it changed. The cap keeps restored sessions of a
 /// long-lived serve from growing it without bound.
 fn marker_cache() -> &'static MarkerCache {
     static PEEKED: std::sync::OnceLock<MarkerCache> = std::sync::OnceLock::new();
     PEEKED.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// The `kage:agent` marker near the top of the session file at
-/// `path`, memoized by (mtime, size): the leading entries of a
-/// session file are fixed once written, so an unchanged file yields
-/// the same marker without the read.
-fn leading_marker_cached(path: &Path) -> Option<serde_json::Value> {
+/// The [`kage_session::list::agent_marker`] of the session file at
+/// `path`, memoized by (mtime, size): an unchanged file yields the same
+/// marker without the read.
+fn agent_marker_cached(path: &Path) -> Option<serde_json::Value> {
     let Ok(meta) = std::fs::metadata(path) else {
         return None;
     };
@@ -756,28 +755,12 @@ fn leading_marker_cached(path: &Path) -> Option<serde_json::Value> {
     {
         return marker.clone();
     }
-    let marker = leading_marker(path);
+    let marker = kage_session::list::agent_marker(path);
     if cache.len() >= 1024 {
         cache.clear();
     }
     cache.insert(path.to_path_buf(), (stamp.0, stamp.1, marker.clone()));
     marker
-}
-
-/// The `kage:agent` marker near the top of the session file at `path`,
-/// read without the rest of the file.
-fn leading_marker(path: &Path) -> Option<serde_json::Value> {
-    SessionReader::iter(path)
-        .ok()?
-        .take(4)
-        .find_map(|entry| match entry {
-            Ok(SessionEntry::Custom(custom))
-                if custom.kind == kage_session::list::AGENT_ENTRY_KIND =>
-            {
-                Some(custom.data)
-            }
-            _ => None,
-        })
 }
 
 /// Whether `history` ends on a reply that calls no tool: the agent

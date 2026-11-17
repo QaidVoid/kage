@@ -774,7 +774,7 @@ mod tests {
                     id: EntryId::new(),
                     ts: Utc::now(),
                     kind: kage_session::list::AGENT_ENTRY_KIND.into(),
-                    data: serde_json::json!({ "agent": "explore" }),
+                    data: serde_json::json!({ "parent": parent.map(|p| p.to_string()), "agent": "explore" }),
                 }))
                 .unwrap();
         }

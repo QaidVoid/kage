@@ -279,7 +279,7 @@ fn agents_started_by(
             _ => continue,
         };
         if let Some(parent) = header.parent_session
-            && (!beside || crate::list::is_agent_of(&path, parent))
+            && (!beside || crate::list::agent_marker(&path).is_some())
         {
             started.entry(parent.to_string()).or_default().push((
                 header.session.to_string(),
@@ -1911,6 +1911,43 @@ mod tests {
                 .unwrap()
                 .contains(&header.session.to_string())
         );
+    }
+
+    #[test]
+    fn a_fork_of_an_agent_is_a_user_session() {
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("kage-personal-0123456789");
+        let root_id = SessionId::new();
+        let agents = project
+            .join(root_id.to_string())
+            .join(crate::layout::AGENTS_DIR);
+        std::fs::create_dir_all(&agents).unwrap();
+        let mut kid = fresh_header("m");
+        kid.parent_session = Some(root_id);
+        let kid_id = kid.session;
+        let marker = SessionEntry::Custom(crate::entry::Custom {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            kind: crate::list::AGENT_ENTRY_KIND.into(),
+            data: serde_json::json!({ "parent": root_id.to_string(), "agent": "explore" }),
+        });
+        let reply = message_entry(Role::Assistant, "done");
+        let at = reply.id();
+        let src = agents.join(format!("{kid_id}.jsonl"));
+        write(&src, kid, &[marker, reply]);
+        assert!(crate::list::is_agent_session(&src));
+
+        let fork_id = SessionId::new();
+        let dst = project.join(format!("{fork_id}.jsonl"));
+        fork(&src, &dst, fork_id, at).unwrap();
+        assert!(
+            std::fs::read_to_string(&dst)
+                .unwrap()
+                .contains(crate::list::AGENT_ENTRY_KIND),
+            "the fork copies the agent's marker"
+        );
+        assert!(!crate::list::is_agent_session(&dst));
+        assert_eq!(crate::list::agent_marker(&dst), None);
     }
 
     #[test]

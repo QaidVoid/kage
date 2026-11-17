@@ -111,6 +111,9 @@ pub struct ProviderForm {
     headers: Pairs,
     /// The models the provider serves.
     models: Vec<ModelRow>,
+    /// The `models_url` the saved entry lists its models from, which
+    /// kage keeps in its cache: the table then only overrides it.
+    models_url: Option<String>,
     /// Where the save stands.
     saving: Saving,
     /// The test or fetch in flight, and whether it fills the models.
@@ -182,6 +185,7 @@ impl ProviderForm {
             base_url: text("base_url"),
             headers: Pairs::new(&headers),
             models,
+            models_url: Some(text("models_url")).filter(|url| !url.is_empty()),
             saving: Saving::Idle,
             probing: None,
             tested: None,
@@ -331,10 +335,13 @@ impl ProviderForm {
         );
         put("kind", Some(json!(self.protocol.clone())));
         let models = self.model_entries()?;
-        if models.is_empty() {
+        if models.is_empty() && self.models_url.is_none() {
             return Err("Add at least one model, or fetch them from /models.".to_owned());
         }
-        put("models", Some(Value::Array(models)));
+        put(
+            "models",
+            (!models.is_empty()).then_some(Value::Array(models)),
+        );
         // The snapshot names every field, defaults too; a default the
         // file did not need stays out of it.
         for (key, default) in [("tool_use", true), ("thinking", false), ("caching", false)] {
@@ -369,10 +376,14 @@ impl ProviderForm {
                 .unwrap_or_default();
             let name = row.name.trim().to_owned();
             model.insert("id".into(), json!(id));
-            model.insert(
-                "name".into(),
-                json!(if name.is_empty() { id.clone() } else { name }),
-            );
+            if !name.is_empty() {
+                model.insert("name".into(), json!(name));
+            } else if self.models_url.is_some() {
+                // An override without a name keeps the listed one.
+                model.remove("name");
+            } else {
+                model.insert("name".into(), json!(id));
+            }
             for (key, text) in [("context", &row.context), ("max_output", &row.max_output)] {
                 let text = text.replace(['_', ','], "");
                 if text.is_empty() {
@@ -666,11 +677,18 @@ impl ProviderForm {
 
     /// The models table.
     fn models_table(&mut self, ui: &mut egui::Ui, palette: &Palette, edit: &mut Edit) {
+        let listed = self.models_url.as_ref().map(|url| {
+            format!(
+                "Listed at {url} and kept current on their own. A row here overrides the fields it sets."
+            )
+        });
         forms::field(
             ui,
             "Models",
-            true,
-            Some("Context windows come from the endpoint or the model catalog when known."),
+            listed.is_none(),
+            Some(listed.as_deref().unwrap_or(
+                "Context windows come from the endpoint or the model catalog when known.",
+            )),
             |ui| {
                 let mut drop: Option<usize> = None;
                 for (ix, row) in self.models.iter().enumerate() {
@@ -743,6 +761,9 @@ impl ProviderForm {
                     let add = forms::add_button(ui, "Add model", crate::icons::Icon::Plus, palette);
                     if add.clicked() {
                         edit.add_model = true;
+                    }
+                    if self.models_url.is_some() {
+                        return;
                     }
                     let fetching = matches!(self.probing, Some((_, true)));
                     let label = if fetching {
@@ -1036,6 +1057,26 @@ mod tests {
         let form = ProviderForm::new(Target::Local, &snapshot());
         let err = form.entry().unwrap_err();
         assert!(err.contains("at least one model"), "{err}");
+    }
+
+    #[test]
+    fn a_provider_listing_its_models_at_a_url_saves_without_rows() {
+        let mut config = snapshot();
+        let lab = &mut config["providers"]["custom"]["lab"];
+        lab["models_url"] = json!("http://lab:8080/models.json");
+        lab.as_object_mut().unwrap().remove("models");
+        let form = ProviderForm::new(Target::Custom(Some("lab".into())), &config);
+        let (_, value) = form.entry().unwrap();
+        let value = value.unwrap();
+        assert_eq!(value["models_url"], "http://lab:8080/models.json");
+        assert!(value.get("models").is_none(), "the list stays in the cache");
+
+        config["providers"]["custom"]["lab"]["models"] = json!([{"id": "m1", "context": 2000}]);
+        let form = ProviderForm::new(Target::Custom(Some("lab".into())), &config);
+        let (_, value) = form.entry().unwrap();
+        let row = &value.unwrap()["models"][0];
+        assert_eq!(row["context"], 2000);
+        assert!(row.get("name").is_none(), "the listed name stays");
     }
 
     #[test]

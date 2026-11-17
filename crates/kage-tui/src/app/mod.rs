@@ -985,6 +985,10 @@ pub struct App {
     /// onto after a plugin hot reload. Drained between event polls;
     /// the newest snapshot re-seeds commands and status widgets.
     plugin_refresh_rx: Option<std::sync::mpsc::Receiver<PluginRefresh>>,
+    /// Channel the host pushes a fresh model list onto when the model
+    /// lists were refreshed. Drained between event polls; the newest
+    /// list replaces [`App::model_choices`].
+    model_choices_rx: Option<std::sync::mpsc::Receiver<Vec<PickItem>>>,
     /// Results of async OS-clipboard image attaches. The arboard read
     /// can block for hundreds of ms on some compositors, so it runs
     /// on a background thread and sends the decoded attachment here;

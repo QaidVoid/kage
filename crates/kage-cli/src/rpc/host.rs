@@ -120,8 +120,12 @@ pub(crate) struct Host {
     pub(super) default_model: String,
     pub(super) sessions: PathBuf,
     pub(super) spec: SpecBuilder,
-    /// The model choices `registry` offers.
-    models: RwLock<Arc<[SessionConfigSelectOption]>>,
+    /// The model choices `registry` offers, shared with every
+    /// connection so a reload reaches the updates they send.
+    models: Arc<RwLock<Arc<[SessionConfigSelectOption]>>>,
+    /// Held across a reload of the providers, so two at once cannot
+    /// leave the older build in effect.
+    reloading: Mutex<()>,
     /// The providers the server's plugins registered at startup, kept
     /// over every rebuild of `registry`.
     plugin_providers: Mutex<Vec<Arc<dyn Provider>>>,
@@ -256,7 +260,8 @@ impl Host {
             default_model,
             sessions,
             spec,
-            models: RwLock::new(models),
+            models: Arc::new(RwLock::new(models)),
+            reloading: Mutex::default(),
             plugin_providers: Mutex::default(),
             aliases,
             live,
@@ -330,6 +335,11 @@ impl Host {
         )
     }
 
+    /// The model choices in effect, as a reload replaces them.
+    pub(super) fn shared_models(&self) -> Arc<RwLock<Arc<[SessionConfigSelectOption]>>> {
+        Arc::clone(&self.models)
+    }
+
     /// The model choices the providers in effect offer.
     pub(super) fn models(&self) -> Arc<[SessionConfigSelectOption]> {
         Arc::clone(
@@ -343,7 +353,8 @@ impl Host {
     /// Rebuilds the providers from the user config, keeping the ones
     /// plugins registered, so the next session and the engine's next
     /// run use an edited `[providers]` section.
-    pub(super) fn reload_providers(&self) -> Result<(), String> {
+    pub(crate) fn reload_providers(&self) -> Result<(), String> {
+        let _reloading = lock(&self.reloading);
         let mut registry = crate::build_provider_registry()?;
         for provider in lock(&self.plugin_providers).iter() {
             registry.register(Arc::clone(provider));
@@ -360,6 +371,26 @@ impl Host {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = models;
         self.engine.commander().set_registry(registry);
         Ok(())
+    }
+
+    /// Fetches, off the caller's thread, the model list of each custom
+    /// provider with a `models_url` that has none cached yet, as one
+    /// just saved or given its key, and reloads the providers when one
+    /// arrived.
+    pub(super) fn fetch_missing_lists(self: &Arc<Self>) {
+        let host = Arc::downgrade(self);
+        let _ = thread::Builder::new()
+            .name("kage-fetch-models".to_owned())
+            .spawn(move || {
+                let Ok(config) = Config::load_default_raw() else {
+                    return;
+                };
+                if crate::custom_models::fetch_missing(&config)
+                    && let Some(host) = host.upgrade()
+                {
+                    let _ = host.reload_providers();
+                }
+            });
     }
 
     /// Serves one connection: a fresh agent on this host for `reader`

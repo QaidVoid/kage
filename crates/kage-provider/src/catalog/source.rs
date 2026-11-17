@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use kage_core::{Effort, Efforts, Modalities, Modality, Reasoning, ReasoningField};
 use serde::Deserialize;
 use serde_json::Value;
+use serde_json::value::RawValue;
 
 use super::ModelCost;
 
@@ -119,14 +120,16 @@ pub struct SourceModel {
     pub cost: Option<ModelCost>,
 }
 
+/// A provider of the catalog, its models still undecoded slices of the
+/// document, so only the ones kage reads are decoded.
 #[derive(Deserialize)]
-struct ApiProvider {
+struct ApiProvider<'a> {
     #[serde(default)]
     name: String,
     #[serde(default)]
     api: Option<String>,
-    #[serde(default)]
-    models: BTreeMap<String, Value>,
+    #[serde(default, borrow)]
+    models: BTreeMap<String, &'a RawValue>,
 }
 
 #[derive(Deserialize)]
@@ -190,12 +193,15 @@ struct ApiCost {
 ///
 /// `json` is not a JSON object.
 pub fn parse(json: &str) -> Result<Vec<SourceProvider>, String> {
-    let root: BTreeMap<String, Value> =
+    // Slices of `json` rather than a decoded tree: a tree of the whole
+    // catalog is many times its size, and memory freed by a thread that
+    // then idles stays with the process.
+    let root: BTreeMap<String, &RawValue> =
         serde_json::from_str(json).map_err(|e| format!("parse catalog: {e}"))?;
     Ok(SUPPORTED_PROVIDERS
         .iter()
         .filter_map(|map| {
-            let raw = ApiProvider::deserialize(root.get(map.api_id)?).ok()?;
+            let raw: ApiProvider = serde_json::from_str(root.get(map.api_id)?.get()).ok()?;
             Some(provider(&raw, map))
         })
         .collect())
@@ -230,7 +236,7 @@ fn provider(raw: &ApiProvider, map: &ProviderMap) -> SourceProvider {
     let mut models: Vec<SourceModel> = raw
         .models
         .values()
-        .filter_map(|v| ApiModel::deserialize(v).ok())
+        .filter_map(|v| serde_json::from_str::<ApiModel>(v.get()).ok())
         .filter(|m| m.tool_call)
         .map(|m| model(&m, map.api_id))
         .collect();

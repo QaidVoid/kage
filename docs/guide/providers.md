@@ -24,8 +24,9 @@ models from your ChatGPT plan instead of API billing. An exported
 With the ChatGPT sign-in, `openai` offers the models your plan may use,
 as ChatGPT's own model list reports them, with the largest context
 window it accepts and no per-token cost. kage saves that list in
-`~/.cache/kage/chatgpt-models.json` when you sign in, and
-`kage models refresh` updates it. Without it, the catalog's OpenAI
+`~/.cache/kage/chatgpt-models.json` when you sign in and keeps it
+current like the catalog (see [model catalog](#model-catalog)).
+Without it, the catalog's OpenAI
 models are offered instead.
 
 A model draws by calling OpenAI's hosted image tool, which runs at
@@ -359,6 +360,36 @@ since kage has no catalog entry for it:
 A model with neither `reasoning` nor `efforts` sends a level you pick
 unchanged, and no level while thinking is automatic.
 
+`kage models fetch <id>` lists what an endpoint serves, and
+`kage models fetch <id> --save` adds the models the config does not
+list yet as `[[...models]]` tables.
+
+### model lists from a URL
+
+An endpoint that publishes its models with their limits, inputs and
+thinking levels, such as a models.dev-style directory document, does
+not need them copied into the config. Name it with `models_url`:
+
+```toml
+[providers.custom.lab]
+base_url = "https://lab.example/v1"
+models_url = "https://lab.example/models.json"
+
+# optional: fix what the list gets wrong, field by field
+[[providers.custom.lab.models]]
+id = "lab-large"
+context = 200000
+```
+
+kage keeps that list in `~/.cache/kage/providers/<id>.json` and
+refreshes it with the [model catalog](#model-catalog). It is fetched
+when the provider is saved from the settings, and
+`kage models refresh` or `kage models fetch <id> --save` fetch it at
+once. A `[[...models]]` table for a listed id changes only the fields
+it sets, and keeps the rest of the listed model. One for an id the
+list lacks adds that model. The key and headers are sent to the
+`models_url` only when it shares the base URL's host and port.
+
 ## model catalog
 
 kage ships a snapshot of a curated catalog for its providers: model
@@ -374,13 +405,32 @@ cannot describe Command Code, and its Kenari entry lists the wider
 pay-as-you-go catalog rather than what the plans cover. kage reads the
 merged document and never contacts those upstreams itself.
 
-`kage models refresh` downloads the current catalog into
-`~/.cache/kage/models.json` (`$XDG_CACHE_HOME/kage`). Later runs lay
-it over the snapshot: it adds models to the providers kage knows and
-updates their metadata. It never adds a provider or changes a
-provider's endpoint or credentials. kage never refreshes on its own,
-and a missing or unreadable cache falls back to the snapshot silently.
-Delete the file to go back to the snapshot.
+kage keeps a copy of the current catalog in
+`~/.cache/kage/models.json` (`$XDG_CACHE_HOME/kage`) and lays it over
+the snapshot: it adds models to the providers kage knows and updates
+their metadata. It never adds a provider or changes a provider's
+endpoint or credentials. A missing cache falls back to the snapshot.
+
+While kage runs (the TUI, `kage serve`, `kage rpc` or the shared
+host), it checks for a newer catalog once a day. It refreshes the
+ChatGPT plan's model list with a sign-in, and the lists of
+[custom providers with a `models_url`](#model-lists-from-a-url), the
+same way. The first check waits
+half a minute after start. A catalog that has not changed costs one
+small request. A new one reaches every running kage within a quarter
+of an hour, with no restart: the TUI's model picker, and the model
+choices a desktop or editor session is sent next. `kage models refresh` fetches them all at once whenever you
+ask.
+
+```toml
+[models]
+auto_refresh = true          # false: only `kage models refresh` updates
+refresh_interval_hours = 24  # how often to check, at least 1
+```
+
+Only the user config sets `[models]`. To go back to the snapshot, set
+`auto_refresh = false`, delete the cache and restart kage: a running
+kage fetches a missing cache again.
 
 Because the catalog is curated upstream, a refresh can bring Command
 Code and Kenari model changes too, not only the models.dev ones. Pass

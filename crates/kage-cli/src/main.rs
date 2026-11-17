@@ -37,6 +37,7 @@ mod acp_glue;
 mod agents;
 mod auth;
 mod chatgpt;
+mod custom_models;
 mod doctor;
 mod engine;
 mod goal;
@@ -46,6 +47,7 @@ mod host_client;
 mod init;
 mod mcp;
 mod mcp_auth;
+mod model_refresh;
 mod opener;
 mod paths;
 mod permissions;
@@ -407,8 +409,8 @@ pub(crate) enum ModelsAction {
     /// `$XDG_CACHE_HOME/kage/models.json`, and with a `ChatGPT` sign-in
     /// the plan's models into `chatgpt-models.json` beside it. It can
     /// add models and update their metadata, never provider endpoints
-    /// or credentials. Only runs when asked; kage never refreshes on its
-    /// own.
+    /// or credentials. A running kage also refreshes them on its own
+    /// unless `[models] auto_refresh = false`.
     Refresh {
         /// Read the catalog from here instead of the published feed. A
         /// `file://` URL reads a local file, which is how an offline run
@@ -449,7 +451,8 @@ pub(crate) enum ModelsAction {
         /// yet are appended as fresh `[[...models]]` tables, listed
         /// ones and their comments stay untouched. Needs the entry to
         /// exist; registered providers keep their models in the
-        /// catalog instead.
+        /// catalog instead. A provider with a saved `models_url` keeps
+        /// its list in the cache, so `--save` writes that instead.
         #[arg(long)]
         save: bool,
     },
@@ -708,33 +711,35 @@ fn run_models_refresh(source: Option<&str>) -> ExitCode {
             ExitCode::from(1)
         }
     };
-    if let Err(e) = refresh_chatgpt_models() {
-        eprintln!("kage: models refresh: ChatGPT {e}");
-        code = ExitCode::from(1);
+    match chatgpt::refresh_plan_models() {
+        Ok(Some((count, cache))) => {
+            println!("wrote {count} ChatGPT plan models to {}", cache.display());
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("kage: models refresh: ChatGPT {e}");
+            code = ExitCode::from(1);
+        }
+    }
+    let config = match kage_core::config::Config::load_default_raw() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("kage: models refresh: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let store = auth::AuthStore::load().unwrap_or_else(|_| auth::AuthStore::empty());
+    for (id, _) in custom_models::listed_providers(&config) {
+        match custom_models::refresh(id, &config, &store) {
+            Ok(Some(count)) => println!("wrote {count} {id} models"),
+            Ok(None) => println!("{id} models are current"),
+            Err(e) => {
+                eprintln!("kage: models refresh: {id}: {e}");
+                code = ExitCode::from(1);
+            }
+        }
     }
     code
-}
-
-/// Refresh the `ChatGPT` plan's model list when a login is stored,
-/// renewing the login first when it is about to expire. A no-op without
-/// one.
-fn refresh_chatgpt_models() -> Result<(), String> {
-    let path = auth::AuthStore::default_path()?;
-    let mut store = auth::AuthStore::load_from(&path)?;
-    if !store
-        .credential(chatgpt::PROVIDER_ID)
-        .is_some_and(auth::Credential::is_oauth)
-    {
-        return Ok(());
-    }
-    chatgpt::ensure_fresh(&mut store, &path, chrono::Utc::now())?;
-    let Some(auth::Credential::Oauth(login)) = store.credential(chatgpt::PROVIDER_ID) else {
-        return Ok(());
-    };
-    let cache = chatgpt::models_cache_path()?;
-    let count = chatgpt::refresh_models(login, &cache)?;
-    println!("wrote {count} ChatGPT plan models to {}", cache.display());
-    Ok(())
 }
 
 /// Implement `kage models fetch`: list the models a provider serves.
@@ -742,7 +747,7 @@ fn refresh_chatgpt_models() -> Result<(), String> {
 /// same way the settings screen's connection test resolves a provider.
 /// With `--save`, the fetched models are merged into the saved custom
 /// provider's entry, the way the form's Fetch fills its models table
-/// before Save.
+/// before Save, or cached for a provider with a saved `models_url`.
 fn run_models_fetch(
     provider: &str,
     base_url: Option<&str>,
@@ -801,7 +806,29 @@ fn run_models_fetch(
         };
         println!("{}{name}  ctx {context}  out {out}{input}", model.id);
     }
-    if save {
+    let saved_url = config
+        .providers
+        .custom
+        .get(provider)
+        .and_then(|p| p.models_url.clone());
+    if save && let Some(url) = saved_url {
+        if models_url.is_some_and(|flag| flag.trim() != url) {
+            eprintln!(
+                "kage: models fetch: --save caches the list of the saved models_url; drop --models-url"
+            );
+            return ExitCode::from(1);
+        }
+        let cached = custom_models::cache_path(provider)
+            .and_then(|path| custom_models::save(&path, &url, &result.models));
+        match cached {
+            Ok(Some(count)) => println!("cached {count} models; they refresh on their own"),
+            Ok(None) => println!("the cached models are current"),
+            Err(e) => {
+                eprintln!("kage: models fetch: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    } else if save {
         let saved = kage_core::config::Config::default_path().map_or_else(
             || Err("no home directory for the config".to_owned()),
             |path| save_fetched_models(&path, provider, &result.models),
@@ -834,9 +861,7 @@ fn save_fetched_models(
     provider: &str,
     fetched: &[kage_acp::acp::ProbeModel],
 ) -> Result<(usize, usize), String> {
-    use kage_core::modality::Modality;
-    use kage_core::thinking::Effort;
-    use serde_json::{Value, json};
+    use serde_json::Value;
     let keys = ["providers", "custom", provider];
     let mut entry = kage_core::config_edit::current(path, &keys)
         .map_err(|e| e.to_string())?
@@ -858,52 +883,7 @@ fn save_fetched_models(
     let fresh: Vec<Value> = fetched
         .iter()
         .filter(|model| !held.iter().any(|id| id == &model.id))
-        .map(|model| {
-            let mut row = json!({
-                "id": model.id,
-                "name": model.name.clone().unwrap_or_else(|| model.id.clone()),
-            });
-            if let Some(context) = model.context {
-                row["context"] = json!(context);
-            }
-            if let Some(out) = model.max_output.and_then(|out| u32::try_from(out).ok()) {
-                row["max_output"] = json!(out);
-            }
-            // Only values the config's own types re-parse make it in;
-            // an endpoint naming an unknown kind would fail the next
-            // load.
-            let input: Vec<&str> = model
-                .input
-                .iter()
-                .map(String::as_str)
-                .filter(|kind| Modality::parse(kind).is_some())
-                .collect();
-            if !input.is_empty() {
-                row["input"] = json!(input);
-            }
-            let produces: Vec<&str> = model
-                .produces
-                .iter()
-                .map(String::as_str)
-                .filter(|kind| Modality::parse(kind).is_some())
-                .collect();
-            if produces.iter().any(|kind| *kind != "text") {
-                row["produces"] = json!(produces);
-            }
-            let efforts: Vec<&str> = model
-                .efforts
-                .iter()
-                .map(String::as_str)
-                .filter(|level| Effort::parse(level).is_some())
-                .collect();
-            if !efforts.is_empty() {
-                row["efforts"] = json!(efforts);
-            }
-            if let Some(reasoning) = model.reasoning {
-                row["reasoning"] = json!(reasoning);
-            }
-            row
-        })
+        .map(custom_models::row)
         .collect();
     let added = fresh.len();
     if added == 0 {
@@ -1202,18 +1182,9 @@ fn main() -> ExitCode {
     if let Some(code) = subcommand_print_conflict(&cli) {
         return code;
     }
-    if let Ok(path) = models_cache_path() {
-        // A missing cache just means `models refresh` has not run
-        // yet; the snapshot serves. One that exists but does not
-        // load is drift the user should hear about.
-        if path.exists() {
-            match kage_provider::catalog::use_cache(&path) {
-                Ok(count) => eprintln!("kage: model cache loaded ({count} models)"),
-                Err(reason) => {
-                    eprintln!("kage: ignoring model cache {}: {reason}", path.display());
-                }
-            }
-        }
+    // `kage rpc` loads it once it knows it serves rather than relays.
+    if !matches!(cli.command, Some(Command::Rpc(_))) {
+        load_model_cache();
     }
 
     let touches_sessions = matches!(
@@ -1254,10 +1225,23 @@ fn main() -> ExitCode {
     )
 }
 
-/// Load the layered config for the current directory before a run
-/// starts. A config that does not load stops kage with the error and
-/// the returned exit status, because running on defaults would drop
-/// custom providers and could start the first-run wizard.
+/// Lays the model cache over the bundled catalog. A missing cache just
+/// means none was fetched yet; the snapshot serves. One that exists but
+/// does not load is drift the user should hear about.
+fn load_model_cache() {
+    let Ok(path) = models_cache_path() else {
+        return;
+    };
+    if path.exists() {
+        match kage_provider::catalog::use_cache(&path) {
+            Ok(count) => eprintln!("kage: model cache loaded ({count} models)"),
+            Err(reason) => {
+                eprintln!("kage: ignoring model cache {}: {reason}", path.display());
+            }
+        }
+    }
+}
+
 /// Entry point for `kage rpc`: a relay to the shared host, or a private
 /// engine when asked for one, when a flag configures the engine, when
 /// the client's `KAGE_*` configuration overrides cannot reach the
@@ -1274,9 +1258,11 @@ fn run_rpc(args: &RpcArgs) -> ExitCode {
             &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         )
         || !user_host_config().share;
+    // A relay only passes bytes along, so it never reads the catalog.
     if !private && let Some(code) = relay_to_shared_host() {
         return code;
     }
+    load_model_cache();
     rpc::run(
         args.model.as_deref(),
         &args.system,
@@ -1342,6 +1328,10 @@ pub(crate) fn user_host_config() -> kage_core::config::HostConfig {
     }
 }
 
+/// Load the layered config for the current directory before a run
+/// starts. A config that does not load stops kage with the error and
+/// the returned exit status, because running on defaults would drop
+/// custom providers and could start the first-run wizard.
 fn config_error() -> Option<ExitCode> {
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let err = kage_core::config::Config::load_layered(&workdir).err()?;

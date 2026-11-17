@@ -433,12 +433,17 @@ fn register_custom_providers(
             supports_thinking: cfg.thinking,
             supports_tool_use: cfg.tool_use,
         };
+        let listed = cfg
+            .models_url
+            .as_deref()
+            .map(|url| crate::custom_models::cached(id, url))
+            .unwrap_or_default();
         let models: Vec<kage_provider::ProviderModel> = cfg
-            .models
+            .models_over(&listed)
             .iter()
             .map(|m| kage_provider::ProviderModel {
                 id: m.id.clone(),
-                name: m.name.clone(),
+                name: m.label().to_owned(),
                 context: m.context,
                 max_output: m.max_output,
                 reasoning: m.reasoning(),

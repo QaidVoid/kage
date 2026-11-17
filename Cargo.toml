@@ -84,7 +84,7 @@ schemars = "1.2.2"
 semver = { version = "1.0.28", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 rusqlite = { version = "0.43", features = ["bundled"] }
-serde_json = { version = "1.0.151", features = ["preserve_order"] }
+serde_json = { version = "1.0.151", features = ["preserve_order", "raw_value"] }
 sha2 = "0.11.0"
 signal-hook = "0.4.4"
 similar = "3.2.0"

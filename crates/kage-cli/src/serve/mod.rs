@@ -153,6 +153,7 @@ pub(crate) fn run(
     };
     kage_core::reaper::start();
     let log: Log = Arc::new(|line| eprintln!("kage serve: {line}"));
+    let applied = crate::model_refresh::Applied::now();
     let host = match Host::start(model, system_role, false) {
         Ok(host) => host,
         Err(e) => {
@@ -160,6 +161,7 @@ pub(crate) fn run(
             return ExitCode::from(1);
         }
     };
+    crate::model_refresh::spawn_host(&host, Some(Arc::clone(&log)), applied);
     let (token_path, token) = match load_token(rotate_token) {
         Ok(found) => found,
         Err(e) => {

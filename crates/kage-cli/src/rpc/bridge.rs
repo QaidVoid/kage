@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use kage_acp::acp::{
     AvailableCommandsUpdate, BlobContent, CompactionPhase, CompactionUpdate, ConfigOptionUpdate,
@@ -68,7 +68,7 @@ pub(super) struct Bridge {
     pub(super) live: Arc<Mutex<Live>>,
     pub(super) ids: Arc<Mutex<Ids>>,
     pub(super) waiters: Waiters,
-    pub(super) models: Arc<[SessionConfigSelectOption]>,
+    pub(super) models: Arc<RwLock<Arc<[SessionConfigSelectOption]>>>,
     pub(super) shown: ShownBySession,
     /// Advertised name to real name for tools the host renamed, so a
     /// call the model makes under its advertised name still renders
@@ -546,7 +546,10 @@ impl Bridge {
             .is_some_and(|shown| shown.observe(&settings));
         if changed {
             let update = ConfigOptionUpdate {
-                config_options: config_options(&self.models, &settings),
+                config_options: config_options(
+                    &self.models.read().unwrap_or_else(PoisonError::into_inner),
+                    &settings,
+                ),
             };
             self.send(
                 session,

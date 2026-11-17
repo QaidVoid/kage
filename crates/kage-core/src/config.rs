@@ -70,6 +70,10 @@ pub struct Config {
     /// config.
     #[serde(default, skip_serializing_if = "SessionsConfig::is_default")]
     pub sessions: SessionsConfig,
+    /// How the model lists stay current (`[models]`), read from the
+    /// user config.
+    #[serde(default, skip_serializing_if = "ModelsConfig::is_default")]
+    pub models: ModelsConfig,
 }
 
 /// The longest a media tool call may take, matching the ceiling the
@@ -271,7 +275,8 @@ impl Config {
         self.shell.validate()?;
         self.tools.validate()?;
         self.trust.validate()?;
-        self.host.validate()
+        self.host.validate()?;
+        self.models.validate()
     }
 
     /// Load configuration from `path`, merging with defaults and env overrides.
@@ -664,9 +669,9 @@ impl ProvidersConfig {
                     "[providers.custom.{id}] id conflicts with registered provider `{id}`; use [providers.{id}] to override it instead"
                 )));
             }
-            if cfg.models.is_empty() {
+            if cfg.models.is_empty() && cfg.models_url.is_none() {
                 return Err(config_error(format!(
-                    "[providers.custom.{id}] must declare at least one [[providers.custom.{id}.models]] entry"
+                    "[providers.custom.{id}] must declare at least one [[providers.custom.{id}.models]] entry, or a models_url to list them from"
                 )));
             }
             for model in &cfg.models {
@@ -738,10 +743,13 @@ pub struct CustomProviderConfig {
     /// wins over a key stored via `kage auth login`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
-    /// Where `kage models fetch <id>` reads the model list from, when
-    /// the endpoint's own list will not do - a models.dev-style
-    /// directory document, for instance. A key and headers are only
-    /// sent when it shares the base URL's host and port.
+    /// Where the provider's model list is read from, when the endpoint's
+    /// own list will not do: a models.dev-style directory document, for
+    /// instance. A key and headers are only sent when it shares the base
+    /// URL's host and port. With it set, kage keeps the list in its cache
+    /// and refreshes it like the model catalog; `models` then only
+    /// overrides what the list says (see
+    /// [`CustomProviderConfig::models_over`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models_url: Option<String>,
     /// Extra HTTP headers sent on every request, e.g. `Authorization`.
@@ -771,6 +779,33 @@ pub struct CustomProviderConfig {
 }
 
 impl CustomProviderConfig {
+    /// The models of this provider given `listed`, the list its
+    /// `models_url` serves: every listed model with the `models` entry
+    /// of the same id merged over it, then the entries the list lacks.
+    /// Without a `models_url`, `models` alone.
+    #[must_use]
+    pub fn models_over(&self, listed: &[CustomProviderModel]) -> Vec<CustomProviderModel> {
+        if self.models_url.is_none() {
+            return self.models.clone();
+        }
+        let mut models: Vec<CustomProviderModel> = listed
+            .iter()
+            .map(|model| {
+                self.models
+                    .iter()
+                    .find(|mine| mine.id == model.id)
+                    .map_or_else(|| model.clone(), |mine| mine.merged_over(model))
+            })
+            .collect();
+        models.extend(
+            self.models
+                .iter()
+                .filter(|mine| listed.iter().all(|model| model.id != mine.id))
+                .cloned(),
+        );
+        models
+    }
+
     /// The environment variable holding this provider's API key:
     /// `api_key_env` when set, else `<ID>_API_KEY` uppercased. Empty
     /// means the endpoint needs no key.
@@ -793,7 +828,9 @@ pub struct CustomProviderModel {
     /// Model id sent to the endpoint; addressable from kage as
     /// `<provider-id>:<this id>`.
     pub id: String,
-    /// Display name shown in the picker.
+    /// Display name shown in the picker. Empty shows the id, or for a
+    /// provider with a `models_url` keeps the listed name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
     /// Context window in tokens, when known. Surfaces to the modeline
     /// like a catalog entry's context.
@@ -834,6 +871,51 @@ pub struct CustomProviderModel {
 }
 
 impl CustomProviderModel {
+    /// This entry laid over `listed`, the model of the same id the
+    /// provider's `models_url` lists: each field this entry sets wins,
+    /// and each it leaves unset keeps the listed value.
+    #[must_use]
+    pub fn merged_over(&self, listed: &Self) -> Self {
+        let or = |mine: Modalities, theirs: Modalities| if mine.is_empty() { theirs } else { mine };
+        Self {
+            id: self.id.clone(),
+            name: if self.name.is_empty() {
+                listed.name.clone()
+            } else {
+                self.name.clone()
+            },
+            context: self.context.or(listed.context),
+            max_output: self.max_output.or(listed.max_output),
+            // Efforts of its own mean the model thinks, whatever the
+            // list said.
+            reasoning: self.reasoning.or(if self.efforts.is_empty() {
+                listed.reasoning
+            } else {
+                None
+            }),
+            efforts: if self.efforts.is_empty() {
+                listed.efforts
+            } else {
+                self.efforts
+            },
+            input: or(self.input, listed.input),
+            produces: or(self.produces, listed.produces),
+            interleaved: self.interleaved.or(listed.interleaved),
+            cost: self.cost.or(listed.cost),
+        }
+    }
+
+    /// The name the picker shows: the display name, or the id without
+    /// one.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        if self.name.is_empty() {
+            &self.id
+        } else {
+            &self.name
+        }
+    }
+
     /// The thinking settings `reasoning` and `efforts` declare.
     #[must_use]
     pub fn reasoning(&self) -> Reasoning {
@@ -1108,6 +1190,55 @@ impl SessionsConfig {
     #[must_use]
     pub fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+}
+
+/// The longest `[models] refresh_interval_hours` may be: a year.
+pub const MAX_REFRESH_INTERVAL_HOURS: u64 = 24 * 366;
+
+/// How the model lists stay current (`[models]`): the curated catalog,
+/// the `ChatGPT` plan's list when signed in, and the lists of custom
+/// providers that name a `models_url`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelsConfig {
+    /// Whether kage refreshes the model lists on its own while it runs.
+    /// `kage models refresh` works either way.
+    pub auto_refresh: bool,
+    /// Hours between checks for newer model lists.
+    pub refresh_interval_hours: u64,
+}
+
+impl Default for ModelsConfig {
+    fn default() -> Self {
+        Self {
+            auto_refresh: true,
+            refresh_interval_hours: 24,
+        }
+    }
+}
+
+impl ModelsConfig {
+    /// Whether nothing is configured, so serializing skips the table.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Refuses an interval of zero, which would check without pause, or
+    /// past [`MAX_REFRESH_INTERVAL_HOURS`]; `auto_refresh = false` is how
+    /// to never check.
+    ///
+    /// # Errors
+    ///
+    /// When `refresh_interval_hours` is out of that range.
+    pub fn validate(&self) -> Result<()> {
+        if !(1..=MAX_REFRESH_INTERVAL_HOURS).contains(&self.refresh_interval_hours) {
+            return Err(config_error(format!(
+                "[models] refresh_interval_hours must be from 1 to {MAX_REFRESH_INTERVAL_HOURS}; set auto_refresh = false to never refresh"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -1545,6 +1676,115 @@ mod tests {
             assert!(!cfg.host.is_default());
             Ok(())
         });
+    }
+
+    #[test]
+    fn a_models_url_list_takes_config_entries_field_by_field() {
+        let listed = |id: &str| CustomProviderModel {
+            id: id.to_owned(),
+            name: format!("Listed {id}"),
+            context: Some(128_000),
+            max_output: Some(8_000),
+            efforts: Efforts::of(&[crate::thinking::Effort::Low, crate::thinking::Effort::High]),
+            input: Modalities::of(&[
+                crate::modality::Modality::Text,
+                crate::modality::Modality::Image,
+            ]),
+            cost: Some(ModelCost {
+                input: 1.0,
+                output: 2.0,
+                cache_read: None,
+                cache_write: None,
+            }),
+            ..CustomProviderModel::default()
+        };
+        let mut provider: CustomProviderConfig = serde_json::from_value(serde_json::json!({
+            "base_url": "https://lab.example",
+            "models_url": "https://lab.example/models.json",
+        }))
+        .unwrap();
+        provider.models = vec![
+            CustomProviderModel {
+                id: "a".to_owned(),
+                context: Some(200_000),
+                ..CustomProviderModel::default()
+            },
+            CustomProviderModel {
+                id: "mine".to_owned(),
+                name: "Mine".to_owned(),
+                ..CustomProviderModel::default()
+            },
+        ];
+
+        let models = provider.models_over(&[listed("a"), listed("b")]);
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "mine"]);
+        assert_eq!(models[0].context, Some(200_000), "the override wins");
+        assert_eq!(
+            CustomProviderModel {
+                context: Some(128_000),
+                ..models[0].clone()
+            },
+            listed("a"),
+            "every field it leaves unset keeps the listed value"
+        );
+        assert_eq!(models[1], listed("b"));
+        assert_eq!(models[2].label(), "Mine");
+
+        let off = CustomProviderModel {
+            reasoning: Some(false),
+            ..listed("a")
+        };
+        let efforts = CustomProviderModel {
+            id: "a".to_owned(),
+            efforts: Efforts::of(&[crate::thinking::Effort::High]),
+            ..CustomProviderModel::default()
+        };
+        assert!(
+            matches!(
+                efforts.merged_over(&off).reasoning(),
+                Reasoning::Effort { .. }
+            ),
+            "efforts of its own mean the model thinks"
+        );
+
+        let without_url = CustomProviderConfig {
+            models_url: None,
+            ..provider.clone()
+        };
+        assert_eq!(
+            without_url.models_over(&[listed("a")]),
+            without_url.models,
+            "without a models_url the config lists them"
+        );
+    }
+
+    #[test]
+    fn models_refresh_defaults_on_daily_and_parses_from_table() {
+        let models = ModelsConfig::default();
+        assert!(models.auto_refresh);
+        assert_eq!(models.refresh_interval_hours, 24);
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                "
+                [models]
+                auto_refresh = false
+                refresh_interval_hours = 6
+                ",
+            )?;
+            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
+            assert!(!cfg.models.auto_refresh);
+            assert_eq!(cfg.models.refresh_interval_hours, 6);
+            Ok(())
+        });
+        let never = ModelsConfig {
+            refresh_interval_hours: 0,
+            ..ModelsConfig::default()
+        };
+        let err = format!("{}", never.validate().unwrap_err());
+        assert!(err.contains("refresh_interval_hours"), "{err}");
     }
 
     #[test]

@@ -29,8 +29,8 @@ read.
 - **Many providers, one model picker.** Anthropic, OpenAI, Gemini,
   DeepSeek, Z.ai, OpenRouter and other OpenAI-compatible APIs, plus
   your own endpoints in `config.toml`. A bundled model catalog knows
-  each model's context window, inputs and thinking levels, and
-  `kage models refresh` updates it on demand.
+  each model's context window, inputs and thinking levels, and kage
+  keeps it current on its own (`[models] auto_refresh`).
 - **MCP.** Tools, resources (`@server:uri` mentions), prompts as
   `/server:prompt` commands, and OAuth login for remote servers.
 - **Editors over ACP.** `kage rpc` speaks the Agent Client Protocol,

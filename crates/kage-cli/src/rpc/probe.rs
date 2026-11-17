@@ -401,8 +401,8 @@ fn list(id: &str, target: &Target) -> ConfigTestResult {
 /// need no key, where `http://` is the normal local case.
 fn cleartext_warning(target: &Target) -> Option<&'static str> {
     let url = models_url(target);
-    let same_origin = origin(&url) == origin(&target.base);
-    let cleartext = url.starts_with("http://") && same_origin && !target.key.is_empty();
+    let cleartext =
+        url.starts_with("http://") && same_origin(&url, target) && !target.key.is_empty();
     cleartext.then_some("warning: the key is sent over cleartext http; use https")
 }
 
@@ -419,23 +419,33 @@ fn models_url(target: &Target) -> String {
     }
 }
 
-/// The `host:port` authority of an http(s) URL, for the same-origin
-/// check that guards the key and headers.
-fn origin(url: &str) -> Option<&str> {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+/// The `scheme://host:port` origin of a URL, for the same-origin check
+/// that guards the key and headers.
+fn origin(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
     let authority = rest.split('/').next()?;
-    (!authority.is_empty()).then_some(authority)
+    (!authority.is_empty()).then(|| format!("{}://{authority}", scheme.to_ascii_lowercase()))
+}
+
+/// Whether `url` shares the endpoint's origin, scheme included, so the
+/// key and headers meant for the endpoint may go with it: a `http://`
+/// URL on the same host would carry them in the clear.
+fn same_origin(url: &str, target: &Target) -> bool {
+    origin(url).is_some_and(|of_url| origin(&target.base) == Some(of_url))
 }
 
 /// The model list request of `list`, without the cleartext warning.
 fn list_models(id: &str, target: &Target) -> ConfigTestResult {
     let url = models_url(target);
     // The key and the provider's headers belong to the endpoint; a
-    // models URL elsewhere reads them anonymously.
-    let same_origin = origin(&url) == origin(&target.base);
+    // models URL elsewhere reads them anonymously. A redirect could take
+    // them somewhere else, so with them it is not followed.
+    let same_origin = same_origin(&url, target);
+    let credentialed = same_origin && (!target.key.is_empty() || !target.headers.is_empty());
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(TIMEOUT))
+        .max_redirects(if credentialed { 0 } else { 10 })
         .build()
         .new_agent();
     let mut request = agent.get(url.as_str());
@@ -727,7 +737,7 @@ mod tests {
 
     use kage_acp::acp::KeySource;
 
-    use super::{Kind, Target, cleartext_warning, probe, provider_keys, resolve};
+    use super::{Kind, Target, cleartext_warning, origin, probe, provider_keys, resolve};
     use crate::auth::AuthStore;
 
     /// Answers one request with `status` and `body`, handing back the
@@ -886,6 +896,20 @@ mod tests {
         let one = &result.models[0];
         assert_eq!((one.context, one.max_output), (Some(4096), Some(512)));
         assert_eq!(one.input, ["text", "image"]);
+    }
+
+    #[test]
+    fn an_origin_includes_the_scheme() {
+        assert_eq!(
+            origin("HTTPS://lab.example:8443/v1/models").as_deref(),
+            Some("https://lab.example:8443")
+        );
+        assert_ne!(
+            origin("http://lab.example/models.json"),
+            origin("https://lab.example/v1"),
+            "a key meant for https never goes to http on the same host"
+        );
+        assert_eq!(origin("lab.example/models"), None);
     }
 
     #[test]

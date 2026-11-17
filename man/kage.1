@@ -169,7 +169,7 @@ Forget the trust recorded for this directory
 Manage the model catalog. kage ships a snapshot of the curated catalog; `kage models refresh` fetches a newer one into the model cache, which later runs use in place of the snapshot\*(Aqs model entries
 .TP
 \fBkage models refresh\fR
-Download the curated model catalog into `$XDG_CACHE_HOME/kage/models.json`, and with a `ChatGPT` sign\-in the plan\*(Aqs models into `chatgpt\-models.json` beside it. It can add models and update their metadata, never provider endpoints or credentials. Only runs when asked; kage never refreshes on its own
+Download the curated model catalog into `$XDG_CACHE_HOME/kage/models.json`, and with a `ChatGPT` sign\-in the plan\*(Aqs models into `chatgpt\-models.json` beside it. It can add models and update their metadata, never provider endpoints or credentials. A running kage also refreshes them on its own unless `[models] auto_refresh = false`
 .TP
 \fB\-\-source\fR\fI <SOURCE>\fR
 Read the catalog from here instead of the published feed. A `file://` URL reads a local file, which is how an offline run or a test pins a catalog. The `KAGE_CATALOG_URL` environment variable sets the same thing
@@ -196,7 +196,7 @@ Environment variable that holds the API key
 The URL the model list is read from, when the endpoint\*(Aqs own will not do \- a models.dev\-style directory document, say. Overrides the provider\*(Aqs saved models URL. A key and headers are only sent when it shares the base URL\*(Aqs host and port
 .TP
 \fB\-\-save\fR
-Save the fetched models into the saved `[providers.custom.<provider>]` entry: ids it does not list yet are appended as fresh `[[...models]]` tables, listed ones and their comments stay untouched. Needs the entry to exist; registered providers keep their models in the catalog instead
+Save the fetched models into the saved `[providers.custom.<provider>]` entry: ids it does not list yet are appended as fresh `[[...models]]` tables, listed ones and their comments stay untouched. Needs the entry to exist; registered providers keep their models in the catalog instead. A provider with a saved `models_url` keeps its list in the cache, so `\-\-save` writes that instead
 .TP
 \fBkage plugin\fR
 Manage plugins: list them, install and update packages from the plugin registry (kura unless `[plugins] registry` names another), grant capabilities, and turn plugins on or off

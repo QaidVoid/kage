@@ -473,6 +473,32 @@ pub fn models_cache_path() -> Result<PathBuf, String> {
     Ok(crate::paths::cache_root()?.join("chatgpt-models.json"))
 }
 
+/// Refresh the plan's model list when a `ChatGPT` login is stored,
+/// renewing the login first when it is about to expire. Returns how
+/// many models were cached and where, or `None` without a login.
+///
+/// # Errors
+///
+/// When the login cannot be read or renewed, or the list cannot be
+/// fetched or cached.
+pub fn refresh_plan_models() -> Result<Option<(usize, PathBuf)>, String> {
+    let path = AuthStore::default_path()?;
+    let mut store = AuthStore::load_from(&path)?;
+    if !store
+        .credential(PROVIDER_ID)
+        .is_some_and(crate::auth::Credential::is_oauth)
+    {
+        return Ok(None);
+    }
+    ensure_fresh(&mut store, &path, Utc::now())?;
+    let Some(crate::auth::Credential::Oauth(login)) = store.credential(PROVIDER_ID) else {
+        return Ok(None);
+    };
+    let cache = models_cache_path()?;
+    let count = refresh_models(login, &cache)?;
+    Ok(Some((count, cache)))
+}
+
 /// Fetch the models the plan behind `login` may use and cache them at
 /// `path`, leaving out the ones the backend hides from pickers. Returns
 /// how many were cached.
@@ -506,9 +532,10 @@ pub fn refresh_models(login: &OAuthCredential, path: &Path) -> Result<usize, Str
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    let partial = path.with_extension("json.partial");
-    std::fs::write(&partial, json).map_err(|e| format!("{}: {e}", partial.display()))?;
-    std::fs::rename(&partial, path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // Each process refreshes on the same schedule, so the write must
+    // not share a temporary name with another's.
+    kage_core::fsutil::atomic_write(path, json.as_bytes())
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(count)
 }
 

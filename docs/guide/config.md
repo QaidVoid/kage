@@ -333,7 +333,7 @@ kage does not know, the agent definitions in `.kage/agents/` (see
 `.kage/skills/`. All of them share one trust decision.
 
 The `[providers]` table, `[acp.agents]`, `[host]` (see
-[shared host](/guide/shared-host#configuration)), `plugins.registry` and the media
+[shared host](/guide/shared-host#configuration)), `[models]`, `plugins.registry` and the media
 tables `[tools.generate_image]`, `[tools.edit_image]`,
 `[tools.generate_speech]` and `[tools.generate_music]` are never read
 from a project, trusted or not.
@@ -682,8 +682,10 @@ endpoints, and per-provider overrides (base URL, headers, key env var).
 | `~/.local/state/kage/`              | session state (`state.json`) and input history (`history.txt`) |
 | `~/.local/state/kage/trust.json`    | trusted project records: gated values plus file hashes          |
 | `~/.local/state/kage/trust/blobs/`  | approved agent and skill texts, one file per SHA-256            |
-| `~/.cache/kage/models.json`         | model catalog written by `kage models refresh`                 |
-| `~/.cache/kage/chatgpt-models.json` | ChatGPT plan models, written at sign-in and by `kage models refresh` |
+| `~/.cache/kage/models.json`         | model catalog, refreshed by a running kage or `kage models refresh` |
+| `~/.cache/kage/models.json.etag`    | what the catalog server tagged the cached catalog with          |
+| `~/.cache/kage/chatgpt-models.json` | ChatGPT plan models, written at sign-in and refreshed like the catalog |
+| `~/.cache/kage/providers/<id>.json` | the models a custom provider's `models_url` lists               |
 
 `XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_STATE_HOME` /
 `XDG_CACHE_HOME` override the `~/.config`, `~/.local/share`,

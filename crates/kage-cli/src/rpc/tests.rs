@@ -4745,14 +4745,21 @@ fn attach_both(h: &Harness, c2: &Connection, session: &str, cwd: &str) {
     c2.client.request("session/load", params).unwrap();
 }
 
-/// Waits for the `$/cancel_request` withdrawing `ask`.
-fn wait_cancel(inbox: &mpsc::Receiver<Inbound>, ask: &serde_json::Value) {
+/// Waits for the `$/cancel_request` withdrawing `ask`, returning the
+/// session updates that arrived first: the engine resumes the run before
+/// it publishes the answer that withdraws the other asks, so the run's
+/// updates can come ahead of the cancel.
+fn wait_cancel(inbox: &mpsc::Receiver<Inbound>, ask: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut before = Vec::new();
     loop {
         match inbox.recv_timeout(WAIT).expect("no cancel") {
             Inbound::Notification { method, params }
                 if method == "$/cancel_request" && params["requestId"] == *ask =>
             {
-                return;
+                return before;
+            }
+            Inbound::Notification { method, params } if method == "session/update" => {
+                before.push(params);
             }
             _ => {}
         }
@@ -5427,15 +5434,19 @@ fn attaching_mid_turn_shows_the_file_then_the_flight_then_the_rest() {
     let mut asked = Vec::new();
     let (ask_1, params) = until_ask(&h.inbox, &mut asked);
     assert_eq!(params["toolCall"]["toolCallId"], "call_1");
-    let (ask_2, _) = until_ask(&c2.inbox, &mut Vec::new());
+    let mut all = updates;
+    let (ask_2, _) = until_ask(&c2.inbox, &mut all);
     allow(&h.client, &ask_1);
-    wait_cancel(&c2.inbox, &ask_2);
-
-    let rest = updates_until(&c2.inbox, &h.session, "agent_message_chunk");
+    let before_cancel = wait_cancel(&c2.inbox, &ask_2);
+    let replied = before_cancel
+        .iter()
+        .any(|p| p["update"]["sessionUpdate"] == "agent_message_chunk");
+    all.extend(before_cancel);
+    if !replied {
+        all.extend(updates_until(&c2.inbox, &h.session, "agent_message_chunk"));
+    }
     let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
     assert_eq!(response["stopReason"], "end_turn");
-    let mut all = updates;
-    all.extend(rest);
     all.extend(drain(&c2.inbox));
     assert_eq!(chunk_texts(&all), ["Hel", "done"]);
     let statuses: Vec<&str> = all

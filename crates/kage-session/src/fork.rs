@@ -175,7 +175,10 @@ fn fork_tree(
         })
         .collect();
     let (agents, until) = match entries.last() {
-        Some(last) if with_agents && crate::layout::agents_dir(src).is_dir() => {
+        Some(last)
+            if with_agents
+                && (crate::layout::agents_dir(src).is_dir() || crate::layout::is_flat(src)) =>
+        {
             let mut named = HashSet::new();
             for entry in &entries {
                 let line = serde_json::to_string(entry).map_err(encode)?;
@@ -221,12 +224,15 @@ fn fork_tree(
 /// `named`, with every agent those started by `until`, as (session id,
 /// file), from the headers in its `agents` directory. An agent of an
 /// agent is in that same directory, so a fork of an agent finds its
-/// agents there too. An agent of a turn undone or rewound away is named
-/// nowhere in the copy, so it stays behind.
+/// agents there too. A session still flat in the sessions directory can
+/// also have agents recorded beside it before the layout, told from the
+/// sessions there, forks of its agents included, by an agent marker
+/// naming the session that started them. An agent of a turn undone or
+/// rewound away is named nowhere in the copy, so it stays behind.
 ///
 /// # Errors
 ///
-/// Errors if the directory cannot be read, or the file of an agent the
+/// Errors if a directory cannot be read, or the file of an agent the
 /// history names cannot, since a fork missing that agent would lose it
 /// with the source. Any other file that cannot be read, is deleted
 /// meanwhile or has no header yet is no agent to copy.
@@ -236,18 +242,29 @@ fn agents_started_by(
     named: &HashSet<String>,
     until: chrono::DateTime<Utc>,
 ) -> Result<Vec<(String, PathBuf)>, SessionError> {
-    let dir = crate::layout::agents_dir(src);
-    let io = |source| SessionError::Io {
-        path: dir.clone(),
-        source,
-    };
+    let nested = crate::layout::agents_dir(src);
+    let beside = src.parent().filter(|_| crate::layout::is_flat(src));
+    let dirs = nested
+        .is_dir()
+        .then_some(nested.as_path())
+        .into_iter()
+        .chain(beside);
+    let mut files = Vec::new();
+    for dir in dirs {
+        let io = |source| SessionError::Io {
+            path: dir.to_path_buf(),
+            source,
+        };
+        for entry in std::fs::read_dir(dir).map_err(io)? {
+            let path = entry.map_err(io)?.path();
+            if path.extension().is_some_and(|ext| ext == "jsonl") && path != src {
+                files.push((path, Some(dir) == beside));
+            }
+        }
+    }
     let mut started: HashMap<String, Vec<(String, chrono::DateTime<Utc>, PathBuf)>> =
         HashMap::new();
-    for entry in std::fs::read_dir(&dir).map_err(io)? {
-        let path = entry.map_err(io)?.path();
-        if path.extension().is_none_or(|ext| ext != "jsonl") || path == src {
-            continue;
-        }
+    for (path, beside) in files {
         let header = match SessionReader::iter(&path).map(|mut reader| reader.next()) {
             Ok(Some(Ok(SessionEntry::Header(header)))) => header,
             Err(err @ SessionError::Io { .. }) | Ok(Some(Err(err @ SessionError::Io { .. })))
@@ -261,7 +278,9 @@ fn agents_started_by(
             }
             _ => continue,
         };
-        if let Some(parent) = header.parent_session {
+        if let Some(parent) = header.parent_session
+            && (!beside || crate::list::is_agent_of(&path, parent))
+        {
             started.entry(parent.to_string()).or_default().push((
                 header.session.to_string(),
                 header.ts,
@@ -1891,6 +1910,69 @@ mod tests {
             std::fs::read_to_string(&dst)
                 .unwrap()
                 .contains(&header.session.to_string())
+        );
+    }
+
+    #[test]
+    fn a_fork_of_a_flat_session_copies_the_agents_beside_it() {
+        let dir = tempdir().unwrap();
+        // A file beside the source whose header names `parent`, with a
+        // marker naming `started_by`.
+        let marked = |parent: SessionId, started_by: SessionId| {
+            let mut header = fresh_header("m");
+            header.parent_session = Some(parent);
+            let id = header.session;
+            let marker = SessionEntry::Custom(crate::entry::Custom {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                kind: crate::list::AGENT_ENTRY_KIND.into(),
+                data: serde_json::json!({ "parent": started_by.to_string() }),
+            });
+            write(&dir.path().join(format!("{id}.jsonl")), header, &[marker]);
+            id
+        };
+        let root = fresh_header("m");
+        let root_id = root.session;
+        let kid_id = marked(root_id, root_id);
+        let grandkid_id = marked(kid_id, kid_id);
+        // A fork of the agent, which carries the agent's own marker.
+        marked(kid_id, root_id);
+        let mut earlier_fork = fresh_header("m");
+        earlier_fork.parent_session = Some(root_id);
+        let earlier_fork_id = earlier_fork.session;
+        write(
+            &dir.path().join(format!("{earlier_fork_id}.jsonl")),
+            earlier_fork,
+            &[],
+        );
+        let src = dir.path().join(format!("{root_id}.jsonl"));
+        let reply = message_entry(
+            Role::Assistant,
+            &format!("<agent session=\"{kid_id}\">done</agent> see {earlier_fork_id}"),
+        );
+        let at = reply.id();
+        write(&src, root, &[reply]);
+
+        let fork_id = SessionId::new();
+        let dst = dir.path().join(format!("{fork_id}.jsonl"));
+        fork(&src, &dst, fork_id, at).unwrap();
+        let mut parents: Vec<_> = jsonl_in(&crate::layout::agents_dir(&dst))
+            .iter()
+            .map(|copy| header_of(copy).parent_session)
+            .collect();
+        parents.sort();
+        assert_eq!(
+            parents.len(),
+            2,
+            "the agent and its own agent, not the fork"
+        );
+        assert!(parents.contains(&Some(fork_id)));
+        let text = std::fs::read_to_string(&dst).unwrap();
+        assert!(!text.contains(&kid_id.to_string()), "renamed in the fork");
+        assert!(text.contains(&earlier_fork_id.to_string()));
+        assert!(
+            dir.path().join(format!("{grandkid_id}.jsonl")).exists(),
+            "the source keeps its agents"
         );
     }
 }

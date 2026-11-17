@@ -186,6 +186,14 @@ pub fn root_of(session: &Path) -> PathBuf {
     home.to_path_buf()
 }
 
+/// Whether the session at `session` sits in the sessions directory
+/// itself: recorded before this layout and not moved yet. Only there can
+/// an agent it started sit beside it rather than in its [`agents_dir`].
+#[must_use]
+pub fn is_flat(session: &Path) -> bool {
+    session.parent().is_some_and(|dir| root_of(session) == dir)
+}
+
 /// The name of the project directory for `key`, an absolute, normalized
 /// path.
 fn project_name(key: &Path) -> String {
@@ -540,6 +548,10 @@ mod tests {
         );
         assert_eq!(root_of(&project.join("01ROOT.jsonl")), root);
         assert_eq!(root_of(&project.join("01ROOT/agents/01CHILD.jsonl")), root);
+        assert!(is_flat(&root.join("01OLD.jsonl")));
+        assert!(!is_flat(&root.join("01OLD/agents/01NEW.jsonl")));
+        assert!(!is_flat(&project.join("01ROOT.jsonl")));
+        assert!(!is_flat(&project.join("01ROOT/agents/01CHILD.jsonl")));
         assert_eq!(
             crate::BlobStore::beside(&project.join("01ROOT/agents/01CHILD.jsonl"))
                 .path(&"a".repeat(64)),

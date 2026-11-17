@@ -6881,6 +6881,50 @@ fn an_interrupted_swarm_gets_its_members_back_from_their_files() {
     );
 }
 
+#[test]
+fn an_interrupted_agent_is_found_in_its_agents_directory_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("p-0123456789");
+    let root = SessionId::new();
+    let root_path = project.join(format!("{root}.jsonl"));
+    let agents = kage_session::layout::agents_dir(&root_path);
+    std::fs::create_dir_all(&agents).unwrap();
+    let marker = |call: &str| {
+        SessionEntry::Custom(kage_session::Custom {
+            id: EntryId::new(),
+            ts: chrono::Utc::now(),
+            kind: kage_session::list::AGENT_ENTRY_KIND.into(),
+            data: serde_json::json!({
+                "parent": root.to_string(),
+                "tool_call_id": call,
+                "agent": "general",
+                "description": "audit",
+            }),
+        })
+    };
+    let nested = record(&agents, "/p", "mock/m", 0, &[marker("call_a")]);
+    record(&project, "/p", "mock/m", 0, &[marker("call_b")]);
+    let call = |id: &str| Content::ToolCall {
+        id: kage_core::ToolCallId::new(id),
+        name: "agent".into(),
+        input: serde_json::json!({}),
+    };
+    let history = [Arc::new(Message::new(
+        Role::Assistant,
+        vec![call("call_a"), call("call_b")],
+        None,
+    ))];
+    let found: Vec<_> = super::sessions::orphaned_agents(&root_path, root, &history)
+        .into_iter()
+        .map(|m| m.subagent_session_id)
+        .collect();
+    assert_eq!(
+        found,
+        [nested],
+        "a file beside a session in a project directory is another session"
+    );
+}
+
 /// A caller with a long or private prompt has to be able to keep it off the
 /// command line, where `/proc/<pid>/cmdline` publishes it to every user on
 /// the host. The file is appended rather than replacing the inline text, so

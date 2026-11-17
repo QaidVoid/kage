@@ -654,11 +654,15 @@ pub(super) fn orphaned_agents(
     if open.is_empty() {
         return Vec::new();
     }
-    // The session's agents directory, and beside the session for agents
-    // recorded before the layout nested them.
+    // The session's agents directory, and beside a session still flat in
+    // the sessions directory for agents recorded before the layout nested
+    // them. Beside a session in a project directory are other sessions.
     let dirs = [
         Some(kage_session::layout::agents_dir(root_path)),
-        root_path.parent().map(Path::to_path_buf),
+        root_path
+            .parent()
+            .filter(|_| kage_session::layout::is_flat(root_path))
+            .map(Path::to_path_buf),
     ];
     let mut nodes: Vec<AgentNode> = dirs
         .into_iter()

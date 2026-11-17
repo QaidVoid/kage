@@ -42,15 +42,15 @@ pub(crate) fn sessions_dir() -> Result<PathBuf, String> {
 }
 
 /// What session project directories are named for: `[sessions] group`
-/// from the user config, read once per process.
+/// from the user config, read on each call. A shared host outlives the
+/// clients it serves, so a host reading it once would record new sessions
+/// where a client started after a change does not look. The rest of the
+/// config is not validated: a mistake saved elsewhere in it must not move
+/// new sessions to another directory.
 pub(crate) fn session_grouping() -> kage_core::config::SessionGrouping {
-    static GROUPING: std::sync::OnceLock<kage_core::config::SessionGrouping> =
-        std::sync::OnceLock::new();
-    *GROUPING.get_or_init(|| {
-        kage_core::config::Config::load_default()
-            .map(|cfg| cfg.sessions.group)
-            .unwrap_or_default()
-    })
+    kage_core::config::Config::load_default_raw()
+        .map(|cfg| cfg.sessions.group)
+        .unwrap_or_default()
 }
 
 /// The file a new session `id` started in `cwd` is recorded in, in its

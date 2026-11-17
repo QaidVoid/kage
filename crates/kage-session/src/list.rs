@@ -59,28 +59,50 @@ pub fn is_agent_session(path: &Path) -> bool {
 /// [`is_agent_session`] and `find_last` all read identity through
 /// this one scan.
 pub(crate) fn agent_session_name(path: &Path) -> Option<String> {
-    let Ok(file) = File::open(path) else {
-        return None;
-    };
+    agent_markers(path)?.next().map(|custom| {
+        custom
+            .data
+            .get("agent")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    })
+}
+
+/// Whether the session file at `path` records an agent `parent`
+/// started: a marker naming `parent`, not only one its history copied
+/// from another agent, as a fork of an agent carries.
+pub(crate) fn is_agent_of(path: &Path, parent: SessionId) -> bool {
+    let parent = parent.to_string();
+    agent_markers(path).is_some_and(|mut markers| {
+        markers.any(|custom| {
+            custom
+                .data
+                .get("parent")
+                .and_then(serde_json::Value::as_str)
+                == Some(&parent)
+        })
+    })
+}
+
+/// The agent markers of the session file at `path`, in file order.
+/// `None` when the file cannot be opened.
+fn agent_markers(path: &Path) -> Option<impl Iterator<Item = crate::Custom>> {
+    let file = File::open(path).ok()?;
     // A foreign or hand-edited file can reorder keys or add spacing,
     // so the scan prefilters on the quoted kind alone and decodes only
     // the lines that carry it.
     let needle = format!("\"{AGENT_ENTRY_KIND}\"").into_bytes();
-    BufReader::new(file)
-        .split(b'\n')
-        .map_while(Result::ok)
-        .filter(|line| line.windows(needle.len()).any(|at| at == needle.as_slice()))
-        .find_map(|line| match serde_json::from_slice::<SessionEntry>(&line) {
-            Ok(SessionEntry::Custom(custom)) if is_agent_marker(&custom) => Some(
-                custom
-                    .data
-                    .get("agent")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-            ),
-            _ => None,
-        })
+    Some(
+        BufReader::new(file)
+            .split(b'\n')
+            .map_while(Result::ok)
+            .filter(move |line| line.windows(needle.len()).any(|at| at == needle.as_slice()))
+            .filter_map(|line| match serde_json::from_slice::<SessionEntry>(&line) {
+                Ok(SessionEntry::Custom(custom)) if is_agent_marker(&custom) => Some(custom),
+                _ => None,
+            }),
+    )
 }
 
 /// Whether one custom entry marks the session an `agent` or `swarm`

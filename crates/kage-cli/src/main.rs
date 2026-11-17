@@ -1216,6 +1216,23 @@ fn main() -> ExitCode {
         }
     }
 
+    let touches_sessions = matches!(
+        cli.command,
+        None | Some(
+            Command::List
+                | Command::Resume { .. }
+                | Command::Fork { .. }
+                | Command::Search { .. }
+                | Command::Rpc(_)
+                | Command::Serve { .. }
+                | Command::Host {
+                    action: HostAction::Run { .. }
+                }
+        )
+    );
+    if touches_sessions {
+        file_older_sessions();
+    }
     if let Some(command) = cli.command {
         return run_subcommand(command, cli.standalone);
     }
@@ -1614,6 +1631,53 @@ pub(crate) fn truncate_one_line(text: &str, max: usize) -> String {
     }
     let head: String = single_line.chars().take(max - 3).collect();
     format!("{head}...")
+}
+
+/// Moves sessions recorded before the project layout into it, saying so
+/// on stderr when it moved any. Once they are all moved this only reads
+/// the sessions directory.
+fn file_older_sessions() {
+    let Ok(root) = sessions_dir() else {
+        return;
+    };
+    // A config that does not load could hide `[sessions] group`, and the
+    // moves cannot be undone, so they wait for a config that loads.
+    let Ok(config) = kage_core::config::Config::load_default() else {
+        return;
+    };
+    let report = match kage_session::migrate::migrate(&root, config.sessions.group) {
+        Ok(report) => report,
+        Err(err) => {
+            eprintln!("kage: could not file older sessions: {err}");
+            return;
+        }
+    };
+    if !report.moved.is_empty() {
+        eprintln!(
+            "kage: filed {} older session files into project directories under {}",
+            report.moved.len(),
+            root.display()
+        );
+    }
+    if !report.held.is_empty() {
+        eprintln!(
+            "kage: {} sessions are open in another kage and will be filed later",
+            report.held.len()
+        );
+    }
+    for (path, why) in &report.failed {
+        eprintln!(
+            "kage: could not file {} yet, will try again: {why}",
+            path.display()
+        );
+    }
+    for (path, why) in &report.refused {
+        eprintln!(
+            "kage: left {} in place for good ({} lists it): {why}",
+            path.display(),
+            root.join(kage_session::migrate::SKIP_FILE).display()
+        );
+    }
 }
 
 /// Create a fresh session file under [`sessions_dir`].

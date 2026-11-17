@@ -6,10 +6,12 @@
 //! before returning, so a successful return implies the entry has reached
 //! disk.
 //!
-//! On Unix writers hold exclusive advisory locks on both the session inode
-//! and a sidecar. The inode lock prevents aliases from bypassing the lock.
-//! Windows currently uses only the sidecar, so aliased session paths do not
-//! share a lock there. Other unsupported platforms fail closed.
+//! One writer at a time holds a session file. On Unix it takes an exclusive
+//! advisory `flock` on the file itself, so every path to the file shares
+//! the lock, and checks the path still names that file. On Windows it opens
+//! the file sharing only reads: a second writer, a rename or a delete is
+//! refused by the system, while readers still open it. Both belong to the
+//! open file. Other platforms fail closed.
 //!
 //! Entries written by this writer end with `\n`. On reopening, a valid
 //! unterminated final entry is preserved and terminated, while an invalid
@@ -32,21 +34,12 @@ pub struct SessionWriter {
     path: PathBuf,
     inner: BufWriter<File>,
     /// Held for the writer's lifetime; released when the writer drops.
-    /// The lock lives on the sidecar file's own handle.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[expect(
         dead_code,
         reason = "held only so the lock lives as long as the writer"
     )]
-    lock: Option<Lock>,
-    /// The sidecar lock file's handle; the lock is released when the
-    /// handle closes.
-    #[cfg(windows)]
-    #[expect(
-        dead_code,
-        reason = "held only so the lock lives as long as the writer"
-    )]
-    lock: Option<File>,
+    lock: Claim,
 }
 
 impl SessionWriter {
@@ -92,19 +85,7 @@ impl SessionWriter {
             // Session logs carry full conversations; keep them owner-only.
             opts.mode(0o600);
         }
-        let lock = acquire_lock(&path)?;
-        let file = opts.open(&path).map_err(|err| SessionError::Io {
-            path: path.clone(),
-            source: err,
-        })?;
-        let lock = lock_inode(
-            file.try_clone().map_err(|source| SessionError::Io {
-                path: path.clone(),
-                source,
-            })?,
-            &path,
-            lock,
-        )?;
+        let (file, lock) = claim(&mut opts, &path, Use::Create)?;
         let mut writer = Self {
             path,
             inner: BufWriter::new(file),
@@ -130,7 +111,7 @@ impl SessionWriter {
     /// refused rather than repaired into a headerless file.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, SessionError> {
         let path = path.into();
-        let (file, lock) = open_locked(&path, true)?;
+        let (file, lock) = open_locked(&path, true, Use::Write)?;
         let mut writer = Self {
             path,
             inner: BufWriter::new(file),
@@ -150,7 +131,7 @@ impl SessionWriter {
         path: impl Into<PathBuf>,
     ) -> Result<Option<(Self, crate::resume::ReplayResult)>, SessionError> {
         let path = path.into();
-        let (mut file, lock) = open_locked(&path, true)?;
+        let (mut file, lock) = open_locked(&path, true, Use::Write)?;
         let header = check_version(&file, &path)?;
         if header.backend.is_some() {
             return Ok(None);
@@ -249,85 +230,107 @@ impl SessionWriter {
     }
 }
 
+/// What a claim on a session file is for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Use {
+    /// Writing a file this process just created, which nobody else can
+    /// be writing yet: on Unix the lock is waited for, so a brief probe
+    /// by another process does not fail the creation.
+    Create,
+    /// Writing, or probing whether anyone writes.
+    Write,
+    /// Renaming or deleting the file, which on Windows must share
+    /// deletion with itself. A writer shares only reads, so nothing
+    /// renames or deletes a live session.
+    Remove,
+}
+
+/// Opens the session file at `path` for writing as its one writer:
+/// `opts` gets the share mode that claims it on Windows, and on Unix the
+/// file is `flock`ed. Another writer holding it is
+/// [`SessionError::Locked`].
 #[cfg(any(unix, windows))]
-fn open_locked(path: &Path, writable: bool) -> Result<(File, Option<Lock>), SessionError> {
-    let lock = acquire_lock(path)?;
-    let file = OpenOptions::new()
-        .read(true)
-        .write(writable)
-        .open(path)
-        .map_err(|source| SessionError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    let lock = lock_inode(
-        file.try_clone().map_err(|source| SessionError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?,
-        path,
-        lock,
-    )?;
-    Ok((file, lock))
-}
-
-#[cfg(unix)]
-#[derive(Debug)]
-struct Lock {
-    _sidecar: nix::fcntl::Flock<File>,
-    _inode: nix::fcntl::Flock<File>,
-}
-
-#[cfg(unix)]
-fn lock_inode(
-    file: File,
-    path: &Path,
-    sidecar: Option<nix::fcntl::Flock<File>>,
-) -> Result<Option<Lock>, SessionError> {
-    use nix::fcntl::{Flock, FlockArg};
-    let inode = Flock::lock(file, FlockArg::LockExclusiveNonblock).map_err(|(_, err)| {
-        if err == nix::errno::Errno::EWOULDBLOCK {
-            SessionError::Locked {
-                path: path.to_path_buf(),
-            }
+fn claim(opts: &mut OpenOptions, path: &Path, use_: Use) -> Result<(File, Claim), SessionError> {
+    let io = |source: std::io::Error| SessionError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        const FILE_SHARE_DELETE: u32 = 0x4;
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+        opts.share_mode(if use_ == Use::Remove {
+            FILE_SHARE_READ | FILE_SHARE_DELETE
         } else {
-            SessionError::Io {
-                path: path.to_path_buf(),
-                source: std::io::Error::from_raw_os_error(err as i32),
+            FILE_SHARE_READ
+        });
+        let file = opts.open(path).map_err(|source| {
+            if source.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
+                SessionError::Locked {
+                    path: path.to_path_buf(),
+                }
+            } else {
+                io(source)
             }
+        })?;
+        Ok((file, ()))
+    }
+    #[cfg(unix)]
+    {
+        use nix::fcntl::{Flock, FlockArg};
+        use std::os::unix::fs::MetadataExt;
+        let file = opts.open(path).map_err(io)?;
+        let arg = if use_ == Use::Create {
+            FlockArg::LockExclusive
+        } else {
+            FlockArg::LockExclusiveNonblock
+        };
+        let lock = Flock::lock(file.try_clone().map_err(io)?, arg).map_err(|(_, err)| {
+            if err == nix::errno::Errno::EWOULDBLOCK {
+                SessionError::Locked {
+                    path: path.to_path_buf(),
+                }
+            } else {
+                io(std::io::Error::from_raw_os_error(err as i32))
+            }
+        })?;
+        // The lock is on the file the path named when it was opened. A
+        // delete or move in between leaves this process holding a file
+        // the path no longer names, which nothing must be written to.
+        let held = file.metadata().map_err(io)?;
+        let named = std::fs::metadata(path).ok();
+        if held.nlink() == 0
+            || named.is_none_or(|named| (named.dev(), named.ino()) != (held.dev(), held.ino()))
+        {
+            return Err(SessionError::Locked {
+                path: path.to_path_buf(),
+            });
         }
-    })?;
-    Ok(Some(Lock {
-        _sidecar: sidecar.expect("Unix sidecar lock"),
-        _inode: inode,
-    }))
+        Ok((file, lock))
+    }
 }
 
-#[cfg(windows)]
-fn lock_inode(
-    _file: File,
-    _path: &Path,
-    sidecar: Option<File>,
-) -> Result<Option<Lock>, SessionError> {
-    Ok(sidecar)
+/// Opens the existing session file at `path` under its one writer's
+/// lock, for `use_`. The file is opened for writing even when `writable`
+/// is false, since on Windows the write access is what claims it.
+#[cfg(any(unix, windows))]
+fn open_locked(path: &Path, writable: bool, use_: Use) -> Result<(File, Claim), SessionError> {
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(writable || cfg!(windows));
+    claim(&mut opts, path, use_)
 }
+
+/// What a writer holds while it writes: the `flock` on Unix; on Windows
+/// the share mode of the file handle itself.
+#[cfg(unix)]
+type Claim = nix::fcntl::Flock<File>;
+#[cfg(windows)]
+type Claim = ();
 
 #[cfg(not(any(unix, windows)))]
-fn lock_inode(_file: File, path: &Path, _sidesidecar: ()) -> Result<(), SessionError> {
-    Err(SessionError::Io {
-        path: path.to_path_buf(),
-        source: std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "session locking is unsupported",
-        ),
-    })
-}
-
-#[cfg(windows)]
-type Lock = File;
-
-#[cfg(not(any(unix, windows)))]
-fn acquire_lock(path: &Path) -> Result<(), SessionError> {
+fn claim(_opts: &mut OpenOptions, path: &Path, _use: Use) -> Result<(File, ()), SessionError> {
     Err(SessionError::Io {
         path: path.to_path_buf(),
         source: std::io::Error::new(
@@ -337,9 +340,8 @@ fn acquire_lock(path: &Path) -> Result<(), SessionError> {
     })
 }
 #[cfg(not(any(unix, windows)))]
-fn open_locked(path: &Path, _writable: bool) -> Result<(File, ()), SessionError> {
-    acquire_lock(path)?;
-    unreachable!()
+fn open_locked(path: &Path, _writable: bool, use_: Use) -> Result<(File, ()), SessionError> {
+    claim(&mut OpenOptions::new(), path, use_)
 }
 
 /// Refuse to append to a file that is not a session this build can
@@ -443,11 +445,152 @@ fn repair_torn_tail(file: &mut File, path: &Path) -> Result<(), SessionError> {
     file.sync_all().map_err(io)
 }
 
-/// Delete a session while holding its exclusive locks.
+/// Move a session file to `dst` while holding its writer's lock, so no
+/// writer appends to it mid-move or opens it at `dst` before it lands. A
+/// session
+/// another process holds fails with [`SessionError::Locked`], and an
+/// existing `dst` is never replaced. A directory made for `dst` goes again
+/// when the move fails.
+pub fn move_locked(path: &Path, dst: &Path) -> Result<(), SessionError> {
+    let io = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| SessionError::Io { path, source }
+    };
+    if dst.exists() {
+        return Err(SessionError::Io {
+            path: dst.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "a session file is already there",
+            ),
+        });
+    }
+    // The writer's lock is on the file, so it moves with it: a writer at
+    // either path is refused until the move is done.
+    let (_file, _lock) = open_locked(path, false, Use::Remove)?;
+    // The directories this move makes, deepest first, to remove again if
+    // it fails.
+    let made: Vec<&Path> = dst
+        .ancestors()
+        .skip(1)
+        .take_while(|dir| !dir.as_os_str().is_empty() && !dir.exists())
+        .collect();
+    if let Some(dir) = dst.parent() {
+        std::fs::create_dir_all(dir).map_err(io(dir))?;
+    }
+    if let Err(source) = place(path, dst) {
+        for dir in made {
+            let _ = std::fs::remove_dir(dir);
+        }
+        return Err(io(path)(source));
+    }
+    // The lock sidecar older builds kept beside the file is not needed.
+    remove_sidecar(path);
+    Ok(())
+}
+
+/// Gives the file at `path` the name `dst` instead, never replacing an
+/// existing `dst`. Unix links the new name, which fails if it is taken,
+/// then drops the old one; a filesystem without hard links, and Windows,
+/// rename after a check.
+fn place(path: &Path, dst: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    match std::fs::hard_link(path, dst) {
+        Ok(()) => return std::fs::remove_file(path),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Err(err),
+        Err(_) => {}
+    }
+    if dst.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "a session file is already there",
+        ));
+    }
+    std::fs::rename(path, dst)
+}
+
+/// Removes the `.lock` sidecar older builds kept beside the session file
+/// `path`, when no older writer holds it.
+pub(crate) fn remove_sidecar(path: &Path) {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(".lock");
+    remove_stray_sidecar(Path::new(&sidecar));
+}
+
+/// Removes the lock sidecar `sidecar` an older build left, when no older
+/// writer holds it. Whether it was removed.
+pub(crate) fn remove_stray_sidecar(sidecar: &Path) -> bool {
+    let Ok(file) = OpenOptions::new().read(true).write(true).open(sidecar) else {
+        return false;
+    };
+    #[cfg(unix)]
+    let held = {
+        use nix::fcntl::{Flock, FlockArg};
+        Flock::lock(file, FlockArg::LockExclusiveNonblock).ok()
+    };
+    #[cfg(windows)]
+    let held = file.try_lock().is_ok().then_some(file);
+    #[cfg(not(any(unix, windows)))]
+    let held = Some(file);
+    held.is_some() && std::fs::remove_file(sidecar).is_ok()
+}
+
+/// [`delete_locked`], then the session's own directory, which holds its
+/// agents (`<id>/agents/`). An agent's file has no such directory; its
+/// `agents` directory, and the session directory above it, go when the
+/// agent was the last one there.
+pub fn delete_with_agents(path: &Path) -> Result<(), SessionError> {
+    if path
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == crate::layout::AGENTS_DIR)
+    {
+        delete_locked(path)?;
+        if let Some(agents) = path.parent()
+            && std::fs::remove_dir(agents).is_ok()
+            && let Some(home) = agents.parent()
+        {
+            let _ = std::fs::remove_dir(home);
+        }
+        return Ok(());
+    }
+    let home = match (path.parent(), path.file_stem()) {
+        (Some(dir), Some(stem)) => dir.join(stem),
+        _ => return delete_locked(path),
+    };
+    // Every agent is claimed before anything goes, so an agent another
+    // process writes refuses the whole delete instead of leaving it half
+    // done.
+    let agents_dir = home.join(crate::layout::AGENTS_DIR);
+    let agent_files: Vec<PathBuf> = std::fs::read_dir(&agents_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|file| file.extension().is_some_and(|ext| ext == "jsonl"))
+                .collect()
+        })
+        .unwrap_or_default();
+    let claims = agent_files
+        .iter()
+        .map(|file| open_locked(file, false, Use::Remove))
+        .collect::<Result<Vec<_>, _>>()?;
+    delete_locked(path)?;
+    for file in &agent_files {
+        let _ = std::fs::remove_file(file);
+    }
+    drop(claims);
+    if agents_dir.is_dir() {
+        std::fs::remove_dir_all(&home).map_err(|source| SessionError::Io { path: home, source })?;
+    }
+    Ok(())
+}
+
+/// Delete a session while holding its writer's lock, and any lock sidecar
+/// an older build left beside it.
 ///
-/// The file is opened but not repaired. Lock acquisition failures prevent
-/// deletion, and the sidecar remains in place for future lock holders.
-/// On Windows aliases can bypass the sidecar lock.
+/// The file is opened but not repaired. A session another writer holds is
+/// not deleted.
 pub fn delete_locked(path: &Path) -> Result<(), SessionError> {
     if path
         .extension()
@@ -461,116 +604,32 @@ pub fn delete_locked(path: &Path) -> Result<(), SessionError> {
             ),
         });
     }
-    let (_file, _lock) = open_locked(path, false)?;
+    let (_file, _lock) = open_locked(path, false, Use::Remove)?;
     std::fs::remove_file(path).map_err(|source| SessionError::Io {
         path: path.to_path_buf(),
         source,
-    })
+    })?;
+    remove_sidecar(path);
+    Ok(())
 }
 
 /// Whether a session appears to be locked by another writer.
 ///
-/// Unix probes the inode, while Windows probes the sidecar. This is only a display hint. Errors return false, and callers must use
+/// This is only a display hint. Errors return false, and callers must use
 /// [`delete_locked`] rather than relying on this probe for synchronization.
 #[must_use]
 pub fn is_locked(path: &Path) -> bool {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
-        use nix::fcntl::{Flock, FlockArg};
-        let Ok(file) = File::open(path) else {
-            return false;
-        };
         matches!(
-            Flock::lock(file, FlockArg::LockExclusiveNonblock),
-            Err((_, nix::errno::Errno::EWOULDBLOCK))
+            open_locked(path, false, Use::Write),
+            Err(SessionError::Locked { .. })
         )
-    }
-    #[cfg(windows)]
-    {
-        use std::fs::TryLockError;
-        let Some(file) = lock_file(path) else {
-            return false;
-        };
-        match file.try_lock() {
-            Ok(()) => {
-                let _ = file.unlock();
-                false
-            }
-            Err(TryLockError::WouldBlock) => true,
-            Err(TryLockError::Error(_)) => false,
-        }
     }
     #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
         false
-    }
-}
-
-/// Open or create the `<session>.lock` sidecar that carries the
-/// writer's advisory lock. `None` when it cannot be opened.
-#[cfg(any(unix, windows))]
-fn lock_file(path: &Path) -> Option<File> {
-    let mut sidecar = path.as_os_str().to_os_string();
-    sidecar.push(".lock");
-    OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .read(true)
-        .open(PathBuf::from(sidecar))
-        .ok()
-}
-
-/// Take an exclusive non-blocking advisory lock on the session's
-/// sidecar lock file.
-///
-/// `EWOULDBLOCK` means another appender holds the lock, reported as
-/// [`SessionError::Locked`]. Any other `flock` failure (filesystems
-/// without lock support) is returned as an I/O error.
-#[cfg(unix)]
-fn acquire_lock(path: &Path) -> Result<Option<nix::fcntl::Flock<File>>, SessionError> {
-    use nix::fcntl::{Flock, FlockArg};
-    let file = lock_file(path).ok_or_else(|| SessionError::Io {
-        path: path.to_path_buf(),
-        source: std::io::Error::other("cannot open session lock"),
-    })?;
-    match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
-        Ok(lock) => Ok(Some(lock)),
-        Err((_, nix::errno::Errno::EWOULDBLOCK)) => Err(SessionError::Locked {
-            path: path.to_path_buf(),
-        }),
-        Err((_, err)) => Err(SessionError::Io {
-            path: path.to_path_buf(),
-            source: std::io::Error::from_raw_os_error(err as i32),
-        }),
-    }
-}
-
-/// Take an exclusive non-blocking advisory lock with `LockFileEx` over
-/// the whole sidecar file, mirroring the Unix `flock` shape.
-///
-/// A held lock is reported as [`SessionError::Locked`]. Any other lock
-/// failure (including unsupported locks) is returned as an I/O error. Unlike `flock`, Windows byte-range locks belong to the whole
-/// process: closing any other handle to the sidecar in this process
-/// releases them, so the lock is only meaningful against other
-/// processes.
-#[cfg(windows)]
-fn acquire_lock(path: &Path) -> Result<Option<File>, SessionError> {
-    use std::fs::TryLockError;
-    let file = lock_file(path).ok_or_else(|| SessionError::Io {
-        path: path.to_path_buf(),
-        source: std::io::Error::other("cannot open session lock"),
-    })?;
-    match file.try_lock() {
-        Ok(()) => Ok(Some(file)),
-        Err(TryLockError::WouldBlock) => Err(SessionError::Locked {
-            path: path.to_path_buf(),
-        }),
-        Err(TryLockError::Error(source)) => Err(SessionError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
     }
 }
 
@@ -645,18 +704,16 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn sidecar_and_inode_aliases_cannot_bypass_live_writer() {
+    fn aliases_cannot_bypass_a_live_writer() {
         use std::os::unix::fs::symlink;
         let dir = tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         let writer = SessionWriter::create(&path, fresh_header()).unwrap();
         let before = std::fs::read(&path).unwrap();
-        let sidecar = dir.path().join("session.jsonl.lock");
-        assert!(delete_locked(&sidecar).is_err());
-        assert!(sidecar.exists());
-        let sidecar_alias = dir.path().join("sidecar-alias");
-        std::fs::hard_link(&sidecar, &sidecar_alias).unwrap();
-        assert!(delete_locked(&sidecar_alias).is_err());
+        assert!(
+            !dir.path().join("session.jsonl.lock").exists(),
+            "the lock is on the file, with no sidecar"
+        );
         for alias in [
             dir.path().join("symlink.jsonl"),
             dir.path().join("hardlink.jsonl"),
@@ -686,13 +743,80 @@ mod tests {
     }
 
     #[test]
-    fn locked_delete_fails_closed_when_sidecar_cannot_open() {
+    fn deleting_and_moving_clear_an_older_builds_sidecar() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
-        std::fs::write(&path, b"contents").unwrap();
-        std::fs::create_dir(dir.path().join("s.jsonl.lock")).unwrap();
-        assert!(delete_locked(&path).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), b"contents");
+        drop(SessionWriter::create(&path, fresh_header()).unwrap());
+        let sidecar = dir.path().join("s.jsonl.lock");
+        std::fs::write(&sidecar, b"").unwrap();
+        let moved = dir.path().join("moved/s.jsonl");
+        move_locked(&path, &moved).unwrap();
+        assert!(!sidecar.exists(), "a move leaves no sidecar behind");
+        let moved_sidecar = dir.path().join("moved/s.jsonl.lock");
+        std::fs::write(&moved_sidecar, b"").unwrap();
+        delete_locked(&moved).unwrap();
+        assert!(!moved_sidecar.exists(), "nor does a delete");
+    }
+
+    #[test]
+    fn a_move_refused_by_a_live_writer_leaves_no_directory() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let _writer = SessionWriter::create(&path, fresh_header()).unwrap();
+        let dst = dir.path().join("project/01ROOT/agents/s.jsonl");
+        assert!(matches!(
+            move_locked(&path, &dst),
+            Err(SessionError::Locked { .. })
+        ));
+        assert!(
+            !dir.path().join("project").exists(),
+            "every level it would have made is gone"
+        );
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn a_move_never_replaces_a_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let taken = dir.path().join("t.jsonl");
+        std::fs::write(&path, b"mine").unwrap();
+        std::fs::write(&taken, b"theirs").unwrap();
+        assert!(place(&path, &taken).is_err());
+        assert_eq!(std::fs::read(&taken).unwrap(), b"theirs");
+        assert_eq!(std::fs::read(&path).unwrap(), b"mine");
+    }
+
+    #[test]
+    fn a_delete_waits_for_every_agent_to_be_free() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("root.jsonl");
+        drop(SessionWriter::create(&path, fresh_header()).unwrap());
+        let agent = dir.path().join("root/agents/kid.jsonl");
+        let held = SessionWriter::create(&agent, fresh_header()).unwrap();
+        assert!(matches!(
+            delete_with_agents(&path),
+            Err(SessionError::Locked { .. })
+        ));
+        assert!(path.exists() && agent.exists(), "nothing went");
+        drop(held);
+        delete_with_agents(&path).unwrap();
+        assert!(!path.exists() && !dir.path().join("root").exists());
+    }
+
+    /// An older build deletes or renames by path, with no lock of ours:
+    /// a live writer must refuse that. Run on a Windows CI leg.
+    #[cfg(windows)]
+    #[test]
+    fn a_live_session_cannot_be_deleted_or_renamed_under_its_writer() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let writer = SessionWriter::create(&path, fresh_header()).unwrap();
+        assert!(std::fs::remove_file(&path).is_err());
+        assert!(std::fs::rename(&path, dir.path().join("t.jsonl")).is_err());
+        assert!(std::fs::read(&path).is_ok(), "readers still open it");
+        drop(writer);
+        std::fs::rename(&path, dir.path().join("t.jsonl")).unwrap();
     }
 
     #[test]
@@ -809,18 +933,6 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
         assert!(SessionWriter::open_native_replay(&path).unwrap().is_none());
         assert_eq!(std::fs::read(path).unwrap(), bytes);
-    }
-
-    #[test]
-    fn native_replay_fails_if_lock_cannot_open() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("s.jsonl");
-        drop(SessionWriter::create(&path, fresh_header()).unwrap());
-        let mut lock = path.as_os_str().to_os_string();
-        lock.push(".lock");
-        std::fs::remove_file(&lock).unwrap();
-        std::fs::create_dir(&lock).unwrap();
-        assert!(SessionWriter::open_native_replay(&path).is_err());
     }
 
     #[test]
@@ -1096,11 +1208,7 @@ mod tests {
     }
 
     /// Windows mirror of `is_locked_while_a_writer_holds_the_file`.
-    /// Unlike the Unix twin this does not re-probe while the writer
-    /// holds the lock: Windows releases a process's byte-range locks
-    /// when the process closes any handle to the sidecar, so the first
-    /// probe's close can end the writer's lock. Run on a Windows CI
-    /// leg.
+    /// Run on a Windows CI leg.
     #[cfg(windows)]
     #[test]
     fn is_locked_while_a_writer_holds_the_file_windows() {
@@ -1133,11 +1241,9 @@ mod tests {
         let torn = format!("{header}\n{kept}\n{{\"type\":\"label\",\"id\":\"01");
         std::fs::write(&path, torn).unwrap();
 
-        // A foreign writer holding the lock, exactly as another kage
-        // process would: the lock lives on the sidecar, not on the
-        // data file.
-        let holder = lock_file(&path).unwrap();
-        holder.try_lock().unwrap();
+        // A foreign writer holding the file, exactly as another kage
+        // process would: open with the writer's share mode.
+        let holder = claim(OpenOptions::new().read(true).write(true), &path, Use::Write).unwrap();
         let err = SessionWriter::open(&path).unwrap_err();
         assert!(matches!(err, SessionError::Locked { .. }), "{err:?}");
         assert!(
@@ -1161,9 +1267,8 @@ mod tests {
         assert!(!raw.contains("01{"), "torn fragment was not truncated");
     }
 
-    /// The lock must outlive the torn-tail repair: the repair's
-    /// second truncate handle touches only the data file, never the
-    /// sidecar that carries the lock. Run on a Windows CI leg.
+    /// The lock must outlive the torn-tail repair, which truncates
+    /// through the writer's own handle. Run on a Windows CI leg.
     #[cfg(windows)]
     #[test]
     fn lock_survives_the_repair_on_windows() {

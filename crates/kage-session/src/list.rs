@@ -181,13 +181,13 @@ pub struct SessionCache {
 }
 
 /// The legacy JSON index.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct Index {
     version: u32,
     entries: Vec<IndexEntry>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct IndexEntry {
     size: u64,
     modified: Option<SystemTime>,
@@ -313,6 +313,44 @@ impl SessionCache {
             );
         }
         !self.by_path.is_empty()
+    }
+}
+
+/// Rewrites the paths of the files `moved` (from, to) in the catalog of
+/// `dir`, or in its legacy index when it has no catalog yet, so a listing after a
+/// move keeps their summaries instead of reading every moved file again.
+/// A missing or unreadable store is left alone.
+pub(crate) fn relocate_index(dir: &Path, moved: &[(PathBuf, PathBuf)]) {
+    if moved.is_empty() {
+        return;
+    }
+    // A catalog means the legacy index was imported, or never will be.
+    if dir.join(crate::catalog::CATALOG_FILE).exists() {
+        if let Some(mut catalog) = crate::catalog::Catalog::open(dir) {
+            let _ = catalog.relocate(moved);
+        }
+        return;
+    }
+    let Ok(bytes) = std::fs::read(dir.join(LEGACY_INDEX_FILE)) else {
+        return;
+    };
+    let Ok(mut index) = serde_json::from_slice::<Index>(&bytes) else {
+        return;
+    };
+    if index.version != LEGACY_INDEX_VERSION {
+        return;
+    }
+    let to: HashMap<&Path, &Path> = moved
+        .iter()
+        .map(|(from, to)| (from.as_path(), to.as_path()))
+        .collect();
+    for entry in &mut index.entries {
+        if let Some(new) = to.get(entry.summary.path.as_path()) {
+            entry.summary.path = new.to_path_buf();
+        }
+    }
+    if let Ok(bytes) = serde_json::to_vec(&index) {
+        let _ = kage_core::fsutil::atomic_write_private(&dir.join(LEGACY_INDEX_FILE), &bytes);
     }
 }
 
@@ -697,6 +735,36 @@ mod tests {
             catalog_rows(dir.path()).len(),
             1,
             "the deleted file left the catalog"
+        );
+    }
+
+    #[test]
+    fn a_legacy_index_follows_a_move_until_it_is_imported() {
+        let dir = tempdir().unwrap();
+        let path = write_session(dir.path(), "a.jsonl", "ask one");
+        let meta = std::fs::metadata(&path).unwrap();
+        let mut summary = summarize_one(&path).unwrap();
+        summary.title = Some("from the old index".to_owned());
+        let index = serde_json::json!({
+            "version": LEGACY_INDEX_VERSION,
+            "entries": [{"size": meta.len(), "modified": meta.modified().unwrap(), "summary": summary}],
+        });
+        std::fs::write(
+            dir.path().join(LEGACY_INDEX_FILE),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+        let moved = dir.path().join("kage-personal-0123456789/a.jsonl");
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::rename(&path, &moved).unwrap();
+
+        relocate_index(dir.path(), &[(path, moved.clone())]);
+        let listed = list(dir.path()).unwrap();
+        assert_eq!(listed[0].path, moved);
+        assert_eq!(
+            listed[0].title.as_deref(),
+            Some("from the old index"),
+            "the moved file keeps its summary"
         );
     }
 

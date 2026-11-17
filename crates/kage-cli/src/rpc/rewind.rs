@@ -109,8 +109,12 @@ impl CliAcpAgent {
         if in_use {
             return Err(RpcError::new(-32602, "the session is in use"));
         }
-        std::fs::remove_file(&path)
-            .map_err(|e| RpcError::internal(format!("{}: {e}", path.display())))?;
+        kage_session::delete_with_agents(&path).map_err(|e| match e {
+            kage_session::SessionError::Locked { .. } => {
+                RpcError::new(-32602, "the session is in use")
+            }
+            other => RpcError::internal(format!("{}: {other}", path.display())),
+        })?;
         Ok(serde_json::json!({}))
     }
 

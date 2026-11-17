@@ -208,6 +208,43 @@ impl Catalog {
         tx.commit()
     }
 
+    /// Gives the rows of the files `moved` (from, to) their new paths, so
+    /// the moved files are not summarized again. Size and mtime stay, as
+    /// a rename keeps both.
+    pub(crate) fn relocate(&mut self, moved: &[(PathBuf, PathBuf)]) -> rusqlite::Result<()> {
+        // Taking the write lock first lets the busy timeout wait out
+        // another writer, which upgrading a read could not.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        {
+            let mut get = tx.prepare_cached("SELECT summary FROM session WHERE path = ?1")?;
+            let mut put = tx.prepare_cached(
+                "UPDATE OR REPLACE session SET path = ?2, summary = ?3 WHERE path = ?1",
+            )?;
+            for (from, to) in moved {
+                let (Some(from), Some(to_text)) = (from.to_str(), to.to_str()) else {
+                    continue;
+                };
+                let Some(json) = get
+                    .query_row([from], |row| row.get::<_, String>(0))
+                    .optional()?
+                else {
+                    continue;
+                };
+                let Ok(mut summary) = serde_json::from_str::<SessionSummary>(&json) else {
+                    continue;
+                };
+                summary.path.clone_from(to);
+                let Ok(json) = serde_json::to_string(&summary) else {
+                    continue;
+                };
+                put.execute(params![from, to_text, json])?;
+            }
+        }
+        tx.commit()
+    }
+
     /// Whether `path` records an agent, from its row, when the row was
     /// taken at `size` and `mtime`. `None` when the row is missing or
     /// stale.

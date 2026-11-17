@@ -9,13 +9,24 @@ use kage_mcp::{McpManager, McpServerHandle, tools_from_connection};
 use kage_tools::ToolRegistry;
 use kage_tools::tool::ToolContext;
 
-/// `[mcp.servers.kage]` pointed at this test binary's `kage mcp serve`.
-fn kage_serve_config() -> McpServer {
+/// `[mcp.servers.kage]` pointed at this test binary's `kage mcp serve`,
+/// with every kage directory under `home`, so the subprocess never reads
+/// or writes the developer's own config and sessions.
+fn kage_serve_config(home: &std::path::Path) -> McpServer {
     McpServer {
         startup_timeout_secs: None,
         command: Some(env!("CARGO_BIN_EXE_kage").to_owned()),
         args: vec!["mcp".to_owned(), "serve".to_owned()],
-        env: BTreeMap::new(),
+        env: [
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+        ]
+        .into_iter()
+        .map(|key| (key.to_owned(), home.join(key).display().to_string()))
+        .collect(),
         url: None,
         headers: BTreeMap::new(),
         disabled: false,
@@ -26,7 +37,8 @@ fn kage_serve_config() -> McpServer {
 
 #[test]
 fn spawn_kage_mcp_serve_and_round_trip_a_builtin_tool() {
-    let cfg = kage_serve_config();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = kage_serve_config(home.path());
 
     let handle = McpServerHandle::spawn("kage", &cfg, &[], None).expect("spawn kage mcp serve");
     let conn = handle.connection();
@@ -67,8 +79,10 @@ fn spawn_kage_mcp_serve_and_round_trip_a_builtin_tool() {
 
 #[test]
 fn manager_restart_respawns_and_keeps_tools_registered() {
+    let home = tempfile::tempdir().unwrap();
     let mut cfg = McpConfig::default();
-    cfg.servers.insert("kage".to_owned(), kage_serve_config());
+    cfg.servers
+        .insert("kage".to_owned(), kage_serve_config(home.path()));
 
     let (mut manager, errors) = McpManager::spawn_all(&cfg, vec![], None);
     assert!(errors.is_empty(), "spawn errors: {errors:?}");

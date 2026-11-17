@@ -12,7 +12,14 @@ fn print_resume_rejects_external_session_without_disclosing_identity_or_modifyin
     let dir = temp.path().join("data/kage/sessions");
     std::fs::create_dir_all(&dir).unwrap();
     let session = kage_core::SessionId::new();
-    let path = dir.join(format!("{session}.jsonl"));
+    // Already in the project layout, so starting up moves nothing.
+    let project = kage_session::layout::project_dir(
+        &dir,
+        temp.path(),
+        kage_core::config::SessionGrouping::Repo,
+    );
+    std::fs::create_dir_all(&project).unwrap();
+    let path = project.join(format!("{session}.jsonl"));
     let header = Header {
         version: FORMAT_VERSION,
         session,

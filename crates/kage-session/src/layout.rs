@@ -215,6 +215,11 @@ fn project_name(key: &Path) -> String {
     format!("{slug}-{}", &hex::encode(digest)[..10])
 }
 
+/// Whether `dir` is a project directory, by its name.
+pub(crate) fn is_project_dir(dir: &Path) -> bool {
+    dir.file_name().is_some_and(is_project_name)
+}
+
 /// Whether `name` has the shape [`project_name`] gives: a slug, a dash
 /// and 10 hex digits.
 fn is_project_name(name: &std::ffi::OsStr) -> bool {

@@ -545,24 +545,30 @@ impl super::Dispatcher {
                 return;
             }
         };
+        let stored = match kage_session::replay(&dst) {
+            Ok(stored) => stored,
+            Err(err) => {
+                self.error(id, format!("clone: {err}"));
+                return;
+            }
+        };
         let session = &self.sessions[&id];
         let Some(idle) = session.idle.as_ref() else {
             return;
         };
-        let cx = idle.cx.clone();
+        // The copy names its own agents by fresh ids, which the model
+        // reads from here on.
+        let mut cx = idle.cx.clone();
+        cx.history = stored.history;
         let recorder = super::Recorder::new(writer, session.plugins.clone());
-        let stored = kage_session::replay(&dst).ok();
         self.reseat(
             id,
             new_id,
             cx,
             recorder,
-            stored.as_ref().and_then(|s| s.title.clone()),
-            stored
-                .as_ref()
-                .map(|s| s.timeline.clone())
-                .unwrap_or_default(),
-            stored.map(|s| s.compacted_agents).unwrap_or_default(),
+            stored.title,
+            stored.timeline,
+            stored.compacted_agents,
             format!("cloned session: {}", short_id(new_id)),
         );
     }

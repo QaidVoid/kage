@@ -11,8 +11,15 @@
 //! inherited.
 //!
 //! Forking does not mutate the source. After a fork, both files exist
-//! independently and may diverge.
+//! independently and may diverge. A [`fork`] also copies the agents the
+//! source had started by the fork point, with their own agents, into the
+//! fork's `agents` directory under fresh session ids, and names them by
+//! those ids throughout the copies. The fork then owns its agents, and
+//! deleting the source leaves them whole. A fork made before this, and a
+//! fork of one, still find theirs with the source through
+//! [`crate::layout::agent_file`].
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -83,7 +90,7 @@ pub fn fork(
         backend: None,
         parent_entry: Some(at),
     };
-    fork_as(src, dst, new_header, at)
+    fork_tree(src, dst, new_header, at, true)
 }
 
 /// Fork `src` into a new session file at `dst` under the header
@@ -112,6 +119,17 @@ pub fn fork_as(
     dst: &Path,
     new_header: Header,
     at: EntryId,
+) -> Result<bool, SessionError> {
+    fork_tree(src, dst, new_header, at, false)
+}
+
+/// [`fork_as`], copying the source's agents too when `with_agents`.
+fn fork_tree(
+    src: &Path,
+    dst: &Path,
+    new_header: Header,
+    at: EntryId,
+    with_agents: bool,
 ) -> Result<bool, SessionError> {
     let tree = SessionTree::read(src)?;
     if tree.header().backend.is_some() {
@@ -144,15 +162,242 @@ pub fn fork_as(
     let truncated = tree.truncated();
     let source_root = tree.header().id;
     let destination_root = new_header.id;
+    let source_session = tree.header().session;
+    let new_session = new_header.session;
+    let encode = |source| SessionError::Encode {
+        path: dst.to_path_buf(),
+        source,
+    };
+    let entries: Vec<SessionEntry> = ancestry
+        .into_iter()
+        .map(|entry| {
+            remap_root(entry, source_root, destination_root).unwrap_or_else(|| entry.clone())
+        })
+        .collect();
+    let (agents, until) = match entries.last() {
+        Some(last) if with_agents && crate::layout::agents_dir(src).is_dir() => {
+            let mut named = HashSet::new();
+            for entry in &entries {
+                let line = serde_json::to_string(entry).map_err(encode)?;
+                named.extend(ids_in(&line).map(str::to_owned));
+            }
+            (
+                agents_started_by(src, source_session, &named, last.ts())?,
+                last.ts(),
+            )
+        }
+        _ => (Vec::new(), Utc::now()),
+    };
+    let mut renames: HashMap<String, String> = agents
+        .iter()
+        .map(|(id, _)| (id.clone(), SessionId::new().to_string()))
+        .collect();
     let mut writer = SessionWriter::create(dst.to_path_buf(), new_header)?;
-    for entry in ancestry {
-        if let Some(remapped) = remap_root(entry, source_root, destination_root) {
-            writer.append(&remapped)?;
-        } else {
+    for entry in &entries {
+        if renames.is_empty() {
             writer.append(entry)?;
+            continue;
+        }
+        let json = serde_json::to_string(entry).map_err(encode)?;
+        let copy = serde_json::from_str(&rename_ids(&json, &renames)).map_err(encode)?;
+        writer.append(&copy)?;
+    }
+    drop(writer);
+    if !agents.is_empty() {
+        // An agent's parent is the session it was copied with.
+        renames.insert(source_session.to_string(), new_session.to_string());
+        if let Err(err) = copy_agents(&agents, &crate::layout::agents_dir(dst), &renames, until) {
+            let _ = std::fs::remove_file(dst);
+            if let (Some(dir), Some(stem)) = (dst.parent(), dst.file_stem()) {
+                let _ = std::fs::remove_dir_all(dir.join(stem));
+            }
+            return Err(err);
         }
     }
     Ok(truncated)
+}
+
+/// The agents the session `root` at `src` started that its copied history
+/// `named`, with every agent those started by `until`, as (session id,
+/// file), from the headers in its `agents` directory. An agent of an
+/// agent is in that same directory, so a fork of an agent finds its
+/// agents there too. An agent of a turn undone or rewound away is named
+/// nowhere in the copy, so it stays behind.
+///
+/// # Errors
+///
+/// Errors if the directory cannot be read, or the file of an agent the
+/// history names cannot, since a fork missing that agent would lose it
+/// with the source. Any other file that cannot be read, is deleted
+/// meanwhile or has no header yet is no agent to copy.
+fn agents_started_by(
+    src: &Path,
+    root: SessionId,
+    named: &HashSet<String>,
+    until: chrono::DateTime<Utc>,
+) -> Result<Vec<(String, PathBuf)>, SessionError> {
+    let dir = crate::layout::agents_dir(src);
+    let io = |source| SessionError::Io {
+        path: dir.clone(),
+        source,
+    };
+    let mut started: HashMap<String, Vec<(String, chrono::DateTime<Utc>, PathBuf)>> =
+        HashMap::new();
+    for entry in std::fs::read_dir(&dir).map_err(io)? {
+        let path = entry.map_err(io)?.path();
+        if path.extension().is_none_or(|ext| ext != "jsonl") || path == src {
+            continue;
+        }
+        let header = match SessionReader::iter(&path).map(|mut reader| reader.next()) {
+            Ok(Some(Ok(SessionEntry::Header(header)))) => header,
+            Err(err @ SessionError::Io { .. }) | Ok(Some(Err(err @ SessionError::Io { .. })))
+                if path.exists()
+                    && path
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .is_some_and(|id| named.contains(id)) =>
+            {
+                return Err(err);
+            }
+            _ => continue,
+        };
+        if let Some(parent) = header.parent_session {
+            started.entry(parent.to_string()).or_default().push((
+                header.session.to_string(),
+                header.ts,
+                path,
+            ));
+        }
+    }
+    let mut found = Vec::new();
+    let mut seen = HashSet::new();
+    let mut pending: Vec<(String, bool)> = vec![(root.to_string(), true)];
+    while let Some((parent, is_root)) = pending.pop() {
+        for (id, ts, path) in started.get(&parent).into_iter().flatten() {
+            let wanted = if is_root {
+                named.contains(id)
+            } else {
+                *ts <= until
+            };
+            if !wanted || !seen.insert(id.clone()) {
+                continue;
+            }
+            pending.push((id.clone(), false));
+            found.push((id.clone(), path.clone()));
+        }
+    }
+    Ok(found)
+}
+
+/// Copies each of `agents` into `dir` under its new id from `renames`,
+/// with every id `renames` names replaced in its lines, through the last
+/// entry written by `until`, the fork point: what an agent did after it
+/// happened in the source alone. A torn last line of an agent still
+/// being written is left out, and a line that does not decode ends the
+/// copy, so the copy reads back whole.
+fn copy_agents(
+    agents: &[(String, PathBuf)],
+    dir: &Path,
+    renames: &HashMap<String, String>,
+    until: chrono::DateTime<Utc>,
+) -> Result<(), SessionError> {
+    for (id, path) in agents {
+        let io = |source: std::io::Error| SessionError::Io {
+            path: path.clone(),
+            source,
+        };
+        let data = std::fs::read(path).map_err(io)?;
+        let text = String::from_utf8_lossy(&data);
+        let mut lines = text
+            .split_inclusive('\n')
+            .filter(|line| line.ends_with('\n'));
+        let Some(first) = lines.next() else {
+            continue;
+        };
+        let SessionEntry::Header(header) = serde_json::from_str(&rename_ids(first, renames))
+            .map_err(|source| SessionError::Encode {
+                path: path.clone(),
+                source,
+            })?
+        else {
+            return Err(SessionError::MissingHeader { path: path.clone() });
+        };
+        let rest: String = lines
+            .filter(|line| !line.trim_ascii().is_empty())
+            .map(|line| rename_ids(line, renames))
+            .take_while(|line| {
+                serde_json::from_str::<SessionEntry>(line).is_ok_and(|entry| entry.ts() <= until)
+            })
+            .collect();
+        let dst = dir.join(format!("{}.jsonl", renames[id]));
+        let mut writer = SessionWriter::create(dst, header)?;
+        if !rest.is_empty() {
+            writer.append_lines(rest.as_bytes())?;
+        }
+    }
+    Ok(())
+}
+
+/// The spans of `text` that read as a session id standing on its own: 26
+/// characters of a ULID's alphabet, after a quote, a space, a JSON escape
+/// such as `\n` or the start, and before no letter or digit. One that is
+/// a path component, after or before `/` or an escaped `\`, names a
+/// directory such as an agent's worktree and is left alone.
+fn id_spans(text: &str) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+    const LEN: usize = 26;
+    let bytes = text.as_bytes();
+    let starts_alone = move |at: usize| match at.checked_sub(1).map(|before| bytes[before]) {
+        None => true,
+        Some(b'/' | b'\\') => false,
+        Some(b'n' | b'r' | b't') => at >= 2 && bytes[at - 2] == b'\\',
+        Some(byte) => !byte.is_ascii_alphanumeric(),
+    };
+    // A quote inside a JSON string is escaped, so a `\` alone may close
+    // an id; an escaped `\` is a path separator.
+    let ends_alone = move |end: usize| match bytes.get(end) {
+        None => true,
+        Some(b'/') => false,
+        Some(b'\\') => bytes.get(end + 1) != Some(&b'\\'),
+        Some(byte) => !byte.is_ascii_alphanumeric(),
+    };
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        while at + LEN <= bytes.len() {
+            let start = at;
+            at += 1;
+            if starts_alone(start)
+                && bytes[start..start + LEN]
+                    .iter()
+                    .all(|byte| byte.is_ascii_digit() || byte.is_ascii_uppercase())
+                && ends_alone(start + LEN)
+            {
+                at = start + LEN;
+                return Some(start..start + LEN);
+            }
+        }
+        None
+    })
+}
+
+/// Every session id [`id_spans`] finds in `text`.
+fn ids_in(text: &str) -> impl Iterator<Item = &str> {
+    id_spans(text).map(move |span| &text[span])
+}
+
+/// `text` with every session id [`id_spans`] finds that `renames` names
+/// replaced.
+fn rename_ids(text: &str, renames: &HashMap<String, String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    for span in id_spans(text) {
+        if let Some(new) = renames.get(&text[span.clone()]) {
+            out.push_str(&text[copied..span.start]);
+            out.push_str(new);
+            copied = span.end;
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
 }
 
 /// A session's entries after its header, up to and including the last
@@ -1338,6 +1583,314 @@ mod tests {
             copied.len(),
             4,
             "header, kept, reply and the abandoned dropped prompt"
+        );
+    }
+
+    /// The session files directly in `dir`.
+    fn jsonl_in(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+            .collect()
+    }
+
+    /// An agent of `parent` in `agents` with no entries, started
+    /// `hours_later` hours from now.
+    fn header_only_agent(agents: &Path, parent: SessionId, hours_later: i64) -> SessionId {
+        let mut header = fresh_header("m");
+        header.parent_session = Some(parent);
+        header.ts = Utc::now() + chrono::Duration::hours(hours_later);
+        let id = header.session;
+        write(&agents.join(format!("{id}.jsonl")), header, &[]);
+        id
+    }
+
+    fn header_of(path: &Path) -> Header {
+        match SessionReader::iter(path).unwrap().next() {
+            Some(Ok(SessionEntry::Header(header))) => header,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fork_owns_copies_of_the_agents_started_by_its_fork_point() {
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("kage-personal-0123456789");
+        std::fs::create_dir_all(&project).unwrap();
+        let root = fresh_header("m");
+        let root_id = root.session;
+        let src = project.join(format!("{root_id}.jsonl"));
+        let agents = crate::layout::agents_dir(&src);
+        std::fs::create_dir_all(&agents).unwrap();
+
+        let mut kid = fresh_header("m");
+        kid.parent_session = Some(root_id);
+        let kid_id = kid.session;
+        let grandkid_id = header_only_agent(&agents, kid_id, 0);
+        let mut after = message_entry(Role::User, "said after the fork point");
+        if let SessionEntry::Message(message) = &mut after {
+            message.ts = Utc::now() + chrono::Duration::hours(1);
+        }
+        write(
+            &agents.join(format!("{kid_id}.jsonl")),
+            kid,
+            &[
+                message_entry(
+                    Role::User,
+                    &format!(
+                        "<message from=\"kage\" session=\"{root_id}\">go</message> started {grandkid_id}"
+                    ),
+                ),
+                after,
+            ],
+        );
+        header_only_agent(&agents, root_id, 0);
+        let reply = message_entry(
+            Role::Assistant,
+            &format!("<agent session=\"{kid_id}\">done</agent>"),
+        );
+        let at = reply.id();
+        write(&src, root, &[message_entry(Role::User, "hi"), reply]);
+        header_only_agent(&agents, root_id, 1);
+        header_only_agent(&agents, kid_id, 1);
+
+        let fork_id = SessionId::new();
+        let dst = project.join(format!("{fork_id}.jsonl"));
+        fork(&src, &dst, fork_id, at).unwrap();
+
+        let copied: Vec<PathBuf> = jsonl_in(&crate::layout::agents_dir(&dst));
+        assert_eq!(
+            copied.len(),
+            2,
+            "the kid and its own agent; not an agent the copy never names, nor one started after the fork point"
+        );
+        let fork_text = std::fs::read_to_string(&dst).unwrap();
+        assert!(
+            !fork_text.contains(&kid_id.to_string()),
+            "the fork names the copy"
+        );
+        let copy_of_kid = copied
+            .iter()
+            .find(|path| header_of(path).parent_session == Some(fork_id))
+            .expect("the kid's copy belongs to the fork");
+        let new_kid = header_of(copy_of_kid).session;
+        assert!(fork_text.contains(&new_kid.to_string()));
+        assert_eq!(
+            copy_of_kid.file_stem().unwrap(),
+            new_kid.to_string().as_str()
+        );
+        let kid_text = std::fs::read_to_string(copy_of_kid).unwrap();
+        assert!(
+            kid_text.contains(&format!("session=\\\"{fork_id}\\\"")),
+            "{kid_text}"
+        );
+        assert!(
+            !kid_text.contains("said after the fork point"),
+            "what the agent did after the fork point stays with the source"
+        );
+        assert!(!kid_text.contains(&grandkid_id.to_string()));
+        let copy_of_grandkid = copied.iter().find(|path| *path != copy_of_kid).unwrap();
+        assert_eq!(header_of(copy_of_grandkid).parent_session, Some(new_kid));
+        assert!(kid_text.contains(&header_of(copy_of_grandkid).session.to_string()));
+
+        assert_eq!(
+            jsonl_in(&agents).len(),
+            5,
+            "the source keeps its own agents untouched"
+        );
+        assert!(
+            std::fs::read_to_string(agents.join(format!("{kid_id}.jsonl")))
+                .unwrap()
+                .contains("said after the fork point")
+        );
+    }
+
+    #[test]
+    fn ids_are_renamed_only_where_they_stand_alone() {
+        let old = SessionId::new().to_string();
+        let renames = HashMap::from([(old.clone(), "NEW".to_owned())]);
+        assert_eq!(rename_ids(&format!("a {old} b"), &renames), "a NEW b");
+        assert_eq!(rename_ids(&format!("\"{old}\""), &renames), "\"NEW\"");
+        assert_eq!(rename_ids(&format!("X{old}"), &renames), format!("X{old}"));
+        assert_eq!(rename_ids(&format!("{old}9"), &renames), format!("{old}9"));
+        assert_eq!(rename_ids("\u{e9} short", &renames), "\u{e9} short");
+        assert_eq!(
+            rename_ids(&format!(r"line\n{old}"), &renames),
+            r"line\nNEW",
+            "after a JSON escape"
+        );
+        assert_eq!(
+            rename_ids(&format!("worktrees/{old}"), &renames),
+            format!("worktrees/{old}"),
+            "a worktree path stays"
+        );
+        assert_eq!(
+            rename_ids(&format!(r"worktrees\\{old}"), &renames),
+            format!(r"worktrees\\{old}"),
+            "on Windows too"
+        );
+        assert_eq!(
+            rename_ids(&format!("\"{old}/output.txt\""), &renames),
+            format!("\"{old}/output.txt\""),
+            "nor where it starts a path"
+        );
+        assert_eq!(
+            rename_ids(&format!(r"{old}\\out"), &renames),
+            format!(r"{old}\\out")
+        );
+        assert_eq!(
+            rename_ids(&format!(r#"session=\"{old}\""#), &renames),
+            r#"session=\"NEW\""#,
+            "an escaped quote still closes it"
+        );
+    }
+
+    /// A source with one agent its history names, as (source, fork
+    /// point, agents directory, agent file).
+    fn source_with_an_agent(project: &Path) -> (PathBuf, EntryId, PathBuf, PathBuf) {
+        let root = fresh_header("m");
+        let root_id = root.session;
+        let src = project.join(format!("{root_id}.jsonl"));
+        let agents = crate::layout::agents_dir(&src);
+        std::fs::create_dir_all(&agents).unwrap();
+        let kid_id = header_only_agent(&agents, root_id, 0);
+        let reply = message_entry(
+            Role::Assistant,
+            &format!("<agent session=\"{kid_id}\">done</agent>"),
+        );
+        let at = reply.id();
+        write(&src, root, &[reply]);
+        (
+            src,
+            at,
+            agents.clone(),
+            agents.join(format!("{kid_id}.jsonl")),
+        )
+    }
+
+    #[test]
+    fn a_corrupt_agent_line_ends_its_copy() {
+        let dir = tempdir().unwrap();
+        let (src, at, _, kid) = source_with_an_agent(dir.path());
+        let mut text = std::fs::read_to_string(&kid).unwrap();
+        text.push_str("not json\n");
+        std::fs::write(&kid, text).unwrap();
+        let fork_id = SessionId::new();
+        let dst = dir.path().join(format!("{fork_id}.jsonl"));
+        fork(&src, &dst, fork_id, at).unwrap();
+        let copied = jsonl_in(&crate::layout::agents_dir(&dst));
+        assert_eq!(copied.len(), 1);
+        assert!(
+            crate::replay(&copied[0]).is_ok(),
+            "the copy reads back whole"
+        );
+    }
+
+    #[test]
+    fn a_blank_agent_line_is_skipped_not_the_end() {
+        let dir = tempdir().unwrap();
+        let (src, _, _, kid) = source_with_an_agent(dir.path());
+        let mut text = std::fs::read_to_string(&kid).unwrap();
+        text.push('\n');
+        std::fs::write(&kid, text).unwrap();
+        SessionWriter::open(&kid)
+            .unwrap()
+            .append(&message_entry(Role::User, "after the blank"))
+            .unwrap();
+        let later = message_entry(Role::User, "later");
+        let at = later.id();
+        SessionWriter::open(&src).unwrap().append(&later).unwrap();
+
+        let fork_id = SessionId::new();
+        let dst = dir.path().join(format!("{fork_id}.jsonl"));
+        fork(&src, &dst, fork_id, at).unwrap();
+        let copied = jsonl_in(&crate::layout::agents_dir(&dst));
+        assert!(
+            std::fs::read_to_string(&copied[0])
+                .unwrap()
+                .contains("after the blank")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_agent_fails_the_fork_only_when_the_history_names_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let (src, at, agents, kid) = source_with_an_agent(dir.path());
+        let stray = agents.join(format!("{}.jsonl", SessionId::new()));
+        std::fs::write(&stray, b"").unwrap();
+        std::fs::set_permissions(&stray, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let first = SessionId::new();
+        fork(&src, &dir.path().join(format!("{first}.jsonl")), first, at).unwrap();
+        if std::fs::read(&stray).is_ok() {
+            // Running as root, which reads any file.
+            return;
+        }
+        std::fs::set_permissions(&kid, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let second = SessionId::new();
+        let dst = dir.path().join(format!("{second}.jsonl"));
+        let forked = fork(&src, &dst, second, at);
+        std::fs::set_permissions(&kid, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(forked.is_err(), "the named agent cannot be copied");
+        assert!(!dst.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_agents_directory_fails_the_fork_before_it_starts() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let (src, at, agents, _) = source_with_an_agent(dir.path());
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let fork_id = SessionId::new();
+        let dst = dir.path().join(format!("{fork_id}.jsonl"));
+        let forked = fork(&src, &dst, fork_id, at);
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if std::fs::read_dir(&agents).is_ok() && forked.is_ok() {
+            // Running as root, which reads any directory.
+            return;
+        }
+        assert!(forked.is_err());
+        assert!(!dst.exists(), "no fork that would lose the agent");
+    }
+
+    #[test]
+    fn a_fork_of_an_agent_copies_the_agents_it_started() {
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("kage-personal-0123456789");
+        let root_id = SessionId::new();
+        let agents = project
+            .join(root_id.to_string())
+            .join(crate::layout::AGENTS_DIR);
+        std::fs::create_dir_all(&agents).unwrap();
+        let mut kid = fresh_header("m");
+        kid.parent_session = Some(root_id);
+        let kid_id = kid.session;
+        let mut grandkid = fresh_header("m");
+        grandkid.parent_session = Some(kid_id);
+        let grandkid_id = grandkid.session;
+        write(&agents.join(format!("{grandkid_id}.jsonl")), grandkid, &[]);
+        let src = agents.join(format!("{kid_id}.jsonl"));
+        let reply = message_entry(
+            Role::Assistant,
+            &format!("<agent session=\"{grandkid_id}\">done</agent>"),
+        );
+        let at = reply.id();
+        write(&src, kid, &[reply]);
+
+        let fork_id = SessionId::new();
+        let dst = project.join(format!("{fork_id}.jsonl"));
+        fork(&src, &dst, fork_id, at).unwrap();
+        let copied: Vec<PathBuf> = jsonl_in(&crate::layout::agents_dir(&dst));
+        assert_eq!(copied.len(), 1, "the agent's own agent, not itself");
+        let header = header_of(&copied[0]);
+        assert_eq!(header.parent_session, Some(fork_id));
+        assert!(
+            std::fs::read_to_string(&dst)
+                .unwrap()
+                .contains(&header.session.to_string())
         );
     }
 }

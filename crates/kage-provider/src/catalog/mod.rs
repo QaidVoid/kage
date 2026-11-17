@@ -2,9 +2,9 @@
 //!
 //! The bundled snapshot lives in `generated.rs`, which is rewritten by
 //! `cargo xtask refresh-models` from the curated catalog at
-//! [`source::catalog_url`]. `kage models refresh` writes a newer copy of
-//! that same catalog to the model cache; [`use_cache`] lays its model
-//! entries over the snapshot. This module exposes a hand-curated API on
+//! [`source::catalog_url`]. `kage models refresh`, and a running kage on
+//! its own, write a newer copy of that same catalog to the model cache;
+//! [`use_cache`] lays its model entries over the snapshot. This module exposes a hand-curated API on
 //! top so callers don't depend on the generator's exact shape.
 //!
 //! Provider impls are still hardcoded in their respective modules
@@ -16,8 +16,8 @@
 mod generated;
 pub mod source;
 
-use std::path::Path;
-use std::sync::OnceLock;
+use std::path::{Path, PathBuf};
+use std::sync::{PoisonError, RwLock};
 
 pub use kage_core::ModelCost;
 use kage_core::{Modalities, Reasoning, ReasoningField};
@@ -80,18 +80,47 @@ impl ModelInfo {
     }
 }
 
-static CATALOG: OnceLock<&'static [ProviderInfo]> = OnceLock::new();
+/// The catalog laid over the snapshot, and the digest of the cache body
+/// it was read from.
+#[derive(Clone, Copy)]
+struct Loaded {
+    providers: &'static [ProviderInfo],
+    digest: [u8; 32],
+}
+
+static CATALOG: RwLock<Option<Loaded>> = RwLock::new(None);
 
 /// Every provider in the catalog: the bundled snapshot, with the model
 /// cache laid over it when [`use_cache`] loaded one.
 #[must_use]
 pub fn providers() -> &'static [ProviderInfo] {
-    CATALOG.get().copied().unwrap_or(generated::PROVIDERS)
+    CATALOG
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .map_or(generated::PROVIDERS, |loaded| loaded.providers)
 }
 
-/// Lay the model cache at `path` over the bundled snapshot for the rest
-/// of the process. Only the first call has an effect; results of a
-/// later `kage models refresh` are picked up on the next process start.
+/// The digest of the cache body the catalog in effect was laid from,
+/// `None` while it is the bundled snapshot alone.
+#[must_use]
+pub fn loaded_digest() -> Option<[u8; 32]> {
+    CATALOG
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .map(|loaded| loaded.digest)
+}
+
+/// The SHA-256 digest of `bytes`.
+fn digest(bytes: &[u8]) -> [u8; 32] {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(bytes).into()
+}
+
+/// Lay the model cache at `path` over the bundled snapshot, replacing
+/// what an earlier call laid. Lookups after it see the cache's models.
+/// A catalog is never freed, since lookups hand out `'static`
+/// references into it, so each load a running process takes keeps one
+/// more copy: loads are meant for a changed cache only.
 ///
 /// The cache may add models to a bundled provider or update their
 /// metadata. It never adds a provider or changes a provider's id,
@@ -103,15 +132,41 @@ pub fn providers() -> &'static [ProviderInfo] {
 /// does not parse. Callers should surface the reason; a silently
 /// stale catalog is exactly the drift the cache exists to prevent.
 pub fn use_cache(path: &Path) -> Result<usize, String> {
+    load(path, false).map(Option::unwrap_or_default)
+}
+
+/// [`use_cache`] when the cache at `path` differs from the one this
+/// process laid last, as after another process refreshed it. Returns
+/// the model count when it was laid.
+///
+/// # Errors
+///
+/// As [`use_cache`].
+pub fn use_cache_if_changed(path: &Path) -> Result<Option<usize>, String> {
+    load(path, true)
+}
+
+fn load(path: &Path, only_changed: bool) -> Result<Option<usize>, String> {
     let json =
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let merged = merge_json(generated::PROVIDERS, &json)
-        .ok_or_else(|| "catalog cache does not parse".to_owned())?;
-    let count = merged.iter().map(|p| p.models.len()).sum();
-    if CATALOG.set(merged).is_err() {
-        return Err("catalog already loaded this process".to_owned());
+    let digest = digest(json.as_bytes());
+    let mut catalog = CATALOG.write().unwrap_or_else(PoisonError::into_inner);
+    if only_changed && catalog.is_some_and(|loaded| loaded.digest == digest) {
+        return Ok(None);
     }
-    Ok(count)
+    let providers = merge_json(generated::PROVIDERS, &json)
+        .ok_or_else(|| "catalog cache does not parse".to_owned())?;
+    *catalog = Some(Loaded { providers, digest });
+    Ok(Some(providers.iter().map(|p| p.models.len()).sum()))
+}
+
+/// What [`refresh_if_changed`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refreshed {
+    /// A new catalog was written, exposing this many models.
+    Changed(usize),
+    /// The published catalog is the one already cached.
+    Unchanged,
 }
 
 /// Read the curated catalog from `url`, check it parses to at least
@@ -133,22 +188,95 @@ pub fn use_cache(path: &Path) -> Result<usize, String> {
 /// not a catalog or names none of kage's providers, or `dest` cannot be
 /// written.
 pub fn refresh(url: &str, dest: &Path) -> Result<usize, String> {
-    let body = if let Some(path) = url.strip_prefix("file://") {
+    let (body, etag) = fetch(url, None)?.ok_or("the catalog server answered 304 unasked")?;
+    store(url, &body, etag.as_deref(), dest)
+}
+
+/// [`refresh`], asking the server for the catalog only when it differs
+/// from the one cached at `dest`, by the entity tag stored beside it.
+/// The tag is only sent while the cache is the body `url` served with it.
+/// An unchanged catalog keeps its file, whose modification time is set
+/// to now so the next check counts from this one.
+///
+/// # Errors
+///
+/// As [`refresh`], and when the unchanged cache cannot be touched.
+pub fn refresh_if_changed(url: &str, dest: &Path) -> Result<Refreshed, String> {
+    if let Some((body, etag)) = fetch(url, cached_etag(url, dest).as_deref())? {
+        return store(url, &body, etag.as_deref(), dest).map(Refreshed::Changed);
+    }
+    std::fs::File::options()
+        .write(true)
+        .open(dest)
+        .and_then(|file| file.set_modified(std::time::SystemTime::now()))
+        .map_err(|e| format!("touch {}: {e}", dest.display()))?;
+    Ok(Refreshed::Unchanged)
+}
+
+/// The entity tag `url` served the cache at `dest` with, when the file
+/// beside it records one for this very body from this very URL: a body
+/// another process or a hand edit replaced, or one another source
+/// served, is fetched whole.
+fn cached_etag(url: &str, dest: &Path) -> Option<String> {
+    let body = std::fs::read(dest).ok()?;
+    let recorded = std::fs::read_to_string(etag_path(dest)).ok()?;
+    let mut lines = recorded.lines();
+    let (etag, of, from) = (lines.next()?, lines.next()?, lines.next()?);
+    (of == hex(&digest(&body)) && from == url).then(|| etag.to_owned())
+}
+
+/// `bytes` as lowercase hexadecimal.
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
+}
+
+/// The file beside the cache at `dest` holding the entity tag its body
+/// was served with, the digest of that body and the URL that served it.
+fn etag_path(dest: &Path) -> PathBuf {
+    let mut name = dest.file_name().unwrap_or_default().to_os_string();
+    name.push(".etag");
+    dest.with_file_name(name)
+}
+
+/// The catalog body at `url` and its entity tag, or `None` when the
+/// server answers that the body tagged `etag` is still current.
+fn fetch(url: &str, etag: Option<&str>) -> Result<Option<(String, Option<String>)>, String> {
+    if let Some(path) = url.strip_prefix("file://") {
         let file = std::fs::File::open(path).map_err(|e| format!("read {path}: {e}"))?;
-        read_limited(file, DOWNLOAD_LIMIT)?
-    } else {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(std::time::Duration::from_secs(60)))
-            .build()
-            .into();
-        let response = agent
-            .get(url)
-            .header("user-agent", concat!("kage/", env!("CARGO_PKG_VERSION")))
-            .call()
-            .map_err(|e| format!("get {url}: {e}"))?;
-        read_limited(response.into_body().into_reader(), DOWNLOAD_LIMIT)?
-    };
-    let providers = source::parse(&body)?;
+        return Ok(Some((read_limited(file, DOWNLOAD_LIMIT)?, None)));
+    }
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(60)))
+        .build()
+        .into();
+    let mut request = agent
+        .get(url)
+        .header("user-agent", concat!("kage/", env!("CARGO_PKG_VERSION")));
+    if let Some(etag) = etag {
+        request = request.header("if-none-match", etag.trim());
+    }
+    let response = request.call().map_err(|e| format!("get {url}: {e}"))?;
+    if response.status() == 304 {
+        return Ok(None);
+    }
+    let etag = response
+        .headers()
+        .get("etag")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let body = read_limited(response.into_body().into_reader(), DOWNLOAD_LIMIT)?;
+    Ok(Some((body, etag)))
+}
+
+/// Checks `body`, served by `url`, is a catalog naming at least one of
+/// kage's providers, writes it to `dest` and its entity tag beside it,
+/// and returns how many models those providers expose.
+fn store(url: &str, body: &str, etag: Option<&str>, dest: &Path) -> Result<usize, String> {
+    let providers = source::parse(body)?;
     if providers.is_empty() {
         return Err("catalog has none of kage's providers".to_owned());
     }
@@ -158,6 +286,21 @@ pub fn refresh(url: &str, dest: &Path) -> Result<usize, String> {
     }
     kage_core::fsutil::atomic_write(dest, body.as_bytes())
         .map_err(|e| format!("write {}: {e}", dest.display()))?;
+    let tag = etag_path(dest);
+    match etag {
+        Some(etag) => {
+            let recorded = format!(
+                "{}\n{}\n{url}\n",
+                etag.trim(),
+                hex(&digest(body.as_bytes()))
+            );
+            kage_core::fsutil::atomic_write(&tag, recorded.as_bytes())
+                .map_err(|e| format!("write {}: {e}", tag.display()))?;
+        }
+        None => {
+            let _ = std::fs::remove_file(&tag);
+        }
+    }
     Ok(count)
 }
 
@@ -357,6 +500,31 @@ mod tests {
     }
 
     #[test]
+    fn an_unchanged_cache_is_not_laid_again() {
+        let dir = std::env::temp_dir().join(format!("kage-cache-same-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("models.json");
+        // A provider without models changes no lookup another test makes.
+        std::fs::write(
+            &path,
+            r#"{"anthropic": {"name": "Anthropic", "models": {}}}"#,
+        )
+        .unwrap();
+        assert!(use_cache_if_changed(&path).unwrap().is_some());
+        assert_eq!(use_cache_if_changed(&path), Ok(None));
+        std::fs::write(
+            &path,
+            r#"{"anthropic": {"name": "Anthropic", "models": { }}}"#,
+        )
+        .unwrap();
+        assert!(
+            use_cache_if_changed(&path).unwrap().is_some(),
+            "a cache another process rewrote is laid"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn unparseable_cache_falls_back() {
         assert!(merge_json(generated::PROVIDERS, "not json").is_none());
         let err = use_cache(Path::new("/nonexistent/kage/models.json"))
@@ -409,6 +577,79 @@ mod tests {
             std::fs::read_to_string(&dest).unwrap(),
             std::fs::read_to_string(&source).unwrap()
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Answers one request on `listener` with `status`, `headers` and
+    /// `body`, returning the request it read.
+    fn answer_once(
+        listener: &std::net::TcpListener,
+        status: &str,
+        headers: &str,
+        body: &str,
+    ) -> String {
+        use std::io::{Read as _, Write as _};
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0u8; 1];
+        while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
+            request.push(byte[0]);
+        }
+        write!(
+            stream,
+            "HTTP/1.1 {status}\r\n{headers}content-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        String::from_utf8(request).unwrap()
+    }
+
+    #[test]
+    fn an_unchanged_catalog_is_not_downloaded_again() {
+        let dir = std::env::temp_dir().join(format!("kage-refresh-etag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let dest = dir.join("models.json");
+        let body = r#"{"anthropic": {"name": "Anthropic", "models": {
+            "a": {"id": "a", "name": "A", "tool_call": true}}}}"#;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let first = answer_once(&listener, "200 OK", "etag: \"v1\"\r\n", body);
+            let second = answer_once(&listener, "304 Not Modified", "", "");
+            let third = answer_once(&listener, "200 OK", "etag: \"v1\"\r\n", body);
+            (first, second, third)
+        });
+
+        assert_eq!(refresh_if_changed(&url, &dest), Ok(Refreshed::Changed(1)));
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&dest)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert_eq!(refresh_if_changed(&url, &dest), Ok(Refreshed::Unchanged));
+        let touched = std::fs::metadata(&dest).unwrap().modified().unwrap();
+        std::fs::write(&dest, body.replace("\"A\"", "\"Edited\"")).unwrap();
+        assert_eq!(refresh_if_changed(&url, &dest), Ok(Refreshed::Changed(1)));
+
+        let (first, second, third) = server.join().unwrap();
+        assert!(!first.to_lowercase().contains("if-none-match"), "{first}");
+        assert!(
+            second.to_lowercase().contains("if-none-match: \"v1\""),
+            "{second}"
+        );
+        assert!(
+            !third.to_lowercase().contains("if-none-match"),
+            "a body that is not the tagged one is fetched whole: {third}"
+        );
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), body);
+        assert!(touched > old, "the check counts from now");
+        assert!(
+            cached_etag("http://elsewhere.example/", &dest).is_none(),
+            "a tag never goes to another source"
+        );
+        assert!(cached_etag(&url, &dest).is_some());
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -71,9 +71,24 @@ struct Env {
 
 impl Env {
     fn new() -> Self {
-        Self {
+        let env = Self {
             dir: tempfile::tempdir().unwrap(),
-        }
+        };
+        env.write_config("");
+        env
+    }
+
+    /// Writes `text` as the user config, with the model lists left
+    /// alone: a host living past its first refresh check would fetch
+    /// them from the network.
+    fn write_config(&self, text: &str) {
+        let config = self.dir.path().join("config/kage");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            config.join("config.toml"),
+            format!("{text}\n[models]\nauto_refresh = false\n"),
+        )
+        .unwrap();
     }
 
     fn runtime(&self) -> PathBuf {
@@ -297,13 +312,7 @@ impl Env {
 
     /// Writes the user config of a host with its web endpoint on `port`.
     fn enable_web(&self, port: u16) {
-        let config = self.dir.path().join("config/kage");
-        std::fs::create_dir_all(&config).unwrap();
-        std::fs::write(
-            config.join("config.toml"),
-            format!("[host]\nweb = true\nport = {port}\n"),
-        )
-        .unwrap();
+        self.write_config(&format!("[host]\nweb = true\nport = {port}\n"));
     }
 
     fn connect(&self) -> UnixStream {
@@ -902,9 +911,7 @@ fn a_host_started_by_a_client_logs_to_the_state_directory() {
 #[test]
 fn a_user_config_can_turn_sharing_off() {
     let env = Env::new();
-    let config = env.dir.path().join("config/kage");
-    std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(config.join("config.toml"), "[host]\nshare = false\n").unwrap();
+    env.write_config("[host]\nshare = false\n");
     let mut rpc = env.rpc(&[]);
     rpc.request("initialize", json!({"protocolVersion": 1}));
     assert!(env.record().is_none());
@@ -914,13 +921,7 @@ fn a_user_config_can_turn_sharing_off() {
 #[test]
 fn the_idle_timeout_comes_from_the_user_config() {
     let env = Env::new();
-    let config = env.dir.path().join("config/kage");
-    std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(
-        config.join("config.toml"),
-        "[host]\nidle_timeout_secs = 1\n",
-    )
-    .unwrap();
+    env.write_config("[host]\nidle_timeout_secs = 1\n");
     let mut host = env.host_with(&[]);
     env.ready(host.id());
     assert!(exit_within(&mut host, WAIT).success());
@@ -1554,18 +1555,12 @@ fn a_relay_stays_within_its_memory_budget() {
 fn a_standalone_tui_runs_a_private_host_in_its_process() {
     let env = Env::new();
     let provider = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let config = env.dir.path().join("config/kage");
-    std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(
-        config.join("config.toml"),
-        format!(
-            "[provider]\ndefault_model = \"fake:small\"\n\n\
-             [providers.custom.fake]\nbase_url = \"http://{}/v1\"\napi_key_env = \"\"\n\n\
-             [[providers.custom.fake.models]]\nid = \"small\"\nname = \"Small\"\n",
-            provider.local_addr().unwrap()
-        ),
-    )
-    .unwrap();
+    env.write_config(&format!(
+        "[provider]\ndefault_model = \"fake:small\"\n\n\
+         [providers.custom.fake]\nbase_url = \"http://{}/v1\"\napi_key_env = \"\"\n\n\
+         [[providers.custom.fake.models]]\nid = \"small\"\nname = \"Small\"\n",
+        provider.local_addr().unwrap()
+    ));
     let (tui, mut keys, mut screen) = env.tui(&[]);
     let pid = env.kage_pid();
     screen.wait_for(TUI_READY);
@@ -1800,13 +1795,7 @@ fn a_taken_web_port_leaves_the_host_serving_local_clients() {
 fn a_host_without_web_config_keeps_the_port_closed() {
     let env = Env::new();
     let port = free_port();
-    let config = env.dir.path().join("config/kage");
-    std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(
-        config.join("config.toml"),
-        format!("[host]\nweb = false\nport = {port}\n"),
-    )
-    .unwrap();
+    env.write_config(&format!("[host]\nweb = false\nport = {port}\n"));
     let mut host = env.host(60);
     env.ready(host.id());
     assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());

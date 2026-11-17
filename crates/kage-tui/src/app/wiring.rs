@@ -88,6 +88,7 @@ impl App {
             toasts: None,
             dialog_rx: None,
             plugin_refresh_rx: None,
+            model_choices_rx: None,
             login_runner: None,
             mcp_login_runner: None,
             pending_login: None,
@@ -464,6 +465,23 @@ impl App {
     /// catalog.
     pub fn set_model_choices(&mut self, choices: Vec<PickItem>) {
         self.model_choices = choices;
+    }
+
+    /// Wire the channel the host pushes a fresh model list onto when the
+    /// model lists were refreshed, so an open TUI offers new models
+    /// without a restart.
+    pub fn set_model_choices_source(&mut self, rx: std::sync::mpsc::Receiver<Vec<PickItem>>) {
+        self.model_choices_rx = Some(rx);
+    }
+
+    /// Apply the newest model list the host pushed, if any.
+    pub(crate) fn drain_model_choices(&mut self) {
+        let Some(rx) = self.model_choices_rx.as_ref() else {
+            return;
+        };
+        if let Some(choices) = rx.try_iter().last() {
+            self.model_choices = choices;
+        }
     }
 
     /// Seed the prompt history with persisted entries (oldest first).

@@ -44,6 +44,7 @@ impl App {
             if self.drain_plugin_refresh() {
                 needs_redraw = true;
             }
+            self.drain_model_choices();
             if self.drain_start_sessions() {
                 needs_redraw = true;
             }

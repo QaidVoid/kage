@@ -382,6 +382,7 @@ fn project_table(workdir: &Path) -> Option<(toml::Table, bool)> {
         | table.remove("acp").is_some()
         | table.remove("trust").is_some()
         | table.remove("host").is_some()
+        | table.remove("models").is_some()
         | registry
         | media;
     Some((table, changed))
@@ -2148,6 +2149,9 @@ mod tests {
 
     [host]
     share = false
+
+    [models]
+    refresh_interval_hours = 0
     "#;
 
     #[test]
@@ -2166,6 +2170,7 @@ mod tests {
             assert!(cfg.providers.overrides.is_empty());
             assert!(cfg.acp.agents.is_empty());
             assert!(cfg.host.share);
+            assert!(cfg.models.is_default(), "a project never sets [models]");
             assert!(!jail.directory().join("state/kage/trust.json").exists());
             Ok(())
         });

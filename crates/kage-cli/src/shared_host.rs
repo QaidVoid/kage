@@ -108,7 +108,9 @@ fn serve(
     };
     let (listener, mut published) = bind(&dir)?;
     kage_core::reaper::start();
+    let applied = crate::model_refresh::Applied::now();
     let host = Host::start(None, "", false)?;
+    crate::model_refresh::spawn_host(&host, Some(Arc::clone(log)), applied);
     let budget = Budget::new(MAX_CONNECTIONS);
     let mut web_error = None;
     let mut web = if host_cfg.web {

@@ -169,7 +169,9 @@ impl Transport {
         yolo: bool,
         events: mpsc::Sender<Event>,
     ) -> Result<Transport, String> {
+        let applied = crate::model_refresh::Applied::now();
         let host = crate::rpc::host::Host::start(model, system, yolo)?;
+        crate::model_refresh::spawn_host(&host, None, applied);
         let (client_read, client_write, host_read, host_write, hangup) =
             private_pair().map_err(|error| format!("cannot open the private pipe: {error}"))?;
         let spawned = thread::Builder::new()
@@ -4054,6 +4056,9 @@ pub(crate) fn run(
     yolo: bool,
     upstream: Upstream,
 ) -> ExitCode {
+    // Before the registry, so a model list written meanwhile reaches the
+    // picker rather than being taken as shown.
+    let applied = crate::model_refresh::Applied::now();
     let mut registry = match crate::build_provider_registry() {
         Ok(registry) => registry,
         Err(e) => {
@@ -4300,6 +4305,27 @@ pub(crate) fn run(
     }
     let mut model_choices = available_model_items(&registry, &shown_model);
     model_choices.extend(external_agent_items(&config, &shown_model));
+    let (model_updates_tx, model_updates) = mpsc::channel();
+    {
+        let config = config.clone();
+        let plugins = plugins.clone();
+        crate::model_refresh::spawn_watcher(applied, move || {
+            let Ok(mut registry) = crate::build_provider_registry() else {
+                return crate::model_refresh::Rebuilt::Failed;
+            };
+            if let Some(rt) = plugins.as_ref() {
+                crate::plugins::merge_plugin_providers(rt, &mut registry);
+            }
+            // The picker marks the session's model as it opens.
+            let mut choices = available_model_items(&registry, "");
+            choices.extend(external_agent_items(&config, ""));
+            if model_updates_tx.send(choices).is_ok() {
+                crate::model_refresh::Rebuilt::Done
+            } else {
+                crate::model_refresh::Rebuilt::Gone
+            }
+        });
+    }
     // The commands the local plugins register; the App completes them
     // and the pump runs them, never the agent.
     let plugin_commands = plugins
@@ -4323,6 +4349,7 @@ pub(crate) fn run(
         acp_feed: feed,
         model: shown_model,
         model_choices,
+        model_updates,
         plugin_commands,
         skills,
         notices,

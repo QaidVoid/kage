@@ -93,6 +93,8 @@ pub(super) struct Frontend {
     /// The model the status line shows until the engine reports one.
     pub(super) model: String,
     pub(super) model_choices: Vec<PickItem>,
+    /// Fresh model lists after the model lists were refreshed.
+    pub(super) model_updates: mpsc::Receiver<Vec<PickItem>>,
     pub(super) plugin_commands: Vec<kage_tui::command::PluginCommand>,
     pub(super) skills: Vec<kage_core::Skill>,
     /// Lines the start card shows.
@@ -136,6 +138,7 @@ impl Frontend {
     fn into_app(self) -> App {
         let mut app = App::new(self.buffer.clone(), self.requests);
         app.set_model_choices(self.model_choices);
+        app.set_model_choices_source(self.model_updates);
         app.set_history(crate::history::load());
         app.set_status_model(Arc::new(Mutex::new(self.model)));
         app.set_engine_events(self.events);

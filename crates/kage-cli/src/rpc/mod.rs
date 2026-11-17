@@ -314,9 +314,15 @@ pub(crate) fn run(
         }
     };
     kage_core::reaper::start();
+    let applied = crate::model_refresh::Applied::now();
     let served = Host::start(model_override, &system_role, yolo)
         .map_err(|e| format!("rpc: {e}"))
         .and_then(|host| {
+            crate::model_refresh::spawn_host(
+                &host,
+                Some(Arc::new(|line| eprintln!("kage: {line}"))),
+                applied,
+            );
             host.serve(BufReader::new(std::io::stdin()), std::io::stdout())
                 .map_err(|e| format!("rpc: {e}"))
         });
@@ -543,7 +549,7 @@ impl CliAcpAgent {
             live: Arc::clone(&host.live),
             ids: Arc::clone(&ids),
             waiters: Arc::clone(&waiters),
-            models: host.models(),
+            models: host.shared_models(),
             shown: Arc::clone(&shown),
             aliases: host.aliases.clone(),
             seen: HashMap::new(),
@@ -1352,6 +1358,7 @@ impl Agent for CliAcpAgent {
             .is_some_and(|section| section == "providers" || section == "acp")
         {
             self.host.reload_providers().map_err(RpcError::internal)?;
+            self.host.fetch_missing_lists();
         }
         self.config_get(ConfigGetRequest {
             session_id: req.session_id,
@@ -1401,6 +1408,7 @@ impl Agent for CliAcpAgent {
         }
         store.save().map_err(RpcError::internal)?;
         self.host.reload_providers().map_err(RpcError::internal)?;
+        self.host.fetch_missing_lists();
         Ok(serde_json::json!({}))
     }
 

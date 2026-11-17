@@ -1033,11 +1033,12 @@ struct Pump {
     app_session: SessionId,
     /// The wire id of the session the App is on.
     wire: String,
-    /// Blocks typed before any session adopted, in submission order,
-    /// sent when one does. The composer is usable while the first
-    /// `session/new` is still in flight, and an early submit would
-    /// otherwise name an empty wire and fail.
-    deferred_prompt: Vec<Vec<ContentBlock>>,
+    /// What the App asked before any session adopted, in order, run
+    /// when one does. The composer is usable while the first
+    /// `session/new` is still in flight, and a request then would
+    /// otherwise name an empty wire and fail, or run without the
+    /// settings asked before it.
+    unadopted: Vec<RunRequest>,
     /// The recorded session being opened. Its answer adopts it; a
     /// failed answer leaves the current session as it was.
     pending_open: Option<PendingOpen>,
@@ -1371,6 +1372,26 @@ impl Pump {
         }
         if let Some((id, new)) = adopted {
             self.adopt(&id, new);
+        } else if self.wire.is_empty() && self.pending_new.is_none() && self.pending_open.is_none()
+        {
+            // No session opened and none is on its way: the prompts
+            // held for one go back to the composer, and the rest is
+            // dropped with a word.
+            let held = std::mem::take(&mut self.unadopted);
+            let settings = held
+                .iter()
+                .filter(|request| !matches!(request, RunRequest::Submit { .. }))
+                .count();
+            self.return_held(held, "no session opened; the prompt was not sent");
+            if settings > 0 {
+                self.notice(
+                    NoticeLevel::Warning,
+                    format!(
+                        "no session opened; {settings} earlier request{} did not run",
+                        if settings == 1 { "" } else { "s" }
+                    ),
+                );
+            }
         }
     }
 
@@ -2639,10 +2660,10 @@ impl Pump {
             usage: self.usage_snapshot(),
         });
         self.agents_moved(id);
-        // Prompts typed while this session was still opening ride it
-        // now that it exists, in the order they were typed.
-        for blocks in std::mem::take(&mut self.deferred_prompt) {
-            self.store.client().prompt(&self.wire, blocks);
+        // What the App asked while the first session was opening runs
+        // on it now that it exists, in the order it was asked.
+        for request in std::mem::take(&mut self.unadopted) {
+            self.handle(request);
         }
     }
 
@@ -2949,6 +2970,21 @@ impl Pump {
         }
     }
 
+    /// Holds `request` until the first session adopts. A cancel hands
+    /// the prompts held so far back to the composer instead: they must
+    /// not start once that session opens, and there is no run to stop.
+    fn hold_unadopted(&mut self, request: RunRequest) {
+        if matches!(request, RunRequest::Cancel { .. }) {
+            let (prompts, rest) = std::mem::take(&mut self.unadopted)
+                .into_iter()
+                .partition(|held| matches!(held, RunRequest::Submit { .. }));
+            self.unadopted = rest;
+            self.return_held(prompts, "cancelled before the session opened");
+        } else {
+            self.unadopted.push(request);
+        }
+    }
+
     /// Returns submissions that raced with transport shutdown.
     fn handle_closed(&mut self, request: RunRequest) {
         if let RunRequest::Submit {
@@ -2976,6 +3012,20 @@ impl Pump {
     fn handle(&mut self, request: RunRequest) {
         if self.closed {
             self.handle_closed(request);
+            return;
+        }
+        // Dialog answers run at once: opening the first session can be
+        // what waits on them. With no session on its way, as after the
+        // first failed, requests run as they come, so `/new` or a resume
+        // can open one.
+        if self.wire.is_empty()
+            && (self.pending_new.is_some() || self.pending_open.is_some())
+            && !matches!(
+                request,
+                RunRequest::ResolvePermission { .. } | RunRequest::AnswerQuestion { .. }
+            )
+        {
+            self.hold_unadopted(request);
             return;
         }
         if let RunRequest::Submit { session, .. } = &request
@@ -3140,10 +3190,6 @@ impl Pump {
     fn cancel_of(&mut self, session: Option<SessionId>) {
         match self.route_of(session) {
             Some(wire) if wire == self.wire => {
-                // A cancel before adoption also drops what the user
-                // typed into it: the prompt must not start once the
-                // session they cancelled against finally opens.
-                self.deferred_prompt.clear();
                 if let Some(surface) = &self.plugins {
                     surface.turn.cancel();
                 }
@@ -3236,12 +3282,6 @@ impl Pump {
                     },
                 );
             }
-            return;
-        }
-        if self.wire.is_empty() {
-            // No session yet: the first `session/new` is still in
-            // flight. Hold the blocks; `adopt` sends them.
-            self.deferred_prompt.push(blocks);
             return;
         }
         if queue {
@@ -3530,6 +3570,8 @@ impl Pump {
             return;
         }
         self.closed = true;
+        let held = std::mem::take(&mut self.unadopted);
+        self.return_held(held, DETACHED);
         // A tool call the agent left running must not run on: the
         // surface's next execute sees the flag at once.
         if let Some(surface) = &self.plugins {
@@ -4098,7 +4140,7 @@ pub(crate) fn run(
         mirror: Arc::clone(&mirror),
         app_session,
         wire: String::new(),
-        deferred_prompt: Vec::new(),
+        unadopted: Vec::new(),
         pending_open: None,
         pending_new: None,
         cwd: workdir.display().to_string(),
@@ -4344,7 +4386,7 @@ mod tests {
     #[test]
     fn a_prompt_typed_before_the_first_session_rides_its_adoption() {
         let (mut pump, app, _dialogs, _feed, dir) = test_pump();
-        pump.wire.clear();
+        awaiting_first_session(&mut pump);
         pump.handle(RunRequest::Submit {
             text: "early".to_owned(),
             images: Vec::new(),
@@ -4382,15 +4424,15 @@ mod tests {
             1,
             "the second deferred prompt queues behind it in order"
         );
-        assert!(pump.deferred_prompt.is_empty());
+        assert!(pump.unadopted.is_empty());
         drop(app);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_cancel_before_adoption_discards_the_deferred_prompt() {
+    fn a_cancel_before_adoption_returns_the_held_prompt() {
         let (mut pump, app, _dialogs, _feed, dir) = test_pump();
-        pump.wire.clear();
+        awaiting_first_session(&mut pump);
         pump.handle(RunRequest::Submit {
             text: "early".to_owned(),
             images: Vec::new(),
@@ -4398,7 +4440,18 @@ mod tests {
             session: None,
         });
         pump.handle(RunRequest::Cancel { session: None });
-        assert!(pump.deferred_prompt.is_empty(), "the cancel drops it");
+        assert!(pump.unadopted.is_empty(), "the cancel takes it back");
+        assert!(
+            app.try_iter().any(|envelope| matches!(
+                envelope.event,
+                kage_core::protocol::Event::Host(HostEvent::PromptWithdrawn { .. })
+            )),
+            "the text goes back to the composer"
+        );
+        assert!(
+            !has_request(&pump.store.take_outgoing(), "session/cancel"),
+            "there is no session to cancel yet"
+        );
         pump.adopt("s1", true);
         assert!(
             !has_request(&pump.store.take_outgoing(), "session/prompt"),
@@ -4406,6 +4459,87 @@ mod tests {
         );
         drop(app);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_mode_asked_before_the_first_session_applies_before_its_prompt() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        awaiting_first_session(&mut pump);
+        pump.handle(RunRequest::PlanMode { on: true });
+        pump.handle(RunRequest::Submit {
+            text: "plan this".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        assert!(pump.store.take_outgoing().is_empty());
+        pump.adopt("s1", true);
+        let methods: Vec<String> = pump
+            .store
+            .take_outgoing()
+            .into_iter()
+            .filter_map(|frame| match frame {
+                Frame::Request { method, params, .. }
+                    if method == "session/prompt"
+                        || params.get("configId").and_then(Value::as_str) == Some("mode") =>
+                {
+                    Some(method)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            methods,
+            ["session/set_config_option", "session/prompt"],
+            "the task runs in the mode asked first"
+        );
+        drop(app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_first_session_that_fails_returns_the_held_prompt() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        awaiting_first_session(&mut pump);
+        pump.handle(RunRequest::Submit {
+            text: "early".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        pump.settle(
+            Answer::NewSession,
+            vec![Change::Failed {
+                request: 1,
+                error: RpcError::invalid_params("no model"),
+            }],
+        );
+        assert!(pump.unadopted.is_empty());
+        let returned = app.try_iter().find_map(|envelope| match envelope.event {
+            kage_core::protocol::Event::Host(HostEvent::PromptWithdrawn { content, .. }) => content,
+            _ => None,
+        });
+        assert_eq!(
+            returned,
+            Some(vec![kage_core::Content::Text {
+                text: "early".to_owned()
+            }]),
+            "the prompt goes back to the composer"
+        );
+        pump.handle(RunRequest::NewSession);
+        assert!(
+            has_request(&pump.store.take_outgoing(), "session/new"),
+            "with no session on its way, `/new` can open one"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Empties the wire with the first `session/new` in flight, as a
+    /// cold start is until its answer lands.
+    fn awaiting_first_session(pump: &mut Pump) {
+        pump.wire.clear();
+        pump.request_new_session();
+        let _ = pump.store.take_outgoing();
     }
 
     #[test]
@@ -4458,7 +4592,7 @@ mod tests {
             mirror: Arc::new(Mutex::new(Mirror::new())),
             app_session: SessionId::new(),
             wire: "s1".to_owned(),
-            deferred_prompt: Vec::new(),
+            unadopted: Vec::new(),
             pending_open: None,
             pending_new: None,
             cwd: "/w".to_owned(),

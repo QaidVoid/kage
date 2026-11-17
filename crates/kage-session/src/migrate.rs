@@ -238,8 +238,8 @@ fn read_legacy(root: &Path, path: PathBuf, report: &mut Migration) -> Option<Leg
         }
         return None;
     };
-    // Only an agent or a fork names a parent, and only an agent carries
-    // the marker, so a session without a parent needs no scan.
+    // Only an agent or a fork names a parent, so a session without one
+    // needs no scan.
     let agent = header.parent_session.is_some() && crate::list::is_agent_session(&path);
     // A relative or empty working directory would be read against wherever
     // kage runs now, so such a session gets the project of the sessions
@@ -382,7 +382,11 @@ mod tests {
                     id: EntryId::new(),
                     ts: Utc::now(),
                     kind: crate::list::AGENT_ENTRY_KIND.into(),
-                    data: serde_json::json!({ "agent": "explore", "description": "look" }),
+                    data: serde_json::json!({
+                        "parent": parent.map(|parent| parent.to_string()),
+                        "agent": "explore",
+                        "description": "look",
+                    }),
                 }))
                 .unwrap();
         }

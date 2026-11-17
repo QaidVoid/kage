@@ -23,7 +23,7 @@ pub const CATALOG_FILE: &str = ".catalog.db";
 /// The schema this build writes. A catalog of another is dropped and
 /// rebuilt. Bump it when the table changes or when [`SessionSummary`]
 /// changes in a way old rows should not be read as.
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS session (

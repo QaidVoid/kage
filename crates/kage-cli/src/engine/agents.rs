@@ -425,8 +425,11 @@ impl super::Dispatcher {
             })?;
         let mut children = Vec::with_capacity(ids.len());
         for id in ids {
-            let marker = agent_marker(&kage_session::layout::agent_file(parent_path, id))
-                .ok_or_else(|| format!("session {id} is not a swarm child of this session"))?;
+            let marker = kage_session::list::agent_marker(&kage_session::layout::agent_file(
+                parent_path,
+                id,
+            ))
+            .ok_or_else(|| format!("session {id} is not a swarm child of this session"))?;
             let text = |key: &str| {
                 marker
                     .get(key)
@@ -535,7 +538,7 @@ impl super::Dispatcher {
             .and_then(|s| s.path.as_deref())
             .map(|parent| kage_session::layout::agent_file(parent, id))
             .ok_or_else(no_session)?;
-        let marker = agent_marker(&path).ok_or_else(no_session)?;
+        let marker = kage_session::list::agent_marker(&path).ok_or_else(no_session)?;
         let text = |key: &str| {
             marker
                 .get(key)
@@ -608,7 +611,7 @@ impl super::Dispatcher {
                 .and_then(|s| s.path.as_deref())
                 .map(|from| kage_session::layout::agent_file(from, id))
                 .ok_or_else(not_ours)?;
-            let marker = agent_marker(&path).ok_or_else(not_ours)?;
+            let marker = kage_session::list::agent_marker(&path).ok_or_else(not_ours)?;
             let text = |key: &str| {
                 marker
                     .get(key)
@@ -1406,30 +1409,6 @@ fn forked_spec(
         setup,
     );
     Ok((spec, missing, child_path))
-}
-
-/// The `kage:agent` marker data of the session file at `path`, from
-/// the first marker entry in the file. `None` when the file carries no
-/// marker, which includes a missing file. The marker sits right after
-/// the header for an ordinary child, but after the copied history for
-/// a forked one, so the file is scanned to the end.
-fn agent_marker(path: &Path) -> Option<serde_json::Value> {
-    let reader = kage_session::SessionReader::iter(path).ok()?;
-    for entry in reader {
-        // A read error is terminal: the iterator would yield the same
-        // error on every poll, so the scan ends here instead of
-        // spinning.
-        let Ok(entry) = entry else {
-            break;
-        };
-        let kage_session::SessionEntry::Custom(custom) = entry else {
-            continue;
-        };
-        if custom.kind == kage_session::list::AGENT_ENTRY_KIND {
-            return Some(custom.data);
-        }
-    }
-    None
 }
 
 /// The session spec that re-opens a swarm child from its session

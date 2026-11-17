@@ -95,7 +95,7 @@ impl super::CliAcpAgent {
                 {
                     let _ = ctx.update(update);
                 }
-                self.announce_restored(id, &replay, ctx);
+                self.announce_restored(&path, id, &replay, ctx);
                 if let Some(title) = replay.title {
                     let _ = ctx.update(SessionUpdate::SessionInfoUpdate(SessionInfoUpdate {
                         title: Some(title),
@@ -124,8 +124,8 @@ impl super::CliAcpAgent {
             {
                 let _ = ctx.update(update);
             }
-            self.announce_restored(id, &replay, ctx);
-            for update in orphaned_agents(&self.host.sessions, id, &replay.history) {
+            self.announce_restored(&path, id, &replay, ctx);
+            for update in orphaned_agents(&path, id, &replay.history) {
                 let _ = ctx.update(SessionUpdate::SubagentUpdate(update));
             }
             if let Some(title) = replay.title {
@@ -209,7 +209,7 @@ impl super::CliAcpAgent {
             {
                 let _ = ctx.update(update);
             }
-            self.announce_restored(replay.header.session, &replay, ctx);
+            self.announce_restored(path, replay.header.session, &replay, ctx);
             if let Some(title) = replay.title {
                 let _ = ctx.update(SessionUpdate::SessionInfoUpdate(SessionInfoUpdate {
                     title: Some(title),
@@ -228,12 +228,13 @@ impl super::CliAcpAgent {
     /// true state.
     pub(super) fn announce_restored(
         &self,
+        path: &Path,
         root: SessionId,
         replay: &ReplayResult,
         ctx: &PromptContext,
     ) {
         let live = lock(&self.host.live);
-        for (parent, update) in restored_subagents(&self.host.sessions, root, replay, &live) {
+        for (parent, update) in restored_subagents(path, root, replay, &live) {
             let update = SessionUpdate::SubagentUpdate(update);
             if parent == root {
                 let _ = ctx.update(update);
@@ -264,7 +265,7 @@ impl super::CliAcpAgent {
             (before, _) => fork_point(&path, before.as_ref())?,
         };
         let id = SessionId::new();
-        let dst = self.host.sessions.join(format!("{id}.jsonl"));
+        let dst = kage_session::layout::project_of(&path).join(format!("{id}.jsonl"));
         let truncated = kage_session::fork(&path, &dst, id, at).map_err(|e| match e {
             SessionError::ExternalFork { .. } => external_backend_error(),
             other => RpcError::internal(other.to_string()),
@@ -359,7 +360,7 @@ fn prompt_text(message: &Message) -> Option<&str> {
 /// The records come from the `<agent>` and `<swarm>` results the
 /// engine wrote, so they survive a restart.
 pub(super) fn restored_subagents(
-    dir: &Path,
+    root_path: &Path,
     root: SessionId,
     replay: &ReplayResult,
     live: &Live,
@@ -372,11 +373,13 @@ pub(super) fn restored_subagents(
         .map(|(_, node)| node.session)
         .collect();
     let mut seen = HashSet::new();
+    let chain = kage_session::layout::fork_chain(root_path);
     while let Some(session) = pending.pop() {
         if !seen.insert(session) {
             continue;
         }
-        let Ok(replay) = kage_session::replay(&crate::build_session_path(dir, session)) else {
+        let Ok(replay) = kage_session::replay(&kage_session::layout::agent_in(&chain, session))
+        else {
             continue;
         };
         tree.restore(session, replay.agent_messages());
@@ -624,7 +627,7 @@ pub(super) fn interrupted_calls(history: &[Arc<Message>]) -> Vec<SessionUpdate> 
 /// replies; each reads as completed when its last word is a reply
 /// without calls, and as failed otherwise.
 pub(super) fn orphaned_agents(
-    dir: &Path,
+    root_path: &Path,
     root: SessionId,
     history: &[Arc<Message>],
 ) -> Vec<SubagentUpdate> {
@@ -651,10 +654,17 @@ pub(super) fn orphaned_agents(
     if open.is_empty() {
         return Vec::new();
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut nodes: Vec<AgentNode> = entries
+    // The session's agents directory, and beside the session for agents
+    // recorded before the layout nested them.
+    let dirs = [
+        Some(kage_session::layout::agents_dir(root_path)),
+        root_path.parent().map(Path::to_path_buf),
+    ];
+    let mut nodes: Vec<AgentNode> = dirs
+        .into_iter()
+        .flatten()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();

@@ -1082,8 +1082,12 @@ impl Agent for CliAcpAgent {
             ));
         }
         let servers = editor_servers(&req.mcp_servers)?;
-        let (path, mut header) =
-            crate::plan_session_in(&self.host.sessions, &self.host.default_model, "");
+        let (path, mut header) = crate::plan_session_in(
+            &self.host.sessions,
+            Path::new(&req.cwd),
+            &self.host.default_model,
+            "",
+        );
         let id = header.session;
         let plugins = self.hosted_plugins(id, req.meta.as_ref())?;
         let settings =

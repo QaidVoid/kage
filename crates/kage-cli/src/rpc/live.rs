@@ -921,7 +921,7 @@ impl CliAcpAgent {
             ) {
                 let _ = ctx.update(update);
             }
-            self.announce_restored(id, &replay, ctx);
+            self.announce_restored(path, id, &replay, ctx);
         }
         // The turn in flight, unless the file already holds its message.
         let mut seen = HashMap::new();

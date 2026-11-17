@@ -41,6 +41,24 @@ pub(crate) fn sessions_dir() -> Result<PathBuf, String> {
     Ok(data_root()?.join("sessions"))
 }
 
+/// What session project directories are named for: `[sessions] group`
+/// from the user config, read once per process.
+pub(crate) fn session_grouping() -> kage_core::config::SessionGrouping {
+    static GROUPING: std::sync::OnceLock<kage_core::config::SessionGrouping> =
+        std::sync::OnceLock::new();
+    *GROUPING.get_or_init(|| {
+        kage_core::config::Config::load_default()
+            .map(|cfg| cfg.sessions.group)
+            .unwrap_or_default()
+    })
+}
+
+/// The file a new session `id` started in `cwd` is recorded in, in its
+/// project directory under the sessions directory `root`.
+pub(crate) fn new_session_path(root: &Path, cwd: &Path, id: kage_core::SessionId) -> PathBuf {
+    kage_session::layout::project_dir(root, cwd, session_grouping()).join(format!("{id}.jsonl"))
+}
+
 /// Resolve the kage config directory: `$XDG_CONFIG_HOME/kage` (default
 /// `~/.config/kage`), the same resolution as `Config::default_path`. It
 /// holds `config.toml`, the trusted `init.lua` and its `lua/` modules.

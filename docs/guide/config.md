@@ -675,7 +675,7 @@ endpoints, and per-provider overrides (base URL, headers, key env var).
 | `~/.config/kage/plugins/`           | Lua plugin scripts                                             |
 | `~/.config/kage/skills/`            | `SKILL.md` skill directories                                   |
 | `~/.config/kage/templates/`         | prompt template `.md` files                                    |
-| `~/.local/share/kage/sessions/`     | append-only session JSONL files                                |
+| `~/.local/share/kage/sessions/`     | append-only session JSONL files, one directory per project     |
 | `~/.local/share/kage/auth.json`     | saved provider credentials (`0600`)                            |
 | `~/.local/share/kage/mcp-auth.json` | OAuth tokens for remote MCP servers (`0600`)                   |
 | `~/.local/share/kage/plugin-state/` | per-plugin `kage.store` JSON files                             |
@@ -693,6 +693,26 @@ templates are also discovered
 under the project-local `<workdir>/.kage/skills/` and
 `<workdir>/.kage/templates/`, plus any directory a plugin
 contributes via the `resources_discover` event.
+
+### session directories
+
+Sessions are filed in one directory per project under
+`~/.local/share/kage/sessions/`, named for the project's last two path
+components and a hash of its path, such as `kage-personal-1a2b3c4d5e`.
+A session's agents nest under it in `<session-id>/agents/`. Media the
+sessions produce is shared in `sessions/blobs/`.
+
+```toml
+[sessions]
+# What a session's project directory is named for: "repo" (default),
+# the repository the working directory sits in, so subdirectories and
+# worktrees share one; or "cwd", the working directory itself.
+group = "repo"
+```
+
+Only the user config sets `[sessions]`, and a change files new sessions
+only. Sessions recorded before this layout stay in `sessions/` itself
+and keep working.
 
 ## skills and templates
 

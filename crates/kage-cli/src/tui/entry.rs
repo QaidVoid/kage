@@ -243,8 +243,8 @@ fn wire_sessions(
     let loader_children = Arc::clone(child_files);
     app.set_agent_loader(Box::new(move |session| {
         let wire = lock(&loader_children).get(&session).cloned()?;
-        let dir = lock(&loader_mirror).path()?.parent()?.to_path_buf();
-        let replay = kage_session::replay(&dir.join(format!("{wire}.jsonl"))).ok()?;
+        let root = lock(&loader_mirror).path()?.to_path_buf();
+        let replay = kage_session::replay(&kage_session::layout::agent_file(&root, &wire)).ok()?;
         Some(kage_tui::StoredAgent {
             messages: replay.history,
             compacted_agents: replay.compacted_agents,

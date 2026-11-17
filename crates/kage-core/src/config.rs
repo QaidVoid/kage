@@ -66,6 +66,10 @@ pub struct Config {
     /// only.
     #[serde(default, skip_serializing_if = "HostConfig::is_default")]
     pub host: HostConfig,
+    /// How recorded sessions are filed (`[sessions]`), read from the user
+    /// config.
+    #[serde(default, skip_serializing_if = "SessionsConfig::is_default")]
+    pub sessions: SessionsConfig,
 }
 
 /// The longest a media tool call may take, matching the ceiling the
@@ -1088,6 +1092,36 @@ impl TrustPart {
             Self::Plugins => "plugins",
         }
     }
+}
+
+/// How recorded sessions are filed under the sessions directory
+/// (`[sessions]`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionsConfig {
+    /// What each session's project directory is named for.
+    pub group: SessionGrouping,
+}
+
+impl SessionsConfig {
+    /// Whether nothing is configured, so serializing skips the table.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// What a session's project directory groups by.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionGrouping {
+    /// The repository the working directory sits in, so a session
+    /// started in a subdirectory or a worktree groups with its project.
+    /// Outside any repository, the working directory itself.
+    #[default]
+    Repo,
+    /// The working directory.
+    Cwd,
 }
 
 /// The shared host every `kage rpc` connects to (`[host]`). Only the user

@@ -18,6 +18,7 @@ pub mod entry;
 pub mod error;
 pub mod external_replay;
 pub mod fork;
+pub mod layout;
 pub mod list;
 pub mod reader;
 pub mod resume;

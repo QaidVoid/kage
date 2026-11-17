@@ -338,7 +338,7 @@ mod tests {
     const WAIT: Duration = Duration::from_secs(5);
 
     fn header(dir: &std::path::Path) -> Header {
-        let (_, mut header) = crate::plan_session_in(dir, "external", "");
+        let (_, mut header) = crate::plan_session_in(dir, dir, "external", "");
         header.cwd = dir.to_path_buf();
         header.backend = Some(SessionBackend::ExternalAcp(ExternalAcpSession {
             agent_name: "fake".into(),

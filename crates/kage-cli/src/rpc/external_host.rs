@@ -32,7 +32,8 @@ impl CliAcpAgent {
             ));
         }
         let config = trusted_agent(name, cwd)?;
-        let (path, mut header) = crate::plan_session_in(&self.host.sessions, "external", "");
+        let (path, mut header) =
+            crate::plan_session_in(&self.host.sessions, Path::new(cwd), "external", "");
         header.cwd = PathBuf::from(cwd);
         let id = header.session.to_string();
         let started = external::External::start(

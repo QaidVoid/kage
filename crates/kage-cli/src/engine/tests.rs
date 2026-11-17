@@ -1383,6 +1383,14 @@ fn clone_and_resume_keep_the_title() {
     assert_eq!(title.as_deref(), Some("hello"));
 }
 
+/// Where the agent `id` of a session recorded under `root` was written,
+/// wherever the layout nested it.
+fn agent_file(root: &std::path::Path, id: impl std::fmt::Display) -> std::path::PathBuf {
+    kage_session::find_by_prefix(root, &id.to_string())
+        .unwrap()
+        .unwrap_or_else(|| panic!("no file for agent {id}"))
+}
+
 fn state_of(envelope: &Envelope) -> Option<&SessionState> {
     match &envelope.event {
         Event::Host(HostEvent::StateChanged { state }) => Some(state),
@@ -2306,7 +2314,7 @@ fn agent_call_returns_the_child_reply_and_records_the_child() {
     assert!(!output.is_error);
     assert_eq!(outcome_of(&events, parent_id), [RunOutcome::Completed]);
 
-    let child_path = dir.path().join(format!("{child}.jsonl"));
+    let child_path = agent_file(dir.path(), child);
     let entries: Vec<kage_session::SessionEntry> = kage_session::SessionReader::iter(&child_path)
         .unwrap()
         .collect::<Result<_, _>>()
@@ -3033,7 +3041,7 @@ fn agent_runs_skip_plugin_events_and_session_ops() {
         "{parent_file}"
     );
     assert!(parent_file.contains("plugin:queued"), "{parent_file}");
-    let child_file = std::fs::read_to_string(dir.path().join(format!("{child}.jsonl"))).unwrap();
+    let child_file = std::fs::read_to_string(agent_file(dir.path(), child)).unwrap();
     assert!(!child_file.contains("plugin:"), "{child_file}");
 }
 
@@ -3349,7 +3357,7 @@ fn a_swarm_aggregates_its_children_in_item_order() {
 
     let mut batch_ids = Vec::new();
     for (index, (child, _)) in children.iter().enumerate() {
-        let path = dir.path().join(format!("{child}.jsonl"));
+        let path = agent_file(dir.path(), child);
         let entries: Vec<kage_session::SessionEntry> = kage_session::SessionReader::iter(&path)
             .unwrap()
             .collect::<Result<_, _>>()
@@ -3521,7 +3529,7 @@ fn a_forked_child_follows_the_call_model_override() {
     h.engine.shutdown();
 
     for (child, _) in spawned(&events) {
-        let path = dir.path().join(format!("{child}.jsonl"));
+        let path = agent_file(dir.path(), child);
         let replay = kage_session::replay(&path).unwrap();
         assert_eq!(replay.header.model, "mock/other");
     }
@@ -4023,8 +4031,7 @@ fn a_resumed_parent_restores_its_swarm_children_from_their_files() {
     );
     assert_eq!(output.text.matches("resumed").count(), 2, "{}", output.text);
 
-    let replay =
-        kage_session::replay(&dir.path().join(format!("{}.jsonl", children[0].0))).unwrap();
+    let replay = kage_session::replay(&agent_file(dir.path(), children[0].0)).unwrap();
     let texts: Vec<String> = replay
         .history
         .iter()
@@ -4303,7 +4310,7 @@ fn a_forked_swarm_child_starts_from_the_parent_snapshot() {
         .iter()
         .zip([("a", "child a one"), ("b", "child b one")])
     {
-        let path = dir.path().join(format!("{child}.jsonl"));
+        let path = agent_file(dir.path(), child);
         let replay = kage_session::replay(&path).unwrap();
         assert_eq!(replay.header.parent_session, Some(parent));
         let texts: Vec<String> = replay
@@ -5271,7 +5278,7 @@ fn finishing_a_swarm_child_reaps_it() {
         // The transcript survives in the session file the reaped child
         // was writing.
         let entries: Vec<kage_session::SessionEntry> =
-            kage_session::SessionReader::iter(dir.path().join(format!("{child}.jsonl")))
+            kage_session::SessionReader::iter(agent_file(dir.path(), child))
                 .unwrap()
                 .collect::<Result<_, _>>()
                 .unwrap();

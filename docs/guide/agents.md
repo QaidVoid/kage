@@ -654,7 +654,9 @@ such as `new session: stop or wait for the agents first`. Afterwards the agents 
 ## sessions on disk
 
 When the main session is recorded, each agent is recorded too, in its
-own file next to the main session's in `~/.local/share/kage/sessions/`.
+own file under the main session's directory:
+`~/.local/share/kage/sessions/<project>/<session-id>/agents/`. Agents an
+agent starts go there as well.
 The file's header names the parent session, its first entry records
 the agent and the task, and its title is the task description.
 

@@ -263,7 +263,7 @@ pub(crate) fn run_fork(src_id_prefix: &str, at_prefix: &str) -> ExitCode {
         }
     };
     let new_session = SessionId::new();
-    let dst = dir.join(format!("{new_session}.jsonl"));
+    let dst = kage_session::layout::project_of(&src_path).join(format!("{new_session}.jsonl"));
     if let Err(e) = kage_session::fork(&src_path, &dst, new_session, at) {
         eprintln!("kage: fork failed: {e}");
         return ExitCode::from(1);

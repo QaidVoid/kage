@@ -2169,7 +2169,7 @@ fn record_as(
         parent_session: None,
         parent_entry: None,
     };
-    let path = crate::build_session_path(dir, session);
+    let path = dir.join(format!("{session}.jsonl"));
     let mut writer = SessionWriter::create(&path, header).unwrap();
     for entry in entries {
         writer.append(entry).unwrap();
@@ -5075,7 +5075,9 @@ fn a_new_session_is_recorded_in_the_host_sessions_directory() {
     let created = h.client.request("session/new", params).unwrap();
     let session = created["sessionId"].as_str().unwrap().to_owned();
     assert_eq!(prompt(&h.client, &session, "hi")["stopReason"], "end_turn");
-    let file = dir.path().join(format!("{session}.jsonl"));
+    let file =
+        kage_session::layout::project_dir(dir.path(), dir.path(), crate::paths::session_grouping())
+            .join(format!("{session}.jsonl"));
     until(|| file.is_file());
 }
 
@@ -6846,7 +6848,7 @@ fn an_interrupted_swarm_gets_its_members_back_from_their_files() {
         None,
     )];
     let members = super::sessions::orphaned_agents(
-        dir.path(),
+        &dir.path().join(format!("{root}.jsonl")),
         root,
         &history.into_iter().map(Arc::new).collect::<Vec<_>>(),
     );

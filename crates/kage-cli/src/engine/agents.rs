@@ -416,17 +416,16 @@ impl super::Dispatcher {
         parent: SessionId,
         ids: &[SessionId],
     ) -> Result<Vec<ResumeChild>, String> {
-        let dir = self
+        let parent_path = self
             .sessions
             .get(&parent)
             .and_then(|s| s.path.as_deref())
-            .and_then(Path::parent)
             .ok_or_else(|| {
                 "this session is not recorded, so it has no swarm children to resume".to_owned()
             })?;
         let mut children = Vec::with_capacity(ids.len());
         for id in ids {
-            let marker = agent_marker(&dir.join(format!("{id}.jsonl")))
+            let marker = agent_marker(&kage_session::layout::agent_file(parent_path, id))
                 .ok_or_else(|| format!("session {id} is not a swarm child of this session"))?;
             let text = |key: &str| {
                 marker
@@ -534,8 +533,7 @@ impl super::Dispatcher {
             .sessions
             .get(&parent)
             .and_then(|s| s.path.as_deref())
-            .and_then(Path::parent)
-            .map(|dir| crate::build_session_path(dir, id))
+            .map(|parent| kage_session::layout::agent_file(parent, id))
             .ok_or_else(no_session)?;
         let marker = agent_marker(&path).ok_or_else(no_session)?;
         let text = |key: &str| {
@@ -608,8 +606,7 @@ impl super::Dispatcher {
                 .sessions
                 .get(&from)
                 .and_then(|s| s.path.as_deref())
-                .and_then(Path::parent)
-                .map(|dir| crate::build_session_path(dir, id))
+                .map(|from| kage_session::layout::agent_file(from, id))
                 .ok_or_else(not_ours)?;
             let marker = agent_marker(&path).ok_or_else(not_ours)?;
             let text = |key: &str| {
@@ -1073,7 +1070,7 @@ fn agent_spec(
         &[],
         from.shell.as_deref(),
     );
-    let recorder = from.path.as_deref().and_then(Path::parent).map(|dir| {
+    let recorder = from.path.as_deref().map(|from_path| {
         let header = kage_session::Header {
             version: kage_session::FORMAT_VERSION,
             session: id,
@@ -1086,7 +1083,11 @@ fn agent_spec(
             parent_session: Some(parent),
             parent_entry: None,
         };
-        Recorder::planned(crate::build_session_path(dir, id), header, None)
+        Recorder::planned(
+            kage_session::layout::agents_dir(from_path).join(format!("{id}.jsonl")),
+            header,
+            None,
+        )
     });
     let thinking = def.thinking.or(from.state.thinking);
     child_spec(
@@ -1342,11 +1343,10 @@ fn forked_spec(
     snapshot: &kage_session::Snapshot,
     workdir: &Path,
 ) -> Result<(SessionSpec, Vec<String>, PathBuf), String> {
-    let dir = from
+    let from_path = from
         .path
         .as_deref()
-        .and_then(Path::parent)
-        .ok_or_else(|| "cannot fork: the session file has no directory".to_owned())?;
+        .ok_or_else(|| "cannot fork: the session is not recorded".to_owned())?;
     let model = def
         .model
         .clone()
@@ -1358,7 +1358,7 @@ fn forked_spec(
         &[],
         from.shell.as_deref(),
     );
-    let child_path = crate::build_session_path(dir, id);
+    let child_path = kage_session::layout::agents_dir(from_path).join(format!("{id}.jsonl"));
     let header = kage_session::Header {
         version: kage_session::FORMAT_VERSION,
         session: id,

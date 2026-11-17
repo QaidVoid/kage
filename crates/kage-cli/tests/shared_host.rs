@@ -258,13 +258,9 @@ impl Env {
         let dir = self.dir.path().join("data/kage/sessions");
         let deadline = Instant::now() + WAIT;
         loop {
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                for entry in entries.filter_map(Result::ok) {
-                    let path = entry.path();
-                    if path.extension().is_some_and(|ext| ext == "jsonl") {
-                        return path;
-                    }
-                }
+            // The only session there, wherever the layout filed it.
+            if let Ok(Some(path)) = kage_session::find_by_prefix(&dir, "") {
+                return path;
             }
             assert!(Instant::now() < deadline, "the TUI never opened a session");
             std::thread::sleep(Duration::from_millis(50));

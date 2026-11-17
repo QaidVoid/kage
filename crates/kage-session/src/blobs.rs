@@ -42,12 +42,13 @@ pub struct BlobStore {
 }
 
 impl BlobStore {
-    /// The store of the directory that holds `session`.
+    /// The store of the sessions directory `session` sits under, shared
+    /// by every project and agent directory in it
+    /// ([`crate::layout::root_of`]).
     #[must_use]
     pub fn beside(session: &Path) -> Self {
-        let dir = session.parent().unwrap_or(Path::new("."));
         Self {
-            root: dir.join("blobs").join("sha256"),
+            root: crate::layout::root_of(session).join("blobs").join("sha256"),
         }
     }
 

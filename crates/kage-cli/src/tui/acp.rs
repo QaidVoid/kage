@@ -413,6 +413,37 @@ const DETACHED: &str = "the kage agent stopped; this TUI is detached";
 /// longer maps, such as one left open past its eviction.
 const GONE_AGENT: &str = "that agent is gone";
 
+/// The answer to a request for the session while none is open, as
+/// after the first one failed to open.
+const NO_SESSION: &str = "no session is open; start one with /new or resume one";
+
+/// Whether `request` goes to the open session, so cannot run without
+/// one.
+fn needs_session(request: &RunRequest) -> bool {
+    match request {
+        RunRequest::SwitchModel(model) => external_agent(model).is_none(),
+        _ => matches!(
+            request,
+            RunRequest::Submit { .. }
+                | RunRequest::Cancel { .. }
+                | RunRequest::CycleThinkingLevel
+                | RunRequest::SetThinkingLevel(_)
+                | RunRequest::SetPermissionMode(_)
+                | RunRequest::PlanMode { .. }
+                | RunRequest::SwarmMode { .. }
+                | RunRequest::SetGoal { .. }
+                | RunRequest::CompactNow
+                | RunRequest::ExportSession(_)
+                | RunRequest::RunShell(_)
+                | RunRequest::UndoSession
+                | RunRequest::ListPrompts
+                | RunRequest::Rewind { .. }
+                | RunRequest::ForkSession { .. }
+                | RunRequest::RestartMcp(_)
+        ),
+    }
+}
+
 /// The most transcript items opening a session replays here: the same
 /// generous tail the engine path keeps (`2 * MAX_BLOCKS` messages), of
 /// which the buffer shows its last 512 blocks.
@@ -2975,11 +3006,29 @@ impl Pump {
     /// not start once that session opens, and there is no run to stop.
     fn hold_unadopted(&mut self, request: RunRequest) {
         if matches!(request, RunRequest::Cancel { .. }) {
-            let (prompts, rest) = std::mem::take(&mut self.unadopted)
+            let (cancelled, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.unadopted)
                 .into_iter()
-                .partition(|held| matches!(held, RunRequest::Submit { .. }));
+                .partition(|held| {
+                    matches!(
+                        held,
+                        RunRequest::Submit { .. }
+                            | RunRequest::RunShell(_)
+                            | RunRequest::CompactNow
+                    )
+                });
             self.unadopted = rest;
-            self.return_held(prompts, "cancelled before the session opened");
+            for held in &cancelled {
+                let what = match held {
+                    RunRequest::RunShell(command) => format!("!{command}"),
+                    RunRequest::CompactNow => "/compact".to_owned(),
+                    _ => continue,
+                };
+                self.notice(
+                    NoticeLevel::Info,
+                    format!("cancelled before the session opened: {what}"),
+                );
+            }
+            self.return_held(cancelled, "cancelled before the session opened");
         } else {
             self.unadopted.push(request);
         }
@@ -3017,7 +3066,7 @@ impl Pump {
         // Dialog answers run at once: opening the first session can be
         // what waits on them. With no session on its way, as after the
         // first failed, requests run as they come, so `/new` or a resume
-        // can open one.
+        // can open one, and those for the session are answered here.
         if self.wire.is_empty()
             && (self.pending_new.is_some() || self.pending_open.is_some())
             && !matches!(
@@ -3026,6 +3075,10 @@ impl Pump {
             )
         {
             self.hold_unadopted(request);
+            return;
+        }
+        if self.wire.is_empty() && needs_session(&request) {
+            self.without_session(request);
             return;
         }
         if let RunRequest::Submit { session, .. } = &request
@@ -3171,6 +3224,31 @@ impl Pump {
                 }
             }
             other => self.refuse(&other),
+        }
+    }
+
+    /// Answers a request for the session while none is open: a prompt
+    /// goes back to the composer, a stop has nothing to stop, a model
+    /// pick opens the next session and the rest is refused.
+    fn without_session(&mut self, request: RunRequest) {
+        match request {
+            RunRequest::Submit {
+                text,
+                images,
+                queue,
+                session,
+            } => self.return_prompt(
+                session.unwrap_or(self.app_session),
+                submission_content(text, &images),
+                queue,
+                NO_SESSION.to_owned(),
+            ),
+            RunRequest::Cancel { .. } => {}
+            RunRequest::SwitchModel(model) => {
+                self.notice(NoticeLevel::Info, format!("{model} opens the next session"));
+                self.model = model;
+            }
+            _ => self.notice(NoticeLevel::Warning, NO_SESSION.to_owned()),
         }
     }
 
@@ -3749,9 +3827,11 @@ impl Pump {
     /// which hosts them, is asked over the wire.
     fn invoke_plugin_command(&mut self, name: &str, args: &str) {
         let Some(runtime) = self.plugins.as_ref().map(|s| Arc::clone(&s.runtime)) else {
+            // Without a session open it runs at project scope.
+            let session = (!self.wire.is_empty()).then_some(self.wire.as_str());
             self.store
                 .client()
-                .ui_command(&self.cwd, name, args, Some(&self.wire));
+                .ui_command(&self.cwd, name, args, session);
             return;
         };
         let command = runtime
@@ -3773,9 +3853,8 @@ impl Pump {
     /// [`Self::invoke_plugin_command`] runs a command.
     fn invoke_keymap(&mut self, id: u64) {
         let Some(runtime) = self.plugins.as_ref().map(|s| Arc::clone(&s.runtime)) else {
-            self.store
-                .client()
-                .ui_keymap(&self.cwd, id, Some(&self.wire));
+            let session = (!self.wire.is_empty()).then_some(self.wire.as_str());
+            self.store.client().ui_keymap(&self.cwd, id, session);
             return;
         };
         let dialog_tx = self.dialog_tx.clone();
@@ -4456,6 +4535,75 @@ mod tests {
         assert!(
             !has_request(&pump.store.take_outgoing(), "session/prompt"),
             "a cancelled early prompt must not start on adoption"
+        );
+        drop(app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cancel_before_adoption_drops_the_held_shell_run() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        awaiting_first_session(&mut pump);
+        pump.handle(RunRequest::PlanMode { on: true });
+        pump.handle(RunRequest::RunShell("sleep 30".to_owned()));
+        pump.handle(RunRequest::Cancel { session: None });
+        assert!(
+            matches!(
+                pump.unadopted.as_slice(),
+                [RunRequest::PlanMode { on: true }]
+            ),
+            "the setting stays held"
+        );
+        pump.adopt("s1", true);
+        let sent = pump.store.take_outgoing();
+        assert!(
+            !has_request(&sent, "_kage/shell"),
+            "a cancelled shell run must not start on adoption"
+        );
+        assert!(
+            sent.iter().any(|frame| matches!(frame,
+                Frame::Request { params, .. }
+                    if params["configId"] == "mode" && params["value"] == "plan")),
+            "the held plan mode applies"
+        );
+        drop(app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn with_no_session_open_a_prompt_returns_and_nothing_is_sent() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        awaiting_first_session(&mut pump);
+        pump.settle(
+            Answer::NewSession,
+            vec![Change::Failed {
+                request: 1,
+                error: RpcError::invalid_params("no model"),
+            }],
+        );
+        let _ = app.try_iter().count();
+        pump.handle(RunRequest::Submit {
+            text: "later".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        pump.handle(RunRequest::RunShell("ls".to_owned()));
+        pump.handle(RunRequest::Cancel { session: None });
+        assert!(
+            pump.store.take_outgoing().is_empty(),
+            "nothing goes out under an empty session id"
+        );
+        let returned = app.try_iter().find_map(|envelope| match envelope.event {
+            kage_core::protocol::Event::Host(HostEvent::PromptWithdrawn { content, .. }) => content,
+            _ => None,
+        });
+        assert_eq!(
+            returned,
+            Some(vec![kage_core::Content::Text {
+                text: "later".to_owned()
+            }]),
+            "the prompt goes back to the composer"
         );
         drop(app);
         let _ = std::fs::remove_dir_all(&dir);

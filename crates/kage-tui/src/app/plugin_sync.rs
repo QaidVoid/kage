@@ -248,7 +248,6 @@ impl App {
         // every session file; listing now would block a frame on it.
         // Stay stale and retry on a later pass instead.
         if !self.sessions_warmed() {
-            self.plugin_sessions_stale = true;
             return;
         }
         self.plugin_sessions_stale = false;

@@ -509,45 +509,62 @@ impl App {
         &mut self,
         rx: std::sync::mpsc::Receiver<Vec<crate::picker::PickItem>>,
     ) {
-        self.start_sessions = Some(rx);
+        self.start_sessions = Some(super::StartSessions::Scan(rx));
     }
 
     /// Run on a session change: drop the old conversation's search
-    /// and list the start card's recent sessions again.
+    /// and list the start card's recent sessions again, once the
+    /// startup scan is done.
     pub(crate) fn on_session_changed(&mut self) {
         self.search_pattern = None;
-        if !self.sessions_warmed() {
+        if self.start_sessions.is_some() && !self.sessions_warmed() {
+            self.start_sessions = Some(super::StartSessions::Relist);
             return;
         }
+        self.start_sessions = None;
+        self.relist_start_sessions();
+    }
+
+    /// Lists the start card's recent sessions again. Returns `true`
+    /// when the start card changed.
+    fn relist_start_sessions(&mut self) -> bool {
         let (Some(info), Some(lister)) = (self.start_info.as_mut(), &self.session_lister) else {
-            return;
+            return false;
         };
         info.sessions = lister(false);
         info.sessions.truncate(view::START_SESSIONS);
+        true
     }
 
-    /// Apply the startup session scan's result, if it has landed.
-    /// One delivery only; later changes list through the session
-    /// lister. Returns `true` when the start card changed.
+    /// Fill the start card once the startup scan is done: with the
+    /// scan's result, or listed again when a session changed meanwhile.
+    /// Returns `true` when the start card changed.
     pub(crate) fn drain_start_sessions(&mut self) -> bool {
-        let Some(rx) = self.start_sessions.as_ref() else {
-            return false;
-        };
-        match rx.try_recv() {
-            Ok(sessions) => {
-                self.start_sessions = None;
-                let Some(info) = self.start_info.as_mut() else {
+        match self.start_sessions.as_ref() {
+            None => false,
+            Some(super::StartSessions::Relist) => {
+                if !self.sessions_warmed() {
                     return false;
-                };
-                info.sessions = sessions;
-                info.sessions.truncate(view::START_SESSIONS);
-                true
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => false,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                }
                 self.start_sessions = None;
-                false
+                self.relist_start_sessions()
             }
+            Some(super::StartSessions::Scan(rx)) => match rx.try_recv() {
+                Ok(sessions) => {
+                    self.start_sessions = None;
+                    let Some(info) = self.start_info.as_mut() else {
+                        return false;
+                    };
+                    info.sessions = sessions;
+                    info.sessions.truncate(view::START_SESSIONS);
+                    true
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => false,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.start_sessions = None;
+                    false
+                }
+            },
         }
     }
 

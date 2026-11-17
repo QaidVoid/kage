@@ -52,9 +52,11 @@ pub fn agents_dir(parent: &Path) -> PathBuf {
 
 /// The file of the agent `id` of the session at `parent`: in
 /// [`agents_dir`], or beside `parent` for an agent recorded before this
-/// layout. A fork or clone names the agents of the session it copied,
-/// which stay with that session, so the lookup follows the header's
-/// `parent_session` to the copied session, through every fork before it.
+/// layout. A fork or clone owns copies of its agents
+/// ([`crate::fork`]), but one made before that names the agents of the
+/// session it copied, which stay with that session, so the lookup follows
+/// the header's `parent_session` to the copied session, through every
+/// fork before it.
 /// The [`agents_dir`] path when none exists. To look up many agents of
 /// one session, resolve its [`fork_chain`] once and use [`agent_in`].
 #[must_use]

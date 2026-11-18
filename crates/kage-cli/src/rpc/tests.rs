@@ -406,7 +406,7 @@ fn test_host_with_plugins(
             rules.tools.insert(
                 "ls".into(),
                 ToolPermissionRules {
-                    default: PermissionAction::Ask,
+                    default: Some(PermissionAction::Ask),
                     allow: Vec::new(),
                     deny: Vec::new(),
                 },

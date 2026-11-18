@@ -19,9 +19,10 @@
 //! Reads are size-capped: a file larger than `READ_MAX` is refused with
 //! an error naming the cap instead of being read into memory.
 //!
-//! Built-in tools use the looser [`kage_tools::resolve`] (no escape check)
-//! because the model already has shell access via the `shell` tool; plugins keep the
-//! tighter check because they are third-party code in a sandbox.
+//! Built-in tools use the looser [`kage_tools::resolve_reachable`], which
+//! takes an absolute path anywhere, because the model already has shell
+//! access via the `shell` tool; plugins keep the tighter check because
+//! they are third-party code in a sandbox.
 
 use std::path::{Path, PathBuf};
 

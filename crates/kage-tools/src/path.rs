@@ -1,20 +1,23 @@
 //! Path resolution for tools and the plugin filesystem helpers.
 //!
-//! Two entry points, sharing canonicalization machinery:
+//! Three entry points, sharing canonicalization machinery:
 //!
 //! - [`resolve`] normalizes a candidate path against `workdir` and
 //!   canonicalizes it (resolving symlinks; preserving any non-existent
 //!   tail). `.` and `..` are resolved lexically before any filesystem
 //!   interaction, and a traversal that leaves the workdir is returned
-//!   as-is. A leading `~` expands to the home directory. Built-in
-//!   tools call this - the user already chose the
-//!   workdir, and `bash` can reach anywhere on the filesystem anyway,
-//!   so a tool-side sandbox is friction without security.
+//!   as-is. A leading `~` expands to the home directory.
+//! - [`resolve_reachable`] is what the built-in file tools use: it
+//!   wraps [`resolve`] and refuses a relative path that leaves the
+//!   workdir, so reaching outside takes an absolute or `~` path.
 //! - [`resolve_under`] wraps [`resolve`] with a `starts_with(workdir)`
 //!   check, returning [`ToolError::Path`] on escape. Used by the
 //!   plugin filesystem helpers (`kage.fs.read` / `kage.fs.write`)
 //!   because Lua plugins are third-party code running inside a
-//!   sandbox; their fs reach should not exceed the workdir.
+//!   sandbox, and by agents working in their own worktree.
+//!
+//! [`is_sensitive`] names the files holding secrets (`.env`, SSH
+//! private keys, cloud credentials) that the file tools refuse.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -26,9 +29,10 @@ use crate::ToolError;
 /// Behavior:
 /// - A leading `~` expands to the home directory before the
 ///   relative/absolute decision: `~` is home itself and `~/...` is
-///   home joined with the rest, like a shell's unquoted word. `~user`
-///   is left untouched, as are environment variables; the `bash`
-///   tool's shell handles those.
+///   home joined with the rest, like a shell's unquoted word. On Unix
+///   `~user` takes that user's home (see
+///   [`kage_core::fsutil::expand_tilde`]). Environment variables are
+///   left untouched; the `bash` tool's shell handles those.
 /// - Relative `candidate` is joined onto `workdir`.
 /// - Absolute `candidate` is taken as-is.
 /// - `.` and `..` components are resolved lexically (the way the kernel
@@ -39,8 +43,8 @@ use crate::ToolError;
 ///   (resolving symlinks); any unresolved tail (for paths that do not
 ///   yet exist, e.g. the target of a `write` tool) is appended verbatim.
 /// - No escape check: a traversal that leaves the workdir is returned
-///   as-is. Built-in tools call this; see [`resolve_under`] for the
-///   confined variant.
+///   as-is. See [`resolve_reachable`] and [`resolve_under`] for the
+///   checked variants.
 ///
 /// # Errors
 ///
@@ -63,6 +67,91 @@ pub fn resolve(workdir: &Path, candidate: &Path) -> Result<PathBuf, ToolError> {
     canonicalize_with_missing_tail(&normalize(&absolute))
 }
 
+/// Resolve `candidate` against `workdir` like [`resolve`], refusing a
+/// relative path that leaves the workdir. An absolute or `~` path may
+/// point anywhere: naming it is the deliberate step a stray `../`
+/// is not.
+///
+/// Whether a relative path leaves is decided from its own components,
+/// not from where symlinks lead, so `shared/notes.md` is reachable
+/// even when `shared` links outside the workdir.
+///
+/// # Errors
+///
+/// - Any error from [`resolve`].
+/// - A relative candidate whose `..` components climb out of the
+///   workdir.
+pub fn resolve_reachable(workdir: &Path, candidate: &Path) -> Result<PathBuf, ToolError> {
+    let resolved = resolve(workdir, candidate)?;
+    let expanded = kage_core::fsutil::expand_tilde(candidate);
+    if expanded.is_absolute() {
+        return Ok(resolved);
+    }
+    let canonical_root = workdir.canonicalize().map_err(|e| ToolError::Path {
+        path: workdir.to_owned(),
+        reason: format!("canonicalize workdir: {e}"),
+    })?;
+    if !normalize(&canonical_root.join(&expanded)).starts_with(&canonical_root) {
+        return Err(ToolError::Path {
+            path: candidate.to_owned(),
+            reason: format!(
+                "leaves the working directory {}; use an absolute path to reach outside it",
+                canonical_root.display()
+            ),
+        });
+    }
+    Ok(resolved)
+}
+
+/// Basenames that hold secrets whatever directory they are in.
+const SENSITIVE_NAMES: &[&str] = &[".env", "id_rsa", "id_ed25519", "id_ecdsa", "credentials"];
+
+/// Templates of `.env` files, which hold no secrets by convention.
+const ENV_TEMPLATES: &[&str] = &[".env.example", ".env.sample", ".env.template"];
+
+/// Suffixes of copies of a private key that still hold it.
+const KEY_COPY_SUFFIXES: &[&str] = &[
+    ".bak",
+    ".backup",
+    ".copy",
+    ".disabled",
+    ".key",
+    ".old",
+    ".orig",
+    ".pem",
+    ".save",
+    ".tmp",
+];
+
+/// Whether `path` names a file that holds secrets: `.env` and its
+/// variants other than templates, an SSH private key or a copy of one,
+/// or a `credentials` file such as `~/.aws/credentials`. Public keys
+/// (`id_ed25519.pub`) are not secrets. Compared case-insensitively.
+#[must_use]
+pub fn is_sensitive(path: &Path) -> bool {
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    let name = name.to_string_lossy().to_lowercase();
+    if ENV_TEMPLATES.contains(&name.as_str())
+        || path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pub"))
+    {
+        return false;
+    }
+    if SENSITIVE_NAMES.contains(&name.as_str()) || name.starts_with(".env.") {
+        return true;
+    }
+    ["id_rsa", "id_ed25519", "id_ecdsa", "credentials"]
+        .iter()
+        .filter_map(|prefix| name.strip_prefix(prefix))
+        .any(|rest| {
+            rest.starts_with(['-', '_'])
+                || (rest.starts_with('.') && KEY_COPY_SUFFIXES.contains(&rest))
+        })
+}
+
 /// Resolve `candidate` against `workdir` and refuse anything that
 /// escapes the canonical workdir: via `..` (normalized lexically before
 /// resolution, so it is caught whether or not the intermediate
@@ -74,8 +163,8 @@ pub fn resolve(workdir: &Path, candidate: &Path) -> Result<PathBuf, ToolError> {
 /// that create parent directories must re-verify containment
 /// afterwards (see the plugin fs helpers).
 ///
-/// Used by the plugin filesystem helpers; tools call [`resolve`]
-/// instead.
+/// Used by the plugin filesystem helpers and by agents in a worktree;
+/// the other tools call [`resolve_reachable`].
 ///
 /// # Errors
 ///
@@ -254,10 +343,16 @@ mod tests {
     }
 
     #[test]
-    fn resolve_leaves_tilde_prefixed_names_alone() {
+    fn resolve_leaves_tilde_names_of_no_user_alone() {
         let dir = workdir();
-        let resolved = resolve(dir.path(), Path::new("~foo")).unwrap();
-        assert_eq!(resolved, dir.path().canonicalize().unwrap().join("~foo"));
+        let resolved = resolve(dir.path(), Path::new("~kage-no-such-user")).unwrap();
+        assert_eq!(
+            resolved,
+            dir.path()
+                .canonicalize()
+                .unwrap()
+                .join("~kage-no-such-user")
+        );
     }
 
     #[test]
@@ -389,5 +484,66 @@ mod tests {
                 .join("x")
         );
         assert!(!dir.path().join("../escape-target").exists());
+    }
+
+    #[test]
+    fn resolve_reachable_takes_absolute_and_tilde_paths_but_not_a_relative_escape() {
+        let root = tempfile::tempdir().unwrap();
+        let work = root.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let err = resolve_reachable(&work, Path::new("../x")).unwrap_err();
+        assert!(err.to_string().contains("use an absolute path"), "{err}");
+        let outside = root.path().join("x");
+        assert_eq!(
+            resolve_reachable(&work, &outside).unwrap(),
+            root.path().canonicalize().unwrap().join("x")
+        );
+        assert!(resolve_reachable(&work, Path::new("~")).is_ok());
+        assert_eq!(
+            resolve_reachable(&work, Path::new("sub/../y")).unwrap(),
+            work.canonicalize().unwrap().join("y")
+        );
+    }
+
+    #[test]
+    fn is_sensitive_names_secrets_but_not_templates_or_public_keys() {
+        for secret in [
+            ".env",
+            ".env.local",
+            "/home/u/.ssh/id_ed25519",
+            "id_rsa.bak",
+            "id_rsa-old",
+            "/home/u/.aws/credentials",
+            "credentials_prod",
+            ".ENV",
+        ] {
+            assert!(is_sensitive(Path::new(secret)), "{secret}");
+        }
+        for plain in [
+            ".env.example",
+            ".envrc",
+            "id_ed25519.pub",
+            "credentials.rs",
+            "id_rsa.txt",
+            "src/main.rs",
+        ] {
+            assert!(!is_sensitive(Path::new(plain)), "{plain}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_reachable_follows_a_link_inside_the_workdir_that_leads_out() {
+        let root = tempfile::tempdir().unwrap();
+        let work = root.path().join("work");
+        let shared = root.path().join("shared");
+        std::fs::create_dir(&work).unwrap();
+        std::fs::create_dir(&shared).unwrap();
+        std::os::unix::fs::symlink(&shared, work.join("shared")).unwrap();
+        assert_eq!(
+            resolve_reachable(&work, Path::new("shared/notes.md")).unwrap(),
+            shared.canonicalize().unwrap().join("notes.md")
+        );
+        assert!(resolve_reachable(&work, Path::new("shared/../../x")).is_err());
     }
 }

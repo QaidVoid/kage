@@ -186,7 +186,7 @@ mod tests {
         permissions.tools.insert(
             "read".into(),
             ToolPermissionRules {
-                default: PermissionAction::Allow,
+                default: Some(PermissionAction::Allow),
                 allow: Vec::new(),
                 deny: paths.iter().map(|p| (*p).to_owned()).collect(),
             },

@@ -8,10 +8,10 @@
 //! model that reads images in tool results sees it. A call may also
 //! name a `path` in the workspace to save it there at once.
 //!
-//! The source image is read from the workspace and uploaded, so it is
-//! confined to the workspace even when path confinement is off. A call
-//! that names no source edits the newest image in the conversation, such
-//! as one `generate_image` made or the user attached.
+//! The source image is read from the workspace and uploaded, so it must
+//! be inside the workspace, though the file tools take absolute paths
+//! anywhere. A call that names no source edits the newest image in the
+//! conversation, such as one `generate_image` made or the user attached.
 
 use std::fmt::Write as _;
 use std::io::Read as _;
@@ -84,7 +84,7 @@ impl EditImageTool {
 
     /// Reads the source image named in the call, refusing anything but
     /// a PNG, JPEG or WebP file of at most [`MAX_SOURCE_BYTES`]. The
-    /// name is confined to the workspace whatever `confine_paths` says,
+    /// name is confined to the workspace, unlike the file tools' paths,
     /// because the file is uploaded.
     fn read_source(cx: &ToolContext<'_>, name: &str) -> Result<(Vec<u8>, &'static str), ToolError> {
         let source = workspace_path(cx.workdir(), name)?;
@@ -669,8 +669,8 @@ mod tests {
         assert_eq!(seen.count(), 1);
     }
 
-    /// `ToolContext::new` leaves `confine_paths` off, as the user's
-    /// `confine_paths = false` does, and the source stays confined.
+    /// `ToolContext::new` is unconfined, as a session is, and the source
+    /// stays confined.
     #[cfg(unix)]
     #[test]
     fn a_source_linked_out_of_the_workspace_is_refused_unconfined() {

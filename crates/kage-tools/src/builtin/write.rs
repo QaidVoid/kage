@@ -18,7 +18,7 @@ use crate::{Tool, ToolContext, ToolError, schema_for};
 /// Input shape for the `write` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 struct WriteInput {
-    /// Path to write, relative to the workdir.
+    /// Path to write, relative to the workdir. Reach outside it with an absolute or `~` path.
     #[serde(alias = "filePath")]
     path: String,
     /// File contents (UTF-8).
@@ -57,7 +57,7 @@ impl Tool for WriteTool {
         cx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
         let input: WriteInput = serde_json::from_value(input)?;
-        let target = cx.resolve_path(Path::new(&input.path))?;
+        let target = cx.resolve_file(Path::new(&input.path))?;
         // The exists check and the rename are one sequence: without the
         // lock, two concurrent non-overwriting writes could both pass
         // the check and both land, silently losing one.
@@ -227,17 +227,38 @@ mod tests {
     }
 
     #[test]
-    fn unconfined_write_accepts_escape() {
+    fn unconfined_write_reaches_outside_only_by_an_absolute_path() {
         let (root, work) = nested_workdir();
-        let out = run(
+        let outside = root.path().join("outside-write-unconfined.txt");
+        let err = run(
             &WriteTool,
             &work,
             serde_json::json!({"path":"../outside-write-unconfined.txt","content":"x"}),
         )
+        .unwrap_err();
+        assert!(err.to_string().contains("use an absolute path"), "{err}");
+        assert!(!outside.exists());
+        let out = run(
+            &WriteTool,
+            &work,
+            serde_json::json!({"path": outside, "content":"x"}),
+        )
         .unwrap();
         assert!(!out.is_error);
-        let outside = root.path().join("outside-write-unconfined.txt");
         assert_eq!(fs::read_to_string(outside).unwrap(), "x");
+    }
+
+    #[test]
+    fn a_secret_file_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = run(
+            &WriteTool,
+            dir.path(),
+            serde_json::json!({"path":".env","content":"KEY=1"}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("holds secrets"), "{err}");
+        assert!(!dir.path().join(".env").exists());
     }
 
     /// A workdir inside its own temp root, so `..` stays private to

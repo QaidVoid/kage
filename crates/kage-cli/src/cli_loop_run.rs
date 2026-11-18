@@ -35,7 +35,7 @@ pub(crate) fn execute_print_run(
     registry: Arc<ProviderRegistry>,
     model: &str,
     tools: kage_tools::ToolRegistry,
-    mut cx: AgentContext,
+    cx: AgentContext,
     prompt: String,
     writer: Option<SessionWriter>,
     plugin_runtime: Option<Arc<kage_plugin::PluginRuntime>>,
@@ -55,14 +55,6 @@ pub(crate) fn execute_print_run(
         }
     };
     let tools = tools.with_media_tools(&layered);
-    if layered.permissions.confine_paths {
-        cx = cx.with_confine_paths();
-    } else {
-        cx = cx.without_confine_paths();
-        eprintln!(
-            "kage: path confinement is OFF for this session (permissions.confine_paths = false)"
-        );
-    }
     if let Err(err) = crate::sigint::install() {
         eprintln!("kage: {err}; Ctrl-C will kill the process");
     }

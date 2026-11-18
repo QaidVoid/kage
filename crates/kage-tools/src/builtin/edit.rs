@@ -27,7 +27,7 @@ use crate::{Tool, ToolContext, ToolError, schema_for};
 /// single-substring form or the multi-change form.
 #[derive(Debug, Deserialize, JsonSchema)]
 struct EditInput {
-    /// Path to edit, relative to the workdir.
+    /// Path to edit, relative to the workdir. Reach outside it with an absolute or `~` path.
     #[serde(alias = "filePath")]
     path: String,
     /// Substring to replace (shorthand single-change form). Required when
@@ -131,7 +131,7 @@ impl Tool for EditTool {
         cx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
         let input: EditInput = serde_json::from_value(input)?;
-        let path = cx.resolve_path(Path::new(&input.path))?;
+        let path = cx.resolve_file(Path::new(&input.path))?;
         // Read, splice and rename are one sequence: without the lock, a
         // concurrent edit could rewrite the file between the read and
         // the write and lose its change set.
@@ -476,6 +476,22 @@ mod tests {
         let cancel = CancelFlag::new();
         let cx = ToolContext::new(workdir, &cancel);
         EditTool::default().execute(input, &cx)
+    }
+
+    #[test]
+    fn a_secret_file_is_not_edited() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("id_ed25519"), "key").unwrap();
+        let err = run(
+            dir.path(),
+            serde_json::json!({"path":"id_ed25519","old_str":"key","new_str":"other"}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("holds secrets"), "{err}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("id_ed25519")).unwrap(),
+            "key"
+        );
     }
 
     #[test]

@@ -64,8 +64,7 @@ enum Prepared<'scope> {
 /// Run the MCP server loop until the client closes the connection.
 ///
 /// `workdir` scopes filesystem tools; the binary passes the process
-/// working directory. `confine` keeps tool paths under `workdir`, and
-/// `gate` is consulted before every call.
+/// working directory. `gate` is consulted before every call.
 ///
 /// # Errors
 ///
@@ -74,7 +73,6 @@ enum Prepared<'scope> {
 pub fn serve<R, W>(
     registry: &ToolRegistry,
     workdir: &Path,
-    confine: bool,
     gate: ServeGate<'_>,
     reader: R,
     writer: W,
@@ -107,7 +105,7 @@ where
             match msg {
                 Inbound::Request { id, method, params } => {
                     if method == "tools/call" {
-                        match prepare_call(scope, registry, workdir, confine, gate, &params) {
+                        match prepare_call(scope, registry, workdir, gate, &params) {
                             Prepared::Now(response) => {
                                 if peer.respond(&id, Ok(response)).is_err() {
                                     break;
@@ -199,7 +197,6 @@ fn prepare_call<'scope>(
     scope: &'scope thread::Scope<'scope, '_>,
     registry: &ToolRegistry,
     workdir: &'scope Path,
-    confine: bool,
     gate: ServeGate<'_>,
     params: &serde_json::Value,
 ) -> Prepared<'scope> {
@@ -220,8 +217,7 @@ fn prepare_call<'scope>(
     }
     let cancel = Arc::new(CancelFlag::new());
     let worker_cancel = Arc::clone(&cancel);
-    let worker =
-        scope.spawn(move || run_tool(tool.as_ref(), workdir, confine, arguments, &worker_cancel));
+    let worker = scope.spawn(move || run_tool(tool.as_ref(), workdir, arguments, &worker_cancel));
     Prepared::Running(cancel, worker)
 }
 
@@ -229,14 +225,10 @@ fn prepare_call<'scope>(
 fn run_tool(
     tool: &dyn Tool,
     workdir: &Path,
-    confine: bool,
     arguments: serde_json::Value,
     cancel: &CancelFlag,
 ) -> serde_json::Value {
-    let mut cx = ToolContext::new(workdir, cancel);
-    if confine {
-        cx = cx.with_confine();
-    }
+    let cx = ToolContext::new(workdir, cancel);
     match tool.execute(arguments, &cx) {
         Ok(out) => serde_json::json!({
             "content": [{ "type": "text", "text": out.text }],
@@ -363,7 +355,7 @@ mod tests {
             let gate = |_: &str, input: &serde_json::Value| {
                 (input["message"] == "forbidden").then(|| "refused by gate".to_owned())
             };
-            serve(&reg, &wd, false, &gate, BufReader::new(srv_r), srv_w).unwrap();
+            serve(&reg, &wd, &gate, BufReader::new(srv_r), srv_w).unwrap();
         });
         let (peer, _in, _h) = connect(BufReader::new(cli_r), cli_w);
         peer
@@ -525,7 +517,7 @@ mod tests {
             let gate = |name: &str, _: &serde_json::Value| {
                 (name == "echo").then(|| "`echo` is denied by permissions".to_owned())
             };
-            serve(&reg, &wd, false, &gate, BufReader::new(srv_r), srv_w).unwrap();
+            serve(&reg, &wd, &gate, BufReader::new(srv_r), srv_w).unwrap();
         });
         let (peer, _in, _h) = connect(BufReader::new(cli_r), cli_w);
         let refused = peer
@@ -573,7 +565,7 @@ mod tests {
             }
             let wd = std::env::temp_dir();
             let gate = |_: &str, _: &serde_json::Value| None;
-            serve(&reg, &wd, false, &gate, BufReader::new(srv_r), srv_w).unwrap();
+            serve(&reg, &wd, &gate, BufReader::new(srv_r), srv_w).unwrap();
         });
         let (peer, _in, _h) = connect(BufReader::new(cli_r), cli_w);
         peer

@@ -130,19 +130,28 @@ fn temp_sibling(target: &Path) -> PathBuf {
 /// Expand a leading `~` the way a shell does for an unquoted word:
 /// `~` is the home directory itself and `~/...` is home joined with
 /// the rest. The home directory is `$HOME` when set, so an exported
-/// home wins on Windows too, and the platform home otherwise.
-/// `~user` and any other tilde use are left alone, and so is the
-/// candidate when the home directory cannot be determined.
+/// home wins on Windows too, and the platform home otherwise. On Unix
+/// `~user` and `~user/...` take that user's home directory. A user
+/// that does not exist, `~user` on Windows, and any other tilde use
+/// are left alone, and so is the candidate when the home directory
+/// cannot be determined.
 #[must_use]
 pub fn expand_tilde(candidate: &Path) -> PathBuf {
-    let Ok(rest) = candidate.strip_prefix("~") else {
+    let Some(std::path::Component::Normal(first)) = candidate.components().next() else {
         return candidate.to_owned();
     };
-    let home = std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-        .or_else(dirs::home_dir);
-    let Some(home) = home else {
+    let Some(user) = first.to_str().and_then(|first| first.strip_prefix('~')) else {
+        return candidate.to_owned();
+    };
+    let home = if user.is_empty() {
+        std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .map(PathBuf::from)
+            .or_else(dirs::home_dir)
+    } else {
+        home_of(user)
+    };
+    let (Some(home), Ok(rest)) = (home, candidate.strip_prefix(first)) else {
         return candidate.to_owned();
     };
     if rest.as_os_str().is_empty() {
@@ -150,6 +159,23 @@ pub fn expand_tilde(candidate: &Path) -> PathBuf {
     } else {
         home.join(rest)
     }
+}
+
+/// The home directory of the user named `user`, from the user database,
+/// when it is an absolute path.
+#[cfg(unix)]
+fn home_of(user: &str) -> Option<PathBuf> {
+    nix::unistd::User::from_name(user)
+        .ok()
+        .flatten()
+        .map(|user| user.dir)
+        .filter(|dir| dir.is_absolute())
+}
+
+/// Windows has no `~user` to expand.
+#[cfg(not(unix))]
+fn home_of(_user: &str) -> Option<PathBuf> {
+    None
 }
 
 /// `value` ready to use as a path: trimmed, then one layer of
@@ -291,17 +317,35 @@ mod tests {
     }
 
     #[test]
-    fn tilde_expands_to_home_and_tilde_user_stays() {
+    fn tilde_expands_to_home_and_an_unknown_user_stays() {
         figment::Jail::expect_with(|jail| {
             let root = jail.directory().to_string_lossy().into_owned();
             jail.set_env("HOME", root);
             let home = jail.directory().to_path_buf();
             assert_eq!(expand_tilde(Path::new("~")), home);
             assert_eq!(expand_tilde(Path::new("~/a/b")), home.join("a/b"));
-            assert_eq!(expand_tilde(Path::new("~foo")), PathBuf::from("~foo"));
+            assert_eq!(
+                expand_tilde(Path::new("~kage-no-such-user/a")),
+                PathBuf::from("~kage-no-such-user/a")
+            );
+            assert_eq!(expand_tilde(Path::new("a/~b")), PathBuf::from("a/~b"));
             assert_eq!(expand_tilde(Path::new("/tmp/x")), PathBuf::from("/tmp/x"));
             Ok(())
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tilde_user_expands_to_that_users_home() {
+        let user = nix::unistd::User::from_uid(nix::unistd::getuid())
+            .unwrap()
+            .unwrap();
+        let named = format!("~{}", user.name);
+        assert_eq!(expand_tilde(Path::new(&named)), user.dir);
+        assert_eq!(
+            expand_tilde(&Path::new(&named).join("a/b")),
+            user.dir.join("a/b")
+        );
     }
 
     #[test]

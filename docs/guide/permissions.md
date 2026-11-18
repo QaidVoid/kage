@@ -3,16 +3,10 @@
 By default kage runs every built-in tool call without asking. The
 `[permissions]` table lets you opt specific tools into rules instead. MCP tools are the exception:
 they ask unless you allow their server (see
-[MCP tools](#mcp-tools)).
+[MCP tools](#mcp-tools)). So does a `write` or `edit` outside the
+working directory (see [paths outside the working directory](#paths-outside-the-working-directory)).
 
 ```toml
-[permissions]
-# path confinement for the built-in file tools (read, write, edit,
-# grep, find, ls). paths that escape the working directory through
-# `..`, absolute paths outside it, or symlinks that point outside it
-# are rejected. on by default; set false to turn it off.
-# confine_paths = false
-
 [permissions.tools.shell]
 # what happens when neither the deny nor the allow list matches.
 # "allow" (the default), "ask", or "deny".
@@ -212,13 +206,42 @@ Project agents can set their own tools and model, so they only load
 once you trust the project. See
 [project config and trust](/guide/config#project-config-and-trust).
 
-## path confinement
+## paths outside the working directory
 
-Confined paths (the default) route the built-in file tools through
-escape-checked resolution: a read or write must stay under the working
-directory. Set `confine_paths = false` to turn it off.
-`shell` is unaffected, because a shell can always reach the whole
-filesystem. Confine it with `deny` rules instead. Agents inherit the setting.
+The built-in file tools (`read`, `write`, `edit`, `grep`, `find`,
+`ls`) work on the working directory, and reach outside it only through
+an absolute or `~` path:
+
+- A relative path that climbs out of the working directory, such as
+  `../notes.txt`, is refused with a hint to name the absolute path. A
+  relative path through a symlink inside the working directory is
+  fine, wherever the link leads.
+- `~` is your home directory, and on Linux and macOS `~name` is the
+  home of the user `name`, as in a shell.
+- Reading and searching outside follows your rules like any other call.
+- A `write` or `edit` outside asks first, even when the rules would
+  allow it. Allow mode (`/permission allow`, `--yolo`), an approval for
+  the session or always, or a `[permissions.tools.write]` or
+  `[permissions.tools.edit]` entry with `default = "allow"` written
+  out lets it through. An entry that leaves the default unset, such as
+  one that only adds `deny` patterns, does not, and neither do `allow`
+  patterns, since they match the whole call input and not just the
+  path. Print mode and `kage mcp serve` cannot ask, so they refuse it.
+
+Files that hold secrets are refused wherever they are: `.env` and
+`.env.*` (but not `.env.example`, `.env.sample` or `.env.template`),
+SSH private keys such as `id_ed25519` and their copies (but not the
+`.pub` keys), and `credentials` files such as `~/.aws/credentials`.
+`read`, `write` and `edit` refuse them, a symlink by that name too,
+and `grep` leaves them out of its results.
+
+None of this is a sandbox: `shell`, MCP servers and external ACP
+agents reach the whole filesystem. Confine `shell` with `deny` rules.
+A [worktree agent](/guide/agents#worktree-agents) is the exception:
+its file tools stay inside its own checkout.
+
+The `confine_paths` setting of earlier versions is gone, and kage
+ignores it in an existing config.
 
 ## runtime mode (`/permission`)
 

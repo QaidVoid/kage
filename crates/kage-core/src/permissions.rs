@@ -36,10 +36,11 @@ pub enum PermissionAction {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolPermissionRules {
-    /// Action when neither `deny` nor `allow` matches. Defaults to
-    /// `allow` so an entry can add `deny` patterns without opting
+    /// Action when neither `deny` nor `allow` matches. Unset means
+    /// `allow`, so an entry can add `deny` patterns without opting
     /// the whole tool into prompts.
-    pub default: PermissionAction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<PermissionAction>,
     /// Glob patterns; a match runs the tool without prompting.
     pub allow: Vec<String>,
     /// Glob patterns; a match refuses the call.
@@ -47,17 +48,9 @@ pub struct ToolPermissionRules {
 }
 
 /// The `[permissions]` table.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PermissionsConfig {
-    /// Path confinement: route the built-in file tools through
-    /// escape-checked resolution so reads and writes stay under the
-    /// working directory. Defaults to `true`; set
-    /// `confine_paths = false` to restore the historical unconfined
-    /// resolution, which lets model-supplied paths escape the
-    /// workdir.
-    #[serde(default = "default_confine_paths")]
-    pub confine_paths: bool,
     /// Per-tool rules, keyed by literal tool name (`shell`,
     /// `write`, `github__create_issue`, ...). No glob keys in
     /// v1: ordering overlapping patterns deterministically is not
@@ -71,26 +64,11 @@ pub struct PermissionsConfig {
     pub mcp: BTreeMap<String, PermissionAction>,
 }
 
-impl Default for PermissionsConfig {
-    fn default() -> Self {
-        Self {
-            confine_paths: default_confine_paths(),
-            tools: BTreeMap::new(),
-            mcp: BTreeMap::new(),
-        }
-    }
-}
-
-fn default_confine_paths() -> bool {
-    true
-}
-
 impl PermissionsConfig {
-    /// Whether the table carries no configuration at all: confinement
-    /// at its default (on) and no tool or MCP rules.
+    /// Whether the table carries no tool or MCP rules.
     #[must_use]
     pub fn is_default(&self) -> bool {
-        self.confine_paths && self.tools.is_empty() && self.mcp.is_empty()
+        self.tools.is_empty() && self.mcp.is_empty()
     }
 
     /// The action for a tool of MCP server `server` that has no
@@ -154,7 +132,18 @@ impl PermissionsConfig {
         if matches_any(&rules.allow, subject) {
             return PermissionAction::Allow;
         }
-        rules.default
+        rules.default.unwrap_or(PermissionAction::Allow)
+    }
+
+    /// Whether the user's own entry for `tool` writes out
+    /// `default = "allow"`, as an "always" approval saves it. An entry
+    /// that leaves the default unset, such as one that only denies,
+    /// does not count.
+    #[must_use]
+    pub fn allows_by_default(&self, tool: &str) -> bool {
+        self.tools
+            .get(tool)
+            .is_some_and(|rules| rules.default == Some(PermissionAction::Allow))
     }
 
     /// The string glob patterns match against for one tool input:
@@ -230,12 +219,11 @@ mod tests {
 
     fn rules(default: PermissionAction, allow: &[&str], deny: &[&str]) -> PermissionsConfig {
         PermissionsConfig {
-            confine_paths: false,
             mcp: BTreeMap::new(),
             tools: [(
                 "shell".to_owned(),
                 ToolPermissionRules {
-                    default,
+                    default: Some(default),
                     allow: allow.iter().map(|s| (*s).to_owned()).collect(),
                     deny: deny.iter().map(|s| (*s).to_owned()).collect(),
                 },
@@ -298,14 +286,24 @@ mod tests {
     }
 
     #[test]
-    fn confine_paths_defaults_on_and_explicit_false_is_honoured() {
-        let cfg: PermissionsConfig = toml::from_str("").unwrap();
-        assert!(cfg.confine_paths);
-        assert!(PermissionsConfig::default().confine_paths);
-        assert!(cfg.is_default());
+    fn allows_by_default_needs_a_written_default() {
+        let deny_only: PermissionsConfig =
+            toml::from_str("[tools.write]\ndeny = [\"*.lock*\"]").unwrap();
+        assert_eq!(deny_only.check("write", "a.txt"), PermissionAction::Allow);
+        assert!(!deny_only.allows_by_default("write"));
+        let written: PermissionsConfig =
+            toml::from_str("[tools.write]\ndefault = \"allow\"\ndeny = [\"*.lock*\"]").unwrap();
+        assert!(written.allows_by_default("write"));
+        let pattern: PermissionsConfig =
+            toml::from_str("[tools.write]\ndefault = \"ask\"\nallow = [\"*notes*\"]").unwrap();
+        assert!(!pattern.allows_by_default("write"));
+        assert!(!PermissionsConfig::default().allows_by_default("write"));
+    }
+
+    #[test]
+    fn the_retired_confine_paths_key_is_ignored() {
         let cfg: PermissionsConfig = toml::from_str("confine_paths = false").unwrap();
-        assert!(!cfg.confine_paths);
-        assert!(!cfg.is_default());
+        assert!(cfg.is_default());
     }
 
     #[test]
@@ -360,15 +358,12 @@ mod tests {
         // Parsed standalone, so the `[permissions]` wrapper header is
         // absent: these tables are the module's own root.
         let src = r#"
-            confine_paths = true
-
             [tools.shell]
             default = "ask"
             allow = ["git *"]
             deny = ["rm -rf *"]
         "#;
         let cfg: PermissionsConfig = toml::from_str(src).unwrap();
-        assert!(cfg.confine_paths);
         assert_eq!(cfg.check("shell", "rm -rf /"), PermissionAction::Deny);
         assert_eq!(cfg.check("shell", "git status"), PermissionAction::Allow);
         assert_eq!(cfg.check("shell", "ls"), PermissionAction::Ask);

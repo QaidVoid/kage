@@ -195,11 +195,10 @@ fn config_non_default_values_roundtrip() {
     config.provider.default_model = "zai/glm-5.3-flash".to_owned();
     config.loop_settings.compaction_threshold = 0.75;
     config.loop_settings.max_provider_retries = 9;
-    config.permissions.confine_paths = false;
     config.permissions.tools.insert(
         "shell".to_owned(),
         kage_core::permissions::ToolPermissionRules {
-            default: kage_core::permissions::PermissionAction::Ask,
+            default: Some(kage_core::permissions::PermissionAction::Ask),
             allow: vec!["git *".to_owned()],
             deny: vec!["git push *".to_owned()],
         },

@@ -1515,6 +1515,7 @@ impl Dispatcher {
         session.cancel.reset();
         session.state.working = true;
         let mut gate = session.gate.clone().with_cancel(session.cancel.clone());
+        gate = gate.with_workdir((!cx.confine_paths).then(|| cx.workdir.clone()));
         if session.interactive {
             gate = gate.with_asker(asker(&self.bus, &self.asks, &self.next_request, id));
         }

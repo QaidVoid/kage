@@ -128,7 +128,8 @@ impl Tool for GrepTool {
             let Ok(entry) = entry else {
                 continue;
             };
-            if !entry.file_type().is_some_and(|t| t.is_file()) {
+            if !entry.file_type().is_some_and(|t| t.is_file()) || crate::is_sensitive(entry.path())
+            {
                 continue;
             }
             let path = entry.path().to_path_buf();
@@ -272,6 +273,19 @@ mod tests {
         let cancel = CancelFlag::new();
         let cx = ToolContext::new(workdir, &cancel);
         GrepTool::default().execute(input, &cx)
+    }
+
+    #[test]
+    fn secret_files_are_left_out_of_the_search() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("keys")).unwrap();
+        fs::write(dir.path().join("keys/id_ed25519"), "token=abc\n").unwrap();
+        fs::write(dir.path().join("keys/credentials"), "token=abc\n").unwrap();
+        fs::write(dir.path().join("keys/notes.txt"), "token=abc\n").unwrap();
+        let out = run(dir.path(), serde_json::json!({"pattern":"token"})).unwrap();
+        assert!(out.text.contains("notes.txt"), "{}", out.text);
+        assert!(!out.text.contains("id_ed25519"), "{}", out.text);
+        assert!(!out.text.contains("credentials"), "{}", out.text);
     }
 
     fn populate(dir: &Path) {

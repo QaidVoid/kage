@@ -657,7 +657,7 @@ fn ask_for_gate() -> PermissionGate {
     rules.tools.insert(
         "gate".into(),
         kage_core::permissions::ToolPermissionRules {
-            default: PermissionAction::Ask,
+            default: Some(PermissionAction::Ask),
             allow: Vec::new(),
             deny: Vec::new(),
         },

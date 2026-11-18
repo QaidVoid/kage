@@ -1469,17 +1469,15 @@ impl Tool for EscapeProbe {
     }
 }
 
-/// A default `AgentContext` confines dispatch, so a model-supplied `../x`
-/// path surfaces as a `ToolError::Path` rejection instead of a resolved
-/// escape.
+/// A model-supplied `../x` path surfaces as a `ToolError::Path`
+/// rejection asking for an absolute path, instead of a resolved escape.
 #[test]
-fn confined_dispatch_rejects_workdir_escape() {
+fn dispatch_rejects_a_relative_workdir_escape() {
     let root = std::env::temp_dir().join("kage-loop-dispatch-confine");
     let work = root.join("work");
     std::fs::create_dir_all(&work).unwrap();
     let tools = ToolRegistry::new().with(Arc::new(EscapeProbe));
     let cx = AgentContext::new("m", "").with_workdir(&work);
-    assert!(cx.confine_paths, "a default AgentContext confines paths");
 
     let sequential = dispatch_tool_calls(
         vec![pending("escape_probe", serde_json::json!({}))],
@@ -1498,7 +1496,7 @@ fn confined_dispatch_rejects_workdir_escape() {
             output, is_error, ..
         } => {
             assert!(*is_error);
-            assert!(output.contains("escapes workdir"), "{output}");
+            assert!(output.contains("use an absolute path"), "{output}");
         }
         other => panic!("unexpected content: {other:?}"),
     }
@@ -1520,7 +1518,7 @@ fn confined_dispatch_rejects_workdir_escape() {
             output, is_error, ..
         } => {
             assert!(*is_error);
-            assert!(output.contains("escapes workdir"), "{output}");
+            assert!(output.contains("use an absolute path"), "{output}");
         }
         other => panic!("unexpected content: {other:?}"),
     }

@@ -2182,6 +2182,9 @@ pub enum PromptDelivery {
     /// Deliver as a new run once the current run ends.
     #[default]
     Queue,
+    /// Stop the running run and deliver as the next run, ahead of
+    /// anything queued.
+    Interrupt,
 }
 
 /// Why a prompt turn ended.

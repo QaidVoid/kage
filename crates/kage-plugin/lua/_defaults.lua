@@ -17,7 +17,7 @@ kage.ui.set_slot("footer", {
 })
 
 local tips = {
-  "Press tab to queue a message while kage works, or enter to steer the running turn.",
+  "While kage works, enter queues a message and ctrl+x stops the run to send it now.",
   "Press up to pull a sent prompt back out of the queue and edit it.",
   "Press ctrl+f to search the conversation, then up and down to walk the matches.",
   "Press shift+enter for a newline, or ctrl+g to edit the prompt in $EDITOR.",
@@ -46,6 +46,7 @@ map("g", "<S-Tab>", act.TogglePlanMode, { desc = "toggle plan mode", group = "ge
 map("g", "<M-t>", act.CycleThinkingLevel, { desc = "cycle thinking level", group = "general" })
 map("g", "<C-v>", act.AttachClipboardImage, { desc = "attach image from clipboard", group = "general" })
 map("i", "<Tab>", act.QueuePrompt, { desc = "queue the prompt until the run ends", group = "general" })
+map("i", "<C-x>", act.SteerNow, { desc = "stop the run and send the prompt now", group = "general" })
 map("i", "<C-f>", act.BeginSearch, { desc = "search the conversation", group = "general" })
 
 local conversation = "conversation"

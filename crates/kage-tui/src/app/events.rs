@@ -54,6 +54,45 @@ impl App {
         }
     }
 
+    /// Resolve an `InputAction::SteerNow`: stop the run in flight and
+    /// send the draft as the next run. In an agent's view it steers, as
+    /// `enter` does: an agent takes no prompt once stopped. A command
+    /// runs as one. Idle it does nothing, like queueing.
+    fn steer_now(&mut self) {
+        if !self.is_run_in_flight() {
+            return;
+        }
+        let Some(text) = self.input.take_prompt() else {
+            return;
+        };
+        if text.starts_with('/') || self.focus.is_some() || self.mcp_expands(&text) {
+            self.handle_submit(text, false);
+            return;
+        }
+        let images = self.input.take_attached();
+        let pending = view::PendingPrompt {
+            text: text
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or("[image]")
+                .to_owned(),
+            queued: true,
+        };
+        if self
+            .send_request(RunRequest::SteerNow { text, images })
+            .is_err()
+        {
+            self.push_error("submit failed: agent worker has stopped");
+            return;
+        }
+        self.follow();
+        // It runs before anything queued, right after the steers the
+        // stop hands back.
+        let at = self.pending.partition_point(|(_, p)| !p.queued);
+        self.pending.insert(at, (None, pending));
+    }
+
     /// Resolve an `InputAction::RecallPrompt`: take the newest pending
     /// prompt of the focused session back out of the engine queue. The
     /// row leaves when the engine confirms what it popped.
@@ -134,6 +173,7 @@ impl App {
         match action {
             InputAction::Submit(text) => self.handle_submit(text, false),
             InputAction::QueuePrompt => self.queue_prompt(),
+            InputAction::SteerNow => self.steer_now(),
             InputAction::RecallPrompt => self.recall_prompt(),
             InputAction::Escape => return self.escalate(keys::Trigger::Esc),
             InputAction::RunShell(text) => self.handle_shell(text),

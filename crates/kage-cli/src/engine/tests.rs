@@ -472,6 +472,39 @@ fn queued_prompt_starts_a_new_run() {
 }
 
 #[test]
+fn an_interrupt_stops_the_run_and_runs_ahead_of_the_queue() {
+    let h = harness(MockProvider::sequence(vec![
+        tool_turn("gate"),
+        text_turn("now done"),
+        text_turn("later done"),
+    ]));
+    let id = SessionId::new();
+    h.open(id, None);
+    prompt(&h.engine, id, "one", Delivery::Steer);
+    wait_for(&h.events, is_tool_start);
+    prompt(&h.engine, id, "later", Delivery::Queue);
+    prompt(&h.engine, id, "now", Delivery::Interrupt);
+    h.release.send(()).unwrap();
+    let events = until_runs_end(&h.events, 3);
+
+    assert_eq!(
+        outcomes(&events),
+        [
+            RunOutcome::Cancelled,
+            RunOutcome::Completed,
+            RunOutcome::Completed
+        ],
+        "the run in flight stops"
+    );
+    let texts = appended_texts(&events);
+    let at = |text: &str| texts.iter().position(|t| t == text).unwrap();
+    assert!(
+        at("now") < at("later"),
+        "the interrupt runs ahead of the prompt queued before it: {texts:?}"
+    );
+}
+
+#[test]
 fn withdraw_prompt_pops_the_newest_of_its_queue() {
     let h = harness(MockProvider::sequence(vec![
         tool_turn("gate"),

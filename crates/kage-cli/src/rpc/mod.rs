@@ -497,6 +497,9 @@ struct CliAcpAgent {
     disconnecting: AtomicBool,
     ids: Arc<Mutex<Ids>>,
     waiters: Waiters,
+    /// Prompts answered by the run after the one in flight, as an
+    /// interrupt's, which the run it stops must not answer.
+    deferred: Waiters,
     shown: ShownBySession,
     subagents: Arc<AtomicBool>,
     /// Whether the client asked for tools without a `[permissions]`
@@ -535,6 +538,7 @@ impl CliAcpAgent {
         let connection = host.next_connection();
         let ids = Arc::new(Mutex::new(Ids::default()));
         let waiters = Waiters::default();
+        let deferred = Waiters::default();
         let shown = ShownBySession::default();
         let subagents = Arc::new(AtomicBool::new(false));
         let kage_client = Arc::new(AtomicBool::new(false));
@@ -549,6 +553,7 @@ impl CliAcpAgent {
             live: Arc::clone(&host.live),
             ids: Arc::clone(&ids),
             waiters: Arc::clone(&waiters),
+            deferred: Arc::clone(&deferred),
             models: host.shared_models(),
             shown: Arc::clone(&shown),
             aliases: host.aliases.clone(),
@@ -583,6 +588,7 @@ impl CliAcpAgent {
             disconnecting: AtomicBool::new(false),
             ids,
             waiters,
+            deferred,
             shown,
             subagents,
             unconfigured_run: AtomicBool::new(false),
@@ -963,6 +969,7 @@ impl CliAcpAgent {
         self.host.engine.unsubscribe(self.subscription);
         self.host.release_prompts_of(self.connection);
         lock(&self.waiters).clear();
+        lock(&self.deferred).clear();
         let asks: Vec<(SessionId, Ask)> = lock(&self.asks)
             .drain()
             .flat_map(|(session, asks)| asks.into_iter().map(move |ask| (session, ask)))
@@ -1701,7 +1708,8 @@ impl Agent for CliAcpAgent {
             let content = req.prompt.into_iter().map(prompt_content).collect();
             let delivery = match req.delivery {
                 Some(PromptDelivery::Steer) => Delivery::Steer,
-                _ => Delivery::Queue,
+                Some(PromptDelivery::Interrupt) => Delivery::Interrupt,
+                Some(PromptDelivery::Queue) | None => Delivery::Queue,
             };
             Ok::<_, RpcError>(ctx.start(|| {
                 if !self.host.claim_prompt(id, self.connection) {
@@ -1711,10 +1719,21 @@ impl Agent for CliAcpAgent {
                     ));
                 }
                 let (done, end) = crossbeam_channel::unbounded();
-                lock(&self.waiters)
-                    .entry(id)
-                    .or_default()
-                    .push(done.clone());
+                // An interrupt stops a run this connection waits on; that
+                // run's end answers its own prompt, the next one this.
+                let mut waiters = lock(&self.waiters);
+                let stops_ours = delivery == Delivery::Interrupt
+                    && waiters.get(&id).is_some_and(|pending| !pending.is_empty());
+                if stops_ours {
+                    drop(waiters);
+                    lock(&self.deferred)
+                        .entry(id)
+                        .or_default()
+                        .push(done.clone());
+                } else {
+                    waiters.entry(id).or_default().push(done.clone());
+                    drop(waiters);
+                }
                 let admission = if let Some(expired) = expired {
                     let accepted = self
                         .host

@@ -1073,6 +1073,7 @@ fn child_waiters_survive_a_rate_limit_and_settle_without_a_tree_node() {
         live: Arc::clone(&h.host.live),
         ids: Arc::clone(&ids),
         waiters: Arc::clone(&waiters),
+        deferred: Waiters::default(),
         models: h.host.shared_models(),
         shown: ShownBySession::default(),
         aliases: BTreeMap::new(),
@@ -3398,6 +3399,43 @@ fn an_unmarked_prompt_during_a_run_queues_instead_of_steering() {
                 .iter()
                 .any(|m| m.content == [text("later")])
         })
+    });
+}
+
+#[test]
+fn an_interrupt_is_answered_by_its_own_run_not_the_one_it_stops() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().display().to_string();
+    let h = serve(
+        vec![
+            tool_turn("call_1", "ls", serde_json::json!({ "path": path })),
+            text_turn("now done"),
+            text_turn("Titles"),
+            text_turn("Titles"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+    let mut updates = Vec::new();
+    let _ = until_ask(&h.inbox, &mut updates);
+
+    let now_end = prompt_async_with(&h.client, &h.session, "now", Some("interrupt"));
+    let stopped = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(
+        stopped["stopReason"], "cancelled",
+        "the run in flight stops"
+    );
+    let now = now_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(
+        now["stopReason"], "end_turn",
+        "the interrupt's own run answers it, not the stopped one"
+    );
+    until(|| {
+        h.mock
+            .requests()
+            .iter()
+            .any(|request| request.messages.iter().any(|m| m.content == [text("now")]))
     });
 }
 

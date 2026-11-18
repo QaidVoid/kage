@@ -1390,7 +1390,7 @@ fn modeline_hides_permission_pill_without_override() {
 // --- Start card ---
 
 const TIP: &str =
-    "   Tip: Press tab to queue a message while kage works, or enter to steer the running turn.";
+    "   Tip: While kage works, enter queues a message and ctrl+x stops the run to send it now.";
 
 fn start_info(sessions: usize) -> StartInfo {
     let titles = [

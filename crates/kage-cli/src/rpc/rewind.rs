@@ -70,6 +70,7 @@ impl CliAcpAgent {
         let delivery = match req.delivery {
             PromptDelivery::Steer => Delivery::Steer,
             PromptDelivery::Queue => Delivery::Queue,
+            PromptDelivery::Interrupt => Delivery::Interrupt,
         };
         let content = self.ask_engine(
             id,

@@ -1015,16 +1015,7 @@ impl Dispatcher {
                 self.prompt(id, content, delivery);
             }
             CommandKind::WithdrawPrompt { delivery } => self.withdraw_prompt(id, delivery),
-            CommandKind::Cancel if self.waiting.contains(&id) => self.end_waiting(id),
-            // An idle session's flag would stay set and cancel every
-            // run its agents start, so only a run or a shell command
-            // in flight takes it.
-            CommandKind::Cancel
-                if self.sessions[&id].idle.is_none() || !self.sessions[&id].shells.is_empty() =>
-            {
-                self.sessions[&id].cancel.cancel();
-            }
-            CommandKind::Cancel => self.end_paused(id),
+            CommandKind::Cancel => self.cancel(id),
             CommandKind::Compact => {
                 if self.ensure_idle(id, "compact") {
                     self.start_run(id, Work::Compact);
@@ -1422,6 +1413,26 @@ impl Dispatcher {
         match delivery {
             Delivery::Steer => lock(&session.steering).push_back(content),
             Delivery::Queue => session.queued.push_back(content),
+            // First in the queue, then the stop: the run's end starts it
+            // before anything else could.
+            Delivery::Interrupt => {
+                session.queued.push_front(content);
+                self.cancel(id);
+            }
+        }
+    }
+
+    /// Stop what `id` runs: the wait on its agents, its run or shell
+    /// command in flight, else a pause. An idle session's flag would stay
+    /// set and cancel every run its agents start, so only a run or a
+    /// shell command in flight takes it.
+    fn cancel(&mut self, id: SessionId) {
+        if self.waiting.contains(&id) {
+            self.end_waiting(id);
+        } else if self.sessions[&id].idle.is_none() || !self.sessions[&id].shells.is_empty() {
+            self.sessions[&id].cancel.cancel();
+        } else {
+            self.end_paused(id);
         }
     }
 
@@ -1433,6 +1444,7 @@ impl Dispatcher {
         let content = match delivery {
             Delivery::Steer => lock(&session.steering).pop_back(),
             Delivery::Queue => session.queued.pop_back(),
+            Delivery::Interrupt => session.queued.pop_front(),
         };
         self.bus
             .publish(id, HostEvent::PromptWithdrawn { delivery, content });

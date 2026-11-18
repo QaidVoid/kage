@@ -192,13 +192,25 @@ fn the_footer_hint_follows_the_editor_state() {
         "enter to send \u{B7} shift+enter for a newline"
     );
     lock(&usage).working = true;
-    assert_eq!(app.footer_hint(), "enter steers \u{B7} esc to interrupt");
+    assert_eq!(
+        app.footer_hint(),
+        "enter queues \u{B7} ctrl+x steers now \u{B7} esc to interrupt"
+    );
     app.handle_key(code(KeyCode::Backspace));
-    assert_eq!(app.footer_hint(), "tab to queue \u{B7} esc to interrupt");
+    assert_eq!(
+        app.footer_hint(),
+        "tab for after the run \u{B7} esc to interrupt"
+    );
     app.set_editor_modeless(false);
-    assert_eq!(app.footer_hint(), "tab to queue \u{B7} ctrl+c to interrupt");
+    assert_eq!(
+        app.footer_hint(),
+        "tab for after the run \u{B7} ctrl+c to interrupt"
+    );
     app.handle_key(key('x'));
-    assert_eq!(app.footer_hint(), "enter steers \u{B7} ctrl+c to interrupt");
+    assert_eq!(
+        app.footer_hint(),
+        "enter queues \u{B7} ctrl+x steers now \u{B7} ctrl+c to interrupt"
+    );
     app.handle_key(code(KeyCode::Esc));
     assert_eq!(
         app.footer_hint(),

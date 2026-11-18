@@ -126,6 +126,14 @@ pub enum RunRequest {
         /// main session.
         session: Option<kage_core::SessionId>,
     },
+    /// Stop the main session's run in flight and send the prompt as
+    /// the next run, ahead of anything queued. Sent plain while idle.
+    SteerNow {
+        /// Prompt text (may be empty if only images were attached).
+        text: String,
+        /// Queued image attachments, in attach order.
+        images: Vec<crate::image::AttachedImage>,
+    },
     /// Trip the agent loop's cancellation flag.
     Cancel {
         /// The agent session to stop, with the agents under it. `None`

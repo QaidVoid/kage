@@ -1194,7 +1194,10 @@ fn pinned_agents_follow_their_cards_and_finished_ones_leave_the_queue_hint() {
             ],
         );
     }
-    assert_eq!(app.footer_hint(), "tab to queue \u{b7} esc to interrupt");
+    assert_eq!(
+        app.footer_hint(),
+        "tab for after the run \u{b7} esc to interrupt"
+    );
 }
 
 #[test]

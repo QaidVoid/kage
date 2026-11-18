@@ -143,9 +143,10 @@ kage advertises:
 - `loadSession: true`, and `sessionCapabilities` with `list`,
   `resume` and `close`.
 - `steer: true`: a `session/prompt` may set `delivery: "steer"` to
-  join a run already in flight at its next turn boundary; a prompt
-  without the field, or with `"queue"`, runs once the current run
-  ends.
+  join a run already in flight at its next turn boundary, or
+  `"interrupt"` to stop that run and run next, ahead of anything
+  queued. A prompt without the field, or with `"queue"`, runs once the
+  current run ends.
 - `promptCapabilities` with `image` and `embeddedContext`.
 - `mcpCapabilities` with `http: true` and `sse: false`.
 - empty `authMethods`, and `agentInfo {name: "kage", version}`.

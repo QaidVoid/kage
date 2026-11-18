@@ -68,6 +68,9 @@ pub(super) struct Bridge {
     pub(super) live: Arc<Mutex<Live>>,
     pub(super) ids: Arc<Mutex<Ids>>,
     pub(super) waiters: Waiters,
+    /// Prompts the next run of a session answers, moved into `waiters`
+    /// once the run in flight ends.
+    pub(super) deferred: Waiters,
     pub(super) models: Arc<RwLock<Arc<[SessionConfigSelectOption]>>>,
     pub(super) shown: ShownBySession,
     /// Advertised name to real name for tools the host renamed, so a
@@ -781,6 +784,7 @@ impl Bridge {
                     delivery: match delivery {
                         Delivery::Steer => PromptDelivery::Steer,
                         Delivery::Queue => PromptDelivery::Queue,
+                        Delivery::Interrupt => PromptDelivery::Interrupt,
                     },
                     content: super::rewind::blocks(content),
                 })
@@ -980,6 +984,9 @@ impl Bridge {
         }
         for waiter in lock(&self.waiters).remove(&session).unwrap_or_default() {
             let _ = waiter.send(end.clone());
+        }
+        if let Some(next) = lock(&self.deferred).remove(&session) {
+            lock(&self.waiters).insert(session, next);
         }
         if let Some(parent) = parent {
             self.settle(parent);

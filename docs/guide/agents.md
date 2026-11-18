@@ -553,7 +553,7 @@ row stays after the main run ends.
 
 While agents are queued or running and the prompt is empty, the
 footer names the key that opens the agents overlay, `ctrl+t for
-agents` by default, in place of `tab to queue`, also while the main
+agents` by default, in place of `tab for after the run`, also while the main
 session is idle. Quitting then says how many agents it stops, such as
 `ctrl+c again to quit and stop 2 agents`. When every agent has
 finished, the pinned list gives way to one summary row, such as

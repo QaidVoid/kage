@@ -57,6 +57,46 @@ fn submit_while_a_run_is_in_flight_is_still_sent() {
 }
 
 #[test]
+fn ctrl_x_stops_the_run_and_sends_the_draft_first() {
+    let (tx, rx) = mpsc::channel();
+    let mut app = app_with_defaults(shared_buffer(), tx);
+    let usage = crate::usage::shared_session_usage();
+    app.set_session_usage(usage.clone());
+    let ctrl_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+    for c in "idle".chars() {
+        app.handle_key(key(c));
+    }
+    app.handle_key(ctrl_x);
+    assert!(
+        rx.try_recv().is_err(),
+        "idle, it sends nothing, like queueing"
+    );
+    assert_eq!(app.input.text(), "idle");
+
+    usage.lock().unwrap().working = true;
+    app.handle_key(code(KeyCode::Tab));
+    let _ = rx.try_recv();
+    for c in "now".chars() {
+        app.handle_key(key(c));
+    }
+    app.handle_key(ctrl_x);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_millis(100)).unwrap(),
+        RunRequest::SteerNow {
+            text: "now".into(),
+            images: Vec::new(),
+        }
+    );
+    let now = format!("  > now{}when this run ends", " ".repeat(34));
+    let idle = format!("  > idle{}when this run ends", " ".repeat(33));
+    assert_eq!(
+        pending_rows(&mut app),
+        [now, idle],
+        "it runs ahead of what was queued"
+    );
+}
+
+#[test]
 fn submit_carries_attached_images() {
     let (tx, rx) = mpsc::channel();
     let mut app = app_with_defaults(shared_buffer(), tx);

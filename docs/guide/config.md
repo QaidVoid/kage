@@ -127,7 +127,7 @@ scrub_env = []
 
 [keybindings]
 # the key <leader> expands to in bindings: one key, default a backslash.
-# leader = "<C-x>"
+# leader = "<C-r>"
 # ms a key that starts a longer mapping waits for more keys.
 timeoutlen = 1000
 # key -> command line, or `action:<Name>` for a built-in action

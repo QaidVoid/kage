@@ -108,6 +108,9 @@ pub enum InputAction {
     /// Send the draft to run after the run in flight ends. The host
     /// ignores it while idle.
     QueuePrompt,
+    /// Stop the run in flight and send the draft as the next run, ahead
+    /// of anything queued. The host ignores it while idle.
+    SteerNow,
     /// Take the newest pending prompt of the focused session back out
     /// of the engine queue and put it in the editor to edit. The host
     /// ignores it while nothing is pending.

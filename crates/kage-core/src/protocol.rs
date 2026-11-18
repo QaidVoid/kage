@@ -564,6 +564,9 @@ pub enum Delivery {
     Steer,
     /// Deliver as a new run once the current run ends.
     Queue,
+    /// Stop the running run and deliver as the next run, ahead of
+    /// anything queued.
+    Interrupt,
 }
 
 /// Names one command, so the events the engine publishes while handling

@@ -978,6 +978,21 @@ struct PendingOpen {
     bootstrap: bool,
 }
 
+/// How a prompt goes to a session with a run in flight.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sending {
+    /// Joins the run at its next turn boundary.
+    Steer,
+    /// Runs once the run ends, after what is queued.
+    Queue,
+    /// Stops the run and runs next, ahead of what is queued.
+    Now,
+}
+
+/// How many answered main-session prompts the pump keeps for a late
+/// hand-back.
+const ANSWERED_KEPT: usize = 8;
+
 /// A mode switch of an external session the agent has not answered
 /// yet, with the prompts held until it does.
 struct ModeSwitch {
@@ -1112,6 +1127,9 @@ struct Pump {
     /// Sent prompts and their owning sessions, so failures can settle
     /// the main run or return a rejected child submission to its draft.
     prompts: HashMap<RequestId, (String, Vec<ContentBlock>)>,
+    /// The main session's latest answered prompts, newest last: a steer
+    /// a stop hands back can arrive after its own answer.
+    answered: Vec<(String, Vec<ContentBlock>)>,
     /// The error that ended the run being settled.
     run_error: Option<String>,
     /// The run-wide session settings that do not come from options.
@@ -1275,7 +1293,14 @@ impl Pump {
                 .remove(id)
                 .map(|(wire, blocks)| (wire, blocks, error.message.clone())),
             Frame::Success { id, .. } => {
-                self.prompts.remove(id);
+                if let Some(answered) = self.prompts.remove(id)
+                    && answered.0 == self.wire
+                {
+                    self.answered.push(answered);
+                    if self.answered.len() > ANSWERED_KEPT {
+                        self.answered.remove(0);
+                    }
+                }
                 None
             }
             _ => None,
@@ -1311,7 +1336,16 @@ impl Pump {
         // A failed prompt moves no session in the client, so the run
         // it ended is settled here.
         if let Some((wire, blocks, message)) = failed_prompt {
-            if wire == self.wire {
+            // One that failed while the run goes on, as a stop-and-send
+            // the host refused, did not take the run: it goes back.
+            let goes_on = self
+                .store
+                .state()
+                .session(&wire)
+                .is_some_and(|session| session.running);
+            if wire == self.wire && goes_on {
+                self.return_prompt(self.app_session, content_of(&blocks), false, message);
+            } else if wire == self.wire {
                 self.run_error = Some(message);
                 self.session_moved(&wire);
                 self.run_error = None;
@@ -1321,7 +1355,8 @@ impl Pump {
         }
     }
 
-    /// Returns live steering that the child finished without consuming.
+    /// Returns live steering a run ended without consuming: a child's,
+    /// or one this TUI sent to the main session before a stop.
     fn withdrawn_child_prompt(&mut self, frame: &Frame) {
         let Frame::Notification { method, params } = frame else {
             return;
@@ -1338,11 +1373,40 @@ impl Pump {
         else {
             return;
         };
+        let content = content_of(&prompt.content);
+        if session_id == self.wire {
+            // Every client attached hears it; only the one that sent the
+            // prompt takes it back. Its bubble already shows, so a word
+            // says it never reached the agent.
+            let ours = |(wire, blocks): &(String, Vec<ContentBlock>)| {
+                wire == &session_id && content_of(blocks) == content
+            };
+            let pending = self
+                .prompts
+                .iter()
+                .find(|(_, sent)| ours(sent))
+                .map(|(id, _)| id.clone());
+            if let Some(id) = pending {
+                self.prompts.remove(&id);
+            } else if let Some(at) = self.answered.iter().rposition(ours) {
+                self.answered.remove(at);
+            } else {
+                return;
+            }
+            self.publish(HostEvent::PromptWithdrawn {
+                delivery: Delivery::Steer,
+                content: Some(content),
+            });
+            self.notice(
+                NoticeLevel::Info,
+                "a prompt the run never reached is back in the editor".to_owned(),
+            );
+            return;
+        }
         let Some(track) = self.children.get(&session_id) else {
             return;
         };
         let app = track.app;
-        let content = content_of(&prompt.content);
         self.prompts
             .retain(|_, (wire, blocks)| wire != &session_id || content_of(blocks) != content);
         self.publish_on(
@@ -1351,6 +1415,7 @@ impl Pump {
                 delivery: match prompt.delivery {
                     PromptDelivery::Steer => Delivery::Steer,
                     PromptDelivery::Queue => Delivery::Queue,
+                    PromptDelivery::Interrupt => Delivery::Interrupt,
                 },
                 content: Some(content),
             },
@@ -3102,6 +3167,24 @@ impl Pump {
         reason = "one dispatch over every request the App sends"
     )]
     fn handle(&mut self, request: RunRequest) {
+        // A stop-and-send with nothing to stop, or nothing settled to
+        // stop yet, is an ordinary prompt and takes its path.
+        let request = match request {
+            RunRequest::SteerNow { text, images } if !self.can_stop_and_send() => {
+                RunRequest::Submit {
+                    text,
+                    images,
+                    queue: false,
+                    session: None,
+                }
+            }
+            RunRequest::SteerNow { text, images } => {
+                let wire = self.wire.clone();
+                self.submit_to(&wire, text, images, Sending::Now);
+                return;
+            }
+            request => request,
+        };
         if self.closed {
             self.handle_closed(request);
             return;
@@ -3154,7 +3237,14 @@ impl Pump {
                 queue,
                 session,
             } => match self.route_of(session) {
-                Some(wire) => self.submit_to(&wire, text, images, queue),
+                Some(wire) => {
+                    let how = if queue {
+                        Sending::Queue
+                    } else {
+                        Sending::Steer
+                    };
+                    self.submit_to(&wire, text, images, how);
+                }
                 None => self.return_prompt(
                     session.unwrap_or(self.app_session),
                     submission_content(text, &images),
@@ -3355,8 +3445,9 @@ impl Pump {
         wire: &str,
         text: String,
         images: Vec<kage_tui::image::AttachedImage>,
-        queue: bool,
+        how: Sending,
     ) {
+        let queue = how == Sending::Queue;
         if wire != self.wire {
             let live = self
                 .children
@@ -3380,6 +3471,71 @@ impl Pump {
             }
         }
         let _ = crate::history::append(&text);
+        let blocks = self.prompt_blocks(text, images);
+        if wire != self.wire {
+            if let Err(error) = self.store.client().steer(wire, blocks.clone()) {
+                self.return_prompt(
+                    self.app_of(wire),
+                    content_of(&blocks),
+                    false,
+                    match error {
+                        kage_client::SteerError::NotRunning => {
+                            "that agent is no longer running".to_owned()
+                        }
+                        kage_client::SteerError::NotAdvertised => {
+                            "the host does not support live steering".to_owned()
+                        }
+                    },
+                );
+            }
+            return;
+        }
+        match how {
+            Sending::Queue => {
+                self.store.client().prompt(wire, blocks);
+                return;
+            }
+            // The host stops the run and runs the prompt next in one
+            // step. An external agent knows no such delivery: the prompt
+            // goes ahead of this client's queue, then the stop, and the
+            // run's end sends it.
+            Sending::Now => {
+                if self.external_agent_of(wire).is_none() {
+                    self.store.client().interrupt(wire, blocks);
+                } else if let kage_client::PromptOutcome::Queued =
+                    self.store.client().prompt_first(wire, blocks)
+                {
+                    self.cancel_of(None);
+                }
+                return;
+            }
+            Sending::Steer => {}
+        }
+        // Steering joins the run in flight; anything else goes plain,
+        // which queues while a run is in flight and starts one
+        // otherwise. An external session cannot be steered: its agent
+        // owns the turn, so the prompt goes plain and the host decides.
+        let running = self
+            .store
+            .state()
+            .session(wire)
+            .is_some_and(|session| session.running);
+        if running
+            && self.external_agent_of(wire).is_none()
+            && self.store.client().steer(wire, blocks.clone()).is_ok()
+        {
+            return;
+        }
+        self.store.client().prompt(wire, blocks);
+    }
+
+    /// `text` and `images` as the blocks of a `session/prompt`, with a
+    /// word about attachments that cannot ride the ACP link.
+    fn prompt_blocks(
+        &mut self,
+        text: String,
+        images: Vec<kage_tui::image::AttachedImage>,
+    ) -> Vec<ContentBlock> {
         let mut blocks = Vec::new();
         if !text.is_empty() || images.is_empty() {
             blocks.push(ContentBlock::Text(TextContent { text }));
@@ -3413,44 +3569,23 @@ impl Pump {
                 format!("{dropped} {noun} cannot ride the ACP link and {verb} dropped"),
             );
         }
-        if wire != self.wire {
-            if let Err(error) = self.store.client().steer(wire, blocks.clone()) {
-                self.return_prompt(
-                    self.app_of(wire),
-                    content_of(&blocks),
-                    false,
-                    match error {
-                        kage_client::SteerError::NotRunning => {
-                            "that agent is no longer running".to_owned()
-                        }
-                        kage_client::SteerError::NotAdvertised => {
-                            "the host does not support live steering".to_owned()
-                        }
-                    },
-                );
-            }
-            return;
-        }
-        if queue {
-            self.store.client().prompt(wire, blocks);
-            return;
-        }
-        // Steering joins the run in flight; anything else goes plain,
-        // which queues while a run is in flight and starts one
-        // otherwise. An external session cannot be steered: its agent
-        // owns the turn, so the prompt goes plain and the host decides.
-        let running = self
-            .store
-            .state()
-            .session(wire)
-            .is_some_and(|session| session.running);
-        if running
-            && self.external_agent_of(wire).is_none()
-            && self.store.client().steer(wire, blocks.clone()).is_ok()
-        {
-            return;
-        }
-        self.store.client().prompt(wire, blocks);
+        blocks
+    }
+
+    /// Whether a stop-and-send can stop the main session's run and send
+    /// at once: the connection is up, the session is settled, a run is
+    /// in flight, and no mode switch holds its prompts.
+    fn can_stop_and_send(&self) -> bool {
+        !self.closed
+            && !self.wire.is_empty()
+            && self.pending_new.is_none()
+            && self.pending_open.is_none()
+            && self.mode_switch.is_none()
+            && self
+                .store
+                .state()
+                .session(&self.wire)
+                .is_some_and(|session| session.running)
     }
 
     /// Returns a refused submission to the composer instead of silently
@@ -3491,7 +3626,9 @@ impl Pump {
 
     fn recall(&mut self, delivery: Delivery) {
         match delivery {
-            Delivery::Queue => {
+            // A stop-and-send runs at once; what is left to take back
+            // waits in the queue.
+            Delivery::Queue | Delivery::Interrupt => {
                 let held = self
                     .store
                     .state()
@@ -4305,6 +4442,7 @@ pub(crate) fn run(
         plugin_answers_tx,
         recorder,
         prompts: HashMap::new(),
+        answered: Vec::new(),
         run_error: None,
         external: HashMap::new(),
         yolo,
@@ -4855,6 +4993,7 @@ mod tests {
             plugin_answers_tx,
             recorder,
             prompts: HashMap::new(),
+            answered: Vec::new(),
             run_error: None,
             yolo: false,
             environment: false,
@@ -8008,6 +8147,199 @@ kage.on('should_stop_after_turn', function(ev) return true end)
             "a session that never went to plan sends nothing"
         );
         assert_eq!(pump.pre_plan_mode, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn steer_now_asks_the_host_to_stop_and_run_it_next() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        let _ = pump.store.take_outgoing();
+        pump.handle(RunRequest::Submit {
+            text: "work".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        let _ = pump.store.take_outgoing();
+        pump.handle(RunRequest::SteerNow {
+            text: "now".to_owned(),
+            images: Vec::new(),
+        });
+        let sent = pump.store.take_outgoing();
+        let params = request_params(&sent, "session/prompt");
+        assert_eq!(params["prompt"][0]["text"], "now");
+        assert_eq!(
+            params["delivery"], "interrupt",
+            "the host stops the run and runs it next in one step"
+        );
+        assert!(
+            !has_notification(&sent, "session/cancel"),
+            "no separate stop that something else could slip behind"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn steer_now_on_an_external_session_stops_then_sends_first() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.external.insert("s1".to_owned(), "reviewer".to_owned());
+        let _ = pump.store.take_outgoing();
+        let submit = |text: &str, queue: bool| RunRequest::Submit {
+            text: text.to_owned(),
+            images: Vec::new(),
+            queue,
+            session: None,
+        };
+        pump.handle(submit("work", false));
+        let running = request_id(&pump.store.take_outgoing(), "session/prompt");
+        pump.handle(submit("later", true));
+        pump.handle(RunRequest::SteerNow {
+            text: "now".to_owned(),
+            images: Vec::new(),
+        });
+        assert!(
+            has_notification(&pump.store.take_outgoing(), "session/cancel"),
+            "an external agent has no stop-and-run delivery"
+        );
+        pump.absorb(Frame::Success {
+            id: running,
+            result: serde_json::json!({"stopReason": "cancelled"}),
+        });
+        let params = request_params(&pump.store.take_outgoing(), "session/prompt");
+        assert_eq!(
+            params["prompt"][0]["text"], "now",
+            "it runs ahead of the prompt queued before it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_steer_the_stop_hands_back_returns_to_the_editor() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        advertise_steering(&mut pump);
+        let _ = pump.store.take_outgoing();
+        pump.handle(RunRequest::Submit {
+            text: "work".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        pump.handle(RunRequest::Submit {
+            text: "also check X".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        let sent = pump.store.take_outgoing();
+        assert_eq!(
+            sent.iter()
+                .filter(|frame| matches!(frame, Frame::Request { method, .. } if method == "session/prompt"))
+                .count(),
+            2,
+            "the second one steers"
+        );
+        for frame in &sent {
+            pump.observe_outgoing(frame);
+        }
+        // The steer's own answer lands before the hand-back.
+        let steer = sent
+            .iter()
+            .filter_map(|frame| match frame {
+                Frame::Request { id, method, .. } if method == "session/prompt" => Some(id.clone()),
+                _ => None,
+            })
+            .nth(1)
+            .unwrap();
+        pump.absorb(Frame::Success {
+            id: steer,
+            result: serde_json::json!({"stopReason": "cancelled"}),
+        });
+        let _ = app.try_iter().count();
+        let withdrawn = |text: &str| Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "_kage/prompt_withdrawn",
+                    "delivery": "steer",
+                    "content": [{"type": "text", "text": text}]
+                }
+            }),
+        };
+        pump.absorb(withdrawn("someone else's"));
+        pump.absorb(withdrawn("also check X"));
+        let returned: Vec<_> = app
+            .try_iter()
+            .filter_map(|envelope| match envelope.event {
+                kage_core::protocol::Event::Host(HostEvent::PromptWithdrawn {
+                    content, ..
+                }) => content,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            returned,
+            [vec![kage_core::Content::Text {
+                text: "also check X".to_owned()
+            }]],
+            "only the prompt this TUI sent comes back"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_refused_steer_now_goes_back_to_the_editor() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let _ = pump.store.take_outgoing();
+        pump.handle(RunRequest::Submit {
+            text: "work".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        let _ = pump.store.take_outgoing();
+        pump.handle(RunRequest::SteerNow {
+            text: "now".to_owned(),
+            images: Vec::new(),
+        });
+        let sent = pump.store.take_outgoing();
+        let interrupt = request_id(&sent, "session/prompt");
+        for frame in &sent {
+            pump.observe_outgoing(frame);
+        }
+        let _ = app.try_iter().count();
+        pump.absorb(Frame::Failure {
+            id: interrupt,
+            error: RpcError::invalid_params("unknown variant `interrupt`"),
+        });
+        let returned = app.try_iter().find_map(|envelope| match envelope.event {
+            kage_core::protocol::Event::Host(HostEvent::PromptWithdrawn { content, .. }) => content,
+            _ => None,
+        });
+        assert_eq!(
+            returned,
+            Some(vec![kage_core::Content::Text {
+                text: "now".to_owned()
+            }]),
+            "the run goes on, so the refused prompt comes back"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn steer_now_with_nothing_running_just_sends() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        let _ = pump.store.take_outgoing();
+        pump.handle(RunRequest::SteerNow {
+            text: "go".to_owned(),
+            images: Vec::new(),
+        });
+        let sent = pump.store.take_outgoing();
+        assert!(!has_notification(&sent, "session/cancel"));
+        assert_eq!(
+            request_params(&sent, "session/prompt")["prompt"][0]["text"],
+            "go"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

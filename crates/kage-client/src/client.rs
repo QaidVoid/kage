@@ -391,6 +391,35 @@ impl Client {
         PromptOutcome::Sent { request_id }
     }
 
+    /// [`Client::prompt`], held ahead of every prompt already queued
+    /// when a run is in flight, so it is the next to run once that run
+    /// ends, as after a cancel.
+    pub fn prompt_first(&mut self, session_id: &str, prompt: Vec<ContentBlock>) -> PromptOutcome {
+        let running = self
+            .state
+            .sessions
+            .get(session_id)
+            .is_some_and(|session| session.running);
+        if running {
+            self.session_mut(session_id)
+                .queue
+                .insert(0, QueuedPrompt { prompt });
+            return PromptOutcome::Queued;
+        }
+        let request_id = self.send_prompt(session_id, prompt, None, true);
+        PromptOutcome::Sent { request_id }
+    }
+
+    /// Stops the run in flight on `session_id` and runs `prompt` next,
+    /// ahead of anything the agent queued, in one request, so nothing
+    /// starts between the stop and the prompt. Idle it starts a run as
+    /// [`Client::prompt`] does. Only a kage host knows this delivery;
+    /// an external agent's session takes [`Client::prompt_first`] and a
+    /// cancel instead.
+    pub fn interrupt(&mut self, session_id: &str, prompt: Vec<ContentBlock>) -> u64 {
+        self.send_prompt(session_id, prompt, Some(PromptDelivery::Interrupt), true)
+    }
+
     /// Steers the run in flight on `session_id` with `prompt`, joining
     /// it at its next turn boundary. Requires the advertised steering
     /// capability and either a client-owned run or a child announced
@@ -1740,18 +1769,30 @@ impl Client {
         let stop = serde_json::from_value::<PromptResponse>(result)
             .ok()
             .map(|response| response.stop_reason);
+        // A stop-and-send owns the run it starts while the run it
+        // stopped is still answering, so the session stays running until
+        // the last run this client owns ends.
+        let still_running = owns_run && self.owns_a_run(&session_id);
         {
             let session = self.session_mut(&session_id);
             session.last_stop = stop;
-            if owns_run {
+            if owns_run && !still_running {
                 session.running = false;
                 session.compacting = false;
             }
         }
-        if owns_run {
+        if owns_run && !still_running {
             self.flush_queue(&session_id);
         }
         vec![Change::Session { id: session_id }]
+    }
+
+    /// Whether a prompt of this client that owns a run on `session_id`
+    /// is still unanswered.
+    fn owns_a_run(&self, session_id: &str) -> bool {
+        self.pending.values().any(|pending| {
+            matches!(pending, Pending::Prompt { session_id: id, owns_run: true } if id == session_id)
+        })
     }
 
     fn handle_failure(&mut self, id: &RequestId, error: RpcError) -> Vec<Change> {
@@ -1763,7 +1804,7 @@ impl Client {
             Pending::Prompt {
                 session_id,
                 owns_run: true,
-            } => {
+            } if !self.owns_a_run(&session_id) => {
                 let session = self.session_mut(&session_id);
                 session.running = false;
                 session.compacting = false;

@@ -231,7 +231,7 @@ mapping in `i` or `g` would catch it while you type.
 `SearchNext`, `SearchPrev`, `YankFocusedBlock`,
 `CycleThinkingLevel`, `TogglePlanMode`, `CyclePane`, `FocusPrev`, `FocusNext`,
 `OpenHelp`, `OpenJumpPicker`, `AttachClipboardImage`, `EnterVisual`,
-`QueuePrompt`, `RecallPrompt`, `OpenAgents`, and the function
+`QueuePrompt`, `SteerNow`, `RecallPrompt`, `OpenAgents`, and the function
 `scroll(n)`.
 
 `OpenAgents` opens the [agents overlay](/guide/agents#the-agents-overlay).
@@ -241,6 +241,10 @@ mapping in `i` or `g` would catch it while you type.
 kage is idle it does nothing, so the default `<Tab>` mapping never
 sends a prompt by accident. The completion popup sees `Tab` before any
 mapping.
+
+`SteerNow` stops the run in flight and sends the draft as the next
+run, ahead of anything queued. Like `QueuePrompt` it does nothing while
+idle. `_defaults.lua` maps it to `<C-x>` in mode `i`.
 
 `RecallPrompt` takes the newest prompt waiting above the input back
 out of the engine queue and puts it in the editor to edit, images
@@ -576,7 +580,7 @@ An item is one of:
 | `agents` | the live agents under the session on screen and how many of them run in the background, such as `3 agents (2 bg)`, hidden while none runs |
 | `tasks` | the `!` shell commands still running, such as `1 shell` |
 | `mode` | `NORMAL`, `INSERT` or `VISUAL` in vim mode, `shell` while `!` shell mode is armed, nothing otherwise |
-| `hint` | what the next keys do: the pending keys of a mapping sequence, the keys of the open picker, dialog, approval panel, `:` line or search line, `ctrl+c again to quit` or `esc again to rewind`, else a hint for the current state such as `? for shortcuts`, `tab to queue`, `ctrl+t for agents`, or `enter to steer`, `esc to go back` and `ctrl+c to stop` in an agent view |
+| `hint` | what the next keys do: the pending keys of a mapping sequence, the keys of the open picker, dialog, approval panel, `:` line or search line, `ctrl+c again to quit` or `esc again to rewind`, else a hint for the current state such as `? for shortcuts`, `tab for after the run`, `ctrl+t for agents`, or `enter to steer`, `esc to go back` and `ctrl+c to stop` in an agent view |
 | `cwd` | the working directory with `~` for your home, and the git branch checked out, such as `~/dev/kage (main)` |
 | `version` | the kage version |
 | `sessions` | `start` only: the three most recent sessions with their titles and times |
@@ -584,7 +588,8 @@ An item is one of:
 
 Keys named in hints follow your mappings. Remapping
 `OpenModelPicker` changes the start card's `ctrl+p to change`, and
-remapping `QueuePrompt` changes the footer's `tab to queue`, and
+remapping `QueuePrompt` changes the footer's `tab for after the run`,
+remapping `SteerNow` changes `ctrl+x steers now`, and
 remapping `OpenAgents` changes `ctrl+t for agents`.
 
 In `start`, some components paint differently. `mark` is the first

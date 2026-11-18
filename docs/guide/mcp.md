@@ -226,7 +226,7 @@ never waits on the network.
 
 Mentions are expanded when a run starts. In the TUI a prompt with a
 mention therefore always waits for the current run to end, even when
-you press `enter` to steer. Print mode and editors expand mentions the
+you press `enter` or `ctrl+x`. Print mode and editors expand mentions the
 same way: `kage -p "summarize @docs:file:///notes.md"` works.
 
 ### the `mcp_resource` tool

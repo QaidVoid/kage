@@ -1375,6 +1375,58 @@ fn server_requests_outside_the_permission_ask_are_refused() {
 }
 
 #[test]
+fn an_interrupt_keeps_the_session_running_until_its_own_run_ends() {
+    let mut client = connected(false);
+    assert_eq!(
+        client.prompt("s1", text("go")),
+        PromptOutcome::Sent { request_id: 3 }
+    );
+    assert_eq!(client.prompt("s1", text("later")), PromptOutcome::Queued);
+    assert_eq!(client.interrupt("s1", text("now")), 4);
+    let outgoing = client.take_outgoing();
+    match &outgoing[1] {
+        Frame::Request { id, params, .. } if *id == n(4) => {
+            assert_eq!(params["delivery"], "interrupt");
+            assert_eq!(params["prompt"][0]["text"], "now");
+        }
+        other => panic!("expected the interrupt, got {other:?}"),
+    }
+
+    client.handle(stop(3, "cancelled"));
+    assert!(
+        client.state().session("s1").unwrap().running,
+        "the stopped run answered, but the interrupt's run is going"
+    );
+    assert!(
+        client.take_outgoing().is_empty(),
+        "the queue waits for the interrupt's run"
+    );
+
+    client.handle(stop(4, "end_turn"));
+    let outgoing = client.take_outgoing();
+    assert!(
+        matches!(&outgoing[0], Frame::Request { id, params, .. }
+            if *id == n(5) && params["prompt"][0]["text"] == "later"),
+        "{outgoing:?}"
+    );
+}
+
+#[test]
+fn prompt_first_holds_ahead_of_the_queue() {
+    let mut client = connected(false);
+    let _ = client.prompt("s1", text("go"));
+    let _ = client.take_outgoing();
+    assert_eq!(client.prompt("s1", text("later")), PromptOutcome::Queued);
+    assert_eq!(
+        client.prompt_first("s1", text("now")),
+        PromptOutcome::Queued
+    );
+    let queue = &client.state().session("s1").unwrap().queue;
+    assert_eq!(queue[0].prompt, text("now"));
+    assert_eq!(queue[1].prompt, text("later"));
+}
+
+#[test]
 fn a_failed_prompt_answer_releases_the_run_and_flushes_the_queue() {
     let mut client = connected(false);
     assert_eq!(

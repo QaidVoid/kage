@@ -489,6 +489,10 @@ pub const ACTIONS: &[ActionDef] = &[
         "Queue the prompt until the run ends. Does nothing while idle.",
     ),
     action(
+        "SteerNow",
+        "Stop the run and send the prompt at once. Does nothing while idle.",
+    ),
+    action(
         "RecallPrompt",
         "Pull the newest pending prompt back into the editor to edit. Does nothing while idle.",
     ),
@@ -1103,7 +1107,7 @@ mod tests {
 
     #[test]
     fn actions_hold_the_rebindable_names() {
-        assert_eq!(ACTIONS.len(), 28);
+        assert_eq!(ACTIONS.len(), 29);
         for (i, a) in ACTIONS.iter().enumerate() {
             assert!(
                 ACTIONS[..i].iter().all(|b| b.name != a.name),

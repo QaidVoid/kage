@@ -592,6 +592,7 @@
 ---@field AttachClipboardImage kage.Action Attach an image from the clipboard.
 ---@field EnterVisual kage.Action Enter visual selection.
 ---@field QueuePrompt kage.Action Queue the prompt until the run ends. Does nothing while idle.
+---@field SteerNow kage.Action Stop the run and send the prompt at once. Does nothing while idle.
 ---@field RecallPrompt kage.Action Pull the newest pending prompt back into the editor to edit. Does nothing while idle.
 ---@field OpenAgents kage.Action Open the agents overlay: every agent of the session.
 

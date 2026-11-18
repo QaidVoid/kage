@@ -70,8 +70,9 @@ the buffer navigation keys above work without any mode switching.
 
 | Key  | Effect                          |
 | ---- | ------------------------------- |
-| `enter` | Send the prompt, or steer it into the running turn |
-| `tab` | Queue the prompt until the running turn ends |
+| `enter` | Send the prompt, or queue it for the running turn's next step |
+| `tab` | Queue the prompt until the run ends |
+| `ctrl+x` | Stop the run and send the prompt at once |
 | `shift+enter` / `alt+enter` | Insert a newline |
 | `esc` | Interrupt the run, else clear the search highlight; `esc` `esc` opens the rewind picker (see [esc and ctrl+c](#esc-and-ctrl-c)) |
 | `ctrl+c` | Interrupt the run, else arm quit |
@@ -132,14 +133,22 @@ and leaves the draft and the overlay alone. When kage is idle,
 
 ## sending while kage works
 
-The prompt stays editable during a run, and there are two ways to send
-what you type:
+The prompt stays editable during a run, and there are three ways to
+send what you type:
 
-- `enter` steers. The prompt joins the running turn at the next turn
-  boundary, after the current tool call.
-- `tab` queues. The prompt waits and starts a new run once the current
-  one ends. Idle, `tab` does nothing, so a stray press never sends a
-  prompt.
+- `enter` queues it for the next step. The prompt joins the running
+  turn at the next turn boundary, after the current tool call, without
+  stopping anything.
+- `tab` queues it for after the run. The prompt waits and starts a new
+  run once the current one ends.
+- `ctrl+x` steers now. It stops the run, as `esc` does, and sends the
+  prompt as the next run, ahead of anything queued. Prompts waiting for
+  the next step come back into the editor, since the step they waited
+  for never comes. In an agent's view it steers like `enter`: a stopped
+  agent takes no new prompt.
+
+Idle, `tab` and `ctrl+x` do nothing, so a stray press never sends a
+prompt.
 
 Prompts that were sent but not delivered yet show above the input,
 each with `after the current tool call` or `when this run ends`. Up to
@@ -352,8 +361,9 @@ work in both vim Insert mode and modeless mode.
 
 | Key            | Effect                                            |
 | -------------- | ------------------------------------------------- |
-| `enter`        | Send the prompt (steer it during a run)           |
+| `enter`        | Send the prompt (queue it for the next step during a run) |
 | `tab`          | Queue the prompt until the run ends               |
+| `ctrl+x`       | Stop the run and send the prompt at once          |
 | `shift+enter`  | Insert a newline (`alt+enter` also works)         |
 | `up` / `down`  | Move between lines, then walk the prompt history  |
 | `ctrl+a` / `ctrl+e` | Start / end of the current line              |
@@ -451,15 +461,15 @@ cannot remove it.
 ```toml
 [keybindings]
 # the key <leader> expands to: one key, default a backslash.
-leader = "<C-x>"
+leader = "<C-r>"
 # ms a mapping that is also the start of a longer one waits for
 # more keys (0 to 5000). Default 1000.
 timeoutlen = 600
 bindings = { "f6" = "theme set kage-dawn", "ctrl+l" = "action:OpenModelPicker", "<leader>s" = "settings", "<leader>q" = "quit" }
 ```
 
-With this table, `ctrl+x` then `s` opens the settings dialog and
-`ctrl+x` then `q` quits.
+With this table, `ctrl+r` then `s` opens the settings dialog and
+`ctrl+r` then `q` quits.
 
 Mappings go in the `bindings` table, written inline as above or as a
 `[keybindings.bindings]` table. A key written directly under
@@ -510,6 +520,7 @@ These action names work after `action:`:
 | misc       | `CycleThinkingLevel`   | step the thinking level           |
 | misc       | `TogglePlanMode`       | turn [plan mode](/guide/plan-mode) on or off |
 | misc       | `QueuePrompt`          | queue the prompt until the run ends (does nothing while idle) |
+| misc       | `SteerNow`             | stop the run and send the prompt at once (does nothing while idle) |
 | misc       | `RecallPrompt`         | pull the newest pending prompt back into the editor to edit (does nothing while idle; `up` does this by default) |
 
 Scrolling by a line count needs an argument, so it is only available

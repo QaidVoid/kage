@@ -419,6 +419,15 @@ const GONE_AGENT: &str = "that agent is gone";
 /// after the first one failed to open.
 const NO_SESSION: &str = "no session is open; start one with /new or resume one";
 
+/// Whether `request` starts work a stop takes back while it waits for a
+/// session to open.
+fn cancellable(request: &RunRequest) -> bool {
+    matches!(
+        request,
+        RunRequest::Submit { .. } | RunRequest::RunShell(_) | RunRequest::CompactNow
+    )
+}
+
 /// Whether `request` goes to the open session, so cannot run without
 /// one.
 fn needs_session(request: &RunRequest) -> bool {
@@ -1066,11 +1075,11 @@ struct Pump {
     app_session: SessionId,
     /// The wire id of the session the App is on.
     wire: String,
-    /// What the App asked before any session adopted, in order, run
-    /// when one does. The composer is usable while the first
-    /// `session/new` is still in flight, and a request then would
-    /// otherwise name an empty wire and fail, or run without the
-    /// settings asked before it.
+    /// What the App asked while a session was opening, the first or
+    /// one a switch asked for, in order, run once it adopts. The
+    /// composer is usable meanwhile, and a request then would otherwise
+    /// name an empty wire, or the session being left, or run without
+    /// the settings asked before it.
     unadopted: Vec<RunRequest>,
     /// The recorded session being opened. Its answer adopts it; a
     /// failed answer leaves the current session as it was.
@@ -1405,12 +1414,32 @@ impl Pump {
         }
         if let Some((id, new)) = adopted {
             self.adopt(&id, new);
-        } else if self.wire.is_empty() && self.pending_new.is_none() && self.pending_open.is_none()
-        {
-            // No session opened and none is on its way: the prompts
-            // held for one go back to the composer, and the rest is
-            // dropped with a word.
+        } else if self.pending_new.is_none() && self.pending_open.is_none() {
+            // No session opened and none is on its way, the first or the
+            // one a switch asked for: the work held for it goes back to
+            // the composer. A switch that failed leaves its session on
+            // screen, where the rest, a model pick or a resume, runs as
+            // asked; with no session at all it is dropped with a word.
             let held = std::mem::take(&mut self.unadopted);
+            if !self.wire.is_empty() {
+                let (work, rest): (Vec<_>, Vec<_>) = held.into_iter().partition(cancellable);
+                for request in &work {
+                    let what = match request {
+                        RunRequest::RunShell(command) => format!("!{command}"),
+                        RunRequest::CompactNow => "/compact".to_owned(),
+                        _ => continue,
+                    };
+                    self.notice(
+                        NoticeLevel::Warning,
+                        format!("the session did not open; {what} did not run"),
+                    );
+                }
+                self.return_held(work, "the session did not open; the prompt was not sent");
+                for request in rest {
+                    self.handle(request);
+                }
+                return;
+            }
             let settings = held
                 .iter()
                 .filter(|request| !matches!(request, RunRequest::Submit { .. }))
@@ -1701,10 +1730,20 @@ impl Pump {
         if mode.as_deref().is_some_and(|mode| mode != "plan") {
             self.pre_plan_mode = None;
         }
-        if mode.as_deref() == Some(switch.value.as_str()) {
+        // With another session opening, the prompts would run there, a
+        // session the mode was never asked of.
+        let opening = self.pending_new.is_some() || self.pending_open.is_some();
+        if mode.as_deref() == Some(switch.value.as_str()) && !opening {
             for request in switch.held {
                 self.handle(request);
             }
+            return;
+        }
+        if opening {
+            self.return_held(
+                switch.held,
+                "the session changed before its mode did; the prompt was not sent",
+            );
             return;
         }
         let agent = self.external().unwrap_or_default();
@@ -2088,13 +2127,22 @@ impl Pump {
             return;
         };
         let (app, working) = (track.app, track.running);
+        // A child has no config options of its own; its parent's
+        // `subagent_update` names the model it runs.
+        let listed = self
+            .store
+            .state()
+            .session(&track.parent)
+            .and_then(|parent| parent.agents.get(wire))
+            .and_then(|agent| agent.model.clone());
         let snapshot = self.store.state().session(wire).map(|session| {
             (
                 session
                     .config_options
                     .iter()
                     .find(|option| option.id == "model")
-                    .map(|option| option.current_value.clone()),
+                    .map(|option| option.current_value.clone())
+                    .or(listed),
                 session.usage.clone(),
             )
         });
@@ -2693,8 +2741,8 @@ impl Pump {
             usage: self.usage_snapshot(),
         });
         self.agents_moved(id);
-        // What the App asked while the first session was opening runs
-        // on it now that it exists, in the order it was asked.
+        // What the App asked while this session was opening runs on it
+        // now that it exists, in the order it was asked.
         for request in std::mem::take(&mut self.unadopted) {
             self.handle(request);
         }
@@ -3003,21 +3051,14 @@ impl Pump {
         }
     }
 
-    /// Holds `request` until the first session adopts. A cancel hands
-    /// the prompts held so far back to the composer instead: they must
-    /// not start once that session opens, and there is no run to stop.
+    /// Holds `request` until the session opening adopts. A cancel hands
+    /// the work held so far back to the composer instead: it must not
+    /// start once that session opens.
     fn hold_unadopted(&mut self, request: RunRequest) {
         if matches!(request, RunRequest::Cancel { .. }) {
             let (cancelled, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.unadopted)
                 .into_iter()
-                .partition(|held| {
-                    matches!(
-                        held,
-                        RunRequest::Submit { .. }
-                            | RunRequest::RunShell(_)
-                            | RunRequest::CompactNow
-                    )
-                });
+                .partition(cancellable);
             self.unadopted = rest;
             for held in &cancelled {
                 let what = match held {
@@ -3065,15 +3106,28 @@ impl Pump {
             self.handle_closed(request);
             return;
         }
-        // Dialog answers run at once: opening the first session can be
-        // what waits on them. With no session on its way, as after the
-        // first failed, requests run as they come, so `/new` or a resume
-        // can open one, and those for the session are answered here.
-        if self.wire.is_empty()
-            && (self.pending_new.is_some() || self.pending_open.is_some())
+        // While a session opens, the first one or one a switch asked for
+        // (`/new`, an external agent's pick, a resume), requests wait for
+        // it: a prompt typed meanwhile goes where the user is headed, not
+        // to the session being left. Dialog answers run at once: opening
+        // a session can be what waits on them. A stop with nothing
+        // waiting is for the run of the session being left. With no
+        // session on its way, as after the first failed, requests run as
+        // they come, so `/new` or a resume can open one, and those for
+        // the session are answered here.
+        let opening = self.pending_new.is_some() || self.pending_open.is_some();
+        let leaving_run = matches!(request, RunRequest::Cancel { .. })
+            && !self.wire.is_empty()
+            && !self.unadopted.iter().any(cancellable);
+        if opening
+            && !leaving_run
+            && !self.for_a_child(&request)
             && !matches!(
                 request,
-                RunRequest::ResolvePermission { .. } | RunRequest::AnswerQuestion { .. }
+                RunRequest::ResolvePermission { .. }
+                    | RunRequest::AnswerQuestion { .. }
+                    | RunRequest::DeleteSession(_)
+                    | RunRequest::ForkSessionFile(_)
             )
         {
             self.hold_unadopted(request);
@@ -3252,6 +3306,19 @@ impl Pump {
             }
             _ => self.notice(NoticeLevel::Warning, NO_SESSION.to_owned()),
         }
+    }
+
+    /// Whether `request` steers, recalls from or stops one of the
+    /// agents of the session on screen, which run on whatever session
+    /// opens meanwhile.
+    fn for_a_child(&self, request: &RunRequest) -> bool {
+        let session = match request {
+            RunRequest::Submit { session, .. }
+            | RunRequest::Cancel { session }
+            | RunRequest::RecallPrompt { session, .. } => *session,
+            _ => None,
+        };
+        session.is_some_and(|app| app != self.app_session)
     }
 
     /// The wire id a prompt or stop aims at: the main session for
@@ -4509,7 +4576,7 @@ mod tests {
             pump.store.take_outgoing().is_empty(),
             "prompts with no session wait for one"
         );
-        pump.adopt("s1", true);
+        answer_new(&mut pump, "s1");
         let sent = pump.store.take_outgoing();
         let prompts = sent
             .iter()
@@ -4555,10 +4622,10 @@ mod tests {
             "the text goes back to the composer"
         );
         assert!(
-            !has_request(&pump.store.take_outgoing(), "session/cancel"),
+            !has_notification(&pump.store.take_outgoing(), "session/cancel"),
             "there is no session to cancel yet"
         );
-        pump.adopt("s1", true);
+        answer_new(&mut pump, "s1");
         assert!(
             !has_request(&pump.store.take_outgoing(), "session/prompt"),
             "a cancelled early prompt must not start on adoption"
@@ -4581,7 +4648,7 @@ mod tests {
             ),
             "the setting stays held"
         );
-        pump.adopt("s1", true);
+        answer_new(&mut pump, "s1");
         let sent = pump.store.take_outgoing();
         assert!(
             !has_request(&sent, "_kage/shell"),
@@ -4648,7 +4715,7 @@ mod tests {
             session: None,
         });
         assert!(pump.store.take_outgoing().is_empty());
-        pump.adopt("s1", true);
+        answer_new(&mut pump, "s1");
         let methods: Vec<String> = pump
             .store
             .take_outgoing()
@@ -4707,6 +4774,13 @@ mod tests {
             "with no session on its way, `/new` can open one"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Adopts `id` as the answer to the `session/new` in flight, as
+    /// `settle` does.
+    fn answer_new(pump: &mut Pump, id: &str) {
+        pump.pending_new = None;
+        pump.adopt(id, true);
     }
 
     /// Empties the wire with the first `session/new` in flight, as a
@@ -4828,7 +4902,6 @@ mod tests {
             .unwrap_or_else(|| panic!("no {method} request in {frames:?}"))
     }
 
-    #[cfg(unix)]
     fn has_notification(frames: &[Frame], method: &str) -> bool {
         frames
             .iter()
@@ -5235,6 +5308,41 @@ mod tests {
             events,
             ["runstart", "start:ls", "end:main.rs"],
             "a tool-calling provider turn ends before tool execution, not the child run; the parent still announces Running"
+        );
+    }
+
+    #[test]
+    fn a_subagent_shows_the_model_its_parent_names() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let child = announced_child(&mut pump, &app, &serde_json::json!({"state": "running"}));
+        let models = |app: &mpsc::Receiver<Envelope>| -> Vec<String> {
+            app.try_iter()
+                .filter(|envelope| envelope.session == child)
+                .filter_map(|envelope| match envelope.event {
+                    kage_core::protocol::Event::Host(HostEvent::StateChanged { state }) => {
+                        Some(state.model)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(models(&app).is_empty(), "no model named yet");
+        pump.absorb(Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "subagent_update",
+                    "subagentSessionId": "child",
+                    "model": "lab/large"
+                }
+            }),
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            models(&app),
+            ["lab/large"],
+            "the footer of the agent's view names its own model"
         );
     }
 
@@ -7913,6 +8021,155 @@ kage.on('should_stop_after_turn', function(ev) return true end)
         };
         assert_eq!(method, "session/new");
         assert_eq!(params["_meta"]["kage"]["externalAgent"], "reviewer");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_prompt_typed_while_switching_to_an_acp_agent_goes_to_it() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        assert_eq!(pump.wire, "s1");
+        let _ = pump.store.take_outgoing();
+        pump.handle(RunRequest::SwitchModel("acp:reviewer".to_owned()));
+        let new = request_id(&pump.store.take_outgoing(), "session/new");
+        pump.handle(RunRequest::Submit {
+            text: "review this".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        assert!(
+            !has_request(&pump.store.take_outgoing(), "session/prompt"),
+            "nothing goes to the session being left"
+        );
+        pump.absorb(Frame::Success {
+            id: new,
+            result: serde_json::json!({"sessionId": "ext1", "configOptions": []}),
+        });
+        let params = request_params(&pump.store.take_outgoing(), "session/prompt");
+        assert_eq!(params["sessionId"], "ext1", "the prompt rides the switch");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_switch_that_fails_returns_the_prompt_typed_meanwhile() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        assert_eq!(pump.wire, "s1");
+        let _ = pump.store.take_outgoing();
+        pump.handle(RunRequest::SwitchModel("acp:reviewer".to_owned()));
+        let new = request_id(&pump.store.take_outgoing(), "session/new");
+        pump.handle(RunRequest::Submit {
+            text: "review this".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        let _ = app.try_iter().count();
+        pump.absorb(Frame::Failure {
+            id: new,
+            error: RpcError::invalid_params("no such agent"),
+        });
+        let returned = app.try_iter().find_map(|envelope| match envelope.event {
+            kage_core::protocol::Event::Host(HostEvent::PromptWithdrawn { content, .. }) => content,
+            _ => None,
+        });
+        assert_eq!(
+            returned,
+            Some(vec![kage_core::Content::Text {
+                text: "review this".to_owned()
+            }]),
+            "the prompt goes back to the composer"
+        );
+        assert_eq!(pump.wire, "s1", "the session stays where it was");
+        pump.handle(RunRequest::Submit {
+            text: "again".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        let params = request_params(&pump.store.take_outgoing(), "session/prompt");
+        assert_eq!(params["sessionId"], "s1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stop_while_switching_takes_back_the_prompt_held_for_it() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::NewSession);
+        let _ = pump.store.take_outgoing();
+        pump.handle(RunRequest::Submit {
+            text: "for the new one".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        let _ = app.try_iter().count();
+        pump.handle(RunRequest::Cancel { session: None });
+        assert!(
+            !has_notification(&pump.store.take_outgoing(), "session/cancel"),
+            "the stop takes back the waiting prompt, not the run being left"
+        );
+        assert!(
+            app.try_iter().any(|envelope| matches!(
+                envelope.event,
+                kage_core::protocol::Event::Host(HostEvent::PromptWithdrawn { .. })
+            )),
+            "the prompt goes back to the composer"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_switch_runs_the_model_pick_asked_meanwhile() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        let _ = pump.store.take_outgoing();
+        pump.handle(RunRequest::SwitchModel("acp:reviewer".to_owned()));
+        let new = request_id(&pump.store.take_outgoing(), "session/new");
+        pump.handle(RunRequest::SwitchModel("test:other".to_owned()));
+        assert!(pump.store.take_outgoing().is_empty(), "held for the switch");
+        pump.absorb(Frame::Failure {
+            id: new,
+            error: RpcError::invalid_params("no such agent"),
+        });
+        let params = request_params(&pump.store.take_outgoing(), "session/set_config_option");
+        assert_eq!(params["sessionId"], "s1", "the session kept takes the pick");
+        assert_eq!(params["value"], "test:other");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn steering_an_agent_while_switching_reaches_it() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        advertise_steering(&mut pump);
+        let child = announced_child(&mut pump, &app, &serde_json::json!({"state": "running"}));
+        let _ = pump.store.take_outgoing();
+        pump.handle(RunRequest::NewSession);
+        let _ = pump.store.take_outgoing();
+        pump.handle(RunRequest::Submit {
+            text: "look in src too".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: Some(child),
+        });
+        let params = request_params(&pump.store.take_outgoing(), "session/prompt");
+        assert_eq!(
+            params["sessionId"], "child",
+            "the agent's steering is not held"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stop_while_switching_still_reaches_the_run_being_left() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        assert_eq!(pump.wire, "s1");
+        let _ = pump.store.take_outgoing();
+        pump.handle(RunRequest::NewSession);
+        let _ = pump.store.take_outgoing();
+        pump.handle(RunRequest::Cancel { session: None });
+        assert!(
+            has_notification(&pump.store.take_outgoing(), "session/cancel"),
+            "with nothing waiting, the stop is for the session being left"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

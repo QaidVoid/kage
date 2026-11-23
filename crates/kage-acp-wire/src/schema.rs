@@ -594,6 +594,9 @@ pub enum McpServerStatus {
     },
     /// The server needs an OAuth login before it can connect.
     NeedsAuth,
+    /// A status this side does not know.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One MCP server's reachability, carried by the `_kage/mcp_status`
@@ -894,6 +897,9 @@ pub enum UiCommandArg {
         /// Parameter name.
         name: String,
     },
+    /// An argument kind this side does not know.
+    #[serde(other)]
+    Unknown,
 }
 
 /// `_kage/shell` request params: a shell command the user typed, run in
@@ -2531,6 +2537,10 @@ pub enum ToolCallContent {
     Diff(DiffContent),
     /// A reference to a created terminal.
     Terminal(TerminalRef),
+    /// Content of a kind this side does not know, kept as a
+    /// placeholder so the rest of the update still applies.
+    #[serde(other)]
+    Unknown,
 }
 
 /// `diff` tool-call content.
@@ -3130,6 +3140,25 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(call.status, ToolCallStatus::Pending);
+    }
+
+    /// Variants a newer peer adds decode as `Unknown` instead of
+    /// failing the whole message they ride in.
+    #[test]
+    fn unknown_variants_decode_as_placeholders() {
+        let call: ToolCall = serde_json::from_value(serde_json::json!({
+            "toolCallId": "call-1",
+            "title": "Read file",
+            "content": [{"type": "hologram", "data": 1}],
+        }))
+        .unwrap();
+        assert_eq!(call.content, [ToolCallContent::Unknown]);
+        let status: McpServerStatus =
+            serde_json::from_value(serde_json::json!({"status": "sleeping"})).unwrap();
+        assert_eq!(status, McpServerStatus::Unknown);
+        let arg: UiCommandArg =
+            serde_json::from_value(serde_json::json!({"kind": "color", "name": "c"})).unwrap();
+        assert_eq!(arg, UiCommandArg::Unknown);
     }
 
     #[test]

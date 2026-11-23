@@ -427,7 +427,8 @@ fn plugin_command(command: &UiCommand) -> PluginCommand {
     }
 }
 
-/// Translate one snapshot argument spec.
+/// Translate one snapshot argument spec. A kind this TUI does not
+/// know takes optional free text, so the command still runs.
 fn plugin_arg(arg: &UiCommandArg) -> OwnedArgSpec {
     match arg {
         UiCommandArg::Text {
@@ -457,6 +458,11 @@ fn plugin_arg(arg: &UiCommandArg) -> OwnedArgSpec {
             optional: *optional,
         },
         UiCommandArg::Flag { name } => OwnedArgSpec::Flag { name: name.clone() },
+        UiCommandArg::Unknown => OwnedArgSpec::Text {
+            name: "arg".to_owned(),
+            optional: true,
+            hint: String::new(),
+        },
     }
 }
 

@@ -1467,7 +1467,7 @@ pub fn mcp_page(
                 (false, Some(McpServerStatus::Starting)) => {
                     ("starting", Tone::warn(palette), palette.warn)
                 }
-                (false, None) => (
+                (false, None | Some(McpServerStatus::Unknown)) => (
                     "status unknown",
                     Tone {
                         line: palette.subtle,

@@ -1182,6 +1182,14 @@ struct Pump {
     /// The main session's latest answered prompts, newest last: a steer
     /// a stop hands back can arrive after its own answer.
     answered: Vec<(String, Vec<ContentBlock>)>,
+    /// Prompts sent to the main session while it ran, oldest first,
+    /// whose bubbles wait for the run to take them: the next turn
+    /// start, where steering joins, or the prompt's answer. A
+    /// withdrawn or failed one never shows.
+    held: Vec<RequestId>,
+    /// Whether the main session was in a turn when last seen, so a turn
+    /// start is noticed once.
+    in_turn: bool,
     /// The error that ended the run being settled.
     run_error: Option<String>,
     /// The run-wide session settings that do not come from options.
@@ -1368,14 +1376,23 @@ impl Pump {
             ) if *id == switch.request
         );
         let failed_prompt = match &frame {
-            Frame::Failure { id, error } => self
-                .prompts
-                .remove(id)
-                .map(|(wire, blocks)| (wire, blocks, error.message.clone())),
+            Frame::Failure { id, error } => {
+                let steered = self.held.contains(id);
+                self.held.retain(|held| held != id);
+                self.prompts
+                    .remove(id)
+                    .map(|(wire, blocks)| (wire, blocks, error.message.clone(), steered))
+            }
             Frame::Success { id, .. } => {
                 if let Some(answered) = self.prompts.remove(id)
                     && answered.0 == self.wire
                 {
+                    if let Some(at) = self.held.iter().position(|held| held == id) {
+                        self.held.remove(at);
+                        self.show_prompt(&answered.1);
+                    } else {
+                        self.in_turn = false;
+                    }
                     self.answered.push(answered);
                     if self.answered.len() > ANSWERED_KEPT {
                         self.answered.remove(0);
@@ -1415,18 +1432,14 @@ impl Pump {
         }
         // A failed prompt moves no session in the client, so the run
         // it ended is settled here.
-        if let Some((wire, blocks, message)) = failed_prompt {
-            // One that failed while the run goes on, as a stop-and-send
-            // the host refused, did not take the run: it goes back.
-            let goes_on = self
-                .store
-                .state()
-                .session(&wire)
-                .is_some_and(|session| session.running);
-            if wire == self.wire && goes_on {
+        if let Some((wire, blocks, message, steered)) = failed_prompt {
+            if wire == self.wire && steered {
                 self.return_prompt(self.app_session, content_of(&blocks), false, message);
             } else if wire == self.wire {
                 self.run_error = Some(message);
+                if self.running {
+                    self.end_run();
+                }
                 self.session_moved(&wire);
                 self.run_error = None;
             } else {
@@ -1468,6 +1481,7 @@ impl Pump {
                 .map(|(id, _)| id.clone());
             if let Some(id) = pending {
                 self.prompts.remove(&id);
+                self.held.retain(|held| held != &id);
             } else if let Some(at) = self.answered.iter().rposition(ours) {
                 self.answered.remove(at);
             } else {
@@ -2044,6 +2058,7 @@ impl Pump {
             self.child_transcript(&prompt.session_id);
             return;
         }
+        let steers = self.running;
         if !self.running {
             self.running = true;
             self.publish(HostEvent::RunStarted);
@@ -2051,12 +2066,49 @@ impl Pump {
         self.publish(HostEvent::StateChanged {
             state: self.state_snapshot(),
         });
-        // The agent echoes a prompt only to the other clients, so the
-        // bubble is this side's own copy.
-        let message = Message::new(Role::User, content_of(&prompt.prompt), None);
+        if steers {
+            self.held.push(id.clone());
+        } else {
+            self.show_prompt(&prompt.prompt);
+        }
+    }
+
+    /// Ends the main session's run: records how it ended and tells the
+    /// App. A run records the session, so a mirror that named a file
+    /// the host did not write (it groups sessions another way) finds
+    /// the real one now.
+    fn end_run(&mut self) {
+        self.running = false;
+        let outcome = self.run_outcome();
+        let _ = self.recorder.send((self.model.clone(), outcome.clone()));
+        self.publish(HostEvent::RunEnded { outcome });
+        if self.mirror_rechecks < MIRROR_RECHECKS
+            && lock(&self.mirror).path().is_some_and(|path| !path.exists())
+        {
+            self.mirror_rechecks += 1;
+            self.note_session_file();
+        }
+    }
+
+    /// Shows a prompt this TUI sent to the main session as its user
+    /// bubble. The agent echoes a prompt only to the other clients, so
+    /// the bubble is this side's own copy.
+    fn show_prompt(&mut self, blocks: &[ContentBlock]) {
+        let message = Message::new(Role::User, content_of(blocks), None);
         self.publish(LoopEvent::MessageAppended {
             message: Arc::new(message),
         });
+    }
+
+    /// Shows the held prompts, oldest first, once a turn start says
+    /// the run took them.
+    fn release_held(&mut self) {
+        for id in std::mem::take(&mut self.held) {
+            if let Some((_, blocks)) = self.prompts.get(&id) {
+                let blocks = blocks.clone();
+                self.show_prompt(&blocks);
+            }
+        }
     }
 
     /// Turns one handled frame's changes into the App's signals.
@@ -2161,20 +2213,18 @@ impl Pump {
             self.running = true;
             self.publish(HostEvent::RunStarted);
         }
+        let in_turn = working
+            && self
+                .store
+                .state()
+                .session(&self.wire)
+                .is_some_and(|session| session.in_turn);
+        if in_turn && !self.in_turn {
+            self.release_held();
+        }
+        self.in_turn = in_turn;
         if !working && self.running {
-            self.running = false;
-            let outcome = self.run_outcome();
-            let _ = self.recorder.send((self.model.clone(), outcome.clone()));
-            self.publish(HostEvent::RunEnded { outcome });
-            // A run records the session, so a mirror that named a file
-            // the host did not write (it groups sessions another way)
-            // finds the real one now.
-            if self.mirror_rechecks < MIRROR_RECHECKS
-                && lock(&self.mirror).path().is_some_and(|path| !path.exists())
-            {
-                self.mirror_rechecks += 1;
-                self.note_session_file();
-            }
+            self.end_run();
         }
         if self.external_agent_of(&self.wire).is_none()
             && let Some(model) = self
@@ -2840,6 +2890,8 @@ impl Pump {
     /// recorded with, as the engine path does.
     fn adopt(&mut self, id: &str, carry_model: bool) {
         if self.wire != id {
+            self.held.clear();
+            self.in_turn = false;
             self.close_ask_cards();
             self.children.clear();
             lock(&self.child_files).clear();
@@ -4539,6 +4591,8 @@ pub(crate) fn run(
         recorder,
         prompts: HashMap::new(),
         answered: Vec::new(),
+        held: Vec::new(),
+        in_turn: false,
         run_error: None,
         external: HashMap::new(),
         yolo,
@@ -5093,6 +5147,8 @@ mod tests {
             recorder,
             prompts: HashMap::new(),
             answered: Vec::new(),
+            held: Vec::new(),
+            in_turn: false,
             run_error: None,
             yolo: false,
             environment: false,
@@ -8408,6 +8464,138 @@ kage.on('should_stop_after_turn', function(ev) return true end)
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The user bubbles `app` received, in order.
+    fn user_bubbles(app: &mpsc::Receiver<Envelope>) -> Vec<String> {
+        app.try_iter()
+            .filter_map(|envelope| match envelope.event {
+                kage_core::protocol::Event::Loop(LoopEvent::MessageAppended { message })
+                    if message.role == Role::User =>
+                {
+                    Some(
+                        message
+                            .content
+                            .iter()
+                            .filter_map(|block| match block {
+                                Content::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<String>(),
+                    )
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn turn_start() -> Frame {
+        Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({"sessionId": "s1", "update": {
+                "sessionUpdate": "_kage/turn", "phase": "start"
+            }}),
+        }
+    }
+
+    /// A steer typed while the agent works shows its bubble where the
+    /// run takes it, at the next turn start, not inside the live reply.
+    #[test]
+    fn a_steer_shows_its_bubble_when_the_next_turn_starts() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        advertise_steering(&mut pump);
+        let submit = |text: &str| RunRequest::Submit {
+            text: text.to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        };
+        pump.handle(submit("work"));
+        pump.flush();
+        pump.absorb(turn_start());
+        assert_eq!(user_bubbles(&app), ["work"]);
+        pump.handle(submit("also this"));
+        pump.flush();
+        assert!(user_bubbles(&app).is_empty(), "no bubble mid-reply");
+        pump.absorb(Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({"sessionId": "s1", "update": {
+                "sessionUpdate": "_kage/turn", "phase": "end", "reason": "tool_calls"
+            }}),
+        });
+        assert!(user_bubbles(&app).is_empty(), "nor at the turn's end");
+        pump.absorb(turn_start());
+        assert_eq!(user_bubbles(&app), ["also this"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Stop-and-send shows its bubble once the stopped run is answered,
+    /// after everything it streamed, and only once.
+    #[test]
+    fn a_stop_and_send_shows_its_bubble_after_the_stopped_run() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        advertise_steering(&mut pump);
+        pump.handle(RunRequest::Submit {
+            text: "work".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        pump.flush();
+        pump.absorb(turn_start());
+        let work = pump
+            .prompts
+            .iter()
+            .find(|(_, (_, blocks))| {
+                content_of(blocks)
+                    .iter()
+                    .any(|c| matches!(c, Content::Text { text } if text == "work"))
+            })
+            .map(|(id, _)| id.clone())
+            .unwrap();
+        let _ = user_bubbles(&app);
+        pump.handle(RunRequest::SteerNow {
+            text: "now".to_owned(),
+            images: Vec::new(),
+        });
+        pump.flush();
+        assert!(user_bubbles(&app).is_empty(), "not while the run streams");
+        pump.absorb(Frame::Success {
+            id: work,
+            result: serde_json::json!({"stopReason": "cancelled"}),
+        });
+        pump.absorb(turn_start());
+        assert_eq!(user_bubbles(&app), ["now"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A steer the run never took goes back to the editor and leaves no
+    /// bubble behind.
+    #[test]
+    fn a_withdrawn_steer_never_shows_a_bubble() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        advertise_steering(&mut pump);
+        let submit = |text: &str| RunRequest::Submit {
+            text: text.to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        };
+        pump.handle(submit("work"));
+        pump.flush();
+        pump.handle(submit("never mind"));
+        pump.flush();
+        pump.absorb(Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({"sessionId": "s1", "update": {
+                "sessionUpdate": "_kage/prompt_withdrawn",
+                "delivery": "steer",
+                "content": [{"type": "text", "text": "never mind"}]
+            }}),
+        });
+        pump.absorb(turn_start());
+        assert_eq!(user_bubbles(&app), ["work"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn steer_now_on_an_external_session_stops_then_sends_first() {
         let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
@@ -8526,7 +8714,7 @@ kage.on('should_stop_after_turn', function(ev) return true end)
             queue: false,
             session: None,
         });
-        let _ = pump.store.take_outgoing();
+        pump.flush();
         pump.handle(RunRequest::SteerNow {
             text: "now".to_owned(),
             images: Vec::new(),
@@ -8552,6 +8740,44 @@ kage.on('should_stop_after_turn', function(ev) return true end)
             }]),
             "the run goes on, so the refused prompt comes back"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A run that fails while another prompt waits in the queue ends as
+    /// failed; its prompt does not come back as a refused steer.
+    #[test]
+    fn a_failed_run_with_a_queued_prompt_ends_failed() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let submit = |text: &str, queue: bool| RunRequest::Submit {
+            text: text.to_owned(),
+            images: Vec::new(),
+            queue,
+            session: None,
+        };
+        pump.handle(submit("work", false));
+        let sent = pump.store.take_outgoing();
+        let work = request_id(&sent, "session/prompt");
+        for frame in &sent {
+            pump.observe_outgoing(frame);
+        }
+        pump.handle(submit("next", true));
+        pump.flush();
+        let _ = app.try_iter().count();
+        pump.absorb(Frame::Failure {
+            id: work,
+            error: RpcError::new(-32603, "provider down"),
+        });
+        let events: Vec<_> = app.try_iter().map(|envelope| envelope.event).collect();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            kage_core::protocol::Event::Host(HostEvent::RunEnded {
+                outcome: RunOutcome::Failed { .. }
+            })
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            kage_core::protocol::Event::Host(HostEvent::PromptWithdrawn { .. })
+        )));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

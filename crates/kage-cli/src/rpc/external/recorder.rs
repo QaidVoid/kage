@@ -32,8 +32,16 @@ const RECORDING: u8 = 0;
 const GAP: u8 = 1;
 const STOPPED: u8 = 2;
 
-// `None` wakes the worker to mark a gap.
-type Item = Option<(ExternalAcpPresentation, usize)>;
+/// What the recording worker takes from its queue, in order.
+enum Item {
+    /// An event to write, with its admission cost.
+    Event(ExternalAcpPresentation, usize),
+    /// Recording stopped for an overflow: the gap is marked after the
+    /// events queued before it.
+    Gap,
+    /// Acknowledged once everything queued before it is written.
+    Flush(mpsc::Sender<()>),
+}
 
 /// Records presentation events of one external session.
 pub(crate) struct Recorder {
@@ -126,10 +134,18 @@ impl Recorder {
             self.stop_with_gap();
             return;
         }
-        if self.sender.try_send(Some((event, size))).is_err() {
+        if self.sender.try_send(Item::Event(event, size)).is_err() {
             self.bytes.fetch_sub(size, Ordering::AcqRel);
             self.stop_with_gap();
         }
+    }
+
+    /// Asks the worker to say when everything queued so far is on disk.
+    /// `None` when the queue is full and cannot take the request.
+    pub(crate) fn flush(&self) -> Option<mpsc::Receiver<()>> {
+        let (ack, done) = mpsc::channel();
+        self.sender.try_send(Item::Flush(ack)).ok()?;
+        Some(done)
     }
 
     /// Whether every event so far was queued and written or is pending.
@@ -150,14 +166,15 @@ impl Recorder {
             .compare_exchange(RECORDING, GAP, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
-            let _ = self.sender.try_send(None);
+            let _ = self.sender.try_send(Item::Gap);
         }
     }
 }
 
-// Writes queued events in batches. Recording stops for good at the first
-// failed write. After an overflow, the gap is marked as soon as the events
-// queued before it are written, so it survives a later crash.
+/// Writes queued events in batches. Recording stops for good at the
+/// first failed write. After an overflow, the gap is marked right after
+/// the events queued before it, so it survives a later crash. A flush is
+/// acknowledged once what came before it is written.
 fn write_all(
     mut writer: SessionWriter,
     items: &mpsc::Receiver<Item>,
@@ -167,29 +184,39 @@ fn write_all(
     let mut broken = false;
     let mut marked = false;
     while let Ok(first) = items.recv() {
-        let mut batch: Vec<_> = first.into_iter().collect();
-        let mut drained = true;
-        loop {
-            if batch.len() >= BATCH {
-                drained = false;
+        let mut events = Vec::new();
+        let mut size = 0;
+        let mut acks = Vec::new();
+        let mut next = Some(first);
+        while let Some(item) = next.take() {
+            match item {
+                Item::Event(event, cost) => {
+                    events.push(event);
+                    size += cost;
+                }
+                Item::Gap if !marked => {
+                    events.push(ExternalAcpPresentation::Gap);
+                    marked = true;
+                }
+                Item::Gap => {}
+                Item::Flush(ack) => {
+                    acks.push(ack);
+                    break;
+                }
+            }
+            if events.len() >= BATCH {
                 break;
             }
-            match items.try_recv() {
-                Ok(item) => batch.extend(item),
-                Err(_) => break,
-            }
-        }
-        let size: usize = batch.iter().map(|(_, size)| size).sum();
-        let mut events: Vec<_> = batch.into_iter().map(|(event, _)| event).collect();
-        if drained && !marked && state.load(Ordering::SeqCst) == GAP {
-            events.push(ExternalAcpPresentation::Gap);
-            marked = true;
+            next = items.try_recv().ok();
         }
         if !broken && !events.is_empty() && !append(&mut writer, events) {
             broken = true;
             state.store(STOPPED, Ordering::SeqCst);
         }
         bytes.fetch_sub(size, Ordering::AcqRel);
+        for ack in acks {
+            let _ = ack.send(());
+        }
     }
     if !broken && !marked && state.load(Ordering::SeqCst) == GAP {
         append(&mut writer, vec![ExternalAcpPresentation::Gap]);
@@ -392,6 +419,33 @@ mod tests {
             replay.events.last(),
             Some(ExternalAcpPresentation::TurnEnd { .. })
         ));
+    }
+
+    /// A flush is acknowledged only once the events before it are in
+    /// the file, while the recorder keeps running.
+    #[test]
+    fn a_flush_answers_once_the_events_before_it_are_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let slot = Lifecycles::new(1).reserve().unwrap().commit();
+        let recorder = Recorder::start(
+            &slot,
+            path.clone(),
+            Target::Create(Box::new(header(dir.path()))),
+            WAIT,
+        )
+        .unwrap();
+        recorder.record(ExternalAcpPresentation::Prompt {
+            text: bounded("hi"),
+        });
+        recorder.flush().unwrap().recv_timeout(WAIT).unwrap();
+        let replay = kage_session::external_replay::replay_external(&path).unwrap();
+        let texts: Vec<_> = replay.events.iter().filter_map(text).collect();
+        assert_eq!(texts, ["hi"]);
+        assert!(recorder.complete());
+        drop(recorder);
+        slot.terminate();
+        assert!(slot.wait_finished(WAIT));
     }
 
     #[test]

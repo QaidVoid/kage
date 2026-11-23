@@ -81,6 +81,8 @@ mod unix {
     use serde_json::{Value, json};
 
     const TIMEOUT: Duration = Duration::from_secs(10);
+    /// How long a turn's answer waits for its record to reach disk.
+    const RECORD_FLUSH_WAIT: Duration = Duration::from_secs(2);
     const SESSION_BUDGET: usize = 4 * 1024 * 1024;
     const ATTACHMENT_BUDGET: usize = 2 * 1024 * 1024;
     const MAX_ATTACHMENTS: usize = 8;
@@ -1038,6 +1040,7 @@ mod unix {
                 Err(_) => PresentationTurnOutcome::Failed,
             };
             self.end_turn(outcome);
+            self.flush_record();
             if result.is_err() {
                 self.terminate();
                 return result;
@@ -1067,6 +1070,19 @@ mod unix {
 
         fn end_turn(&self, outcome: PresentationTurnOutcome) {
             lock(&self.state).end_turn(outcome);
+        }
+
+        /// Waits, briefly, until what the turn recorded is on disk, so a
+        /// client that reads, reopens or forks the session right after
+        /// the answer finds the turn in the file.
+        fn flush_record(&self) {
+            let flushed = lock(&self.state)
+                .recorder
+                .as_ref()
+                .and_then(Recorder::flush);
+            if let Some(flushed) = flushed {
+                let _ = flushed.recv_timeout(RECORD_FLUSH_WAIT);
+            }
         }
 
         /// Whether the presentation history has no gap so far.

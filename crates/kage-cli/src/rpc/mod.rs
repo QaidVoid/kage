@@ -1684,8 +1684,8 @@ impl Agent for CliAcpAgent {
             .workdir(id)
             .ok_or_else(|| RpcError::new(-32602, format!("unknown session {}", req.session_id)))?;
         let permissions = Config::load_layered(&workdir)
-            .map(|config| config.permissions)
-            .unwrap_or_default();
+            .map_err(|e| RpcError::internal(format!("config: {e}")))?
+            .permissions;
         fs::handle(&workdir, &permissions, &req)
     }
 

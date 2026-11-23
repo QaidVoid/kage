@@ -131,16 +131,15 @@ fn read(permissions: &PermissionsConfig, file: &Path) -> Result<FsReadResult, Rp
             format!("denied by permissions: {subject}"),
         ));
     }
+    let failed = |e: std::io::Error| RpcError::new(-32602, format!("{}: {e}", file.display()));
+    let handle = open_regular(file)?;
+    let len = handle.metadata().map_err(failed)?.len();
     let mut bytes = Vec::new();
-    let taken = fs::File::open(file)
-        .map_err(|e| RpcError::new(-32602, format!("{}: {e}", file.display())))?
+    let taken = handle
         .take(READ_CAP as u64)
         .read_to_end(&mut bytes)
-        .map_err(|e| RpcError::new(-32602, format!("{}: {e}", file.display())))?;
-    let mut truncated = false;
-    if taken >= READ_CAP {
-        truncated = read_len(file)? > taken as u64;
-    }
+        .map_err(failed)?;
+    let truncated = taken >= READ_CAP && len > taken as u64;
     let (content, binary) = match String::from_utf8(bytes) {
         Ok(text) => (text, false),
         Err(err) => {
@@ -161,10 +160,26 @@ fn read(permissions: &PermissionsConfig, file: &Path) -> Result<FsReadResult, Rp
 }
 
 /// The full size of `file` in bytes.
-fn read_len(file: &Path) -> Result<u64, RpcError> {
-    fs::metadata(file)
-        .map(|meta| meta.len())
-        .map_err(|e| RpcError::new(-32602, format!("{}: {e}", file.display())))
+/// Opens `file` for reading when it is a regular file, judged by the
+/// opened handle. On Unix the open does not wait, so a FIFO fails here
+/// instead of blocking until something writes to it.
+fn open_regular(file: &Path) -> Result<fs::File, RpcError> {
+    let failed = |e: std::io::Error| RpcError::new(-32602, format!("{}: {e}", file.display()));
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
+    }
+    let handle = options.open(file).map_err(failed)?;
+    if !handle.metadata().map_err(failed)?.is_file() {
+        return Err(RpcError::new(
+            -32602,
+            format!("{}: not a regular file", file.display()),
+        ));
+    }
+    Ok(handle)
 }
 
 #[cfg(test)]
@@ -194,6 +209,21 @@ mod tests {
         permissions
     }
 
+    /// A FIFO in the workdir fails at once instead of blocking the
+    /// request until something writes to it.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_refused_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        let err = read(&PermissionsConfig::default(), &fifo).unwrap_err();
+        assert!(
+            err.message.contains("not a regular file"),
+            "{}",
+            err.message
+        );
+    }
     #[test]
     fn list_walks_the_tree_parents_before_children() {
         let dir = tempfile::tempdir().unwrap();

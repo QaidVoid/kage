@@ -1,6 +1,6 @@
 //! Engine events as ACP traffic.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
@@ -76,7 +76,7 @@ pub(super) struct Bridge {
     /// Advertised name to real name for tools the host renamed, so a
     /// call the model makes under its advertised name still renders
     /// with the real tool's title, kind, and read-only grouping.
-    pub(super) aliases: BTreeMap<String, String>,
+    pub(super) aliases: super::host::SessionAliases,
     pub(super) seen: HashMap<SessionId, HashMap<String, SeenCall>>,
     pub(super) stops: HashMap<SessionId, CoreStopReason>,
     pub(super) tree: AgentTree,
@@ -338,7 +338,11 @@ impl Bridge {
     pub(super) fn handle(&mut self, envelope: &Envelope) {
         self.forget_closed();
         self.apply_seeds();
-        let envelope = &with_canonical_tool_names(envelope.clone(), &self.aliases);
+        let aliases = lock(&self.aliases)
+            .get(&self.tree.root_of(envelope.session))
+            .cloned()
+            .unwrap_or_default();
+        let envelope = &with_canonical_tool_names(envelope.clone(), &aliases);
         if let Event::Host(
             HostEvent::PermissionResolved { request_id } | HostEvent::QuestionClosed { request_id },
         ) = &envelope.event

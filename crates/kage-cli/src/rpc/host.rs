@@ -22,7 +22,6 @@ use kage_jsonrpc::RpcError;
 use kage_loop::{AgentContext, LoopConfig};
 use kage_plugin::{PluginRuntime, session_plugins::SessionPlugins};
 use kage_provider::{Provider, ProviderRegistry};
-use kage_tools::ToolRegistry;
 
 use super::options::{Settings, choice};
 use super::projects::{Project, Projects};
@@ -43,6 +42,9 @@ pub(crate) const ASK_HOLD: Duration = Duration::from_secs(12 * 60 * 60);
 /// when present, and the client's own system role, which replaces the
 /// host's when given. The caller fills in the history and recorder,
 /// and applies the rest of the connection's settings.
+/// Each open session's renamed tools: advertised name to real name.
+pub(super) type SessionAliases = Arc<Mutex<HashMap<SessionId, Arc<BTreeMap<String, String>>>>>;
+
 pub(crate) type SpecBuilder = Box<
     dyn Fn(
             &ProviderRegistry,
@@ -128,10 +130,10 @@ pub(crate) struct Host {
     /// The providers the server's plugins registered at startup, kept
     /// over every rebuild of `registry`.
     plugin_providers: Mutex<Vec<Arc<dyn Provider>>>,
-    /// Advertised name to real name for tools the host renamed, for the
-    /// bridges' card titles and kind hints. Loaded once at startup, like
-    /// the TUI does.
-    pub(super) aliases: BTreeMap<String, String>,
+    /// Advertised name to real name for the tools each open session
+    /// renamed, by `[tools.rename]` in its project or by its plugins,
+    /// for the bridges' card titles and kind hints.
+    pub(super) aliases: SessionAliases,
     /// Live engine state one subscriber folds envelopes into: the turn
     /// in flight, open asks, the agent tree, prompt owners, and what a
     /// session's attachments allow closing.
@@ -192,13 +194,6 @@ impl Host {
         }
         let sessions = crate::sessions_dir()?;
         let registry = Arc::new(registry);
-        let aliases = {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let renames = Config::load_layered(&cwd)
-                .map(|config| config.tools.rename)
-                .unwrap_or_default();
-            ToolRegistry::new().with_renames(&renames).alias_map()
-        };
         let projects = Arc::new(Projects::default());
         let spec: SpecBuilder = {
             let system_role = system_role.to_owned();
@@ -231,7 +226,7 @@ impl Host {
                 },
             )
         };
-        let host = Self::new(registry, default_model, sessions, spec, aliases);
+        let host = Self::new(registry, default_model, sessions, spec);
         *lock(&host.plugin_providers) = plugin_providers;
         let _ = host.projects.set(projects);
         system_role.clone_into(&mut lock(&host.system_role));
@@ -245,7 +240,6 @@ impl Host {
         default_model: String,
         sessions: PathBuf,
         spec: SpecBuilder,
-        aliases: BTreeMap<String, String>,
     ) -> Arc<Self> {
         let models = model_choices(&registry);
         let engine = Engine::start(Arc::clone(&registry));
@@ -262,7 +256,7 @@ impl Host {
             models: Arc::new(RwLock::new(models)),
             reloading: Mutex::default(),
             plugin_providers: Mutex::default(),
-            aliases,
+            aliases: Arc::default(),
             live,
             open: Arc::default(),
             workdirs: Arc::default(),
@@ -317,6 +311,7 @@ impl Host {
                     instances.remove(&id);
                     lock(&host.open).remove(&id);
                     lock(&host.workdirs).remove(&id);
+                    lock(&host.aliases).remove(&id);
                     lock(&host.runtimes).remove(&id);
                     lock(&host.live).closed(id);
                 }
@@ -510,6 +505,17 @@ impl Host {
         lock(&self.live).attach(spec.id, true);
         lock(&self.open).insert(spec.id, Open { settings });
         lock(&self.workdirs).insert(spec.id, spec.cx.workdir.clone());
+        let mut aliases = spec.tools.alias_map();
+        if let Some(plugins) = &spec.plugins {
+            for (from, to) in plugins.registered_renames() {
+                aliases.insert(to, from);
+            }
+        }
+        if aliases.is_empty() {
+            lock(&self.aliases).remove(&spec.id);
+        } else {
+            lock(&self.aliases).insert(spec.id, Arc::new(aliases));
+        }
         if let Some(runtime) = runtime {
             lock(&self.runtimes).insert(spec.id, runtime);
         }
@@ -938,13 +944,7 @@ mod tests {
                 None,
             ))
         });
-        Host::new(
-            registry,
-            "mock/m".into(),
-            dir.path().to_path_buf(),
-            spec,
-            BTreeMap::new(),
-        )
+        Host::new(registry, "mock/m".into(), dir.path().to_path_buf(), spec)
     }
 
     /// A client that attaches while a background agent runs learns it

@@ -610,7 +610,7 @@ impl CliAcpAgent {
             deferred: Arc::clone(&deferred),
             models: host.shared_models(),
             shown: Arc::clone(&shown),
-            aliases: host.aliases.clone(),
+            aliases: Arc::clone(&host.aliases),
             seen: HashMap::new(),
             stops: HashMap::new(),
             asks: Arc::clone(&asks),

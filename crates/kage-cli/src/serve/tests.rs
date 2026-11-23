@@ -117,13 +117,7 @@ fn test_host(scripts: Vec<Script>, workdir: &Path) -> Arc<Host> {
             ))
         },
     );
-    Host::new(
-        registry,
-        "mock:m".to_owned(),
-        workdir.to_path_buf(),
-        spec,
-        BTreeMap::new(),
-    )
+    Host::new(registry, "mock:m".to_owned(), workdir.to_path_buf(), spec)
 }
 
 /// The server under test: the real accept loop on an ephemeral port,

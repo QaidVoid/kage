@@ -445,7 +445,7 @@ fn test_host_with_plugins(
             ))
         },
     );
-    Host::new(registry, "mock/m".into(), sessions, spec, BTreeMap::new())
+    Host::new(registry, "mock/m".into(), sessions, spec)
 }
 
 /// An in-process MCP server with the prompt `p(a, b?)`, which answers
@@ -1075,7 +1075,7 @@ fn child_waiters_survive_a_rate_limit_and_settle_without_a_tree_node() {
         deferred: Deferred::default(),
         models: h.host.shared_models(),
         shown: ShownBySession::default(),
-        aliases: BTreeMap::new(),
+        aliases: Arc::default(),
         seen: HashMap::new(),
         stops: HashMap::new(),
         tree: AgentTree::default(),
@@ -7382,13 +7382,7 @@ fn only_a_local_client_sets_the_environment_of_its_sessions() {
         lock(&record).push(from_client);
         Err(RpcError::internal("recorded"))
     });
-    let host = Host::new(
-        registry,
-        "mock/m".into(),
-        dir.path().to_path_buf(),
-        spec,
-        BTreeMap::new(),
-    );
+    let host = Host::new(registry, "mock/m".into(), dir.path().to_path_buf(), spec);
     for local in [false, true] {
         let (srv_r, cli_w) = std::io::pipe().unwrap();
         let (cli_r, srv_w) = std::io::pipe().unwrap();
@@ -7862,6 +7856,42 @@ fn an_attach_id_that_is_not_newer_is_refused() {
 /// A session the host launched with plugins runs the commands and
 /// mappings its own runtime registered; the UI a client attaches to
 /// that session pins to it.
+/// A tool a session's plugin renamed renders as the real tool when
+/// the model calls it under the advertised name.
+#[test]
+fn a_plugin_renamed_tool_renders_as_the_real_one() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("note.txt"), "hi").unwrap();
+    let runtime = Arc::new(kage_plugin::PluginRuntime::builder().build().unwrap());
+    runtime
+        .eval("kage.rename_tool({ from = 'read', to = 'peek' })")
+        .unwrap();
+    let mock = MockProvider::sequence(vec![
+        tool_turn("call_peek", "peek", serde_json::json!({"path": "note.txt"})),
+        text_turn("done"),
+    ]);
+    let provider = Listed {
+        mock: mock.clone(),
+        input: Modalities::default(),
+    };
+    let host = test_host_with_plugins(
+        Arc::new(provider),
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+        false,
+        default_agents(),
+        PermissionAction::Allow,
+        Some(runtime),
+    );
+    let h = serve_on_host(mock, host, SessionId::new(), dir.path(), false);
+    initialize(&h.client);
+    prompt(&h.client, &h.session, "go");
+    let updates = updates_until(&h.inbox, &h.session, "tool_call");
+    let call = &updates.last().unwrap()["update"];
+    assert_eq!(call["toolCallId"], "call_peek");
+    assert_eq!(call["kind"], "read", "{call}");
+}
+
 #[test]
 fn a_session_bound_attach_pins_its_runtime() {
     let dir = tempfile::tempdir().unwrap();

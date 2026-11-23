@@ -8,7 +8,7 @@
 //! thread, no clock and no IO here, which makes the client testable
 //! from recorded transcripts and usable on wasm.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
@@ -222,6 +222,10 @@ pub struct Client {
     /// replaced session back when it fails, so an older open failing
     /// late cannot wipe a newer one's replay.
     latest_open: BTreeMap<String, u64>,
+    /// Sessions this client closed, with the subagents under them, so
+    /// a late update does not bring one back. Opening one again lets
+    /// its updates in.
+    closed: BTreeSet<String>,
 }
 
 /// Every view of `session_id` an open replaces at once.
@@ -1338,6 +1342,7 @@ impl Client {
             },
         );
         self.latest_open.insert(session_id.to_owned(), id);
+        self.closed.remove(session_id);
         (id, opened_changes(session_id))
     }
 
@@ -1495,6 +1500,7 @@ impl Client {
                     .and_then(Value::as_str)
                     .map(str::to_owned);
                 match serde_json::from_value::<SessionNotification>(params) {
+                    Ok(note) if self.closed.contains(&note.session_id) => Vec::new(),
                     Ok(note) => self.apply_update(&note.session_id, note.update),
                     Err(error) => {
                         log::debug!("an unreadable session/update arrived: {error}");
@@ -1634,8 +1640,21 @@ impl Client {
                 }
             }
             Pending::Close { session_id } => {
-                self.state.sessions.remove(&session_id);
-                vec![Change::Session { id: session_id }]
+                let mut gone = self.descendants(&session_id);
+                gone.push(session_id);
+                gone.into_iter()
+                    .map(|id| {
+                        self.state.sessions.remove(&id);
+                        self.closed.insert(id.clone());
+                        Change::Session { id }
+                    })
+                    .collect()
+            }
+            Pending::Delete { session_id } => {
+                self.state
+                    .directory
+                    .retain(|listed| listed.session_id != session_id);
+                vec![Change::Directory, Change::Deleted { session_id }]
             }
             pending @ (Pending::ConfigGet
             | Pending::ConfigTest
@@ -1658,7 +1677,6 @@ impl Client {
             | Pending::Undo { .. }
             | Pending::Prompts { .. }
             | Pending::Rewind { .. }
-            | Pending::Delete { .. }
             | Pending::Fork { .. }
             | Pending::Export { .. }) => session_op_answer(id, pending, result),
             Pending::Fs { session_id } => {
@@ -2023,11 +2041,44 @@ impl Client {
 impl Client {
     /// An undo or rewind replaced the session's conversation: drop the
     /// transcript and agents, which the replay that follows rebuilds.
+    /// The subagent sessions under `session_id`, at any depth.
+    fn descendants(&self, session_id: &str) -> Vec<String> {
+        self.state
+            .sessions
+            .values()
+            .filter(|session| self.is_under(session, session_id))
+            .map(|session| session.id.clone())
+            .collect()
+    }
+
+    /// Whether `session` hangs under `ancestor`. The walk is bounded by
+    /// the session count, so a malformed parent cycle ends it.
+    fn is_under(&self, session: &Session, ancestor: &str) -> bool {
+        let mut parent = session.parent.as_deref();
+        for _ in 0..self.state.sessions.len() {
+            match parent {
+                Some(id) if id == ancestor => return true,
+                Some(id) => {
+                    parent = self
+                        .state
+                        .sessions
+                        .get(id)
+                        .and_then(|s| s.parent.as_deref());
+                }
+                None => return false,
+            }
+        }
+        false
+    }
+
     fn replace_session(
         &mut self,
         session_id: &str,
         replaced: kage_acp_wire::SessionReplacedUpdate,
     ) -> Vec<Change> {
+        for child in self.descendants(session_id) {
+            self.state.sessions.remove(&child);
+        }
         let session = self.session_mut(session_id);
         session.items.clear();
         session.agents.clear();
@@ -2314,7 +2365,6 @@ fn session_op_answer(id: u64, pending: Pending, result: Value) -> Vec<Change> {
             }
         }
         Pending::Rewind { session_id } => vec![Change::Rewound { session_id }],
-        Pending::Delete { session_id } => vec![Change::Deleted { session_id }],
         Pending::Fork { session_id } => {
             match answer::<SessionForkResponse>(id, result, "_kage/session/fork result") {
                 Err(failed) => failed,

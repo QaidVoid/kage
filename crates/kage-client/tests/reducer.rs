@@ -208,6 +208,47 @@ fn the_directory_follows_every_page() {
     assert_eq!(ids, ["r1", "r2"]);
 }
 
+/// Closing a session drops its subagents with it, and a late update
+/// does not bring either back; deleting one drops its directory row.
+#[test]
+fn a_closed_session_takes_its_subagents_and_stays_gone() {
+    let mut client = opened();
+    client.handle(update(
+        "s1",
+        &json!({"sessionUpdate": "subagent_update", "subagentSessionId": "c1", "name": "explore", "state": "running"}),
+    ));
+    client.handle(update(
+        "c1",
+        &json!({"sessionUpdate": "subagent_update", "subagentSessionId": "g1", "name": "explore", "state": "running"}),
+    ));
+    assert!(client.state().session("g1").is_some());
+    let close = client.close_session("s1");
+    client.handle(Frame::Success {
+        id: n(close),
+        result: json!({}),
+    });
+    for id in ["s1", "c1", "g1"] {
+        assert!(client.state().session(id).is_none(), "{id} closed");
+    }
+    let late = json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "late"}});
+    client.handle(update("s1", &late));
+    client.handle(update("c1", &late));
+    assert!(client.state().session("s1").is_none(), "a late update");
+    assert!(client.state().session("c1").is_none(), "a late update");
+
+    let list = client.list_sessions(None, None);
+    client.handle(Frame::Success {
+        id: n(list),
+        result: json!({"sessions": [{"sessionId": "r1", "cwd": "/srv/proj"}]}),
+    });
+    let delete = client.delete_session("r1");
+    client.handle(Frame::Success {
+        id: n(delete),
+        result: json!({}),
+    });
+    assert!(client.state().directory.is_empty());
+}
+
 #[test]
 fn a_reload_replays_history_but_keeps_what_only_the_client_holds() {
     let mut client = opened();

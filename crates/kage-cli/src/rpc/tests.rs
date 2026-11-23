@@ -21,7 +21,6 @@ use kage_core::{
 };
 use kage_jsonrpc::{Inbound, Peer};
 use kage_loop::{AgentContext, LoopConfig};
-use kage_mcp::McpError;
 use kage_provider::testing::MockProvider;
 use kage_provider::{ProviderError, ProviderEvent, ProviderRegistry};
 use kage_session::{
@@ -35,7 +34,7 @@ use crate::permissions::PermissionGate;
 use super::bridge::{to_update, tool_kind, usage_update};
 use super::content::prompt_content;
 use super::host::Host;
-use super::mcp::{prompt_commands, without_login};
+use super::mcp::prompt_commands;
 use super::*;
 
 const WAIT: Duration = Duration::from_secs(20);
@@ -4212,24 +4211,6 @@ fn editor_entries_become_server_specs_and_sse_is_refused() {
         err.message.contains("`old` uses the sse transport"),
         "{}",
         err.message
-    );
-}
-
-#[test]
-fn editor_servers_get_no_login_hint() {
-    let editor = ["ed".to_owned()];
-    let refused = |server: &str| McpError::Unauthorized {
-        server: server.to_owned(),
-        login: true,
-    };
-    assert_eq!(
-        without_login(refused("ed"), &editor).to_string(),
-        "server `ed` needs authorization"
-    );
-    assert!(
-        without_login(refused("conf"), &editor)
-            .to_string()
-            .contains("run kage mcp login conf")
     );
 }
 

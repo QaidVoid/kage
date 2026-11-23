@@ -203,6 +203,29 @@ pub(crate) fn spawn_and_register_with(
     (manager, errors)
 }
 
+/// The MCP servers a session gets from the config, its plugins and
+/// `extra`, configured but not started: the engine brings them up once
+/// the session is open, so opening one never waits on a server.
+pub(crate) fn unstarted_with(
+    workdir: &Path,
+    runtime: Option<&PluginRuntime>,
+    extra: BTreeMap<String, McpServer>,
+    env: Environment,
+) -> McpManager {
+    let handed: Vec<String> = extra.keys().cloned().collect();
+    let mut cfg = merged_config(workdir, runtime);
+    merge_extra(&mut cfg, extra);
+    let handler = sampling_handler(&cfg, workdir, &env);
+    McpManager::unstarted(
+        &cfg,
+        vec![workdir.to_path_buf()],
+        handler,
+        crate::mcp_auth::token_source(),
+        env,
+    )
+    .handed_over(handed)
+}
+
 /// Adds `extra` to `cfg`. An entry replaces the server of the same name,
 /// and stderr says so.
 fn merge_extra(cfg: &mut McpConfig, extra: BTreeMap<String, McpServer>) {

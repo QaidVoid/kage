@@ -236,6 +236,10 @@ pub struct McpManager {
     /// Whether the manager registered [`McpResourceTool`], so it never
     /// unregisters a tool of the same name that it did not add.
     resource_tool: bool,
+    /// Servers the host was handed, such as an editor's, rather than
+    /// configured: `kage mcp login` cannot help them, so their refusals
+    /// carry no login hint.
+    handed: Vec<String>,
 }
 
 impl McpManager {
@@ -320,6 +324,7 @@ impl McpManager {
                 tokens,
                 env,
                 resource_tool: false,
+                handed: Vec::new(),
             },
             errors,
         )
@@ -331,7 +336,8 @@ impl McpManager {
     /// connect MCP afterwards: the servers report
     /// [`McpServerStatus::Starting`] and [`Self::server_names`] still
     /// lists them for the permission gate. `roots`, `handler` and
-    /// `tokens` are kept for those restarts, exactly as in
+    /// `tokens` are kept for those restarts, and `env` is the
+    /// environment stdio servers start with, exactly as in
     /// [`Self::spawn_all_with`].
     #[must_use]
     pub fn unstarted(
@@ -339,6 +345,7 @@ impl McpManager {
         roots: Vec<std::path::PathBuf>,
         handler: Option<Arc<dyn crate::ServerRequestHandler>>,
         tokens: Option<Arc<dyn TokenSource>>,
+        env: Environment,
     ) -> Self {
         let servers = cfg
             .servers
@@ -355,8 +362,9 @@ impl McpManager {
             roots,
             handler,
             tokens,
-            env: Environment::inherit(),
+            env,
             resource_tool: false,
+            handed: Vec::new(),
         }
     }
 
@@ -547,9 +555,6 @@ impl McpManager {
     /// error, or the discovery error from bringing the replacement up
     /// (the previous server stays live).
     pub fn restart(&mut self, name: &str, reg: &mut ToolRegistry) -> Result<(), McpError> {
-        let roots = self.roots.clone();
-        let handler = self.handler.clone();
-        let tokens = self.tokens.clone();
         let managed = self
             .servers
             .iter_mut()
@@ -557,22 +562,99 @@ impl McpManager {
             .map(|(_, m)| m)
             .ok_or_else(|| McpError::Unknown(name.to_owned()))?;
         managed.starting = false;
-        let timeout = managed
-            .spec
+        let spec = managed.spec.clone();
+        let spawned = self.spawn_server(name, &spec);
+        self.install(name, spawned, reg)
+    }
+
+    /// Marks `names` as servers the host was handed rather than
+    /// configured, whose refusals carry no `kage mcp login` hint.
+    #[must_use]
+    pub fn handed_over(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.handed.extend(names);
+        self
+    }
+
+    /// Brings up every server still waiting for its first spawn, the
+    /// slow part side by side, and registers their tools into `reg`.
+    /// Returns the servers that failed, with why; the rest are live.
+    pub fn start_waiting(&mut self, reg: &mut ToolRegistry) -> Vec<(String, McpError)> {
+        let waiting: Vec<(String, McpServer)> = self
+            .servers
+            .iter_mut()
+            .filter(|(_, m)| m.starting)
+            .map(|(name, m)| {
+                m.starting = false;
+                (name.clone(), m.spec.clone())
+            })
+            .collect();
+        let this = &*self;
+        let spawned: Vec<(String, Result<McpServerHandle, McpError>)> =
+            std::thread::scope(|scope| {
+                let starts: Vec<_> = waiting
+                    .iter()
+                    .map(|(name, spec)| (name, scope.spawn(move || this.spawn_server(name, spec))))
+                    .collect();
+                starts
+                    .into_iter()
+                    .map(|(name, start)| {
+                        let spawned = start.join().unwrap_or_else(|_| {
+                            Err(McpError::Protocol {
+                                server: name.clone(),
+                                detail: "its start panicked".to_owned(),
+                            })
+                        });
+                        (name.clone(), spawned)
+                    })
+                    .collect()
+            });
+        spawned
+            .into_iter()
+            .filter_map(|(name, spawned)| {
+                let result = self.install(&name, spawned, reg);
+                result.err().map(|e| (name, e))
+            })
+            .collect()
+    }
+
+    /// Spawns server `name` from `spec` with the roots, handler, tokens
+    /// and environment this manager keeps.
+    fn spawn_server(&self, name: &str, spec: &McpServer) -> Result<McpServerHandle, McpError> {
+        let timeout = spec
             .startup_timeout_secs
             .map_or(INITIALIZE_TIMEOUT, Duration::from_secs);
-        let spawned = McpServerHandle::spawn_with_startup_timeout(
+        McpServerHandle::spawn_with_startup_timeout(
             name.to_owned(),
-            &managed.spec,
-            &roots,
-            handler,
-            tokens,
+            spec,
+            &self.roots,
+            self.handler.clone(),
+            self.tokens.clone(),
             timeout,
             &self.env,
-        );
+        )
+    }
+
+    /// Makes the result of spawning server `name` its live server:
+    /// discovers its tools, resources and prompts and registers them
+    /// into `reg` in place of the previous server's. A failed spawn
+    /// leaves the previous server live, except a refused token.
+    fn install(
+        &mut self,
+        name: &str,
+        spawned: Result<McpServerHandle, McpError>,
+        reg: &mut ToolRegistry,
+    ) -> Result<(), McpError> {
+        let managed = self
+            .servers
+            .iter_mut()
+            .find(|(n, _)| n == name)
+            .map(|(_, m)| m)
+            .ok_or_else(|| McpError::Unknown(name.to_owned()))?;
+        let handed = self.handed.iter().any(|h| h == name);
         let fresh = match spawned {
             Ok(fresh) => fresh,
             Err(e) => {
+                let e = without_login(e, handed);
                 if matches!(e, McpError::Unauthorized { .. }) {
                     managed.evict(reg, &e);
                     self.sync_resource_tool(reg);
@@ -587,6 +669,7 @@ impl McpManager {
             Ok(tools) => tools,
             Err(e) => {
                 drop(fresh);
+                let e = without_login(e, handed);
                 if matches!(e, McpError::Unauthorized { .. }) {
                     managed.evict(reg, &e);
                     self.sync_resource_tool(reg);
@@ -703,6 +786,18 @@ fn register_tools(
         if reg.get(name).is_some() {
             registered.push(name.to_owned());
         }
+    }
+}
+
+/// `err` without the `kage mcp login` hint when the server was
+/// `handed` over rather than configured, so a login cannot help.
+fn without_login(err: McpError, handed: bool) -> McpError {
+    match err {
+        McpError::Unauthorized { server, .. } if handed => McpError::Unauthorized {
+            server,
+            login: false,
+        },
+        other => other,
     }
 }
 
@@ -1034,6 +1129,7 @@ mod tests {
             vec![],
             None,
             Some(Arc::clone(&tokens) as Arc<dyn TokenSource>),
+            Environment::inherit(),
         );
         assert_eq!(mgr.len(), 0);
         assert_eq!(mgr.server_names().collect::<Vec<_>>(), ["broken", "remote"]);
@@ -1319,6 +1415,64 @@ mod tests {
             },
         );
         cfg
+    }
+
+    /// Waiting servers start together: the live one registers its
+    /// tools and the broken one reports why, in one pass.
+    #[test]
+    fn start_waiting_brings_up_every_waiting_server() {
+        let ready = Arc::new(AtomicBool::new(true));
+        let server = guarded_server(Arc::clone(&ready), None);
+        let mut cfg = remote_config(format!("{}/mcp", server.base));
+        cfg.servers.insert(
+            "broken".to_owned(),
+            McpServer {
+                command: Some("definitely-not-a-real-binary-xyz".to_owned()),
+                url: None,
+                ..cfg.servers["remote"].clone()
+            },
+        );
+        let tokens = StaticTokens::new("good", None);
+        let mut mgr = McpManager::unstarted(
+            &cfg,
+            vec![],
+            None,
+            Some(Arc::clone(&tokens) as Arc<dyn TokenSource>),
+            Environment::inherit(),
+        );
+        let mut reg = ToolRegistry::new();
+        let errors = mgr.start_waiting(&mut reg);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].0, "broken");
+        assert!(reg.get("remote__t").is_some());
+        assert_eq!(mgr.starting_names().count(), 0);
+    }
+
+    /// A server the host was handed, such as an editor's, refuses
+    /// without the `kage mcp login` hint, which cannot help it.
+    #[test]
+    fn a_handed_over_server_refuses_without_a_login_hint() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let server = guarded_server(Arc::clone(&ready), None);
+        let tokens = StaticTokens::new("good", None);
+        let mut mgr = McpManager::unstarted(
+            &remote_config(format!("{}/mcp", server.base)),
+            vec![],
+            None,
+            Some(Arc::clone(&tokens) as Arc<dyn TokenSource>),
+            Environment::inherit(),
+        )
+        .handed_over(["remote".to_owned()]);
+        let errors = mgr.start_waiting(&mut ToolRegistry::new());
+        assert!(
+            matches!(&errors[0].1, McpError::Unauthorized { login: false, .. }),
+            "{:?}",
+            errors[0].1
+        );
+        assert!(
+            mgr.error("remote")
+                .is_some_and(|e| !e.contains("kage mcp login"))
+        );
     }
 
     #[test]

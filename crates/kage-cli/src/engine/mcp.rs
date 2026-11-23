@@ -92,10 +92,8 @@ impl super::Dispatcher {
         let tx = self.tx.clone();
         thread::spawn(move || {
             let mut tools = before.clone();
-            for name in &names {
-                if let Err(err) = manager.restart(name, &mut tools) {
-                    restart_failed(&bus, id, name, &err);
-                }
+            for (name, err) in manager.start_waiting(&mut tools) {
+                notice(&bus, id, NoticeLevel::Error, format!("mcp `{name}`: {err}"));
             }
             bus.publish(
                 id,

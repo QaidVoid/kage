@@ -29,7 +29,6 @@ use super::projects::{Project, Projects};
 use super::{
     CliAcpAgent,
     live::{AskRef, Live},
-    mcp,
 };
 use crate::engine::{AgentSetup, Background, Engine, SessionSpec, WithMediaTools as _};
 use crate::permissions::PermissionGate;
@@ -827,20 +826,10 @@ fn session_spec(
         &skills,
         shell.as_deref(),
     );
-    let mut tools =
+    let tools =
         kage_tools::configured_registry(&config.tools, &config.shell).with_media_tools(&config);
     let aliases = tools.alias_map();
-    let editor: Vec<String> = servers.keys().cloned().collect();
-    let (mcp, mcp_errors) = crate::mcp::spawn_and_register_with(
-        &mut tools,
-        &workdir,
-        concrete.as_deref(),
-        servers,
-        env.clone(),
-    );
-    for (server, err) in mcp_errors {
-        eprintln!("kage: mcp `{server}`: {}", mcp::without_login(err, &editor));
-    }
+    let mcp = crate::mcp::unstarted_with(&workdir, concrete.as_deref(), servers, env.clone());
     let (defs, agent_errors) = crate::agents::load(&workdir);
     for err in agent_errors {
         eprintln!("kage: {err}");

@@ -6,7 +6,6 @@ use kage_acp::acp::McpServer;
 use kage_core::config::McpServer as McpSpec;
 use kage_core::protocol::{McpServerInfo, McpServerStatus};
 use kage_jsonrpc::RpcError;
-use kage_mcp::McpError;
 
 /// The MCP servers a client passed, as specs by name.
 ///
@@ -63,20 +62,6 @@ pub(super) fn editor_servers(servers: &[McpServer]) -> Result<BTreeMap<String, M
             )),
         })
         .collect()
-}
-
-/// `err` without the `kage mcp login` hint when it names one of the
-/// `editor`'s servers, which are not configured, so a login cannot help.
-pub(super) fn without_login(err: McpError, editor: &[String]) -> McpError {
-    match err {
-        McpError::Unauthorized { server, .. } if editor.contains(&server) => {
-            McpError::Unauthorized {
-                server,
-                login: false,
-            }
-        }
-        other => other,
-    }
 }
 
 /// One `available_commands_update` entry per prompt of a live server in

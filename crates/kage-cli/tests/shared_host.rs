@@ -806,7 +806,17 @@ fn a_session_starts_its_servers_in_the_environment_of_its_client() {
         );
         assert!(created["result"]["sessionId"].is_string(), "{created}");
     }
-    let seen = |name: &str| std::fs::read_to_string(format!("{}.{name}", out.display())).unwrap();
+    let seen = |name: &str| {
+        let path = format!("{}.{name}", out.display());
+        let deadline = std::time::Instant::now() + WAIT;
+        loop {
+            match std::fs::read_to_string(&path) {
+                Ok(text) if !text.is_empty() => return text,
+                _ if std::time::Instant::now() >= deadline => panic!("server {name} never ran"),
+                _ => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+    };
     assert_eq!(seen("a"), "first");
     assert_eq!(seen("b"), "second");
     assert!(first.close().success());

@@ -4723,7 +4723,13 @@ fn deferred_mcp_manager() -> McpManager {
         "servers": { "broken": { "command": BROKEN_COMMAND } },
     }))
     .unwrap();
-    McpManager::unstarted(&cfg, Vec::new(), None, None)
+    McpManager::unstarted(
+        &cfg,
+        Vec::new(),
+        None,
+        None,
+        kage_core::environment::Environment::inherit(),
+    )
 }
 
 #[test]
@@ -4755,7 +4761,11 @@ fn deferred_mcp_servers_start_after_open() {
                     if matches!(servers[0].status, McpServerStatus::Failed { .. })
             )
     });
-    assert_eq!(restart_notices(&events).len(), 1);
+    let started: Vec<String> = notices(&events)
+        .into_iter()
+        .filter(|n| n.starts_with("mcp `broken`"))
+        .collect();
+    assert_eq!(started.len(), 1, "{started:?}");
 
     // The session came back idle, so a prompt runs.
     prompt(&h.engine, id, "hi", Delivery::Steer);

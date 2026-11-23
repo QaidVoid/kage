@@ -1260,6 +1260,10 @@ struct Pump {
     /// working: a cancel stops them. A session that opens hears its
     /// running commands again, so its list starts over then.
     shells: HashMap<String, Vec<String>>,
+    /// The latest MCP catalog the host sent for each session, so the
+    /// App gets the adopted session's servers even when the catalog
+    /// arrived while it was opening.
+    mcp_catalogs: HashMap<String, Vec<kage_core::protocol::McpServerInfo>>,
     closed: bool,
 }
 
@@ -1412,7 +1416,11 @@ impl Pump {
             _ => None,
         };
         let shell = shell_update(&frame);
+        let catalog = mcp_servers_update(&frame);
         let changes = self.store.absorb(frame);
+        if let Some((wire, servers)) = catalog {
+            self.mcp_catalog(wire, servers);
+        }
         if let Some(wire) = replaced {
             self.reset_child_transcript(&wire);
         }
@@ -2088,6 +2096,17 @@ impl Pump {
             self.mirror_rechecks += 1;
             self.note_session_file();
         }
+    }
+
+    /// Keeps session `wire`'s MCP catalog and shows it when it is the
+    /// session on screen.
+    fn mcp_catalog(&mut self, wire: String, servers: Vec<kage_core::protocol::McpServerInfo>) {
+        if wire == self.wire {
+            self.publish(HostEvent::McpServers {
+                servers: servers.clone(),
+            });
+        }
+        self.mcp_catalogs.insert(wire, servers);
     }
 
     /// Shows a prompt this TUI sent to the main session as its user
@@ -2915,6 +2934,7 @@ impl Pump {
         if !old.is_empty() && old != id {
             self.store.client().close_session(&old);
             self.shells.remove(&old);
+            self.mcp_catalogs.remove(&old);
         }
         self.warned_model = None;
         self.handed = None;
@@ -2953,6 +2973,8 @@ impl Pump {
         self.session_moved(id);
         self.agents_moved(id);
         self.asks_moved(id);
+        let servers = self.mcp_catalogs.get(id).cloned().unwrap_or_default();
+        self.publish(HostEvent::McpServers { servers });
         // What the App asked while this session was opening runs on it
         // now that it exists, in the order it was asked.
         for request in std::mem::take(&mut self.unadopted) {
@@ -4243,6 +4265,19 @@ fn shell_update(frame: &Frame) -> Option<(String, kage_acp::acp::ShellUpdate)> {
     }
 }
 
+/// The session and servers of a `_kage/mcp_servers` update in `frame`.
+fn mcp_servers_update(frame: &Frame) -> Option<(String, Vec<kage_core::protocol::McpServerInfo>)> {
+    let Frame::Notification { method, params } = frame else {
+        return None;
+    };
+    if method != "session/update" || params["update"]["sessionUpdate"] != "_kage/mcp_servers" {
+        return None;
+    }
+    let session = params["sessionId"].as_str()?.to_owned();
+    let servers = serde_json::from_value(params["update"]["servers"].clone()).ok()?;
+    Some((session, servers))
+}
+
 /// The id of the recorded session at `path`: its file stem.
 fn recorded_id(path: &Path) -> Option<String> {
     path.file_stem()?.to_str().map(str::to_owned)
@@ -4616,6 +4651,7 @@ pub(crate) fn run(
         last_mode: None,
         mode_switch: None,
         shells: HashMap::new(),
+        mcp_catalogs: HashMap::new(),
         mirror_rechecks: 0,
         closed: false,
     };
@@ -5172,6 +5208,7 @@ mod tests {
             last_mode: None,
             mode_switch: None,
             shells: HashMap::new(),
+            mcp_catalogs: HashMap::new(),
             mirror_rechecks: 0,
             closed: false,
         };
@@ -6211,6 +6248,33 @@ mod tests {
                 HostEvent::StateChanged { .. } | HostEvent::UsageUpdated { .. }
             )
         )));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The host's MCP catalog for the session on screen reaches the
+    /// App, which `/mcp`, resource mentions and prompt commands read.
+    #[test]
+    fn the_mcp_catalog_reaches_the_app() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        while app.try_recv().is_ok() {}
+        pump.absorb(Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({"sessionId": "s1", "update": {
+                "sessionUpdate": "_kage/mcp_servers",
+                "servers": [{"name": "docs", "status": "connected", "tools": 2}]
+            }}),
+        });
+        let servers = app
+            .try_iter()
+            .find_map(|event| match event.event {
+                kage_core::protocol::Event::Host(HostEvent::McpServers { servers }) => {
+                    Some(servers)
+                }
+                _ => None,
+            })
+            .expect("the catalog is published");
+        assert_eq!(servers[0].name, "docs");
+        assert_eq!(servers[0].tools, 2);
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -8,7 +8,7 @@
 use std::io;
 use std::os::fd::{AsFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use kage_core::CancelFlag;
@@ -23,10 +23,31 @@ const CHECK_INTERVAL: Duration = Duration::from_millis(10);
 struct Shared {
     fd: Mutex<Option<OwnedFd>>,
     closed: AtomicBool,
+    /// How many writes have let go of `fd`, so a writer waiting for it
+    /// wakes on `released_cv` the moment one does, and never misses it.
+    released: Mutex<u64>,
+    released_cv: Condvar,
     #[cfg(test)]
     after_request_write: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     writer_blocked: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+/// Counts a write letting go of the descriptor and wakes the writers
+/// waiting for it. Declared before the descriptor guard, so it drops
+/// after it.
+struct ReleaseNotice<'a>(&'a Shared);
+
+impl Drop for ReleaseNotice<'_> {
+    fn drop(&mut self) {
+        let mut released = self
+            .0
+            .released
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *released = released.wrapping_add(1);
+        self.0.released_cv.notify_all();
+    }
 }
 
 /// Cloneable, frame-serializing pipe writer with cooperative shutdown.
@@ -37,7 +58,8 @@ struct Shared {
 /// control of the open file description: no duplicate may write or change its
 /// flags while this writer exists. The constructor cannot verify exclusivity.
 /// Shutdown and cancellation are checked at most every 10 ms while polling,
-/// subject to OS scheduling. No worker thread is created. As with ordinary Unix
+/// subject to OS scheduling; a writer waiting for another's frame wakes as
+/// soon as that write ends. No worker thread is created. As with ordinary Unix
 /// pipe writes, a process configured to use the default SIGPIPE disposition may
 /// terminate when the pipe's reader closes.
 #[derive(Clone)]
@@ -92,6 +114,8 @@ impl PipeWriter {
         Ok(Self(Arc::new(Shared {
             fd: Mutex::new(Some(fd)),
             closed: AtomicBool::new(false),
+            released: Mutex::new(0),
+            released_cv: Condvar::new(),
             #[cfg(test)]
             after_request_write: Mutex::new(None),
             #[cfg(test)]
@@ -149,6 +173,45 @@ impl PipeWriter {
             .map_err(GuardedWriteError::into_io)
     }
 
+    /// Waits for the descriptor until it is free, the deadline passes,
+    /// `cancel` fires or the writer closes.
+    fn acquire(
+        &self,
+        deadline: Option<Instant>,
+        cancel: Option<&CancelFlag>,
+    ) -> Result<std::sync::MutexGuard<'_, Option<OwnedFd>>, GuardedWriteError> {
+        loop {
+            self.check(deadline, cancel)
+                .map_err(|e| GuardedWriteError::from_check(e, 0))?;
+            let seen = *self
+                .0
+                .released
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            match self.0.fd.try_lock() {
+                Ok(guard) => return Ok(guard),
+                Err(TryLockError::Poisoned(err)) => return Ok(err.into_inner()),
+                Err(TryLockError::WouldBlock) => {
+                    #[cfg(test)]
+                    if let Some(hook) = self.0.writer_blocked.lock().unwrap().take() {
+                        hook();
+                    }
+                    let released = self
+                        .0
+                        .released
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    if *released == seen {
+                        let _ = self
+                            .0
+                            .released_cv
+                            .wait_timeout(released, wait_interval(deadline));
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn write_frame_guarded(
         &self,
         frame: &[u8],
@@ -156,21 +219,8 @@ impl PipeWriter {
         cancel: Option<&CancelFlag>,
         eof: Option<&Mutex<bool>>,
     ) -> Result<(), GuardedWriteError> {
-        let mut guard = loop {
-            self.check(deadline, cancel)
-                .map_err(|e| GuardedWriteError::from_check(e, 0))?;
-            match self.0.fd.try_lock() {
-                Ok(guard) => break guard,
-                Err(TryLockError::Poisoned(err)) => break err.into_inner(),
-                Err(TryLockError::WouldBlock) => {
-                    #[cfg(test)]
-                    if let Some(hook) = self.0.writer_blocked.lock().unwrap().take() {
-                        hook();
-                    }
-                    std::thread::sleep(wait_interval(deadline));
-                }
-            }
-        };
+        let _notice = ReleaseNotice(&self.0);
+        let mut guard = self.acquire(deadline, cancel)?;
         self.check(deadline, cancel)
             .map_err(|e| GuardedWriteError::from_check(e, 0))?;
         let mut written = 0;

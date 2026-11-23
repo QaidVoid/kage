@@ -166,7 +166,7 @@ impl CliAcpAgent {
         if self.disconnecting.load(Ordering::SeqCst) {
             return Err(RpcError::internal("client is disconnecting"));
         }
-        if fence.is_some_and(|fence| fence.closed.load(Ordering::SeqCst)) {
+        if fence.is_some_and(OpenFence::is_closed) {
             return Err(RpcError::new(
                 -32602,
                 "the session was closed before it finished opening",

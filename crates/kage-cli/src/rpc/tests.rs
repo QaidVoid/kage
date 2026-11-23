@@ -9271,6 +9271,68 @@ impl Agent for FencedAgent {
     }
 }
 
+/// A close dispatched after a native resume waits for the resume to
+/// finish and then closes what it opened, instead of failing on an
+/// unknown session and leaving the resume attached.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_native_close_waits_for_a_resume_dispatched_before_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let session = record(
+        dir.path(),
+        &cwd,
+        "mock/m",
+        1,
+        &[message(Role::User, vec![text("hello")], None)],
+    );
+    let host = test_host(
+        Arc::new(Listed::of(MockProvider::sequence(vec![]))),
+        dir.path().to_path_buf(),
+        dir.path().to_path_buf(),
+        false,
+    );
+    let (peer, _, _) = kage_jsonrpc::connect(std::io::empty(), std::io::sink());
+    let agent = Arc::new(CliAcpAgent::new(Arc::clone(&host), peer.into()));
+    let (entered_tx, entered) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    let (mut wire, rx) = serve_raw(FencedAgent {
+        inner: Arc::clone(&agent),
+        resume_entered: entered_tx,
+        resume_release: Mutex::new(Some(release_rx)),
+        close_release: Mutex::new(None),
+    });
+    writeln!(
+        wire,
+        "{}\n{}",
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"session/resume","params":{"sessionId":session,"cwd":cwd,"mcpServers":[]}}),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"session/close","params":{"sessionId":session}}),
+    )
+    .unwrap();
+    entered.recv_timeout(WAIT).unwrap();
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "the close waits for the resume"
+    );
+    release.send(()).unwrap();
+    let mut answers = [
+        rx.recv_timeout(WAIT).unwrap(),
+        rx.recv_timeout(WAIT).unwrap(),
+    ];
+    answers.sort_by_key(|(id, _)| *id);
+    assert!(answers[0].1["result"].is_object(), "{}", answers[0].1);
+    assert_eq!(
+        answers[1].1["result"],
+        serde_json::json!({}),
+        "{}",
+        answers[1].1
+    );
+    assert!(lock(&agent.ids).by_client.is_empty());
+    assert!(lock(&agent.ids).opening.is_empty());
+    drop(wire);
+    agent.detach();
+}
+
 /// Serves `agent` and returns a raw writer and a reader of responses by id,
 /// so tests control the exact order of messages on the wire.
 #[cfg(target_os = "linux")]

@@ -371,7 +371,29 @@ struct Ids {
     external: HashSet<String>,
     /// Loads and resumes dispatched and not yet finished, by session, so a
     /// later close can stop them from attaching.
-    opening: HashMap<String, Vec<Arc<AtomicBool>>>,
+    opening: HashMap<String, Vec<Arc<Opening>>>,
+}
+
+/// One load or resume in flight, as the closes dispatched after it see it.
+#[derive(Default)]
+struct Opening {
+    /// Set by a close dispatched after the open.
+    closed: AtomicBool,
+    /// Set once the open finished, attached or not.
+    finished: Mutex<bool>,
+    finished_cv: std::sync::Condvar,
+}
+
+impl Opening {
+    fn wait_finished(&self) {
+        let mut finished = lock(&self.finished);
+        while !*finished {
+            finished = self
+                .finished_cv
+                .wait(finished)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
 }
 
 impl Ids {
@@ -438,29 +460,42 @@ impl Drop for ExternalOpen {
 }
 
 /// A load or resume dispatched on this connection. A close dispatched after
-/// it marks it closed, so it cannot attach to an external session later.
+/// it marks it closed, so it cannot attach to an external session later,
+/// and a native close waits for it to finish before closing what it
+/// opened.
 struct OpenFence {
     ids: Arc<Mutex<Ids>>,
     id: String,
-    closed: Arc<AtomicBool>,
+    opening: Arc<Opening>,
+}
+
+impl OpenFence {
+    fn is_closed(&self) -> bool {
+        self.opening.closed.load(Ordering::SeqCst)
+    }
 }
 
 impl Drop for OpenFence {
     fn drop(&mut self) {
-        let mut ids = lock(&self.ids);
-        if let Some(fences) = ids.opening.get_mut(&self.id) {
-            fences.retain(|fence| !Arc::ptr_eq(fence, &self.closed));
-            if fences.is_empty() {
-                ids.opening.remove(&self.id);
+        {
+            let mut ids = lock(&self.ids);
+            if let Some(fences) = ids.opening.get_mut(&self.id) {
+                fences.retain(|fence| !Arc::ptr_eq(fence, &self.opening));
+                if fences.is_empty() {
+                    ids.opening.remove(&self.id);
+                }
             }
         }
+        *lock(&self.opening.finished) = true;
+        self.opening.finished_cv.notify_all();
     }
 }
 
 /// Which close a fenced `session/close` already performed at dispatch.
 enum CloseFence {
     External,
-    Native,
+    /// A native close, after the opens dispatched before it finish.
+    Native(Vec<Arc<Opening>>),
 }
 
 struct PreparedExternalPrompt {
@@ -843,16 +878,16 @@ impl CliAcpAgent {
 
     /// Registers a load or resume of `id` that a later close can fence.
     fn open_fence(&self, id: &str) -> OpenFence {
-        let closed = Arc::new(AtomicBool::new(false));
+        let opening = Arc::new(Opening::default());
         lock(&self.ids)
             .opening
             .entry(id.to_owned())
             .or_default()
-            .push(Arc::clone(&closed));
+            .push(Arc::clone(&opening));
         OpenFence {
             ids: Arc::clone(&self.ids),
             id: id.to_owned(),
-            closed,
+            opening,
         }
     }
 
@@ -904,7 +939,7 @@ impl CliAcpAgent {
         if self.disconnecting.load(Ordering::SeqCst) {
             return Err(RpcError::internal("client is disconnecting"));
         }
-        if fence.is_some_and(|fence| fence.closed.load(Ordering::SeqCst)) {
+        if fence.is_some_and(OpenFence::is_closed) {
             return Err(RpcError::new(
                 -32602,
                 "the session was closed before it finished opening",
@@ -1275,15 +1310,15 @@ impl Agent for CliAcpAgent {
     /// attachment before any later prompt or cancellation is dispatched.
     /// Releasing never blocks. Native sessions still close on the worker.
     fn fence_close(&self, req: &CloseSessionRequest) -> Option<Box<dyn std::any::Any + Send>> {
-        let fenced = lock(&self.ids)
+        let opens = lock(&self.ids)
             .opening
             .get(&req.session_id)
-            .is_some_and(|fences| {
-                for fence in fences {
-                    fence.store(true, Ordering::SeqCst);
-                }
-                true
-            });
+            .cloned()
+            .unwrap_or_default();
+        for open in &opens {
+            open.closed.store(true, Ordering::SeqCst);
+        }
+        let fenced = !opens.is_empty();
         // A close that stopped a pending resume of an external session
         // took effect, so it answers like a release.
         let fence = if self.release_external(&req.session_id)
@@ -1293,7 +1328,7 @@ impl Agent for CliAcpAgent {
         {
             CloseFence::External
         } else {
-            CloseFence::Native
+            CloseFence::Native(opens)
         };
         Some(Box::new(fence))
     }
@@ -1306,7 +1341,12 @@ impl Agent for CliAcpAgent {
         match fence.and_then(|fence| fence.downcast::<CloseFence>().ok()) {
             Some(fence) => match *fence {
                 CloseFence::External => Ok(CloseSessionResponse {}),
-                CloseFence::Native => self.close_native(&req),
+                CloseFence::Native(opens) => {
+                    for open in opens {
+                        open.wait_finished();
+                    }
+                    self.close_native(&req)
+                }
             },
             None => self.close_session(req),
         }

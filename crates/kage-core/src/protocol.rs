@@ -233,6 +233,10 @@ pub enum HostEvent {
     /// on its way: the main view stays where it was. The engine never
     /// emits it. Live.
     OpenFailed,
+    /// A compaction a client was shown starting ended, finished or given
+    /// up; its record, if any, reaches the transcript on its own. The
+    /// engine never emits it: it sends [`LoopEvent::Compaction`]. Live.
+    CompactionEnded,
     /// The session title was set or generated. Durable.
     TitleChanged {
         /// New title.

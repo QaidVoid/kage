@@ -273,6 +273,20 @@ mod tests {
         assert!(app.opening.is_none());
     }
 
+    /// The end of a compaction the connection reported clears the
+    /// "Compacting" indicator.
+    #[test]
+    fn a_compaction_end_clears_the_indicator() {
+        let mut app = App::new(crate::events::shared_buffer(), std::sync::mpsc::channel().0);
+        app.compacting = Some((7, 3));
+        app.apply_envelope(kage_core::protocol::Envelope {
+            session: kage_core::SessionId::new(),
+            seq: 0,
+            event: kage_core::protocol::HostEvent::CompactionEnded.into(),
+        });
+        assert!(app.compacting.is_none());
+    }
+
     /// Events the session left published before the switch still land
     /// in its buffer: the new buffer is drawn only once the adoption
     /// arrives, in order.

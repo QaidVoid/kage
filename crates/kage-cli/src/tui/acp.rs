@@ -1485,7 +1485,15 @@ impl Pump {
         };
         let shell = shell_update(&frame);
         let catalog = mcp_servers_update(&frame);
+        let finished_call = finished_tool_call(&frame).is_some_and(|wire| wire == self.wire);
+        let compaction = compaction_update(&frame).filter(|(wire, _)| *wire == self.wire);
         let changes = self.store.absorb(frame);
+        if finished_call {
+            self.annotate_edits();
+        }
+        if let Some((_, update)) = compaction {
+            self.compaction_moved(&update);
+        }
         if let Some((wire, servers)) = catalog {
             self.mcp_catalog(wire, servers);
         }
@@ -2189,6 +2197,29 @@ impl Pump {
             });
         }
         self.mcp_catalogs.insert(wire, servers);
+    }
+
+    /// Shows the main session compacting while it does, the way the
+    /// engine path's `CompactionStarted` does; the card itself is the
+    /// store's.
+    fn compaction_moved(&mut self, update: &kage_acp::acp::CompactionUpdate) {
+        if update.phase == kage_acp::acp::CompactionPhase::Started {
+            let count = |n: Option<u64>| usize::try_from(n.unwrap_or(0)).unwrap_or(0);
+            self.publish(LoopEvent::CompactionStarted {
+                summarized: count(update.summarized),
+                kept: count(update.kept),
+            });
+        } else {
+            self.publish(HostEvent::CompactionEnded);
+        }
+    }
+
+    /// Gives the main session's finished edits line diffs read from
+    /// their files, as the engine path does when a call ends.
+    fn annotate_edits(&mut self) {
+        let cwd = PathBuf::from(&self.cwd);
+        lock(&self.store.shared_buffer(&self.wire))
+            .annotate_edits(|path| std::fs::read_to_string(cwd.join(path)).ok());
     }
 
     /// Shows a prompt this TUI sent to the main session as its user
@@ -3015,6 +3046,7 @@ impl Pump {
         // keep it loaded for a TUI that moved on.
         if !old.is_empty() && old != id {
             self.store.client().close_session(&old);
+            self.store.forget_session(&old);
             self.shells.remove(&old);
             self.mcp_catalogs.remove(&old);
         }
@@ -3326,12 +3358,13 @@ impl Pump {
         } else {
             Vec::new()
         };
+        let input = crate::runtime_env::input_for(&self.registry, &model);
         SessionState {
             model,
             thinking,
             thinking_effective: thinking,
             thinking_levels,
-            input: kage_core::Modalities::default(),
+            input,
             permission_mode,
             working: session.running || session.compacting || shells > 0,
             swarm: option("swarm").as_deref() == Some("on"),
@@ -4411,6 +4444,37 @@ fn shell_update(frame: &Frame) -> Option<(String, kage_acp::acp::ShellUpdate)> {
         } => Some((session_id, update)),
         _ => None,
     }
+}
+
+/// The session and update of a compaction in `frame`.
+fn compaction_update(frame: &Frame) -> Option<(String, kage_acp::acp::CompactionUpdate)> {
+    let Frame::Notification { method, params } = frame else {
+        return None;
+    };
+    if method != "session/update" || params["update"]["sessionUpdate"] != "_kage/compaction" {
+        return None;
+    }
+    match serde_json::from_value::<SessionNotification>(params.clone()).ok()? {
+        SessionNotification {
+            session_id,
+            update: SessionUpdate::Compaction(update),
+        } => Some((session_id, update)),
+        _ => None,
+    }
+}
+
+/// The session of a tool call that completed in `frame`.
+fn finished_tool_call(frame: &Frame) -> Option<String> {
+    let Frame::Notification { method, params } = frame else {
+        return None;
+    };
+    let update = &params["update"];
+    let kind = update["sessionUpdate"].as_str()?;
+    (method == "session/update"
+        && matches!(kind, "tool_call" | "tool_call_update")
+        && update["status"] == "completed")
+        .then(|| params["sessionId"].as_str().map(str::to_owned))
+        .flatten()
 }
 
 /// The session and servers of a `_kage/mcp_servers` update in `frame`.
@@ -6469,6 +6533,69 @@ mod tests {
         assert_eq!(servers[0].name, "docs");
         assert_eq!(servers[0].tools, 2);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A finished edit of the main session gets its line diff from the
+    /// file, so the card shows where in the file it changed.
+    #[test]
+    fn a_finished_edit_gets_its_file_diff() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        std::fs::write(dir.join("a.txt"), "one\nTWO\nthree\n").unwrap();
+        pump.cwd = dir.display().to_string();
+        let tool = |status: &str| Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({"sessionId": "s1", "update": {
+                "sessionUpdate": if status == "in_progress" { "tool_call" } else { "tool_call_update" },
+                "toolCallId": "e1",
+                "title": "edit",
+                "kind": "edit",
+                "status": status,
+                "rawInput": {"path": "a.txt", "old_string": "two", "new_string": "TWO"},
+            }}),
+        };
+        pump.absorb(tool("in_progress"));
+        pump.absorb(tool("completed"));
+        let buffer = pump.store.shared_buffer("s1");
+        let has_diff = lock(&buffer).blocks().iter().any(|block| {
+            matches!(block.as_ref(), kage_tui::Block::ToolCall { name, diff: Some(_), .. } if name == "edit")
+        });
+        assert!(has_diff);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A compaction of the main session shows while it runs: its start
+    /// as the engine path's `CompactionStarted`, its end as
+    /// `CompactionEnded`.
+    #[test]
+    fn a_compaction_shows_while_it_runs() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let compaction = |fields: serde_json::Value| {
+            let mut update = serde_json::json!({"sessionUpdate": "_kage/compaction"});
+            for (key, value) in fields.as_object().unwrap() {
+                update[key] = value.clone();
+            }
+            Frame::Notification {
+                method: "session/update".into(),
+                params: serde_json::json!({"sessionId": "s1", "update": update}),
+            }
+        };
+        while app.try_recv().is_ok() {}
+        pump.absorb(compaction(
+            serde_json::json!({"phase": "started", "summarized": 7, "kept": 3}),
+        ));
+        assert!(app.try_iter().any(|event| matches!(
+            event.event,
+            kage_core::protocol::Event::Loop(LoopEvent::CompactionStarted {
+                summarized: 7,
+                kept: 3
+            })
+        )));
+        pump.absorb(compaction(serde_json::json!({"phase": "aborted"})));
+        assert!(app.try_iter().any(|event| matches!(
+            event.event,
+            kage_core::protocol::Event::Host(HostEvent::CompactionEnded)
+        )));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A second `/new` while one is opening adds nothing: the session

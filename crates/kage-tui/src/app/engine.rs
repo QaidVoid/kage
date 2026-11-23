@@ -83,6 +83,10 @@ impl App {
             self.opening = None;
             return;
         }
+        if let Event::Host(HostEvent::CompactionEnded) = &envelope.event {
+            self.compacting = None;
+            return;
+        }
         if let Event::Host(
             HostEvent::SessionChanged { .. }
             | HostEvent::TitleChanged { .. }
@@ -244,28 +248,32 @@ impl App {
         }
     }
 
+    /// Show the main session's new model, thinking, mode and working
+    /// state in the status line and footer.
+    fn state_changed(&mut self, state: kage_core::protocol::SessionState) {
+        if let Some(model) = &self.status_model {
+            lock(model).clone_from(&state.model);
+        }
+        if let Some(usage) = &self.session_usage {
+            let mut usage = lock(usage);
+            usage.model = state.model;
+            usage.thinking_level = state.thinking_effective;
+            usage.thinking_auto = state.thinking.is_none();
+            usage.thinking_levels = state.thinking_levels;
+            usage.input = state.input;
+            usage.permission_mode = state.permission_mode;
+            usage.swarm = state.swarm;
+            usage.plan = state.plan;
+            usage.shells = state.shells;
+            usage.working = state.working;
+            usage.modes = state.modes;
+            usage.mode_value = state.mode_value;
+        }
+    }
+
     fn apply_host_event(&mut self, event: HostEvent) {
         match event {
-            HostEvent::StateChanged { state } => {
-                if let Some(model) = &self.status_model {
-                    lock(model).clone_from(&state.model);
-                }
-                if let Some(usage) = &self.session_usage {
-                    let mut usage = lock(usage);
-                    usage.model = state.model;
-                    usage.thinking_level = state.thinking_effective;
-                    usage.thinking_auto = state.thinking.is_none();
-                    usage.thinking_levels = state.thinking_levels;
-                    usage.input = state.input;
-                    usage.permission_mode = state.permission_mode;
-                    usage.swarm = state.swarm;
-                    usage.plan = state.plan;
-                    usage.shells = state.shells;
-                    usage.working = state.working;
-                    usage.modes = state.modes;
-                    usage.mode_value = state.mode_value;
-                }
-            }
+            HostEvent::StateChanged { state } => self.state_changed(state),
             HostEvent::UsageUpdated { usage: totals } => {
                 if let Some(usage) = &self.session_usage {
                     let mut usage = lock(usage);
@@ -342,6 +350,7 @@ impl App {
             | HostEvent::PromptList { .. }
             | HostEvent::SessionAdopted
             | HostEvent::OpenFailed
+            | HostEvent::CompactionEnded
             | HostEvent::TitleChanged { .. }
             | HostEvent::AgentSpawned { .. }
             | HostEvent::AgentPaused { .. } => {}
@@ -561,6 +570,7 @@ impl App {
             | HostEvent::SessionChanged { .. }
             | HostEvent::SessionAdopted
             | HostEvent::OpenFailed
+            | HostEvent::CompactionEnded
             | HostEvent::McpServers { .. }
             | HostEvent::AgentPaused { .. }
             // Only the main session asks questions.

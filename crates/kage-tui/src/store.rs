@@ -112,6 +112,12 @@ impl Store {
         fresh
     }
 
+    /// Drops the buffer of `session_id`, a session this side closed.
+    /// Handles taken before keep its blocks.
+    pub fn forget_session(&mut self, session_id: &str) {
+        self.buffers.remove(session_id);
+    }
+
     /// Ends every still-running tool call in every buffer: the
     /// connection closed, so no update will finish them.
     pub fn interrupt_running(&mut self) {
@@ -174,7 +180,9 @@ fn apply_update(buf: &mut Buffer, update: &SessionUpdate) {
                 call.title.clone(),
                 call.raw_input.clone().unwrap_or(Value::Null),
             );
-            set_status(buf, &call.tool_call_id, Some(call.status));
+            if !is_terminal(Some(call.status)) {
+                set_status(buf, &call.tool_call_id, Some(call.status));
+            }
             land_result(
                 buf,
                 &call.tool_call_id,
@@ -196,10 +204,12 @@ fn apply_update(buf: &mut Buffer, update: &SessionUpdate) {
                     }
                 }
             }
-            set_status(buf, &update.tool_call_id, update.status);
-            let output = content_text(&update.content);
-            if !output.is_empty() {
-                buf.set_tool_progress(&update.tool_call_id, output);
+            if !is_terminal(update.status) {
+                set_status(buf, &update.tool_call_id, update.status);
+                let output = content_text(&update.content);
+                if !output.is_empty() {
+                    buf.set_tool_progress(&update.tool_call_id, output);
+                }
             }
             land_result(
                 buf,
@@ -322,7 +332,8 @@ fn push_media(buf: &mut Buffer, content: &ContentBlock) {
 
 /// Move the call to the phase its wire status renders as. A status
 /// this build does not know stays queued, so an unknown state cannot
-/// look like a result.
+/// look like a result. A running call stays as it started, so its timer
+/// keeps counting.
 fn set_status(buf: &mut Buffer, call_id: &str, status: Option<ToolCallStatus>) {
     let Some(status) = status else {
         return;
@@ -333,12 +344,25 @@ fn set_status(buf: &mut Buffer, call_id: &str, status: Option<ToolCallStatus>) {
         ToolCallStatus::Completed => ToolPhase::Done,
         ToolCallStatus::Failed => ToolPhase::Failed,
     };
+    if phase == ToolPhase::Running && buf.tool_phase(call_id) == Some(ToolPhase::Running) {
+        return;
+    }
     buf.set_tool_phase(call_id, phase);
+}
+
+/// Whether `status` ends the call. Its result sets the final phase,
+/// which keeps a denial a denial rather than a failure.
+fn is_terminal(status: Option<ToolCallStatus>) -> bool {
+    matches!(
+        status,
+        Some(ToolCallStatus::Completed | ToolCallStatus::Failed)
+    )
 }
 
 /// Push the call's result once its status says it has one, then the
 /// image and audio its content carried, as the engine path does after
-/// a result.
+/// a result. Only an open call takes one, so a repeated terminal
+/// update adds nothing.
 fn land_result(
     buf: &mut Buffer,
     call_id: &str,
@@ -349,7 +373,9 @@ fn land_result(
     let Some(status) = status else {
         return;
     };
-    if !matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed) {
+    if !matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed)
+        || buf.tool_phase(call_id).is_none()
+    {
         return;
     }
     buf.push_tool_result_with_duration(
@@ -890,6 +916,75 @@ mod tests {
             3 * MAX_BLOCKS,
             "every frame folds; the renderer compacts at draw, as on the engine path"
         );
+    }
+
+    fn running_call(store: &mut Store) {
+        store.absorb(update(
+            "s1",
+            "tool_call",
+            &json!({
+                "toolCallId": "c1",
+                "title": "shell",
+                "kind": "execute",
+                "status": "in_progress",
+                "rawInput": {"command": "ls"},
+            }),
+        ));
+    }
+
+    fn finished(status: &str) -> Frame {
+        update(
+            "s1",
+            "tool_call_update",
+            &json!({
+                "toolCallId": "c1",
+                "status": status,
+                "content": [{"type": "content", "content": {"type": "text", "text": "out"}}],
+            }),
+        )
+    }
+
+    /// A call the user denied stays denied when its failure arrives,
+    /// and its output lands once, in the result, not also as progress.
+    #[test]
+    fn a_denied_call_stays_denied_and_its_output_lands_once() {
+        let mut store = Store::new();
+        running_call(&mut store);
+        let handle = store.shared_buffer("s1");
+        lock(&handle).set_tool_phase("c1", crate::view::tool_view::ToolPhase::Denied);
+        store.absorb(finished("failed"));
+        store.absorb(finished("failed"));
+        let buffer = lock(&handle);
+        let blocks = buffer.blocks();
+        let Block::ToolCall {
+            phase, progress, ..
+        } = blocks[0].as_ref()
+        else {
+            panic!("expected the call, got {:#?}", blocks[0]);
+        };
+        assert_eq!(*phase, crate::view::tool_view::ToolPhase::Denied);
+        assert!(progress.is_empty(), "{progress}");
+        assert_eq!(kinds(&buffer), ["call:shell", "result:shell"], "one result");
+    }
+
+    /// A progress update on a running call keeps the time it started.
+    #[test]
+    fn progress_keeps_a_running_calls_start() {
+        let mut store = Store::new();
+        running_call(&mut store);
+        let handle = store.shared_buffer("s1");
+        let started = |buffer: &Buffer| match buffer.blocks()[0].as_ref() {
+            Block::ToolCall { started_at, .. } => *started_at,
+            other => panic!("expected the call, got {other:#?}"),
+        };
+        let before = started(&lock(&handle));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store.absorb(update(
+            "s1",
+            "tool_call_update",
+            &json!({"toolCallId": "c1", "status": "in_progress"}),
+        ));
+        assert_eq!(started(&lock(&handle)), before);
     }
 
     #[test]

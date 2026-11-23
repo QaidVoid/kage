@@ -426,14 +426,17 @@ const TICK: Duration = Duration::from_millis(20);
 const FRAMES_PER_PASS: usize = 64;
 
 /// Writes the runs the pump reports to the saved state, one at a time
-/// and off the pump thread: the model the last run used, and the
-/// auth failures the run outcomes clear or add. Ends with its queue.
+/// and off the pump thread: the model the last run used (never an
+/// external agent pick, which is no model), and the auth failures the
+/// run outcomes clear or add. Ends with its queue.
 fn start_run_recorder(runs: mpsc::Receiver<(String, RunOutcome)>) {
     let spawned = thread::Builder::new()
         .name("kage-acp-state".to_owned())
         .spawn(move || {
             for (model, outcome) in runs {
-                let _ = crate::state::record_last_model(&model);
+                if external_agent(&model).is_none() {
+                    let _ = crate::state::record_last_model(&model);
+                }
                 let _ = crate::state::record_run_outcome(&model, &outcome);
             }
         });
@@ -1250,6 +1253,9 @@ struct Pump {
     /// reset on the store side (a replaced session) swaps the object,
     /// which is when the App must be handed the new one.
     handed: Option<SharedBuffer>,
+    /// The model a session opening for a model pick takes once it is
+    /// adopted; until then the session on screen keeps its own.
+    pending_model: Option<String>,
     /// What startup wrote before any session existed: config, plugin
     /// and state errors. Carried into the first adopted session.
     startup_notes: Option<SharedBuffer>,
@@ -1658,6 +1664,7 @@ impl Pump {
         if let Some((id, new)) = adopted {
             self.adopt(&id, new);
         } else if self.pending_new.is_none() && self.pending_open.is_none() {
+            self.pending_model = None;
             self.publish(HostEvent::OpenFailed);
             // No session opened and none is on its way, the first or the
             // one a switch asked for: the work held for it goes back to
@@ -1767,6 +1774,16 @@ impl Pump {
     /// Asks the agent for a new session, whose answer adopts the wire.
     /// An `acp:<name>` model opens a persistent external session on the
     /// configured agent instead of an engine session.
+    /// Opens a new session on `model`, which becomes the model in use
+    /// only once that session is adopted, so a failed open leaves the
+    /// session on screen and its model as they were.
+    fn open_on(&mut self, model: String) {
+        self.stop_for_switch();
+        let kept = std::mem::replace(&mut self.model, model);
+        self.request_new_session();
+        self.pending_model = Some(std::mem::replace(&mut self.model, kept));
+    }
+
     /// Stops the run of the session the App is leaving as soon as the
     /// switch is asked for, so it does not stream on while the next
     /// session opens.
@@ -1848,9 +1865,6 @@ impl Pump {
             return false;
         }
         match request {
-            RunRequest::SwitchModel(model) => {
-                external_agent(model).is_none() && self.refuse_external()
-            }
             RunRequest::SetThinkingLevel(level) => {
                 let Some(option) = self.config_option("thinking") else {
                     return self.refuse_external();
@@ -3038,6 +3052,9 @@ impl Pump {
             let _ = self.recorder.send((self.model.clone(), outcome.clone()));
             self.publish(HostEvent::RunEnded { outcome });
         }
+        if let Some(model) = self.pending_model.take() {
+            self.model = model;
+        }
         let old = std::mem::replace(&mut self.wire, id.to_owned());
         self.app_session = ulid::Ulid::from_string(id).map_or_else(|_| SessionId::new(), SessionId);
         *lock(&self.main_view) = self.app_session;
@@ -3560,10 +3577,10 @@ impl Pump {
             RunRequest::SwitchModel(model) => {
                 // An external agent is a different backend, not a
                 // model: it opens as a session of its own, like the
-                // desktop's new-session pick.
-                if let Some(agent) = external_agent(&model).map(str::to_owned) {
-                    self.model = model;
-                    self.request_external_session(&agent);
+                // desktop's new-session pick, and leaving one for a
+                // kage model opens a kage session.
+                if external_agent(&model).is_some() || self.external().is_some() {
+                    self.open_on(model);
                 } else {
                     self.model.clone_from(&model);
                     self.set_option("model", &model);
@@ -4867,6 +4884,7 @@ pub(crate) fn run(
         seq: 0,
         running: false,
         handed: None,
+        pending_model: None,
         startup_notes: Some(buffer.clone()),
         last_keymap: None,
         forwarded: HashSet::new(),
@@ -5427,6 +5445,7 @@ mod tests {
             seq: 0,
             running: false,
             handed: None,
+            pending_model: None,
             startup_notes: None,
             last_keymap: None,
             forwarded: HashSet::new(),
@@ -8563,7 +8582,6 @@ kage.on('should_stop_after_turn', function(ev) return true end)
             id: new,
             result: serde_json::json!({"sessionId": "ext1", "configOptions": []}),
         });
-        pump.handle(RunRequest::SwitchModel("anthropic/claude".to_owned()));
         pump.handle(RunRequest::CompactNow);
         pump.handle(RunRequest::SetPermissionMode(Some(
             kage_core::permissions::PermissionAction::Allow,
@@ -8579,8 +8597,56 @@ kage.on('should_stop_after_turn', function(ev) return true end)
             .filter(|(level, _)| *level == NoticeLevel::Warning)
             .map(|(_, text)| text)
             .collect();
-        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
         assert!(warnings.iter().all(|text| text.contains("reviewer")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Picking a kage model on an external agent session opens a kage
+    /// session on it; the pick becomes the model in use only once that
+    /// session opens, and never counts as the last model while external.
+    #[test]
+    fn a_kage_model_pick_leaves_an_external_session() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.model = "acp:reviewer".to_owned();
+        pump.request_new_session();
+        let new = request_id(&pump.store.take_outgoing(), "session/new");
+        pump.absorb(Frame::Success {
+            id: new,
+            result: serde_json::json!({"sessionId": "ext1", "configOptions": []}),
+        });
+        pump.handle(RunRequest::SwitchModel("test:other".to_owned()));
+        let sent = pump.store.take_outgoing();
+        let params = request_params(&sent, "session/new");
+        assert!(
+            params["_meta"]["kage"]["externalAgent"].is_null(),
+            "{params}"
+        );
+        assert_eq!(params["_meta"]["kage"]["model"], "test:other");
+        assert_eq!(pump.model, "acp:reviewer", "kept until the session opens");
+        let id = request_id(&sent, "session/new");
+        pump.absorb(Frame::Success {
+            id,
+            result: serde_json::json!({"sessionId": "native1", "configOptions": []}),
+        });
+        assert_eq!(pump.model, "test:other");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A model pick whose session fails to open leaves the model in use
+    /// as it was, so the next `/new` does not open the failed pick.
+    #[test]
+    fn a_failed_model_pick_keeps_the_model_in_use() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.model = "test:model".to_owned();
+        pump.handle(RunRequest::SwitchModel("acp:reviewer".to_owned()));
+        let new = request_id(&pump.store.take_outgoing(), "session/new");
+        pump.absorb(Frame::Failure {
+            id: new,
+            error: RpcError::invalid_params("no such agent"),
+        });
+        assert_eq!(pump.model, "test:model");
+        assert!(pump.pending_model.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

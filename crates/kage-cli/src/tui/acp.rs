@@ -723,16 +723,27 @@ struct PluginSurface {
     workdir: PathBuf,
     /// Raised when the connection ends, so no tool call runs on.
     cancel: CancelFlag,
-    /// The flag tool calls run under: raised by `Esc` and cleared as
-    /// each call starts, and it reads cancelled whenever `cancel` is.
-    turn: CancelFlag,
+    /// The flag the tool calls queued from now on run under, a child of
+    /// `cancel`. `Esc` raises it and puts a fresh one in its place, so
+    /// it stops the calls queued before it and no later one.
+    turn: Arc<Mutex<CancelFlag>>,
 }
 
-/// One plugin reverse request waiting for the worker.
+/// The threads answering plugin reverse requests: tool calls, which a
+/// Lua tool may hold for as long as it runs, apart from the snapshot,
+/// hook, event and drain requests, so those never wait behind a call.
+struct PluginWorkers {
+    calls: mpsc::Sender<PluginJob>,
+    rest: mpsc::Sender<PluginJob>,
+}
+
+/// One plugin reverse request waiting for a worker.
 struct PluginJob {
     id: RequestId,
     method: String,
     params: Value,
+    /// The flag a tool call runs under, taken when it was queued.
+    turn: CancelFlag,
 }
 
 /// What the worker answers a [`PluginJob`] with.
@@ -741,7 +752,7 @@ type PluginAnswer = (RequestId, Result<Value, RpcError>);
 impl PluginSurface {
     fn new(runtime: Arc<PluginRuntime>, workdir: PathBuf) -> Self {
         let cancel = CancelFlag::new();
-        let turn = cancel.child();
+        let turn = Arc::new(Mutex::new(cancel.child()));
         Self {
             runtime,
             workdir,
@@ -750,21 +761,43 @@ impl PluginSurface {
         }
     }
 
-    /// Starts the thread that answers plugin requests in arrival
-    /// order, which a Lua tool may hold for as long as it runs. It
-    /// ends with the returned queue.
+    /// The flag a tool call queued now runs under.
+    fn current_turn(&self) -> CancelFlag {
+        lock(&self.turn).clone()
+    }
+
+    /// Stops the tool calls queued so far, running or waiting, and
+    /// leaves later ones a fresh flag.
+    fn cancel_turn(&self) {
+        let mut turn = lock(&self.turn);
+        turn.cancel();
+        *turn = self.cancel.child();
+    }
+
+    /// Starts the threads that answer plugin requests, each in arrival
+    /// order. They end with the returned queues.
+    fn start_workers(
+        &self,
+        answers: &crossbeam_channel::Sender<PluginAnswer>,
+    ) -> Result<PluginWorkers, String> {
+        Ok(PluginWorkers {
+            calls: self.start_worker("kage-acp-plugin-calls", answers.clone())?,
+            rest: self.start_worker("kage-acp-plugins", answers.clone())?,
+        })
+    }
+
     fn start_worker(
         &self,
+        name: &str,
         answers: crossbeam_channel::Sender<PluginAnswer>,
     ) -> Result<mpsc::Sender<PluginJob>, String> {
         let surface = self.clone();
         let (jobs, queue) = mpsc::channel::<PluginJob>();
         thread::Builder::new()
-            .name("kage-acp-plugins".to_owned())
+            .name(name.to_owned())
             .spawn(move || {
                 for job in queue {
-                    surface.turn.reset();
-                    let answer = surface.answer(&job.method, &job.params);
+                    let answer = surface.answer(&job.method, &job.params, &job.turn);
                     if answers.send((job.id, answer)).is_err() {
                         break;
                     }
@@ -776,10 +809,10 @@ impl PluginSurface {
 
     /// Answer one reverse request. Unknown methods cannot reach here:
     /// the pump only routes the `_kage/plugin/` prefix.
-    fn answer(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
+    fn answer(&self, method: &str, params: &Value, turn: &CancelFlag) -> Result<Value, RpcError> {
         match method {
             crate::rpc::client_plugins::PLUGIN_TOOLS => self.tools(params),
-            crate::rpc::client_plugins::PLUGIN_CALL => self.call(params),
+            crate::rpc::client_plugins::PLUGIN_CALL => self.call(params, turn),
             crate::rpc::client_plugins::PLUGIN_HOOK => self.hook(params),
             crate::rpc::client_plugins::PLUGIN_EVENT => self.event(params),
             crate::rpc::client_plugins::PLUGIN_DRAIN => self.drain(params),
@@ -853,7 +886,7 @@ impl PluginSurface {
     /// request, which the host turns into a failed tool call. An
     /// override wins the name, the way the engine's registry replaces
     /// tools by name.
-    fn call(&self, params: &Value) -> Result<Value, RpcError> {
+    fn call(&self, params: &Value, turn: &CancelFlag) -> Result<Value, RpcError> {
         let request = serde_json::from_value::<PluginCallRequest>(params.clone())
             .map_err(|e| RpcError::invalid_params(format!("plugin call: {e}")))?;
         let runtime = &*self.runtime;
@@ -868,7 +901,7 @@ impl PluginSurface {
                 request.tool
             )));
         };
-        let cx = kage_tools::ToolContext::new(&self.workdir, &self.turn);
+        let cx = kage_tools::ToolContext::new(&self.workdir, turn);
         let output = Self::in_session(&request.session_id, || tool.execute(request.input, &cx))?
             .map_err(|e| plugin_internal(format!("plugin tool `{}`: {e}", request.tool)))?;
         let result = PluginCallResult {
@@ -1169,10 +1202,16 @@ struct Pump {
     /// plugin loading to the agent.
     plugins: Option<PluginSurface>,
     /// Where plugin reverse requests queue for the worker.
-    plugin_jobs: Option<mpsc::Sender<PluginJob>>,
+    plugin_jobs: Option<PluginWorkers>,
     /// The worker's answers, to send on the wire.
     plugin_answers: crossbeam_channel::Receiver<PluginAnswer>,
     plugin_answers_tx: crossbeam_channel::Sender<PluginAnswer>,
+    /// The thread running this TUI's plugin commands and key mappings,
+    /// started on first use.
+    command_jobs: Option<crossbeam_channel::Sender<CommandJob>>,
+    /// The notices those commands produce, to publish from here.
+    command_notices: crossbeam_channel::Receiver<(NoticeLevel, String)>,
+    command_notices_tx: crossbeam_channel::Sender<(NoticeLevel, String)>,
     /// Where finished runs go to be written to the saved state, off
     /// this thread.
     recorder: mpsc::Sender<(String, RunOutcome)>,
@@ -1296,6 +1335,7 @@ impl Pump {
         };
         let requests = self.requests.clone();
         let answers = self.plugin_answers.clone();
+        let command_notices = self.command_notices.clone();
         crossbeam_channel::select_biased! {
             recv(frames) -> event => self.take_frame(event.ok()),
             recv(requests) -> request => match request {
@@ -1305,6 +1345,11 @@ impl Pump {
             recv(answers) -> answer => {
                 if let Ok(answer) = answer {
                     self.send_plugin_answer(answer);
+                }
+            },
+            recv(command_notices) -> notice => {
+                if let Ok((level, text)) = notice {
+                    self.notice(level, text);
                 }
             },
             default(TICK) => {}
@@ -1329,6 +1374,9 @@ impl Pump {
         while let Ok(answer) = answers.try_recv() {
             self.send_plugin_answer(answer);
         }
+        while let Ok((level, text)) = command_notices.try_recv() {
+            self.notice(level, text);
+        }
         self.poll_dialogs();
         self.flush();
         true
@@ -1343,9 +1391,41 @@ impl Pump {
 
     /// Starts answering the plugin reverse requests from `surface`.
     fn host_plugins(&mut self, surface: PluginSurface) -> Result<(), String> {
-        self.plugin_jobs = Some(surface.start_worker(self.plugin_answers_tx.clone())?);
+        self.plugin_jobs = Some(surface.start_workers(&self.plugin_answers_tx)?);
         self.plugins = Some(surface);
         Ok(())
+    }
+
+    /// Hands a plugin reverse request in `frame` to its worker when this
+    /// TUI hosts the plugins: tool calls to their own, the rest to the
+    /// other. Whether `frame` was one.
+    fn route_plugin_request(&mut self, frame: &Frame) -> bool {
+        let Frame::Request { id, method, params } = frame else {
+            return false;
+        };
+        let (Some(workers), Some(surface)) = (&self.plugin_jobs, &self.plugins) else {
+            return false;
+        };
+        if !method.starts_with("_kage/plugin/") {
+            return false;
+        }
+        let job = PluginJob {
+            id: id.clone(),
+            method: method.clone(),
+            params: params.clone(),
+            turn: surface.current_turn(),
+        };
+        let queue = if method == crate::rpc::client_plugins::PLUGIN_CALL {
+            &workers.calls
+        } else {
+            &workers.rest
+        };
+        if queue.send(job).is_err() {
+            self.store
+                .client()
+                .fail(id.clone(), plugin_internal("the plugin thread stopped"));
+        }
+        true
     }
 
     /// Feeds one frame in. The plugin reverse requests never touch the
@@ -1353,20 +1433,7 @@ impl Pump {
     /// otherwise fail them as methods it does not know. Hosting
     /// nothing leaves them to the store, which fails them the same way.
     fn absorb(&mut self, frame: Frame) {
-        if let Frame::Request { id, method, params } = &frame
-            && method.starts_with("_kage/plugin/")
-            && let Some(jobs) = &self.plugin_jobs
-        {
-            let job = PluginJob {
-                id: id.clone(),
-                method: method.clone(),
-                params: params.clone(),
-            };
-            if jobs.send(job).is_err() {
-                self.store
-                    .client()
-                    .fail(id.clone(), plugin_internal("the plugin thread stopped"));
-            }
+        if self.route_plugin_request(&frame) {
             return;
         }
         self.withdrawn_child_prompt(&frame);
@@ -3606,7 +3673,7 @@ impl Pump {
         match self.route_of(session) {
             Some(wire) if wire == self.wire => {
                 if let Some(surface) = &self.plugins {
-                    surface.turn.cancel();
+                    surface.cancel_turn();
                 }
                 self.store.client().cancel(&self.wire);
             }
@@ -4205,61 +4272,123 @@ impl Pump {
     }
 
     /// Runs a plugin command the App asked for. Hosting the plugins
-    /// runs it here, where its handler's dialogs ride the App's dialog
-    /// channel and the output lands as a notice; otherwise the agent,
-    /// which hosts them, is asked over the wire.
+    /// runs it on the command thread, where its handler's dialogs ride
+    /// the App's dialog channel and the output comes back as a notice;
+    /// otherwise the agent, which hosts them, is asked over the wire.
     fn invoke_plugin_command(&mut self, name: &str, args: &str) {
-        let Some(runtime) = self.plugins.as_ref().map(|s| Arc::clone(&s.runtime)) else {
+        if self.plugins.is_none() {
             // Without a session open it runs at project scope.
             let session = (!self.wire.is_empty()).then_some(self.wire.as_str());
             self.store
                 .client()
                 .ui_command(&self.cwd, name, args, session);
             return;
-        };
-        let command = runtime
-            .registered_command_overrides()
-            .into_iter()
-            .chain(runtime.registered_commands())
-            .find(|command| command.name() == name);
-        let Some(command) = command else {
-            self.notice(NoticeLevel::Error, format!("no plugin command: {name}"));
-            return;
-        };
-        let dialog_tx = self.dialog_tx.clone();
-        let mut errors = |text| self.notice(NoticeLevel::Error, text);
-        let output = run_bridged_command(&runtime, &command, args, &dialog_tx, &mut errors);
-        self.plugin_output(output);
+        }
+        self.run_command(CommandJob::Command {
+            name: name.to_owned(),
+            args: args.to_owned(),
+        });
     }
 
     /// Runs a key mapping's handler the way
     /// [`Self::invoke_plugin_command`] runs a command.
     fn invoke_keymap(&mut self, id: u64) {
-        let Some(runtime) = self.plugins.as_ref().map(|s| Arc::clone(&s.runtime)) else {
+        if self.plugins.is_none() {
             let session = (!self.wire.is_empty()).then_some(self.wire.as_str());
             self.store.client().ui_keymap(&self.cwd, id, session);
             return;
-        };
-        let dialog_tx = self.dialog_tx.clone();
-        let mut errors = |text| self.notice(NoticeLevel::Error, text);
-        let output = run_bridged_keymap(&runtime, id, &dialog_tx, &mut errors);
-        self.plugin_output(output);
+        }
+        self.run_command(CommandJob::Keymap(id));
     }
 
-    /// Publish a locally run plugin command or keymap output the way
-    /// the engine path's host does: a notice, an error one when it
-    /// failed, nothing when the handler produced no text.
-    fn plugin_output(&mut self, output: Option<CommandOutput>) {
-        let Some(output) = output.filter(|output| !output.text.is_empty()) else {
-            return;
-        };
-        let level = if output.is_error {
-            NoticeLevel::Error
-        } else {
-            NoticeLevel::Info
-        };
-        self.notice(level, output.text);
+    /// Hands `job` to the command thread, starting it on first use.
+    fn run_command(&mut self, job: CommandJob) {
+        if self.command_jobs.is_none() {
+            let Some(runtime) = self.plugins.as_ref().map(|s| Arc::clone(&s.runtime)) else {
+                return;
+            };
+            self.command_jobs = start_command_worker(
+                runtime,
+                self.dialog_tx.clone(),
+                self.feed.wake.clone(),
+                self.command_notices_tx.clone(),
+            );
+        }
+        let sent = self
+            .command_jobs
+            .as_ref()
+            .is_some_and(|jobs| jobs.send(job).is_ok());
+        if !sent {
+            self.command_jobs = None;
+            self.notice(
+                NoticeLevel::Error,
+                "the plugin command thread is not running".to_owned(),
+            );
+        }
     }
+}
+
+/// A plugin command or key mapping this TUI hosts.
+enum CommandJob {
+    /// The command `name` with its raw `args`.
+    Command { name: String, args: String },
+    /// The key mapping with this id.
+    Keymap(u64),
+}
+
+/// Starts the thread that runs this TUI's plugin commands and key
+/// mappings one at a time, so a handler waiting on a dialog or slow Lua
+/// never stalls the pump. Dialogs go to the App on `dialog_tx` with a
+/// `wake`; what a handler reports comes back on `notices`.
+fn start_command_worker(
+    runtime: Arc<PluginRuntime>,
+    dialog_tx: mpsc::Sender<PluginDialog>,
+    wake: Option<crossbeam_channel::Sender<()>>,
+    notices: crossbeam_channel::Sender<(NoticeLevel, String)>,
+) -> Option<crossbeam_channel::Sender<CommandJob>> {
+    let (jobs, queue) = crossbeam_channel::unbounded::<CommandJob>();
+    let show = move |dialog: PluginDialog| {
+        let shown = dialog_tx.send(dialog).is_ok();
+        if let Some(wake) = &wake {
+            let _ = wake.try_send(());
+        }
+        shown
+    };
+    thread::Builder::new()
+        .name("kage-acp-commands".to_owned())
+        .spawn(move || {
+            for job in queue {
+                let mut errors = |text| {
+                    let _ = notices.send((NoticeLevel::Error, text));
+                };
+                let output = match job {
+                    CommandJob::Command { name, args } => {
+                        let command = runtime
+                            .registered_command_overrides()
+                            .into_iter()
+                            .chain(runtime.registered_commands())
+                            .find(|command| command.name() == name);
+                        if let Some(command) = command {
+                            run_bridged_command(&runtime, &command, &args, &show, &mut errors)
+                        } else {
+                            errors(format!("no plugin command: {name}"));
+                            None
+                        }
+                    }
+                    CommandJob::Keymap(id) => run_bridged_keymap(&runtime, id, &show, &mut errors),
+                };
+                if let Some(output) = output.filter(|output| !output.text.is_empty()) {
+                    let level = if output.is_error {
+                        NoticeLevel::Error
+                    } else {
+                        NoticeLevel::Info
+                    };
+                    let _ = notices.send((level, output.text));
+                }
+            }
+        })
+        .ok()?;
+    Some(jobs)
 }
 
 /// The session and progress of a user shell command update.
@@ -4608,6 +4737,7 @@ pub(crate) fn run(
         .as_ref()
         .map(|rt| PluginSurface::new(Arc::clone(rt), workdir.clone()));
     let (plugin_answers_tx, plugin_answers) = crossbeam_channel::unbounded();
+    let (command_notices_tx, command_notices) = crossbeam_channel::unbounded();
     let (recorder, finished_runs) = mpsc::channel();
     start_run_recorder(finished_runs);
     let mirror = Arc::new(Mutex::new(Mirror::new()));
@@ -4637,6 +4767,9 @@ pub(crate) fn run(
         plugin_jobs: None,
         plugin_answers,
         plugin_answers_tx,
+        command_jobs: None,
+        command_notices,
+        command_notices_tx,
         recorder,
         prompts: HashMap::new(),
         answered: Vec::new(),
@@ -5168,6 +5301,7 @@ mod tests {
         let (dialog_tx, dialog_rx) = mpsc::channel::<PluginDialog>();
         let feed = Arc::new(FeedState::default());
         let (plugin_answers_tx, plugin_answers) = crossbeam_channel::unbounded();
+        let (command_notices_tx, command_notices) = crossbeam_channel::unbounded();
         let (recorder, _recorded) = mpsc::channel();
         let pump = Pump {
             store: Store::new(),
@@ -5194,6 +5328,9 @@ mod tests {
             plugin_jobs: None,
             plugin_answers,
             plugin_answers_tx,
+            command_jobs: None,
+            command_notices,
+            command_notices_tx,
             recorder,
             prompts: HashMap::new(),
             answered: Vec::new(),
@@ -7761,6 +7898,59 @@ kage.on('should_stop_after_turn', function(ev) return true end)
     }
 
     #[cfg(unix)]
+    /// A long tool call holds only its own worker: the snapshot a new
+    /// session asks for is answered meanwhile.
+    #[test]
+    fn a_running_plugin_tool_does_not_hold_up_the_snapshot() {
+        let (mut pump, _app, dir) = hosted_pump();
+        pump.absorb(Frame::Request {
+            id: RequestId::Number(40),
+            method: "_kage/plugin/call".to_owned(),
+            params: serde_json::json!({
+                "sessionId": fixture_session(),
+                "tool": "plugin_wait",
+                "input": {},
+            }),
+        });
+        pump.absorb(Frame::Request {
+            id: RequestId::Number(41),
+            method: "_kage/plugin/tools".to_owned(),
+            params: serde_json::json!({"sessionId": fixture_session()}),
+        });
+        let (id, answer) = pump
+            .plugin_answers
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the snapshot is answered while the tool runs");
+        assert_eq!(id, RequestId::Number(41));
+        assert!(answer.is_ok(), "{answer:?}");
+        pump.handle(RunRequest::Cancel { session: None });
+        let (id, _) = pump
+            .plugin_answers
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the cancel ends the tool call");
+        assert_eq!(id, RequestId::Number(40));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `Esc` stops the calls queued before it, even one not started
+    /// yet, and none queued after it.
+    #[test]
+    fn a_cancel_reaches_queued_calls_and_spares_later_ones() {
+        let surface = PluginSurface::new(
+            Arc::new(PluginRuntime::builder().build().unwrap()),
+            PathBuf::from("."),
+        );
+        let queued = surface.current_turn();
+        surface.cancel_turn();
+        assert!(queued.is_cancelled());
+        assert!(!surface.current_turn().is_cancelled());
+        surface.cancel.cancel();
+        assert!(
+            surface.current_turn().is_cancelled(),
+            "the connection ending stops all"
+        );
+    }
+
     #[test]
     fn a_running_plugin_tool_leaves_the_pump_free_and_esc_cancels_it() {
         let (mut pump, _app, dir) = hosted_pump();
@@ -7913,6 +8103,62 @@ kage.on('should_stop_after_turn', function(ev) return true end)
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A plugin command waiting on its dialog runs on its own thread:
+    /// the pump keeps serving meanwhile, and the answer finishes it.
+    #[test]
+    fn a_command_waiting_on_a_dialog_does_not_stall_the_pump() {
+        let (mut pump, app, dialogs, _feed, dir) = test_pump();
+        std::fs::write(
+            dir.join("ask.lua"),
+            "kage.register_command({ name = 'ask', description = 'asks', \
+             handler = function() if kage.ui.confirm('Sure', 'go on?') then return 'yes' end \
+             return 'no' end })",
+        )
+        .unwrap();
+        let runtime = PluginRuntime::builder()
+            .workdir(dir.clone())
+            .config(serde_json::json!({"model": "mock/m"}))
+            .build()
+            .unwrap();
+        kage_plugin::load_all(Some(&dir), &runtime).unwrap();
+        pump.host_plugins(PluginSurface::new(Arc::new(runtime), dir.clone()))
+            .unwrap();
+        let _ = app.try_iter().count();
+        pump.handle(RunRequest::InvokePluginCommand {
+            name: "ask".to_owned(),
+            args: String::new(),
+        });
+        let dialog = dialogs
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the command asks");
+        let (_requests, requests_rx) = crossbeam_channel::unbounded::<RunRequest>();
+        pump.requests = requests_rx;
+        assert!(pump.pass(), "the pump serves while the dialog is open");
+        let PluginDialog::Confirm { reply, .. } = dialog else {
+            panic!("a confirm dialog")
+        };
+        reply.send(Some(Value::Bool(true))).unwrap();
+        assert_eq!(
+            command_notice(&mut pump, &app),
+            [(NoticeLevel::Info, "yes".to_owned())]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The one notice the command thread reports for the job just
+    /// handed to it, published the way the pump's loop publishes it.
+    fn command_notice(
+        pump: &mut Pump,
+        app: &mpsc::Receiver<Envelope>,
+    ) -> Vec<(NoticeLevel, String)> {
+        let (level, text) = pump
+            .command_notices
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the command reports");
+        pump.notice(level, text);
+        notices(app)
+    }
+
     #[test]
     fn a_hosted_pump_runs_plugin_commands_and_keymaps_itself() {
         let (mut pump, app, dir) = hosted_pump();
@@ -7922,7 +8168,7 @@ kage.on('should_stop_after_turn', function(ev) return true end)
             args: "world".to_owned(),
         });
         assert_eq!(
-            notices(&app),
+            command_notice(&mut pump, &app),
             [(NoticeLevel::Info, "hello world".to_owned())]
         );
         pump.handle(RunRequest::InvokePluginCommand {
@@ -7930,7 +8176,7 @@ kage.on('should_stop_after_turn', function(ev) return true end)
             args: String::new(),
         });
         assert_eq!(
-            notices(&app),
+            command_notice(&mut pump, &app),
             [(NoticeLevel::Error, "no plugin command: missing".to_owned())]
         );
         let handler = {
@@ -7946,7 +8192,10 @@ kage.on('should_stop_after_turn', function(ev) return true end)
                 .expect("the fixture maps zz")
         };
         pump.handle(RunRequest::InvokeKeymap { id: handler });
-        assert_eq!(notices(&app), [(NoticeLevel::Info, "mapped".to_owned())]);
+        assert_eq!(
+            command_notice(&mut pump, &app),
+            [(NoticeLevel::Info, "mapped".to_owned())]
+        );
         assert!(
             pump.store.take_outgoing().is_empty(),
             "a hosted pump never asks the agent to run them"

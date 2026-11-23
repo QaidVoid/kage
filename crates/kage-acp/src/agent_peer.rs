@@ -134,28 +134,10 @@ impl AgentPeer {
             Transport::Generic(peer) => peer.request_timeout(method, params, timeout),
             #[cfg(unix)]
             Transport::Unix(_, _) => {
+                let until = deadline(timeout)?;
                 let cancel = CancelFlag::new();
-                let (finished, done) = std::sync::mpsc::channel::<()>();
-                let timer = {
-                    let cancel = cancel.clone();
-                    std::thread::spawn(move || {
-                        let expired = matches!(
-                            done.recv_timeout(timeout),
-                            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-                        );
-                        if expired {
-                            cancel.cancel();
-                        }
-                        expired
-                    })
-                };
-                let result = self.request_cancellable(method, params, &cancel);
-                drop(finished);
-                let expired = timer.join().unwrap_or(false);
-                match result {
-                    Err(_) if expired => Err(RpcError::timed_out(method)),
-                    other => other,
-                }
+                self.dispatch_cancellable(method, params, &cancel)?
+                    .wait_until(&cancel, Some(until))
             }
         }
     }
@@ -270,6 +252,12 @@ impl DispatchedRequest {
     /// # Errors
     /// Returns the remote error, cancellation, or a transport error.
     pub fn wait(self, cancel: &CancelFlag) -> Result<Value, RpcError> {
+        self.wait_until(cancel, None)
+    }
+
+    /// [`Self::wait`] that gives up at `until`, telling the peer to drop
+    /// the request the way a cancellation does.
+    fn wait_until(self, cancel: &CancelFlag, until: Option<Instant>) -> Result<Value, RpcError> {
         let Self {
             peer: agent,
             request,
@@ -278,8 +266,18 @@ impl DispatchedRequest {
             unreachable!("dispatched requests require a Unix transport");
         };
         let id = request.id();
+        let abandon = || {
+            agent.record(deadline(*timeout).and_then(|deadline| {
+                peer.notify(
+                    "$/cancel_request",
+                    serde_json::json!({"requestId": id}),
+                    Some(deadline),
+                    None,
+                )
+            }))
+        };
 
-        match request.wait_typed(None, Some(cancel)) {
+        match request.wait_typed(until, Some(cancel)) {
             RequestWaitOutcome::Delivered {
                 result,
                 barrier: Some(barrier),
@@ -306,16 +304,14 @@ impl DispatchedRequest {
             RequestWaitOutcome::Delivered { barrier: None, .. } => agent.record(Err(
                 RpcError::internal("response ordering barrier was not delivered"),
             )),
-            RequestWaitOutcome::LocalError(error) => Err(error),
+            RequestWaitOutcome::LocalError(error) => {
+                if until.is_some_and(|until| Instant::now() >= until) {
+                    abandon()?;
+                }
+                Err(error)
+            }
             RequestWaitOutcome::Cancelled => {
-                agent.record(deadline(*timeout).and_then(|deadline| {
-                    peer.notify(
-                        "$/cancel_request",
-                        serde_json::json!({"requestId": id}),
-                        Some(deadline),
-                        None,
-                    )
-                }))?;
+                abandon()?;
                 Err(RpcError::new(-32800, "request cancelled"))
             }
         }
@@ -434,6 +430,33 @@ mod tests {
             inbox.recv_timeout(Duration::from_millis(100)),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout)
         ));
+        assert!(peer.failure().is_none());
+    }
+
+    /// A Unix request that gets no answer in time fails as timed out
+    /// and tells the peer to drop it, with no timer thread involved.
+    #[test]
+    fn an_unanswered_unix_request_times_out_and_is_withdrawn() {
+        let (reader, input) = std::io::pipe().unwrap();
+        let (output, writer) = std::io::pipe().unwrap();
+        let (unix, _, _) =
+            kage_jsonrpc::unix_peer::connect_ordered_server(BufReader::new(reader), writer.into())
+                .unwrap();
+        let peer = AgentPeer::unix(unix, Duration::from_secs(1));
+        let (_client, inbox, _) = connect(BufReader::new(output), input);
+        let started = Instant::now();
+        let error = peer
+            .request_timeout("ask", Value::Null, Duration::from_millis(100))
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(error, RpcError::timed_out("ask"));
+        let Inbound::Request { id, .. } = inbox.recv_timeout(Duration::from_secs(1)).unwrap()
+        else {
+            panic!("expected request");
+        };
+        assert!(
+            matches!(inbox.recv_timeout(Duration::from_secs(1)).unwrap(), Inbound::Notification { method, params } if method == "$/cancel_request" && params == serde_json::json!({"requestId": id}))
+        );
         assert!(peer.failure().is_none());
     }
 

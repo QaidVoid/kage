@@ -44,7 +44,7 @@ pub(crate) fn run_bridged_command(
     rt: &PluginRuntime,
     cmd: &kage_plugin::LuaCommand,
     raw: &str,
-    dialog_tx: &mpsc::Sender<PluginDialog>,
+    show: &dyn Fn(PluginDialog) -> bool,
     errors: &mut dyn FnMut(String),
 ) -> Option<CommandOutput> {
     let label = format!("command {}", cmd.name());
@@ -60,7 +60,7 @@ pub(crate) fn run_bridged_command(
         Ok(step) => step,
         Err(e) => return Some(error_output(&label, &e.to_string())),
     };
-    drive_bridge(rt, &label, step, dialog_tx, errors)
+    drive_bridge(rt, &label, step, show, errors)
 }
 
 /// Run a key mapping's Lua handler through the coroutine bridge,
@@ -70,7 +70,7 @@ pub(crate) fn run_bridged_command(
 pub(crate) fn run_bridged_keymap(
     rt: &PluginRuntime,
     id: u64,
-    dialog_tx: &mpsc::Sender<PluginDialog>,
+    show: &dyn Fn(PluginDialog) -> bool,
     errors: &mut dyn FnMut(String),
 ) -> Option<CommandOutput> {
     let label = "key mapping";
@@ -86,7 +86,7 @@ pub(crate) fn run_bridged_keymap(
         Ok(step) => step,
         Err(e) => return Some(error_output(label, &e.to_string())),
     };
-    drive_bridge(rt, label, step, dialog_tx, errors)
+    drive_bridge(rt, label, step, show, errors)
 }
 
 /// Drive a started bridge call to completion: service each suspend
@@ -97,14 +97,14 @@ pub(crate) fn drive_bridge(
     rt: &PluginRuntime,
     label: &str,
     mut step: BridgeStep,
-    dialog_tx: &mpsc::Sender<PluginDialog>,
+    show: &dyn Fn(PluginDialog) -> bool,
     errors: &mut dyn FnMut(String),
 ) -> Option<CommandOutput> {
     loop {
         match step {
             BridgeStep::Done(value) => return Some(CommandOutput::from_json(&value)),
             BridgeStep::Suspended(req) => {
-                let resumed = match service_dialog(&req, dialog_tx, errors) {
+                let resumed = match service_dialog(&req, show, errors) {
                     Some(value) => rt.bridge_resume(&value),
                     None => rt.bridge_cancel(),
                 };
@@ -121,14 +121,15 @@ pub(crate) fn drive_bridge(
 }
 
 /// Service one suspended dialog request (`ui.select` / `ui.confirm`).
-/// Builds the matching [`PluginDialog`], hands it to the App, and
-/// blocks on the reply. Returns the value to resume the coroutine
+/// Builds the matching [`PluginDialog`], hands it to the App through
+/// `show` (which says whether the App took it), and blocks on the
+/// reply. Returns the value to resume the coroutine
 /// with, or `None` (resume with `nil`) on dismissal, an unsupported
 /// kind, or a malformed payload (the latter two also reported
 /// through `errors`).
 pub(crate) fn service_dialog(
     req: &kage_plugin::SuspendRequest,
-    dialog_tx: &mpsc::Sender<PluginDialog>,
+    show: &dyn Fn(PluginDialog) -> bool,
     errors: &mut dyn FnMut(String),
 ) -> Option<serde_json::Value> {
     let (reply_tx, reply_rx) = mpsc::channel();
@@ -182,7 +183,7 @@ pub(crate) fn service_dialog(
             return None;
         }
     };
-    if dialog_tx.send(dialog).is_err() {
+    if !show(dialog) {
         return None;
     }
     reply_rx.recv().unwrap_or(None)

@@ -1428,6 +1428,9 @@ struct ChildTrack {
     running: bool,
     /// Whether the last announced run has already settled.
     ended: bool,
+    /// Whether the client let go of the finished child's transcript
+    /// items: a restart then shows its history from its file.
+    pruned: bool,
 }
 
 /// The thread that turns the store's view of the wire into the App's
@@ -1790,7 +1793,7 @@ impl Pump {
             self.mcp_catalog(wire, servers);
         }
         if let Some(wire) = replaced {
-            self.reset_child_transcript(&wire);
+            self.reset_child_transcript(&wire, Vec::new());
         }
         if let Some((wire, update)) = shell {
             self.track_shell(&wire, &update);
@@ -2791,25 +2794,58 @@ impl Pump {
         self.child_transcript(wire);
     }
 
-    /// Resets a replaced child's tracking and displayed conversation
-    /// before the replacement replay arrives.
-    fn reset_child_transcript(&mut self, wire: &str) {
+    /// Resets a replaced or restarted child's tracking and displayed
+    /// conversation, showing `timeline` first, before the replacement
+    /// replay or the restart's new items arrive. A restarted child the
+    /// client was pruned of passes its recorded history, which the
+    /// client no longer holds.
+    fn reset_child_transcript(
+        &mut self,
+        wire: &str,
+        timeline: Vec<kage_core::protocol::TimelineItem>,
+    ) {
         let Some(track) = self.children.get_mut(wire) else {
             return;
         };
         track.committed = 0;
         track.tools.clear();
         track.tail = None;
+        track.pruned = false;
         let app = track.app;
         self.publish_on(
             app,
             HostEvent::SessionChanged {
                 path: PathBuf::from(format!("{wire}.jsonl")),
                 title: None,
-                timeline: Vec::new(),
+                timeline,
                 compacted_agents: Vec::new(),
             },
         );
+    }
+
+    /// The recorded history of child `wire`, from its session file
+    /// beside the main session's. Empty when it cannot be read.
+    fn child_history(&self, wire: &str) -> Vec<kage_core::protocol::TimelineItem> {
+        let Some(root) = lock(&self.mirror).path().map(Path::to_path_buf) else {
+            return Vec::new();
+        };
+        kage_session::replay(&kage_session::layout::agent_file(&root, wire))
+            .map(|replay| replay.timeline)
+            .unwrap_or_default()
+    }
+
+    /// Lets the client free a finished child's transcript items once
+    /// all of them reached the App, which keeps its own view and
+    /// reopens an evicted one from the file.
+    fn prune_child(&mut self, wire: &str) {
+        let Some(track) = self.children.get_mut(wire) else {
+            return;
+        };
+        track.committed = 0;
+        track.tools.clear();
+        track.tail = None;
+        track.pruned = true;
+        self.store.client().drop_items(wire);
     }
 
     /// Settles a child exactly once, finalizing its stream before the
@@ -2824,8 +2860,10 @@ impl Pump {
         track.running = false;
         track.ended = true;
         let app = track.app;
+        self.child_transcript(wire);
         self.child_close_tail(wire);
         self.publish_on(app, HostEvent::RunEnded { outcome });
+        self.prune_child(wire);
     }
 
     /// Finalizes a child's streaming bubble and counts its item as
@@ -2870,6 +2908,7 @@ impl Pump {
                         tail: None,
                         running: false,
                         ended: false,
+                        pruned: false,
                     },
                 );
                 lock(&self.child_files).insert(app, wire.clone());
@@ -2908,7 +2947,12 @@ impl Pump {
                 track.ended = false;
                 self.publish_on(app, HostEvent::RunStarted);
                 if restarting {
-                    self.reset_child_transcript(wire);
+                    let history = if self.children.get(wire).is_some_and(|t| t.pruned) {
+                        self.child_history(wire)
+                    } else {
+                        Vec::new()
+                    };
+                    self.reset_child_transcript(wire, history);
                 }
             }
             self.child_sync(wire);
@@ -6754,6 +6798,7 @@ mod tests {
             tail: None,
             running: true,
             ended: false,
+            pruned: false,
         };
         let order: Vec<String> = child_events(&items, &mut track)
             .into_iter()
@@ -6777,6 +6822,125 @@ mod tests {
         );
         assert_eq!(track.committed, 2);
         assert!(child_events(&items, &mut track).is_empty(), "nothing twice");
+    }
+
+    /// A finished subagent's transcript reaches its view whole, then the
+    /// client lets go of its items, which the view already holds.
+    #[test]
+    fn a_finished_child_is_pruned_after_its_transcript_reached_the_app() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let child = announced_child(&mut pump, &app, &serde_json::json!({"state": "running"}));
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "all done"}
+            }),
+        );
+        let _ = app.try_iter().count();
+        pump.absorb(Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({"sessionId": "s1", "update": {
+                "sessionUpdate": "subagent_update",
+                "subagentSessionId": "child",
+                "name": "general",
+                "task": "list files",
+                "toolCallId": "call-agent",
+                "state": "completed",
+            }}),
+        });
+        let session = pump
+            .store
+            .state()
+            .session("child")
+            .expect("the child is still known");
+        assert!(session.items.is_empty(), "{:?}", session.items);
+        assert!(pump.children["child"].pruned);
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": " late"}
+            }),
+        );
+        let late: Vec<String> = app
+            .try_iter()
+            .filter(|envelope| envelope.session == child)
+            .filter_map(|envelope| match envelope.event {
+                kage_core::protocol::Event::Loop(LoopEvent::TextDelta { delta, .. }) => Some(delta),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(late, [" late"], "a late item still reaches the view, once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pruned subagent that runs again shows its past from its file,
+    /// since the client no longer holds it.
+    #[test]
+    fn a_restarted_pruned_child_shows_its_recorded_history() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let main = dir.join("s1.jsonl");
+        let header = |session| kage_session::entry::Header {
+            version: kage_session::FORMAT_VERSION,
+            session,
+            id: kage_session::EntryId::new(),
+            ts: chrono::Utc::now(),
+            cwd: dir.clone(),
+            model: "test:model".to_owned(),
+            system_prompt: String::new(),
+            backend: None,
+            parent_session: None,
+            parent_entry: None,
+        };
+        kage_session::SessionWriter::create(&main, header(SessionId::new())).unwrap();
+        let file = kage_session::layout::agent_file(&main, "child");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let mut writer =
+            kage_session::SessionWriter::create(&file, header(SessionId::new())).unwrap();
+        writer
+            .append(&kage_session::entry::SessionEntry::Message(
+                kage_session::entry::MessageEntry {
+                    id: kage_session::EntryId::new(),
+                    ts: chrono::Utc::now(),
+                    message: Arc::new(Message::new(
+                        Role::User,
+                        vec![Content::Text {
+                            text: "earlier task".to_owned(),
+                        }],
+                        None,
+                    )),
+                    usage: None,
+                },
+            ))
+            .unwrap();
+        drop(writer);
+        lock(&pump.mirror).point_at(main);
+        let child = announced_child(&mut pump, &app, &serde_json::json!({"state": "completed"}));
+        assert!(pump.children["child"].pruned);
+        let _ = app.try_iter().count();
+        pump.absorb(Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({"sessionId": "s1", "update": {
+                "sessionUpdate": "subagent_update",
+                "subagentSessionId": "child",
+                "name": "general",
+                "task": "list files",
+                "toolCallId": "call-agent",
+                "state": "running",
+            }}),
+        });
+        let timeline = app
+            .try_iter()
+            .find_map(|envelope| match envelope.event {
+                kage_core::protocol::Event::Host(HostEvent::SessionChanged {
+                    timeline, ..
+                }) if envelope.session == child => Some(timeline),
+                _ => None,
+            })
+            .expect("the restart resets the view");
+        assert_eq!(timeline.len(), 1, "{timeline:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A second `/new` while one is opening adds nothing: the session

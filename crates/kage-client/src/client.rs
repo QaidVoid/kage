@@ -1001,6 +1001,16 @@ impl Client {
         )
     }
 
+    /// Frees the transcript items of `session_id`, keeping the rest of
+    /// its state: for a finished subagent whose transcript the caller
+    /// already handed on, so it is not held for the whole session.
+    /// Items that arrive later collect from empty.
+    pub fn drop_items(&mut self, session_id: &str) {
+        if let Some(session) = self.state.sessions.get_mut(session_id) {
+            session.items = Vec::new();
+        }
+    }
+
     /// Asks the engine to rebuild its providers from the config and the
     /// credential store, as after a login saved here. A failure arrives
     /// as [`Change::Failed`].

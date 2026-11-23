@@ -1126,12 +1126,15 @@ impl PluginSurface {
     }
 
     /// The registration snapshot the host takes once at session open:
-    /// the tools, overrides and renames the runtime holds, plus the
-    /// per-event handler counts that let it skip round trips.
+    /// the tools, overrides and renames the runtime holds, the
+    /// per-event handler counts that let it skip round trips, and the
+    /// skill directories the plugins report for the session.
     fn tools(&self, params: &Value) -> Result<Value, RpcError> {
-        serde_json::from_value::<PluginToolsRequest>(params.clone())
+        let request = serde_json::from_value::<PluginToolsRequest>(params.clone())
             .map_err(|e| RpcError::invalid_params(format!("plugin tools: {e}")))?;
         let runtime = &*self.runtime;
+        let discover = || kage_plugin::session_plugins::SessionPlugins::skill_dirs(runtime);
+        let skills = Self::in_session(&request.session_id, discover).unwrap_or_else(|_| discover());
         let spec = |tool: &Arc<dyn kage_tools::Tool>| PluginToolSpec {
             name: tool.name().to_owned(),
             description: tool.description().to_owned(),
@@ -1162,6 +1165,7 @@ impl PluginSurface {
                     (count > 0).then(|| (name.to_string(), count))
                 })
                 .collect(),
+            skills: skills.iter().map(|dir| dir.display().to_string()).collect(),
         };
         serde_json::to_value(result).map_err(|e| plugin_internal(format!("plugin tools: {e}")))
     }
@@ -5062,7 +5066,12 @@ pub(crate) fn run(
         .as_ref()
         .map(|rt| snapshot_plugin_commands(rt))
         .unwrap_or_default();
-    let skills = crate::load_skills(&workdir, plugins.as_deref());
+    let skills = crate::load_skills(
+        &workdir,
+        plugins
+            .as_deref()
+            .map(|rt| rt as &dyn kage_plugin::session_plugins::SessionPlugins),
+    );
     Frontend {
         buffer: root,
         toasts,
@@ -8165,6 +8174,7 @@ kage.api.keymap_set('n', 'zz', function() return 'mapped' end)
 kage.on('message_end', function(ev) count = (count or 0) + 1 end)
 kage.on('transform_context', function(messages) return { replaced = true } end)
 kage.on('should_stop_after_turn', function(ev) return true end)
+kage.on('resources_discover', function() return { skills = { '/fixture/skills' } } end)
 ";
 
     /// A pump hosting a runtime with [`FIXTURE`] loaded from its
@@ -8237,6 +8247,11 @@ kage.on('should_stop_after_turn', function(ev) return true end)
         assert_eq!(result["handlers"]["message_end"], 1);
         assert_eq!(result["handlers"]["transform_context"], 1);
         assert_eq!(result["handlers"]["should_stop_after_turn"], 1);
+        assert_eq!(
+            result["skills"],
+            serde_json::json!(["/fixture/skills"]),
+            "the host lists the plugins' skills too"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

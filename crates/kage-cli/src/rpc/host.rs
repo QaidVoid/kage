@@ -813,7 +813,7 @@ fn session_spec(
         Some,
     );
     let skills = kage_plugin::Invocation::session(id)
-        .scope(|| crate::load_skills(&workdir, concrete.as_deref()));
+        .scope(|| crate::load_skills(&workdir, session_plugins.as_deref()));
     let shell = config
         .shell
         .program

@@ -65,6 +65,12 @@ pub trait SessionPlugins: Send + Sync {
     /// Drain the MCP restarts plugins asked for in this invocation.
     fn take_mcp_restarts(&self) -> Vec<String>;
 
+    /// Directories of skills the plugins' `resources_discover` handlers
+    /// report, for the session's system prompt. None by default.
+    fn skill_dirs(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+
     /// Drain the steering and follow-up messages plugins queued in
     /// this invocation.
     fn take_pending_messages(&self) -> Vec<PendingMessage>;
@@ -128,6 +134,16 @@ impl SessionPlugins for PluginRuntime {
 
     fn take_pending_messages(&self) -> Vec<PendingMessage> {
         PluginRuntime::take_pending_messages(self)
+    }
+
+    fn skill_dirs(&self) -> Vec<std::path::PathBuf> {
+        match self.discover_resources() {
+            Ok(entries) => entries.skills,
+            Err(err) => {
+                eprintln!("kage: resources_discover dispatch failed: {err}");
+                Vec::new()
+            }
+        }
     }
 
     fn take_pending_session_ops(&self) -> Vec<PendingSessionOp> {

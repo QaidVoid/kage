@@ -1443,7 +1443,12 @@ fn run_print_mode(cli: Cli) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let skills = load_skills(&workdir, plugin_runtime.as_deref());
+    let skills = load_skills(
+        &workdir,
+        plugin_runtime
+            .as_deref()
+            .map(|rt| rt as &dyn kage_plugin::session_plugins::SessionPlugins),
+    );
     let system_prompt =
         runtime_env::build_system_prompt(&cli.system, &workdir, &model, &skills, shell.as_deref());
 
@@ -1524,7 +1529,7 @@ pub(crate) use cli_query::{run_fork, run_resume, run_search};
 /// skills are logged to stderr and skipped.
 pub(crate) fn load_skills(
     workdir: &std::path::Path,
-    plugin_runtime: Option<&kage_plugin::PluginRuntime>,
+    plugins: Option<&dyn kage_plugin::session_plugins::SessionPlugins>,
 ) -> Vec<kage_core::Skill> {
     let mut out: std::collections::BTreeMap<String, kage_core::Skill> =
         std::collections::BTreeMap::new();
@@ -1539,11 +1544,8 @@ pub(crate) fn load_skills(
         search.push(workdir.join(".kage").join("skills"));
         search.push(workdir.join(".agents").join("skills"));
     }
-    if let Some(rt) = plugin_runtime {
-        match rt.discover_resources() {
-            Ok(entries) => search.extend(entries.skills),
-            Err(err) => eprintln!("kage: resources_discover dispatch failed: {err}"),
-        }
+    if let Some(plugins) = plugins {
+        search.extend(plugins.skill_dirs());
     }
     for dir in &search {
         for result in kage_core::load_skills_dir(dir) {

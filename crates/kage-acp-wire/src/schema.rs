@@ -965,6 +965,11 @@ pub struct PluginToolsResult {
     /// nobody listens to without a round trip.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub handlers: BTreeMap<String, u32>,
+    /// Directories of skills the plugins' `resources_discover` handlers
+    /// reported, which the host lists in the session's system prompt
+    /// like its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
 }
 
 /// One tool a client-hosted plugin registers.

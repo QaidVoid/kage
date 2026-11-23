@@ -170,6 +170,14 @@ impl ClientPlugins {
 }
 
 impl SessionPlugins for ClientPlugins {
+    fn skill_dirs(&self) -> Vec<std::path::PathBuf> {
+        self.snapshot
+            .skills
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect()
+    }
+
     fn registered_tools(&self) -> Vec<Arc<dyn Tool>> {
         self.tools.clone()
     }

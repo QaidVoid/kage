@@ -242,7 +242,8 @@ fn continues_unsigned_turn(req: &StreamRequest) -> bool {
         .any(|m| m.role == Role::ToolResult);
     let signed = matches!(
         req.messages[idx].content.first(),
-        Some(Content::Thinking { signature: Some(sig), .. }) if sig.model == req.model
+        Some(Content::Thinking { signature: Some(sig), .. })
+            if sig.model == req.model && !sig.names_reasoning_field()
     );
     open && !signed
 }
@@ -345,7 +346,7 @@ fn convert_assistant_blocks(blocks: &[Content], model: &str) -> Vec<Value> {
                 text,
                 signature: Some(sig),
                 ..
-            } if sig.model == model => Some(serde_json::json!({
+            } if sig.model == model && !sig.names_reasoning_field() => Some(serde_json::json!({
                 "type": "thinking",
                 "thinking": text,
                 "signature": sig.data,
@@ -940,6 +941,23 @@ mod thinking_tests {
         let body = build_request_body(&req, true);
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["output_config"]["effort"], "high");
+    }
+
+    /// A block that only names the Chat Completions field it streamed
+    /// in is not an Anthropic signature, even for a model of the same
+    /// name, so Claude gets no thinking block for it.
+    #[test]
+    fn a_reasoning_field_name_is_not_sent_as_a_signature() {
+        let block = Content::Thinking {
+            text: "hm".into(),
+            signature: Some(kage_core::ThinkingSignature {
+                model: "claude-haiku-5-5".into(),
+                data: "reasoning_content".into(),
+                redacted: false,
+            }),
+            duration_ms: None,
+        };
+        assert!(convert_assistant_blocks(&[block], "claude-haiku-5-5").is_empty());
     }
 
     #[test]

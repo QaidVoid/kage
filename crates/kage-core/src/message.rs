@@ -189,6 +189,16 @@ pub struct ThinkingSignature {
     pub redacted: bool,
 }
 
+impl ThinkingSignature {
+    /// Whether `data` only names the Chat Completions field the
+    /// reasoning streamed in. Such a block carries nothing another wire
+    /// format can verify, even for a model of the same name.
+    #[must_use]
+    pub fn names_reasoning_field(&self) -> bool {
+        crate::REASONING_FIELDS.contains(&self.data.as_str())
+    }
+}
+
 /// Where the bytes of an image (or other media) live.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

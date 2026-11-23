@@ -506,7 +506,9 @@ fn convert_assistant_parts(
             Content::Thinking {
                 signature: Some(sig),
                 ..
-            } if sig.model == model && !sig.redacted => signature = Some(&sig.data),
+            } if sig.model == model && !sig.redacted && !sig.names_reasoning_field() => {
+                signature = Some(&sig.data);
+            }
             Content::Thinking { text, .. } => {
                 if let Some(text) = Content::flattened_thinking(text) {
                     parts.push(serde_json::json!({"text": text}));

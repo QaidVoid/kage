@@ -435,7 +435,7 @@ fn convert_assistant_items(blocks: &[Content], model: &str) -> Vec<Value> {
             } => {
                 let encrypted = signature
                     .as_ref()
-                    .filter(|s| s.model == model && !s.redacted);
+                    .filter(|s| s.model == model && !s.redacted && !s.names_reasoning_field());
                 if text.trim().is_empty() && encrypted.is_none() {
                     continue;
                 }

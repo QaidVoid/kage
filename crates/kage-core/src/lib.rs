@@ -60,7 +60,7 @@ pub use skills::{Skill, SkillError, load_skill_file, load_skills_dir};
 pub use templates::{
     Template, TemplateError, load_template_file, load_templates_dir, render_template,
 };
-pub use thinking::{Effort, Efforts, Reasoning, ReasoningField, ThinkingLevel};
+pub use thinking::{Effort, Efforts, REASONING_FIELDS, Reasoning, ReasoningField, ThinkingLevel};
 pub use tool_spec::ToolSpec;
 
 #[cfg(test)]

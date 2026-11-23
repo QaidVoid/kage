@@ -396,6 +396,11 @@ impl Reasoning {
     }
 }
 
+/// Delta fields OpenAI-compatible models stream their reasoning in,
+/// checked in this order. A thinking block from such a model records
+/// the one it came in as its signature, to go back the same way.
+pub const REASONING_FIELDS: [&str; 2] = ["reasoning_content", "reasoning"];
+
 /// The assistant message field an OpenAI-compatible model reads its
 /// own reasoning back from during a tool loop (models.dev
 /// `interleaved.field`).

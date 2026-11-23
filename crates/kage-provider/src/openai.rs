@@ -168,9 +168,8 @@ impl Provider for OpenAiProvider {
         self.models.clone()
     }
 
-    /// Interleaved models get the current turn's thinking in their
-    /// reasoning field; other models get it as `<thinking>` text, see
-    /// `build_request_body`.
+    /// The current turn's thinking goes back in the model's reasoning
+    /// field, see `build_request_body`.
     fn preserves_thinking(&self) -> bool {
         true
     }
@@ -225,21 +224,24 @@ impl Provider for OpenAiProvider {
 /// How assistant thinking goes out on one message.
 #[derive(Clone, Copy)]
 enum ThinkingReplay {
-    /// As `<thinking>` text in `content`, for models that do not take
-    /// reasoning back.
-    Text,
+    /// In the field the block streamed in, for the current turn of a
+    /// model the catalog names no field for. Blocks from another model
+    /// or without a recorded field are left out.
+    Streamed,
     /// In the model's reasoning field, for the current turn of an
     /// interleaved model.
     Field(ReasoningField),
-    /// Left out, for earlier turns of an interleaved model.
+    /// Left out, for earlier turns.
     Drop,
 }
 
-/// Build the JSON body for a Chat Completions request. `interleaved`
-/// names the field the model reads its reasoning back from: the
-/// current turn (everything after the last user message) carries its
-/// thinking there and earlier turns leave it out, as the providers
-/// ask. Without it, thinking goes as `<thinking>` text.
+/// Build the JSON body for a Chat Completions request. The current
+/// turn (everything after the last user message) carries its thinking
+/// in a reasoning field and earlier turns leave it out, as the
+/// providers ask. `interleaved` names that field when the catalog
+/// knows it; otherwise each block goes back in the field it streamed
+/// in. Thinking never goes as text: a model shown its reasoning in
+/// `content` starts writing it there.
 fn build_request_body(
     req: &StreamRequest,
     stream: bool,
@@ -262,9 +264,9 @@ fn build_request_body(
     let audio = req.accepts.contains(kage_core::Modality::Audio);
     for (i, msg) in req.messages.iter().enumerate() {
         let replay = match interleaved {
-            None => ThinkingReplay::Text,
-            Some(field) if i >= turn_start => ThinkingReplay::Field(field),
-            Some(_) => ThinkingReplay::Drop,
+            _ if i < turn_start => ThinkingReplay::Drop,
+            Some(field) => ThinkingReplay::Field(field),
+            None => ThinkingReplay::Streamed,
         };
         if let Some(converted) = internal_message_to_openai(msg, replay, &req.model, audio) {
             messages.extend(converted);
@@ -431,6 +433,7 @@ fn convert_assistant_message(blocks: &[Content], replay: ThinkingReplay, model: 
     let mut text_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<Value> = Vec::new();
     let mut reasoning = String::new();
+    let mut streamed: Option<&str> = None;
     let mut details: Vec<Value> = Vec::new();
     for block in blocks {
         match block {
@@ -441,7 +444,21 @@ fn convert_assistant_message(blocks: &[Content], replay: ThinkingReplay, model: 
             Content::Thinking {
                 text, signature, ..
             } => match replay {
-                ThinkingReplay::Text => text_parts.extend(Content::flattened_thinking(text)),
+                ThinkingReplay::Streamed => {
+                    if let Some(field) =
+                        signature
+                            .as_ref()
+                            .filter(|s| s.model == model)
+                            .and_then(|s| {
+                                kage_core::REASONING_FIELDS
+                                    .into_iter()
+                                    .find(|f| *f == s.data)
+                            })
+                    {
+                        streamed.get_or_insert(field);
+                        reasoning.push_str(text);
+                    }
+                }
                 ThinkingReplay::Field(_) => {
                     reasoning.push_str(text);
                     if let Some(sig) = signature.as_ref().filter(|s| s.model == model)
@@ -480,6 +497,11 @@ fn convert_assistant_message(blocks: &[Content], replay: ThinkingReplay, model: 
     match replay {
         ThinkingReplay::Field(ReasoningField::ReasoningContent) if !reasoning.is_empty() => {
             msg["reasoning_content"] = Value::String(reasoning);
+        }
+        ThinkingReplay::Streamed => {
+            if let Some(field) = streamed.filter(|_| !reasoning.is_empty()) {
+                msg[field] = Value::String(reasoning);
+            }
         }
         ThinkingReplay::Field(ReasoningField::ReasoningDetails) => {
             if details.is_empty() && !reasoning.is_empty() {
@@ -558,6 +580,9 @@ pub struct OpenAiStream {
     /// `OpenRouter` `reasoning_details` of the reasoning in flight;
     /// `None` when the stream does not keep them.
     details: Option<Vec<Value>>,
+    /// The field the reasoning in flight streamed in, handed over as
+    /// its signature so the replay sends it back the same way.
+    reasoning_field: Option<&'static str>,
     /// For a model that draws but answers with links: the provider's
     /// origin, and the reply's text so far. `None` otherwise.
     linked: Option<(String, String)>,
@@ -584,6 +609,7 @@ impl OpenAiStream {
             finish_reason: StopReason::Other,
             usage: kage_core::TokenUsage::default(),
             details: None,
+            reasoning_field: None,
             linked: None,
         }
     }
@@ -666,13 +692,15 @@ impl OpenAiStream {
         // OpenAI-compatible reasoning models stream their thinking on
         // a side channel, not in `content`: GLM / Zhipu / DeepSeek use
         // `reasoning_content`, OpenRouter and others use `reasoning`.
-        // Surface it as a thinking delta so it is not silently lost.
-        if let Some(reasoning) = delta
-            .get("reasoning_content")
-            .or_else(|| delta.get("reasoning"))
-            .and_then(Value::as_str)
-            && !reasoning.is_empty()
-        {
+        // Some send both with the same text, so only the first counts.
+        if let Some((field, reasoning)) = kage_core::REASONING_FIELDS.iter().find_map(|&field| {
+            delta
+                .get(field)
+                .and_then(Value::as_str)
+                .filter(|r| !r.is_empty())
+                .map(|r| (field, r))
+        }) {
+            self.reasoning_field = Some(field);
             self.pending.push_back(Ok(ProviderEvent::ThinkingDelta {
                 delta: reasoning.to_owned(),
             }));
@@ -687,7 +715,7 @@ impl OpenAiStream {
         if let Some(content) = delta.get("content").and_then(Value::as_str)
             && !content.is_empty()
         {
-            self.flush_details();
+            self.flush_reasoning();
             if let Some((_, text)) = self.linked.as_mut() {
                 text.push_str(content);
             }
@@ -696,7 +724,7 @@ impl OpenAiStream {
             }));
         }
         if let Some(images) = delta.get("images").and_then(Value::as_array) {
-            self.flush_details();
+            self.flush_reasoning();
             for image in images {
                 self.process_image(image);
             }
@@ -704,7 +732,7 @@ impl OpenAiStream {
         let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) else {
             return;
         };
-        self.flush_details();
+        self.flush_reasoning();
         for tc in tool_calls {
             self.process_tool_call_delta(tc);
         }
@@ -793,13 +821,18 @@ impl OpenAiStream {
         }
     }
 
-    /// Close the reasoning in flight with the `reasoning_details` kept
-    /// for it.
-    fn flush_details(&mut self) {
-        let Some(details) = self.details.as_mut().filter(|d| !d.is_empty()) else {
-            return;
+    /// Close the reasoning in flight with what it needs to go back:
+    /// the `reasoning_details` kept for it, else the name of the field
+    /// it streamed in.
+    fn flush_reasoning(&mut self) {
+        let field = self.reasoning_field.take();
+        let data = match self.details.as_mut().filter(|d| !d.is_empty()) {
+            Some(details) => Value::Array(std::mem::take(details)).to_string(),
+            None => match field {
+                Some(field) => field.to_owned(),
+                None => return,
+            },
         };
-        let data = Value::Array(std::mem::take(details)).to_string();
         self.pending
             .push_back(Ok(ProviderEvent::ThinkingSignature { data }));
     }
@@ -807,7 +840,7 @@ impl OpenAiStream {
     /// End the message: what is still buffered, the linked pictures,
     /// then `MessageEnd`.
     fn finish(&mut self) {
-        self.flush_details();
+        self.flush_reasoning();
         self.flush_pending_tool_calls();
         if let Some((origin, text)) = self.linked.take() {
             for url in image_links(&text) {
@@ -1777,25 +1810,83 @@ mod tests {
         assert_eq!(messages[3]["tool_calls"][0]["id"], "call_1");
     }
 
+    /// A thinking block signed by `model` with the field it streamed in.
+    fn streamed_in(model: &str, field: &str) -> kage_core::ThinkingSignature {
+        kage_core::ThinkingSignature {
+            model: model.into(),
+            data: field.into(),
+            redacted: false,
+        }
+    }
+
+    /// Without a catalog field, the current turn's thinking goes back
+    /// in the field it streamed in and never as text.
     #[test]
-    fn other_models_get_thinking_as_text_and_no_reasoning_field() {
-        let req = StreamRequest::new("gpt", tool_loop_history());
+    fn other_models_get_thinking_back_in_the_field_it_streamed_in() {
+        let mut history = tool_loop_history();
+        Arc::make_mut(&mut history[1]).content[0] = thinking(
+            "old reasoning",
+            Some(streamed_in("ds", "reasoning_content")),
+        );
+        Arc::make_mut(&mut history[3]).content[0] =
+            thinking("need a file", Some(streamed_in("ds", "reasoning_content")));
+        let req = StreamRequest::new("ds", history.clone());
         let body = build_request_body(&req, true, None, Dialect::OpenAi);
         let messages = body["messages"].as_array().unwrap();
-        assert_eq!(
-            messages[1]["content"],
-            "<thinking>\nold reasoning\n</thinking>answer"
+        assert_eq!(messages[1]["content"], "answer");
+        assert!(messages[1].get("reasoning_content").is_none());
+        assert_eq!(messages[3]["reasoning_content"], "need a file");
+        assert!(messages[3]["content"].is_null());
+        assert!(!body.to_string().contains("<thinking>"));
+
+        Arc::make_mut(&mut history[3]).content[0] =
+            thinking("need a file", Some(streamed_in("ds", "reasoning")));
+        let req = StreamRequest::new("ds", history);
+        let body = build_request_body(&req, true, None, Dialect::OpenAi);
+        assert_eq!(body["messages"][3]["reasoning"], "need a file");
+        assert!(body["messages"][3].get("reasoning_content").is_none());
+    }
+
+    /// Thinking with no recorded field, or from another model, is left
+    /// out rather than sent as text.
+    #[test]
+    fn thinking_without_a_known_field_is_left_out() {
+        let mut history = tool_loop_history();
+        let req = StreamRequest::new("gpt", history.clone());
+        let body = build_request_body(&req, true, None, Dialect::OpenAi);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[1]["content"], "answer");
+        assert!(messages[3]["content"].is_null());
+        assert_eq!(messages[3]["tool_calls"][0]["id"], "call_1");
+
+        Arc::make_mut(&mut history[3]).content[0] = thinking(
+            "need a file",
+            Some(streamed_in("other", "reasoning_content")),
         );
-        assert_eq!(
-            messages[3]["content"],
-            "<thinking>\nneed a file\n</thinking>"
-        );
-        assert!(
-            messages
-                .iter()
-                .all(|m| m.get("reasoning_content").is_none()
-                    && m.get("reasoning_details").is_none())
-        );
+        let req = StreamRequest::new("gpt", history);
+        let body = build_request_body(&req, true, None, Dialect::OpenAi);
+        for m in body["messages"].as_array().unwrap() {
+            assert!(m.get("reasoning_content").is_none() && m.get("reasoning").is_none());
+        }
+        assert!(!body.to_string().contains("need a file"));
+    }
+
+    /// An upstream that sends the same reasoning in both fields yields
+    /// it once, closed with the first field's name before the answer.
+    #[test]
+    fn stream_records_the_reasoning_field_before_the_answer() {
+        let bytes: &[u8] = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"hm\",\"reasoning_content\":\"hm\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"}}]}\n\ndata: [DONE]\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+        let kinds: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::ThinkingDelta { delta } => Some(format!("think:{delta}")),
+                ProviderEvent::ThinkingSignature { data } => Some(format!("sig:{data}")),
+                ProviderEvent::TextDelta { delta } => Some(format!("text:{delta}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, ["think:hm", "sig:reasoning_content", "text:answer"]);
     }
 
     #[test]
@@ -1900,11 +1991,14 @@ mod tests {
             }])
         );
         let plain = collect_ok(stream_from_bytes(bytes));
-        assert!(
-            !plain
-                .iter()
-                .any(|e| matches!(e, ProviderEvent::ThinkingSignature { .. }))
-        );
+        let signatures: Vec<&str> = plain
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::ThinkingSignature { data } => Some(data.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(signatures, ["reasoning"]);
     }
 
     #[test]

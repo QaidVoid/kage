@@ -1503,9 +1503,14 @@ struct Pump {
     /// The thread running this TUI's plugin commands and key mappings,
     /// started on first use.
     command_jobs: Option<crossbeam_channel::Sender<CommandJob>>,
-    /// The notices those commands produce, to publish from here.
-    command_notices: crossbeam_channel::Receiver<(NoticeLevel, String)>,
-    command_notices_tx: crossbeam_channel::Sender<(NoticeLevel, String)>,
+    /// What those commands and plugin reloads report, to act on here.
+    command_notices: crossbeam_channel::Receiver<CommandNote>,
+    command_notices_tx: crossbeam_channel::Sender<CommandNote>,
+    /// Where a plugin reload reads the plugins from.
+    plugins_dir: Option<PathBuf>,
+    /// Where a plugin reload hands the App the new commands, widgets
+    /// and completions.
+    plugin_refresh: mpsc::Sender<PluginRefresh>,
     /// Where finished runs go to be written to the saved state, off
     /// this thread.
     recorder: mpsc::Sender<(String, RunOutcome)>,
@@ -1647,9 +1652,9 @@ impl Pump {
                     self.send_plugin_answer(answer);
                 }
             },
-            recv(command_notices) -> notice => {
-                if let Ok((level, text)) = notice {
-                    self.notice(level, text);
+            recv(command_notices) -> note => {
+                if let Ok(note) = note {
+                    self.command_note(note);
                 }
             },
             default(TICK) => {}
@@ -1674,12 +1679,31 @@ impl Pump {
         while let Ok(answer) = answers.try_recv() {
             self.send_plugin_answer(answer);
         }
-        while let Ok((level, text)) = command_notices.try_recv() {
-            self.notice(level, text);
+        while let Ok(note) = command_notices.try_recv() {
+            self.command_note(note);
         }
         self.poll_dialogs();
         self.flush();
         true
+    }
+
+    fn command_note(&mut self, note: CommandNote) {
+        match note {
+            CommandNote::Notice(level, text) => self.notice(level, text),
+            CommandNote::Reloaded => self.plugins_reloaded(),
+        }
+    }
+
+    /// Asks the agent to read the session's plugin registrations again
+    /// after this TUI reloaded the plugins it hosts, so the session's
+    /// next run uses their tools. An external agent's session hosts no
+    /// plugins of this TUI.
+    fn plugins_reloaded(&mut self) {
+        if self.wire.is_empty() || self.external.contains_key(&self.wire) {
+            return;
+        }
+        let wire = self.wire.clone();
+        self.store.client().plugins_resync(&wire);
     }
 
     fn send_plugin_answer(&mut self, (id, answer): PluginAnswer) {
@@ -3770,6 +3794,13 @@ impl Pump {
                     self.registry = registry;
                 }
             }
+            RunRequest::ReloadPlugins => {
+                if self.plugins.is_some() {
+                    self.run_command(CommandJob::Reload);
+                } else {
+                    self.notice(NoticeLevel::Warning, "no plugins are loaded".to_owned());
+                }
+            }
             other => self.refuse(&other),
         }
     }
@@ -4237,7 +4268,6 @@ impl Pump {
             RunRequest::CloneSession => "cloning the session",
             RunRequest::Image { .. } => "opening or saving images",
             RunRequest::Media { .. } => "opening or saving media",
-            RunRequest::ReloadPlugins => "reloading plugins",
             RunRequest::SwitchSession(SwitchTarget::PendingFork(_)) => "that switch",
             _ => "that command",
         };
@@ -4472,6 +4502,10 @@ impl Pump {
                 self.dialog_tx.clone(),
                 self.feed.wake.clone(),
                 self.command_notices_tx.clone(),
+                Reload {
+                    dir: self.plugins_dir.clone(),
+                    refresh: self.plugin_refresh.clone(),
+                },
             );
         }
         let sent = self
@@ -4488,12 +4522,89 @@ impl Pump {
     }
 }
 
-/// A plugin command or key mapping this TUI hosts.
+/// A plugin command or key mapping this TUI hosts, or a reload of
+/// its plugins.
 enum CommandJob {
     /// The command `name` with its raw `args`.
     Command { name: String, args: String },
     /// The key mapping with this id.
     Keymap(u64),
+    /// Read the plugins from disk again.
+    Reload,
+}
+
+/// What the command thread reports to the pump.
+enum CommandNote {
+    /// A notice to publish.
+    Notice(NoticeLevel, String),
+    /// The plugins reloaded, so the agent reads their registrations
+    /// again.
+    Reloaded,
+}
+
+/// What a plugin reload on the command thread needs: where the plugins
+/// live and where the App takes the new surfaces.
+struct Reload {
+    dir: Option<PathBuf>,
+    refresh: mpsc::Sender<PluginRefresh>,
+}
+
+/// Reads the plugins from disk again and republishes what they
+/// contribute: block renderers, then commands, widgets and completions
+/// to the App. Reports the outcome, and `Reloaded` once the runtime
+/// holds the new registrations.
+fn reload_plugins(
+    runtime: &PluginRuntime,
+    reload: &Reload,
+    wake: Option<&crossbeam_channel::Sender<()>>,
+    notes: &crossbeam_channel::Sender<CommandNote>,
+) {
+    let report = runtime.reload_all(reload.dir.as_deref());
+    register_block_renderers(runtime);
+    let _ = reload.refresh.send(PluginRefresh {
+        commands: snapshot_plugin_commands(runtime),
+        widgets: runtime.registered_widgets(),
+        autocomplete: runtime.registered_autocomplete_providers(),
+        models: Vec::new(),
+    });
+    if let Some(wake) = wake {
+        let _ = wake.try_send(());
+    }
+    let report = match report {
+        Ok(report) => report,
+        Err(err) => {
+            let _ = notes.send(CommandNote::Notice(
+                NoticeLevel::Error,
+                format!("plugin reload: {err}"),
+            ));
+            return;
+        }
+    };
+    let init = match report.init {
+        Some(Ok(())) => ", init.lua ok",
+        Some(Err(_)) => ", init.lua failed",
+        None => "",
+    };
+    for err in &report.keymap_errors {
+        let _ = notes.send(CommandNote::Notice(NoticeLevel::Error, err.clone()));
+    }
+    let summary = if report.failed.is_empty() {
+        format!("plugins reloaded ({} loaded{init})", report.loaded.len())
+    } else {
+        format!(
+            "plugins reloaded ({} ok, {} failed{init})",
+            report.loaded.len(),
+            report.failed.len()
+        )
+    };
+    let _ = notes.send(CommandNote::Notice(NoticeLevel::Info, summary));
+    for (path, err) in report.failed {
+        let _ = notes.send(CommandNote::Notice(
+            NoticeLevel::Error,
+            format!("plugin {}: {err}", path.display()),
+        ));
+    }
+    let _ = notes.send(CommandNote::Reloaded);
 }
 
 /// Starts the thread that runs this TUI's plugin commands and key
@@ -4504,12 +4615,14 @@ fn start_command_worker(
     runtime: Arc<PluginRuntime>,
     dialog_tx: mpsc::Sender<PluginDialog>,
     wake: Option<crossbeam_channel::Sender<()>>,
-    notices: crossbeam_channel::Sender<(NoticeLevel, String)>,
+    notices: crossbeam_channel::Sender<CommandNote>,
+    reload: Reload,
 ) -> Option<crossbeam_channel::Sender<CommandJob>> {
     let (jobs, queue) = crossbeam_channel::unbounded::<CommandJob>();
+    let dialog_wake = wake.clone();
     let show = move |dialog: PluginDialog| {
         let shown = dialog_tx.send(dialog).is_ok();
-        if let Some(wake) = &wake {
+        if let Some(wake) = &dialog_wake {
             let _ = wake.try_send(());
         }
         shown
@@ -4519,7 +4632,7 @@ fn start_command_worker(
         .spawn(move || {
             for job in queue {
                 let mut errors = |text| {
-                    let _ = notices.send((NoticeLevel::Error, text));
+                    let _ = notices.send(CommandNote::Notice(NoticeLevel::Error, text));
                 };
                 let output = match job {
                     CommandJob::Command { name, args } => {
@@ -4536,6 +4649,10 @@ fn start_command_worker(
                         }
                     }
                     CommandJob::Keymap(id) => run_bridged_keymap(&runtime, id, &show, &mut errors),
+                    CommandJob::Reload => {
+                        reload_plugins(&runtime, &reload, wake.as_ref(), &notices);
+                        None
+                    }
                 };
                 if let Some(output) = output.filter(|output| !output.text.is_empty()) {
                     let level = if output.is_error {
@@ -4543,12 +4660,48 @@ fn start_command_worker(
                     } else {
                         NoticeLevel::Info
                     };
-                    let _ = notices.send((level, output.text));
+                    let _ = notices.send(CommandNote::Notice(level, output.text));
                 }
             }
         })
         .ok()?;
     Some(jobs)
+}
+
+/// Watches the plugins directory, `init.lua` and `lua/` for changes
+/// and asks for a reload when a Lua file changes. The thread ends with
+/// the App's request channel.
+fn watch_plugins(
+    dir: Option<PathBuf>,
+    user: Option<PathBuf>,
+    requests: mpsc::Sender<RunRequest>,
+    buffer: &SharedBuffer,
+) {
+    let errors = buffer.clone();
+    let spawned = thread::Builder::new()
+        .name("kage-plugin-watch".to_owned())
+        .spawn(move || {
+            let watcher = match kage_plugin::PluginWatcher::for_config(dir, user) {
+                Ok(watcher) => watcher,
+                Err(err) => {
+                    lock(&errors).push_custom(
+                        "kage:error",
+                        format!("plugin watcher: {err}"),
+                        false,
+                    );
+                    return;
+                }
+            };
+            loop {
+                thread::sleep(Duration::from_millis(150));
+                if watcher.poll() && requests.send(RunRequest::ReloadPlugins).is_err() {
+                    return;
+                }
+            }
+        });
+    if let Err(err) = spawned {
+        lock(buffer).push_custom("kage:error", format!("plugin watcher: {err}"), false);
+    }
 }
 
 /// The session and progress of a user shell command update.
@@ -4915,10 +5068,15 @@ pub(crate) fn run(
     let (requests_tx, app_requests) = mpsc::channel::<RunRequest>();
     let requests_rx = forward_requests(app_requests);
     let (dialog_tx, dialog_rx) = mpsc::channel::<PluginDialog>();
-    // Plugin hot reload stays off: the pump cannot reload a runtime
-    // whose tools the agent already snapshotted for the session.
     let (refresh_tx, refresh_rx) = mpsc::channel::<PluginRefresh>();
-    drop(refresh_tx);
+    if plugins.is_some() {
+        watch_plugins(
+            plugins_dir_path.clone(),
+            user_dir.clone(),
+            requests_tx.clone(),
+            &buffer,
+        );
+    }
     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
     let feed = Arc::new(FeedState {
         wake: Some(wake_tx.clone()),
@@ -4972,6 +5130,8 @@ pub(crate) fn run(
         command_jobs: None,
         command_notices,
         command_notices_tx,
+        plugins_dir: plugins_dir_path.clone(),
+        plugin_refresh: refresh_tx,
         recorder,
         prompts: HashMap::new(),
         answered: Vec::new(),
@@ -5533,6 +5693,8 @@ mod tests {
             command_jobs: None,
             command_notices,
             command_notices_tx,
+            plugins_dir: None,
+            plugin_refresh: mpsc::channel().0,
             recorder,
             prompts: HashMap::new(),
             answered: Vec::new(),
@@ -8693,12 +8855,60 @@ kage.on('resources_discover', function() return { skills = { '/fixture/skills' }
         pump: &mut Pump,
         app: &mpsc::Receiver<Envelope>,
     ) -> Vec<(NoticeLevel, String)> {
-        let (level, text) = pump
+        let note = pump
             .command_notices
             .recv_timeout(Duration::from_secs(5))
             .expect("the command reports");
-        pump.notice(level, text);
+        pump.command_note(note);
         notices(app)
+    }
+
+    /// `/reload` reads the plugins from disk again on the command
+    /// thread, hands the App the new commands, and asks the agent to
+    /// read the session's plugin registrations again.
+    #[test]
+    fn a_plugin_reload_refreshes_the_app_and_resyncs_the_agent() {
+        let (mut pump, app, dir) = hosted_pump();
+        let (refresh, refreshed) = mpsc::channel();
+        pump.plugin_refresh = refresh;
+        pump.plugins_dir = Some(dir.clone());
+        pump.wire = "s1".to_owned();
+        std::fs::write(
+            dir.join("fresh.lua"),
+            "kage.register_command({ name = 'fresh', description = 'd', \
+             handler = function() return 'new' end })",
+        )
+        .unwrap();
+        let _ = pump.store.take_outgoing();
+        pump.handle(RunRequest::ReloadPlugins);
+        loop {
+            let note = pump
+                .command_notices
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the reload reports");
+            let done = matches!(note, CommandNote::Reloaded);
+            pump.command_note(note);
+            if done {
+                break;
+            }
+        }
+        let refresh = refreshed.try_recv().expect("the App gets the new surfaces");
+        assert!(
+            refresh
+                .commands
+                .iter()
+                .any(|command| command.name == "fresh")
+        );
+        assert!(
+            notices(&app)
+                .iter()
+                .any(|(_, text)| text.starts_with("plugins reloaded")),
+        );
+        assert!(has_request(
+            &pump.store.take_outgoing(),
+            "_kage/plugin/resync"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

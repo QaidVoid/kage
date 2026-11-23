@@ -1055,6 +1055,7 @@ impl Dispatcher {
                 s.state.permission_mode = mode;
             }),
             CommandKind::RestartMcp { server } => self.restart_mcp(id, server),
+            CommandKind::ReloadPluginTools => self.apply_plugin_tools(id),
             CommandKind::Close => self.close(id),
             CommandKind::SwarmMode { on } => self.set_swarm_mode(id, on),
             CommandKind::SetGoal { goal } => self.set_goal(id, goal),

@@ -1047,6 +1047,19 @@ impl Client {
         )
     }
 
+    /// Asks the agent to read the plugin registrations of `session_id`
+    /// again, after this client reloaded the plugins it hosts for the
+    /// session. A failure arrives as [`Change::Failed`].
+    pub fn plugins_resync(&mut self, session_id: &str) -> u64 {
+        self.request(
+            "_kage/plugin/resync",
+            params(&SessionRequest {
+                session_id: session_id.to_owned(),
+            }),
+            Pending::Started,
+        )
+    }
+
     /// Continues swarm children of `session_id`: each member id maps to
     /// a follow-up prompt, and an empty prompt continues the child's
     /// task. The children report back through `subagent_update`.

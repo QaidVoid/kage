@@ -564,6 +564,10 @@ struct CliAcpAgent {
     /// Whether the client hosts session plugins and answers the
     /// `_kage/plugin/*` reverse requests for them.
     plugin_host: AtomicBool,
+    /// The plugins the client hosts for each session it opened, which a
+    /// `_kage/plugin/resync` asks again. Weak, so a closed session's
+    /// plugins go with it.
+    client_plugins: Mutex<HashMap<SessionId, std::sync::Weak<client_plugins::ClientPlugins>>>,
     /// The environment the client sent, which sessions it opens from now
     /// on start their processes with. The host's own until it sends one.
     env: Mutex<Environment>,
@@ -648,6 +652,7 @@ impl CliAcpAgent {
             subagents,
             unconfigured_run: AtomicBool::new(false),
             plugin_host: AtomicBool::new(false),
+            client_plugins: Mutex::default(),
             kage_client,
             history_window,
             env: Mutex::new(Environment::inherit()),
@@ -731,10 +736,13 @@ impl CliAcpAgent {
             ));
         }
         match source {
-            Some(PluginsSource::Client) => Ok(Some(Arc::new(client_plugins::ClientPlugins::open(
-                id,
-                self.peer.clone(),
-            )?) as Arc<dyn SessionPlugins>)),
+            Some(PluginsSource::Client) => {
+                let plugins = Arc::new(client_plugins::ClientPlugins::open(id, self.peer.clone())?);
+                let mut hosted = lock(&self.client_plugins);
+                hosted.retain(|_, plugins| plugins.strong_count() > 0);
+                hosted.insert(id, Arc::downgrade(&plugins));
+                Ok(Some(plugins as Arc<dyn SessionPlugins>))
+            }
             None => Ok(None),
         }
     }
@@ -1468,6 +1476,30 @@ impl Agent for CliAcpAgent {
     fn providers_reload(&self) -> Result<serde_json::Value, RpcError> {
         self.host.reload_providers().map_err(RpcError::internal)?;
         self.host.fetch_missing_lists();
+        Ok(serde_json::json!({}))
+    }
+
+    /// Asks the client again what the session's plugins register, after
+    /// it reloaded them, and has the engine register the new tools for
+    /// the session's next run.
+    fn plugins_resync(&self, req: SessionRequest) -> Result<serde_json::Value, RpcError> {
+        let id = self.engine_id(&req.session_id)?;
+        let plugins = lock(&self.client_plugins)
+            .get(&id)
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| {
+                RpcError::new(
+                    -32602,
+                    format!("this client hosts no plugins for {}", req.session_id),
+                )
+            })?;
+        plugins.resync()?;
+        self.host
+            .set_plugin_renames(id, &plugins.registered_renames());
+        self.host
+            .engine
+            .commander()
+            .send(Command::to(id, CommandKind::ReloadPluginTools));
         Ok(serde_json::json!({}))
     }
 

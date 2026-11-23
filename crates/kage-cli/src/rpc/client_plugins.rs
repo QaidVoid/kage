@@ -13,7 +13,7 @@
 //! a tool call is bounded by its cancellation instead of a deadline,
 //! since a tool may legitimately run for long.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use kage_acp::acp::{
@@ -44,25 +44,32 @@ pub(crate) const PLUGIN_DRAIN: &str = "_kage/plugin/drain";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The plugin surface of session `session`, answered by the client on
-/// `peer`. The snapshot is the one answer to `_kage/plugin/tools`,
-/// taken while the opening `session/new` is still in flight.
+/// `peer`. The registrations are the answer to `_kage/plugin/tools`,
+/// taken while the opening `session/new` is still in flight and again
+/// on each [`ClientPlugins::resync`].
 pub(super) struct ClientPlugins {
     session_id: String,
     peer: AgentPeer,
     timeout: Duration,
+    registered: Mutex<Arc<Registered>>,
+    sink: SharedHostLog,
+}
+
+/// One answer to `_kage/plugin/tools` with the proxy tools built from
+/// it.
+struct Registered {
     snapshot: PluginToolsResult,
     tools: Vec<Arc<dyn Tool>>,
     overrides: Vec<Arc<dyn Tool>>,
-    sink: SharedHostLog,
 }
 
 impl std::fmt::Debug for ClientPlugins {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClientPlugins")
             .field("session_id", &self.session_id)
-            .field("tools", &self.snapshot.tools.len())
-            .field("overrides", &self.snapshot.overrides.len())
-            .field("renames", &self.snapshot.renames.len())
+            .field("tools", &self.registered().snapshot.tools.len())
+            .field("overrides", &self.registered().snapshot.overrides.len())
+            .field("renames", &self.registered().snapshot.renames.len())
             .finish_non_exhaustive()
     }
 }
@@ -84,36 +91,31 @@ impl ClientPlugins {
     /// within `timeout` or sends a malformed snapshot, and `-32602`
     /// when a tool names a risk the host does not know.
     fn open_with(session: SessionId, peer: AgentPeer, timeout: Duration) -> Result<Self, RpcError> {
-        let request = PluginToolsRequest {
-            session_id: session.to_string(),
-        };
-        let params = serde_json::to_value(&request).unwrap_or_default();
-        let reply = peer
-            .request_timeout(PLUGIN_TOOLS, params, timeout)
-            .map_err(|e| {
-                if is_timeout(&e, PLUGIN_TOOLS) {
-                    RpcError::internal(format!(
-                        "the client's plugin host did not answer {PLUGIN_TOOLS} within {}s",
-                        timeout.as_secs_f32()
-                    ))
-                } else {
-                    e
-                }
-            })?;
-        let snapshot = serde_json::from_value::<PluginToolsResult>(reply)
-            .map_err(|e| RpcError::internal(format!("plugin tools: {e}")))?;
         let session_id = session.to_string();
-        let tools = client_tools(&session_id, &peer, &snapshot.tools)?;
-        let overrides = client_tools(&session_id, &peer, &snapshot.overrides)?;
+        let registered = fetch(&session_id, &peer, timeout)?;
         Ok(Self {
             session_id,
             peer,
             timeout,
-            snapshot,
-            tools,
-            overrides,
+            registered: Mutex::new(Arc::new(registered)),
             sink: default_host_log(),
         })
+    }
+
+    /// Asks the owner again what its plugins register, after it
+    /// reloaded them. A failure keeps the registrations from before.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open`].
+    pub(super) fn resync(&self) -> Result<(), RpcError> {
+        let registered = fetch(&self.session_id, &self.peer, self.timeout)?;
+        *lock(&self.registered) = Arc::new(registered);
+        Ok(())
+    }
+
+    fn registered(&self) -> Arc<Registered> {
+        Arc::clone(&lock(&self.registered))
     }
 
     /// Ask the owner within the deadline. A silent owner is logged here
@@ -169,9 +171,40 @@ impl ClientPlugins {
     }
 }
 
+/// Asks the client on `peer` what its plugins register for
+/// `session_id` and builds the proxy tools for it.
+fn fetch(session_id: &str, peer: &AgentPeer, timeout: Duration) -> Result<Registered, RpcError> {
+    let request = PluginToolsRequest {
+        session_id: session_id.to_owned(),
+    };
+    let params = serde_json::to_value(&request).unwrap_or_default();
+    let reply = peer
+        .request_timeout(PLUGIN_TOOLS, params, timeout)
+        .map_err(|e| {
+            if is_timeout(&e, PLUGIN_TOOLS) {
+                RpcError::internal(format!(
+                    "the client's plugin host did not answer {PLUGIN_TOOLS} within {}s",
+                    timeout.as_secs_f32()
+                ))
+            } else {
+                e
+            }
+        })?;
+    let snapshot = serde_json::from_value::<PluginToolsResult>(reply)
+        .map_err(|e| RpcError::internal(format!("plugin tools: {e}")))?;
+    let tools = client_tools(session_id, peer, &snapshot.tools)?;
+    let overrides = client_tools(session_id, peer, &snapshot.overrides)?;
+    Ok(Registered {
+        snapshot,
+        tools,
+        overrides,
+    })
+}
+
 impl SessionPlugins for ClientPlugins {
     fn skill_dirs(&self) -> Vec<std::path::PathBuf> {
-        self.snapshot
+        self.registered()
+            .snapshot
             .skills
             .iter()
             .map(std::path::PathBuf::from)
@@ -179,15 +212,16 @@ impl SessionPlugins for ClientPlugins {
     }
 
     fn registered_tools(&self) -> Vec<Arc<dyn Tool>> {
-        self.tools.clone()
+        self.registered().tools.clone()
     }
 
     fn registered_tool_overrides(&self) -> Vec<Arc<dyn Tool>> {
-        self.overrides.clone()
+        self.registered().overrides.clone()
     }
 
     fn registered_renames(&self) -> Vec<(String, String)> {
-        self.snapshot
+        self.registered()
+            .snapshot
             .renames
             .iter()
             .map(|rename| (rename.from.clone(), rename.to.clone()))
@@ -195,7 +229,12 @@ impl SessionPlugins for ClientPlugins {
     }
 
     fn handler_count(&self, event: &str) -> usize {
-        self.snapshot.handlers.get(event).copied().unwrap_or(0) as usize
+        self.registered()
+            .snapshot
+            .handlers
+            .get(event)
+            .copied()
+            .unwrap_or(0) as usize
     }
 
     fn dispatch_event(&self, event: &str, payload: &Value) -> Result<(), PluginError> {

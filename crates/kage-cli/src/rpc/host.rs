@@ -505,21 +505,49 @@ impl Host {
         lock(&self.live).attach(spec.id, true);
         lock(&self.open).insert(spec.id, Open { settings });
         lock(&self.workdirs).insert(spec.id, spec.cx.workdir.clone());
-        let mut aliases = spec.tools.alias_map();
-        if let Some(plugins) = &spec.plugins {
-            for (from, to) in plugins.registered_renames() {
-                aliases.insert(to, from);
-            }
-        }
-        if aliases.is_empty() {
-            lock(&self.aliases).remove(&spec.id);
-        } else {
-            lock(&self.aliases).insert(spec.id, Arc::new(aliases));
-        }
+        let renames = spec
+            .plugins
+            .as_ref()
+            .map(|plugins| plugins.registered_renames())
+            .unwrap_or_default();
+        self.store_aliases(spec.id, spec.tools.alias_map(), &renames);
         if let Some(runtime) = runtime {
             lock(&self.runtimes).insert(spec.id, runtime);
         }
         self.engine.open_with_instance(spec, instance);
+    }
+
+    /// Records the renamed tools of session `id`: the `config` renames
+    /// its registry carries plus its plugins' `renames`.
+    fn store_aliases(
+        &self,
+        id: SessionId,
+        mut aliases: BTreeMap<String, String>,
+        renames: &[(String, String)],
+    ) {
+        for (from, to) in renames {
+            aliases.insert(to.clone(), from.clone());
+        }
+        if aliases.is_empty() {
+            lock(&self.aliases).remove(&id);
+        } else {
+            lock(&self.aliases).insert(id, Arc::new(aliases));
+        }
+    }
+
+    /// Records the renames session `id`'s plugins apply after they
+    /// reloaded, over the `[tools.rename]` of its project.
+    pub(super) fn set_plugin_renames(&self, id: SessionId, renames: &[(String, String)]) {
+        let Some(workdir) = self.workdir(id) else {
+            return;
+        };
+        let config = Config::load_layered(&workdir)
+            .map(|config| config.tools.rename)
+            .unwrap_or_default();
+        let aliases = kage_tools::ToolRegistry::new()
+            .with_renames(&config)
+            .alias_map();
+        self.store_aliases(id, aliases, renames);
     }
 
     /// The plugin runtime of the project at `workdir`, loading it with the

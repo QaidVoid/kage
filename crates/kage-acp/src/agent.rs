@@ -840,6 +840,18 @@ pub trait Agent: Send + Sync + 'static {
         Err(RpcError::method_not_found("_kage/providers/reload"))
     }
 
+    /// Asks the client again what the session's plugins register
+    /// (`_kage/plugin/resync`), after it reloaded the plugins it hosts,
+    /// so the session's next run uses their tools. The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if this client hosts no plugins for the
+    /// session or does not answer.
+    fn plugins_resync(&self, _req: SessionRequest) -> Result<serde_json::Value, RpcError> {
+        Err(RpcError::method_not_found("_kage/plugin/resync"))
+    }
+
     /// Lists the providers of a directory in the models.dev `api.json`
     /// shape (`_kage/providers/directory`), fetched by the agent. The
     /// default rejects.
@@ -1515,6 +1527,10 @@ fn handle_kage_request<A: Agent>(
             Err(e) => return parse_failed(peer, &id, e),
         },
         "_kage/providers/reload" => spawn_op(peer, agent, id, Agent::providers_reload),
+        "_kage/plugin/resync" => match parse::<SessionRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.plugins_resync(req)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
         "_kage/folders" => match parse::<FoldersRequest>(params) {
             Ok(req) => spawn_op(peer, agent, id, move |a| a.folders(req).map(jval)),
             Err(e) => return parse_failed(peer, &id, e),

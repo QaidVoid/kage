@@ -825,6 +825,10 @@ pub enum CommandKind {
         /// Whether the session plans before it changes anything.
         on: bool,
     },
+    /// Register the session's plugin tools again, after its plugins
+    /// reloaded. A run in flight keeps the tools it started with; the
+    /// next run uses the new ones.
+    ReloadPluginTools,
     /// Drop an idle session and its idle agent descendants from the
     /// engine. A session with a run or shell in flight is kept and
     /// warned instead. Engine-internal: hosts close sessions through

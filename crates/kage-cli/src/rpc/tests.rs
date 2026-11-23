@@ -8321,6 +8321,17 @@ fn serve_plugin_answers(
     tools: serde_json::Value,
     call: serde_json::Value,
 ) -> (mpsc::Receiver<Inbound>, PluginLog) {
+    serve_changing_plugin_answers(client, inbox, Arc::new(Mutex::new(tools)), call)
+}
+
+/// [`serve_plugin_answers`] with a snapshot the test can change, as a
+/// client that reloads its plugins.
+fn serve_changing_plugin_answers(
+    client: &Peer,
+    inbox: mpsc::Receiver<Inbound>,
+    tools: Arc<Mutex<serde_json::Value>>,
+    call: serde_json::Value,
+) -> (mpsc::Receiver<Inbound>, PluginLog) {
     let (tx, rx) = mpsc::channel();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let record = Arc::clone(&seen);
@@ -8332,7 +8343,7 @@ fn serve_plugin_answers(
                 continue;
             };
             let answer = match method.as_str() {
-                "_kage/plugin/tools" => Some(tools.clone()),
+                "_kage/plugin/tools" => Some(lock(&tools).clone()),
                 "_kage/plugin/call" => Some(call.clone()),
                 "_kage/plugin/event" | "_kage/plugin/hook" => Some(serde_json::Value::Null),
                 "_kage/plugin/drain" => Some(serde_json::json!({})),
@@ -8466,6 +8477,58 @@ fn a_client_hosted_tool_runs_on_the_client() {
             .iter()
             .any(|text| text.contains("client says hi"))
     );
+}
+
+/// A client that reloaded its plugins asks the host to read them
+/// again; the session's next run has the tool the reload added.
+#[test]
+fn a_plugin_resync_registers_the_reloaded_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(
+        vec![
+            tool_turn(
+                "call_echo",
+                "echo_client",
+                serde_json::json!({ "text": "ping" }),
+            ),
+            text_turn("done"),
+            text_turn("title"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    initialize_plugin_host(&h.client);
+    let tools = Arc::new(Mutex::new(serde_json::json!({})));
+    let (_inbox, seen) = serve_changing_plugin_answers(
+        &h.client,
+        h.inbox,
+        Arc::clone(&tools),
+        serde_json::json!({ "text": "client says hi" }),
+    );
+    let session = client_hosted_new_session(&h.client, &dir);
+    *lock(&tools) = client_tools();
+    h.client
+        .request(
+            "_kage/plugin/resync",
+            serde_json::json!({ "sessionId": session }),
+        )
+        .unwrap();
+    let end = prompt_async(&h.client, &session, "call the client tool");
+    let response = end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    let requests = lock(&seen).clone();
+    let count = |method: &str| requests.iter().filter(|(m, _)| m == method).count();
+    assert_eq!(count("_kage/plugin/tools"), 2, "opened, then resynced");
+    assert_eq!(count("_kage/plugin/call"), 1, "the reloaded tool ran");
+
+    let unknown = h
+        .client
+        .request(
+            "_kage/plugin/resync",
+            serde_json::json!({ "sessionId": "nobody" }),
+        )
+        .unwrap_err();
+    assert_eq!(unknown.code, -32602);
 }
 
 #[test]

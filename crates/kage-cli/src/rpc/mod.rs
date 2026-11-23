@@ -538,6 +538,9 @@ struct CliAcpAgent {
     subscription: SubscriptionId,
     /// Attaches waiting to be applied by the bridge.
     seeds: Arc<Mutex<Vec<Seed>>>,
+    /// Sessions this connection closed, whose bookkeeping the bridge
+    /// drops before its next envelope.
+    closed: Arc<Mutex<Vec<SessionId>>>,
 }
 
 impl CliAcpAgent {
@@ -554,6 +557,7 @@ impl CliAcpAgent {
         let held = Held::default();
         let asks = AskSet::default();
         let seeds = Arc::default();
+        let closed = Arc::<Mutex<Vec<SessionId>>>::default();
         let mut bridge = Bridge {
             peer: peer.clone(),
             commander: host.engine.commander(),
@@ -586,6 +590,7 @@ impl CliAcpAgent {
             held: Arc::clone(&held),
             approving: HashMap::new(),
             seeds: Arc::clone(&seeds),
+            closed: Arc::clone(&closed),
         };
         let subscription = host
             .engine
@@ -614,6 +619,7 @@ impl CliAcpAgent {
             asks,
             subscription,
             seeds,
+            closed,
         }
     }
 
@@ -967,6 +973,7 @@ impl CliAcpAgent {
             lock(&self.shown).remove(&id);
             lock(&self.held).remove(&id);
             self.host.release(id);
+            lock(&self.closed).push(id);
         });
         if !self.host.held(id) {
             // No connection is left to answer the asks parked under the

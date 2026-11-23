@@ -131,6 +131,9 @@ pub(super) struct Bridge {
     /// Attaches waiting to be applied: what a connection that loaded a
     /// hosted session needs before its next envelope routes.
     pub(super) seeds: Arc<Mutex<Vec<Seed>>>,
+    /// Sessions the connection closed, whose bookkeeping goes before
+    /// the next envelope, so reopening one starts clean.
+    pub(super) closed: Arc<Mutex<Vec<SessionId>>>,
 }
 
 /// A permission question in flight on its own thread.
@@ -333,6 +336,7 @@ pub(super) fn spawn_ask(
 
 impl Bridge {
     pub(super) fn handle(&mut self, envelope: &Envelope) {
+        self.forget_closed();
         self.apply_seeds();
         let envelope = &with_canonical_tool_names(envelope.clone(), &self.aliases);
         if let Event::Host(
@@ -672,6 +676,27 @@ impl Bridge {
                 summary: pending.summary,
             });
             self.send(session, client_id, update);
+        }
+    }
+
+    /// Drops what the bridge kept about the sessions the connection
+    /// closed: a reopened one would otherwise skip its first commands
+    /// update as unchanged and count its pruned agents' cost twice.
+    fn forget_closed(&mut self) {
+        let closed = std::mem::take(&mut *lock(&self.closed));
+        for session in closed {
+            self.seen.remove(&session);
+            self.stops.remove(&session);
+            self.ended.remove(&session);
+            self.commands.remove(&session);
+            self.modes.remove(&session);
+            self.names.remove(&session);
+            self.statuses.remove(&session);
+            self.fills.remove(&session);
+            self.pruned_cost.remove(&session);
+            self.compacting.remove(&session);
+            self.compacting_started.remove(&session);
+            self.approving.retain(|(owner, _), _| *owner != session);
         }
     }
 

@@ -1097,6 +1097,7 @@ fn child_waiters_survive_a_rate_limit_and_settle_without_a_tree_node() {
         approving: HashMap::new(),
         asks: AskSet::default(),
         seeds: Arc::default(),
+        closed: Arc::default(),
     };
     let event = |outcome| kage_core::protocol::Envelope {
         session: child,
@@ -4350,6 +4351,36 @@ fn a_new_session_is_answered_before_its_updates_as_the_input_ends() {
         .collect();
     assert!(!updates.is_empty(), "{lines:?}");
     assert!(updates.iter().all(|&i| i > answered), "{lines:?}");
+}
+
+/// A session closed and loaded again on one connection gets its
+/// commands again: the bridge forgot what it had sent the closed one.
+#[test]
+fn a_reloaded_session_gets_its_commands_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let session = record(
+        dir.path(),
+        &cwd,
+        "mock/m",
+        1,
+        &[message(Role::User, vec![text("hello")], None)],
+    );
+    let h = serve_with(
+        vec![text_turn("ok")],
+        dir.path(),
+        dir.path(),
+        true,
+        Modalities::default(),
+    );
+    let params = serde_json::json!({"sessionId": session, "cwd": cwd, "mcpServers": []});
+    for _ in 0..2 {
+        h.client.request("session/load", params.clone()).unwrap();
+        updates_until(&h.inbox, &session, "available_commands_update");
+        h.client
+            .request("session/close", serde_json::json!({"sessionId": session}))
+            .unwrap();
+    }
 }
 
 #[test]

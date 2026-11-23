@@ -5960,10 +5960,14 @@ fn a_late_subagent_client_hears_of_a_running_agent_and_its_ask() {
     assert_eq!(announced["update"]["task"], "list files");
     assert_eq!(announced["update"]["capabilities"]["cancel"], true);
     assert_eq!(announced["update"]["state"], "running");
+    let root_call = params["toolCall"].clone();
     let (re_asked, params) = until_ask(&c2.inbox, &mut Vec::new());
     assert_eq!(params["sessionId"], child);
-    assert_eq!(params["toolCall"]["toolCallId"], "call_agent");
-    assert_eq!(params["toolCall"]["title"], "general: ls");
+    assert_eq!(params["toolCall"]["toolCallId"], "call_child");
+    assert_eq!(
+        params["toolCall"]["title"], root_call["title"],
+        "the late client is asked the way the live one was"
+    );
 
     let refused = c2
         .client
@@ -5977,6 +5981,69 @@ fn a_late_subagent_client_hears_of_a_running_agent_and_its_ask() {
     let (_, terminal) = notes.last().unwrap();
     assert_eq!(terminal["update"]["subagentSessionId"], child);
     assert_eq!(terminal["update"]["state"], "completed");
+    let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+}
+
+/// A late client without the `subagents` capability hears of no
+/// subagent session; the running agent's ask comes on the client's own
+/// session as the agent call's card, as the live bridge sends it.
+#[test]
+fn a_late_plain_client_is_asked_on_its_own_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().display().to_string();
+    let task = serde_json::json!({"description": "list files", "prompt": "list"});
+    let h = serve_paused(
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::ToolCallStart {
+                id: ToolCallId::new("call_agent"),
+                name: "agent".into(),
+            }),
+        ],
+        vec![
+            Ok(ProviderEvent::ToolCallEnd {
+                id: ToolCallId::new("call_agent"),
+                input: task,
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: CoreStopReason::ToolUse,
+                usage: TokenUsage::default(),
+            }),
+        ],
+        vec![
+            tool_turn("call_child", "ls", serde_json::json!({ "path": path })),
+            text_turn("child done"),
+            text_turn("parent done"),
+            text_turn("titled"),
+        ],
+        dir.path(),
+        dir.path(),
+    );
+    initialize(&h.client);
+    let prompt_end = prompt_async(&h.client, &h.session, "go");
+    until(|| h.paused.is_parked());
+    h.release.send(()).unwrap();
+    let (root_ask, _) = until_ask(&h.inbox, &mut Vec::new());
+
+    let c2 = connect(&h.host);
+    let params = serde_json::json!({"protocolVersion": PROTOCOL_VERSION, "clientCapabilities": {}});
+    c2.client.request("initialize", params).unwrap();
+    c2.client.request("session/load", h.resume.clone()).unwrap();
+    let mut seen = Vec::new();
+    let (re_asked, params) = until_ask(&c2.inbox, &mut seen);
+    assert_eq!(params["sessionId"], h.session.as_str());
+    assert_eq!(params["toolCall"]["toolCallId"], "call_agent");
+    assert_eq!(params["toolCall"]["title"], "general: ls");
+    assert!(
+        !seen
+            .iter()
+            .any(|note| note["update"]["sessionUpdate"] == "subagent_update"),
+        "{seen:#?}"
+    );
+
+    allow(&c2.client, &re_asked);
+    wait_cancel(&h.inbox, &root_ask);
     let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
     assert_eq!(response["stopReason"], "end_turn");
 }

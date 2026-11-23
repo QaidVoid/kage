@@ -963,39 +963,13 @@ impl CliAcpAgent {
                 }));
             }
         }
-        // The subagents the client missed, parents first, then every
-        // open permission request under the session.
-        let running = self.announce_subagents(id, client, &snap.subagents);
-        let commander = self.host.engine.commander();
-        for seed in &snap.asks {
-            let ask = &seed.ask;
-            let (tool_call, client_id) = match &seed.top {
-                None => (
-                    permission_call(ask.tool_call_id.as_ref(), &ask.tool, &ask.input),
-                    client.to_owned(),
-                ),
-                Some((call_id, agent)) => (
-                    ToolCallUpdate {
-                        tool_call_id: call_id.to_string(),
-                        title: Some(format!("{agent}: {}", tool_title(&ask.tool))),
-                        kind: Some(tool_kind(&ask.tool)),
-                        raw_input: Some(ask.input.clone()),
-                        ..ToolCallUpdate::default()
-                    },
-                    ask.session.to_string(),
-                ),
-            };
-            let kind = ask_kind(&ask.tool, &ask.input, tool_call);
-            spawn_ask(
-                &self.peer,
-                &commander,
-                &self.asks,
-                ask.session,
-                client_id,
-                ask.request_id,
-                kind,
-            );
-        }
+        let subagents = self.subagents.load(Ordering::SeqCst);
+        let running = if subagents {
+            self.announce_subagents(id, client, &snap.subagents)
+        } else {
+            HashSet::new()
+        };
+        self.re_ask(client, &snap.asks, subagents);
         let paused = snap
             .subagents
             .iter()
@@ -1011,6 +985,47 @@ impl CliAcpAgent {
         });
         self.host.attach(id, false);
         Ok(())
+    }
+
+    /// Asks the client again what is open under the session it
+    /// attached as `client`, routed as the live bridge routes them: a
+    /// `subagents` client is asked on the agent's own session, any other
+    /// on its own session as the agent call's card.
+    fn re_ask(&self, client: &str, asks: &[AskSeed], subagents: bool) {
+        let commander = self.host.engine.commander();
+        for seed in asks {
+            let ask = &seed.ask;
+            let (tool_call, client_id) = match &seed.top {
+                None => (
+                    permission_call(ask.tool_call_id.as_ref(), &ask.tool, &ask.input),
+                    client.to_owned(),
+                ),
+                Some(_) if subagents => (
+                    permission_call(ask.tool_call_id.as_ref(), &ask.tool, &ask.input),
+                    ask.session.to_string(),
+                ),
+                Some((call_id, agent)) => (
+                    ToolCallUpdate {
+                        tool_call_id: call_id.to_string(),
+                        title: Some(format!("{agent}: {}", tool_title(&ask.tool))),
+                        kind: Some(tool_kind(&ask.tool)),
+                        raw_input: Some(ask.input.clone()),
+                        ..ToolCallUpdate::default()
+                    },
+                    client.to_owned(),
+                ),
+            };
+            let kind = ask_kind(&ask.tool, &ask.input, tool_call);
+            spawn_ask(
+                &self.peer,
+                &commander,
+                &self.asks,
+                ask.session,
+                client_id,
+                ask.request_id,
+                kind,
+            );
+        }
     }
 
     /// Announces `subagents` to the client on their parent's session,

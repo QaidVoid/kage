@@ -107,8 +107,8 @@ impl Provider for GeminiProvider {
         self.models.clone()
     }
 
-    /// Thought signatures go back on their function calls, and thinking
-    /// text as `<thinking>` text, see `build_request_body`.
+    /// Thought signatures go back on their function calls, see
+    /// `build_request_body`.
     fn preserves_thinking(&self) -> bool {
         true
     }
@@ -486,7 +486,9 @@ fn convert_user_parts(blocks: &[Content], audio: bool) -> Vec<Value> {
 /// back on the function call that follows it, which Gemini 3 requires
 /// on the first call of every step in the current turn. With
 /// `placeholder`, a first call that has no real signature carries
-/// [`SKIP_SIGNATURE`] instead. Other thinking goes as `<thinking>` text.
+/// [`SKIP_SIGNATURE`] instead. Other thinking is left out: Gemini reads
+/// no thought text back, and a model shown its reasoning as text starts
+/// writing it there.
 /// With `images`, an image the model produced goes back as inline data,
 /// carrying the signature before it; without, as a short note, and the
 /// signature is dropped so it never lands on a later call. An audio
@@ -508,11 +510,6 @@ fn convert_assistant_parts(
                 ..
             } if sig.model == model && !sig.redacted && !sig.names_reasoning_field() => {
                 signature = Some(&sig.data);
-            }
-            Content::Thinking { text, .. } => {
-                if let Some(text) = Content::flattened_thinking(text) {
-                    parts.push(serde_json::json!({"text": text}));
-                }
             }
             Content::ToolCall { name, input, .. } => {
                 let mut part = serde_json::json!({
@@ -1197,12 +1194,13 @@ mod tests {
         );
         let body = build_request_body(&req);
         let parts = body["contents"][1]["parts"].as_array().unwrap();
-        assert_eq!(parts.len(), 4);
+        assert_eq!(parts.len(), 3);
         assert_eq!(parts[0]["thoughtSignature"], "sig");
         assert_eq!(parts[0]["functionCall"]["name"], "read");
         assert!(parts[1].get("thoughtSignature").is_none());
-        assert_eq!(parts[2]["text"], "<thinking>\nother model\n</thinking>");
-        assert!(parts[3].get("thoughtSignature").is_none());
+        assert_eq!(parts[2]["functionCall"]["name"], "read");
+        assert!(parts[2].get("thoughtSignature").is_none());
+        assert!(!body.to_string().contains("other model"));
     }
 
     fn unsigned_loop() -> Vec<std::sync::Arc<Message>> {
@@ -1267,11 +1265,9 @@ mod tests {
         assert!(sig(3, 0).is_none());
         assert_eq!(sig(5, 0).unwrap(), SKIP_SIGNATURE);
         assert!(sig(5, 1).is_none());
-        assert_eq!(
-            contents[8]["parts"][0]["text"],
-            "<thinking>\nswitched\n</thinking>"
-        );
-        assert_eq!(sig(8, 1).unwrap(), SKIP_SIGNATURE);
+        assert_eq!(contents[8]["parts"][0]["functionCall"]["name"], "read");
+        assert_eq!(sig(8, 0).unwrap(), SKIP_SIGNATURE);
+        assert!(!body.to_string().contains("switched"));
         assert!(sig(10, 0).is_none());
     }
 

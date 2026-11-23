@@ -523,21 +523,17 @@ fn push_user_text<F: FnMut(LoopEvent)>(cx: &mut AgentContext, emit: &mut F, text
     push_user_content(cx, emit, vec![Content::Text { text }]);
 }
 
-/// Rewrite persisted `Content::Thinking` blocks into inline
-/// `<thinking>...</thinking>` text before a request is built.
+/// Drop persisted `Content::Thinking` blocks before a request is built,
+/// for providers that do not send thinking back themselves (see
+/// [`Provider::preserves_thinking`]).
 ///
-/// Thinking blocks are not portable across providers: a native block
-/// needs the signature of the provider and model that produced it, and
-/// providers without thinking input drop unknown content silently,
-/// losing the reasoning chain outright. Flattening historical thinking
-/// to plain text keeps the reasoning visible to whatever provider runs
-/// the next turn, regardless of which produced it. Providers that send
-/// thinking back themselves opt out via [`Provider::preserves_thinking`].
+/// Thinking is never replayed as text: a model shown its own reasoning
+/// in the message content starts writing it into its replies.
 ///
 /// Only persisted history is touched. The in-flight assistant turn is
 /// not appended to `cx.history` until after it has streamed, so live
 /// thinking deltas reach the UI unmodified.
-fn flatten_thinking(history: &[Arc<Message>]) -> Vec<Arc<Message>> {
+fn strip_thinking(history: &[Arc<Message>]) -> Vec<Arc<Message>> {
     history
         .iter()
         .map(|msg| {
@@ -555,12 +551,8 @@ fn flatten_thinking(history: &[Arc<Message>]) -> Vec<Arc<Message>> {
             let content = msg
                 .content
                 .iter()
-                .filter_map(|c| match c {
-                    Content::Thinking { text, .. } => {
-                        Content::flattened_thinking(text).map(|text| Content::Text { text })
-                    }
-                    other => Some(other.clone()),
-                })
+                .filter(|c| !matches!(c, Content::Thinking { .. }))
+                .cloned()
                 .collect();
             Arc::new(Message { content, ..**msg })
         })
@@ -576,7 +568,7 @@ fn build_request(
     let history = if provider.preserves_thinking() {
         cx.history.clone()
     } else {
-        flatten_thinking(&cx.history)
+        strip_thinking(&cx.history)
     };
     let mut req = StreamRequest::new(&cx.model, close_unanswered_calls(history));
     if !cx.system_prompt.is_empty() {

@@ -155,21 +155,6 @@ impl Content {
     pub fn audio_note(mime: &str) -> String {
         format!("[an audio clip ({mime}) was here; it is not sent to the model]")
     }
-
-    /// Thinking `text` framed as `<thinking>` text, the form kage sends
-    /// to a provider that cannot take a thinking block natively. A
-    /// literal close tag in the text is escaped so the frame cannot end
-    /// early. `None` for blank thinking.
-    #[must_use]
-    pub fn flattened_thinking(text: &str) -> Option<String> {
-        if text.trim().is_empty() {
-            return None;
-        }
-        Some(format!(
-            "<thinking>\n{}\n</thinking>",
-            text.replace("</thinking", "<\\/thinking")
-        ))
-    }
 }
 
 /// Opaque data a provider attached to a thinking block: an Anthropic
@@ -640,15 +625,6 @@ mod tests {
             r#"{"type":"thinking","text":"hmm","duration_ms":11000}"#
         );
         assert_eq!(serde_json::from_str::<Content>(&json).unwrap(), timed);
-    }
-
-    #[test]
-    fn flattened_thinking_frames_text_and_skips_blank() {
-        assert_eq!(
-            Content::flattened_thinking("why").as_deref(),
-            Some("<thinking>\nwhy\n</thinking>")
-        );
-        assert_eq!(Content::flattened_thinking("  "), None);
     }
 
     #[test]

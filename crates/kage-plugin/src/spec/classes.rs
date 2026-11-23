@@ -411,7 +411,7 @@ pub(super) const CLASSES: &[Class] = &[
             Field {
                 name: "preserves_thinking?",
                 ty: "boolean",
-                doc: "Skip flatten-thinking when replaying history. Defaults to false.",
+                doc: "Receive thinking blocks in the history; without it they are left out. Defaults to false.",
             },
             Field {
                 name: "models?",

@@ -347,8 +347,8 @@ since kage has no catalog entry for it:
 - `interleaved`: for `kind = "openai"`, the assistant message field
   the model reads its own reasoning back from during a tool loop,
   `reasoning_content` or `reasoning_details` (the models.dev
-  `interleaved.field`). Left out, reasoning is sent as `<thinking>`
-  text in the message content.
+  `interleaved.field`). Left out, reasoning goes back in the field it
+  streamed in (`reasoning_content` or `reasoning`).
 - `cost`: prices in USD per million tokens, with the same fields as
   the catalog: `input` and `output`, plus the optional `cache_read`
   and `cache_write`. Cache reads without a price are billed at the
@@ -481,15 +481,20 @@ across tool calls:
 - Gemini gets each thought signature back on its function call.
 - The Responses API returns encrypted reasoning, which goes back as the
   `encrypted_content` of its `reasoning` item.
-- OpenAI-compatible models with a catalog or config `interleaved`
-  field get the current turn's reasoning in that field. Earlier turns
-  leave it out.
+- OpenAI-compatible models get the current turn's reasoning in their
+  catalog or config `interleaved` field, else in the field it streamed
+  in. Earlier turns leave it out.
 
 Anthropic-compatible gateways serving non-Claude models get thinking
 another model produced back as an unsigned native block, which those
 backends need on a tool-call turn. Claude models reject unsigned
 blocks, so their unsigned thinking is dropped. Gemini cannot verify
-thinking another model produced, so it gets it as `<thinking>` text.
+thinking another model produced, so it is left out.
+
+Thinking never goes back as text in the message content: a model
+shown its own reasoning that way starts writing it into its replies.
+Plugin providers that do not set `preserves_thinking` get the history
+without thinking.
 Custom providers of `kind = "anthropic"` or `"gemini"` follow the
 same rules.
 

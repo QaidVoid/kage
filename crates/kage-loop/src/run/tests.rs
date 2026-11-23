@@ -162,7 +162,7 @@ fn assistant_msg(content: Vec<Content>) -> Message {
 }
 
 #[test]
-fn flatten_thinking_rewrites_thinking_to_tagged_text() {
+fn strip_thinking_drops_thinking_and_keeps_the_rest() {
     let history = vec![Arc::new(assistant_msg(vec![
         Content::Thinking {
             text: "weigh the options".to_owned(),
@@ -173,50 +173,24 @@ fn flatten_thinking_rewrites_thinking_to_tagged_text() {
             text: "the answer is 42".to_owned(),
         },
     ]))];
-    let flat = flatten_thinking(&history);
+    let stripped = strip_thinking(&history);
     assert_eq!(
-        flat[0].content,
-        vec![
-            Content::Text {
-                text: "<thinking>\nweigh the options\n</thinking>".to_owned(),
-            },
-            Content::Text {
-                text: "the answer is 42".to_owned(),
-            },
-        ]
-    );
-}
-
-#[test]
-fn flatten_thinking_drops_empty_thinking_blocks() {
-    let history = vec![Arc::new(assistant_msg(vec![
-        Content::Thinking {
-            text: "   ".to_owned(),
-            signature: None,
-            duration_ms: None,
-        },
-        Content::Text {
-            text: "done".to_owned(),
-        },
-    ]))];
-    let flat = flatten_thinking(&history);
-    assert_eq!(
-        flat[0].content,
+        stripped[0].content,
         vec![Content::Text {
-            text: "done".to_owned(),
+            text: "the answer is 42".to_owned(),
         }]
     );
 }
 
 #[test]
-fn flatten_thinking_leaves_non_thinking_messages_unchanged() {
+fn strip_thinking_leaves_non_thinking_messages_unchanged() {
     let history = vec![
         Arc::new(user_msg("hi")),
         Arc::new(assistant_msg(vec![Content::Text {
             text: "hello".to_owned(),
         }])),
     ];
-    assert_eq!(flatten_thinking(&history), history);
+    assert_eq!(strip_thinking(&history), history);
 }
 
 #[test]
@@ -249,7 +223,7 @@ fn build_request_shares_history_arcs_without_cloning_text() {
 }
 
 #[test]
-fn build_request_flattens_history_thinking() {
+fn build_request_strips_history_thinking() {
     let mut cx = AgentContext::new("m", "");
     cx.history.push(Arc::new(user_msg("question")));
     cx.history
@@ -268,10 +242,7 @@ fn build_request_flattens_history_thinking() {
             .any(|c| matches!(c, Content::Thinking { .. })),
         "no native thinking blocks should survive into the request"
     );
-    assert!(req.messages[1].content.iter().any(|c| matches!(
-        c,
-        Content::Text { text } if text.contains("<thinking>") && text.contains("reason")
-    )));
+    assert!(req.messages[1].content.is_empty());
 }
 
 struct OneFollowup(bool);

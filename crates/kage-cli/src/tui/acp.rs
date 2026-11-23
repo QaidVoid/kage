@@ -285,6 +285,18 @@ type PrivatePair = (
     Option<Hangup>,
 );
 
+/// Moves the diagnostics startup wrote before any session existed from
+/// `from` into `into`, the adopted session's transcript.
+fn carry_startup_notes(from: &SharedBuffer, into: &SharedBuffer) {
+    let blocks = lock(from).take();
+    let mut into = lock(into);
+    for block in blocks {
+        if let kage_tui::Block::Custom { kind, text, folded } = block.as_ref() {
+            into.push_custom(kind.clone(), text.clone(), *folded);
+        }
+    }
+}
+
 /// A hangup that stops reads on `stream`, so a reader blocked on a
 /// clone of it returns end of file. Writes already queued still go
 /// out: the writer thread closes its own end once its queue is empty.
@@ -1154,6 +1166,9 @@ struct Pump {
     /// reset on the store side (a replaced session) swaps the object,
     /// which is when the App must be handed the new one.
     handed: Option<SharedBuffer>,
+    /// What startup wrote before any session existed: config, plugin
+    /// and state errors. Carried into the first adopted session.
+    startup_notes: Option<SharedBuffer>,
     /// The keymap data last offered to the App, so a snapshot that
     /// moved for other reasons does not clear a half-typed chord.
     last_keymap: Option<Vec<MappingData>>,
@@ -2791,6 +2806,9 @@ impl Pump {
         // `/plan off` restores the mode the session came from only if
         // the open reported one.
         self.last_mode = self.mode_value();
+        if let Some(notes) = self.startup_notes.take() {
+            carry_startup_notes(&notes, &self.store.shared_buffer(&self.wire));
+        }
         if !self.hand_buffer() {
             self.publish(HostEvent::SessionAdopted);
         }
@@ -4468,6 +4486,7 @@ pub(crate) fn run(
         seq: 0,
         running: false,
         handed: None,
+        startup_notes: Some(buffer.clone()),
         last_keymap: None,
         forwarded: HashSet::new(),
         dialog_shown: HashSet::new(),
@@ -4493,10 +4512,10 @@ pub(crate) fn run(
     }
     pump.bootstrap(resume);
     // The buffer the App draws first: a resumed session's replay
-    // target, or a placeholder until the new session's answer adopts
-    // the wire and the feed swaps the store's buffer in.
+    // target, or the startup notes until the new session's answer
+    // adopts the wire and the feed swaps the store's buffer in.
     let root = if pump.wire.is_empty() {
-        shared_buffer()
+        buffer.clone()
     } else {
         pump.store.shared_buffer(&pump.wire)
     };
@@ -5019,6 +5038,7 @@ mod tests {
             seq: 0,
             running: false,
             handed: None,
+            startup_notes: None,
             last_keymap: None,
             forwarded: HashSet::new(),
             dialog_shown: HashSet::new(),
@@ -6022,6 +6042,29 @@ mod tests {
                     )),
             "the approval card reaches the App"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Errors startup wrote before any session existed show in the
+    /// first session the App adopts.
+    #[test]
+    fn startup_notes_join_the_first_adopted_session() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        let notes = shared_buffer();
+        lock(&notes).push_custom("kage:error", "config: bad option", false);
+        pump.startup_notes = Some(Arc::clone(&notes));
+        pump.handle(RunRequest::NewSession);
+        let new = request_id(&pump.store.take_outgoing(), "session/new");
+        pump.absorb(Frame::Success {
+            id: new,
+            result: serde_json::json!({"sessionId": "fresh"}),
+        });
+        let adopted = pump.store.shared_buffer("fresh");
+        assert!(lock(&adopted).blocks().iter().any(|block| matches!(
+            block.as_ref(),
+            kage_tui::Block::Custom { text, .. } if text == "config: bad option"
+        )));
+        assert!(pump.startup_notes.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 

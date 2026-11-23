@@ -9,6 +9,13 @@ use super::*;
 use crate::terminal::InputReader;
 
 impl App {
+    /// The main session's transcript the App draws now, which an ACP
+    /// connection swaps as it adopts sessions.
+    #[must_use]
+    pub fn root_buffer(&self) -> SharedBuffer {
+        Arc::clone(&self.root_buffer)
+    }
+
     /// Drive the event loop until the user quits. Returns the exit
     /// reason. The caller is expected to drop the [`Tui`] (which
     /// restores the terminal) before printing anything to stdout.

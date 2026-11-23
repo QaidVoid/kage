@@ -114,12 +114,12 @@ impl Frontend {
                 return ExitCode::from(1);
             }
         };
-        let buffer = self.buffer.clone();
         let options = Arc::clone(&self.options);
         let mirror = Arc::clone(&self.mirror);
         let mut app = self.into_app();
         let result = app.run(&mut tui);
         let width = tui.terminal().size().map_or(80, |size| size.width);
+        let buffer = app.root_buffer();
         drop(tui);
         drop(app);
         stop();

@@ -161,8 +161,10 @@ impl App {
 
     /// Resolve an `InputAction::RunShell`: send the command to the
     /// worker, which paints its own shell block, so no user block is
-    /// pushed here, and follow the conversation to its end.
+    /// pushed here, and follow the conversation to its end. It runs in
+    /// the main session, so an agent view goes back to the main one.
     pub(crate) fn handle_shell(&mut self, text: String) {
+        self.set_focus(None);
         if self.send_request(RunRequest::RunShell(text)).is_err() {
             self.push_error("shell failed: agent worker has stopped");
         } else {

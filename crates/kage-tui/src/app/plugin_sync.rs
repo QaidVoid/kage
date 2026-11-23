@@ -10,9 +10,9 @@ impl App {
             .iter()
             .map(|w| w.render(width))
             .collect();
-        self.plugin_status_cache.clear();
         if let Some(status) = self.plugin_status.as_ref() {
             let map = lock(status);
+            self.plugin_status_cache.clear();
             self.plugin_status_cache
                 .extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
@@ -134,14 +134,15 @@ impl App {
     }
 
     /// Drain one pending blocking [`PluginDialog`] and open its
-    /// overlay. Skipped while another overlay (picker or an earlier
-    /// plugin dialog) is up: the worker stays parked and the request
+    /// overlay. Skipped while any modal (an approval, a picker, an
+    /// earlier plugin dialog, ...) is up: the worker stays parked and
+    /// the request
     /// is taken on a later tick once the screen is free (the bridge is
     /// single-slot, so at most one is queued). An empty item list
     /// resolves immediately to "cancelled" rather than opening a dead
     /// picker.
     pub(crate) fn drain_plugin_dialog(&mut self) -> bool {
-        if self.picker.is_some() || self.plugin_overlay.is_some() {
+        if self.modal_open() {
             return false;
         }
         let Some(rx) = self.dialog_rx.as_ref() else {

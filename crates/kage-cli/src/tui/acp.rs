@@ -1526,8 +1526,8 @@ impl Pump {
                 }
                 self.session_moved(&wire);
                 self.run_error = None;
-            } else {
-                self.return_prompt(self.app_of(&wire), content_of(&blocks), false, message);
+            } else if let Some(app) = self.app_of(&wire) {
+                self.return_prompt(app, content_of(&blocks), false, message);
             }
         }
     }
@@ -2412,14 +2412,13 @@ impl Pump {
 
     /// The App session a wire session's envelopes ride: the main
     /// session's for the wire itself, the child's mapping for one of
-    /// its subagents.
-    fn app_of(&self, wire: &str) -> SessionId {
+    /// its subagents. `None` for a session this TUI no longer shows,
+    /// whose late envelopes must not land on the main session.
+    fn app_of(&self, wire: &str) -> Option<SessionId> {
         if wire == self.wire {
-            return self.app_session;
+            return Some(self.app_session);
         }
-        self.children
-            .get(wire)
-            .map_or(self.app_session, |child| child.app)
+        self.children.get(wire).map(|child| child.app)
     }
 
     /// The wire id an App session maps to: the wire session itself, or
@@ -2554,7 +2553,9 @@ impl Pump {
             .session(parent)
             .map(|session| session.agents.clone())
             .unwrap_or_default();
-        let parent_app = self.app_of(parent);
+        let Some(parent_app) = self.app_of(parent) else {
+            return;
+        };
         for (wire, sub) in &agents {
             let fresh = !self.children.contains_key(wire);
             if fresh {
@@ -2921,7 +2922,9 @@ impl Pump {
                 .collect();
             (open, session.permissions.clone())
         };
-        let app = self.app_of(wire);
+        let Some(app) = self.app_of(wire) else {
+            return;
+        };
         let closed = self.close_stray_asks(wire, &open);
         for wire_id in closed {
             self.publish_resolved(&wire_id);
@@ -3165,8 +3168,11 @@ impl Pump {
             // One resolved per ask: the entry leaves, so a second
             // notice of the same ask publishes nothing.
             self.ask_ids.remove(&app);
+            let Some(view) = self.app_of(&session) else {
+                return;
+            };
             self.publish_on(
-                self.app_of(&session),
+                view,
                 HostEvent::PermissionResolved {
                     request_id: kage_core::protocol::RequestId(app),
                 },
@@ -3266,16 +3272,19 @@ impl Pump {
         self.dialogs.retain(|(id, _)| open.contains(id));
     }
 
-    /// Forwards the answers the App's overlays produced.
+    /// Forwards the answers the App's overlays produced. A dialog whose
+    /// reply was dropped unanswered resolves as dismissed, so the
+    /// plugin is not left waiting.
     fn poll_dialogs(&mut self) {
         let mut answered = Vec::new();
         for (index, (id, reply)) in self.dialogs.iter().enumerate() {
-            if let Ok(answer) = reply.try_recv() {
-                self.store
-                    .client()
-                    .reply_dialog(id.clone(), answer.unwrap_or(Value::Null));
-                answered.push(index);
-            }
+            let answer = match reply.try_recv() {
+                Ok(answer) => answer.unwrap_or(Value::Null),
+                Err(mpsc::TryRecvError::Disconnected) => Value::Null,
+                Err(mpsc::TryRecvError::Empty) => continue,
+            };
+            self.store.client().reply_dialog(id.clone(), answer);
+            answered.push(index);
         }
         for index in answered.into_iter().rev() {
             self.dialogs.swap_remove(index);
@@ -3745,7 +3754,7 @@ impl Pump {
             };
             if let Some(message) = refusal {
                 self.return_prompt(
-                    self.app_of(wire),
+                    self.app_of(wire).unwrap_or(self.app_session),
                     submission_content(text, &images),
                     queue,
                     message.to_owned(),
@@ -3758,7 +3767,7 @@ impl Pump {
         if wire != self.wire {
             if let Err(error) = self.store.client().steer(wire, blocks.clone()) {
                 self.return_prompt(
-                    self.app_of(wire),
+                    self.app_of(wire).unwrap_or(self.app_session),
                     content_of(&blocks),
                     false,
                     match error {
@@ -4136,7 +4145,10 @@ impl Pump {
             return;
         }
         self.closed = true;
-        let held = std::mem::take(&mut self.unadopted);
+        let mut held = std::mem::take(&mut self.unadopted);
+        if let Some(switch) = self.mode_switch.take() {
+            held.extend(switch.held);
+        }
         self.return_held(held, DETACHED);
         // A tool call the agent left running must not run on: the
         // surface's next execute sees the flag at once.
@@ -4231,15 +4243,18 @@ impl Pump {
 
     /// Counts a user shell command of `wire` in while it runs and out
     /// once it finished, and shows the App the state it leaves when
-    /// `wire` is the session on screen.
+    /// `wire` is the session on screen. A run's first update carries no
+    /// output yet, so two runs of one command count twice.
     fn track_shell(&mut self, wire: &str, update: &kage_acp::acp::ShellUpdate) {
         let shells = self.shells.entry(wire.to_owned()).or_default();
         let running = shells.iter().position(|command| *command == update.command);
+        let starts = update.tail.as_deref().is_none_or(str::is_empty);
         match (update.finished, running) {
             (true, Some(index)) => {
                 shells.remove(index);
             }
             (false, None) => shells.push(update.command.clone()),
+            (false, Some(_)) if starts => shells.push(update.command.clone()),
             _ => return,
         }
         if wire != self.wire {
@@ -6595,6 +6610,27 @@ mod tests {
             event.event,
             kage_core::protocol::Event::Host(HostEvent::CompactionEnded)
         )));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two runs of one shell command count as two, so the first to
+    /// finish does not mark the other done.
+    #[test]
+    fn two_runs_of_one_shell_command_count_twice() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        let shell = |finished: bool, tail: &str| kage_acp::acp::ShellUpdate {
+            command: "make".to_owned(),
+            finished,
+            tail: (!tail.is_empty()).then(|| tail.to_owned()),
+            output: None,
+            exit_code: None,
+        };
+        pump.track_shell("s1", &shell(false, ""));
+        pump.track_shell("s1", &shell(false, "building"));
+        pump.track_shell("s1", &shell(false, ""));
+        assert_eq!(pump.shells["s1"].len(), 2);
+        pump.track_shell("s1", &shell(true, ""));
+        assert_eq!(pump.shells["s1"].len(), 1, "the other run goes on");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

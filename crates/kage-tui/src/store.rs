@@ -55,12 +55,15 @@ impl Store {
 
     /// Handles one incoming frame: the client mirrors the agent into
     /// its state, and a `session/update` folds into its session's
-    /// buffer, which a replaced session gets fresh. Reports what
-    /// moved.
+    /// buffer, which a replaced session gets fresh. Only a session
+    /// shown through [`Self::shared_buffer`] or [`Self::reset_session`]
+    /// has a buffer; the updates of any other, such as a subagent whose
+    /// view the App builds itself, fold nowhere. Reports what moved.
     pub fn absorb(&mut self, frame: Frame) -> Vec<Change> {
         if let Frame::Notification { method, params } = &frame
             && method == "session/update"
             && let Ok(note) = serde_json::from_value::<SessionNotification>(params.clone())
+            && self.buffers.contains_key(&note.session_id)
         {
             if matches!(note.update, SessionUpdate::SessionReplaced(_)) {
                 self.reset_session(&note.session_id);
@@ -92,9 +95,10 @@ impl Store {
         self.client.state()
     }
 
-    /// The buffer `session_id` folds into, made on first use. Hand it
-    /// to the renderer and keep absorbing: frames that land later show
-    /// up in it.
+    /// The buffer `session_id` folds into, made on first use, which
+    /// shows the session: only a shown session's updates are folded.
+    /// Hand it to the renderer and keep absorbing: frames that land
+    /// later show up in it.
     pub fn shared_buffer(&mut self, session_id: &str) -> SharedBuffer {
         self.buffers
             .entry(session_id.to_owned())
@@ -464,6 +468,14 @@ mod tests {
     use kage_core::keymap::RhsData;
     use serde_json::json;
 
+    /// A store showing `session`, as the pump shows the session on
+    /// screen.
+    fn shown(session: &str) -> Store {
+        let mut store = Store::new();
+        store.shared_buffer(session);
+        store
+    }
+
     /// A `session/update` notification for `session`.
     fn update(session: &str, kind: &str, fields: &Value) -> Frame {
         let mut params = json!({"sessionId": session, "update": {"sessionUpdate": kind}});
@@ -495,7 +507,7 @@ mod tests {
 
     #[test]
     fn a_session_folds_into_the_blocks_the_engine_path_renders() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         store.absorb(update(
             "s1",
             "agent_message_chunk",
@@ -556,7 +568,7 @@ mod tests {
     /// calls, not by their contents.
     #[test]
     fn plans_mirroring_the_sessions_own_todo_calls_add_nothing() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         let long = "x".repeat(250);
         for (id, title) in [("c1", long.as_str()), ("c2", "second")] {
             store.absorb(update(
@@ -582,7 +594,7 @@ mod tests {
     /// any list adds nothing, and entries without a title are dropped.
     #[test]
     fn an_external_agents_plans_become_its_todo_list() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         let plan = |entries: Value| update("s1", "plan", &json!({ "entries": entries }));
         store.absorb(plan(json!([])));
         assert!(kinds(&lock(&store.shared_buffer("s1"))).is_empty());
@@ -610,7 +622,7 @@ mod tests {
 
     #[test]
     fn a_replayed_shell_run_shows_as_its_shell_block() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         let run = kage_core::message::ShellRun {
             command: "ls".to_owned(),
             exit_code: Some(0),
@@ -626,7 +638,7 @@ mod tests {
 
     #[test]
     fn resource_content_shows_in_the_result() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         store.absorb(update(
             "s1",
             "tool_call",
@@ -669,7 +681,7 @@ mod tests {
 
     #[test]
     fn a_failed_call_reads_as_its_error() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         store.absorb(update(
             "s1",
             "tool_call",
@@ -692,7 +704,7 @@ mod tests {
 
     #[test]
     fn a_finished_call_reports_how_long_it_took() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         store.absorb(update(
             "s1",
             "tool_call",
@@ -724,7 +736,7 @@ mod tests {
 
     #[test]
     fn the_rest_of_the_vocabulary_lands_in_the_kinds_the_tui_knows() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         store.absorb(update(
             "s1",
             "agent_thought_chunk",
@@ -783,7 +795,7 @@ mod tests {
 
     #[test]
     fn a_compaction_reports_its_token_delta() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         store.absorb(update(
             "s1",
             "_kage/compaction",
@@ -809,7 +821,7 @@ mod tests {
 
     #[test]
     fn an_answer_flows_back_out_and_leaves_the_transcript() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         store.absorb(update(
             "s1",
             "tool_call",
@@ -848,7 +860,7 @@ mod tests {
 
     #[test]
     fn a_buffer_taken_earlier_still_sees_later_frames() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         store.absorb(update(
             "s1",
             "agent_message_chunk",
@@ -873,7 +885,8 @@ mod tests {
 
     #[test]
     fn a_closed_connection_ends_the_running_calls() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
+        store.shared_buffer("s2");
         for session in ["s1", "s2"] {
             store.absorb(update(
                 session,
@@ -898,9 +911,23 @@ mod tests {
         }
     }
 
+    /// A session nothing shows, such as a subagent whose view the App
+    /// builds from events, gets no buffer: its transcript is not kept
+    /// a second time.
+    #[test]
+    fn an_unshown_session_gets_no_buffer() {
+        let mut store = shown("s1");
+        store.absorb(update(
+            "child",
+            "agent_message_chunk",
+            &json!({"content": {"type": "text", "text": "hi"}}),
+        ));
+        assert!(!store.buffers.contains_key("child"));
+    }
+
     #[test]
     fn a_long_session_folds_every_frame() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         for turn in 0..(3 * MAX_BLOCKS) {
             store.absorb(update(
                 "s1",
@@ -948,7 +975,7 @@ mod tests {
     /// and its output lands once, in the result, not also as progress.
     #[test]
     fn a_denied_call_stays_denied_and_its_output_lands_once() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         running_call(&mut store);
         let handle = store.shared_buffer("s1");
         lock(&handle).set_tool_phase("c1", crate::view::tool_view::ToolPhase::Denied);
@@ -970,7 +997,7 @@ mod tests {
     /// A progress update on a running call keeps the time it started.
     #[test]
     fn progress_keeps_a_running_calls_start() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         running_call(&mut store);
         let handle = store.shared_buffer("s1");
         let started = |buffer: &Buffer| match buffer.blocks()[0].as_ref() {
@@ -989,7 +1016,7 @@ mod tests {
 
     #[test]
     fn a_titleless_input_update_keeps_the_tool_row() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         store.absorb(update(
             "s1",
             "tool_call",
@@ -1042,7 +1069,7 @@ mod tests {
 
     #[test]
     fn a_replaced_session_folds_over_a_clean_slate() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         store.absorb(update(
             "s1",
             "agent_message_chunk",
@@ -1066,7 +1093,7 @@ mod tests {
 
     #[test]
     fn media_chunks_become_labelled_rows() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         store.absorb(update(
             "s1",
             "user_message_chunk",
@@ -1097,7 +1124,7 @@ mod tests {
 
     /// An attached `_kage/ui` over `/proj`, holding `snapshot`.
     fn attached(snapshot: Value) -> Store {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         let id = store.client().ui_attach("/proj", None);
         store.absorb(Frame::Success {
             id: RequestId::Number(id),
@@ -1337,7 +1364,7 @@ mod tests {
 
     #[test]
     fn without_an_attachment_the_plugin_data_is_empty() {
-        let mut store = Store::new();
+        let mut store = shown("s1");
         assert!(store.plugin_commands().is_empty());
         assert!(store.plugin_keymap().is_none());
     }

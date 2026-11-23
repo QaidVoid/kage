@@ -499,7 +499,7 @@ impl UnixPeer {
         self.ensure_writable(allow_after_eof)?;
         let mut frame = CappedFrame(Vec::new());
         serde_json::to_writer(&mut frame, value)
-            .map_err(|e| DispatchError::Other(RpcError::internal(format!("encode: {e}"))))?;
+            .map_err(|e| DispatchError::Other(RpcError::not_sent(format!("encode: {e}"))))?;
         frame.0.push(b'\n');
         match self.0.pipe.write_frame_guarded(
             &frame.0,
@@ -562,7 +562,7 @@ impl UnixPeer {
     ) -> Result<(), RpcError> {
         let _admission = self.admit(deadline, cancel, true)?;
         serde_json::to_writer(&mut CappedFrame(Vec::new()), id)
-            .map_err(|e| RpcError::internal(format!("encode: {e}")))?;
+            .map_err(|e| RpcError::not_sent(format!("encode: {e}")))?;
         self.write_value(&native_response(id, result), deadline, cancel, true)
             .map_err(Into::into)
     }
@@ -628,7 +628,7 @@ impl UnixPeer {
                 return Err(DispatchError::Other(closed()));
             }
             if pending.requests.len() >= MAX_PENDING {
-                return Err(DispatchError::Other(RpcError::internal(
+                return Err(DispatchError::Other(RpcError::not_sent(
                     "too many pending requests",
                 )));
             }
@@ -649,7 +649,7 @@ impl UnixPeer {
 
 fn check_method(method: &str) -> Result<(), RpcError> {
     if method.len() >= MAX_FRAME {
-        return Err(RpcError::internal("outbound frame exceeds size cap"));
+        return Err(RpcError::not_sent("outbound frame exceeds size cap"));
     }
     Ok(())
 }

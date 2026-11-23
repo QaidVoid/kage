@@ -93,18 +93,26 @@ impl AgentPeer {
         self.record(result)
     }
 
-    /// Send a response.
+    /// Send a response. One too large to send goes as an error response
+    /// instead, so the request does not wait forever.
     ///
     /// # Errors
     /// Returns the transport error, including a native write timeout.
     pub fn respond(&self, id: &Value, result: Result<Value, RpcError>) -> Result<(), RpcError> {
-        let result = match &self.inner {
+        let write = |result| match &self.inner {
             Transport::Generic(peer) => peer.respond(id, result),
             #[cfg(unix)]
             Transport::Unix(peer, timeout) => deadline(*timeout)
                 .and_then(|deadline| peer.respond(id, result, Some(deadline), None)),
         };
-        self.record(result)
+        let outcome = match write(result) {
+            Err(error) if error.is_not_sent() => write(Err(RpcError::internal(format!(
+                "the answer could not be sent: {}",
+                error.message
+            )))),
+            other => other,
+        };
+        self.record(outcome)
     }
 
     /// Send a request and wait for the response with no deadline.
@@ -204,9 +212,15 @@ impl AgentPeer {
         })
     }
 
+    /// Remembers the first error that broke the connection and shuts it
+    /// down, so later writes fail at once rather than each waiting out
+    /// a stalled client. A message refused before any byte of it was
+    /// written leaves the connection as it is.
     fn record<T>(&self, result: Result<T, RpcError>) -> Result<T, RpcError> {
         #[cfg(unix)]
-        if let (Some(failure), Err(error)) = (&self.failure, &result) {
+        if let (Some(failure), Err(error)) = (&self.failure, &result)
+            && !error.is_not_sent()
+        {
             let mut first = failure
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -530,6 +544,44 @@ mod tests {
         let error = request.wait(&CancelFlag::new()).unwrap_err();
         assert_eq!(error.message, "response ordering barrier was not delivered");
         assert_eq!(peer.failure(), Some(error));
+    }
+
+    /// A message too large to send fails alone: the connection stays
+    /// up for the next one, and a too large answer reaches the asker as
+    /// an error rather than never.
+    #[test]
+    fn an_oversized_message_spares_the_connection() {
+        let (reader, input) = std::io::pipe().unwrap();
+        let (output, writer) = std::io::pipe().unwrap();
+        let (unix, inbound, _) =
+            kage_jsonrpc::unix_peer::connect_ordered_server(BufReader::new(reader), writer.into())
+                .unwrap();
+        let peer = AgentPeer::unix(unix, Duration::from_secs(1));
+        let (client, inbox, _) = connect(BufReader::new(output), input);
+        let huge = Value::String("x".repeat(9 * 1024 * 1024));
+        let error = peer.notify("big", huge.clone()).unwrap_err();
+        assert!(error.is_not_sent(), "{error:?}");
+        assert!(peer.failure().is_none());
+        peer.notify("small", Value::Null).unwrap();
+        assert!(
+            matches!(inbox.recv_timeout(Duration::from_secs(1)).unwrap(), Inbound::Notification { method, .. } if method == "small")
+        );
+        let (done, answer) = std::sync::mpsc::channel();
+        thread::spawn(move || done.send(client.request("ask", Value::Null)).unwrap());
+        let OrderedInbound::Message(Inbound::Request { id, .. }) =
+            inbound.recv_timeout(Duration::from_secs(1)).unwrap()
+        else {
+            panic!("expected the request");
+        };
+        peer.respond(&id, Ok(huge)).unwrap();
+        let answer = answer.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            answer
+                .as_ref()
+                .is_err_and(|e| e.message.contains("could not be sent")),
+            "{answer:?}"
+        );
+        assert!(peer.failure().is_none());
     }
 
     #[test]

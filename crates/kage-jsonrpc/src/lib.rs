@@ -77,6 +77,9 @@ pub struct RpcError {
     pub message: String,
 }
 
+/// Code of [`RpcError::not_sent`]: implementation-defined, never sent.
+const NOT_SENT: i64 = -32_090;
+
 impl RpcError {
     /// Build an error with an arbitrary code.
     #[must_use]
@@ -110,6 +113,20 @@ impl RpcError {
     #[must_use]
     pub fn timed_out(method: &str) -> Self {
         Self::new(-32000, format!("request timed out: {method}"))
+    }
+
+    /// A message refused before any of it was written, such as one over
+    /// the size cap or past the pending request cap: the connection is
+    /// fine. Local only; a peer never sends it.
+    #[must_use]
+    pub fn not_sent(reason: impl std::fmt::Display) -> Self {
+        Self::new(NOT_SENT, format!("not sent: {reason}"))
+    }
+
+    /// Whether this is a [`Self::not_sent`] error.
+    #[must_use]
+    pub fn is_not_sent(&self) -> bool {
+        self.code == NOT_SENT
     }
 
     fn from_value(value: &serde_json::Value) -> Self {
@@ -296,7 +313,7 @@ impl Peer {
     fn write(&self, value: &serde_json::Value) -> Result<(), RpcError> {
         let mut guard = lock(&self.writer);
         let mut line =
-            serde_json::to_vec(value).map_err(|e| RpcError::internal(format!("encode: {e}")))?;
+            serde_json::to_vec(value).map_err(|e| RpcError::not_sent(format!("encode: {e}")))?;
         line.push(b'\n');
         guard
             .write_all(&line)
@@ -604,11 +621,11 @@ impl ReaderPeer {
                 line.write_all(b"}")?;
                 Ok(())
             })();
-            encode.map_err(|e| RpcError::internal(format!("encode: {e}")))?;
+            encode.map_err(|e| RpcError::not_sent(format!("encode: {e}")))?;
             line.bytes
         } else {
             serde_json::to_vec(&response_message(id, outcome))
-                .map_err(|e| RpcError::internal(format!("encode: {e}")))?
+                .map_err(|e| RpcError::not_sent(format!("encode: {e}")))?
         };
         line.push(b'\n');
         let mut guard = lock(&writer);

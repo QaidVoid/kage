@@ -8274,6 +8274,7 @@ fn session_meta_settings_reach_the_spec() {
             }),
             max_output_tokens: Some(1_024),
             external_agent: None,
+            model: None,
         }),
     };
     let settings = SessionSettings::of(Some(&meta), false).unwrap();
@@ -8351,6 +8352,38 @@ fn new_session_with_opt(
         "_meta": { "kage": { "opt": opt } },
     });
     h.client.request("session/new", params)
+}
+
+/// `session/new` opens on the model the client names when the host can
+/// run it, in one request, and on the host's default otherwise.
+#[test]
+fn session_new_opens_on_the_model_the_client_names() {
+    let current_model = |opened: &serde_json::Value| {
+        opened["configOptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|option| option["id"] == "model")
+            .map(|option| option["currentValue"].clone())
+            .unwrap()
+    };
+    for (asked, opened_on) in [("mock/other", "mock/other"), ("nope/x", "mock/m")] {
+        let dir = tempfile::tempdir().unwrap();
+        let h = serve(vec![text_turn("hi")], dir.path(), dir.path());
+        initialize(&h.client);
+        let opened = h
+            .client
+            .request(
+                "session/new",
+                serde_json::json!({
+                    "cwd": dir.path().display().to_string(),
+                    "mcpServers": [],
+                    "_meta": { "kage": { "model": asked } },
+                }),
+            )
+            .unwrap();
+        assert_eq!(current_model(&opened), opened_on, "{asked}");
+    }
 }
 
 #[test]

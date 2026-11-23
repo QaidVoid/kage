@@ -631,6 +631,7 @@ fn session_meta(
             opt,
             max_output_tokens: crate::runtime_env::max_output_tokens_for(registry, model),
             external_agent: None,
+            model: (!model.is_empty() && external_agent(model).is_none()).then(|| model.to_owned()),
         }),
     }
 }
@@ -1693,7 +1694,9 @@ impl Pump {
     }
 
     /// Opens the connection before the App starts: handshake, session
-    /// and plugin UI, with the frames these produce sent at once.
+    /// and, when the agent hosts the plugins, their UI, with the frames
+    /// these produce sent at once. A TUI hosting the plugins serves
+    /// their UI itself, so the agent never loads them a second time.
     /// Resuming replays on a fresh buffer; otherwise the new session's
     /// answer lands while the App runs and adopts the wire then.
     fn bootstrap(&mut self, resume: Option<&Path>) {
@@ -1747,7 +1750,9 @@ impl Pump {
         } else {
             self.request_new_session();
         }
-        self.store.client().ui_attach(&self.cwd, None);
+        if self.plugins.is_none() {
+            self.store.client().ui_attach(&self.cwd, None);
+        }
         self.flush();
     }
 
@@ -7326,6 +7331,15 @@ mod tests {
         let registry = ProviderRegistry::default();
         let meta = session_meta(&options, &registry, "test:model", "", false, false);
         let kage = meta.kage.expect("the settings are set");
+        assert_eq!(kage.model.as_deref(), Some("test:model"));
+        assert!(
+            session_meta(&options, &registry, "acp:reviewer", "", false, false)
+                .kage
+                .unwrap()
+                .model
+                .is_none(),
+            "an external agent pick is not an engine model"
+        );
         assert!(!kage.yolo);
         assert!(kage.system_prompt.is_none(), "an empty system adds nothing");
         let opt = kage.opt.expect("the options are set");
@@ -7898,6 +7912,45 @@ kage.on('should_stop_after_turn', function(ev) return true end)
     }
 
     #[cfg(unix)]
+    /// A TUI hosting the plugins does not ask the agent for their UI,
+    /// which would make the agent load the same plugins again.
+    #[test]
+    fn a_hosting_pump_does_not_attach_the_agents_plugin_ui() {
+        let (mut pump, _app, dir) = hosted_pump();
+        let (to_agent, from_pump) = crate::tui::pipe::channel_pair();
+        let (unwritten, from_agent) = crate::tui::pipe::channel_pair();
+        Box::leak(Box::new(unwritten));
+        pump.transport = Transport::stream(
+            BufReader::new(from_agent),
+            to_agent,
+            None,
+            crossbeam_channel::unbounded().0,
+        )
+        .unwrap();
+        let (lines_tx, lines) = mpsc::channel();
+        thread::spawn(move || {
+            for line in BufReader::new(from_pump).lines() {
+                if lines_tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        pump.bootstrap(None);
+        let mut sent = Vec::new();
+        while let Ok(Ok(line)) = lines.recv_timeout(Duration::from_millis(300)) {
+            sent.push(line);
+        }
+        assert!(
+            sent.iter().any(|line| line.contains("session/new")),
+            "{sent:?}"
+        );
+        assert!(
+            !sent.iter().any(|line| line.contains("_kage/ui/attach")),
+            "{sent:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A long tool call holds only its own worker: the snapshot a new
     /// session asks for is answered meanwhile.
     #[test]

@@ -332,6 +332,10 @@ pub struct NewSessionKage {
     /// Name of a configured external agent, not an executable command.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_agent: Option<String>,
+    /// The model the session opens on, as `provider/model`. Unset, or
+    /// one the host cannot run, keeps the host's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// Where a session's plugins run.
@@ -3156,6 +3160,7 @@ mod tests {
                 }),
                 max_output_tokens: Some(8_192),
                 external_agent: None,
+                model: None,
             }),
             serde_json::json!({
                 "cwd": "/proj",

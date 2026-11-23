@@ -1095,24 +1095,21 @@ impl Agent for CliAcpAgent {
             ));
         }
         let servers = editor_servers(&req.mcp_servers)?;
-        let (path, mut header) = crate::plan_session_in(
-            &self.host.sessions,
-            Path::new(&req.cwd),
-            &self.host.default_model,
-            "",
-        );
+        let model = req
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.kage.as_ref())
+            .and_then(|kage| kage.model.clone())
+            .filter(|model| self.host.registry().resolve(model).is_ok())
+            .unwrap_or_else(|| self.host.default_model.clone());
+        let (path, mut header) =
+            crate::plan_session_in(&self.host.sessions, Path::new(&req.cwd), &model, "");
         let id = header.session;
         let plugins = self.hosted_plugins(id, req.meta.as_ref())?;
         let settings =
             SessionSettings::of(req.meta.as_ref(), self.kage_client.load(Ordering::SeqCst))?;
-        let (mut spec, runtime) = self.session_spec(
-            id,
-            &req.cwd,
-            &self.host.default_model,
-            servers,
-            plugins,
-            &settings,
-        )?;
+        let (mut spec, runtime) =
+            self.session_spec(id, &req.cwd, &model, servers, plugins, &settings)?;
         header.cwd.clone_from(&spec.cx.workdir);
         header.system_prompt.clone_from(&spec.cx.system_prompt);
         spec.recorder = Some(Recorder::planned(path, header, spec.plugins.clone()));

@@ -2776,6 +2776,7 @@ impl Pump {
         // keep it loaded for a TUI that moved on.
         if !old.is_empty() && old != id {
             self.store.client().close_session(&old);
+            self.shells.remove(&old);
         }
         self.warned_model = None;
         self.handed = None;
@@ -2795,10 +2796,7 @@ impl Pump {
         }
         self.mirror_rechecks = 0;
         self.point_mirror(crate::paths::sessions_dir(), !carry_model);
-        self.update_ui_slot(|ui| {
-            ui.session_id.clone_from(&self.wire);
-            ui.session_title = None;
-        });
+        self.update_ui_slot(|ui| ui.session_id.clone_from(&self.wire));
         // An external session carries no engine model option: the
         // status shows the agent pick instead, and nothing is sent.
         let external = self.external_agent_of(id);
@@ -2811,13 +2809,9 @@ impl Pump {
                 .client()
                 .set_config_option(&self.wire, "model", &self.model);
         }
-        self.publish(HostEvent::StateChanged {
-            state: self.state_snapshot(),
-        });
-        self.publish(HostEvent::UsageUpdated {
-            usage: self.usage_snapshot(),
-        });
+        self.session_moved(id);
         self.agents_moved(id);
+        self.asks_moved(id);
         // What the App asked while this session was opening runs on it
         // now that it exists, in the order it was asked.
         for request in std::mem::take(&mut self.unadopted) {
@@ -3130,7 +3124,8 @@ impl Pump {
 
     /// Holds `request` until the session opening adopts. A cancel hands
     /// the work held so far back to the composer instead: it must not
-    /// start once that session opens.
+    /// start once that session opens. A newer session open replaces one
+    /// held, and a `/new` while a new session is opening is dropped.
     fn hold_unadopted(&mut self, request: RunRequest) {
         if matches!(request, RunRequest::Cancel { .. }) {
             let (cancelled, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.unadopted)
@@ -3150,6 +3145,14 @@ impl Pump {
             }
             self.return_held(cancelled, "cancelled before the session opened");
         } else {
+            let opens =
+                |r: &RunRequest| matches!(r, RunRequest::NewSession | RunRequest::ResumeSession(_));
+            if opens(&request) {
+                self.unadopted.retain(|held| !opens(held));
+                if matches!(request, RunRequest::NewSession) && self.pending_new.is_some() {
+                    return;
+                }
+            }
             self.unadopted.push(request);
         }
     }
@@ -5983,6 +5986,58 @@ mod tests {
                 ..
             }
         )));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A permission the resumed session asked before `/resume` answered
+    /// arrives while the wire still names the session left; adopting
+    /// the resumed session shows it.
+    #[test]
+    fn resuming_a_session_shows_the_permission_it_already_asked() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let resumed = SessionId::new().to_string();
+        pump.handle(RunRequest::ResumeSession(PathBuf::from(format!(
+            "/sessions/{resumed}.jsonl"
+        ))));
+        let load = RequestId::Number(pump.pending_open.as_ref().unwrap().request);
+        pump.absorb(Frame::Request {
+            id: RequestId::Number(77),
+            method: "session/request_permission".into(),
+            params: serde_json::json!({
+                "sessionId": resumed,
+                "toolCall": {"toolCallId": "call-1", "title": "ls", "status": "pending", "rawInput": {}},
+                "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]
+            }),
+        });
+        pump.absorb(Frame::Success {
+            id: load,
+            result: serde_json::json!({"configOptions": []}),
+        });
+        assert!(
+            app.try_iter()
+                .any(|event| event.session.to_string() == resumed
+                    && matches!(
+                        event.event,
+                        kage_core::protocol::Event::Host(HostEvent::PermissionRequested { .. })
+                    )),
+            "the approval card reaches the App"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A second `/new` while one is opening adds nothing: the session
+    /// on its way is already new.
+    #[test]
+    fn a_second_new_session_while_one_opens_is_dropped() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::NewSession);
+        pump.handle(RunRequest::NewSession);
+        assert!(
+            !pump
+                .unadopted
+                .iter()
+                .any(|held| matches!(held, RunRequest::NewSession))
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

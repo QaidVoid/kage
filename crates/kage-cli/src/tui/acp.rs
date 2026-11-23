@@ -305,6 +305,267 @@ fn rebuilt_models(
     Some((registry, choices))
 }
 
+/// An event for the App's engine channel.
+type AppEvent = kage_core::protocol::Event;
+
+/// What the App has not heard of a child transcript yet, given what
+/// `track` says it has: updates to the tool calls still open, then the
+/// items past the last one handed over, in transcript order. The
+/// streaming tail, the last item while it grows, goes as deltas.
+fn child_events(items: &[kage_client::TranscriptItem], track: &mut ChildTrack) -> Vec<AppEvent> {
+    let mut out = Vec::new();
+    let open: Vec<usize> = track
+        .tools
+        .values()
+        .filter(|tool| tool.phase != ToolSent::Ended)
+        .map(|tool| tool.index)
+        .collect();
+    for index in open {
+        if let Some(kage_client::TranscriptItem::ToolCall(call)) = items.get(index) {
+            child_tool_events(index, call, &mut track.tools, &mut out);
+        }
+    }
+    let streaming = match items.last() {
+        Some(kage_client::TranscriptItem::Assistant { text }) if items.len() > track.committed => {
+            Some((TailKind::Assistant, text.as_str()))
+        }
+        Some(kage_client::TranscriptItem::Thinking { text, .. })
+            if items.len() > track.committed =>
+        {
+            Some((TailKind::Thinking, text.as_str()))
+        }
+        _ => None,
+    }
+    .map(|(kind, text)| (kind, text, items.len() - 1));
+    let live = streaming.is_some_and(|(kind, _, index)| {
+        track
+            .tail
+            .is_some_and(|(sent_kind, sent_index, _)| (sent_kind, sent_index) == (kind, index))
+    });
+    if track.tail.is_some() && !live {
+        if let Some((_, index, _)) = track.tail.take() {
+            track.committed = track.committed.max(index + 1);
+        }
+        out.push(message_end());
+    }
+    let end = streaming.map_or(items.len(), |(_, _, index)| index);
+    if !live {
+        for (index, item) in items.iter().enumerate().take(end).skip(track.committed) {
+            match item {
+                kage_client::TranscriptItem::ToolCall(call) => {
+                    child_tool_events(index, call, &mut track.tools, &mut out);
+                }
+                item => commit_child_item(item, &mut out),
+            }
+        }
+        track.committed = track.committed.max(end);
+    }
+    if let Some((kind, text, index)) = streaming {
+        let sent = if live {
+            track.tail.map_or(0, |(_, _, sent)| sent)
+        } else {
+            0
+        };
+        if text.len() > sent {
+            let delta = text[sent..].to_owned();
+            match kind {
+                TailKind::Assistant => push(
+                    &mut out,
+                    LoopEvent::TextDelta {
+                        id: MessageId::new(),
+                        delta,
+                    },
+                ),
+                TailKind::Thinking => push(
+                    &mut out,
+                    LoopEvent::ThinkingDelta {
+                        id: MessageId::new(),
+                        delta,
+                    },
+                ),
+            }
+        }
+        track.tail = Some((kind, index, text.len()));
+        track.committed = index;
+    }
+    out
+}
+
+/// Announces child tool call `call`, at transcript `index`, the
+/// first time it is seen, and brings the App up to its name, input,
+/// progress and phase. Updates merge into the call they name
+/// wherever it sits, so an open call is looked at again each time.
+fn child_tool_events(
+    index: usize,
+    call: &kage_client::ToolCallItem,
+    tools: &mut BTreeMap<String, ChildTool>,
+    out: &mut Vec<AppEvent>,
+) {
+    let id = ToolCallId::new(&call.tool_call_id);
+    let name = call.name.as_ref().unwrap_or(&call.title);
+    let input = call.input.clone().unwrap_or_else(|| serde_json::json!({}));
+    let sent = tools.entry(call.tool_call_id.clone()).or_insert_with(|| {
+        push(
+            out,
+            LoopEvent::ToolCallStart {
+                id: id.clone(),
+                name: name.clone(),
+                input_partial: input.clone(),
+            },
+        );
+        ChildTool {
+            index,
+            phase: ToolSent::Started,
+            name: name.clone(),
+            input: input.clone(),
+            progress: String::new(),
+        }
+    });
+    if sent.name != *name || sent.input != input {
+        push(
+            out,
+            LoopEvent::ToolCallArgsDelta {
+                id: id.clone(),
+                name: name.clone(),
+                input_partial: input.clone(),
+            },
+        );
+        sent.name.clone_from(name);
+        sent.input = input;
+    }
+    let text = call.text();
+    match call.status {
+        ToolCallStatus::InProgress if sent.phase != ToolSent::Ended => {
+            if sent.phase == ToolSent::Started {
+                push(out, LoopEvent::ToolExecutionStart { id: id.clone() });
+                sent.phase = ToolSent::Executing;
+            }
+            if text != sent.progress {
+                push(
+                    out,
+                    LoopEvent::ToolUpdate {
+                        id,
+                        update: kage_core::ToolUpdate {
+                            content: text.clone(),
+                            structured: None,
+                        },
+                    },
+                );
+                sent.progress = text;
+            }
+        }
+        ToolCallStatus::Completed | ToolCallStatus::Failed if sent.phase != ToolSent::Ended => {
+            push(
+                out,
+                LoopEvent::ToolCallEnd {
+                    id,
+                    output: ToolOutput {
+                        is_error: call.status == ToolCallStatus::Failed,
+                        text,
+                        ..ToolOutput::default()
+                    },
+                },
+            );
+            sent.phase = ToolSent::Ended;
+        }
+        _ => {}
+    }
+}
+
+/// Publishes one finished child transcript item whole.
+fn commit_child_item(item: &kage_client::TranscriptItem, out: &mut Vec<AppEvent>) {
+    match item {
+        kage_client::TranscriptItem::User { content, .. } => {
+            let message = Message::new(Role::User, content_of(content), None);
+            push(
+                out,
+                LoopEvent::MessageAppended {
+                    message: Arc::new(message),
+                },
+            );
+        }
+        kage_client::TranscriptItem::Assistant { text } => {
+            push(
+                out,
+                LoopEvent::TextDelta {
+                    id: MessageId::new(),
+                    delta: text.clone(),
+                },
+            );
+            out.push(message_end());
+        }
+        kage_client::TranscriptItem::Thinking { text, .. } => {
+            push(
+                out,
+                LoopEvent::ThinkingDelta {
+                    id: MessageId::new(),
+                    delta: text.clone(),
+                },
+            );
+            out.push(message_end());
+        }
+        kage_client::TranscriptItem::Media { mime, data } => {
+            push(
+                out,
+                LoopEvent::Media {
+                    id: MessageId::new(),
+                    kind: media_kind(mime),
+                    mime: mime.clone(),
+                    data: data.clone(),
+                },
+            );
+        }
+        kage_client::TranscriptItem::Notice { tone, text } => {
+            push(
+                out,
+                HostEvent::Notice {
+                    level: notice_level(*tone),
+                    text: text.clone(),
+                    transient: false,
+                },
+            );
+        }
+        kage_client::TranscriptItem::Compaction {
+            kept,
+            summarized,
+            summary,
+            ..
+        } => {
+            push(
+                out,
+                LoopEvent::Compaction {
+                    kept: usize::try_from(*kept).unwrap_or(0),
+                    summarized: usize::try_from(summarized.unwrap_or(0)).unwrap_or(0),
+                    summary: summary.clone().unwrap_or_default(),
+                    before: 0,
+                    estimate: 0,
+                },
+            );
+        }
+        // Tool calls went out in the phase walk; turn boundaries,
+        // plans and decision records have no agent-buffer shape.
+        kage_client::TranscriptItem::ToolCall(_)
+        | kage_client::TranscriptItem::TurnEnd { .. }
+        | kage_client::TranscriptItem::Plan { .. }
+        | kage_client::TranscriptItem::Decision { .. } => {}
+    }
+}
+
+/// The event that closes a child's streaming message.
+fn message_end() -> AppEvent {
+    LoopEvent::MessageEnd {
+        id: MessageId::new(),
+        usage: kage_core::TokenUsage::default(),
+        stop_reason: kage_core::StopReason::EndTurn,
+    }
+    .into()
+}
+
+/// Adds `event` to the events a child transcript move produced.
+fn push(out: &mut Vec<AppEvent>, event: impl Into<AppEvent>) {
+    out.push(event.into());
+}
+
 /// Moves the App's requests onto a channel the pump can wait on next
 /// to the agent's frames.
 fn forward_requests(
@@ -1131,6 +1392,8 @@ enum ToolSent {
 /// The latest tool state delivered to a child view.
 #[derive(Clone)]
 struct ChildTool {
+    /// Where the call sits in the child's transcript.
+    index: usize,
     phase: ToolSent,
     name: String,
     input: Value,
@@ -2574,7 +2837,7 @@ impl Pump {
         if let Some((_, index, _)) = track.tail.take() {
             track.committed = track.committed.max(index + 1);
             let app = track.app;
-            self.message_end(app);
+            self.publish_on(app, message_end());
         }
     }
 
@@ -2676,270 +2939,20 @@ impl Pump {
     }
 
     /// Publishes a child session's transcript moves on its App
-    /// session: finished items whole, the streaming tail as deltas,
-    /// tool calls by phase.
+    /// session: finished items whole and in order, the streaming tail
+    /// as deltas, tool calls by phase.
     fn child_transcript(&mut self, wire: &str) {
-        let Some(items) = self
-            .store
-            .state()
-            .session(wire)
-            .map(|session| session.items.clone())
-        else {
+        let Some(session) = self.store.state().session(wire) else {
             return;
         };
         let Some(track) = self.children.get_mut(wire) else {
             return;
         };
         let app = track.app;
-        let mut tools = std::mem::take(&mut track.tools);
-        let mut committed = track.committed;
-        let mut tail = track.tail;
-        self.child_tool_phases(app, &items, &mut tools);
-        // The streaming tail: the item still last grows by suffix;
-        // once anything else ends the transcript, what streamed counts
-        // as handed over and the tail moves on.
-        let streaming = match items.last() {
-            Some(kage_client::TranscriptItem::Assistant { text }) if items.len() > committed => {
-                Some((TailKind::Assistant, text.as_str()))
-            }
-            Some(kage_client::TranscriptItem::Thinking { text, .. }) if items.len() > committed => {
-                Some((TailKind::Thinking, text.as_str()))
-            }
-            _ => None,
+        let events = child_events(&session.items, track);
+        for event in events {
+            self.publish_on(app, event);
         }
-        .map(|(kind, text)| (kind, text, items.len() - 1));
-        let live = streaming.is_some()
-            && streaming.as_ref().map(|&(_, _, index)| Some(index))
-                == tail.as_ref().map(|(_, index, _)| Some(*index));
-        if tail.is_some() && !live {
-            if let Some((_, index, _)) = tail.take() {
-                committed = committed.max(index + 1);
-            }
-            self.message_end(app);
-        }
-        if let Some((kind, text, index)) = streaming {
-            let mut delta = None;
-            if live {
-                let (_, _, sent_len) = tail.expect("live implies an open tail");
-                if text.len() > sent_len {
-                    delta = Some(text[sent_len..].to_owned());
-                }
-                tail = Some((kind, index, text.len()));
-            } else {
-                for item in &items[committed..index] {
-                    self.commit_child_item(app, item);
-                }
-                if !text.is_empty() {
-                    delta = Some(text.to_owned());
-                }
-                tail = Some((kind, index, text.len()));
-            }
-            if let Some(delta) = delta {
-                match kind {
-                    TailKind::Assistant => self.publish_on(
-                        app,
-                        LoopEvent::TextDelta {
-                            id: MessageId::new(),
-                            delta,
-                        },
-                    ),
-                    TailKind::Thinking => self.publish_on(
-                        app,
-                        LoopEvent::ThinkingDelta {
-                            id: MessageId::new(),
-                            delta,
-                        },
-                    ),
-                }
-            }
-            committed = index;
-        } else {
-            for item in &items[committed..] {
-                self.commit_child_item(app, item);
-            }
-            committed = items.len();
-        }
-        let track = self.children.get_mut(wire).expect("checked above");
-        track.tools = tools;
-        track.committed = committed;
-        track.tail = tail;
-    }
-
-    /// Walks a child transcript's tool calls for the phases the App
-    /// has not heard of yet, since updates merge into the call they
-    /// name wherever it sits.
-    fn child_tool_phases(
-        &mut self,
-        app: SessionId,
-        items: &[kage_client::TranscriptItem],
-        tools: &mut BTreeMap<String, ChildTool>,
-    ) {
-        for item in items {
-            let kage_client::TranscriptItem::ToolCall(call) = item else {
-                continue;
-            };
-            let id = ToolCallId::new(&call.tool_call_id);
-            let name = call.name.as_ref().unwrap_or(&call.title);
-            let input = call.input.clone().unwrap_or_else(|| serde_json::json!({}));
-            let sent = tools.entry(call.tool_call_id.clone()).or_insert_with(|| {
-                self.publish_on(
-                    app,
-                    LoopEvent::ToolCallStart {
-                        id: id.clone(),
-                        name: name.clone(),
-                        input_partial: input.clone(),
-                    },
-                );
-                ChildTool {
-                    phase: ToolSent::Started,
-                    name: name.clone(),
-                    input: input.clone(),
-                    progress: String::new(),
-                }
-            });
-            if sent.name != *name || sent.input != input {
-                self.publish_on(
-                    app,
-                    LoopEvent::ToolCallArgsDelta {
-                        id: id.clone(),
-                        name: name.clone(),
-                        input_partial: input.clone(),
-                    },
-                );
-                sent.name.clone_from(name);
-                sent.input = input;
-            }
-            let text = call.text();
-            match call.status {
-                ToolCallStatus::InProgress if sent.phase != ToolSent::Ended => {
-                    if sent.phase == ToolSent::Started {
-                        self.publish_on(app, LoopEvent::ToolExecutionStart { id: id.clone() });
-                        sent.phase = ToolSent::Executing;
-                    }
-                    if text != sent.progress {
-                        self.publish_on(
-                            app,
-                            LoopEvent::ToolUpdate {
-                                id,
-                                update: kage_core::ToolUpdate {
-                                    content: text.clone(),
-                                    structured: None,
-                                },
-                            },
-                        );
-                        sent.progress = text;
-                    }
-                }
-                ToolCallStatus::Completed | ToolCallStatus::Failed
-                    if sent.phase != ToolSent::Ended =>
-                {
-                    self.publish_on(
-                        app,
-                        LoopEvent::ToolCallEnd {
-                            id,
-                            output: ToolOutput {
-                                is_error: call.status == ToolCallStatus::Failed,
-                                text,
-                                ..ToolOutput::default()
-                            },
-                        },
-                    );
-                    sent.phase = ToolSent::Ended;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    /// Publishes one finished child transcript item whole.
-    fn commit_child_item(&mut self, app: SessionId, item: &kage_client::TranscriptItem) {
-        match item {
-            kage_client::TranscriptItem::User { content, .. } => {
-                let message = Message::new(Role::User, content_of(content), None);
-                self.publish_on(
-                    app,
-                    LoopEvent::MessageAppended {
-                        message: Arc::new(message),
-                    },
-                );
-            }
-            kage_client::TranscriptItem::Assistant { text } => {
-                self.publish_on(
-                    app,
-                    LoopEvent::TextDelta {
-                        id: MessageId::new(),
-                        delta: text.clone(),
-                    },
-                );
-                self.message_end(app);
-            }
-            kage_client::TranscriptItem::Thinking { text, .. } => {
-                self.publish_on(
-                    app,
-                    LoopEvent::ThinkingDelta {
-                        id: MessageId::new(),
-                        delta: text.clone(),
-                    },
-                );
-                self.message_end(app);
-            }
-            kage_client::TranscriptItem::Media { mime, data } => {
-                self.publish_on(
-                    app,
-                    LoopEvent::Media {
-                        id: MessageId::new(),
-                        kind: media_kind(mime),
-                        mime: mime.clone(),
-                        data: data.clone(),
-                    },
-                );
-            }
-            kage_client::TranscriptItem::Notice { tone, text } => {
-                self.publish_on(
-                    app,
-                    HostEvent::Notice {
-                        level: notice_level(*tone),
-                        text: text.clone(),
-                        transient: false,
-                    },
-                );
-            }
-            kage_client::TranscriptItem::Compaction {
-                kept,
-                summarized,
-                summary,
-                ..
-            } => {
-                self.publish_on(
-                    app,
-                    LoopEvent::Compaction {
-                        kept: usize::try_from(*kept).unwrap_or(0),
-                        summarized: usize::try_from(summarized.unwrap_or(0)).unwrap_or(0),
-                        summary: summary.clone().unwrap_or_default(),
-                        before: 0,
-                        estimate: 0,
-                    },
-                );
-            }
-            // Tool calls went out in the phase walk; turn boundaries,
-            // plans and decision records have no agent-buffer shape.
-            kage_client::TranscriptItem::ToolCall(_)
-            | kage_client::TranscriptItem::TurnEnd { .. }
-            | kage_client::TranscriptItem::Plan { .. }
-            | kage_client::TranscriptItem::Decision { .. } => {}
-        }
-    }
-
-    /// Closes a child's streaming message bubble.
-    fn message_end(&mut self, app: SessionId) {
-        self.publish_on(
-            app,
-            LoopEvent::MessageEnd {
-                id: MessageId::new(),
-                usage: kage_core::TokenUsage::default(),
-                stop_reason: kage_core::StopReason::EndTurn,
-            },
-        );
     }
 
     /// A subagent's permission asks moved. Children ask no questions,
@@ -6704,6 +6717,66 @@ mod tests {
         ));
         assert!(rebuilt.load(std::sync::atomic::Ordering::SeqCst));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A child transcript replayed whole goes to the App in transcript
+    /// order: the text before a tool call ahead of it, the call, then
+    /// what follows, which streams as the tail.
+    #[test]
+    fn a_replayed_child_transcript_keeps_its_order() {
+        let call = kage_client::ToolCallItem {
+            tool_call_id: "t1".to_owned(),
+            title: "read".to_owned(),
+            name: Some("read".to_owned()),
+            locations: None,
+            kind: kage_acp::acp::ToolKind::Read,
+            status: ToolCallStatus::Completed,
+            input: Some(serde_json::json!({"path": "a"})),
+            swarm: None,
+            content: Vec::new(),
+            raw_output: None,
+            took_ms: None,
+        };
+        let items = vec![
+            kage_client::TranscriptItem::Assistant {
+                text: "looking".to_owned(),
+            },
+            kage_client::TranscriptItem::ToolCall(call),
+            kage_client::TranscriptItem::Assistant {
+                text: "found".to_owned(),
+            },
+        ];
+        let mut track = ChildTrack {
+            app: SessionId::new(),
+            parent: "s1".to_owned(),
+            committed: 0,
+            tools: BTreeMap::new(),
+            tail: None,
+            running: true,
+            ended: false,
+        };
+        let order: Vec<String> = child_events(&items, &mut track)
+            .into_iter()
+            .map(|event| match event {
+                kage_core::protocol::Event::Loop(LoopEvent::TextDelta { delta, .. }) => {
+                    format!("text:{delta}")
+                }
+                kage_core::protocol::Event::Loop(LoopEvent::MessageEnd { .. }) => "end".to_owned(),
+                kage_core::protocol::Event::Loop(LoopEvent::ToolCallStart { name, .. }) => {
+                    format!("start:{name}")
+                }
+                kage_core::protocol::Event::Loop(LoopEvent::ToolCallEnd { .. }) => {
+                    "done".to_owned()
+                }
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            order,
+            ["text:looking", "end", "start:read", "done", "text:found"]
+        );
+        assert_eq!(track.committed, 2);
+        assert!(child_events(&items, &mut track).is_empty(), "nothing twice");
     }
 
     /// A second `/new` while one is opening adds nothing: the session

@@ -1397,6 +1397,12 @@ impl Agent for CliAcpAgent {
 
     /// Saves or removes the key, then reloads the providers so one that
     /// had no key before registers.
+    fn providers_reload(&self) -> Result<serde_json::Value, RpcError> {
+        self.host.reload_providers().map_err(RpcError::internal)?;
+        self.host.fetch_missing_lists();
+        Ok(serde_json::json!({}))
+    }
+
     fn auth_set(&self, req: AuthSetRequest) -> Result<serde_json::Value, RpcError> {
         if req.provider.is_empty() {
             return Err(RpcError::new(-32602, "name the provider the key is for"));

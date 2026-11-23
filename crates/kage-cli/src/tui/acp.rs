@@ -285,6 +285,26 @@ type PrivatePair = (
     Option<Hangup>,
 );
 
+/// What rebuilds the providers and their model list on the pump.
+type ModelRebuild = Box<dyn Fn() -> Option<Arc<ProviderRegistry>> + Send>;
+
+/// The providers from the config and the credential store, with the
+/// plugins' own, and the model list the picker offers from them. The
+/// picker marks the session's model as it opens. `None` when the
+/// providers cannot be built.
+fn rebuilt_models(
+    config: &kage_core::config::Config,
+    plugins: Option<&PluginRuntime>,
+) -> Option<(ProviderRegistry, Vec<kage_tui::PickItem>)> {
+    let mut registry = crate::build_provider_registry().ok()?;
+    if let Some(rt) = plugins {
+        crate::plugins::merge_plugin_providers(rt, &mut registry);
+    }
+    let mut choices = available_model_items(&registry, "");
+    choices.extend(external_agent_items(config, ""));
+    Some((registry, choices))
+}
+
 /// Moves the App's requests onto a channel the pump can wait on next
 /// to the agent's frames.
 fn forward_requests(
@@ -1256,6 +1276,9 @@ struct Pump {
     /// The model a session opening for a model pick takes once it is
     /// adopted; until then the session on screen keeps its own.
     pending_model: Option<String>,
+    /// Rebuilds the providers here after a login, hands the App the
+    /// model list they offer, and returns them for this side's lookups.
+    rebuild_models: ModelRebuild,
     /// What startup wrote before any session existed: config, plugin
     /// and state errors. Carried into the first adopted session.
     startup_notes: Option<SharedBuffer>,
@@ -3678,6 +3701,12 @@ impl Pump {
                     Err(error) => self.notice(NoticeLevel::Error, error),
                 }
             }
+            RunRequest::RefreshProviders => {
+                self.store.client().providers_reload();
+                if let Some(registry) = (self.rebuild_models)() {
+                    self.registry = registry;
+                }
+            }
             other => self.refuse(&other),
         }
     }
@@ -4145,9 +4174,7 @@ impl Pump {
             RunRequest::CloneSession => "cloning the session",
             RunRequest::Image { .. } => "opening or saving images",
             RunRequest::Media { .. } => "opening or saving media",
-            RunRequest::RefreshProviders | RunRequest::ReloadPlugins => {
-                "reloading providers and plugins"
-            }
+            RunRequest::ReloadPlugins => "reloading plugins",
             RunRequest::SwitchSession(SwitchTarget::PendingFork(_)) => "that switch",
             _ => "that command",
         };
@@ -4843,6 +4870,17 @@ pub(crate) fn run(
     start_run_recorder(finished_runs);
     let mirror = Arc::new(Mutex::new(Mirror::new()));
     let child_files = Arc::new(Mutex::new(HashMap::new()));
+    let (model_updates_tx, model_updates) = mpsc::channel();
+    let rebuild_models: ModelRebuild = {
+        let config = config.clone();
+        let plugins = plugins.clone();
+        let updates = model_updates_tx.clone();
+        Box::new(move || {
+            let (registry, choices) = rebuilt_models(&config, plugins.as_deref())?;
+            let _ = updates.send(choices);
+            Some(Arc::new(registry))
+        })
+    };
     let mut pump = Pump {
         store,
         transport,
@@ -4885,6 +4923,7 @@ pub(crate) fn run(
         running: false,
         handed: None,
         pending_model: None,
+        rebuild_models,
         startup_notes: Some(buffer.clone()),
         last_keymap: None,
         forwarded: HashSet::new(),
@@ -4946,20 +4985,13 @@ pub(crate) fn run(
     }
     let mut model_choices = available_model_items(&registry, &shown_model);
     model_choices.extend(external_agent_items(&config, &shown_model));
-    let (model_updates_tx, model_updates) = mpsc::channel();
     {
         let config = config.clone();
         let plugins = plugins.clone();
         crate::model_refresh::spawn_watcher(applied, move || {
-            let Ok(mut registry) = crate::build_provider_registry() else {
+            let Some((_, choices)) = rebuilt_models(&config, plugins.as_deref()) else {
                 return crate::model_refresh::Rebuilt::Failed;
             };
-            if let Some(rt) = plugins.as_ref() {
-                crate::plugins::merge_plugin_providers(rt, &mut registry);
-            }
-            // The picker marks the session's model as it opens.
-            let mut choices = available_model_items(&registry, "");
-            choices.extend(external_agent_items(&config, ""));
             if model_updates_tx.send(choices).is_ok() {
                 crate::model_refresh::Rebuilt::Done
             } else {
@@ -5446,6 +5478,7 @@ mod tests {
             running: false,
             handed: None,
             pending_model: None,
+            rebuild_models: Box::new(|| None),
             startup_notes: None,
             last_keymap: None,
             forwarded: HashSet::new(),
@@ -6650,6 +6683,26 @@ mod tests {
         assert_eq!(pump.shells["s1"].len(), 2);
         pump.track_shell("s1", &shell(true, ""));
         assert_eq!(pump.shells["s1"].len(), 1, "the other run goes on");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// After a login the host rebuilds its providers and this side
+    /// rebuilds its own, so the new models are offered and run.
+    #[test]
+    fn a_provider_refresh_reloads_the_host_and_the_local_models() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        let rebuilt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = Arc::clone(&rebuilt);
+        pump.rebuild_models = Box::new(move || {
+            seen.store(true, std::sync::atomic::Ordering::SeqCst);
+            None
+        });
+        pump.handle(RunRequest::RefreshProviders);
+        assert!(has_request(
+            &pump.store.take_outgoing(),
+            "_kage/providers/reload"
+        ));
+        assert!(rebuilt.load(std::sync::atomic::Ordering::SeqCst));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

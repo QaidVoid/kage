@@ -829,6 +829,17 @@ pub trait Agent: Send + Sync + 'static {
         Err(RpcError::method_not_found("_kage/auth/set"))
     }
 
+    /// Rebuilds the providers from the config and the credential store
+    /// (`_kage/providers/reload`), as after a client saved a login, so
+    /// the next session and run use them. The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the providers cannot be rebuilt.
+    fn providers_reload(&self) -> Result<serde_json::Value, RpcError> {
+        Err(RpcError::method_not_found("_kage/providers/reload"))
+    }
+
     /// Lists the providers of a directory in the models.dev `api.json`
     /// shape (`_kage/providers/directory`), fetched by the agent. The
     /// default rejects.
@@ -1470,6 +1481,7 @@ fn handle_kage_request<A: Agent>(
             Ok(req) => spawn_op(peer, agent, id, move |a| a.auth_set(req)),
             Err(e) => return parse_failed(peer, &id, e),
         },
+        "_kage/providers/reload" => spawn_op(peer, agent, id, Agent::providers_reload),
         "_kage/folders" => match parse::<FoldersRequest>(params) {
             Ok(req) => spawn_op(peer, agent, id, move |a| a.folders(req).map(jval)),
             Err(e) => return parse_failed(peer, &id, e),

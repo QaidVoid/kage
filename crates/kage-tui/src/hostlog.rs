@@ -91,7 +91,7 @@ fn tidy_error(message: &str) -> String {
     match message.strip_prefix("init.lua: ") {
         Some(rest) => {
             let rest = rest.strip_prefix("lua error: ").unwrap_or(rest);
-            format!("init.lua: {rest}\nFix init.lua, then run /reload.")
+            format!("init.lua: {rest}\nFix init.lua, then restart kage.")
         }
         None => message.to_owned(),
     }
@@ -154,7 +154,7 @@ mod tests {
                 .is_ok()
         );
         sink.lock().unwrap().log(LogLevel::Error, raw);
-        let want = "init.lua: runtime error: init.lua:3: boom\nFix init.lua, then run /reload.";
+        let want = "init.lua: runtime error: init.lua:3: boom\nFix init.lua, then restart kage.";
         let buf = buffer.lock().unwrap();
         assert!(matches!(buf.blocks()[0].as_ref(), Block::Custom { text, .. } if text == want));
         assert_eq!(*calls.lock().unwrap(), [want]);

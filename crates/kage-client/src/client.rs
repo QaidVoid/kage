@@ -1001,6 +1001,17 @@ impl Client {
         )
     }
 
+    /// Asks the engine to rebuild its providers from the config and the
+    /// credential store, as after a login saved here. A failure arrives
+    /// as [`Change::Failed`].
+    pub fn providers_reload(&mut self) -> u64 {
+        self.request(
+            "_kage/providers/reload",
+            serde_json::json!({}),
+            Pending::Started,
+        )
+    }
+
     /// Continues swarm children of `session_id`: each member id maps to
     /// a follow-up prompt, and an empty prompt continues the child's
     /// task. The children report back through `subagent_update`.

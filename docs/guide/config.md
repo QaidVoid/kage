@@ -312,6 +312,13 @@ Env vars use `KAGE_` with `__` for nesting, e.g.
 In the TUI, `init.lua` runs after all of these. An option it sets, such
 as `kage.opt.theme`, wins over every layer above.
 
+A running kage follows edits to these files. Saving the user config
+reloads the providers, so a model it now names resolves and the model
+picker lists it. Saving either file brings the open sessions' MCP
+servers in line (see [MCP](/guide/mcp)). Other settings apply where
+kage reads them next: skills and session settings when a session opens,
+the TUI's own settings when it starts.
+
 ## project config and trust
 
 A cloned repository should not gain power just because you opened it,

@@ -453,7 +453,7 @@ impl App {
         if self.mcp_servers.is_empty() {
             self.push_info(
                 "no MCP servers configured. Add one under [mcp.servers.<name>] in \
-                 config.toml, then restart kage.",
+                 config.toml; it starts when you save the file.",
             );
             return;
         }

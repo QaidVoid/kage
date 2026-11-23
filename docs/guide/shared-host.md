@@ -82,7 +82,10 @@ port = 7433              # the web endpoint's TCP port, when web = true
 bind = "127.0.0.1"       # the web endpoint's address, when web = true
 ```
 
-A project's `.kage/config.toml` never sets it.
+A project's `.kage/config.toml` never sets it. A running host follows
+edits to `web`, `port` and `bind`: saving the file starts, stops or
+moves the web endpoint, and connections it already accepted stay until
+they end. `share` and `idle_timeout_secs` apply to hosts started after.
 
 ## the web endpoint
 

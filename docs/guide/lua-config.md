@@ -22,7 +22,7 @@ kage reads `$XDG_CONFIG_HOME/kage/init.lua`, which is
   `.kage/config.toml` (see [configuration](/guide/config)).
 - An error in `init.lua` shows in the TUI as an error block in the
   conversation, such as `init.lua: runtime error: init.lua:3: boom`
-  followed by `Fix init.lua, then restart kage.` The Lua traceback is
+  followed by `Fix init.lua; saving it reloads the plugins.` The Lua traceback is
   left out. kage still starts, with its defaults and your plugins
   loaded. A host writes the error to its log instead (see
   [shared host](/guide/shared-host)).

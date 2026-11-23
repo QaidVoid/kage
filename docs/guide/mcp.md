@@ -302,7 +302,14 @@ the first line of its error.
 
 With no servers configured, `/mcp` says so instead:
 `no MCP servers configured. Add one under [mcp.servers.<name>] in
-config.toml, then restart kage.`
+config.toml; it starts when you save the file.`
+
+Saving `config.toml`, or a project's `.kage/config.toml`, brings the
+open sessions' servers in line with it: a new server starts, a removed
+or disabled one stops, and a changed one starts again from its new
+entry. Servers an editor or plugin passed are left alone. Like a
+restart, the change waits for the next run when a run is in flight. A
+file that does not load leaves the servers as they are.
 
 `/mcp restart <server>` and `/mcp login <server>` do the same without
 the picker.

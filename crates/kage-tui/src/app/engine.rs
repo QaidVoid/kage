@@ -51,7 +51,7 @@ impl App {
         self.open_next_permission() || changed
     }
 
-    fn apply_envelope(&mut self, envelope: Envelope) {
+    pub(crate) fn apply_envelope(&mut self, envelope: Envelope) {
         if let Event::Host(HostEvent::PromptWithdrawn { delivery, content }) = &envelope.event {
             self.pending_withdrawn(envelope.session, *delivery, content.clone());
             return;
@@ -73,6 +73,10 @@ impl App {
         }
         if let Event::Host(HostEvent::PromptList { prompts }) = &envelope.event {
             self.show_rewind_picker(prompts.clone());
+            return;
+        }
+        if let Event::Host(HostEvent::SessionAdopted) = &envelope.event {
+            self.session_adopted(envelope.session);
             return;
         }
         if let Event::Host(
@@ -332,6 +336,7 @@ impl App {
             HostEvent::PromptWithdrawn { .. }
             | HostEvent::Undone { .. }
             | HostEvent::PromptList { .. }
+            | HostEvent::SessionAdopted
             | HostEvent::TitleChanged { .. }
             | HostEvent::AgentSpawned { .. }
             | HostEvent::AgentPaused { .. } => {}
@@ -549,6 +554,7 @@ impl App {
             | HostEvent::StateChanged { .. }
             | HostEvent::TitleChanged { .. }
             | HostEvent::SessionChanged { .. }
+            | HostEvent::SessionAdopted
             | HostEvent::McpServers { .. }
             | HostEvent::AgentPaused { .. }
             // Only the main session asks questions.
@@ -684,7 +690,7 @@ impl App {
     /// Drop the per-view UI state a switch or a resume must not
     /// carry over: the search, the mouse selection and drag anchor,
     /// the context menu and the completion popup.
-    fn reset_session_ui(&mut self) {
+    pub(crate) fn reset_session_ui(&mut self) {
         self.search_line = None;
         self.search_origin = None;
         self.search_pattern = None;

@@ -14,6 +14,7 @@ impl App {
         let (attach_tx, attach_rx) = std::sync::mpsc::channel();
         Self {
             root_buffer: Arc::clone(&buffer),
+            adopted_buffer: None,
             buffer,
             focus: None,
             input: InputState::new(),

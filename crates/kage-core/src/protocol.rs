@@ -223,6 +223,12 @@ pub enum HostEvent {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         compacted_agents: Vec<Arc<Message>>,
     },
+    /// A client's own session store moved the main view onto the
+    /// session this envelope names, or replaced its transcript in
+    /// place, and already holds the transcript. The client resets the
+    /// view's session state and keeps the blocks. The engine never
+    /// emits it. Live.
+    SessionAdopted,
     /// The session title was set or generated. Durable.
     TitleChanged {
         /// New title.

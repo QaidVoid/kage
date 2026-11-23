@@ -1085,9 +1085,13 @@ struct Pump {
     /// The mirror the run loop and the App read, pointed at the wire
     /// session's file as sessions are adopted.
     mirror: Arc<Mutex<Mirror>>,
-    /// The session id every envelope names: the App sees one session
-    /// per connection, whatever the agent calls its sessions.
+    /// The session id the main view's envelopes name: the wire
+    /// session's id once one is adopted, so the App's status line and
+    /// session picker name the real session.
     app_session: SessionId,
+    /// [`Self::app_session`], shared with publishers outside the pump
+    /// such as the plugin log.
+    main_view: Arc<Mutex<SessionId>>,
     /// The wire id of the session the App is on.
     wire: String,
     /// What the App asked while a session was opening, the first or
@@ -2693,8 +2697,10 @@ impl Pump {
     /// Hands the App the wire session's current buffer when the store
     /// swapped it, as a replaced session does: the replay of the
     /// replacement folds into the new object, so the old one the App
-    /// still draws has to go.
-    fn hand_buffer(&mut self) {
+    /// still draws has to go. The handover is announced with
+    /// `SessionAdopted`, so the App swaps in order with the session's
+    /// events. Returns whether a buffer was handed.
+    fn hand_buffer(&mut self) -> bool {
         let buffer = self.store.shared_buffer(&self.wire);
         let same = self
             .handed
@@ -2703,7 +2709,9 @@ impl Pump {
         if !same {
             self.handed = Some(Arc::clone(&buffer));
             self.feed.send_buffer(buffer);
+            self.publish(HostEvent::SessionAdopted);
         }
+        !same
     }
 
     /// Points the mirror at the wire session's file, which the exit
@@ -2758,6 +2766,8 @@ impl Pump {
             self.publish(HostEvent::RunEnded { outcome });
         }
         let old = std::mem::replace(&mut self.wire, id.to_owned());
+        self.app_session = ulid::Ulid::from_string(id).map_or_else(|_| SessionId::new(), SessionId);
+        *lock(&self.main_view) = self.app_session;
         // A cold start adopts its first session off an empty wire;
         // there is nothing to close. A bootstrap resume adopts the
         // session `wire` already names: closing it would end the very
@@ -2780,7 +2790,9 @@ impl Pump {
         // `/plan off` restores the mode the session came from only if
         // the open reported one.
         self.last_mode = self.mode_value();
-        self.hand_buffer();
+        if !self.hand_buffer() {
+            self.publish(HostEvent::SessionAdopted);
+        }
         self.mirror_rechecks = 0;
         self.point_mirror(crate::paths::sessions_dir(), !carry_model);
         self.update_ui_slot(|ui| {
@@ -4376,6 +4388,7 @@ pub(crate) fn run(
     );
     let registry = Arc::new(registry);
     let app_session = SessionId::new();
+    let main_view = Arc::new(Mutex::new(app_session));
     let store = Store::new();
     let (frames_tx, frames_rx) = mpsc::channel();
     let upstream = match upstream {
@@ -4427,6 +4440,7 @@ pub(crate) fn run(
         feed: Arc::clone(&feed),
         mirror: Arc::clone(&mirror),
         app_session,
+        main_view: Arc::clone(&main_view),
         wire: String::new(),
         unadopted: Vec::new(),
         pending_open: None,
@@ -4490,7 +4504,7 @@ pub(crate) fn run(
             _ => NoticeLevel::Info,
         };
         let _ = log_events.send(Envelope {
-            session: app_session,
+            session: *lock(&main_view),
             seq: 0,
             event: HostEvent::Notice {
                 level,
@@ -4978,6 +4992,7 @@ mod tests {
             feed: Arc::clone(&feed),
             mirror: Arc::new(Mutex::new(Mirror::new())),
             app_session: SessionId::new(),
+            main_view: Arc::new(Mutex::new(SessionId::new())),
             wire: "s1".to_owned(),
             unadopted: Vec::new(),
             pending_open: None,
@@ -5220,6 +5235,32 @@ mod tests {
         });
         assert_eq!(pump.wire, "fresh");
         assert_eq!(pump.pending_new, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A new session's adoption reaches the App first among the new
+    /// session's envelopes, named by the session's own id, so the App
+    /// swaps its buffer and resets in order.
+    #[test]
+    fn adoption_is_announced_under_the_new_session_id_before_its_state() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::NewSession);
+        let new = request_id(&pump.store.take_outgoing(), "session/new");
+        while app.try_recv().is_ok() {}
+        let fresh = SessionId::new().to_string();
+        pump.absorb(Frame::Success {
+            id: new,
+            result: serde_json::json!({"sessionId": fresh}),
+        });
+        let first = app
+            .try_iter()
+            .find(|e| e.session.to_string() == fresh)
+            .expect("an envelope for the new session");
+        assert_eq!(
+            first.event,
+            kage_core::protocol::Event::Host(HostEvent::SessionAdopted)
+        );
+        assert_eq!(*lock(&pump.main_view), first.session);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

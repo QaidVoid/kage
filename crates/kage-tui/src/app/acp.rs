@@ -6,8 +6,9 @@
 //! event channel. What that thread cannot apply itself, because it
 //! takes `&mut App`, waits in an [`AcpFeed`] the loop drains each
 //! pass: plugin commands for the `:` palette, the keymap the snapshot
-//! offers, status entries plugins set, and a fresh root buffer after
-//! the session was replaced.
+//! offers, status entries plugins set, and the root buffer of a
+//! session the connection moved onto or replaced, which waits for that
+//! session's `SessionAdopted` event.
 
 use super::*;
 
@@ -68,22 +69,41 @@ impl App {
             changed = true;
         }
         if let Some(buffer) = update.root_buffer {
-            self.set_root_buffer(buffer);
-            changed = true;
+            self.adopted_buffer = Some(buffer);
         }
         changed
     }
 
-    /// Draw `buffer` as the main session's transcript from now on: the
-    /// conversation was replaced in place, so the connection handed
-    /// over a fresh one its replay folds into.
-    pub(crate) fn set_root_buffer(&mut self, buffer: SharedBuffer) {
-        self.root_buffer = Arc::clone(&buffer);
-        if self.focus.is_none() {
-            self.buffer = buffer;
+    /// Show the session the connection's store moved the main view
+    /// onto, or the transcript it replaced in place. The store already
+    /// holds the blocks, handed over through the feed, so only the
+    /// view's session state resets: agent views, focus, search and, on
+    /// a switch, the pending prompts and run indicators of the session
+    /// left. The composer keeps what is being typed.
+    pub(crate) fn session_adopted(&mut self, session: kage_core::SessionId) {
+        let switched = self.active_session != Some(session);
+        self.set_focus(None);
+        self.reset_session_ui();
+        self.active_session = Some(session);
+        self.status_session_id = Some(session.to_string().chars().take(8).collect());
+        if let Some(buffer) = self.adopted_buffer.take() {
+            self.root_buffer = buffer;
         }
+        self.buffer = Arc::clone(&self.root_buffer);
         self.draw_snapshot = None;
         lock(&self.buffer).invalidate_all_heights();
+        self.agents.clear();
+        self.agent_buffers.clear();
+        self.evicted_agents.clear();
+        self.drafts.clear();
+        if switched {
+            self.pending.clear();
+            self.swarm_oneshot = None;
+            self.compacting = None;
+            self.pending_compaction_before = None;
+        }
+        self.plugin_sessions_stale = true;
+        self.on_session_changed();
     }
 }
 
@@ -151,11 +171,15 @@ mod tests {
             [("mood".to_owned(), "fine".to_owned())]
         );
         assert!(
-            Arc::ptr_eq(&app.root_buffer, &sent_buffer),
-            "the app draws the feed's buffer"
+            !Arc::ptr_eq(&app.root_buffer, &sent_buffer),
+            "the buffer waits for its session's adoption"
         );
-        // A second drain takes nothing: the feed was emptied.
-        assert!(!app.drain_acp_feed());
+        app.session_adopted(kage_core::SessionId::new());
+        assert!(
+            Arc::ptr_eq(&app.root_buffer, &sent_buffer),
+            "the app draws the feed's buffer once adopted"
+        );
+        assert!(!app.drain_acp_feed(), "a second drain takes nothing");
     }
 
     #[test]
@@ -167,15 +191,66 @@ mod tests {
         assert!(!app.drain_acp_feed());
     }
 
+    /// Adopting another session leaves the agent view and the agents
+    /// of the session left, shows the handed buffer, and takes the new
+    /// session's id for the status line and the session picker.
     #[test]
-    fn a_root_buffer_swap_keeps_a_focused_agent_view() {
+    fn adopting_a_session_resets_the_view_onto_its_buffer() {
         let fresh = crate::events::shared_buffer();
         let mut app = App::new(crate::events::shared_buffer(), std::sync::mpsc::channel().0);
-        // A focused agent view (no agent present, so just the focus
-        // flag) must not be yanked to the new root.
+        let old = kage_core::SessionId::new();
+        app.active_session = Some(old);
         app.focus = Some(kage_core::SessionId::new());
-        app.set_root_buffer(Arc::clone(&fresh));
-        assert!(!Arc::ptr_eq(&app.buffer, &fresh));
+        app.pending.push((
+            None,
+            crate::view::PendingPrompt {
+                text: "hi".into(),
+                queued: true,
+            },
+        ));
+        app.adopted_buffer = Some(Arc::clone(&fresh));
+        let new = kage_core::SessionId::new();
+        app.session_adopted(new);
+        assert_eq!(app.focus, None);
+        assert!(Arc::ptr_eq(&app.buffer, &fresh));
         assert!(Arc::ptr_eq(&app.root_buffer, &fresh));
+        assert_eq!(app.active_session, Some(new));
+        assert_eq!(
+            app.status_session_id.as_deref(),
+            Some(&new.to_string()[..8])
+        );
+        assert!(app.pending.is_empty(), "the old session's pending rows go");
+    }
+
+    /// Events the session left published before the switch still land
+    /// in its buffer: the new buffer is drawn only once the adoption
+    /// arrives, in order.
+    #[test]
+    fn events_before_the_adoption_stay_with_the_session_left() {
+        let old_buffer = crate::events::shared_buffer();
+        let fresh = crate::events::shared_buffer();
+        let mut app = App::new(Arc::clone(&old_buffer), std::sync::mpsc::channel().0);
+        let old = kage_core::SessionId::new();
+        app.active_session = Some(old);
+        app.adopted_buffer = Some(Arc::clone(&fresh));
+        let notice = |session| kage_core::protocol::Envelope {
+            session,
+            seq: 0,
+            event: kage_core::protocol::HostEvent::Notice {
+                level: kage_core::protocol::NoticeLevel::Info,
+                text: "late".into(),
+                transient: false,
+            }
+            .into(),
+        };
+        app.apply_envelope(notice(old));
+        let new = kage_core::SessionId::new();
+        app.apply_envelope(kage_core::protocol::Envelope {
+            session: new,
+            seq: 0,
+            event: kage_core::protocol::HostEvent::SessionAdopted.into(),
+        });
+        assert_eq!(lock(&old_buffer).blocks().len(), 1);
+        assert!(lock(&fresh).blocks().is_empty());
     }
 }

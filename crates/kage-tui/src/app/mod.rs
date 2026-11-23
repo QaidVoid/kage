@@ -698,6 +698,11 @@ pub struct App {
     buffer: SharedBuffer,
     /// The main session's transcript.
     root_buffer: SharedBuffer,
+    /// The transcript an ACP connection handed over for the session it
+    /// is moving the main view onto, applied when its
+    /// [`kage_core::protocol::HostEvent::SessionAdopted`] arrives in
+    /// order with the session's other events.
+    adopted_buffer: Option<SharedBuffer>,
     /// The agent the view points at. `None` shows the main session.
     focus: Option<kage_core::SessionId>,
     input: InputState,

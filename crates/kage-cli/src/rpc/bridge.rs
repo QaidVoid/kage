@@ -1,6 +1,6 @@
 //! Engine events as ACP traffic.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
@@ -34,7 +34,7 @@ use super::content::source_block;
 use super::live::{Live, Seed};
 use super::mcp::prompt_commands;
 use super::options::{Settings, config_options};
-use super::{Held, Ids, PromptEnd, ShownBySession, Waiters};
+use super::{Deferred, Held, Ids, PromptEnd, ShownBySession, Waiters};
 use crate::engine::Commander;
 
 /// A compaction whose post-compaction usage has not arrived yet: the
@@ -68,9 +68,9 @@ pub(super) struct Bridge {
     pub(super) live: Arc<Mutex<Live>>,
     pub(super) ids: Arc<Mutex<Ids>>,
     pub(super) waiters: Waiters,
-    /// Prompts the next run of a session answers, moved into `waiters`
-    /// once the run in flight ends.
-    pub(super) deferred: Waiters,
+    /// Prompts later runs of a session answer, one group per run, moved
+    /// into `waiters` one group at a time as the run in flight ends.
+    pub(super) deferred: Deferred,
     pub(super) models: Arc<RwLock<Arc<[SessionConfigSelectOption]>>>,
     pub(super) shown: ShownBySession,
     /// Advertised name to real name for tools the host renamed, so a
@@ -985,8 +985,17 @@ impl Bridge {
         for waiter in lock(&self.waiters).remove(&session).unwrap_or_default() {
             let _ = waiter.send(end.clone());
         }
-        if let Some(next) = lock(&self.deferred).remove(&session) {
+        let next = {
+            let mut deferred = lock(&self.deferred);
+            let next = deferred.get_mut(&session).and_then(VecDeque::pop_front);
+            if deferred.get(&session).is_some_and(VecDeque::is_empty) {
+                deferred.remove(&session);
+            }
+            next
+        };
+        if let Some(next) = next {
             lock(&self.waiters).insert(session, next);
+            lock(&self.live).claim_prompt(session, self.connection);
         }
         if let Some(parent) = parent {
             self.settle(parent);

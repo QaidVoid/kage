@@ -470,6 +470,14 @@ struct PreparedExternalPrompt {
 
 type Waiters = Arc<Mutex<HashMap<SessionId, Vec<crossbeam_channel::Sender<PromptEnd>>>>>;
 
+/// Per session, the prompts later runs answer, one group per run in the
+/// order they will run, as interrupts stack up.
+type Deferred = Arc<
+    Mutex<
+        HashMap<SessionId, std::collections::VecDeque<Vec<crossbeam_channel::Sender<PromptEnd>>>>,
+    >,
+>;
+
 type ShownBySession = Arc<Mutex<HashMap<SessionId, Shown>>>;
 
 /// Updates for client sessions whose opening response is not written
@@ -497,9 +505,9 @@ struct CliAcpAgent {
     disconnecting: AtomicBool,
     ids: Arc<Mutex<Ids>>,
     waiters: Waiters,
-    /// Prompts answered by the run after the one in flight, as an
-    /// interrupt's, which the run it stops must not answer.
-    deferred: Waiters,
+    /// Prompts answered by the runs after the one in flight, as
+    /// interrupts', which the run they stop must not answer.
+    deferred: Deferred,
     shown: ShownBySession,
     subagents: Arc<AtomicBool>,
     /// Whether the client asked for tools without a `[permissions]`
@@ -538,7 +546,7 @@ impl CliAcpAgent {
         let connection = host.next_connection();
         let ids = Arc::new(Mutex::new(Ids::default()));
         let waiters = Waiters::default();
-        let deferred = Waiters::default();
+        let deferred = Deferred::default();
         let shown = ShownBySession::default();
         let subagents = Arc::new(AtomicBool::new(false));
         let kage_client = Arc::new(AtomicBool::new(false));
@@ -925,7 +933,11 @@ impl CliAcpAgent {
         }
     }
 
-    /// Releases the caller's native, read-only or unknown session.
+    /// Releases the caller's native, read-only or unknown session. The
+    /// release runs under the event hold, like a prompt's registration,
+    /// so a racing prompt either reaches the engine before the close
+    /// and its run answers it, or finds the session gone; it never
+    /// lands on a closed session and waits forever.
     fn close_native(&self, req: &CloseSessionRequest) -> Result<CloseSessionResponse, RpcError> {
         let id = {
             let mut ids = lock(&self.ids);
@@ -950,10 +962,12 @@ impl CliAcpAgent {
         for ask in asks {
             ask.stop();
         }
-        lock(&self.ids).remove_client(&req.session_id);
-        lock(&self.shown).remove(&id);
-        lock(&self.held).remove(&id);
-        self.host.release(id);
+        self.host.engine.hold_events(|| {
+            lock(&self.ids).remove_client(&req.session_id);
+            lock(&self.shown).remove(&id);
+            lock(&self.held).remove(&id);
+            self.host.release(id);
+        });
         if !self.host.held(id) {
             // No connection is left to answer the asks parked under the
             // session, so they are declined and the session closes once
@@ -1732,7 +1746,7 @@ impl Agent for CliAcpAgent {
                     lock(&self.deferred)
                         .entry(id)
                         .or_default()
-                        .push(done.clone());
+                        .push_back(vec![done.clone()]);
                 } else {
                     waiters.entry(id).or_default().push(done.clone());
                     drop(waiters);

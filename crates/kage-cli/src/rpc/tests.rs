@@ -1072,7 +1072,7 @@ fn child_waiters_survive_a_rate_limit_and_settle_without_a_tree_node() {
         live: Arc::clone(&h.host.live),
         ids: Arc::clone(&ids),
         waiters: Arc::clone(&waiters),
-        deferred: Waiters::default(),
+        deferred: Deferred::default(),
         models: h.host.shared_models(),
         shown: ShownBySession::default(),
         aliases: BTreeMap::new(),

@@ -113,20 +113,8 @@ fn serve(
     crate::model_refresh::spawn_host(&host, Some(Arc::clone(log)), applied);
     let budget = Budget::new(MAX_CONNECTIONS);
     let web_budget = Budget::new(MAX_CONNECTIONS);
-    let mut web_error = None;
-    let mut web = if host_cfg.web {
-        match start_web(host_cfg, &host, web_budget.clone(), log) {
-            Ok(web) => Some(web),
-            Err(e) => {
-                log(&format!("web endpoint not started: {e}"));
-                web_error = Some(e);
-                None
-            }
-        }
-    } else {
-        None
-    };
-    published.record(&dir, web_error)?;
+    let mut web = WebEndpoint::start(host_cfg, &host, &web_budget, log);
+    published.record(&dir, web.error.clone())?;
     log(&format!(
         "accepting clients on {}",
         dir.join(SOCKET).display()
@@ -134,7 +122,12 @@ fn serve(
     let mut listener = listener;
     let budgets = [&budget, &web_budget];
     loop {
-        serve_until_idle(&listener, &host, &budgets, &stop, idle, log);
+        let mut tend = || {
+            if web.follow_config(&host, &web_budget, log) {
+                let _ = published.record(&dir, web.error.clone());
+            }
+        };
+        serve_until_idle(&listener, &host, &budgets, &stop, idle, &mut tend, log);
         if stop.load(Ordering::SeqCst) {
             break;
         }
@@ -158,9 +151,7 @@ fn serve(
     // a socket this host never touches. A host holds the lock only
     // while its socket or its record is present, so a starting instance
     // can tell a host from a serve, which publishes neither.
-    if let Some(web) = web.as_mut() {
-        web.stop();
-    }
+    web.stop();
     let _ = fs::remove_file(&published.socket);
     log("shutting down; cancelling runs");
     host.shutdown();
@@ -453,6 +444,9 @@ struct Published {
     socket: PathBuf,
     record: Option<PathBuf>,
     retired: bool,
+    /// When the host first published its record, kept when the record
+    /// is written again.
+    started: Option<DateTime<Utc>>,
 }
 
 impl Published {
@@ -464,7 +458,7 @@ impl Published {
             version: kage_core::build::version().to_owned(),
             protocol: PROTOCOL,
             socket: self.socket.clone(),
-            started: Utc::now(),
+            started: *self.started.get_or_insert_with(Utc::now),
             web_error,
         };
         let bytes = serde_json::to_vec(&entry).map_err(|e| e.to_string())?;
@@ -501,6 +495,7 @@ fn bind(dir: &Path) -> Result<(UnixListener, Published), String> {
         socket: socket.clone(),
         record: None,
         retired: false,
+        started: None,
     };
     let listener = bind_socket(&socket)?;
     Ok((listener, published))
@@ -517,13 +512,14 @@ fn bind_socket(socket: &Path) -> Result<UnixListener, String> {
 
 /// Accepts local clients until `stop` is set, or until the host has
 /// had no client in any of `budgets` (local first, then web) and no
-/// work for `idle`.
+/// work for `idle`. Runs `tend` once a tick.
 fn serve_until_idle(
     listener: &UnixListener,
     host: &Arc<Host>,
     budgets: &[&Budget; 2],
     stop: &AtomicBool,
     idle: Duration,
+    tend: &mut dyn FnMut(),
     log: &Log,
 ) {
     let mut quiet_since = Instant::now();
@@ -539,6 +535,7 @@ fn serve_until_idle(
         }
         host.prune_projects();
         host.decline_expired_asks(ASK_HOLD);
+        tend();
         if accepted || budgets.iter().any(|budget| budget.live() > 0) || host.busy() {
             quiet_since = Instant::now();
         } else if quiet_since.elapsed() >= idle {
@@ -645,6 +642,106 @@ fn peer_uid(_stream: &UnixStream) -> Option<u32> {
 }
 
 /// The host's web endpoint, served on its own thread.
+/// The web endpoint `[host]` asks for, following edits to the user
+/// configuration: turning `web` on or off, or moving `bind` or `port`,
+/// stops the old listener and starts the new one. Connections the old
+/// one accepted stay until they end.
+struct WebEndpoint {
+    /// `web`, `bind` and `port` as the listener runs them.
+    settings: (bool, String, u16),
+    listener: Option<WebListener>,
+    /// Why the endpoint the settings ask for is not running.
+    error: Option<String>,
+    stamps: crate::config_watch::Stamps,
+    polled: Instant,
+}
+
+impl WebEndpoint {
+    fn start(
+        host_cfg: &kage_core::config::HostConfig,
+        host: &Arc<Host>,
+        budget: &Budget,
+        log: &Log,
+    ) -> Self {
+        let mut stamps = crate::config_watch::Stamps::default();
+        stamps.changed(&Self::files());
+        let mut endpoint = Self {
+            settings: (false, String::new(), 0),
+            listener: None,
+            error: None,
+            stamps,
+            polled: Instant::now(),
+        };
+        endpoint.apply(host_cfg, host, budget, log);
+        endpoint
+    }
+
+    fn files() -> Vec<PathBuf> {
+        kage_core::config::Config::default_path()
+            .into_iter()
+            .collect()
+    }
+
+    /// Rereads `[host]` once a [`crate::config_watch::POLL`] when the
+    /// user configuration changed, and moves the endpoint to it. Returns
+    /// whether the endpoint changed, so the record follows. A
+    /// configuration that does not load leaves the endpoint as it is.
+    fn follow_config(&mut self, host: &Arc<Host>, budget: &Budget, log: &Log) -> bool {
+        if self.polled.elapsed() < crate::config_watch::POLL {
+            return false;
+        }
+        self.polled = Instant::now();
+        if self.stamps.changed(&Self::files()).is_empty() {
+            return false;
+        }
+        let host_cfg = match kage_core::config::Config::load_default() {
+            Ok(config) => config.host,
+            Err(e) => {
+                log(&format!("configuration not applied: {e}"));
+                return false;
+            }
+        };
+        self.apply(&host_cfg, host, budget, log)
+    }
+
+    /// Runs the endpoint `host_cfg` asks for. Returns whether that moved
+    /// it.
+    fn apply(
+        &mut self,
+        host_cfg: &kage_core::config::HostConfig,
+        host: &Arc<Host>,
+        budget: &Budget,
+        log: &Log,
+    ) -> bool {
+        let settings = (host_cfg.web, host_cfg.bind.clone(), host_cfg.port);
+        if settings == self.settings {
+            return false;
+        }
+        let was_running = self.listener.is_some();
+        self.stop();
+        self.error = None;
+        self.settings = settings;
+        if host_cfg.web {
+            match start_web(host_cfg, host, budget.clone(), log) {
+                Ok(listener) => self.listener = Some(listener),
+                Err(e) => {
+                    log(&format!("web endpoint not started: {e}"));
+                    self.error = Some(e);
+                }
+            }
+        } else if was_running {
+            log("web endpoint off");
+        }
+        true
+    }
+
+    fn stop(&mut self) {
+        if let Some(mut listener) = self.listener.take() {
+            listener.stop();
+        }
+    }
+}
+
 struct WebListener {
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
@@ -845,6 +942,7 @@ mod tests {
             socket: socket.clone(),
             record: None,
             retired: false,
+            started: None,
         };
         drop(UnixListener::bind(&socket).unwrap());
         published.record(dir.path(), None).unwrap();
@@ -867,6 +965,7 @@ mod tests {
             socket: socket.clone(),
             record: None,
             retired: false,
+            started: None,
         };
         drop(UnixListener::bind(&socket).unwrap());
         published.record(dir.path(), None).unwrap();

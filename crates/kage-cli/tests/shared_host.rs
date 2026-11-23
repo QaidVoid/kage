@@ -1812,6 +1812,73 @@ fn a_host_without_web_config_keeps_the_port_closed() {
     assert!(terminate(&mut host).success());
 }
 
+/// A model added to the user configuration of a running host is listed
+/// and resolvable without a restart.
+#[test]
+fn a_running_host_follows_provider_config_edits() {
+    let env = Env::new();
+    let provider = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let config = |models: &str| {
+        format!(
+            "[provider]\ndefault_model = \"fake/small\"\n\n\
+             [providers.custom.fake]\nbase_url = \"http://{}/v1\"\napi_key_env = \"\"\n\n{models}",
+            provider.local_addr().unwrap()
+        )
+    };
+    let small = "[[providers.custom.fake.models]]\nid = \"small\"\nname = \"Small\"\n";
+    let big = "[[providers.custom.fake.models]]\nid = \"big\"\nname = \"Big\"\n";
+    env.write_config(&config(small));
+    let mut rpc = env.rpc(&[]);
+    rpc.request("initialize", json!({"protocolVersion": 1}));
+    let listed = |rpc: &mut Rpc| {
+        rpc.request("_kage/models/list", json!({}))["result"]["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|provider| provider["models"].as_array().unwrap().clone())
+            .map(|model| model["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let before = listed(&mut rpc);
+    assert!(before.contains(&"fake/small".to_owned()), "{before:?}");
+    assert!(!before.contains(&"fake/big".to_owned()));
+    env.write_config(&config(&format!("{small}\n{big}")));
+    let deadline = Instant::now() + WAIT;
+    while !listed(&mut rpc).contains(&"fake/big".to_owned()) {
+        assert!(Instant::now() < deadline, "the new model never listed");
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Turning `[host] web` on in the user configuration opens the port of
+/// a running host, and turning it off closes it, with no restart.
+#[test]
+fn a_running_host_follows_web_config_edits() {
+    let env = Env::new();
+    let port = free_port();
+    env.write_config(&format!("[host]\nweb = false\nport = {port}\n"));
+    let mut host = env.host(60);
+    env.ready(host.id());
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+    let open = || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok();
+    let until = |want: bool| {
+        let deadline = std::time::Instant::now() + WAIT;
+        while open() != want {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the port is open: {}",
+                !want
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+    env.enable_web(port);
+    until(true);
+    env.write_config(&format!("[host]\nweb = false\nport = {port}\n# off\n"));
+    until(false);
+    assert!(terminate(&mut host).success());
+}
+
 /// The first status line an HTTP request to `addr` earns.
 fn http_status(addr: std::net::SocketAddr, request: &str) -> String {
     let mut stream = std::net::TcpStream::connect(addr).unwrap();

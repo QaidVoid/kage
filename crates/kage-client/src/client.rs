@@ -1367,13 +1367,33 @@ impl Client {
     }
 
     /// Sends the oldest queued prompt of a run that just ended, if
-    /// there is one.
-    fn flush_queue(&mut self, session_id: &str) {
+    /// there is one, and returns whether it did: the prompt is in the
+    /// transcript then.
+    fn flush_queue(&mut self, session_id: &str) -> bool {
         if self.session_mut(session_id).queue.is_empty() {
-            return;
+            return false;
         }
         let queued = self.session_mut(session_id).queue.remove(0);
         self.send_prompt(session_id, queued.prompt, None, true);
+        true
+    }
+
+    /// Marks the run of `session_id` ended, sends the oldest queued
+    /// prompt, and returns the changes that makes.
+    fn end_run(&mut self, session_id: &str) -> Vec<Change> {
+        let session = self.session_mut(session_id);
+        session.running = false;
+        session.in_turn = false;
+        session.compacting = false;
+        let mut changes = vec![Change::Session {
+            id: session_id.to_owned(),
+        }];
+        if self.flush_queue(session_id) {
+            changes.push(Change::Transcript {
+                id: session_id.to_owned(),
+            });
+        }
+        changes
     }
 
     fn session_mut(&mut self, session_id: &str) -> &mut Session {
@@ -1579,7 +1599,7 @@ impl Client {
             Pending::Prompt {
                 session_id,
                 owns_run,
-            } => self.apply_prompt_answer(session_id, owns_run, result),
+            } => self.apply_prompt_answer(id, &session_id, owns_run, result),
             Pending::SetConfigOption {
                 session_id,
                 config_id,
@@ -1780,32 +1800,28 @@ impl Client {
     }
 
     /// Records a prompt answer and, when it ended the run, sends the
-    /// oldest queued prompt.
+    /// oldest queued prompt. A stop-and-send owns the run it starts
+    /// while the run it stopped is still answering, so the session stays
+    /// running, and keeps its last stop, until the last run this client
+    /// owns ends. An answer that does not decode still ends the run.
     fn apply_prompt_answer(
         &mut self,
-        session_id: String,
+        id: u64,
+        session_id: &str,
         owns_run: bool,
         result: Value,
     ) -> Vec<Change> {
-        let stop = serde_json::from_value::<PromptResponse>(result)
-            .ok()
-            .map(|response| response.stop_reason);
-        // A stop-and-send owns the run it starts while the run it
-        // stopped is still answering, so the session stays running until
-        // the last run this client owns ends.
-        let still_running = owns_run && self.owns_a_run(&session_id);
-        {
-            let session = self.session_mut(&session_id);
-            session.last_stop = stop;
-            if owns_run && !still_running {
-                session.running = false;
-                session.compacting = false;
-            }
+        let decoded = answer::<PromptResponse>(id, result, "prompt response");
+        if !owns_run || self.owns_a_run(session_id) {
+            return decoded.err().unwrap_or_default();
         }
-        if owns_run && !still_running {
-            self.flush_queue(&session_id);
+        self.session_mut(session_id).last_stop =
+            decoded.as_ref().ok().map(|response| response.stop_reason);
+        let mut changes = self.end_run(session_id);
+        if let Err(failed) = decoded {
+            changes.extend(failed);
         }
-        vec![Change::Session { id: session_id }]
+        changes
     }
 
     /// Whether a prompt of this client that owns a run on `session_id`
@@ -1826,10 +1842,7 @@ impl Client {
                 session_id,
                 owns_run: true,
             } if !self.owns_a_run(&session_id) => {
-                let session = self.session_mut(&session_id);
-                session.running = false;
-                session.compacting = false;
-                self.flush_queue(&session_id);
+                changes = self.end_run(&session_id);
             }
             Pending::SetConfigOption {
                 session_id,

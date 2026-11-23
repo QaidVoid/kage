@@ -419,8 +419,8 @@ fn the_cancel_fixture_withdraws_the_ask_and_ends_cancelled() {
     assert_eq!(session.last_stop, Some(StopReason::Cancelled));
     assert!(!session.running);
     assert!(
-        session.in_turn,
-        "the turn never closed on the wire, so it stays open"
+        !session.in_turn,
+        "the answer ended the run, though the wire never closed the turn"
     );
 }
 
@@ -446,8 +446,8 @@ fn the_error_fixture_surfaces_a_mid_turn_failure() {
     let session = client.state().session(PARENT).unwrap();
     assert!(!session.running, "the failed answer released the run");
     assert!(
-        session.in_turn,
-        "the turn never closed on the wire, so it stays open"
+        !session.in_turn,
+        "the failed answer ended the run, though the wire never closed the turn"
     );
     assert_eq!(session.last_stop, None, "no stop reason rode the error");
     assert_eq!(
@@ -1435,10 +1435,16 @@ fn a_failed_prompt_answer_releases_the_run_and_flushes_the_queue() {
     );
     let _ = client.take_outgoing();
     assert_eq!(client.prompt("s1", text("later")), PromptOutcome::Queued);
-    client.handle(Frame::Failure {
+    let changes = client.handle(Frame::Failure {
         id: n(3),
         error: kage_client::RpcError::new(-32603, "session is busy"),
     });
+    for change in [
+        Change::Session { id: "s1".into() },
+        Change::Transcript { id: "s1".into() },
+    ] {
+        assert!(changes.contains(&change), "{change:?} in {changes:?}");
+    }
     assert!(
         client.state().session("s1").unwrap().running,
         "the failed run released, so the queued prompt took over"

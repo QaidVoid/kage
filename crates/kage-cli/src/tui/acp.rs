@@ -1802,6 +1802,11 @@ impl Pump {
         if let Some((wire, update)) = shell {
             self.track_shell(&wire, &update);
         }
+        if let Some((wire, _, message, false)) = &failed_prompt
+            && *wire == self.wire
+        {
+            self.run_error = Some(message.clone());
+        }
         match answer {
             Some(answer) => self.settle(answer, changes),
             None => {
@@ -1813,13 +1818,10 @@ impl Pump {
         if switched {
             self.finish_mode_switch();
         }
-        // A failed prompt moves no session in the client, so the run
-        // it ended is settled here.
         if let Some((wire, blocks, message, steered)) = failed_prompt {
             if wire == self.wire && steered {
                 self.return_prompt(self.app_session, content_of(&blocks), false, message);
             } else if wire == self.wire {
-                self.run_error = Some(message);
                 if self.running {
                     self.end_run();
                 }

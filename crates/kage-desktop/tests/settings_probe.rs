@@ -299,11 +299,6 @@ fn the_permissions_page_shows_the_modes_and_the_rules() {
         1,
         "the configured tool rule draws"
     );
-    assert_eq!(
-        testutil::count(&harness, "Confine file tools to the working directory"),
-        1,
-        "the path confinement switch draws"
-    );
 }
 
 #[test]

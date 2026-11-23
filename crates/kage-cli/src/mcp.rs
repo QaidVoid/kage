@@ -52,11 +52,6 @@ pub(crate) fn run_serve(tools: &[String]) -> ExitCode {
         eprintln!("kage: mcp serve: {e}");
         return ExitCode::from(1);
     }
-    if !permissions.confine_paths {
-        eprintln!(
-            "kage: path confinement is OFF for this session (permissions.confine_paths = false)"
-        );
-    }
     let registry = match serve_registry(tools, &shell, &config.tools) {
         Ok(r) => r,
         Err(e) => {
@@ -64,11 +59,11 @@ pub(crate) fn run_serve(tools: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let gate = |name: &str, input: &serde_json::Value| serve_verdict(&permissions, name, input);
+    let gate =
+        |name: &str, input: &serde_json::Value| serve_verdict(&permissions, &workdir, name, input);
     match kage_mcp::serve(
         &registry,
         &workdir,
-        permissions.confine_paths,
         &gate,
         BufReader::new(std::io::stdin()),
         std::io::stdout(),
@@ -119,12 +114,24 @@ fn serve_registry(
 
 /// The serve gate's answer for one call: `[permissions.tools.<name>]`
 /// decides, and `ask` is refused since `kage mcp serve` cannot prompt.
+/// So is a `write` or `edit` outside `workdir`, which asks in a session,
+/// unless the tool's entry writes out `default = "allow"`.
 fn serve_verdict(
     permissions: &PermissionsConfig,
+    workdir: &Path,
     name: &str,
     input: &serde_json::Value,
 ) -> Option<String> {
     match permissions.check(name, &PermissionsConfig::subject_for(input)) {
+        PermissionAction::Allow
+            if !permissions.allows_by_default(name)
+                && crate::permissions::writes_outside(workdir, name, input) =>
+        {
+            Some(format!(
+                "`{name}` outside the working directory asks and `kage mcp serve` cannot \
+                 prompt; denied"
+            ))
+        }
         PermissionAction::Allow => None,
         PermissionAction::Ask => Some(format!(
             "`{name}`: permission is `ask` ([permissions.tools.{name}]) and \
@@ -489,20 +496,47 @@ mod tests {
             permissions.tools.insert(
                 tool.to_owned(),
                 ToolPermissionRules {
-                    default,
+                    default: Some(default),
                     ..ToolPermissionRules::default()
                 },
             );
         }
+        let workdir = tempfile::tempdir().unwrap();
+        let workdir = workdir.path();
         let input = serde_json::json!({});
-        assert!(serve_verdict(&permissions, "read", &input).is_none());
-        let ask = serve_verdict(&permissions, "shell", &input).unwrap();
+        assert!(serve_verdict(&permissions, workdir, "read", &input).is_none());
+        let ask = serve_verdict(&permissions, workdir, "shell", &input).unwrap();
         assert!(ask.contains("cannot prompt"), "{ask}");
-        let deny = serve_verdict(&permissions, "write", &input).unwrap();
+        let deny = serve_verdict(&permissions, workdir, "write", &input).unwrap();
         assert!(
             deny.contains("denied by [permissions.tools.write]"),
             "{deny}"
         );
+    }
+
+    #[test]
+    fn serve_verdict_refuses_an_edit_outside_the_workdir_unless_allowed() {
+        let outside = tempfile::tempdir().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        let workdir = workdir.path();
+        let target = outside.path().join("notes.txt");
+        let input = serde_json::json!({ "path": target, "old_str": "a", "new_str": "b" });
+        let mut permissions = PermissionsConfig::default();
+        let refused = serve_verdict(&permissions, workdir, "edit", &input).unwrap();
+        assert!(
+            refused.contains("outside the working directory"),
+            "{refused}"
+        );
+        let inside = serde_json::json!({ "path": "notes.txt", "old_str": "a", "new_str": "b" });
+        assert!(serve_verdict(&permissions, workdir, "edit", &inside).is_none());
+        permissions.tools.insert(
+            "edit".to_owned(),
+            ToolPermissionRules {
+                default: Some(PermissionAction::Allow),
+                ..ToolPermissionRules::default()
+            },
+        );
+        assert!(serve_verdict(&permissions, workdir, "edit", &input).is_none());
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use kage_core::{CancelFlag, Message, Risk, ToolCallId, ToolOutput, ToolUpdate};
 
 use crate::ToolError;
-use crate::path::{resolve, resolve_under};
+use crate::path::{is_sensitive, resolve_reachable, resolve_under};
 
 /// Sink the dispatcher hands to a [`ToolContext`] so a long-running tool
 /// can stream progress without blocking on the loop's emit closure.
@@ -97,8 +97,8 @@ pub trait Tool: Send + Sync + std::fmt::Debug {
 /// Carries the working directory the tool must respect, a cancellation flag
 /// the tool should poll at safe points for long-running work, an optional
 /// [`ProgressSink`] long-running tools call to stream progress, the
-/// opt-in path-confinement flag that switches [`ToolContext::resolve_path`]
-/// to escape-checked resolution, the id of the call being served when
+/// path-confinement flag that keeps [`ToolContext::resolve_path`] under
+/// the workdir, the id of the call being served when
 /// the dispatcher knows it, and the conversation so far when the
 /// dispatcher hands it over.
 #[derive(Clone)]
@@ -196,8 +196,7 @@ impl<'a> ToolContext<'a> {
 
     /// Switch [`Self::resolve_path`] to escape-checked resolution so
     /// every path the tool touches stays under the workdir. Off by
-    /// default: the historical behavior resolves against the workdir
-    /// but accepts absolute paths and `..` traversals that escape it.
+    /// default, where an absolute or `~` path reaches outside it.
     #[must_use]
     pub fn with_confine(mut self) -> Self {
         self.confine = true;
@@ -231,21 +230,43 @@ impl<'a> ToolContext<'a> {
     }
 
     /// Resolve `candidate` against the context workdir. Unconfined
-    /// contexts use [`crate::path::resolve`]; confined ones use
+    /// contexts use [`crate::path::resolve_reachable`], which reaches
+    /// outside only through an absolute or `~` path; confined ones use
     /// [`crate::path::resolve_under`], which rejects `..` traversals,
     /// outside absolute paths, and escaping symlinks with
     /// [`ToolError::Path`].
     ///
     /// # Errors
     ///
-    /// Whatever the selected resolution entry point returns; under
-    /// confinement that includes the escape rejection.
+    /// Whatever the selected resolution entry point returns.
     pub fn resolve_path(&self, candidate: &Path) -> Result<PathBuf, ToolError> {
         if self.confine {
             resolve_under(self.workdir, candidate)
         } else {
-            resolve(self.workdir, candidate)
+            resolve_reachable(self.workdir, candidate)
         }
+    }
+
+    /// Resolve a file the tool reads or writes, as
+    /// [`Self::resolve_path`] does, refusing one that holds secrets
+    /// (see [`crate::path::is_sensitive`]) by its own name or, through
+    /// a symlink, by its target's.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::resolve_path`] returns, or [`ToolError::Path`]
+    /// for a sensitive file.
+    pub fn resolve_file(&self, candidate: &Path) -> Result<PathBuf, ToolError> {
+        let resolved = self.resolve_path(candidate)?;
+        if is_sensitive(candidate) || is_sensitive(&resolved) {
+            return Err(ToolError::Path {
+                path: candidate.to_owned(),
+                reason: "holds secrets (an env file, a private key or credentials), so file \
+                         tools do not open it"
+                    .to_owned(),
+            });
+        }
+        Ok(resolved)
     }
 
     /// Whether the caller has requested cancellation.

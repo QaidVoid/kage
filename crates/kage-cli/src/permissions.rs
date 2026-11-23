@@ -18,6 +18,11 @@
 //! tools of unknown risk always ask, and `exit_plan` always asks without
 //! ever becoming a session or config grant. A denied `exit_plan` ends
 //! the run.
+//!
+//! A `write` or `edit` outside the session's working directory asks
+//! where the rules would allow it by default. Allow mode, a session or
+//! "always" approval, or a `default = "allow"` written in the tool's
+//! `[permissions.tools.<name>]` entry lets it through.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -90,6 +95,9 @@ pub(crate) struct PermissionGate {
     /// production construction) resolves [`Config::default_path`] at
     /// write time; tests point it at a tempdir.
     config_path: Option<PathBuf>,
+    /// The working directory of the run, set by the engine, so a write
+    /// outside it asks. `None` (and a confined session) skips the check.
+    workdir: Option<PathBuf>,
 }
 
 impl PermissionGate {
@@ -112,7 +120,16 @@ impl PermissionGate {
             plan: Arc::new(Mutex::new(false)),
             risks: Arc::new(Mutex::new(BTreeMap::new())),
             config_path: None,
+            workdir: None,
         }
+    }
+
+    /// Ask before a `write` or `edit` outside `workdir`. `None` skips
+    /// the check, for a session confined to its workdir.
+    #[must_use]
+    pub(crate) fn with_workdir(mut self, workdir: Option<PathBuf>) -> Self {
+        self.workdir = workdir;
+        self
     }
 
     /// Turn plan mode on or off. Shared across every clone.
@@ -349,7 +366,7 @@ impl PermissionGate {
             .tools
             .entry(tool.to_owned())
             .or_default()
-            .default = PermissionAction::Allow;
+            .default = Some(PermissionAction::Allow);
         if let Err(e) = save_allow_always(&path, tool) {
             eprintln!("kage: persist permission: {e}");
         }
@@ -460,6 +477,18 @@ impl Hooks for PermissionGate {
             Some(_) if configured.0 == PermissionAction::Deny => configured,
             Some(action) => (action, Rule::Mode),
         };
+        let (action, rule) = if action == PermissionAction::Allow
+            && mode.is_none()
+            && !lock(&self.rules).allows_by_default(name)
+            && self
+                .workdir
+                .as_deref()
+                .is_some_and(|workdir| writes_outside(workdir, name, input))
+        {
+            (PermissionAction::Ask, Rule::Outside)
+        } else {
+            (action, rule)
+        };
         match (action, &rule) {
             (PermissionAction::Allow, _) => None,
             (PermissionAction::Deny, Rule::Mode) => Some(error_output(
@@ -471,10 +500,12 @@ impl Hooks for PermissionGate {
                 name,
                 &format!("permission denied by [permissions.mcp] {server}"),
             )),
-            (PermissionAction::Deny, Rule::Tool | Rule::Plan | Rule::Review) => Some(error_output(
-                name,
-                &format!("permission denied by [permissions.tools.{name}]"),
-            )),
+            (PermissionAction::Deny, Rule::Tool | Rule::Plan | Rule::Review | Rule::Outside) => {
+                Some(error_output(
+                    name,
+                    &format!("permission denied by [permissions.tools.{name}]"),
+                ))
+            }
             (PermissionAction::Ask, _) => self.ask_user(
                 PermissionPrompt {
                     call_id: id.clone(),
@@ -500,6 +531,31 @@ enum Rule {
     Plan,
     /// Plan mode's review of the plan `exit_plan` presents.
     Review,
+    /// A write outside the working directory.
+    Outside,
+}
+
+/// Tools that write the file their `path` input names.
+const FILE_WRITERS: &[&str] = &["write", "edit"];
+
+/// Whether the call of `name` writes a file outside `workdir`. A path
+/// the tool would refuse anyway, such as a relative one leaving the
+/// workdir, does not count.
+pub(crate) fn writes_outside(workdir: &Path, name: &str, input: &serde_json::Value) -> bool {
+    if !FILE_WRITERS.contains(&name) {
+        return false;
+    }
+    let Some(path) = ["path", "filePath"]
+        .iter()
+        .find_map(|key| input.get(*key)?.as_str())
+    else {
+        return false;
+    };
+    let Ok(root) = workdir.canonicalize() else {
+        return false;
+    };
+    kage_tools::resolve_reachable(workdir, Path::new(path))
+        .is_ok_and(|target| !target.starts_with(root))
 }
 
 /// The refusal of a write tool while plan mode is on.
@@ -551,6 +607,11 @@ fn non_interactive_output(tool: &str, rule: &Rule) -> ToolOutput {
             "plan mode asks before `{tool}` and this mode is non-interactive; \
              turn plan mode off or run the interactive TUI"
         ),
+        Rule::Outside => format!(
+            "`{tool}` outside the working directory asks and this mode is non-interactive; \
+             allow the tool with `default = \"allow\"` under [permissions.tools.{tool}], \
+             run with --yolo, or run the interactive TUI"
+        ),
         Rule::Mode | Rule::Tool => format!(
             "permission is `ask` ([permissions.tools.{tool}]) and this mode is non-interactive; \
              add an allow rule or run the interactive TUI"
@@ -593,12 +654,11 @@ mod tests {
 
     fn rules_for(default: PermissionAction) -> PermissionsConfig {
         PermissionsConfig {
-            confine_paths: false,
             mcp: std::collections::BTreeMap::new(),
             tools: [(
                 "shell".to_owned(),
                 ToolPermissionRules {
-                    default,
+                    default: Some(default),
                     allow: Vec::new(),
                     deny: Vec::new(),
                 },
@@ -773,6 +833,110 @@ mod tests {
             out.text.contains("[permissions.tools.shell]"),
             "{}",
             out.text
+        );
+    }
+
+    #[test]
+    fn a_write_outside_the_workdir_asks_until_approved_for_the_session() {
+        let workdir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let (ask_tx, ask_rx) = channel_asker();
+        let gate = PermissionGate::new(PermissionsConfig::default())
+            .with_workdir(Some(workdir.path().to_owned()))
+            .with_asker(ask_tx);
+        let inside = serde_json::json!({ "path": "notes.txt", "content": "x" });
+        let away = serde_json::json!({ "path": outside.path().join("notes.txt"), "content": "x" });
+        let id = kage_core::ToolCallId::new("call");
+        assert!(
+            gate.clone()
+                .before_tool_call(&id, "write", &inside)
+                .is_none()
+        );
+        assert!(
+            gate.clone()
+                .before_tool_call(&id, "read", &serde_json::json!({ "path": outside.path() }))
+                .is_none()
+        );
+        let handle = std::thread::spawn({
+            let mut gate = gate.clone();
+            let away = away.clone();
+            move || gate.before_tool_call(&kage_core::ToolCallId::new("call"), "write", &away)
+        });
+        let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(ask.tool, "write");
+        ask.reply.send(PermissionDecision::AllowSession).unwrap();
+        assert!(handle.join().unwrap().is_none());
+        assert!(gate.clone().before_tool_call(&id, "write", &away).is_none());
+        assert!(ask_rx.try_recv().is_err(), "the session approval covers it");
+    }
+
+    #[test]
+    fn a_write_outside_the_workdir_runs_in_allow_mode_and_is_refused_unasked() {
+        let workdir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut rules = PermissionsConfig::default();
+        rules.tools.insert(
+            "edit".to_owned(),
+            ToolPermissionRules {
+                deny: vec!["*.lock*".to_owned()],
+                ..ToolPermissionRules::default()
+            },
+        );
+        let mut gate = PermissionGate::new(rules).with_workdir(Some(workdir.path().to_owned()));
+        let id = kage_core::ToolCallId::new("call");
+        for key in ["path", "filePath"] {
+            let away = serde_json::json!({ key: outside.path().join("a.txt"), "old_str": "a", "new_str": "b" });
+            let refused = gate.before_tool_call(&id, "edit", &away).unwrap();
+            assert!(
+                refused.text.contains("outside the working directory"),
+                "{key}: {}",
+                refused.text
+            );
+            assert!(refused.text.contains("--yolo"), "{}", refused.text);
+        }
+        let home = serde_json::json!({ "path": "~/kage-outside-test.txt", "old_str": "a", "new_str": "b" });
+        assert!(gate.before_tool_call(&id, "edit", &home).is_some());
+        gate.set_mode(Some(PermissionAction::Allow));
+        let away = serde_json::json!({ "path": outside.path().join("a.txt"), "old_str": "a", "new_str": "b" });
+        assert!(gate.before_tool_call(&id, "edit", &away).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_through_a_link_leading_out_of_the_workdir_asks() {
+        let root = tempfile::tempdir().unwrap();
+        let work = root.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        std::os::unix::fs::symlink(root.path(), work.join("up")).unwrap();
+        let mut gate = PermissionGate::new(PermissionsConfig::default()).with_workdir(Some(work));
+        let through = serde_json::json!({ "path": "up/a.txt", "content": "x" });
+        let refused = gate
+            .before_tool_call(&kage_core::ToolCallId::new("call"), "write", &through)
+            .unwrap();
+        assert!(
+            refused.text.contains("outside the working directory"),
+            "{}",
+            refused.text
+        );
+    }
+
+    #[test]
+    fn an_entry_allowing_the_write_lets_it_out_of_the_workdir_unasked() {
+        let workdir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut rules = PermissionsConfig::default();
+        rules.tools.insert(
+            "write".to_owned(),
+            ToolPermissionRules {
+                default: Some(PermissionAction::Allow),
+                ..ToolPermissionRules::default()
+            },
+        );
+        let mut gate = PermissionGate::new(rules).with_workdir(Some(workdir.path().to_owned()));
+        let away = serde_json::json!({ "path": outside.path().join("a.txt"), "content": "x" });
+        assert!(
+            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "write", &away)
+                .is_none()
         );
     }
 
@@ -976,7 +1140,7 @@ mod tests {
         rules.tools.insert(
             "write".to_owned(),
             ToolPermissionRules {
-                default: PermissionAction::Ask,
+                default: Some(PermissionAction::Ask),
                 allow: Vec::new(),
                 deny: Vec::new(),
             },
@@ -1126,7 +1290,7 @@ mod tests {
         rules.tools.insert(
             "shell".to_owned(),
             ToolPermissionRules {
-                default: PermissionAction::Allow,
+                default: Some(PermissionAction::Allow),
                 allow: Vec::new(),
                 deny: vec!["rm *".to_owned()],
             },
@@ -1156,7 +1320,7 @@ mod tests {
         rules.tools.insert(
             "shell".to_owned(),
             ToolPermissionRules {
-                default: PermissionAction::Ask,
+                default: Some(PermissionAction::Ask),
                 allow: Vec::new(),
                 deny: Vec::new(),
             },
@@ -1181,7 +1345,7 @@ mod tests {
         rules.tools.insert(
             "shell".to_owned(),
             ToolPermissionRules {
-                default: PermissionAction::Ask,
+                default: Some(PermissionAction::Ask),
                 allow: Vec::new(),
                 deny: Vec::new(),
             },
@@ -1249,7 +1413,7 @@ mod tests {
         rules.tools.insert(
             "shell".to_owned(),
             ToolPermissionRules {
-                default: PermissionAction::Allow,
+                default: Some(PermissionAction::Allow),
                 allow: Vec::new(),
                 deny: vec!["rm *".to_owned()],
             },
@@ -1458,7 +1622,7 @@ mod tests {
         rules.tools.insert(
             "github__force_push".to_owned(),
             ToolPermissionRules {
-                default: PermissionAction::Deny,
+                default: Some(PermissionAction::Deny),
                 allow: Vec::new(),
                 deny: Vec::new(),
             },

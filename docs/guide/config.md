@@ -176,7 +176,6 @@ budget = 0
 [permissions]
 # tool permission rules. built-in tools are allowed unless configured
 # and MCP tools ask. see the permissions guide for the full reference.
-# confine_paths = false
 # [permissions.tools.shell]
 # default = "ask"
 # allow = ["git *"]
@@ -519,8 +518,8 @@ and because it has its own permission rule. To keep the key out of
 the environment, save it for the tool with
 `kage auth login edit_image` and leave out `api_key_env`.
 
-A source file is read only from inside the workspace, even with
-`confine_paths = false`, because the file is uploaded. Either source
+A source file is read only from inside the workspace, unlike the file
+tools' absolute paths, because the file is uploaded. Either source
 may be at most 16 MiB. One image goes in per call. There is no mask. A
 `path` saves the result and never replaces an existing file, the
 source included: the name gets `-2`, `-3` and so on.

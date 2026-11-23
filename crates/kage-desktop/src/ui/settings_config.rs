@@ -178,7 +178,6 @@ pub struct McpServer {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct Permissions {
-    confine_paths: bool,
     tools: BTreeMap<String, ToolRules>,
     mcp: BTreeMap<String, String>,
 }
@@ -386,13 +385,18 @@ pub fn rule_added(
     }
 }
 
-/// `rule` as `[permissions.tools.<tool>]` holds it.
+/// `rule` as `[permissions.tools.<tool>]` holds it. An unset default
+/// stays unset: it means allow, but only a written `default = "allow"`
+/// lets a `write` or `edit` outside the working directory run unasked.
 fn rule_json(rule: &ToolRules) -> serde_json::Value {
-    serde_json::json!({
-        "default": if rule.default.is_empty() { "allow" } else { rule.default.as_str() },
+    let mut json = serde_json::json!({
         "allow": rule.allow,
         "deny": rule.deny,
-    })
+    });
+    if !rule.default.is_empty() {
+        json["default"] = serde_json::json!(rule.default);
+    }
+    json
 }
 
 /// The capabilities `[plugins.capabilities]` may grant, as kage-plugin
@@ -1585,48 +1589,30 @@ pub fn permissions_page(
         state.rule_text.clear();
     }
     let rules = &snapshot.permissions;
-    boxed(ui, palette, |ui| {
-        let hit = list_row(
-            ui,
-            "confine",
-            &Lead::Icon(crate::icons::Icon::FolderLock),
-            &[Part::Text(
-                "Confine file tools to the working directory".to_owned(),
-            )],
-            Some("Reads and writes outside the session's directory are refused"),
-            &Trail::Switch {
-                on: rules.confine_paths,
-                live: true,
-            },
-            false,
-            palette,
-        );
-        if hit == Hit::Switch {
-            store.config_set(
-                &["permissions", "confine_paths"],
-                Some(serde_json::json!(!rules.confine_paths)),
-            );
-        }
-        if state.adding == Some(RuleAdd::Tool) {
-            rule_field_row(
-                ui,
-                state,
-                store,
-                snapshot,
-                "Name the tool, such as shell or github__create_issue, then Enter",
-                palette,
-            );
-        }
-        if !rules.tools.is_empty() || !rules.mcp.is_empty() {
-            rule_header(ui, palette);
-        }
-        for (tool, rule) in &rules.tools {
-            tool_rule_row(ui, store, snapshot, tool, rule, state, palette);
-        }
-        for (server, action) in &rules.mcp {
-            server_rule_row(ui, store, server, action, palette);
-        }
-    });
+    let empty = rules.tools.is_empty() && rules.mcp.is_empty();
+    if !empty || state.adding == Some(RuleAdd::Tool) {
+        boxed(ui, palette, |ui| {
+            if state.adding == Some(RuleAdd::Tool) {
+                rule_field_row(
+                    ui,
+                    state,
+                    store,
+                    snapshot,
+                    "Name the tool, such as shell or github__create_issue, then Enter",
+                    palette,
+                );
+            }
+            if !empty {
+                rule_header(ui, palette);
+            }
+            for (tool, rule) in &rules.tools {
+                tool_rule_row(ui, store, snapshot, tool, rule, state, palette);
+            }
+            for (server, action) in &rules.mcp {
+                server_rule_row(ui, store, server, action, palette);
+            }
+        });
+    }
     note(
         ui,
         "Rules are saved to config.toml under [permissions] and apply to sessions opened after. Deny beats allow, and the mode decides what no rule matches.",
@@ -2704,7 +2690,7 @@ mod tests {
             deny: false,
         };
         let (_, value) = rule_added(&config, &fresh, "src/**").unwrap();
-        assert_eq!(value["default"], "allow");
+        assert_eq!(value, serde_json::json!({"allow": ["src/**"], "deny": []}));
     }
 
     #[test]

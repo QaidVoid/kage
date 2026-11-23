@@ -46,8 +46,7 @@ pub struct Config {
     #[serde(skip_serializing_if = "ProvidersConfig::is_default")]
     pub providers: ProvidersConfig,
     /// Tool permission rules (`[permissions]`): allow / ask / deny
-    /// per tool, plus the path-confinement flag (on by default;
-    /// `confine_paths = false` opts out).
+    /// per tool and per MCP server.
     #[serde(default, skip_serializing_if = "PermissionsConfig::is_default")]
     pub permissions: crate::permissions::PermissionsConfig,
     /// Shell tool policy (`[shell]`).
@@ -2581,9 +2580,6 @@ default = "ask"   # keep asking
             jail.create_file(
                 "config.toml",
                 r#"
-                [permissions]
-                confine_paths = true
-
                 [permissions.tools.shell]
                 default = "ask"
                 allow = ["git *"]
@@ -2591,7 +2587,6 @@ default = "ask"   # keep asking
                 "#,
             )?;
             let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
-            assert!(cfg.permissions.confine_paths);
             assert_eq!(
                 cfg.permissions.check("shell", "git status"),
                 crate::permissions::PermissionAction::Allow

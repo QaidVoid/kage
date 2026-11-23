@@ -21,7 +21,7 @@ const MAX_IMAGE_BYTES: usize = 5_000_000;
 /// Input shape for the `read` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ReadInput {
-    /// Path to read, relative to the workdir.
+    /// Path to read, relative to the workdir. Reach outside it with an absolute or `~` path.
     #[serde(alias = "filePath")]
     path: String,
     /// Optional 1-indexed start line (inclusive). Line numbers are
@@ -89,7 +89,7 @@ impl Tool for ReadTool {
         cx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
         let input: ReadInput = serde_json::from_value(input)?;
-        let path = cx.resolve_path(Path::new(&input.path))?;
+        let path = cx.resolve_file(Path::new(&input.path))?;
         if input.start_line == Some(0) || input.end_line == Some(0) {
             return Err(ToolError::InvalidInput(
                 "line numbers are 1-based; line numbers must be at least 1".into(),
@@ -949,16 +949,61 @@ mod tests {
     }
 
     #[test]
-    fn unconfined_read_accepts_escape() {
+    fn unconfined_read_reaches_outside_only_by_an_absolute_path() {
         let (root, work) = nested_workdir();
-        fs::write(root.path().join("outside-read.txt"), "secret").unwrap();
-        let out = run(
+        let outside = root.path().join("outside-read.txt");
+        fs::write(&outside, "text").unwrap();
+        let err = run(
             &ReadTool::default(),
             &work,
             serde_json::json!({"path":"../outside-read.txt"}),
         )
+        .unwrap_err();
+        assert!(err.to_string().contains("use an absolute path"), "{err}");
+        let out = run(
+            &ReadTool::default(),
+            &work,
+            serde_json::json!({"path": outside}),
+        )
         .unwrap();
-        assert_eq!(out.text, "secret");
+        assert_eq!(out.text, "text");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_secret_name_linking_to_another_file_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("app.conf"), "KEY=secret").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("app.conf"), dir.path().join(".env")).unwrap();
+        let err = run(
+            &ReadTool::default(),
+            dir.path(),
+            serde_json::json!({"path":".env"}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("holds secrets"), "{err}");
+    }
+
+    #[test]
+    fn a_secret_file_is_not_read_but_its_template_is() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env"), "KEY=secret").unwrap();
+        fs::write(dir.path().join(".env.example"), "KEY=").unwrap();
+        let err = run(
+            &ReadTool::default(),
+            dir.path(),
+            serde_json::json!({"path":".env"}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("holds secrets"), "{err}");
+        assert!(!err.to_string().contains("KEY=secret"), "{err}");
+        let out = run(
+            &ReadTool::default(),
+            dir.path(),
+            serde_json::json!({"path":".env.example"}),
+        )
+        .unwrap();
+        assert_eq!(out.text, "KEY=");
     }
 
     /// A workdir inside its own temp root, so `..` stays private to

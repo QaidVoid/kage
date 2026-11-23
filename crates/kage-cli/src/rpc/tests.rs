@@ -4388,6 +4388,47 @@ fn a_new_session_is_answered_before_its_updates_as_the_input_ends() {
     assert!(updates.iter().all(|&i| i > answered), "{lines:?}");
 }
 
+/// Loading an open session again under a prefix renames it on the
+/// connection: the old id is gone, so the one attachment is released
+/// once and the session closes.
+#[test]
+fn a_reload_under_a_prefix_replaces_the_old_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().display().to_string();
+    let session = record(
+        dir.path(),
+        &cwd,
+        "mock/m",
+        1,
+        &[message(Role::User, vec![text("hello")], None)],
+    );
+    let h = serve(vec![text_turn("ok")], dir.path(), dir.path());
+    let load = |id: &str| {
+        h.client
+            .request(
+                "session/load",
+                serde_json::json!({"sessionId": id, "cwd": cwd, "mcpServers": []}),
+            )
+            .unwrap()
+    };
+    let close = |id: &str| {
+        h.client
+            .request("session/close", serde_json::json!({"sessionId": id}))
+    };
+    let prefix = &session[..12];
+    load(&session);
+    load(prefix);
+    close(prefix).unwrap();
+    let error = close(&session).unwrap_err();
+    assert_eq!(error.code, -32602, "{error}");
+    let engine = SessionId(session.parse().unwrap());
+    let deadline = Instant::now() + WAIT;
+    while h.host.workdir(engine).is_some() {
+        assert!(Instant::now() < deadline, "the session closes");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// A session closed and loaded again on one connection gets its
 /// commands again: the bridge forgot what it had sent the closed one.
 #[test]

@@ -397,8 +397,15 @@ impl Opening {
 }
 
 impl Ids {
+    /// Names `engine` `client` on this connection. A session loaded
+    /// again under another id keeps only the new one, so the connection
+    /// holds one attachment it releases once.
     fn insert(&mut self, client: String, engine: SessionId) {
-        self.by_engine.insert(engine, client.clone());
+        if let Some(old) = self.by_engine.insert(engine, client.clone())
+            && old != client
+        {
+            self.by_client.remove(&old);
+        }
         self.by_client.insert(client, engine);
     }
 

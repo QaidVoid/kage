@@ -113,7 +113,14 @@ impl super::CliAcpAgent {
         if let Some(settings) = self.host.open_settings(id) {
             return self.attach_live(id, client_id, &path, &settings, replay_file, ctx);
         }
-        let (writer, replay) = Self::open_hosted(&path)?;
+        let live = || self.host.open_settings(id).is_some();
+        let Some((writer, replay)) = Self::open_hosted(&path, live)? else {
+            let settings = self
+                .host
+                .open_settings(id)
+                .ok_or_else(|| RpcError::internal("the session closed while it was opening"))?;
+            return self.attach_live(id, client_id, &path, &settings, replay_file, ctx);
+        };
         if replay_file && let Some(ctx) = ctx {
             // Nothing runs this session, so a call the file never closed
             // ended with the engine that made it.
@@ -177,12 +184,16 @@ impl super::CliAcpAgent {
     /// writer: a load that lands there finds the file still locked by
     /// this very process. A session locked by a real second kage
     /// stays locked and the error surfaces after the wait.
-    fn open_hosted(path: &Path) -> Result<(SessionWriter, ReplayResult), RpcError> {
+    fn open_hosted(
+        path: &Path,
+        live: impl Fn() -> bool,
+    ) -> Result<Option<(SessionWriter, ReplayResult)>, RpcError> {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             match SessionWriter::open_native_replay(path) {
-                Ok(Some(opened)) => return Ok(opened),
+                Ok(Some(opened)) => return Ok(Some(opened)),
                 Ok(None) => return Err(external_backend_error()),
+                Err(SessionError::Locked { .. }) if live() => return Ok(None),
                 Err(SessionError::Locked { .. }) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(25));
                 }
@@ -1009,7 +1020,9 @@ mod tests {
         };
         write_header(&header);
         assert!(super::require_native_backend(&path).is_ok());
-        let (writer, replay) = super::super::CliAcpAgent::open_hosted(&path).unwrap();
+        let (writer, replay) = super::super::CliAcpAgent::open_hosted(&path, || false)
+            .unwrap()
+            .unwrap();
         assert_eq!(replay.header.session, header.session);
         drop(writer);
         header.backend = Some(SessionBackend::ExternalAcp(ExternalAcpSession {
@@ -1019,7 +1032,7 @@ mod tests {
         }));
         write_header(&header);
         let external_bytes = std::fs::read(&path).unwrap();
-        assert!(super::super::CliAcpAgent::open_hosted(&path).is_err());
+        assert!(super::super::CliAcpAgent::open_hosted(&path, || false).is_err());
         assert!(super::replay_native(&path).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), external_bytes);
         let error = super::require_native_backend(&path)

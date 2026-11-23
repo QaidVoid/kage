@@ -303,13 +303,19 @@ impl App {
         label
     }
 
-    /// The working row text while a run of the session on screen is in
-    /// flight: what it is doing, the run's elapsed time and, in the
+    /// The working row text while another session opens, or while a
+    /// run of the session on screen is in flight: what it is doing, the
+    /// run's elapsed time and, in the
     /// main view when the next key would reach the editor with an empty
     /// draft, the key that interrupts the run. At `width` columns what
     /// it is doing is cut first, so the time and the key stay.
     pub(crate) fn activity_label(&self, buffer: &crate::Buffer, width: u16) -> Option<String> {
         use kage_core::protocol::AgentState;
+        if self.focus.is_none()
+            && let Some(at) = self.opening
+        {
+            return Some(format!("Opening session ({}s)", at.elapsed().as_secs()));
+        }
         let started = match self.focus {
             None => self.run_started?,
             Some(session) => {

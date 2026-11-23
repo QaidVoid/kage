@@ -229,6 +229,10 @@ pub enum HostEvent {
     /// view's session state and keeps the blocks. The engine never
     /// emits it. Live.
     SessionAdopted,
+    /// A session a client asked to open did not open and none other is
+    /// on its way: the main view stays where it was. The engine never
+    /// emits it. Live.
+    OpenFailed,
     /// The session title was set or generated. Durable.
     TitleChanged {
         /// New title.

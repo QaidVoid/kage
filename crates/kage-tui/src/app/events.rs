@@ -128,7 +128,8 @@ impl App {
         queue: bool,
         session: Option<kage_core::SessionId>,
     ) {
-        let pending = self.session_running(session).then(|| view::PendingPrompt {
+        let opening = session.is_none() && self.opening.is_some();
+        let pending = (opening || self.session_running(session)).then(|| view::PendingPrompt {
             text: text
                 .lines()
                 .map(str::trim)

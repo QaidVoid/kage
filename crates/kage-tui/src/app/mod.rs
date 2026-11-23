@@ -704,6 +704,9 @@ pub struct App {
         crossbeam_channel::Sender<()>,
         crossbeam_channel::Receiver<()>,
     ),
+    /// When the App asked to open another session, while it is still
+    /// opening: the working row says so and prompts wait as pending.
+    opening: Option<std::time::Instant>,
     /// The transcript an ACP connection handed over for the session it
     /// is moving the main view onto, applied when its
     /// [`kage_core::protocol::HostEvent::SessionAdopted`] arrives in

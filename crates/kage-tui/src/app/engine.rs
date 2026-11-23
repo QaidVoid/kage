@@ -79,6 +79,10 @@ impl App {
             self.session_adopted(envelope.session);
             return;
         }
+        if let Event::Host(HostEvent::OpenFailed) = &envelope.event {
+            self.opening = None;
+            return;
+        }
         if let Event::Host(
             HostEvent::SessionChanged { .. }
             | HostEvent::TitleChanged { .. }
@@ -337,6 +341,7 @@ impl App {
             | HostEvent::Undone { .. }
             | HostEvent::PromptList { .. }
             | HostEvent::SessionAdopted
+            | HostEvent::OpenFailed
             | HostEvent::TitleChanged { .. }
             | HostEvent::AgentSpawned { .. }
             | HostEvent::AgentPaused { .. } => {}
@@ -555,6 +560,7 @@ impl App {
             | HostEvent::TitleChanged { .. }
             | HostEvent::SessionChanged { .. }
             | HostEvent::SessionAdopted
+            | HostEvent::OpenFailed
             | HostEvent::McpServers { .. }
             | HostEvent::AgentPaused { .. }
             // Only the main session asks questions.
@@ -989,6 +995,7 @@ impl App {
         // resets; run them explicitly. The live draft belongs to the
         // old session and goes too, along with any agent view.
         self.reset_session_ui();
+        self.opening = None;
         let _ = self.input.swap_draft(Draft::default());
         self.drafts.clear();
         self.focus = None;

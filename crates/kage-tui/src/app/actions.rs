@@ -283,7 +283,7 @@ impl App {
                 None
             }
             "new" => {
-                let _ = self.send_request(RunRequest::NewSession);
+                self.open_session(RunRequest::NewSession);
                 None
             }
             "export" => {

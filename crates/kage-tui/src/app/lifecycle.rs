@@ -106,8 +106,10 @@ impl App {
             // Computed once and reused for the redraw gate below;
             // `has_running_tool_call` locks the buffer and scans every
             // block, so calling it twice per iteration is wasteful.
-            let animating =
-                self.is_working() || self.is_run_in_flight() || self.has_running_tool_call();
+            let animating = self.opening.is_some()
+                || self.is_working()
+                || self.is_run_in_flight()
+                || self.has_running_tool_call();
             let tick = if animating {
                 // 50ms keeps the spinner and the timers moving, and
                 // shaves the worst-case lag after `working` flips false

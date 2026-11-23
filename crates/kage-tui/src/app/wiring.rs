@@ -16,6 +16,7 @@ impl App {
             root_buffer: Arc::clone(&buffer),
             wake: crossbeam_channel::bounded(1),
             adopted_buffer: None,
+            opening: None,
             buffer,
             focus: None,
             input: InputState::new(),

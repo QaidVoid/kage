@@ -81,6 +81,7 @@ impl App {
     /// a switch, the pending prompts and run indicators of the session
     /// left. The composer keeps what is being typed.
     pub(crate) fn session_adopted(&mut self, session: kage_core::SessionId) {
+        self.opening = None;
         let switched = self.active_session != Some(session);
         self.set_focus(None);
         self.reset_session_ui();
@@ -104,6 +105,18 @@ impl App {
         }
         self.plugin_sessions_stale = true;
         self.on_session_changed();
+    }
+
+    /// Asks the connection to open another session, shown as opening
+    /// until it is adopted or the open fails. Resuming the session on
+    /// screen opens nothing.
+    pub(crate) fn open_session(&mut self, request: RunRequest) {
+        let current = self.active_session.map(|id| id.to_string());
+        let stays = matches!(&request, RunRequest::ResumeSession(path)
+            if path.file_stem().and_then(|stem| stem.to_str()) == current.as_deref());
+        if self.send_request(request).is_ok() && !stays {
+            self.opening = Some(std::time::Instant::now());
+        }
     }
 }
 
@@ -220,6 +233,44 @@ mod tests {
             Some(&new.to_string()[..8])
         );
         assert!(app.pending.is_empty(), "the old session's pending rows go");
+    }
+
+    /// `/new` shows the session opening until it is adopted, and a
+    /// prompt typed meanwhile waits as a pending row.
+    #[test]
+    fn a_session_shows_opening_until_it_is_adopted() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(crate::events::shared_buffer(), tx);
+        app.open_session(RunRequest::NewSession);
+        assert!(matches!(rx.try_recv(), Ok(RunRequest::NewSession)));
+        let label = app.activity_label(&lock(&app.buffer), 80).unwrap();
+        assert!(label.starts_with("Opening session"), "{label}");
+        app.send_prompt("hello".into(), Vec::new(), false, None);
+        assert_eq!(app.pending.len(), 1);
+        app.session_adopted(kage_core::SessionId::new());
+        assert!(app.opening.is_none());
+        assert!(app.activity_label(&lock(&app.buffer), 80).is_none());
+    }
+
+    /// A failed open ends the opening state, and resuming the session
+    /// on screen never starts one.
+    #[test]
+    fn a_failed_or_needless_open_shows_no_opening() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(crate::events::shared_buffer(), tx);
+        app.open_session(RunRequest::NewSession);
+        app.apply_envelope(kage_core::protocol::Envelope {
+            session: kage_core::SessionId::new(),
+            seq: 0,
+            event: kage_core::protocol::HostEvent::OpenFailed.into(),
+        });
+        assert!(app.opening.is_none());
+        let current = kage_core::SessionId::new();
+        app.active_session = Some(current);
+        app.open_session(RunRequest::ResumeSession(std::path::PathBuf::from(
+            format!("/sessions/{current}.jsonl"),
+        )));
+        assert!(app.opening.is_none());
     }
 
     /// Events the session left published before the switch still land

@@ -1582,6 +1582,7 @@ impl Pump {
         if let Some((id, new)) = adopted {
             self.adopt(&id, new);
         } else if self.pending_new.is_none() && self.pending_open.is_none() {
+            self.publish(HostEvent::OpenFailed);
             // No session opened and none is on its way, the first or the
             // one a switch asked for: the work held for it goes back to
             // the composer. A switch that failed leaves its session on
@@ -1686,6 +1687,15 @@ impl Pump {
     /// Asks the agent for a new session, whose answer adopts the wire.
     /// An `acp:<name>` model opens a persistent external session on the
     /// configured agent instead of an engine session.
+    /// Stops the run of the session the App is leaving as soon as the
+    /// switch is asked for, so it does not stream on while the next
+    /// session opens.
+    fn stop_for_switch(&mut self) {
+        if self.running && !self.wire.is_empty() {
+            self.store.client().cancel(&self.wire);
+        }
+    }
+
     fn request_new_session(&mut self) {
         if let Some(agent) = external_agent(&self.model).map(str::to_owned) {
             self.request_external_session(&agent);
@@ -3526,7 +3536,10 @@ impl Pump {
             RunRequest::RestartMcp(server) => {
                 self.store.client().restart_mcp(&self.wire, &server);
             }
-            RunRequest::NewSession => self.request_new_session(),
+            RunRequest::NewSession => {
+                self.stop_for_switch();
+                self.request_new_session();
+            }
             RunRequest::ResumeSession(path) => self.open_recorded(&path),
             RunRequest::SwitchSession(SwitchTarget::Session(target)) => {
                 match super::support::resolve_switch_target(&target) {
@@ -3974,6 +3987,7 @@ impl Pump {
         if self.pending_open.as_ref().is_some_and(|open| open.id == id) || id == self.wire {
             return;
         }
+        self.stop_for_switch();
         // The wire list never describes this connection's sessions,
         // so a recorded external session is recognized by its file's
         // header before the load answers.
@@ -5388,6 +5402,43 @@ mod tests {
                 .iter()
                 .any(|(_, text)| text.contains("cannot start"))
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed `/new` tells the App, so it stops showing the session
+    /// as opening.
+    #[test]
+    fn a_failed_new_session_tells_the_app() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::NewSession);
+        let new = request_id(&pump.store.take_outgoing(), "session/new");
+        while app.try_recv().is_ok() {}
+        pump.absorb(Frame::Failure {
+            id: new,
+            error: RpcError::new(-32000, "cannot start".to_owned()),
+        });
+        assert!(app.try_iter().any(|event| matches!(
+            event.event,
+            kage_core::protocol::Event::Host(HostEvent::OpenFailed)
+        )));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `/new` during a run stops it at once, not when the new session
+    /// is adopted.
+    #[test]
+    fn a_new_session_during_a_run_stops_it_at_once() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::Submit {
+            text: "work".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        pump.flush();
+        pump.handle(RunRequest::NewSession);
+        let sent = pump.store.take_outgoing();
+        assert!(has_notification(&sent, "session/cancel"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

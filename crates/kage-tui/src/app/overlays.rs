@@ -567,9 +567,9 @@ impl App {
                         let _ = self.send_request(RunRequest::SwitchModel(value));
                     }
                     Some(PickerKind::Session) => {
-                        let _ = self.send_request(RunRequest::ResumeSession(
-                            std::path::PathBuf::from(value),
-                        ));
+                        self.open_session(RunRequest::ResumeSession(std::path::PathBuf::from(
+                            value,
+                        )));
                     }
                     Some(PickerKind::Mcp) => {
                         let needs_login = self.mcp_servers.iter().any(|s| {
@@ -773,7 +773,7 @@ impl App {
                 let path = std::path::PathBuf::from(path);
                 match action {
                     "resume" => {
-                        let _ = self.send_request(RunRequest::ResumeSession(path));
+                        self.open_session(RunRequest::ResumeSession(path));
                     }
                     "fork" => {
                         let _ = self.send_request(RunRequest::ForkSessionFile(path));

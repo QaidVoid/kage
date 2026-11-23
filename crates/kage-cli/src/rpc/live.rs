@@ -151,6 +151,9 @@ pub(super) struct Spawn {
     agent: String,
     description: String,
     swarm: Option<SwarmMember>,
+    /// Whether the agent runs in the background, which a parent's
+    /// prompt does not wait for.
+    background: bool,
 }
 
 impl Spawn {
@@ -165,7 +168,7 @@ impl Spawn {
                 agent: self.agent.clone(),
                 description: self.description.clone(),
                 swarm: self.swarm.clone(),
-                background: false,
+                background: self.background,
             }
             .into(),
         }
@@ -527,6 +530,7 @@ impl Live {
                         agent: node.agent.clone(),
                         description: node.description.clone(),
                         swarm: node.swarm.clone(),
+                        background: node.background,
                     });
                     if let Some(spawn) = spawn {
                         self.spawns.entry(root).or_default().push(spawn);

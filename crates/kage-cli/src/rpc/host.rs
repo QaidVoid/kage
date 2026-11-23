@@ -947,6 +947,37 @@ mod tests {
         )
     }
 
+    /// A client that attaches while a background agent runs learns it
+    /// is one, so its prompts do not wait for that agent.
+    #[test]
+    fn an_attach_snapshot_keeps_an_agent_in_the_background() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = host_in(&dir);
+        let root = SessionId::new();
+        let child = SessionId::new();
+        lock(&host.live).observe(&Envelope {
+            session: child,
+            seq: 0,
+            event: HostEvent::AgentSpawned {
+                parent: root,
+                tool_call_id: kage_core::ToolCallId::new("call-1"),
+                agent: "general".to_owned(),
+                description: "watch".to_owned(),
+                swarm: None,
+                background: true,
+            }
+            .into(),
+        });
+        let snapshot = lock(&host.live).snapshot(root);
+        assert!(matches!(
+            snapshot.spawns[0].envelope().event,
+            kage_core::protocol::Event::Host(HostEvent::AgentSpawned {
+                background: true,
+                ..
+            })
+        ));
+    }
+
     #[test]
     fn a_released_session_prunes_the_host_bookkeeping() {
         let dir = tempfile::tempdir().unwrap();

@@ -534,6 +534,10 @@ fn a_head_checks_the_token_without_upgrading() {
     let server = spawn_server(vec![]);
     let (_, good) = request_with_token(server.addr, "HEAD /acp", &server.token);
     assert!(good.starts_with("HTTP/1.1 204 "), "{good}");
+    assert!(
+        !good.contains("Content-Length"),
+        "a 204 has no body: {good}"
+    );
     let wrong = "de".repeat(32);
     let (_, refused) = http_request(
         server.addr,
@@ -976,4 +980,37 @@ fn a_missing_web_dir_logs_unavailable_and_keeps_acp_working() {
     assert_eq!(answer["stopReason"], "end_turn");
     drop(client);
     server.stop();
+}
+
+/// Admitting checks and counts in one step, never past the budget, and
+/// a closed budget admits nobody until it reopens while the peers it
+/// holds still count.
+#[test]
+fn a_budget_admits_atomically_and_closes() {
+    let budget = Budget::new(2);
+    let first = budget.try_admit().unwrap();
+    let _second = budget.try_admit().unwrap();
+    assert!(budget.try_admit().is_none(), "spent");
+    drop(first);
+    budget.close();
+    assert!(budget.try_admit().is_none(), "closed");
+    assert_eq!(budget.live(), 1);
+    budget.reopen();
+    assert!(budget.try_admit().is_some());
+
+    let shared = Budget::new(50);
+    let admitted: usize = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    (0..20)
+                        .filter_map(|_| shared.try_admit())
+                        .map(std::mem::forget)
+                        .count()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).sum()
+    });
+    assert_eq!(admitted, 50);
 }

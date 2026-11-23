@@ -112,9 +112,10 @@ fn serve(
     let host = Host::start(None, "", false)?;
     crate::model_refresh::spawn_host(&host, Some(Arc::clone(log)), applied);
     let budget = Budget::new(MAX_CONNECTIONS);
+    let web_budget = Budget::new(MAX_CONNECTIONS);
     let mut web_error = None;
     let mut web = if host_cfg.web {
-        match start_web(host_cfg, &host, budget.clone(), log) {
+        match start_web(host_cfg, &host, web_budget.clone(), log) {
             Ok(web) => Some(web),
             Err(e) => {
                 log(&format!("web endpoint not started: {e}"));
@@ -131,18 +132,23 @@ fn serve(
         dir.join(SOCKET).display()
     ));
     let mut listener = listener;
+    let budgets = [&budget, &web_budget];
     loop {
-        serve_until_idle(&listener, &host, &budget, &stop, idle, log);
+        serve_until_idle(&listener, &host, &budgets, &stop, idle, log);
         if stop.load(Ordering::SeqCst) {
             break;
         }
-        // Unlink first, so a client either connected before and is served
-        // now, or connects after and starts a new host.
+        // Unlink first and close the web budget, so a client either
+        // connected before and is served now, or connects after and
+        // starts a new host or is refused by this one.
         let _ = fs::remove_file(&published.socket);
-        if !accept_all(&listener, &host, &budget, log) && budget.live() == 0 {
+        web_budget.close();
+        let accepted = accept_all(&listener, &host, &budget, log);
+        if !accepted && budgets.iter().all(|b| b.live() == 0) && !host.busy() {
             log("idle; exiting");
             break;
         }
+        web_budget.reopen();
         listener = bind_socket(&published.socket)?;
     }
     // The web endpoint stops accepting first, then the socket: a client
@@ -509,12 +515,13 @@ fn bind_socket(socket: &Path) -> Result<UnixListener, String> {
     Ok(listener)
 }
 
-// Accepts clients until `stop` is set, or until the host has had no client
-// and no work for `idle`.
+/// Accepts local clients until `stop` is set, or until the host has
+/// had no client in any of `budgets` (local first, then web) and no
+/// work for `idle`.
 fn serve_until_idle(
     listener: &UnixListener,
     host: &Arc<Host>,
-    budget: &Budget,
+    budgets: &[&Budget; 2],
     stop: &AtomicBool,
     idle: Duration,
     log: &Log,
@@ -526,13 +533,13 @@ fn serve_until_idle(
             &mut fds,
             PollTimeout::try_from(TICK).unwrap_or(PollTimeout::NONE),
         );
-        let accepted = accept_all(listener, host, budget, log);
+        let accepted = accept_all(listener, host, budgets[0], log);
         if ready.is_err() {
             thread::sleep(TICK);
         }
         host.prune_projects();
         host.decline_expired_asks(ASK_HOLD);
-        if accepted || budget.live() > 0 || host.busy() {
+        if accepted || budgets.iter().any(|budget| budget.live() > 0) || host.busy() {
             quiet_since = Instant::now();
         } else if quiet_since.elapsed() >= idle {
             return;
@@ -564,10 +571,10 @@ fn accept(stream: UnixStream, host: &Arc<Host>, budget: &Budget, log: &Log) {
         log("refused a client running as another user");
         return;
     }
-    if budget.spent() {
+    let Some(guard) = budget.try_admit() else {
         log("refused a client: too many connections");
         return;
-    }
+    };
     let setup = stream
         .set_nonblocking(false)
         .and_then(|()| stream.try_clone());
@@ -585,7 +592,6 @@ fn accept(stream: UnixStream, host: &Arc<Host>, budget: &Budget, log: &Log) {
             return;
         }
     };
-    let guard = budget.admit();
     let host = Arc::clone(host);
     let spawned = thread::Builder::new()
         .name("kage-host-client".into())

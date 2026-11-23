@@ -79,6 +79,9 @@ const ACCEPT_POLL: Duration = Duration::from_millis(25);
 /// How long a rejected connection may take to collect its reply before
 /// the socket is dropped.
 const REJECT_DRAIN: Duration = Duration::from_millis(200);
+/// Refusals drained at once; past this a refused peer's socket just
+/// closes.
+const MAX_REJECTS: usize = 64;
 
 /// The id of the next served connection, named in the 101's
 /// `Acp-Connection-Id` and in the serve log lines.
@@ -318,6 +321,9 @@ pub(crate) struct Budget {
     max: usize,
 }
 
+/// The bit of a budget's count that marks it closed to new peers.
+const CLOSED: usize = 1 << (usize::BITS - 1);
+
 impl Budget {
     /// A fresh budget of `max` live connections.
     pub(crate) fn new(max: usize) -> Self {
@@ -329,19 +335,32 @@ impl Budget {
 
     /// How many connections the budget holds now.
     pub(crate) fn live(&self) -> usize {
-        self.connections.load(Ordering::SeqCst)
-    }
-
-    /// Whether the budget is spent, so the next peer is refused.
-    pub(crate) fn spent(&self) -> bool {
-        self.live() >= self.max
+        self.connections.load(Ordering::SeqCst) & !CLOSED
     }
 
     /// Counts one more connection, released when the returned guard
-    /// drops.
-    pub(crate) fn admit(&self) -> Connection {
-        self.connections.fetch_add(1, Ordering::SeqCst);
-        Connection(Arc::clone(&self.connections))
+    /// drops. `None` when the budget is spent or closed: the check and
+    /// the count are one step, so two accept loops sharing the budget
+    /// never pass `max` between them.
+    pub(crate) fn try_admit(&self) -> Option<Connection> {
+        self.connections
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                (count & CLOSED == 0 && count < self.max).then_some(count + 1)
+            })
+            .ok()?;
+        Some(Connection(Arc::clone(&self.connections)))
+    }
+
+    /// Admits nobody until [`Self::reopen`], so [`Self::live`] can only
+    /// fall from here: a host deciding whether it is idle reads a count
+    /// no new peer joins.
+    pub(crate) fn close(&self) {
+        self.connections.fetch_or(CLOSED, Ordering::SeqCst);
+    }
+
+    /// Admits peers again after [`Self::close`].
+    pub(crate) fn reopen(&self) {
+        self.connections.fetch_and(!CLOSED, Ordering::SeqCst);
     }
 }
 
@@ -367,6 +386,7 @@ pub(crate) fn accept_until(
     log: &Log,
 ) {
     let _ = listener.set_nonblocking(true);
+    let rejects = Budget::new(MAX_REJECTS);
     let mut ticked = Instant::now();
     while !stop.load(Ordering::SeqCst) {
         if ticked.elapsed() >= HOUSEKEEPING {
@@ -380,17 +400,10 @@ pub(crate) fn accept_until(
                 // BSD and macOS hand the listener's nonblocking flag
                 // to the accepted socket.
                 let _ = stream.set_nonblocking(false);
-                if budget.spent() {
-                    log(&format!("refuse {peer} (503)"));
-                    // The rejection drains up to REJECT_DRAIN, so it
-                    // runs on its own thread and the accept loop never
-                    // stalls one drain per refused peer.
-                    let _ = thread::Builder::new()
-                        .name("kage-serve-reject".to_owned())
-                        .spawn(move || reject(stream, 503, "Service Unavailable", BODY_503));
+                let Some(guard) = budget.try_admit() else {
+                    refuse_busy(stream, peer, &rejects, log);
                     continue;
-                }
-                let guard = budget.admit();
+                };
                 let thread_host = Arc::clone(host);
                 let thread_token = Arc::clone(token);
                 let thread_web = web.clone();
@@ -419,6 +432,25 @@ pub(crate) fn accept_until(
             }
         }
     }
+}
+
+/// Refuses `peer` with a `503` while the connection budget is spent.
+/// The rejection drains up to [`REJECT_DRAIN`], so it runs on its own
+/// thread and the accept loop never stalls one drain per refused peer;
+/// with `rejects` spent too, the socket just closes, so a flood of
+/// peers cannot start a thread each.
+fn refuse_busy(stream: TcpStream, peer: SocketAddr, rejects: &Budget, log: &Log) {
+    let Some(guard) = rejects.try_admit() else {
+        log(&format!("refuse {peer} (closed, too many refusals)"));
+        return;
+    };
+    log(&format!("refuse {peer} (503)"));
+    let _ = thread::Builder::new()
+        .name("kage-serve-reject".to_owned())
+        .spawn(move || {
+            let _guard = guard;
+            reject(stream, 503, "Service Unavailable", BODY_503);
+        });
 }
 
 /// The routing table for one accepted connection: read the head, then

@@ -164,20 +164,24 @@ pub fn read_head_with_timeout(
 }
 
 /// Writes a plain HTTP reply with a `text/plain` body, for every
-/// non-upgrade answer.
+/// non-upgrade answer. A `204` carries no body and so no body headers.
 ///
 /// # Errors
 ///
 /// Fails when the reply cannot be written.
 pub fn respond(stream: &mut TcpStream, status: u16, reason: &str, body: &str) -> io::Result<()> {
-    let reply = format!(
-        "HTTP/1.1 {status} {reason}\r\n\
-         Content-Type: text/plain; charset=utf-8\r\n\
-         Content-Length: {}\r\n\
-         Connection: close\r\n\
-         \r\n{body}",
-        body.len(),
-    );
+    let reply = if status == 204 {
+        format!("HTTP/1.1 {status} {reason}\r\nConnection: close\r\n\r\n")
+    } else {
+        format!(
+            "HTTP/1.1 {status} {reason}\r\n\
+             Content-Type: text/plain; charset=utf-8\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n{body}",
+            body.len(),
+        )
+    };
     stream.write_all(reply.as_bytes())?;
     stream.flush()
 }

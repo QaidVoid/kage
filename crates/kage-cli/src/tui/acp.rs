@@ -1752,25 +1752,14 @@ impl Pump {
         true
     }
 
-    /// Feeds one frame in. The plugin reverse requests never touch the
-    /// store: the worker answers them, because the client would
-    /// otherwise fail them as methods it does not know. Hosting
-    /// nothing leaves them to the store, which fails them the same way.
-    fn absorb(&mut self, frame: Frame) {
-        if self.route_plugin_request(&frame) {
-            return;
-        }
-        self.withdrawn_child_prompt(&frame);
-        let answer = self.answer_of(&frame);
-        let switched = matches!(
-            (&frame, &self.mode_switch),
-            (
-                Frame::Success { id: RequestId::Number(id), .. }
-                    | Frame::Failure { id: RequestId::Number(id), .. },
-                Some(switch),
-            ) if *id == switch.request
-        );
-        let failed_prompt = match &frame {
+    /// Settles the prompt `frame` answers, if it answers one, and
+    /// returns a failed one's session, content, error and whether it
+    /// was a steer.
+    fn prompt_answered(
+        &mut self,
+        frame: &Frame,
+    ) -> Option<(String, Vec<ContentBlock>, String, bool)> {
+        match frame {
             Frame::Failure { id, error } => {
                 let steered = self.held.contains(id);
                 self.held.retain(|held| held != id);
@@ -1796,7 +1785,30 @@ impl Pump {
                 None
             }
             _ => None,
-        };
+        }
+    }
+
+    /// Feeds one frame in. The plugin reverse requests never touch the
+    /// store: the worker answers them, because the client would
+    /// otherwise fail them as methods it does not know. Hosting
+    /// nothing leaves them to the store, which fails them the same way.
+    /// A failed prompt is reported once: by the run it ends, or by
+    /// handing the prompt back, not again as a failed request.
+    fn absorb(&mut self, frame: Frame) {
+        if self.route_plugin_request(&frame) {
+            return;
+        }
+        self.withdrawn_child_prompt(&frame);
+        let answer = self.answer_of(&frame);
+        let switched = matches!(
+            (&frame, &self.mode_switch),
+            (
+                Frame::Success { id: RequestId::Number(id), .. }
+                    | Frame::Failure { id: RequestId::Number(id), .. },
+                Some(switch),
+            ) if *id == switch.request
+        );
+        let failed_prompt = self.prompt_answered(&frame);
         let replaced = match &frame {
             Frame::Notification { method, params }
                 if method == "session/update"
@@ -1810,7 +1822,15 @@ impl Pump {
         let catalog = mcp_servers_update(&frame);
         let finished_call = finished_tool_call(&frame).is_some_and(|wire| wire == self.wire);
         let compaction = compaction_update(&frame).filter(|(wire, _)| *wire == self.wire);
-        let changes = self.store.absorb(frame);
+        let reported = failed_prompt
+            .as_ref()
+            .is_some_and(|(wire, ..)| *wire == self.wire || self.app_of(wire).is_some());
+        let changes: Vec<Change> = self
+            .store
+            .absorb(frame)
+            .into_iter()
+            .filter(|change| !(reported && matches!(change, Change::Failed { .. })))
+            .collect();
         if finished_call {
             self.annotate_edits();
         }
@@ -7636,6 +7656,30 @@ mod tests {
             RunOutcome::Failed { .. }
         ));
         assert!(!pump.running);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed prompt shows its error once, as the run's failure,
+    /// not again as a failed request.
+    #[test]
+    fn a_failed_prompt_reports_its_error_once() {
+        let (mut pump, app, _recorded, dir) = running_pump();
+        let prompt = pump
+            .prompts
+            .keys()
+            .next()
+            .cloned()
+            .expect("a prompt is out");
+        let _ = app.try_iter().count();
+        pump.absorb(Frame::Failure {
+            id: prompt,
+            error: RpcError::new(-32000, "provider down".to_owned()),
+        });
+        let repeated = notices(&app)
+            .into_iter()
+            .filter(|(_, text)| text.contains("provider down"))
+            .count();
+        assert_eq!(repeated, 0, "the run's failure carries the error");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

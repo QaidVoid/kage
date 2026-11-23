@@ -158,6 +158,21 @@ fn merged_config(workdir: &Path, runtime: Option<&PluginRuntime>) -> McpConfig {
     merged
 }
 
+/// The MCP servers the configuration of `workdir` names now, with the
+/// ones `runtime`'s plugins declare. `None` when the configuration does
+/// not load, as while a file is half edited, so the running servers
+/// stay instead of all going down.
+pub(crate) fn configured_servers(
+    workdir: &Path,
+    runtime: Option<&PluginRuntime>,
+) -> Option<BTreeMap<String, McpServer>> {
+    let mut servers = Config::load_layered(workdir).ok()?.mcp.servers;
+    if let Some(rt) = runtime {
+        servers.extend(rt.registered_mcp_servers());
+    }
+    Some(servers)
+}
+
 /// Spawn every enabled MCP server and register its tools into
 /// `tools`. HTTP servers get their stored OAuth tokens from
 /// `mcp-auth.json`. The caller must keep the returned [`McpManager`] alive

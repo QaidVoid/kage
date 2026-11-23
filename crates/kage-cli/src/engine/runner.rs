@@ -107,6 +107,8 @@ pub(super) struct McpLease {
     pub manager: McpManager,
     /// Servers to restart first.
     pub restarts: Vec<String>,
+    /// The configured servers to bring the manager in line with first.
+    pub specs: Option<std::collections::BTreeMap<String, kage_core::config::McpServer>>,
 }
 
 impl McpLease {
@@ -123,9 +125,11 @@ impl McpLease {
         let Self {
             mut manager,
             restarts,
+            specs,
         } = self;
         let before = tools.clone();
-        let catalog = super::mcp::refresh_mcp(bus, session, &mut manager, &restarts, tools);
+        let catalog =
+            super::mcp::refresh_mcp(bus, session, &mut manager, &restarts, specs.as_ref(), tools);
         let clients = manager.clients();
         let _ = done.send(Input::McpDone(Box::new(McpDone {
             session,

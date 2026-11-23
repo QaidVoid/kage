@@ -37,6 +37,7 @@
 //! whenever it registers, refreshes or restarts, and unregisters it once
 //! no such server is left.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -152,13 +153,19 @@ impl Managed {
     /// Take the server down: unregister its tools, drop the handle and
     /// the catalog, and record `error`.
     fn evict(&mut self, reg: &mut ToolRegistry, error: &McpError) {
+        self.take_down(reg);
+        self.failed(error);
+    }
+
+    /// Unregister the server's tools and drop its handle, which stops
+    /// it, and its catalog.
+    fn take_down(&mut self, reg: &mut ToolRegistry) {
         for stale in self.registered.drain(..) {
             reg.unregister(&stale);
         }
         self.handle = None;
         self.signed_in = false;
         self.clear_catalog();
-        self.failed(error);
     }
 
     /// The URL this server's HTTP transport asks `tokens` a bearer for:
@@ -431,9 +438,9 @@ impl McpManager {
 
     /// Manage an already initialized connection as server `name`, for
     /// hosts and tests that run a server in process. The server has no
-    /// launch spec, so [`Self::restart`] reports a config error for it.
-    /// Call [`Self::register_into`] afterwards to list its tools and
-    /// catalog.
+    /// launch spec, so [`Self::restart`] reports a config error for it,
+    /// and it counts as handed, not configured. Call
+    /// [`Self::register_into`] afterwards to list its tools and catalog.
     pub fn adopt(&mut self, name: &str, conn: Arc<McpConnection>) {
         let spec = McpServer {
             startup_timeout_secs: None,
@@ -449,6 +456,7 @@ impl McpManager {
         let handle = McpServerHandle::from_connection(conn);
         self.servers
             .push((name.to_owned(), Managed::new(spec, Some(handle))));
+        self.handed.push(name.to_owned());
     }
 
     /// Discover and register every live server's tools, and list the
@@ -565,6 +573,62 @@ impl McpManager {
         let spec = managed.spec.clone();
         let spawned = self.spawn_server(name, &spec);
         self.install(name, spawned, reg)
+    }
+
+    /// Brings the configured servers in line with `specs`, the
+    /// configuration as it reads now. A server no longer named there,
+    /// or now disabled, goes down and leaves; one whose spec changed
+    /// goes down and waits to start from the new spec; a new one waits
+    /// to start. [`Self::start_waiting`] brings the waiting ones up.
+    /// Servers the host was handed are not configuration and stay as
+    /// they are. Returns whether any server changed.
+    pub fn reconcile(
+        &mut self,
+        specs: &BTreeMap<String, McpServer>,
+        reg: &mut ToolRegistry,
+    ) -> bool {
+        let wanted: BTreeMap<&String, &McpServer> = specs
+            .iter()
+            .filter(|(name, spec)| !spec.disabled && !self.handed.contains(name))
+            .collect();
+        let mut changed = false;
+        let handed = &self.handed;
+        self.servers.retain_mut(|(name, managed)| {
+            if handed.contains(name) {
+                return true;
+            }
+            match wanted.get(name) {
+                Some(spec) if **spec == managed.spec => true,
+                Some(spec) => {
+                    managed.take_down(reg);
+                    *managed = Managed::unstarted((*spec).clone());
+                    changed = true;
+                    true
+                }
+                None => {
+                    managed.take_down(reg);
+                    changed = true;
+                    false
+                }
+            }
+        });
+        for (name, spec) in wanted {
+            if self.servers.iter().all(|(n, _)| n != name) {
+                self.servers
+                    .push((name.clone(), Managed::unstarted(spec.clone())));
+                changed = true;
+            }
+        }
+        let tokens = self.tokens.clone();
+        for (_, managed) in &mut self.servers {
+            if managed.starting {
+                managed.signed_in = managed.has_token(tokens.as_ref());
+            }
+        }
+        if changed {
+            self.sync_resource_tool(reg);
+        }
+        changed
     }
 
     /// Marks `names` as servers the host was handed rather than
@@ -1161,6 +1225,66 @@ mod tests {
         let broken = catalog.iter_mut().find(|s| s.name == "broken").unwrap();
         assert!(matches!(&broken.status, McpServerStatus::Failed { .. }));
         assert_eq!(mgr.starting_names().collect::<Vec<_>>(), Vec::<&str>::new());
+    }
+
+    /// Reconciling with the configuration as it reads now takes a
+    /// removed server down with its tools, restarts a changed one from
+    /// its new spec, adds a new one, and leaves a handed server and an
+    /// unchanged one alone.
+    #[test]
+    fn reconcile_follows_the_configuration() {
+        let ready = Arc::new(AtomicBool::new(true));
+        let server = guarded_server(Arc::clone(&ready), None);
+        let cfg = remote_config(format!("{}/mcp", server.base));
+        let tokens = StaticTokens::new("good", None);
+        let mut mgr = McpManager::unstarted(
+            &cfg,
+            vec![],
+            None,
+            Some(tokens as Arc<dyn TokenSource>),
+            Environment::inherit(),
+        )
+        .handed_over(["editor".to_owned()]);
+        let mut reg = ToolRegistry::new();
+        assert!(mgr.start_waiting(&mut reg).is_empty());
+        assert!(reg.get("remote__t").is_some());
+
+        assert!(!mgr.reconcile(&cfg.servers, &mut reg), "nothing changed");
+        assert!(reg.get("remote__t").is_some());
+
+        let mut moved = cfg.servers.clone();
+        moved.get_mut("remote").unwrap().disabled_tools = vec!["nothing".to_owned()];
+        moved.insert(
+            "added".to_owned(),
+            McpServer {
+                url: Some(format!("{}/mcp", server.base)),
+                ..cfg.servers["remote"].clone()
+            },
+        );
+        moved.insert(
+            "editor".to_owned(),
+            McpServer {
+                disabled: true,
+                ..cfg.servers["remote"].clone()
+            },
+        );
+        assert!(mgr.reconcile(&moved, &mut reg));
+        assert!(
+            reg.get("remote__t").is_none(),
+            "the changed server went down"
+        );
+        assert_eq!(
+            mgr.starting_names().collect::<Vec<_>>(),
+            ["remote", "added"]
+        );
+        assert!(mgr.start_waiting(&mut reg).is_empty());
+        assert!(reg.get("remote__t").is_some());
+        assert!(reg.get("added__t").is_some());
+
+        moved.remove("remote");
+        assert!(mgr.reconcile(&moved, &mut reg));
+        assert!(reg.get("remote__t").is_none());
+        assert_eq!(mgr.server_names().collect::<Vec<_>>(), ["added"]);
     }
 
     /// A server that advertises `capabilities`, answers `initialize`,

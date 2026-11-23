@@ -1,7 +1,10 @@
 //! MCP restarts and list reloads off the dispatcher.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::thread;
+
+use kage_core::config::McpServer;
 
 use kage_core::protocol::{HostEvent, McpServerInfo, NoticeLevel};
 use kage_core::sync::lock;
@@ -59,6 +62,18 @@ impl ToolDelta {
 }
 
 impl super::Dispatcher {
+    /// Bring the session's configured MCP servers in line with `servers`
+    /// now when the session is idle, or at the next run start.
+    pub(super) fn sync_mcp(&mut self, id: SessionId, servers: BTreeMap<String, McpServer>) {
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        session.mcp_specs = Some(servers);
+        if session.idle.is_some() {
+            self.restart_now(id);
+        }
+    }
+
     /// Restart MCP server `server` now when the session is idle, or at
     /// the next run start when a run or another restart is in flight.
     pub(super) fn restart_mcp(&mut self, id: SessionId, server: String) {
@@ -110,8 +125,9 @@ impl super::Dispatcher {
         });
     }
 
-    /// Apply the idle session's pending restarts on a worker thread. The
-    /// session stays busy until [`Self::mcp_done`] gives it back.
+    /// Apply the idle session's pending restarts and configuration on a
+    /// worker thread. The session stays busy until [`Self::mcp_done`]
+    /// gives it back.
     fn restart_now(&mut self, id: SessionId) {
         let session = self.sessions.get_mut(&id).expect("session checked");
         let restarts = std::mem::take(&mut session.mcp_restarts);
@@ -121,13 +137,21 @@ impl super::Dispatcher {
             }
             return;
         };
+        let specs = session.mcp_specs.take();
         let idle = session.idle.take();
         let before = session.tools.clone();
         let bus = Arc::clone(&self.bus);
         let tx = self.tx.clone();
         thread::spawn(move || {
             let mut tools = before.clone();
-            refresh_mcp(&bus, id, &mut manager, &restarts, &mut tools);
+            refresh_mcp(
+                &bus,
+                id,
+                &mut manager,
+                &restarts,
+                specs.as_ref(),
+                &mut tools,
+            );
             let _ = tx.send(Input::McpDone(Box::new(McpDone {
                 session: id,
                 manager,
@@ -151,6 +175,9 @@ impl super::Dispatcher {
             return;
         };
         tools.apply(&mut session.tools);
+        session
+            .gate
+            .set_mcp_servers(manager.server_names().map(str::to_owned).collect());
         session.mcp = Some(manager);
         let Some(idle) = idle else {
             return;
@@ -167,23 +194,37 @@ impl super::Dispatcher {
         }
         if let Some(content) = session.queued.pop_front() {
             self.start_run(id, Work::Prompt(Message::new(Role::User, content, None)));
-        } else if !session.mcp_restarts.is_empty() {
+        } else if !session.mcp_restarts.is_empty() || session.mcp_specs.is_some() {
             self.restart_now(id);
         }
     }
 }
 
-/// Restart `restarts`, then reload the lists `mcp`'s servers announced
-/// changes for, updating `tools`. Publishes `McpServers` after a restart
-/// or when the catalog changed, and returns the catalog.
+/// Bring the configured servers in line with `specs` when given, restart
+/// `restarts`, then reload the lists `mcp`'s servers announced changes
+/// for, updating `tools`. Publishes `McpServers` after a restart or when
+/// the catalog changed, and returns the catalog.
 pub(super) fn refresh_mcp(
     bus: &Bus,
     id: SessionId,
     mcp: &mut McpManager,
     restarts: &[String],
+    specs: Option<&BTreeMap<String, McpServer>>,
     tools: &mut ToolRegistry,
 ) -> Vec<McpServerInfo> {
     let before = mcp.catalog();
+    if let Some(specs) = specs
+        && mcp.reconcile(specs, tools)
+    {
+        for (server, err) in mcp.start_waiting(tools) {
+            notice(
+                bus,
+                id,
+                NoticeLevel::Error,
+                format!("mcp `{server}`: {err}"),
+            );
+        }
+    }
     for name in restarts {
         match mcp.restart(name, tools) {
             Ok(()) => notice(bus, id, NoticeLevel::Info, format!("restarted `{name}`")),

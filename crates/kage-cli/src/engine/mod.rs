@@ -240,6 +240,18 @@ impl Commander {
     pub(crate) fn set_registry(&self, registry: Arc<ProviderRegistry>) {
         let _ = self.0.send(Input::SetRegistry(registry));
     }
+
+    /// Bring session `id`'s configured MCP servers in line with
+    /// `servers`, the configuration as it reads now: at once when the
+    /// session is idle, else at its next run start, since calls in
+    /// flight hold the old connections.
+    pub(crate) fn sync_mcp(
+        &self,
+        id: SessionId,
+        servers: BTreeMap<String, kage_core::config::McpServer>,
+    ) {
+        let _ = self.0.send(Input::SyncMcp { id, servers });
+    }
 }
 
 enum Input {
@@ -303,6 +315,11 @@ enum Input {
     },
     Finished(Box<Finished>),
     McpDone(Box<McpDone>),
+    /// The MCP servers the configuration of a session names now.
+    SyncMcp {
+        id: SessionId,
+        servers: BTreeMap<String, kage_core::config::McpServer>,
+    },
     ShellDone(Box<ShellDone>),
     Title {
         session: SessionId,
@@ -579,6 +596,9 @@ struct Session {
     mcp: Option<McpManager>,
     /// `RestartMcp` names that wait for the next run start.
     mcp_restarts: Vec<String>,
+    /// The MCP servers the configuration names now, waiting like the
+    /// restarts to be brought in line with.
+    mcp_specs: Option<BTreeMap<String, kage_core::config::McpServer>>,
     interactive: bool,
     /// Session file, when the session is recorded.
     path: Option<PathBuf>,
@@ -750,6 +770,7 @@ impl Dispatcher {
                     let _ = reply.send(self.fork_snapshot.as_ref().map(|(batch, _)| batch.clone()));
                 }
                 Input::McpDone(done) => self.mcp_done(*done),
+                Input::SyncMcp { id, servers } => self.sync_mcp(id, servers),
                 Input::ShellDone(done) => self.shell_done(*done),
                 Input::Title { session, title } => {
                     if self.sessions.get(&session).is_some_and(|s| s.title) {
@@ -778,6 +799,31 @@ impl Dispatcher {
         }
     }
 
+    /// The state a session opens with, fitted to its model, published
+    /// for the clients.
+    fn opening_state(
+        &self,
+        id: SessionId,
+        model: &str,
+        cx: &AgentContext,
+        gate: &PermissionGate,
+    ) -> SessionState {
+        let mut state = SessionState {
+            model: kage_core::canonical_model(model),
+            thinking: cx.thinking_level,
+            permission_mode: gate.mode(),
+            ..SessionState::default()
+        };
+        fit_to_model(&mut state, &self.registry);
+        self.bus.publish(
+            id,
+            HostEvent::StateChanged {
+                state: state.clone(),
+            },
+        );
+        state
+    }
+
     fn open(
         &mut self,
         spec: SessionSpec,
@@ -802,19 +848,7 @@ impl Dispatcher {
         } = spec;
         let usage = usage_of(&cx);
         let output_cap = pinned_output_cap(&cx, &self.registry, &model);
-        let mut state = SessionState {
-            model: kage_core::canonical_model(&model),
-            thinking: cx.thinking_level,
-            permission_mode: gate.mode(),
-            ..SessionState::default()
-        };
-        fit_to_model(&mut state, &self.registry);
-        self.bus.publish(
-            id,
-            HostEvent::StateChanged {
-                state: state.clone(),
-            },
-        );
+        let state = self.opening_state(id, &model, &cx, &gate);
         self.bus.publish(id, HostEvent::UsageUpdated { usage });
         if link.is_none() {
             let servers = mcp.as_ref().map(McpManager::catalog).unwrap_or_default();
@@ -857,6 +891,7 @@ impl Dispatcher {
                 loop_cfg,
                 mcp,
                 mcp_restarts: Vec::new(),
+                mcp_specs: None,
                 interactive,
                 shell,
                 path,
@@ -2169,7 +2204,11 @@ fn mcp_lease(bus: &Bus, id: SessionId, session: &mut Session) -> Option<McpLease
         .map(|rt| kage_plugin::Invocation::session(id).scope(|| rt.take_mcp_restarts()))
         .unwrap_or_default();
     restarts.append(&mut session.mcp_restarts);
-    Some(McpLease { manager, restarts })
+    Some(McpLease {
+        manager,
+        restarts,
+        specs: session.mcp_specs.take(),
+    })
 }
 
 /// Register the delegation tools a session may call while its depth

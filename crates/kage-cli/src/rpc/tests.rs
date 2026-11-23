@@ -8221,6 +8221,43 @@ fn withdrawing_from_an_empty_queue_answers_with_nothing() {
     assert_eq!(withdrawn, serde_json::json!({"delivery": "queue"}));
 }
 
+/// A server the configuration names now joins an open idle session,
+/// and leaves it once the configuration drops it; a server the session
+/// was handed stays through both.
+#[test]
+fn a_configuration_change_brings_mcp_servers_in_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve_with(
+        vec![text_turn("ok")],
+        dir.path(),
+        dir.path(),
+        true,
+        Modalities::default(),
+    );
+    updates_until(&h.inbox, &h.session, "_kage/mcp_servers");
+    let spec: McpSpec = serde_json::from_value(serde_json::json!({
+        "command": "sh",
+        "args": [editor_server(dir.path())],
+    }))
+    .unwrap();
+    let names = |updates: &[serde_json::Value]| {
+        updates.last().unwrap()["update"]["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|server| server["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let commander = h.host.engine.commander();
+    commander.sync_mcp(h.id, BTreeMap::from([("ed".to_owned(), spec)]));
+    let added = updates_until(&h.inbox, &h.session, "_kage/mcp_servers");
+    assert!(names(&added).contains(&"ed".to_owned()), "{added:?}");
+    assert!(names(&added).contains(&"srv".to_owned()));
+    commander.sync_mcp(h.id, BTreeMap::new());
+    let removed = updates_until(&h.inbox, &h.session, "_kage/mcp_servers");
+    assert!(!names(&removed).contains(&"ed".to_owned()), "{removed:?}");
+}
+
 #[test]
 fn the_mcp_catalog_arrives_whole() {
     let dir = tempfile::tempdir().unwrap();

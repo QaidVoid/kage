@@ -4688,6 +4688,30 @@ fn start_command_worker(
     Some(jobs)
 }
 
+/// Watches the user configuration and asks for the providers again when
+/// it changes, so the model picker lists a model the file now names.
+/// The thread ends with the App's request channel.
+fn watch_user_config(requests: mpsc::Sender<RunRequest>) {
+    let Some(file) = kage_core::config::Config::default_path() else {
+        return;
+    };
+    let _ = thread::Builder::new()
+        .name("kage-config-watch".to_owned())
+        .spawn(move || {
+            let files = [file];
+            let mut stamps = crate::config_watch::Stamps::default();
+            stamps.changed(&files);
+            loop {
+                thread::sleep(crate::config_watch::POLL);
+                if !stamps.changed(&files).is_empty()
+                    && requests.send(RunRequest::RefreshProviders).is_err()
+                {
+                    return;
+                }
+            }
+        });
+}
+
 /// Watches the plugins directory, `init.lua` and `lua/` for changes
 /// and asks for a reload when a Lua file changes. The thread ends with
 /// the App's request channel.
@@ -5089,6 +5113,7 @@ pub(crate) fn run(
     let requests_rx = forward_requests(app_requests);
     let (dialog_tx, dialog_rx) = mpsc::channel::<PluginDialog>();
     let (refresh_tx, refresh_rx) = mpsc::channel::<PluginRefresh>();
+    watch_user_config(requests_tx.clone());
     if plugins.is_some() {
         watch_plugins(
             plugins_dir_path.clone(),

@@ -37,6 +37,7 @@ mod acp_glue;
 mod agents;
 mod auth;
 mod chatgpt;
+mod config_watch;
 mod custom_models;
 mod doctor;
 mod engine;

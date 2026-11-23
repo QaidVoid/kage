@@ -230,7 +230,75 @@ impl Host {
         *lock(&host.plugin_providers) = plugin_providers;
         let _ = host.projects.set(projects);
         system_role.clone_into(&mut lock(&host.system_role));
+        host.watch_config();
         Ok(host)
+    }
+
+    /// Follows edits to the user configuration and to the project
+    /// configuration of each open session, on a thread that ends with
+    /// the host.
+    fn watch_config(self: &Arc<Self>) {
+        let host = Arc::downgrade(self);
+        let mut stamps = crate::config_watch::Stamps::default();
+        stamps.changed(&self.config_files());
+        let spawned = thread::Builder::new()
+            .name("kage-config-watch".to_owned())
+            .spawn(move || {
+                loop {
+                    thread::sleep(crate::config_watch::POLL);
+                    let Some(host) = host.upgrade() else {
+                        return;
+                    };
+                    let changed = stamps.changed(&host.config_files());
+                    if !changed.is_empty() {
+                        host.config_changed(&changed);
+                    }
+                }
+            });
+        if let Err(e) = spawned {
+            eprintln!("kage: cannot watch the configuration: {e}");
+        }
+    }
+
+    /// The user configuration and the project configuration of every
+    /// open session's directory.
+    fn config_files(&self) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = Config::default_path().into_iter().collect();
+        for workdir in lock(&self.workdirs).values() {
+            let project = Config::project_path(workdir);
+            if !files.contains(&project) {
+                files.push(project);
+            }
+        }
+        files
+    }
+
+    /// Applies edited configuration `changed`: an edited user file
+    /// reloads the providers, so a model it now names resolves, and each
+    /// open session whose configuration changed brings its MCP servers
+    /// in line.
+    fn config_changed(self: &Arc<Self>, changed: &[PathBuf]) {
+        let user = Config::default_path().is_some_and(|path| changed.contains(&path));
+        if user {
+            match self.reload_providers() {
+                Ok(()) => self.fetch_missing_lists(),
+                Err(e) => eprintln!("kage: providers not reloaded: {e}"),
+            }
+        }
+        let sessions: Vec<(SessionId, PathBuf)> = lock(&self.workdirs)
+            .iter()
+            .map(|(id, workdir)| (*id, workdir.clone()))
+            .collect();
+        let commander = self.engine.commander();
+        for (id, workdir) in sessions {
+            if !user && !changed.contains(&Config::project_path(&workdir)) {
+                continue;
+            }
+            let runtime = lock(&self.runtimes).get(&id).cloned();
+            if let Some(servers) = crate::mcp::configured_servers(&workdir, runtime.as_deref()) {
+                commander.sync_mcp(id, servers);
+            }
+        }
     }
 
     /// The engine and shared setup every connection works through. The

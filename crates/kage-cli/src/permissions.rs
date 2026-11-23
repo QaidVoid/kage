@@ -171,8 +171,14 @@ impl PermissionGate {
     /// tools, resolved through `[permissions.mcp]`.
     #[must_use]
     pub(crate) fn with_mcp_servers(mut self, servers: Vec<String>) -> Self {
-        self.mcp_servers = servers.into();
+        self.set_mcp_servers(servers);
         self
+    }
+
+    /// [`Self::with_mcp_servers`] in place, after the session's servers
+    /// changed.
+    pub(crate) fn set_mcp_servers(&mut self, servers: Vec<String>) {
+        self.mcp_servers = servers.into();
     }
 
     /// Judge aliased calls under the tool's real name.

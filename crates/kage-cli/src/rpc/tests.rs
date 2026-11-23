@@ -2466,6 +2466,41 @@ fn session_export_renders_the_recorded_transcript() {
     assert_eq!(unknown.code, -32602);
 }
 
+/// An external agent's session file holds its display history only,
+/// so exporting it as a native transcript is refused.
+#[test]
+fn session_export_refuses_an_external_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let header = Header {
+        version: FORMAT_VERSION,
+        session: SessionId::new(),
+        id: EntryId::new(),
+        ts: chrono::Utc::now(),
+        cwd: dir.path().to_path_buf(),
+        model: "external".into(),
+        backend: Some(kage_session::entry::SessionBackend::ExternalAcp(
+            kage_session::entry::ExternalAcpSession {
+                agent_name: "fake".into(),
+                protocol_version: 1,
+                upstream_session_id: "up".into(),
+            },
+        )),
+        system_prompt: String::new(),
+        parent_session: None,
+        parent_entry: None,
+    };
+    let source = record_header(dir.path(), header, &[]);
+    let h = serve(Vec::new(), dir.path(), dir.path());
+    let error = h
+        .client
+        .request(
+            "_kage/session/export",
+            serde_json::json!({ "sessionId": source }),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, -32602, "{error}");
+}
+
 #[test]
 fn session_rename_names_the_session_for_every_client() {
     let dir = tempfile::tempdir().unwrap();

@@ -282,6 +282,7 @@ impl super::CliAcpAgent {
         client_id: &str,
     ) -> Result<SessionExportResponse, RpcError> {
         let path = self.recorded_path(client_id)?;
+        require_native_backend(&path)?;
         let replay = kage_session::replay(&path).map_err(|e| RpcError::internal(e.to_string()))?;
         Ok(SessionExportResponse {
             markdown: render_session_markdown(&replay),
@@ -292,7 +293,7 @@ impl super::CliAcpAgent {
 fn external_backend_error() -> RpcError {
     RpcError::new(
         -32602,
-        "recorded external sessions cannot be opened or forked",
+        "recorded external sessions cannot be opened, forked or exported",
     )
 }
 

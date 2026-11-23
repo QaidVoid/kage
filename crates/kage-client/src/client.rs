@@ -218,6 +218,21 @@ pub struct Client {
     /// landing, and an older attach that already succeeded may still
     /// land under it.
     landed_attach: u64,
+    /// The newest load or resume of each session. Only it may put the
+    /// replaced session back when it fails, so an older open failing
+    /// late cannot wipe a newer one's replay.
+    latest_open: BTreeMap<String, u64>,
+}
+
+/// Every view of `session_id` an open replaces at once.
+fn opened_changes(session_id: &str) -> Vec<Change> {
+    let id = || session_id.to_owned();
+    vec![
+        Change::Session { id: id() },
+        Change::Transcript { id: id() },
+        Change::Permission { id: id() },
+        Change::Agents { id: id() },
+    ]
 }
 
 impl Client {
@@ -1308,6 +1323,7 @@ impl Client {
             },
             title: session.title.take(),
             parent: session.parent.take(),
+            external_agent: session.external_agent.take(),
             draft: session.draft.take(),
             queue: std::mem::take(&mut session.queue),
             ..Session::default()
@@ -1321,12 +1337,8 @@ impl Client {
                 snapshot,
             },
         );
-        (
-            id,
-            vec![Change::Session {
-                id: session_id.to_owned(),
-            }],
-        )
+        self.latest_open.insert(session_id.to_owned(), id);
+        (id, opened_changes(session_id))
     }
 
     fn send_prompt(
@@ -1594,7 +1606,12 @@ impl Client {
             Pending::Open {
                 session_id,
                 snapshot: _,
-            } => self.apply_open(id, session_id, result),
+            } => {
+                if self.latest_open.get(&session_id) == Some(&id) {
+                    self.latest_open.remove(&session_id);
+                }
+                self.apply_open(id, session_id, result)
+            }
             Pending::List { cwd } => self.apply_list_page(id, cwd.as_deref(), result),
             Pending::Prompt {
                 session_id,
@@ -1859,15 +1876,18 @@ impl Client {
             Pending::Open {
                 session_id,
                 snapshot,
-            } => {
+            } if self.latest_open.get(&session_id) == Some(&id) => {
+                self.latest_open.remove(&session_id);
                 let session = self.session_mut(&session_id);
+                let draft = session.draft.take();
+                let queue = std::mem::take(&mut session.queue);
                 *session = *snapshot;
-                // The run the old state read busy with rode the
-                // connection this load replaced, so it reads idle.
+                session.draft = draft;
+                session.queue = queue;
                 session.running = false;
                 session.in_turn = false;
                 session.compacting = false;
-                changes.push(Change::Session { id: session_id });
+                changes.extend(opened_changes(&session_id));
             }
             _ => {}
         }

@@ -1453,6 +1453,49 @@ fn a_failed_prompt_answer_releases_the_run_and_flushes_the_queue() {
     assert!(matches!(&outgoing[0], Frame::Request { id, .. } if *id == n(4)));
 }
 
+/// Of two overlapping loads of one session, only the newer one may
+/// put the old session back when it fails: an older load that fails
+/// after the newer one landed leaves the newer replay alone, and a
+/// failed load keeps the draft typed while it was in flight.
+#[test]
+fn only_the_newest_load_rolls_back_and_the_draft_survives() {
+    let mut client = connected(false);
+    let (older, _) = client.load_session("s1", "/w", &[], None);
+    let (newer, changes) = client.load_session("s1", "/w", &[], None);
+    assert!(changes.contains(&Change::Transcript { id: "s1".into() }));
+    client.handle(Frame::Notification {
+        method: "session/update".into(),
+        params: serde_json::json!({"sessionId": "s1", "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "replayed"},
+        }}),
+    });
+    client.handle(Frame::Success {
+        id: n(newer),
+        result: serde_json::json!({}),
+    });
+    client.handle(Frame::Failure {
+        id: n(older),
+        error: kage_client::RpcError::new(-32603, "late"),
+    });
+    assert!(
+        !client.state().session("s1").unwrap().items.is_empty(),
+        "the older load's failure left the newer replay"
+    );
+
+    let (last, _) = client.load_session("s1", "/w", &[], None);
+    client.set_draft("s1", "typed meanwhile");
+    let changes = client.handle(Frame::Failure {
+        id: n(last),
+        error: kage_client::RpcError::new(-32603, "gone"),
+    });
+    assert!(changes.contains(&Change::Agents { id: "s1".into() }));
+    assert_eq!(
+        client.state().session("s1").unwrap().draft.as_deref(),
+        Some("typed meanwhile")
+    );
+}
+
 #[test]
 fn a_fork_names_its_prompt_by_text_and_occurrence() {
     let mut client = connected(false);

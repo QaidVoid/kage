@@ -135,7 +135,7 @@ pub(crate) struct Transport {
 impl Transport {
     /// Spawns `kage rpc` beside this binary and starts its io
     /// threads.
-    pub(crate) fn child(events: mpsc::Sender<Event>) -> Result<Transport, String> {
+    pub(crate) fn child(events: crossbeam_channel::Sender<Event>) -> Result<Transport, String> {
         let program = program()?;
         spawn(&program, &["rpc".to_owned()], events)
     }
@@ -147,7 +147,7 @@ impl Transport {
     #[cfg(unix)]
     pub(crate) fn host(
         stream: std::os::unix::net::UnixStream,
-        events: mpsc::Sender<Event>,
+        events: crossbeam_channel::Sender<Event>,
     ) -> Result<Transport, String> {
         let reader = stream
             .try_clone()
@@ -167,7 +167,7 @@ impl Transport {
         model: Option<&str>,
         system: &str,
         yolo: bool,
-        events: mpsc::Sender<Event>,
+        events: crossbeam_channel::Sender<Event>,
     ) -> Result<Transport, String> {
         let applied = crate::model_refresh::Applied::now();
         let host = crate::rpc::host::Host::start(model, system, yolo)?;
@@ -192,7 +192,7 @@ impl Transport {
         reader: impl BufRead + Send + 'static,
         writer: impl Write + Send + 'static,
         child: Option<Child>,
-        events: mpsc::Sender<Event>,
+        events: crossbeam_channel::Sender<Event>,
     ) -> Result<Transport, String> {
         let (queue, frames) = mpsc::channel::<Frame>();
         let shared = Arc::new(Shared {
@@ -285,6 +285,24 @@ type PrivatePair = (
     Option<Hangup>,
 );
 
+/// Moves the App's requests onto a channel the pump can wait on next
+/// to the agent's frames.
+fn forward_requests(
+    requests: mpsc::Receiver<RunRequest>,
+) -> crossbeam_channel::Receiver<RunRequest> {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let _ = std::thread::Builder::new()
+        .name("kage-acp-requests".to_owned())
+        .spawn(move || {
+            for request in requests {
+                if tx.send(request).is_err() {
+                    break;
+                }
+            }
+        });
+    rx
+}
+
 /// Moves the diagnostics startup wrote before any session existed from
 /// `from` into `into`, the adopted session's transcript.
 fn carry_startup_notes(from: &SharedBuffer, into: &SharedBuffer) {
@@ -366,7 +384,7 @@ fn program() -> Result<PathBuf, String> {
 fn spawn(
     program: &Path,
     args: &[String],
-    events: mpsc::Sender<Event>,
+    events: crossbeam_channel::Sender<Event>,
 ) -> Result<Transport, String> {
     let mut child = Command::new(program)
         .args(args)
@@ -399,9 +417,13 @@ fn spawn(
     Ok(transport)
 }
 
-/// How long the pump waits on a silent connection before it looks at
-/// the channels it shares with the App again.
+/// How long the pump waits with nothing arriving before it polls the
+/// replies of open plugin dialogs again.
 const TICK: Duration = Duration::from_millis(20);
+
+/// Frames the pump absorbs in one pass before it serves the App's
+/// requests and flushes, so a burst cannot starve them.
+const FRAMES_PER_PASS: usize = 64;
 
 /// Writes the runs the pump reports to the saved state, one at a time
 /// and off the pump thread: the model the last run used, and the
@@ -489,23 +511,37 @@ struct FeedState {
     keymap: Mutex<Option<Keymap>>,
     buffer: Mutex<Option<SharedBuffer>>,
     status: Mutex<Option<Vec<(String, String)>>>,
+    /// Wakes the App's event loop to take what was handed over.
+    wake: Option<crossbeam_channel::Sender<()>>,
 }
 
 impl FeedState {
     fn send_commands(&self, commands: Vec<PluginCommand>) {
         *self.commands.lock().unwrap() = Some(commands);
+        self.wake();
     }
 
     fn send_keymap(&self, keymap: Option<Keymap>) {
         *self.keymap.lock().unwrap() = keymap;
+        self.wake();
     }
 
     fn send_buffer(&self, buffer: SharedBuffer) {
         *self.buffer.lock().unwrap() = Some(buffer);
+        self.wake();
     }
 
     fn send_status(&self, status: Vec<(String, String)>) {
         *self.status.lock().unwrap() = Some(status);
+        self.wake();
+    }
+
+    /// Wakes the App to repaint, as after the pump folded a transcript
+    /// change into a buffer it draws.
+    fn wake(&self) {
+        if let Some(wake) = &self.wake {
+            let _ = wake.try_send(());
+        }
     }
 }
 
@@ -719,7 +755,7 @@ impl PluginSurface {
     /// ends with the returned queue.
     fn start_worker(
         &self,
-        answers: mpsc::Sender<PluginAnswer>,
+        answers: crossbeam_channel::Sender<PluginAnswer>,
     ) -> Result<mpsc::Sender<PluginJob>, String> {
         let surface = self.clone();
         let (jobs, queue) = mpsc::channel::<PluginJob>();
@@ -1086,9 +1122,9 @@ struct ChildTrack {
 struct Pump {
     store: Store,
     transport: Transport,
-    frames: mpsc::Receiver<Event>,
+    frames: crossbeam_channel::Receiver<Event>,
     events: mpsc::Sender<Envelope>,
-    requests: mpsc::Receiver<RunRequest>,
+    requests: crossbeam_channel::Receiver<RunRequest>,
     dialog_tx: mpsc::Sender<PluginDialog>,
     /// Dialogs the App is showing, by wire request id, with the
     /// channel its answer lands on.
@@ -1135,8 +1171,8 @@ struct Pump {
     /// Where plugin reverse requests queue for the worker.
     plugin_jobs: Option<mpsc::Sender<PluginJob>>,
     /// The worker's answers, to send on the wire.
-    plugin_answers: mpsc::Receiver<PluginAnswer>,
-    plugin_answers_tx: mpsc::Sender<PluginAnswer>,
+    plugin_answers: crossbeam_channel::Receiver<PluginAnswer>,
+    plugin_answers_tx: crossbeam_channel::Sender<PluginAnswer>,
     /// Where finished runs go to be written to the saved state, off
     /// this thread.
     recorder: mpsc::Sender<(String, RunOutcome)>,
@@ -1225,35 +1261,60 @@ impl Pump {
         while self.pass() {}
     }
 
-    /// One turn of the loop: waits up to a tick for the agent or, once
-    /// it is gone, for the App, then handles what the App and the
-    /// plugin worker have queued. `false` once the App is gone, which
-    /// ends the child with the transport.
+    /// Absorbs a frame from the agent. `None`, the reader's `Closed` or
+    /// its dropped channel, closes the connection.
+    fn take_frame(&mut self, event: Option<Event>) {
+        match event {
+            Some(Event::Frame(frame)) => self.absorb(frame),
+            Some(Event::Closed) | None => self.close(),
+        }
+    }
+
+    /// One turn of the loop: waits up to a tick for whichever comes
+    /// first, a frame from the agent (until it is gone), a request from
+    /// the App or a plugin answer, then handles everything else already
+    /// queued. The tick bounds the wait only for plugin dialogs, which
+    /// are polled. `false` once the App is gone, which ends the child
+    /// with the transport.
     fn pass(&mut self) -> bool {
-        if self.closed {
-            match self.requests.recv_timeout(TICK) {
-                Ok(request) => self.handle(request),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => return false,
-            }
+        let frames = if self.closed {
+            crossbeam_channel::never()
         } else {
-            match self.frames.recv_timeout(TICK) {
-                Ok(Event::Frame(frame)) => self.absorb(frame),
-                Ok(Event::Closed)
-                // The reader sends Closed before it drops, so this is
-                // its late echo.
-                | Err(mpsc::RecvTimeoutError::Disconnected) => self.close(),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            self.frames.clone()
+        };
+        let requests = self.requests.clone();
+        let answers = self.plugin_answers.clone();
+        crossbeam_channel::select_biased! {
+            recv(frames) -> event => self.take_frame(event.ok()),
+            recv(requests) -> request => match request {
+                Ok(request) => self.handle(request),
+                Err(_) => return false,
+            },
+            recv(answers) -> answer => {
+                if let Ok(answer) = answer {
+                    self.send_plugin_answer(answer);
+                }
+            },
+            default(TICK) => {}
+        }
+        for _ in 0..FRAMES_PER_PASS {
+            if self.closed {
+                break;
+            }
+            match frames.try_recv() {
+                Ok(event) => self.take_frame(Some(event)),
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => self.take_frame(None),
             }
         }
         loop {
-            match self.requests.try_recv() {
+            match requests.try_recv() {
                 Ok(request) => self.handle(request),
-                Err(mpsc::TryRecvError::Disconnected) => return false,
-                Err(mpsc::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => return false,
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
             }
         }
-        while let Ok(answer) = self.plugin_answers.try_recv() {
+        while let Ok(answer) = answers.try_recv() {
             self.send_plugin_answer(answer);
         }
         self.poll_dialogs();
@@ -2010,12 +2071,7 @@ impl Pump {
             }
             Change::Transcript { id } => {
                 if id == self.wire {
-                    let state = self.state_snapshot();
-                    self.update_ui_slot(|ui| ui.state = state.clone());
-                    self.publish(HostEvent::StateChanged { state });
-                    let usage = self.usage_snapshot();
-                    self.update_ui_slot(|ui| ui.usage = Some(usage));
-                    self.publish(HostEvent::UsageUpdated { usage });
+                    self.feed.wake();
                     self.hand_buffer();
                 } else {
                     self.child_transcript(&id);
@@ -2709,6 +2765,21 @@ impl Pump {
         }
     }
 
+    /// Sets the wire session's `config_id` option to `value` and shows
+    /// it at once, ahead of the agent's answer. Returns the request id.
+    /// Mode changes do not come here: plan mode tracks the mode the
+    /// agent confirmed.
+    fn set_option(&mut self, config_id: &str, value: &str) -> u64 {
+        let (request, changes) = self
+            .store
+            .client()
+            .set_config_option(&self.wire, config_id, value);
+        for change in changes {
+            self.react(change);
+        }
+        request
+    }
+
     /// Hands the App the wire session's current buffer when the store
     /// swapped it, as a replaced session does: the replay of the
     /// replacement folds into the new object, so the old one the App
@@ -2987,6 +3058,7 @@ impl Pump {
             let (reply_tx, reply_rx) = mpsc::channel();
             if let Some(dialog) = plugin_dialog(&ask, reply_tx) {
                 let _ = self.dialog_tx.send(dialog);
+                self.feed.wake();
                 self.dialogs.push((ask.request_id.clone(), reply_rx));
             } else {
                 self.dialog_shown.remove(&ask.request_id);
@@ -3296,9 +3368,7 @@ impl Pump {
                     self.request_external_session(&agent);
                 } else {
                     self.model.clone_from(&model);
-                    self.store
-                        .client()
-                        .set_config_option(&self.wire, "model", &model);
+                    self.set_option("model", &model);
                 }
             }
             RunRequest::ResolvePermission {
@@ -3311,11 +3381,7 @@ impl Pump {
             } => self.answer_question(request_id, answers),
             RunRequest::CycleThinkingLevel => self.cycle_thinking(),
             RunRequest::SetThinkingLevel(level) => {
-                self.store.client().set_config_option(
-                    &self.wire,
-                    "thinking",
-                    thinking_value(&level),
-                );
+                self.set_option("thinking", thinking_value(&level));
             }
             RunRequest::SetPermissionMode(mode) => {
                 let value = match mode {
@@ -3339,18 +3405,10 @@ impl Pump {
             // between the App's request and this dispatch.
             RunRequest::SetModeValue { .. } => {}
             RunRequest::SwarmMode { on } => {
-                self.store.client().set_config_option(
-                    &self.wire,
-                    "swarm",
-                    if on { "on" } else { "off" },
-                );
+                self.set_option("swarm", if on { "on" } else { "off" });
             }
             RunRequest::SetGoal { goal } => {
-                self.store.client().set_config_option(
-                    &self.wire,
-                    "goal",
-                    goal.as_deref().unwrap_or(""),
-                );
+                self.set_option("goal", goal.as_deref().unwrap_or(""));
             }
             RunRequest::CompactNow => {
                 self.store.client().compact_session(&self.wire);
@@ -3819,9 +3877,7 @@ impl Pump {
             })
         };
         if let Some(next) = current {
-            self.store
-                .client()
-                .set_config_option(&self.wire, "thinking", &next);
+            self.set_option("thinking", &next);
         }
     }
 
@@ -4411,7 +4467,7 @@ pub(crate) fn run(
     let app_session = SessionId::new();
     let main_view = Arc::new(Mutex::new(app_session));
     let store = Store::new();
-    let (frames_tx, frames_rx) = mpsc::channel();
+    let (frames_tx, frames_rx) = crossbeam_channel::unbounded();
     let upstream = match upstream {
         Upstream::Decide { standalone } => choose_upstream(standalone, &workdir),
         upstream => upstream,
@@ -4435,17 +4491,22 @@ pub(crate) fn run(
         }
     };
     let (events_tx, events_rx) = mpsc::channel();
-    let (requests_tx, requests_rx) = mpsc::channel::<RunRequest>();
+    let (requests_tx, app_requests) = mpsc::channel::<RunRequest>();
+    let requests_rx = forward_requests(app_requests);
     let (dialog_tx, dialog_rx) = mpsc::channel::<PluginDialog>();
     // Plugin hot reload stays off: the pump cannot reload a runtime
     // whose tools the agent already snapshotted for the session.
     let (refresh_tx, refresh_rx) = mpsc::channel::<PluginRefresh>();
     drop(refresh_tx);
-    let feed = Arc::new(FeedState::default());
+    let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
+    let feed = Arc::new(FeedState {
+        wake: Some(wake_tx.clone()),
+        ..FeedState::default()
+    });
     let surface = plugins
         .as_ref()
         .map(|rt| PluginSurface::new(Arc::clone(rt), workdir.clone()));
-    let (plugin_answers_tx, plugin_answers) = mpsc::channel();
+    let (plugin_answers_tx, plugin_answers) = crossbeam_channel::unbounded();
     let (recorder, finished_runs) = mpsc::channel();
     start_run_recorder(finished_runs);
     let mirror = Arc::new(Mutex::new(Mirror::new()));
@@ -4588,6 +4649,7 @@ pub(crate) fn run(
         dialogs: dialog_rx,
         refresh: refresh_rx,
         acp_feed: feed,
+        wake: (wake_tx, wake_rx),
         model: shown_model,
         model_choices,
         model_updates,
@@ -4648,7 +4710,7 @@ mod tests {
     #[test]
     fn frames_round_trip_through_the_child() {
         let dir = scratch();
-        let (events, received) = mpsc::channel();
+        let (events, received) = crossbeam_channel::unbounded();
         let transport = spawn(&echo_child_program(), &[echo_child(&dir)], events).unwrap();
         transport.send(Frame::Request {
             id: RequestId::Number(1),
@@ -4682,7 +4744,7 @@ mod tests {
     #[test]
     fn frames_round_trip_through_a_stream_pair() {
         let (mine, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
-        let (events, received) = mpsc::channel();
+        let (events, received) = crossbeam_channel::unbounded();
         let transport = Transport::stream(
             BufReader::new(mine.try_clone().unwrap()),
             mine,
@@ -4967,7 +5029,7 @@ mod tests {
 
     #[test]
     fn a_missing_program_refuses_without_events() {
-        let (events, received) = mpsc::channel();
+        let (events, received) = crossbeam_channel::unbounded();
         let Err(error) = spawn(Path::new("/nonexistent/kage-acp-missing"), &[], events) else {
             panic!("a missing program does not start")
         };
@@ -4989,7 +5051,7 @@ mod tests {
         PathBuf,
     ) {
         let dir = scratch();
-        let (frames_tx, frames_rx) = mpsc::channel();
+        let (frames_tx, frames_rx) = crossbeam_channel::unbounded();
         let (to_agent, unread) = crate::tui::pipe::channel_pair();
         let (unwritten, from_agent) = crate::tui::pipe::channel_pair();
         // The silent agent's ends stay open for the life of the test
@@ -4998,10 +5060,10 @@ mod tests {
         let transport =
             Transport::stream(BufReader::new(from_agent), to_agent, None, frames_tx).unwrap();
         let (events, app) = mpsc::channel();
-        let (_requests, requests_rx) = mpsc::channel::<RunRequest>();
+        let (_requests, requests_rx) = crossbeam_channel::unbounded::<RunRequest>();
         let (dialog_tx, dialog_rx) = mpsc::channel::<PluginDialog>();
         let feed = Arc::new(FeedState::default());
-        let (plugin_answers_tx, plugin_answers) = mpsc::channel();
+        let (plugin_answers_tx, plugin_answers) = crossbeam_channel::unbounded();
         let (recorder, _recorded) = mpsc::channel();
         let pump = Pump {
             store: Store::new(),
@@ -6068,6 +6130,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A streamed token wakes the App to repaint instead of sending it
+    /// a state and a usage event that did not change.
+    #[test]
+    fn a_streamed_token_wakes_the_app_without_state_events() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
+        pump.feed = Arc::new(FeedState {
+            wake: Some(wake_tx),
+            ..FeedState::default()
+        });
+        while app.try_recv().is_ok() {}
+        pump.absorb(Frame::Notification {
+            method: "session/update".into(),
+            params: serde_json::json!({"sessionId": "s1", "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "hi"}
+            }}),
+        });
+        assert!(wake_rx.try_recv().is_ok(), "the App is woken");
+        assert!(!app.try_iter().any(|event| matches!(
+            event.event,
+            kage_core::protocol::Event::Host(
+                HostEvent::StateChanged { .. } | HostEvent::UsageUpdated { .. }
+            )
+        )));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// A second `/new` while one is opening adds nothing: the session
     /// on its way is already new.
     #[test]
@@ -6342,7 +6432,7 @@ mod tests {
             BufReader::new(from_agent),
             to_agent,
             None,
-            mpsc::channel().0,
+            crossbeam_channel::unbounded().0,
         )
         .unwrap();
         pump.bootstrap(None);
@@ -6596,11 +6686,11 @@ mod tests {
         let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
         // The frames sender is gone, so every read of the channel
         // fails at once, as after the reader thread ends.
-        let (frames_tx, frames_rx) = mpsc::channel();
+        let (frames_tx, frames_rx) = crossbeam_channel::unbounded();
         drop(frames_tx);
         pump.frames = frames_rx;
         pump.close();
-        let (requests, requests_rx) = mpsc::channel::<RunRequest>();
+        let (requests, requests_rx) = crossbeam_channel::unbounded::<RunRequest>();
         pump.requests = requests_rx;
         let start = std::time::Instant::now();
         for _ in 0..5 {
@@ -7516,7 +7606,7 @@ kage.on('should_stop_after_turn', function(ev) return true end)
         // here with no answer sent.
         assert!(pump.store.take_outgoing().is_empty());
         assert!(pump.plugin_answers.try_recv().is_err());
-        let (_requests, requests_rx) = mpsc::channel::<RunRequest>();
+        let (_requests, requests_rx) = crossbeam_channel::unbounded::<RunRequest>();
         pump.requests = requests_rx;
         assert!(pump.pass(), "the pump keeps serving while the tool runs");
         let start = std::time::Instant::now();
@@ -8691,7 +8781,7 @@ kage.on('should_stop_after_turn', function(ev) return true end)
         theirs
             .set_read_timeout(Some(Duration::from_secs(30)))
             .unwrap();
-        let (events, received) = mpsc::channel();
+        let (events, received) = crossbeam_channel::unbounded();
         let transport = Transport::host(mine, events).unwrap();
         drop(transport);
         match received.recv_timeout(Duration::from_secs(30)) {

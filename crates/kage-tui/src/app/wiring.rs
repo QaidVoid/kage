@@ -14,6 +14,7 @@ impl App {
         let (attach_tx, attach_rx) = std::sync::mpsc::channel();
         Self {
             root_buffer: Arc::clone(&buffer),
+            wake: crossbeam_channel::bounded(1),
             adopted_buffer: None,
             buffer,
             focus: None,

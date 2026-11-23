@@ -90,6 +90,11 @@ pub(super) struct Frontend {
     pub(super) refresh: mpsc::Receiver<PluginRefresh>,
     /// The feed an ACP connection's pump fills.
     pub(super) acp_feed: Arc<dyn kage_tui::AcpFeed>,
+    /// The App's wake channel, shared with the connection that feeds it.
+    pub(super) wake: (
+        crossbeam_channel::Sender<()>,
+        crossbeam_channel::Receiver<()>,
+    ),
     /// The model the status line shows until the engine reports one.
     pub(super) model: String,
     pub(super) model_choices: Vec<PickItem>,
@@ -184,6 +189,7 @@ impl Frontend {
         app.set_plugin_dialog(self.dialogs);
         app.set_plugin_refresh(self.refresh);
         app.set_acp_feed(self.acp_feed);
+        app.set_wake(self.wake);
         app.set_toasts(self.toasts.clone());
         app.set_session_usage(shared_session_usage());
         app.set_status_session_id(self.session.to_string().chars().take(8).collect());

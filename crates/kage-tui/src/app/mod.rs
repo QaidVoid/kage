@@ -698,6 +698,12 @@ pub struct App {
     buffer: SharedBuffer,
     /// The main session's transcript.
     root_buffer: SharedBuffer,
+    /// Wakes the event loop: engine events and threads that change
+    /// what the App draws ping it. Bounded to one pending wake.
+    wake: (
+        crossbeam_channel::Sender<()>,
+        crossbeam_channel::Receiver<()>,
+    ),
     /// The transcript an ACP connection handed over for the session it
     /// is moving the main view onto, applied when its
     /// [`kage_core::protocol::HostEvent::SessionAdopted`] arrives in

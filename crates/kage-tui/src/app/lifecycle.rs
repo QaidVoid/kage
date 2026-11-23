@@ -27,7 +27,8 @@ impl App {
         // burst of streamed deltas repaints at most once per frame.
         const FRAME: Duration = Duration::from_millis(16);
         let input = InputReader::spawn()?;
-        let mut engine = self.forward_engine_events();
+        self.forward_engine_events();
+        let mut engine = Some(self.wake.1.clone());
         // Always paint once before the steady-state loop.
         let mut last_buffer_version = self.buffer_version();
         let mut last_spinner_idx = crate::view::spinner_frame_index();
@@ -225,13 +226,15 @@ impl App {
     }
 
     /// Move the engine events onto a thread that passes them back
-    /// through `engine_rx` and signals each arrival on the returned
+    /// through `engine_rx` and signals each arrival on the App's wake
     /// channel, so the run loop can wait on them next to terminal
-    /// input. `None` when no engine events are wired.
-    fn forward_engine_events(&mut self) -> Option<Receiver<()>> {
-        let source = self.engine_rx.take()?;
+    /// input.
+    fn forward_engine_events(&mut self) {
+        let Some(source) = self.engine_rx.take() else {
+            return;
+        };
         let (tx, rx) = std::sync::mpsc::channel();
-        let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
+        let wake_tx = self.wake.0.clone();
         self.engine_rx = Some(rx);
         std::thread::spawn(move || {
             for envelope in source {
@@ -241,7 +244,20 @@ impl App {
                 let _ = wake_tx.try_send(());
             }
         });
-        Some(wake_rx)
+    }
+
+    /// Use `wake` as the event loop's wake channel, for a thread that
+    /// changes what the App draws without sending it an event, such as
+    /// an ACP connection folding a transcript. Its sender pings with
+    /// `try_send`; a full channel already holds a wake.
+    pub fn set_wake(
+        &mut self,
+        wake: (
+            crossbeam_channel::Sender<()>,
+            crossbeam_channel::Receiver<()>,
+        ),
+    ) {
+        self.wake = wake;
     }
 
     /// True when the worker has marked the [`crate::usage::SessionUsage`]

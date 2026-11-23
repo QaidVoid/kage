@@ -402,12 +402,16 @@ impl Buffer {
     /// live buffer has fewer blocks than the snapshot or went through
     /// a structural change (clear, take, compaction) since the
     /// snapshot was taken, because stale cache indices would
-    /// mislabel. (Structural mutations are UI-thread only, so they
-    /// cannot overlap a draw on that same thread; the guard is
-    /// defensive.) In-place edits are not: a connection thread can
-    /// change a tool call's phase or input mid-draw, so the per-block
+    /// mislabel. In-place edits can land mid-draw too, since the
+    /// session store writes from its own thread, so the per-block
     /// caches are handed back only when none was invalidated since
     /// the snapshot was taken.
+    ///
+    /// The stream dirty flag travels with the caches: the rebuild that
+    /// produced them consumed it. A streaming delta that landed after
+    /// the snapshot was taken grew the last block past what was drawn,
+    /// so that block keeps its live caches and the flag stays set for
+    /// the next frame to reparse.
     pub fn merge_render_state(&mut self, snapshot: &Self) {
         if snapshot.epoch != self.epoch || snapshot.blocks.len() > self.blocks.len() {
             return;
@@ -416,10 +420,18 @@ impl Buffer {
         // a block that changed since: the snapshot's entry for it
         // shows the old content, so the caches stay as they are.
         if snapshot.cache_clears == self.cache_clears {
+            let streamed = snapshot.output_serial != self.output_serial
+                && snapshot.blocks.len() == self.blocks.len();
+            let fresh = if streamed {
+                snapshot.blocks.len().saturating_sub(1)
+            } else {
+                snapshot.blocks.len()
+            };
             for (slot, entry) in self
                 .block_heights
                 .iter_mut()
                 .zip(snapshot.block_heights.iter())
+                .take(fresh)
             {
                 *slot = *entry;
             }
@@ -427,18 +439,13 @@ impl Buffer {
                 .block_render_lines
                 .iter_mut()
                 .zip(snapshot.block_render_lines.iter())
+                .take(fresh)
             {
                 slot.clone_from(entry);
             }
-            // The dirty flag is consumed by the rebuild that produced
-            // the snapshot's fresh caches, so it travels with them:
-            // copying it back keeps the live buffer from re-serving a
-            // window that already rebuilt. When the caches stay behind,
-            // so does the flag, or the live buffer would keep its old
-            // lines with nothing left to force their reparse. A delta
-            // landing mid-draw re-arms on the next frame at the cost
-            // of one extra window of staleness, at worst.
-            self.stream_dirty_since = snapshot.stream_dirty_since;
+            if !streamed {
+                self.stream_dirty_since = snapshot.stream_dirty_since;
+            }
         }
         self.scroll = snapshot.scroll;
         self.last_drawn_focus = snapshot.last_drawn_focus;
@@ -575,6 +582,16 @@ impl Buffer {
 
     pub(crate) fn invalidate_height(&mut self, idx: usize) {
         self.cache_clears = self.cache_clears.wrapping_add(1);
+        self.clear_caches_at(idx);
+        self.bump_version();
+    }
+
+    /// Drop the caches of a block whose focus emphasis changed. Unlike
+    /// [`Self::invalidate_height`] this is the renderer's own change,
+    /// made on the draw snapshot, so it must not stop
+    /// [`Self::merge_render_state`] from handing the re-rendered
+    /// caches back to the live buffer.
+    pub(crate) fn refocus_caches(&mut self, idx: usize) {
         self.clear_caches_at(idx);
         self.bump_version();
     }

@@ -92,10 +92,10 @@ pub(super) fn render_buffer(
 
     if focus != buffer.last_drawn_focus() {
         if let Some(old) = buffer.last_drawn_focus() {
-            buffer.invalidate_height(old);
+            buffer.refocus_caches(old);
         }
         if let Some(new) = focus {
-            buffer.invalidate_height(new);
+            buffer.refocus_caches(new);
         }
     }
 

@@ -463,6 +463,58 @@ fn merge_render_state_keeps_pending_stream_edits_with_the_caches() {
     );
 }
 
+/// Moving focus re-renders the old and new blocks on the snapshot.
+/// Those caches carry the new emphasis and must reach the live buffer,
+/// or the next fresh clone paints the highlight on the old block.
+#[test]
+fn merge_render_state_keeps_caches_rebuilt_for_a_focus_move() {
+    let mut live = Buffer::new();
+    live.push_user("a");
+    live.push_user("b");
+    live.set_cached_render_lines(0, 80, Arc::new(vec![Line::from("a")]));
+    let mut snap = live.clone();
+    snap.refocus_caches(0);
+    snap.refocus_caches(1);
+    snap.set_cached_render_lines(0, 80, Arc::new(vec![Line::from("A")]));
+    snap.set_cached_render_lines(1, 80, Arc::new(vec![Line::from("B")]));
+    snap.set_last_drawn_focus(Some(1));
+    live.merge_render_state(&snap);
+    assert_eq!(
+        live.cached_render_lines(0, 80).unwrap()[0],
+        Line::from("A"),
+        "the unfocused render is handed back"
+    );
+    assert_eq!(live.cached_render_lines(1, 80).unwrap()[0], Line::from("B"));
+    assert_eq!(live.last_drawn_focus(), Some(1));
+}
+
+/// A delta that lands while a frame is drawn: the snapshot rendered
+/// the reply without it, so the reply keeps its pending reparse while
+/// the other blocks still take the snapshot's caches.
+#[test]
+fn merge_render_state_keeps_the_streaming_block_when_a_delta_lands_mid_draw() {
+    let mut live = Buffer::new();
+    live.push_user("q");
+    live.append_assistant_delta("hello");
+    live.append_assistant_delta(" world");
+    let mut snap = live.clone();
+    snap.set_cached_render_lines(0, 80, Arc::new(vec![Line::from("q")]));
+    snap.set_cached_render_lines(1, 80, Arc::new(vec![Line::from("hello world")]));
+    assert!(!snap.stream_edits_pending());
+    live.append_assistant_delta("!");
+    live.merge_render_state(&snap);
+    assert_eq!(live.cached_render_lines(0, 80).unwrap()[0], Line::from("q"));
+    assert!(
+        live.stream_edits_pending(),
+        "the reply still needs the reparse that shows the new delta"
+    );
+    assert_ne!(
+        live.cached_render_lines(1, 80).map(|l| l[0].clone()),
+        Some(Line::from("hello world")),
+        "the pre-delta render is not handed back"
+    );
+}
+
 #[test]
 fn merge_render_state_skips_when_live_has_fewer_blocks() {
     let mut live = Buffer::new();
@@ -691,11 +743,10 @@ fn merge_render_state_carries_throttle_flag() {
     snap.set_cached_height(0, 80, 2);
     snap.set_cached_render_lines(0, 80, Arc::new(vec![Line::from("hello")]));
     assert!(!snap.stream_edits_pending());
-
-    live.append_assistant_delta(" world");
     assert!(live.stream_edits_pending());
     live.merge_render_state(&snap);
     assert!(!live.stream_edits_pending());
+    assert_eq!(live.cached_height(0, 80), Some(2));
 }
 
 #[test]

@@ -83,7 +83,7 @@ impl App {
             if needs_redraw {
                 self.draw(tui)?;
                 last_draw = Instant::now();
-                last_buffer_version = self.buffer_version();
+                last_buffer_version = self.draw_snapshot_version;
                 last_spinner_idx = crate::view::spinner_frame_index();
                 needs_redraw = false;
             }
@@ -587,11 +587,13 @@ impl App {
             (live.version(), live.stream_edits_pending())
         };
         let reuse = !stream_pending && self.draw_snapshot_version == live_version;
-        let buffer = match self.draw_snapshot.take() {
-            Some(snap) if reuse => snap,
-            _ => lock(&self.buffer).clone(),
-        };
-        (buffer, live_version)
+        match self.draw_snapshot.take() {
+            Some(snap) if reuse => (snap, live_version),
+            _ => {
+                let live = lock(&self.buffer);
+                (live.clone(), live.version())
+            }
+        }
     }
 
     /// Park a drawn snapshot for [`Self::take_draw_snapshot`] to

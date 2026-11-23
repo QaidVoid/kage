@@ -1209,23 +1209,56 @@ fn jval<T: serde::Serialize>(value: T) -> serde_json::Value {
     serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
 }
 
+/// Runs `op` on its own thread, answering `id` with an internal error
+/// instead of leaving the client waiting when the thread cannot start
+/// or `op` panics. `None` when no thread started.
+fn spawn_answering<F>(
+    peer: &AgentPeer,
+    id: serde_json::Value,
+    op: F,
+) -> Option<thread::JoinHandle<()>>
+where
+    F: FnOnce() -> Option<Result<serde_json::Value, RpcError>> + Send + 'static,
+{
+    let worker_peer = peer.clone();
+    let unspawned = id.clone();
+    let spawned = thread::Builder::new().spawn(move || {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(op)) {
+            Ok(Some(outcome)) => {
+                let _ = worker_peer.respond(&id, outcome);
+            }
+            Ok(None) => {}
+            Err(_) => {
+                let _ = worker_peer
+                    .respond(&id, Err(RpcError::internal("the request handler panicked")));
+            }
+        }
+    });
+    match spawned {
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            let _ = peer.respond(
+                &unspawned,
+                Err(RpcError::internal(format!("spawn request worker: {error}"))),
+            );
+            None
+        }
+    }
+}
+
 /// Answer request `id` with `op`, run on its own thread.
 fn spawn_op<A, F>(
     peer: &AgentPeer,
     agent: &Arc<A>,
     id: serde_json::Value,
     op: F,
-) -> thread::JoinHandle<()>
+) -> Option<thread::JoinHandle<()>>
 where
     A: Agent,
     F: FnOnce(&A) -> Result<serde_json::Value, RpcError> + Send + 'static,
 {
     let agent = Arc::clone(agent);
-    let peer = peer.clone();
-    thread::spawn(move || {
-        let outcome = op(&agent);
-        let _ = peer.respond(&id, outcome);
-    })
+    spawn_answering(peer, id, move || Some(op(&agent)))
 }
 
 fn spawn_prompt<A: Agent>(
@@ -1260,27 +1293,27 @@ fn spawn_open<A, F, T>(
     agent: &Arc<A>,
     id: serde_json::Value,
     op: F,
-) -> thread::JoinHandle<()>
+) -> Option<thread::JoinHandle<()>>
 where
     A: Agent,
     F: FnOnce(&A) -> Result<(String, T, Option<OpenReceipt>), RpcError> + Send + 'static,
     T: serde::Serialize,
 {
     let agent = Arc::clone(agent);
-    let peer = peer.clone();
-    thread::spawn(move || match op(&agent).and_then(encode_open) {
+    let worker_peer = peer.clone();
+    let worker_id = id.clone();
+    spawn_answering(peer, id, move || match op(&agent).and_then(encode_open) {
         Ok((session, response, receipt)) => {
-            if peer.respond(&id, Ok(response)).is_ok() {
+            if worker_peer.respond(&worker_id, Ok(response)).is_ok() {
                 if let Some(receipt) = receipt {
                     receipt();
                 } else {
                     agent.session_announced(&session);
                 }
             }
+            None
         }
-        Err(e) => {
-            let _ = peer.respond(&id, Err(e));
-        }
+        Err(e) => Some(Err(e)),
     })
 }
 
@@ -1298,7 +1331,7 @@ fn spawn_close<A: Agent>(
     agent: &Arc<A>,
     id: serde_json::Value,
     req: CloseSessionRequest,
-) -> thread::JoinHandle<()> {
+) -> Option<thread::JoinHandle<()>> {
     let fence = agent.fence_close(&req);
     spawn_op(peer, agent, id, move |a| {
         a.close_session_fenced(req, fence).map(jval)
@@ -1422,7 +1455,7 @@ fn handle_request<A: Agent>(
             let _ = peer.respond(&id, Err(RpcError::method_not_found(other)));
             return None;
         }
-    };
+    }?;
     Some(op)
 }
 
@@ -1521,7 +1554,7 @@ fn handle_kage_request<A: Agent>(
             Err(e) => return parse_failed(peer, &id, e),
         },
         other => return handle_session_request(peer, agent, id, other, params),
-    };
+    }?;
     Some(op)
 }
 
@@ -1580,7 +1613,7 @@ fn handle_session_request<A: Agent>(
             let _ = peer.respond(&id, Err(RpcError::method_not_found(other)));
             return None;
         }
-    };
+    }?;
     Some(op)
 }
 
@@ -2231,7 +2264,7 @@ mod tests {
             let worker = spawn_open(&peer, &agent, serde_json::json!(9), |a| {
                 Ok(("session".into(), FailingSerialize, a.receipt("9".into())))
             });
-            worker.join().unwrap();
+            worker.unwrap().join().unwrap();
             reader.join().unwrap();
             assert!(received.try_iter().next().is_none());
             assert_eq!(dropped.try_iter().count(), usize::from(with_receipt));
@@ -2524,6 +2557,55 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, -32602);
         assert_eq!(err.message, "unknown option nope");
+        drop(client);
+        server.join().unwrap().unwrap();
+    }
+
+    struct PanickingAgent;
+
+    impl Agent for PanickingAgent {
+        fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
+            MockAgent.initialize(req)
+        }
+
+        fn new_session(&self, _r: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+            panic!("a handler bug")
+        }
+
+        fn prompt(
+            &self,
+            _r: PromptRequest,
+            _c: &PromptContext,
+        ) -> Result<PromptResponse, RpcError> {
+            Ok(PromptResponse {
+                stop_reason: StopReason::EndTurn,
+            })
+        }
+
+        fn cancel(&self, _session_id: &str) {}
+    }
+
+    /// A handler that panics answers its request with an internal
+    /// error instead of leaving the client waiting, and the connection
+    /// keeps serving.
+    #[test]
+    fn a_panicking_handler_answers_with_an_error() {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let server =
+            thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, |_| PanickingAgent));
+        let (client, _inbox, _h) = connect(BufReader::new(cli_r), cli_w);
+        let params = serde_json::json!({"cwd": "/", "mcpServers": []});
+        for _ in 0..2 {
+            let err = client
+                .request_timeout(
+                    "session/new",
+                    params.clone(),
+                    std::time::Duration::from_secs(5),
+                )
+                .unwrap_err();
+            assert!(err.message.contains("panicked"), "{err:?}");
+        }
         drop(client);
         server.join().unwrap().unwrap();
     }

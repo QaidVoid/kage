@@ -2,7 +2,7 @@
 //! itself, what extension facts it keeps, and what survives a reload.
 
 use kage_acp_wire::{ClientCapabilities, ContentBlock, SubagentState};
-use kage_client::{Client, Frame, PromptOutcome, RequestId, TranscriptItem};
+use kage_client::{Change, Client, Frame, PromptOutcome, RequestId, TranscriptItem};
 use serde_json::{Value, json};
 
 /// The numeric id fixtures answer under.
@@ -247,6 +247,48 @@ fn a_closed_session_takes_its_subagents_and_stays_gone() {
         result: json!({}),
     });
     assert!(client.state().directory.is_empty());
+}
+
+/// A compaction starting moves the session, not the transcript; its
+/// completion moves both, as a plan does.
+#[test]
+fn compaction_and_plans_report_the_views_they_move() {
+    let mut client = opened();
+    let session = || Change::Session { id: "s1".into() };
+    let transcript = || Change::Transcript { id: "s1".into() };
+    let started = client.handle(update(
+        "s1",
+        &json!({"sessionUpdate": "_kage/compaction", "phase": "started"}),
+    ));
+    assert_eq!(started, [session()]);
+    assert!(client.state().session("s1").unwrap().compacting);
+    let complete = client.handle(update(
+        "s1",
+        &json!({"sessionUpdate": "_kage/compaction", "phase": "complete", "kept": 2}),
+    ));
+    assert_eq!(complete, [session(), transcript()]);
+    let plan = client.handle(update(
+        "s1",
+        &json!({"sessionUpdate": "plan", "entries": []}),
+    ));
+    assert_eq!(plan, [session(), transcript()]);
+}
+
+/// A page that names its own cursor as the next one ends the paging
+/// instead of asking for itself forever, and withdrawing from an
+/// unknown session's queue makes no session.
+#[test]
+fn a_repeating_cursor_ends_the_listing() {
+    let mut client = opened();
+    let first = client.list_sessions(None, Some("loop"));
+    let _ = client.take_outgoing();
+    client.handle(Frame::Success {
+        id: n(first),
+        result: json!({"sessions": [], "nextCursor": "loop"}),
+    });
+    assert!(client.take_outgoing().is_empty());
+    assert!(client.withdraw_queued("nobody", 0).is_empty());
+    assert!(client.state().session("nobody").is_none());
 }
 
 #[test]

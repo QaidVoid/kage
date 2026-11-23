@@ -123,6 +123,8 @@ enum Pending {
     List {
         /// The directory filter of the first page, kept for the next.
         cwd: Option<String>,
+        /// The cursor that asked for this page.
+        cursor: Option<String>,
     },
     Prompt {
         session_id: String,
@@ -386,6 +388,7 @@ impl Client {
             }),
             Pending::List {
                 cwd: cwd.map(str::to_owned),
+                cursor: cursor.map(str::to_owned),
             },
         )
     }
@@ -486,7 +489,10 @@ impl Client {
     /// a client that holds the queue, as this one does, withdraws by
     /// dropping the held prompt.
     pub fn withdraw_queued(&mut self, session_id: &str, index: usize) -> Vec<Change> {
-        let queue = &mut self.session_mut(session_id).queue;
+        let Some(session) = self.state.sessions.get_mut(session_id) else {
+            return Vec::new();
+        };
+        let queue = &mut session.queue;
         if index >= queue.len() {
             return Vec::new();
         }
@@ -1618,7 +1624,9 @@ impl Client {
                 }
                 self.apply_open(id, session_id, result)
             }
-            Pending::List { cwd } => self.apply_list_page(id, cwd.as_deref(), result),
+            Pending::List { cwd, cursor } => {
+                self.apply_list_page(id, cwd.as_deref(), cursor.as_deref(), result)
+            }
             Pending::Prompt {
                 session_id,
                 owns_run,
@@ -1756,7 +1764,16 @@ impl Client {
     /// Merges a `session/list` page into the directory and asks for
     /// the next one. An empty cursor is the end of the list, not a
     /// page to fetch.
-    fn apply_list_page(&mut self, id: u64, cwd: Option<&str>, result: Value) -> Vec<Change> {
+    /// Merges one page into the directory and asks for the next. A
+    /// next cursor equal to the one that fetched this page would ask
+    /// for the same page forever, so paging stops there.
+    fn apply_list_page(
+        &mut self,
+        id: u64,
+        cwd: Option<&str>,
+        sent: Option<&str>,
+        result: Value,
+    ) -> Vec<Change> {
         let page = match answer::<kage_acp_wire::ListSessionsResponse>(
             id,
             result,
@@ -1777,7 +1794,10 @@ impl Client {
                 self.state.directory.push(info);
             }
         }
-        if let Some(cursor) = page.next_cursor.filter(|cursor| !cursor.is_empty()) {
+        if let Some(cursor) = page
+            .next_cursor
+            .filter(|cursor| !cursor.is_empty() && Some(cursor.as_str()) != sent)
+        {
             self.list_sessions(cwd, Some(&cursor));
         }
         vec![Change::Directory]
@@ -1933,10 +1953,32 @@ impl Client {
         changes
     }
 
-    fn apply_update(&mut self, session_id: &str, update: SessionUpdate) -> Vec<Change> {
-        let transcript = || Change::Transcript {
-            id: session_id.into(),
+    /// Applies an update that lands in the transcript, reporting the
+    /// views it moved: a plan or a compaction moves the session too,
+    /// and a compaction that only starts or stops moves nothing else.
+    fn apply_transcript_update(&mut self, session_id: &str, update: SessionUpdate) -> Vec<Change> {
+        let (moves_session, moves_transcript) = match &update {
+            SessionUpdate::Plan(_) => (true, true),
+            SessionUpdate::Compaction(compaction) => {
+                (true, compaction.phase == CompactionPhase::Complete)
+            }
+            _ => (false, true),
         };
+        if !apply_item(self.session_mut(session_id), update) {
+            return Vec::new();
+        }
+        let id = || session_id.to_owned();
+        let mut changes = Vec::new();
+        if moves_session {
+            changes.push(Change::Session { id: id() });
+        }
+        if moves_transcript {
+            changes.push(Change::Transcript { id: id() });
+        }
+        changes
+    }
+
+    fn apply_update(&mut self, session_id: &str, update: SessionUpdate) -> Vec<Change> {
         match update {
             SessionUpdate::UserMessageChunk(_)
             | SessionUpdate::AgentMessageChunk(_)
@@ -1945,13 +1987,7 @@ impl Client {
             | SessionUpdate::ToolCallUpdate(_)
             | SessionUpdate::Plan(_)
             | SessionUpdate::Notice(_)
-            | SessionUpdate::Compaction(_) => {
-                let session = self.session_mut(session_id);
-                apply_item(session, update)
-                    .then(transcript)
-                    .into_iter()
-                    .collect()
-            }
+            | SessionUpdate::Compaction(_) => self.apply_transcript_update(session_id, update),
             SessionUpdate::AvailableCommandsUpdate(update) => {
                 self.session_mut(session_id).commands = update.available_commands;
                 vec![Change::Session {

@@ -500,11 +500,7 @@ impl Live {
                 if !is_agent {
                     self.prune_ended_agents(session);
                     self.maybe_close(session);
-                } else if !requeued {
-                    // A background agent the parent run left behind has
-                    // ended: drop its node so a later attach reads its
-                    // report from the file, then close the parent when
-                    // nothing else keeps it open.
+                } else if !requeued && self.ended_agent_leaves(session) {
                     let root = self.tree.root_of(session);
                     self.tree.remove_subtree(session);
                     self.retain_spawns(root);
@@ -608,12 +604,37 @@ impl Live {
 
     /// Whether the end of a parent run leaves `node` in the tree: a
     /// background agent still queued or running, or waiting out a rate
-    /// limit.
+    /// limit, or any agent with such an agent under it.
     fn agent_kept(&self, node: &AgentNode) -> bool {
-        node.background
+        (node.background
             && (matches!(node.state, AgentState::Queued | AgentState::Running)
                 || self.running.contains(&node.session)
-                || self.paused.contains_key(&node.session))
+                || self.paused.contains_key(&node.session)))
+            || self.agents_live_under(node.session)
+    }
+
+    /// Whether the agent `session`, whose run just ended for good,
+    /// leaves the tree now, so a later attach reads its report from the
+    /// file and its root may close. A foreground agent stays while its
+    /// parent's run goes on, since the parent has not recorded the
+    /// result yet; the end of that run prunes it. Nothing leaves while
+    /// an agent under it still works or asks, so those keep their root.
+    fn ended_agent_leaves(&self, session: SessionId) -> bool {
+        let Some(node) = self.tree.get(session) else {
+            return false;
+        };
+        let parent_busy = if self.tree.get(node.parent).is_some() {
+            self.running.contains(&node.parent) || self.paused.contains_key(&node.parent)
+        } else {
+            self.working.contains(&node.parent)
+        };
+        let under = self.tree.under(session);
+        (node.background || !parent_busy)
+            && !self.agents_live_under(session)
+            && !self
+                .asks
+                .values()
+                .any(|ask| under.iter().any(|(_, node)| node.session == ask.session))
     }
 
     /// Drops the tree nodes of the depth-1 children of `session` whose

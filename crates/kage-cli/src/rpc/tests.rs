@@ -1182,6 +1182,65 @@ fn refused_child_admission_removes_only_its_own_waiter_and_owner() {
     }
 }
 
+/// A foreground agent that ends while its parent's run goes on stays
+/// in the live tree, so an attach meanwhile still sees it and the
+/// agents under it keep their root; the end of the parent's run
+/// prunes it.
+#[test]
+fn a_foreground_agent_stays_live_until_its_parents_run_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(Vec::new(), dir.path(), dir.path());
+    let root = SessionId::new();
+    let child = SessionId::new();
+    let mut live = lock(&h.host.live);
+    let observe = |live: &mut super::live::Live,
+                   session: SessionId,
+                   event: kage_core::protocol::HostEvent| {
+        live.observe(&kage_core::protocol::Envelope {
+            session,
+            seq: 0,
+            event: event.into(),
+        });
+    };
+    let working = |working: bool| kage_core::protocol::HostEvent::StateChanged {
+        state: kage_core::protocol::SessionState {
+            working,
+            ..Default::default()
+        },
+    };
+    observe(&mut live, root, working(true));
+    observe(
+        &mut live,
+        child,
+        kage_core::protocol::HostEvent::AgentSpawned {
+            parent: root,
+            tool_call_id: ToolCallId::new("call_agent"),
+            agent: "general".into(),
+            description: "work".into(),
+            swarm: None,
+            background: false,
+        },
+    );
+    observe(&mut live, child, kage_core::protocol::HostEvent::RunStarted);
+    observe(
+        &mut live,
+        child,
+        kage_core::protocol::HostEvent::RunEnded {
+            outcome: RunOutcome::Completed,
+        },
+    );
+    assert!(live.in_use(child), "the parent's run still goes on");
+    observe(&mut live, root, working(false));
+    observe(
+        &mut live,
+        root,
+        kage_core::protocol::HostEvent::RunEnded {
+            outcome: RunOutcome::Completed,
+        },
+    );
+    assert!(!live.in_use(child), "the parent's run ended");
+}
+
 #[test]
 fn child_prompt_ownership_checks_every_owned_ancestor() {
     let dir = tempfile::tempdir().unwrap();

@@ -91,6 +91,9 @@ pub enum AgentState {
 
 impl AgentTree {
     /// Fold one envelope in. Returns whether it belongs to a known agent.
+    /// An agent the engine announces anew runs again under the new call,
+    /// whether it was rebuilt from a stored conversation or its last run
+    /// ended.
     pub fn apply(&mut self, envelope: &Envelope) -> bool {
         let session = envelope.session;
         if let Event::Host(HostEvent::AgentSpawned {
@@ -102,15 +105,20 @@ impl AgentTree {
             background,
         }) = &envelope.event
         {
-            // An agent rebuilt from a stored conversation runs again
-            // when the engine announces it anew.
             if let Some(&i) = self.index.get(&session)
-                && self.nodes[i].restored
+                && (self.nodes[i].restored
+                    || matches!(
+                        self.nodes[i].state,
+                        AgentState::Done | AgentState::Failed | AgentState::Cancelled
+                    ))
             {
                 let node = &mut self.nodes[i];
                 node.restored = false;
                 node.state = AgentState::Queued;
                 node.background = *background;
+                node.tool_call_id.clone_from(tool_call_id);
+                node.description.clone_from(description);
+                node.swarm.clone_from(swarm);
                 return true;
             }
             return self.insert(AgentNode {
@@ -950,6 +958,32 @@ mod tests {
             AgentState::Cancelled,
             "the process ended before the report"
         );
+    }
+
+    /// A finished agent the engine resumes runs again under the call
+    /// that resumed it.
+    #[test]
+    fn a_finished_agent_runs_again_when_announced() {
+        let parent = SessionId::new();
+        let mut tree = AgentTree::default();
+        let child = spawn(&mut tree, parent, "general");
+        assert_eq!(
+            end(&mut tree, child, RunOutcome::Completed),
+            AgentState::Done
+        );
+        let spawned = HostEvent::AgentSpawned {
+            parent,
+            tool_call_id: ToolCallId("again".into()),
+            agent: "general".into(),
+            description: "resume".into(),
+            swarm: None,
+            background: false,
+        };
+        assert!(tree.apply(&envelope(child, spawned)));
+        let node = tree.get(child).unwrap();
+        assert_eq!(node.state, AgentState::Queued);
+        assert_eq!(node.tool_call_id, ToolCallId("again".into()));
+        assert_eq!(node.description, "resume");
     }
 
     #[test]

@@ -245,15 +245,35 @@ impl StderrTail {
     /// How long one kept line may be.
     const LINE_CHARS: usize = 160;
 
-    /// Drain `reader` on a background thread into the tail.
+    /// How many bytes one read of a line takes at most, so a line with
+    /// no end is kept in pieces instead of growing without bound.
+    const READ_BYTES: u64 = 4096;
+
+    /// Drain `reader` on a background thread into the tail until it
+    /// ends. Bytes that are not UTF-8 are kept lossily, so they never
+    /// stop the drain and leave the agent blocked on a full pipe.
     fn capture(reader: impl std::io::Read + Send + 'static) -> Self {
+        use std::io::{BufRead as _, Read as _};
         let tail = Self::default();
         let shared = Arc::clone(&tail.0);
         std::thread::spawn(move || {
-            let reader = std::io::BufReader::new(reader);
-            for line in std::io::BufRead::lines(reader) {
-                let Ok(line) = line else { return };
-                let line: String = line.chars().take(Self::LINE_CHARS).collect();
+            let mut reader = std::io::BufReader::new(reader);
+            let mut bytes = Vec::new();
+            loop {
+                bytes.clear();
+                match (&mut reader)
+                    .take(Self::READ_BYTES)
+                    .read_until(b'\n', &mut bytes)
+                {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {}
+                }
+                let text = String::from_utf8_lossy(&bytes);
+                let line: String = text
+                    .trim_end_matches(['\n', '\r'])
+                    .chars()
+                    .take(Self::LINE_CHARS)
+                    .collect();
                 let Ok(mut lines) = shared.lock() else { return };
                 if lines.len() == Self::LINES {
                     lines.remove(0);
@@ -1271,6 +1291,20 @@ mod tests {
             tail.snippet()
         );
         assert_eq!(tail.snippet().chars().count(), StderrTail::LINE_CHARS);
+    }
+
+    /// A line that is not UTF-8 is kept lossily and the drain goes on
+    /// to the lines after it.
+    #[test]
+    fn stderr_tail_reads_past_bytes_that_are_not_utf8() {
+        let input = b"bad \xff byte\nlater line\n".to_vec();
+        let tail = StderrTail::capture(std::io::Cursor::new(input));
+        assert!(
+            wait_until(|| tail.snippet().contains("later line")),
+            "got {:?}",
+            tail.snippet()
+        );
+        assert!(tail.snippet().starts_with("bad "), "{}", tail.snippet());
     }
 
     #[test]

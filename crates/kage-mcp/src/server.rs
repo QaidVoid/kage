@@ -1046,6 +1046,38 @@ mod tests {
         assert_eq!(err.code, -32601);
     }
 
+    #[test]
+    fn live_connection_revokes_sampling_without_waiting_for_reconnect() {
+        struct Sampling;
+        impl ServerRequestHandler for Sampling {
+            fn handle(
+                &self,
+                method: &str,
+                _: &serde_json::Value,
+            ) -> Option<Result<serde_json::Value, RpcError>> {
+                (method == "sampling/createMessage").then(|| Ok(serde_json::json!({"ok": true})))
+            }
+
+            fn capabilities(&self) -> serde_json::Value {
+                serde_json::json!({"sampling": {}})
+            }
+        }
+
+        let policy = crate::SamplingPolicy::default();
+        policy.set_allowed(true);
+        let handler = policy.wrap(Some(Arc::new(Sampling)), true);
+        let (_conn, server, initialized) = stub_server_with_handler(handler);
+        assert!(
+            initialized.lock().unwrap().as_ref().unwrap()["capabilities"]["sampling"].is_object()
+        );
+        let request = || server.request("sampling/createMessage", serde_json::json!({}));
+        assert_eq!(request().unwrap()["ok"], true);
+        policy.set_allowed(false);
+        assert_eq!(request().unwrap_err().code, -32601);
+        policy.set_allowed(true);
+        assert_eq!(request().unwrap()["ok"], true);
+    }
+
     fn empty_server() -> McpServer {
         McpServer {
             startup_timeout_secs: None,

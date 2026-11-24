@@ -234,6 +234,9 @@ pub struct McpManager {
     /// Host handler for server-initiated requests (sampling, ...),
     /// retained so a `restart` re-injects it.
     handler: Option<Arc<dyn crate::ServerRequestHandler>>,
+    sampling: crate::SamplingPolicy,
+    /// Capability snapshot used by every start in one maintenance pass.
+    negotiated_sampling: bool,
     /// Bearer tokens for HTTP servers, retained so a `restart` (for
     /// example after a login) sends them.
     tokens: Option<Arc<dyn TokenSource>>,
@@ -250,6 +253,14 @@ pub struct McpManager {
 }
 
 impl McpManager {
+    /// The live sampling permission shared with every existing connection.
+    /// Changing it revokes request acceptance immediately; [`Self::reconcile`]
+    /// renegotiates capabilities at the next maintenance boundary.
+    #[must_use]
+    pub fn sampling_policy(&self) -> crate::SamplingPolicy {
+        self.sampling.clone()
+    }
+
     /// The child process id of server `name`, for diagnostics.
     /// `None` when the server is not running or is not a spawned
     /// subprocess (an HTTP server has no child).
@@ -290,6 +301,9 @@ impl McpManager {
         tokens: Option<Arc<dyn TokenSource>>,
         env: Environment,
     ) -> (Self, Vec<(String, McpError)>) {
+        let sampling = crate::SamplingPolicy::default();
+        sampling.set_allowed(cfg.allow_sampling);
+        let connection_handler = sampling.wrap(handler.clone(), cfg.allow_sampling);
         let mut servers = Vec::new();
         let mut errors = Vec::new();
         for (name, spec) in &cfg.servers {
@@ -303,7 +317,7 @@ impl McpManager {
                 name.clone(),
                 spec,
                 &roots,
-                handler.clone(),
+                connection_handler.clone(),
                 tokens.clone(),
                 timeout,
                 &env,
@@ -328,6 +342,8 @@ impl McpManager {
                 servers,
                 roots,
                 handler,
+                sampling,
+                negotiated_sampling: cfg.allow_sampling,
                 tokens,
                 env,
                 resource_tool: false,
@@ -354,6 +370,8 @@ impl McpManager {
         tokens: Option<Arc<dyn TokenSource>>,
         env: Environment,
     ) -> Self {
+        let sampling = crate::SamplingPolicy::default();
+        sampling.set_allowed(cfg.allow_sampling);
         let servers = cfg
             .servers
             .iter()
@@ -368,6 +386,8 @@ impl McpManager {
             servers,
             roots,
             handler,
+            sampling,
+            negotiated_sampling: cfg.allow_sampling,
             tokens,
             env,
             resource_tool: false,
@@ -581,7 +601,8 @@ impl McpManager {
     /// goes down and waits to start from the new spec; a new one waits
     /// to start. [`Self::start_waiting`] brings the waiting ones up.
     /// Servers the host was handed are not configuration and stay as
-    /// they are. Returns whether any server changed.
+    /// they are. A sampling policy change reconnects all retained servers
+    /// to renegotiate capabilities. Returns whether any server changed.
     pub fn reconcile(
         &mut self,
         specs: &BTreeMap<String, McpServer>,
@@ -618,6 +639,17 @@ impl McpManager {
                     .push((name.clone(), Managed::unstarted(spec.clone())));
                 changed = true;
             }
+        }
+        let allowed = self.sampling.is_allowed();
+        if self.negotiated_sampling != allowed {
+            for (_, managed) in &mut self.servers {
+                if !managed.starting {
+                    managed.take_down(reg);
+                    *managed = Managed::unstarted(managed.spec.clone());
+                }
+            }
+            self.negotiated_sampling = allowed;
+            changed = true;
         }
         let tokens = self.tokens.clone();
         for (_, managed) in &mut self.servers {
@@ -691,7 +723,8 @@ impl McpManager {
             name.to_owned(),
             spec,
             &self.roots,
-            self.handler.clone(),
+            self.sampling
+                .wrap(self.handler.clone(), self.negotiated_sampling),
             self.tokens.clone(),
             timeout,
             &self.env,
@@ -1285,6 +1318,81 @@ mod tests {
         assert!(mgr.reconcile(&moved, &mut reg));
         assert!(reg.get("remote__t").is_none());
         assert_eq!(mgr.server_names().collect::<Vec<_>>(), ["added"]);
+    }
+
+    #[test]
+    fn sampling_policy_reconnects_retained_and_configured_servers() {
+        struct Sampling;
+        impl crate::ServerRequestHandler for Sampling {
+            fn handle(
+                &self,
+                _: &str,
+                _: &serde_json::Value,
+            ) -> Option<Result<serde_json::Value, kage_jsonrpc::RpcError>> {
+                Some(Ok(serde_json::json!({})))
+            }
+
+            fn capabilities(&self) -> serde_json::Value {
+                serde_json::json!({"sampling": {}})
+            }
+        }
+
+        for initially_allowed in [false, true] {
+            let server = guarded_server(Arc::new(AtomicBool::new(true)), None);
+            let mut cfg = remote_config(format!("{}/mcp", server.base));
+            cfg.allow_sampling = initially_allowed;
+            let spec = cfg.servers["remote"].clone();
+            for name in ["replaced", "editor", "removed"] {
+                cfg.servers.insert(name.to_owned(), spec.clone());
+            }
+            let mut mgr = McpManager::unstarted(
+                &cfg,
+                vec![],
+                Some(Arc::new(Sampling)),
+                Some(StaticTokens::new("good", None)),
+                Environment::inherit(),
+            )
+            .handed_over(["editor".to_owned()]);
+            let mut reg = ToolRegistry::new();
+            assert!(mgr.start_waiting(&mut reg).is_empty());
+            let previous = mgr.clients();
+            server.seen.lock().unwrap().clear();
+
+            cfg.servers.remove("removed");
+            cfg.servers.get_mut("replaced").unwrap().disabled_tools = vec!["t".to_owned()];
+            cfg.servers.get_mut("editor").unwrap().disabled = true;
+            cfg.servers.insert("added".to_owned(), spec.clone());
+            let allowed = !initially_allowed;
+            mgr.sampling_policy().set_allowed(allowed);
+            assert!(mgr.reconcile(&cfg.servers, &mut reg));
+            assert!(mgr.start_waiting(&mut reg).is_empty());
+            let current = mgr.clients();
+            assert_eq!(current.len(), 4);
+            assert!(reg.get("remote__t").is_some());
+            assert!(reg.get("editor__t").is_some());
+            assert!(reg.get("added__t").is_some());
+            assert!(reg.get("replaced__t").is_none());
+            assert!(reg.get("removed__t").is_none());
+            for name in ["remote", "editor", "replaced"] {
+                let old = &previous.iter().find(|(n, _)| n == name).unwrap().1;
+                let new = &current.iter().find(|(n, _)| n == name).unwrap().1;
+                assert!(!Arc::ptr_eq(old, new), "{name} must renegotiate");
+            }
+            let seen = server.seen.lock().unwrap();
+            let initializations: Vec<serde_json::Value> = seen
+                .iter()
+                .filter_map(|r| serde_json::from_str::<serde_json::Value>(&r.body).ok())
+                .filter(|r| r["method"] == "initialize")
+                .collect();
+            assert_eq!(initializations.len(), 4);
+            for request in initializations {
+                assert_eq!(
+                    request["params"]["capabilities"].get("sampling").is_some(),
+                    allowed
+                );
+            }
+            assert!(!mgr.reconcile(&cfg.servers, &mut reg), "settled policy");
+        }
     }
 
     /// A server that advertises `capabilities`, answers `initialize`,

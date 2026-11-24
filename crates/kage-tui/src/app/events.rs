@@ -10,19 +10,19 @@ impl App {
     /// prompts, so the text goes back into the draft. A draft starting
     /// with `/` is a command instead, run through the command
     /// executor; an unknown one goes back into the draft with the
-    /// reason shown.
-    pub(crate) fn handle_submit(&mut self, text: String, queue: bool) {
+    /// reason shown. Returns the exit requested by a command, if any.
+    pub(crate) fn handle_submit(&mut self, text: String, queue: bool) -> Option<AppExit> {
         if let Some(line) = text.strip_prefix('/') {
             if line.is_empty() {
-                return;
+                return None;
             }
             let registry = self.command_registry();
             match self.run_command_validated(line, &registry) {
-                CommandResult::Done(_) => return,
+                CommandResult::Done(exit) => return exit,
                 CommandResult::ValidationError(msg) => {
                     self.input.splice(0, 0, &text);
                     self.notify(msg);
-                    return;
+                    return None;
                 }
             }
         }
@@ -31,43 +31,42 @@ impl App {
             let agent = self.focused_agent().unwrap_or("the agent");
             let text = format!("{agent} has finished; only a running agent can be steered");
             self.notify(text);
-            return;
+            return None;
         }
         let queue = queue || self.mcp_expands(&text);
         if self.focus.is_some() && queue {
             self.input.splice(0, 0, &text);
             self.notify("subagents accept live steering only; queued prompts are not supported");
-            return;
+            return None;
         }
         let images = self.input.take_attached();
         self.send_prompt(text, images, queue, self.focus);
+        None
     }
 
     /// Resolve an `InputAction::QueuePrompt`: send the draft to run
     /// after the run in flight. Idle it does nothing, so a stray Tab
     /// never sends a prompt.
-    fn queue_prompt(&mut self) {
+    fn queue_prompt(&mut self) -> Option<AppExit> {
         if self.is_run_in_flight()
             && let Some(text) = self.input.take_prompt()
         {
-            self.handle_submit(text, true);
+            return self.handle_submit(text, true);
         }
+        None
     }
 
     /// Resolve an `InputAction::SteerNow`: stop the run in flight and
     /// send the draft as the next run. In an agent's view it steers, as
     /// `enter` does: an agent takes no prompt once stopped. A command
     /// runs as one. Idle it does nothing, like queueing.
-    fn steer_now(&mut self) {
+    fn steer_now(&mut self) -> Option<AppExit> {
         if !self.is_run_in_flight() {
-            return;
+            return None;
         }
-        let Some(text) = self.input.take_prompt() else {
-            return;
-        };
+        let text = self.input.take_prompt()?;
         if text.starts_with('/') || self.focus.is_some() || self.mcp_expands(&text) {
-            self.handle_submit(text, false);
-            return;
+            return self.handle_submit(text, false);
         }
         let images = self.input.take_attached();
         let pending = view::PendingPrompt {
@@ -84,13 +83,14 @@ impl App {
             .is_err()
         {
             self.push_error("submit failed: agent worker has stopped");
-            return;
+            return None;
         }
         self.follow();
         // It runs before anything queued, right after the steers the
         // stop hands back.
         let at = self.pending.partition_point(|(_, p)| !p.queued);
         self.pending.insert(at, (None, pending));
+        None
     }
 
     /// Resolve an `InputAction::RecallPrompt`: take the newest pending
@@ -174,9 +174,9 @@ impl App {
 
     pub(crate) fn apply(&mut self, action: InputAction) -> Option<AppExit> {
         match action {
-            InputAction::Submit(text) => self.handle_submit(text, false),
-            InputAction::QueuePrompt => self.queue_prompt(),
-            InputAction::SteerNow => self.steer_now(),
+            InputAction::Submit(text) => return self.handle_submit(text, false),
+            InputAction::QueuePrompt => return self.queue_prompt(),
+            InputAction::SteerNow => return self.steer_now(),
             InputAction::RecallPrompt => self.recall_prompt(),
             InputAction::Escape => return self.escalate(keys::Trigger::Esc),
             InputAction::RunShell(text) => self.handle_shell(text),

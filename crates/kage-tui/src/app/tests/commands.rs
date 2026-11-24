@@ -566,6 +566,54 @@ fn validated_valid_command_returns_done() {
 }
 
 #[test]
+fn slash_quit_submit_returns_exit() {
+    let (mut app, rx, _events) = app_with_events();
+    assert_eq!(
+        app.apply(InputAction::Submit("/quit".to_owned())),
+        Some(AppExit::Quit)
+    );
+    assert!(rx_idle(&rx));
+}
+
+#[test]
+fn slash_quit_keystrokes_return_exit() {
+    let (mut app, rx, _events) = app_with_events();
+    type_str(&mut app, "/quit");
+    assert_eq!(app.handle_key(code(KeyCode::Enter)), Some(AppExit::Quit));
+    assert!(app.input.text().is_empty());
+    assert!(rx_idle(&rx));
+}
+
+#[test]
+fn slash_quit_queue_and_steer_return_exit() {
+    for action in [InputAction::QueuePrompt, InputAction::SteerNow] {
+        let (mut app, rx, _events) = app_with_events();
+        let usage = crate::usage::shared_session_usage();
+        usage.lock().unwrap().working = true;
+        app.set_session_usage(usage);
+        type_str(&mut app, "/quit");
+        assert_eq!(app.apply(action), Some(AppExit::Quit));
+        assert!(app.input.text().is_empty());
+        assert!(rx_idle(&rx));
+    }
+}
+
+#[test]
+fn submit_without_exit_keeps_the_app_running() {
+    let (mut app, rx, _events) = app_with_events();
+    assert_eq!(app.apply(InputAction::Submit("hello".to_owned())), None);
+    assert!(matches!(rx.try_recv(), Ok(RunRequest::Submit { text, .. }) if text == "hello"));
+    assert_eq!(app.apply(InputAction::Submit("/".to_owned())), None);
+    assert_eq!(app.apply(InputAction::Submit("/help".to_owned())), None);
+    assert_eq!(
+        app.apply(InputAction::Submit("/not-a-command".to_owned())),
+        None
+    );
+    assert_eq!(app.input.text(), "/not-a-command");
+    assert!(rx_idle(&rx));
+}
+
+#[test]
 fn validated_quit_returns_done_with_exit() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();

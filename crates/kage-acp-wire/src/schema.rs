@@ -1829,6 +1829,32 @@ pub struct RegistryInstallResult {
     pub capabilities: Vec<String>,
 }
 
+/// `_kage/media/read` request params.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaReadRequest {
+    /// The open session whose recorded output to read.
+    pub session_id: String,
+    /// Return only images instead of images and audio clips.
+    #[serde(default)]
+    pub image_only: bool,
+    /// Return the MIME type and digest without transferring the media bytes.
+    #[serde(default)]
+    pub metadata_only: bool,
+}
+
+/// The newest image or audio clip produced in a session recording.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaReadResponse {
+    /// The media's MIME type.
+    pub mime: String,
+    /// The media's bytes encoded as standard base64, or empty for metadata only.
+    pub data: String,
+    /// The sha256 of the decoded bytes, lowercase hex.
+    pub sha256: String,
+}
+
 /// `_kage/image/save` request params. Despite the name, it saves an
 /// audio clip as well as an image.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -4637,6 +4663,37 @@ mod tests {
                 "sessionUpdate": "_kage/provider_retry", "attempt": 1,
                 "maxAttempts": 4, "waitSecs": 0, "waitMs": 250, "error": "busy"
             }),
+        );
+    }
+    #[test]
+    fn media_read_uses_camel_case_and_defaults_to_all_media() {
+        let request: MediaReadRequest = serde_json::from_value(serde_json::json!({
+            "sessionId": "session"
+        }))
+        .unwrap();
+        assert!(!request.image_only);
+        assert!(!request.metadata_only);
+        roundtrip(
+            &MediaReadRequest {
+                session_id: "session".into(),
+                image_only: true,
+                metadata_only: true,
+            },
+            serde_json::json!({"sessionId": "session", "imageOnly": true, "metadataOnly": true}),
+        );
+        roundtrip(
+            &MediaReadResponse {
+                mime: "audio/mpeg".into(),
+                data: "Y2xpcA==".into(),
+                sha256: "digest".into(),
+            },
+            serde_json::json!({"mime": "audio/mpeg", "data": "Y2xpcA==", "sha256": "digest"}),
+        );
+        assert!(
+            serde_json::from_value::<MediaReadResponse>(serde_json::json!({
+                "mime": "image/png", "data": "aW1hZ2U="
+            }))
+            .is_err()
         );
     }
 }

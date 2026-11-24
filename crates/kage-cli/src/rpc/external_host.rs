@@ -36,6 +36,7 @@ impl CliAcpAgent {
             crate::plan_session_in(&self.host.sessions, Path::new(cwd), "external", "");
         header.cwd = PathBuf::from(cwd);
         let id = header.session.to_string();
+        let env = lock(&self.env).clone();
         let started = external::External::start(
             &self.host.lifecycles,
             external::Launch {
@@ -43,6 +44,7 @@ impl CliAcpAgent {
                 name,
                 cwd,
                 config: &config,
+                env,
                 owner: self.connection,
                 peer: self.peer.clone(),
                 record: Some(external::Recording::Create {
@@ -94,6 +96,7 @@ impl CliAcpAgent {
             }
             other => RpcError::internal(format!("cannot open external session file: {other}")),
         })?;
+        let env = lock(&self.env).clone();
         let started = external::External::start(
             &self.host.lifecycles,
             external::Launch {
@@ -101,6 +104,7 @@ impl CliAcpAgent {
                 name: &backend.agent_name,
                 cwd: &cwd,
                 config: &config,
+                env,
                 owner: self.connection,
                 peer: self.peer.clone(),
                 record: Some(external::Recording::Append {

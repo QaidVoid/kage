@@ -30,7 +30,7 @@ impl Env {
             config.join("config.toml"),
             format!(
                 "[acp.agents.fake]\ncommand = \"python3\"\nargs = [{}]\n\n\
-                 [acp.agents.fake.env]\nHISTORY_FILE = {}\n",
+                 [acp.agents.fake.env]\nHISTORY_FILE = {}\nKAGE_EXTERNAL_OVERRIDE = \"configured\"\n",
                 serde_json::to_string(script.to_str().unwrap()).unwrap(),
                 serde_json::to_string(dir.path().join("history.json").to_str().unwrap()).unwrap(),
             ),
@@ -46,6 +46,10 @@ impl Env {
     /// A `kage rpc` relay, which starts the shared host when none runs. The
     /// host exits a second after its last client leaves.
     fn client(&self) -> Client {
+        self.client_with_env(&[])
+    }
+
+    fn client_with_env(&self, extra: &[(&str, &str)]) -> Client {
         let root = self.dir.path();
         let mut child = Command::new(env!("CARGO_BIN_EXE_kage"))
             .arg("rpc")
@@ -57,6 +61,7 @@ impl Env {
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_STATE_HOME", root.join("state"))
             .env("KAGE_HOST_IDLE_SECS", "1")
+            .envs(extra.iter().copied())
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -421,4 +426,82 @@ fn stopping_the_host_ends_its_external_agents() {
         agent_processes(&env).is_empty()
     });
     client.leave();
+}
+
+#[test]
+fn external_processes_use_the_opening_clients_environment() {
+    let env = Env::new();
+    let cwd = env.cwd();
+    let mut first = env.client_with_env(&[
+        ("KAGE_EXTERNAL_MARKER", "first"),
+        ("KAGE_EXTERNAL_HOST_ONLY", "host"),
+        ("KAGE_EXTERNAL_OVERRIDE", "first"),
+    ]);
+    first.initialize();
+    let mut second = env.client_with_env(&[
+        ("KAGE_EXTERNAL_MARKER", "second"),
+        ("KAGE_EXTERNAL_OVERRIDE", "second"),
+    ]);
+    second.initialize();
+    let created = second.request(
+        "session/new",
+        json!({"cwd": cwd, "mcpServers": [], "_meta": {"kage": {"externalAgent": "fake"}}}),
+    );
+    let session = created["sessionId"].as_str().unwrap();
+    assert_child_environment(&mut second, session, "second", None);
+
+    first.request(
+        "session/resume",
+        json!({"sessionId": session, "cwd": cwd, "mcpServers": []}),
+    );
+    assert_child_environment(&mut first, session, "second", None);
+    assert_eq!(agent_processes(&env).len(), 1);
+    for client in [&mut first, &mut second] {
+        client.request("session/close", json!({"sessionId": session}));
+    }
+    wait_until("the agent remained live after close", || {
+        agent_processes(&env).is_empty()
+    });
+
+    second.request(
+        "session/load",
+        json!({"sessionId": session, "cwd": cwd, "mcpServers": []}),
+    );
+    assert_child_environment(&mut second, session, "second", None);
+    second.request("session/close", json!({"sessionId": session}));
+    wait_until("the restored agent remained live after close", || {
+        agent_processes(&env).is_empty()
+    });
+
+    first.request(
+        "session/resume",
+        json!({"sessionId": session, "cwd": cwd, "mcpServers": []}),
+    );
+    assert_child_environment(&mut first, session, "first", Some("host"));
+    first.request("session/close", json!({"sessionId": session}));
+    first.leave();
+    second.leave();
+    wait_until("the restored agent outlived its clients", || {
+        agent_processes(&env).is_empty()
+    });
+}
+
+fn assert_child_environment(client: &mut Client, session: &str, marker: &str, host: Option<&str>) {
+    client.held.clear();
+    let prompt = client.prompt(session, "environment");
+    assert_eq!(client.stop_reason(prompt), "end_turn");
+    let update = client.wait_for("child environment", |message| {
+        message["method"] == "session/update"
+            && message["params"]["update"]["content"]["text"]
+                .as_str()
+                .is_some_and(|text| text.starts_with("environment:"))
+    });
+    let text = update["params"]["update"]["content"]["text"]
+        .as_str()
+        .unwrap();
+    let actual: Value = serde_json::from_str(text.strip_prefix("environment:").unwrap()).unwrap();
+    assert_eq!(
+        actual,
+        json!({"marker": marker, "override": "configured", "hostOnly": host})
+    );
 }

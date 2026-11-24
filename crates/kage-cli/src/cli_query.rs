@@ -97,7 +97,7 @@ pub(crate) fn run_resume(
         for id in plugins::merge_plugin_providers(rt, &mut registry) {
             eprintln!("kage: plugin provider `{id}` shadows the built-in registration");
         }
-        acp_glue::set_runtime(rt);
+        acp_glue::set_runtime(Some(rt));
     }
 
     let model = provisional_model;

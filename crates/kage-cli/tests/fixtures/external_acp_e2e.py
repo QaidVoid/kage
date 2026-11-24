@@ -52,7 +52,13 @@ for line in sys.stdin:
         result = {}
     elif method == 'session/prompt':
         text = params['prompt'][0]['text']
-        if text == 'wait':
+        if text == 'environment':
+            update('environment:' + json.dumps({
+                'marker': os.environ.get('KAGE_EXTERNAL_MARKER'),
+                'override': os.environ.get('KAGE_EXTERNAL_OVERRIDE'),
+                'hostOnly': os.environ.get('KAGE_EXTERNAL_HOST_ONLY')}))
+            result = {'stopReason': 'end_turn'}
+        elif text == 'wait':
             update('waiting')
             while next_message().get('method') != 'session/cancel':
                 pass

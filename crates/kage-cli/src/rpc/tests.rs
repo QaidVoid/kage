@@ -311,7 +311,7 @@ fn serve_on_host(
                     };
                     spec.recorder = Some(Recorder::planned(path, header, spec.plugins.clone()));
                 }
-                agent.open(id.to_string(), spec, runtime);
+                agent.open(&agent.host.providers(), id.to_string(), spec, runtime);
                 agent.session_announced(&id.to_string());
                 let _ = opened_tx.send(());
             })
@@ -5615,7 +5615,7 @@ fn serve_paused(
                     None,
                 )
                 .unwrap();
-                agent.open(id.to_string(), spec, runtime);
+                agent.open(&agent.host.providers(), id.to_string(), spec, runtime);
                 agent.session_announced(&id.to_string());
                 let _ = opened_tx.send(());
             })
@@ -8267,11 +8267,17 @@ fn a_configuration_change_brings_mcp_servers_in_line() {
             .collect::<Vec<_>>()
     };
     let commander = h.host.engine.commander();
-    commander.sync_mcp(h.id, BTreeMap::from([("ed".to_owned(), spec)]));
+    commander.sync_mcp(
+        h.id,
+        kage_core::config::McpConfig {
+            servers: BTreeMap::from([("ed".to_owned(), spec)]),
+            ..Default::default()
+        },
+    );
     let added = updates_until(&h.inbox, &h.session, "_kage/mcp_servers");
     assert!(names(&added).contains(&"ed".to_owned()), "{added:?}");
     assert!(names(&added).contains(&"srv".to_owned()));
-    commander.sync_mcp(h.id, BTreeMap::new());
+    commander.sync_mcp(h.id, kage_core::config::McpConfig::default());
     let removed = updates_until(&h.inbox, &h.session, "_kage/mcp_servers");
     assert!(!names(&removed).contains(&"ed".to_owned()), "{removed:?}");
 }
@@ -8735,8 +8741,7 @@ fn new_session_with_opt(
     h.client.request("session/new", params)
 }
 
-/// `session/new` opens on the model the client names when the host can
-/// run it, in one request, and on the host's default otherwise.
+/// `session/new` accepts runnable explicit models even before they are listed.
 #[test]
 fn session_new_opens_on_the_model_the_client_names() {
     let current_model = |opened: &serde_json::Value| {
@@ -8748,7 +8753,10 @@ fn session_new_opens_on_the_model_the_client_names() {
             .map(|option| option["currentValue"].clone())
             .unwrap()
     };
-    for (asked, opened_on) in [("mock/other", "mock/other"), ("nope/x", "mock/m")] {
+    for (asked, opened_on) in [
+        ("mock/other", "mock/other"),
+        ("mock/unlisted", "mock/unlisted"),
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let h = serve(vec![text_turn("hi")], dir.path(), dir.path());
         initialize(&h.client);
@@ -8858,6 +8866,7 @@ fn external_race_session(
             name: "fake",
             cwd: dir.to_str().unwrap(),
             config: &config,
+            env: Environment::inherit(),
             owner: owner.connection,
             peer: owner.peer.clone(),
             record: None,
@@ -9290,6 +9299,7 @@ for line in sys.stdin:
             name: "fake",
             cwd: dir.path().to_str().unwrap(),
             config: &config,
+            env: Environment::inherit(),
             owner: owner.connection,
             peer: owner.peer.clone(),
             record: None,
@@ -10932,4 +10942,110 @@ fn attaching_mid_child_attempt_replays_and_seeds_its_rollback_identity() {
             );
         }
     }
+}
+
+#[test]
+fn an_explicit_unavailable_model_cannot_create_a_fallback_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(Vec::new(), dir.path(), dir.path());
+    initialize(&h.client);
+    let before = lock(&h.host.instances).len();
+    let error = h
+        .client
+        .request(
+            "session/new",
+            serde_json::json!({
+                "cwd": dir.path(),
+                "mcpServers": [],
+                "_meta": {"kage": {"model": "missing-provider/private"}}
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, -32602);
+    assert!(
+        error.message.contains("missing-provider/private"),
+        "{error:?}"
+    );
+    assert_eq!(lock(&h.host.instances).len(), before);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn media_read_uses_the_full_recording_and_requires_a_session_attachment() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut entries = vec![
+        message(Role::User, vec![text("make an image")], None),
+        message(
+            Role::Assistant,
+            vec![Content::Image {
+                source: kage_core::MediaSource::Base64 {
+                    data: "aGk=".into(),
+                },
+                mime: "image/png".into(),
+            }],
+            None,
+        ),
+    ];
+    for turn in 0..4 {
+        entries.push(message(
+            Role::User,
+            vec![text(&format!("later {turn}"))],
+            None,
+        ));
+        entries.push(message(Role::Assistant, vec![text("reply")], None));
+    }
+    let source = record(
+        dir.path(),
+        &dir.path().display().to_string(),
+        "mock/m",
+        1,
+        &entries,
+    );
+    let h = serve(Vec::new(), dir.path(), dir.path());
+    let windowed = h.connect();
+    windowed
+        .client
+        .request(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": 1,
+                "clientCapabilities": {"_meta": {"kage": {"historyWindow": 2}}}
+            }),
+        )
+        .unwrap();
+    windowed
+        .client
+        .request(
+            "session/load",
+            serde_json::json!({
+                "sessionId": source, "cwd": dir.path(), "mcpServers": []
+            }),
+        )
+        .unwrap();
+    let updates = drain_quiet(&windowed.inbox, &source);
+    assert_eq!(user_texts(&updates), ["later 3"]);
+    let media = windowed
+        .client
+        .request(
+            "_kage/media/read",
+            serde_json::json!({
+                "sessionId": source, "imageOnly": true
+            }),
+        )
+        .unwrap();
+    assert_eq!(media["mime"], "image/png");
+    assert_eq!(media["data"], "aGk=");
+    assert_eq!(media["sha256"], kage_session::BlobStore::digest(b"hi"));
+    let other = h.connect();
+    initialize(&other.client);
+    let error = other
+        .client
+        .request(
+            "_kage/media/read",
+            serde_json::json!({
+                "sessionId": source, "imageOnly": true
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, -32602);
 }

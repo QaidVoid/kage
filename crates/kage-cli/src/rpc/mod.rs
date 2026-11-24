@@ -45,6 +45,7 @@ mod fs;
 pub(crate) mod host;
 mod live;
 mod mcp;
+mod media;
 mod models;
 #[cfg(unix)]
 mod native;
@@ -720,8 +721,9 @@ impl CliAcpAgent {
     /// The config options a new session opens with: the default model,
     /// its automatic thinking level and no permission mode.
     fn default_options(&self) -> Vec<SessionConfigOption> {
-        let settings = Settings::fresh(&self.host.default_model, &self.host.registry());
-        config_options(&self.host.models(), &settings)
+        let providers = self.host.providers();
+        let settings = Settings::fresh(&providers.default_model, &providers.registry);
+        config_options(&providers.models, &settings)
     }
 
     /// The session plugins a `session/new` asks for: a proxy over the
@@ -757,8 +759,13 @@ impl CliAcpAgent {
     /// with the permission fallback the client asked for at
     /// `initialize`, and the settings its `session/new` asked for.
     /// Agents the session starts inherit its gate.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the session setup and its provider snapshot"
+    )]
     fn session_spec(
         &self,
+        providers: &host::ProviderSnapshot,
         id: SessionId,
         cwd: &str,
         model: &str,
@@ -768,7 +775,7 @@ impl CliAcpAgent {
     ) -> Result<(SessionSpec, Option<Arc<PluginRuntime>>), RpcError> {
         let env = lock(&self.env).clone();
         let (mut spec, runtime) = (self.host.spec)(
-            &self.host.registry(),
+            &providers.registry,
             id,
             cwd,
             model,
@@ -801,12 +808,13 @@ impl CliAcpAgent {
     /// [`Agent::session_announced`].
     fn open(
         &self,
+        providers: &host::ProviderSnapshot,
         client_id: String,
         spec: SessionSpec,
         runtime: Option<Arc<PluginRuntime>>,
     ) -> Vec<SessionConfigOption> {
-        let settings = Settings::of(&spec, &self.host.registry());
-        let options = config_options(&self.host.models(), &settings);
+        let settings = Settings::of(&spec, &providers.registry);
+        let options = config_options(&providers.models, &settings);
         let shown = Shown {
             settings: settings.clone(),
             catching_up: false,
@@ -1176,25 +1184,37 @@ impl Agent for CliAcpAgent {
             ));
         }
         let servers = editor_servers(&req.mcp_servers)?;
-        let model = req
+        let providers = self.host.providers();
+        let model = match req
             .meta
             .as_ref()
             .and_then(|meta| meta.kage.as_ref())
-            .and_then(|kage| kage.model.clone())
-            .filter(|model| self.host.registry().resolve(model).is_ok())
-            .unwrap_or_else(|| self.host.default_model.clone());
+            .and_then(|kage| kage.model.as_deref())
+        {
+            Some(model) => {
+                providers.registry.resolve(model).map_err(|error| {
+                    RpcError::new(
+                        -32602,
+                        format!("cannot resolve requested model {model}: {error}"),
+                    )
+                })?;
+                model.to_owned()
+            }
+            None => providers.default_model.clone(),
+        };
         let (path, mut header) =
             crate::plan_session_in(&self.host.sessions, Path::new(&req.cwd), &model, "");
         let id = header.session;
         let plugins = self.hosted_plugins(id, req.meta.as_ref())?;
         let settings =
             SessionSettings::of(req.meta.as_ref(), self.kage_client.load(Ordering::SeqCst))?;
-        let (mut spec, runtime) =
-            self.session_spec(id, &req.cwd, &model, servers, plugins, &settings)?;
+        let (mut spec, runtime) = self.session_spec(
+            &providers, id, &req.cwd, &model, servers, plugins, &settings,
+        )?;
         header.cwd.clone_from(&spec.cx.workdir);
         header.system_prompt.clone_from(&spec.cx.system_prompt);
         spec.recorder = Some(Recorder::planned(path, header, spec.plugins.clone()));
-        let config_options = self.open(id.to_string(), spec, runtime);
+        let config_options = self.open(&providers, id.to_string(), spec, runtime);
         Ok(NewSessionResponse {
             session_id: id.to_string(),
             config_options,
@@ -1394,19 +1414,17 @@ impl Agent for CliAcpAgent {
             let shown = shown.get_mut(&id).ok_or_else(|| {
                 RpcError::new(-32602, format!("unknown session {}", req.session_id))
             })?;
+            let providers = self.host.providers();
             let commands = shown.settings.apply(
-                &self.host.models(),
-                &self.host.registry(),
+                &providers.models,
+                &providers.registry,
                 &req.config_id,
                 &req.value,
             )?;
             shown.catching_up = true;
             shown.changed.absorb(&commands);
             shown.swallowed = 0;
-            (
-                commands,
-                config_options(&self.host.models(), &shown.settings),
-            )
+            (commands, config_options(&providers.models, &shown.settings))
         };
         for command in commands {
             self.host.engine.send(Command::to(id, command));
@@ -1484,11 +1502,9 @@ impl Agent for CliAcpAgent {
         ))
     }
 
-    /// Saves or removes the key, then reloads the providers so one that
-    /// had no key before registers.
+    /// Rebuilds providers and choices from local configuration and caches.
     fn providers_reload(&self) -> Result<serde_json::Value, RpcError> {
         self.host.reload_providers().map_err(RpcError::internal)?;
-        self.host.fetch_missing_lists();
         Ok(serde_json::json!({}))
     }
 
@@ -1695,6 +1711,13 @@ impl Agent for CliAcpAgent {
         let id = self.engine_id(&req.session_id)?;
         self.host.engine.send(Command::to(id, CommandKind::Compact));
         Ok(serde_json::json!({}))
+    }
+
+    fn media_read(
+        &self,
+        req: kage_acp::acp::MediaReadRequest,
+    ) -> Result<kage_acp::acp::MediaReadResponse, RpcError> {
+        self.read_media(&req)
     }
 
     fn models_list(&self) -> Result<ModelsResponse, RpcError> {

@@ -134,6 +134,20 @@ pub enum Change {
         /// The transcript as Markdown.
         markdown: String,
     },
+    /// Produced media read from the full session recording, delivered once
+    /// without retaining its bytes in client state.
+    MediaRead {
+        /// The id of the request answered.
+        request: u64,
+        /// The session whose output was read.
+        session: String,
+        /// The media's MIME type.
+        mime: String,
+        /// The media's bytes encoded as standard base64, or empty for metadata only.
+        data: String,
+        /// The sha256 of the decoded bytes, lowercase hex.
+        sha256: String,
+    },
     /// A `_kage/models/list` answer arrived: every model the engine can
     /// run now, by provider.
     Models {
@@ -244,6 +258,7 @@ impl Change {
             | Self::Rewound { session_id }
             | Self::Deleted { session_id } => Some(session_id),
             Self::Forked { from, .. } => Some(from),
+            Self::MediaRead { session, .. } => Some(session),
             Self::Connection
             | Self::Directory
             | Self::Config { .. }

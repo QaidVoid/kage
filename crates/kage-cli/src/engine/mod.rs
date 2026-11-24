@@ -14,7 +14,7 @@ mod agents;
 mod bus;
 mod edit_image_tool;
 mod image_tool;
-mod images;
+pub(crate) mod images;
 mod mailbox_tool;
 mod mcp;
 mod media_tool;
@@ -244,12 +244,9 @@ impl Commander {
     /// Bring session `id`'s configured MCP servers in line with
     /// `servers`, the configuration as it reads now: at once when the
     /// session is idle, else at its next run start, since calls in
-    /// flight hold the old connections.
-    pub(crate) fn sync_mcp(
-        &self,
-        id: SessionId,
-        servers: BTreeMap<String, kage_core::config::McpServer>,
-    ) {
+    /// flight hold the old connections. Sampling acceptance is revoked
+    /// as soon as the dispatcher observes a disabled policy.
+    pub(crate) fn sync_mcp(&self, id: SessionId, servers: kage_core::config::McpConfig) {
         let _ = self.0.send(Input::SyncMcp { id, servers });
     }
 }
@@ -318,7 +315,7 @@ enum Input {
     /// The MCP servers the configuration of a session names now.
     SyncMcp {
         id: SessionId,
-        servers: BTreeMap<String, kage_core::config::McpServer>,
+        servers: kage_core::config::McpConfig,
     },
     ShellDone(Box<ShellDone>),
     Title {
@@ -598,7 +595,9 @@ struct Session {
     mcp_restarts: Vec<String>,
     /// The MCP servers the configuration names now, waiting like the
     /// restarts to be brought in line with.
-    mcp_specs: Option<BTreeMap<String, kage_core::config::McpServer>>,
+    mcp_specs: Option<kage_core::config::McpConfig>,
+    /// Shared with connections even while maintenance holds the manager.
+    mcp_sampling: Option<kage_mcp::SamplingPolicy>,
     interactive: bool,
     /// Session file, when the session is recorded.
     path: Option<PathBuf>,
@@ -889,6 +888,7 @@ impl Dispatcher {
                 plugins,
                 gate,
                 loop_cfg,
+                mcp_sampling: mcp.as_ref().map(McpManager::sampling_policy),
                 mcp,
                 mcp_restarts: Vec::new(),
                 mcp_specs: None,

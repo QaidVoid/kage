@@ -21,7 +21,7 @@ use kage_core::sync::lock;
 use kage_jsonrpc::RpcError;
 use kage_loop::{AgentContext, LoopConfig};
 use kage_plugin::{PluginRuntime, session_plugins::SessionPlugins};
-use kage_provider::{Provider, ProviderRegistry};
+use kage_provider::ProviderRegistry;
 
 use super::options::{Settings, choice};
 use super::projects::{Project, Projects};
@@ -107,6 +107,16 @@ impl<W> Drop for DoneOnDrop<W> {
     }
 }
 
+/// The providers, model choices, and default published by one host reload.
+pub(crate) struct ProviderSnapshot {
+    /// The providers available to run models.
+    pub(crate) registry: Arc<ProviderRegistry>,
+    /// The model choices those providers advertise.
+    pub(crate) models: Arc<[SessionConfigSelectOption]>,
+    /// The model new sessions use without an explicit choice.
+    pub(crate) default_model: String,
+}
+
 /// One engine with the shared setup of [`CliAcpAgent`], behind every
 /// connection served on the host.
 pub(crate) struct Host {
@@ -117,8 +127,8 @@ pub(crate) struct Host {
     /// External sessions being restored, so one starts only one process.
     pub(super) restoring: Mutex<std::collections::HashSet<String>>,
     /// The providers in effect, replaced when the config's change.
-    registry: RwLock<Arc<ProviderRegistry>>,
-    pub(super) default_model: String,
+    providers: RwLock<Arc<ProviderSnapshot>>,
+    model_override: Mutex<Option<String>>,
     pub(super) sessions: PathBuf,
     pub(super) spec: SpecBuilder,
     /// The model choices `registry` offers, shared with every
@@ -127,9 +137,6 @@ pub(crate) struct Host {
     /// Held across a reload of the providers, so two at once cannot
     /// leave the older build in effect.
     reloading: Mutex<()>,
-    /// The providers the server's plugins registered at startup, kept
-    /// over every rebuild of `registry`.
-    plugin_providers: Mutex<Vec<Arc<dyn Provider>>>,
     /// Advertised name to real name for the tools each open session
     /// renamed, by `[tools.rename]` in its project or by its plugins,
     /// for the bridges' card titles and kind hints.
@@ -176,7 +183,7 @@ impl Host {
         yolo: bool,
     ) -> Result<Arc<Self>, String> {
         let mut registry = crate::build_provider_registry()?;
-        let plugin_providers = merge_plugin_providers(&mut registry, model_override, system_role);
+        merge_plugin_providers(&mut registry, model_override, system_role);
         let default_model =
             model_override.map_or_else(|| crate::default_model(&registry), str::to_owned);
         if crate::has_usable_provider(&registry) {
@@ -227,7 +234,7 @@ impl Host {
             )
         };
         let host = Self::new(registry, default_model, sessions, spec);
-        *lock(&host.plugin_providers) = plugin_providers;
+        *lock(&host.model_override) = model_override.map(str::to_owned);
         let _ = host.projects.set(projects);
         system_role.clone_into(&mut lock(&host.system_role));
         host.watch_config();
@@ -264,6 +271,9 @@ impl Host {
     /// open session's directory.
     fn config_files(&self) -> Vec<PathBuf> {
         let mut files: Vec<PathBuf> = Config::default_path().into_iter().collect();
+        if let Ok(dir) = crate::config_dir() {
+            files.push(dir.join("init.lua"));
+        }
         for workdir in lock(&self.workdirs).values() {
             let project = Config::project_path(workdir);
             if !files.contains(&project) {
@@ -278,10 +288,15 @@ impl Host {
     /// open session whose configuration changed brings its MCP servers
     /// in line.
     fn config_changed(self: &Arc<Self>, changed: &[PathBuf]) {
-        let user = Config::default_path().is_some_and(|path| changed.contains(&path));
+        let user = Config::default_path().is_some_and(|path| changed.contains(&path))
+            || crate::config_dir().is_ok_and(|dir| changed.contains(&dir.join("init.lua")));
         if user {
             match self.reload_providers() {
-                Ok(()) => self.fetch_missing_lists(),
+                Ok(()) => {
+                    if Config::load_default_raw().is_ok_and(|config| config.models.auto_refresh) {
+                        self.fetch_missing_lists();
+                    }
+                }
                 Err(e) => eprintln!("kage: providers not reloaded: {e}"),
             }
         }
@@ -317,13 +332,16 @@ impl Host {
             external: Mutex::default(),
             lifecycles: super::external::Lifecycles::new(super::external::MAX_SESSIONS),
             restoring: Mutex::default(),
-            registry: RwLock::new(registry),
-            default_model,
+            providers: RwLock::new(Arc::new(ProviderSnapshot {
+                registry,
+                models: Arc::clone(&models),
+                default_model,
+            })),
+            model_override: Mutex::default(),
             sessions,
             spec,
             models: Arc::new(RwLock::new(models)),
             reloading: Mutex::default(),
-            plugin_providers: Mutex::default(),
             aliases: Arc::default(),
             live,
             open: Arc::default(),
@@ -387,46 +405,60 @@ impl Host {
             .expect("the host prune thread");
     }
 
-    /// The providers in effect.
-    pub(super) fn registry(&self) -> Arc<ProviderRegistry> {
+    /// The providers, model choices, and default from the same reload.
+    pub(crate) fn providers(&self) -> Arc<ProviderSnapshot> {
         Arc::clone(
             &self
-                .registry
+                .providers
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
     }
 
-    /// The model choices in effect, as a reload replaces them.
+    /// The providers in effect.
+    pub(super) fn registry(&self) -> Arc<ProviderRegistry> {
+        Arc::clone(&self.providers().registry)
+    }
+
+    /// The model new sessions use without an explicit choice.
+    pub(super) fn default_model(&self) -> String {
+        self.providers().default_model.clone()
+    }
+
+    /// The model choices shared with connection event bridges.
     pub(super) fn shared_models(&self) -> Arc<RwLock<Arc<[SessionConfigSelectOption]>>> {
         Arc::clone(&self.models)
     }
 
     /// The model choices the providers in effect offer.
     pub(super) fn models(&self) -> Arc<[SessionConfigSelectOption]> {
-        Arc::clone(
-            &self
-                .models
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+        Arc::clone(&self.providers().models)
     }
 
-    /// Rebuilds the providers from the user config, keeping the ones
-    /// plugins registered, so the next session and the engine's next
-    /// run use an edited `[providers]` section.
+    /// Rebuilds configured and Lua providers without fetching model lists.
     pub(crate) fn reload_providers(&self) -> Result<(), String> {
         let _reloading = lock(&self.reloading);
         let mut registry = crate::build_provider_registry()?;
-        for provider in lock(&self.plugin_providers).iter() {
-            registry.register(Arc::clone(provider));
-        }
+        let model_override = lock(&self.model_override);
+        merge_plugin_providers(
+            &mut registry,
+            model_override.as_deref(),
+            &lock(&self.system_role),
+        );
+        let default_model = model_override
+            .as_deref()
+            .map_or_else(|| crate::default_model(&registry), str::to_owned);
         let registry = Arc::new(registry);
         let models = model_choices(&registry);
+        let snapshot = Arc::new(ProviderSnapshot {
+            registry: Arc::clone(&registry),
+            models: Arc::clone(&models),
+            default_model,
+        });
         *self
-            .registry
+            .providers
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::clone(&registry);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
         *self
             .models
             .write()
@@ -622,18 +654,17 @@ impl Host {
     /// default model, the system prompt a session there would start with,
     /// and `env`, when no session has.
     pub(super) fn project(&self, workdir: &std::path::Path, env: &Environment) -> Option<Project> {
+        let model = self.default_model();
         let prompt = || {
             crate::runtime_env::build_system_prompt(
                 lock(&self.system_role).as_str(),
                 workdir,
-                &self.default_model,
+                &model,
                 &[],
                 None,
             )
         };
-        self.projects
-            .get()?
-            .get(workdir, &self.default_model, &prompt, env)
+        self.projects.get()?.get(workdir, &model, &prompt, env)
     }
 
     /// Installs the project registry a test host loads runtimes from.
@@ -775,44 +806,25 @@ impl Host {
     }
 }
 
-/// Load the plugins of the server's directory once and add the
-/// providers they register, so a model only a plugin provides passes
-/// the startup checks and resolves for every session, as it does in the
-/// TUI and print mode. The runtime is kept for the process, which keeps
-/// the merged providers' Lua state alive.
+/// Loads the host's Lua providers, including the user's init.lua.
 fn merge_plugin_providers(
     registry: &mut ProviderRegistry,
     model_override: Option<&str>,
     system_role: &str,
-) -> Vec<Arc<dyn Provider>> {
+) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let model = model_override.map_or_else(|| crate::default_model(registry), str::to_owned);
     let bare = crate::runtime_env::build_system_prompt(system_role, &cwd, &model, &[], None);
-    let runtime = match crate::plugins_dir() {
-        Ok(dir) => {
-            crate::plugins::setup_runtime(&dir, &cwd, &model, &bare, &Environment::inherit())
-                .unwrap_or_else(|e| {
-                    eprintln!("kage: {e}");
-                    None
-                })
-        }
-        Err(e) => {
-            eprintln!("kage: {e}");
-            None
-        }
+    let Some(project) =
+        Projects::default().get(&cwd, &model, &|| bare.clone(), &Environment::inherit())
+    else {
+        crate::acp_glue::set_runtime(None);
+        return;
     };
-    let Some(runtime) = runtime else {
-        return Vec::new();
-    };
-    for id in crate::plugins::merge_plugin_providers(&runtime, registry) {
+    for id in crate::plugins::merge_plugin_providers(&project.runtime, registry) {
         eprintln!("kage: plugin provider `{id}` shadows the built-in registration");
     }
-    crate::acp_glue::set_runtime(&runtime);
-    runtime
-        .registered_providers()
-        .into_iter()
-        .map(|provider| provider as Arc<dyn Provider>)
-        .collect()
+    crate::acp_glue::set_runtime(Some(&project.runtime));
 }
 
 /// The model choices `registry` offers a client.

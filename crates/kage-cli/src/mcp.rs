@@ -158,19 +158,19 @@ fn merged_config(workdir: &Path, runtime: Option<&PluginRuntime>) -> McpConfig {
     merged
 }
 
-/// The MCP servers the configuration of `workdir` names now, with the
-/// ones `runtime`'s plugins declare. `None` when the configuration does
+/// The MCP policy and servers configured for `workdir`, including the
+/// servers `runtime`'s plugins declare. `None` when the configuration does
 /// not load, as while a file is half edited, so the running servers
 /// stay instead of all going down.
 pub(crate) fn configured_servers(
     workdir: &Path,
     runtime: Option<&PluginRuntime>,
-) -> Option<BTreeMap<String, McpServer>> {
-    let mut servers = Config::load_layered(workdir).ok()?.mcp.servers;
+) -> Option<McpConfig> {
+    let mut config = Config::load_layered(workdir).ok()?.mcp;
     if let Some(rt) = runtime {
-        servers.extend(rt.registered_mcp_servers());
+        config.servers.extend(rt.registered_mcp_servers());
     }
-    Some(servers)
+    Some(config)
 }
 
 /// Spawn every enabled MCP server and register its tools into
@@ -206,7 +206,7 @@ pub(crate) fn spawn_and_register_with(
 ) -> (McpManager, Vec<(String, McpError)>) {
     let mut cfg = merged_config(workdir, runtime);
     merge_extra(&mut cfg, extra);
-    let handler = sampling_handler(&cfg, workdir, &env);
+    let handler = sampling_handler(workdir, &env);
     let (mut manager, mut errors) = McpManager::spawn_all_with(
         &cfg,
         vec![workdir.to_path_buf()],
@@ -230,7 +230,7 @@ pub(crate) fn unstarted_with(
     let handed: Vec<String> = extra.keys().cloned().collect();
     let mut cfg = merged_config(workdir, runtime);
     merge_extra(&mut cfg, extra);
-    let handler = sampling_handler(&cfg, workdir, &env);
+    let handler = sampling_handler(workdir, &env);
     McpManager::unstarted(
         &cfg,
         vec![workdir.to_path_buf()],
@@ -251,19 +251,14 @@ fn merge_extra(cfg: &mut McpConfig, extra: BTreeMap<String, McpServer>) {
     }
 }
 
-/// Build the server-request handler when `[mcp] allow_sampling` is set,
-/// backed by the host's default model. Returns `None` when sampling is
-/// off, so servers never see a `sampling` capability advertised. The
+/// Build the server-request handler backed by the host's default model.
+/// The manager gates acceptance and capability advertisement. The
 /// handler answers with the session's `workdir` and `env`, since the
 /// ACP client launches the model subprocess with them.
 fn sampling_handler(
-    cfg: &McpConfig,
     workdir: &Path,
     env: &Environment,
 ) -> Option<std::sync::Arc<dyn kage_mcp::ServerRequestHandler>> {
-    if !cfg.allow_sampling {
-        return None;
-    }
     let registry = match crate::build_provider_registry() {
         Ok(registry) => registry,
         Err(e) => {

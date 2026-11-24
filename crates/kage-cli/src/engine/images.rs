@@ -97,7 +97,7 @@ impl super::Dispatcher {
 /// The MIME type and bytes of a media block of one of `kinds` that
 /// the model or one of its tools produced in the session at `path`:
 /// the one whose bytes hash to `sha256`, or the last one.
-fn produced_media(
+pub(crate) fn produced_media(
     path: &Path,
     sha256: Option<&str>,
     kinds: &[Modality],
@@ -194,7 +194,7 @@ pub(super) fn save(
 
 /// Copies the image into the cache under a name with its extension, so
 /// the viewer knows its type, and opens it there.
-fn open(mime: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+pub(crate) fn open(mime: &str, bytes: &[u8]) -> Result<PathBuf, String> {
     let dir = crate::cache_root()?.join("media");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let name = format!(
@@ -377,6 +377,48 @@ mod tests {
             produced_media(&path, Some(&attached), &[Modality::Image, Modality::Audio]).is_none(),
             "a user's clip is never produced"
         );
+    }
+
+    #[test]
+    fn media_lookup_hydrates_blobs_outside_a_replay_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut writer =
+            kage_session::SessionWriter::create(&path, session_header(dir.path())).unwrap();
+        let bytes = vec![42; kage_session::blobs::INLINE_MAX + 1];
+        writer.append(&image(Role::ToolResult, &bytes)).unwrap();
+        for _ in 0..300 {
+            writer
+                .append(&entry(
+                    Role::Assistant,
+                    Content::Text {
+                        text: "later output".into(),
+                    },
+                ))
+                .unwrap();
+        }
+        writer.append(&image(Role::User, b"attached")).unwrap();
+        drop(writer);
+
+        let recording = std::fs::read_to_string(&path).unwrap();
+        assert!(recording.contains("blob"), "large media is externalized");
+        let found = produced_media(&path, None, &[Modality::Image]).unwrap();
+        assert_eq!(found.0, "image/png");
+        assert_eq!(found.1, bytes);
+    }
+
+    #[test]
+    fn media_lookup_reports_absence_without_counting_attachments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut writer =
+            kage_session::SessionWriter::create(&path, session_header(dir.path())).unwrap();
+        writer.append(&image(Role::User, b"attached")).unwrap();
+        writer.append(&clip(Role::Assistant, b"clip")).unwrap();
+        drop(writer);
+
+        assert!(produced_media(&path, None, &[Modality::Image]).is_none());
+        assert!(produced_media(&dir.path().join("missing"), None, &[Modality::Image]).is_none());
     }
 
     #[test]

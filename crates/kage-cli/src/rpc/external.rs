@@ -11,6 +11,8 @@ pub(crate) struct Launch<'a> {
     pub(crate) name: &'a str,
     pub(crate) cwd: &'a str,
     pub(crate) config: &'a kage_core::config::AcpAgent,
+    /// The opening client's environment, before configured agent overrides.
+    pub(crate) env: kage_core::environment::Environment,
     pub(crate) owner: u64,
     pub(crate) peer: kage_acp::agent::AgentPeer,
     pub(crate) record: Option<Recording>,
@@ -612,13 +614,14 @@ mod unix {
                 name,
                 cwd,
                 config,
+                env,
                 owner,
                 peer,
                 record,
                 restore,
             } = launch;
             let startup = lifecycles.reserve()?;
-            let (mut connection, incoming) = spawn_agent(&startup, name, cwd, config)?;
+            let (mut connection, incoming) = spawn_agent(&startup, name, cwd, config, &env)?;
             let slot = startup.slot();
             let writers = Arc::new(AtomicUsize::new(0));
             let mut first = attachment(peer, slot, &writers)?;
@@ -646,8 +649,7 @@ mod unix {
                 turn_open: false,
                 discard_replay: false,
             }));
-            let session_id = id.clone();
-            let started = receive_updates(incoming, Arc::clone(&state), id, slot)
+            let started = receive_updates(incoming, Arc::clone(&state), id.clone(), slot)
                 .and_then(|()| initialize(&mut connection, &state, cwd, restore.as_ref()))
                 .and_then(|initialized| {
                     let seed = match &record {
@@ -674,8 +676,7 @@ mod unix {
                         .as_ref()
                         .is_some_and(|restore| restore.history)
                         .then_some(owner);
-                    let written =
-                        publish(&state, &session_id, &initialized, recorder, seed, history)?;
+                    let written = publish(&state, &id, &initialized, recorder, seed, history)?;
                     Ok((initialized.capabilities, written))
                 });
             let (capabilities, written) = match started {
@@ -690,7 +691,7 @@ mod unix {
                 }
             };
             let session = Arc::new(Self {
-                id: session_id,
+                id,
                 connection,
                 prompt_gate: Mutex::new(()),
                 admitted: Arc::new(AtomicUsize::new(0)),
@@ -1383,8 +1384,10 @@ mod unix {
         name: &str,
         cwd: &str,
         config: &kage_core::config::AcpAgent,
+        env: &kage_core::environment::Environment,
     ) -> Result<(UnixConnection, kage_acp::connection::Incoming), RpcError> {
         let mut command = Command::new(&config.command);
+        env.apply(&mut command);
         command
             .args(&config.args)
             .envs(&config.env)
@@ -2585,6 +2588,7 @@ for line in sys.stdin:
                     name: "fake",
                     cwd: cwd.to_str().unwrap(),
                     config: &config,
+                    env: kage_core::environment::Environment::inherit(),
                     owner: 1,
                     peer: peer.into(),
                     record: None,
@@ -2681,6 +2685,7 @@ for line in sys.stdin:
                     name: "fake",
                     cwd,
                     config: &config,
+                    env: kage_core::environment::Environment::inherit(),
                     owner: 1,
                     peer: peer.into(),
                     record: None,
@@ -2736,6 +2741,7 @@ for line in sys.stdin:
                     name: "fake",
                     cwd: cwd.to_str().unwrap(),
                     config: &config,
+                    env: kage_core::environment::Environment::inherit(),
                     owner: 1,
                     peer: peer.into(),
                     record: None,
@@ -2805,6 +2811,7 @@ for line in sys.stdin:
                     name: "fake",
                     cwd: cwd.to_str().unwrap(),
                     config: &config,
+                    env: kage_core::environment::Environment::inherit(),
                     owner: 1,
                     peer: peer.into(),
                     record: None,
@@ -2864,6 +2871,7 @@ for line in sys.stdin:
                     name: "fake",
                     cwd: cwd.to_str().unwrap(),
                     config: &config,
+                    env: kage_core::environment::Environment::inherit(),
                     owner: 1,
                     peer: peer.into(),
                     record: None,
@@ -2922,6 +2930,7 @@ for line in sys.stdin:
                     name: "fake",
                     cwd: cwd.to_str().unwrap(),
                     config: &config,
+                    env: kage_core::environment::Environment::inherit(),
                     owner: 1,
                     peer: peer.into(),
                     record: None,
@@ -2978,6 +2987,7 @@ for line in sys.stdin:
                     name: "fake",
                     cwd: cwd.to_str().unwrap(),
                     config: &config,
+                    env: kage_core::environment::Environment::inherit(),
                     owner: 1,
                     peer: peer.into(),
                     record: None,
@@ -3026,6 +3036,7 @@ for line in sys.stdin:
                     name: "fake",
                     cwd: cwd.to_str().unwrap(),
                     config: &config,
+                    env: kage_core::environment::Environment::inherit(),
                     owner: 1,
                     peer: peer.into(),
                     record: None,
@@ -3080,6 +3091,7 @@ for line in sys.stdin:
                     name: "fake",
                     cwd: cwd.to_str().unwrap(),
                     config: &config,
+                    env: kage_core::environment::Environment::inherit(),
                     owner: 1,
                     peer: peer.into(),
                     record: None,
@@ -4183,6 +4195,7 @@ for line in sys.stdin:
                     name: "fake",
                     cwd: cwd.to_str().unwrap(),
                     config: &config,
+                    env: kage_core::environment::Environment::inherit(),
                     owner: 1,
                     peer: peer.into(),
                     record: None,
@@ -4297,6 +4310,7 @@ for line in sys.stdin:
                     name: "fake",
                     cwd: cwd.to_str().unwrap(),
                     config: &config,
+                    env: kage_core::environment::Environment::inherit(),
                     owner: 1,
                     peer,
                     record: None,
@@ -4511,6 +4525,7 @@ for line in sys.stdin:
                     name: "fake",
                     cwd: dir.to_str().unwrap(),
                     config: &config,
+                    env: kage_core::environment::Environment::inherit(),
                     owner: 1,
                     peer: peer.into(),
                     record: Some(Recording::Create {
@@ -4676,6 +4691,7 @@ for line in sys.stdin:
                     name: "fake",
                     cwd: dir.to_str().unwrap(),
                     config: &config,
+                    env: kage_core::environment::Environment::inherit(),
                     owner: 1,
                     peer: peer.into(),
                     record: Some(Recording::Append {
@@ -5763,6 +5779,7 @@ for line in sys.stdin:
                     name: "fake",
                     cwd: cwd.to_str().unwrap(),
                     config: &config,
+                    env: kage_core::environment::Environment::inherit(),
                     owner: 1,
                     peer: peer.clone().into(),
                     record: None,
@@ -5836,6 +5853,7 @@ for line in sys.stdin:
                     name: "fake",
                     cwd: cwd.to_str().unwrap(),
                     config: &config,
+                    env: kage_core::environment::Environment::inherit(),
                     owner: 1,
                     peer: peer.clone().into(),
                     record: None,

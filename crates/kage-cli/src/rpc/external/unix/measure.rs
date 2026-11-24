@@ -109,6 +109,7 @@ fn flood_sessions(config: &kage_core::config::AcpAgent, clients: u64, flood: boo
                 name: "flood",
                 cwd: dir.path().to_str().unwrap(),
                 config,
+                env: kage_core::environment::Environment::inherit(),
                 owner: 1,
                 peer: peers[0].clone(),
                 record: Some(Recording::Create {

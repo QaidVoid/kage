@@ -1,10 +1,9 @@
 //! MCP restarts and list reloads off the dispatcher.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::thread;
 
-use kage_core::config::McpServer;
+use kage_core::config::McpConfig;
 
 use kage_core::protocol::{HostEvent, McpServerInfo, NoticeLevel};
 use kage_core::sync::lock;
@@ -64,10 +63,13 @@ impl ToolDelta {
 impl super::Dispatcher {
     /// Bring the session's configured MCP servers in line with `servers`
     /// now when the session is idle, or at the next run start.
-    pub(super) fn sync_mcp(&mut self, id: SessionId, servers: BTreeMap<String, McpServer>) {
+    pub(super) fn sync_mcp(&mut self, id: SessionId, servers: McpConfig) {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
+        if let Some(policy) = &session.mcp_sampling {
+            policy.set_allowed(servers.allow_sampling);
+        }
         session.mcp_specs = Some(servers);
         if session.idle.is_some() {
             self.restart_now(id);
@@ -209,12 +211,12 @@ pub(super) fn refresh_mcp(
     id: SessionId,
     mcp: &mut McpManager,
     restarts: &[String],
-    specs: Option<&BTreeMap<String, McpServer>>,
+    specs: Option<&McpConfig>,
     tools: &mut ToolRegistry,
 ) -> Vec<McpServerInfo> {
     let before = mcp.catalog();
     if let Some(specs) = specs
-        && mcp.reconcile(specs, tools)
+        && mcp.reconcile(&specs.servers, tools)
     {
         for (server, err) in mcp.start_waiting(tools) {
             notice(

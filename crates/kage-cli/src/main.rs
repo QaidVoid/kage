@@ -1419,7 +1419,7 @@ fn run_print_mode(cli: Cli) -> ExitCode {
         for id in plugins::merge_plugin_providers(rt, &mut registry) {
             eprintln!("kage: plugin provider `{id}` shadows the built-in registration");
         }
-        acp_glue::set_runtime(rt);
+        acp_glue::set_runtime(Some(rt));
     }
 
     let model = cli.model.unwrap_or_else(|| default_model(&registry));

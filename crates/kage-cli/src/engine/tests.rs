@@ -4808,6 +4808,57 @@ fn restart_while_running_waits_for_the_next_run() {
 }
 
 #[test]
+fn sampling_revocation_is_observed_while_the_session_is_busy() {
+    let h = harness(MockProvider::sequence(vec![
+        tool_turn("gate"),
+        text_turn("done"),
+    ]));
+    let id = SessionId::new();
+    let config = kage_core::config::McpConfig {
+        allow_sampling: true,
+        ..Default::default()
+    };
+    let manager = McpManager::unstarted(
+        &config,
+        Vec::new(),
+        None,
+        None,
+        kage_core::environment::Environment::inherit(),
+    );
+    let policy = manager.sampling_policy();
+    h.engine.open(SessionSpec {
+        mcp: Some(manager),
+        ..h.spec(id)
+    });
+    prompt(&h.engine, id, "go", Delivery::Steer);
+    wait_for(&h.events, is_tool_start);
+    assert!(policy.is_allowed());
+
+    h.engine
+        .commander()
+        .sync_mcp(id, kage_core::config::McpConfig::default());
+    h.engine.send(Command::to(
+        id,
+        CommandKind::SetThinking {
+            level: Some(ThinkingLevel::High),
+        },
+    ));
+    let events = wait_for(&h.events, |e| {
+        state_of(e).is_some_and(|s| s.thinking == Some(ThinkingLevel::High))
+    });
+    assert!(
+        !policy.is_allowed(),
+        "revocation must not wait for the active turn"
+    );
+    assert!(mcp_snapshots(&events).is_empty(), "maintenance still waits");
+    h.release.send(()).unwrap();
+    assert_eq!(
+        outcomes(&until_runs_end(&h.events, 1)),
+        [RunOutcome::Completed]
+    );
+}
+
+#[test]
 fn switching_sessions_publishes_the_mcp_catalog() {
     let dir = tempfile::tempdir().unwrap();
     let h = harness(MockProvider::replaying(text_turn("hello")));

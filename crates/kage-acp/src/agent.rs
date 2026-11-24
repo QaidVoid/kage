@@ -35,17 +35,18 @@ use crate::acp::{
     ConfigSetRequest, ConfigTestRequest, ConfigTestResult, DirectoryRequest, DirectoryResult,
     FoldersRequest, FoldersResult, FsRequest, FsResult, ImageSaveRequest, InitializeRequest,
     InitializeResponse, KageMeta, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, McpRestartRequest, ModelsResponse, NewSessionRequest, NewSessionResponse,
-    OptionSetRequest, OptionsResponse, PermissionOption, PermissionOptionKind, PermissionOutcome,
-    PlanReview, PluginInstallRequest, PluginRemoveRequest, PromptRequest, PromptResponse,
-    PromptWithdrawn, QuestionMeta, QuestionPrompt, RegistryInstallRequest, RegistryInstallResult,
-    RegistrySearchRequest, RegistrySearchResult, RequestMeta, RequestPermissionRequest,
-    RequestPermissionResponse, RequestPermissionResult, ResumeSessionRequest,
-    ResumeSessionResponse, SessionExportResponse, SessionForkRequest, SessionForkResponse,
-    SessionNotification, SessionPromptsResponse, SessionRenameRequest, SessionRequest,
-    SessionRewindRequest, SessionUndoResponse, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, ShellRequest, SwarmResumeRequest, SwarmResumeResponse,
-    ThemesRequest, ThemesResult, ToolCallUpdate, WithdrawRequest,
+    LoadSessionResponse, McpRestartRequest, MediaReadRequest, MediaReadResponse, ModelsResponse,
+    NewSessionRequest, NewSessionResponse, OptionSetRequest, OptionsResponse, PermissionOption,
+    PermissionOptionKind, PermissionOutcome, PlanReview, PluginInstallRequest, PluginRemoveRequest,
+    PromptRequest, PromptResponse, PromptWithdrawn, QuestionMeta, QuestionPrompt,
+    RegistryInstallRequest, RegistryInstallResult, RegistrySearchRequest, RegistrySearchResult,
+    RequestMeta, RequestPermissionRequest, RequestPermissionResponse, RequestPermissionResult,
+    ResumeSessionRequest, ResumeSessionResponse, SessionExportResponse, SessionForkRequest,
+    SessionForkResponse, SessionNotification, SessionPromptsResponse, SessionRenameRequest,
+    SessionRequest, SessionRewindRequest, SessionUndoResponse, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, ShellRequest,
+    SwarmResumeRequest, SwarmResumeResponse, ThemesRequest, ThemesResult, ToolCallUpdate,
+    WithdrawRequest,
 };
 
 /// The client's answer to a `session/request_permission`.
@@ -908,6 +909,17 @@ pub trait Agent: Send + Sync + 'static {
         Err(RpcError::method_not_found("_kage/plugins/remove"))
     }
 
+    /// Reads the newest produced media from an open session's recording
+    /// (`_kage/media/read`). The default rejects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session is unknown, has no produced
+    /// media, or its recording cannot be read.
+    fn media_read(&self, _req: MediaReadRequest) -> Result<MediaReadResponse, RpcError> {
+        Err(RpcError::method_not_found("_kage/media/read"))
+    }
+
     /// Saves an image the model produced into the session's directory
     /// (`_kage/image/save`). The default rejects.
     ///
@@ -1553,6 +1565,10 @@ fn handle_kage_request<A: Agent>(
             Ok(req) => spawn_op(peer, agent, id, move |a| a.plugin_remove(req)),
             Err(e) => return parse_failed(peer, &id, e),
         },
+        "_kage/media/read" => match parse::<MediaReadRequest>(params) {
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.media_read(req).map(jval)),
+            Err(e) => return parse_failed(peer, &id, e),
+        },
         "_kage/image/save" => match parse::<ImageSaveRequest>(params) {
             Ok(req) => spawn_op(peer, agent, id, move |a| a.image_save(req)),
             Err(e) => return parse_failed(peer, &id, e),
@@ -1697,6 +1713,52 @@ mod tests {
         }
 
         fn cancel(&self, _session_id: &str) {}
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn media_read_routes_and_defaults_to_method_not_found() {
+        use std::io::{BufRead, Write};
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        let (server_io, mut client) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let server_read = server_io.try_clone().unwrap();
+        let server = thread::spawn(move || {
+            serve_agent(BufReader::new(server_read), server_io, |_| MockAgent)
+        });
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        for (id, params, code) in [
+            (1, serde_json::json!({"sessionId": "sess-1"}), -32601),
+            (2, serde_json::json!({"imageOnly": true}), -32602),
+        ] {
+            writeln!(
+                client,
+                "{}",
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": id, "method": "_kage/media/read", "params": params
+                })
+            )
+            .unwrap();
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(response["id"], id);
+            assert_eq!(response["error"]["code"], code);
+            if id == 1 {
+                assert!(
+                    response["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("_kage/media/read")
+                );
+            }
+        }
+        client.shutdown(std::net::Shutdown::Both).unwrap();
+        server.join().unwrap().unwrap();
     }
 
     #[cfg(unix)]

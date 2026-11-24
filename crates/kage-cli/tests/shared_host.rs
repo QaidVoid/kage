@@ -147,10 +147,15 @@ impl Env {
     /// `kage rpc` as an editor or the desktop runs it, with a short idle
     /// timeout for any host it starts.
     fn rpc(&self, extra: &[(&str, &str)]) -> Rpc {
+        self.rpc_with_args(&[], extra)
+    }
+
+    fn rpc_with_args(&self, args: &[&str], extra: &[(&str, &str)]) -> Rpc {
         let root = self.dir.path();
         let mut command = Command::new(env!("CARGO_BIN_EXE_kage"));
         command
             .arg("rpc")
+            .args(args)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", root)
@@ -201,12 +206,21 @@ impl Env {
     /// notably a provider key so first-run onboarding does not wait on
     /// the pty.
     fn tui(&self, extra: &[(&str, &str)]) -> (Child, std::process::ChildStdin, Screen) {
+        self.tui_with_args(&["--standalone"], extra)
+    }
+
+    fn tui_with_args(
+        &self,
+        args: &[&str],
+        extra: &[(&str, &str)],
+    ) -> (Child, std::process::ChildStdin, Screen) {
         let root = self.dir.path();
         let mut child = Command::new("script")
             .arg("-qec")
             .arg(format!(
-                "stty cols 100 rows 30; exec {} --standalone",
-                env!("CARGO_BIN_EXE_kage")
+                "stty cols 100 rows 30; exec {} {}",
+                env!("CARGO_BIN_EXE_kage"),
+                args.join(" ")
             ))
             .arg("/dev/null")
             .env_clear()
@@ -2166,4 +2180,348 @@ fn web_client(addr: std::net::SocketAddr, token: &str) -> WebClient {
         },
     );
     WebClient { peer, sock }
+}
+
+fn model_option(response: &Value) -> &Value {
+    response["result"]["configOptions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no config options: {response}"))
+        .iter()
+        .find(|option| option["id"] == "model")
+        .unwrap()
+}
+
+fn write_lua_provider(env: &Env, text: &str) {
+    let source = format!(
+        "kage.register_provider({{
+         id = 'user-provider',
+         models = {{{{id = 'small'}}, {{id = 'big'}}}},
+         stream = function(req)
+             kage.fs.write('provider-ran', '{text}')
+             return {{
+                 {{type = 'message_start'}},
+                 {{type = 'text_delta', delta = '{text}'}},
+                 {{type = 'message_end', stop_reason = 'end_turn',
+                   usage = {{input = 0, output = 0, cache_read = 0, cache_write = 0}}}},
+             }}
+         end,
+         }})
+"
+    );
+    replace(&env.dir.path().join("config/kage/init.lua"), &source);
+}
+
+#[test]
+fn host_run_loads_rebuilds_and_removes_init_lua_providers() {
+    let env = Env::new();
+    env.write_config("[provider]\ndefault_model = \"user-provider/small\"\n");
+    write_lua_provider(&env, "first");
+    let mut host = KillOnDrop(env.host(60));
+    env.ready(host.0.id());
+    let mut rpc = env.rpc(&[]);
+    rpc.request("initialize", json!({"protocolVersion": 1}));
+    let created = rpc.request(
+        "session/new",
+        json!({"cwd": env.dir.path(), "mcpServers": []}),
+    );
+    assert_eq!(
+        model_option(&created)["currentValue"],
+        "user-provider/small"
+    );
+    let session = created["result"]["sessionId"].as_str().unwrap();
+    let prompt = json!({"sessionId": session, "prompt": [{"type": "text", "text": "hello"}]});
+    assert_eq!(
+        rpc.request("session/prompt", prompt.clone())["result"]["stopReason"],
+        "end_turn"
+    );
+    assert_eq!(
+        std::fs::read_to_string(env.dir.path().join("provider-ran")).unwrap(),
+        "first"
+    );
+
+    write_lua_provider(&env, "second");
+    assert!(rpc.request("_kage/providers/reload", json!({}))["result"].is_object());
+    assert_eq!(
+        rpc.request("session/prompt", prompt)["result"]["stopReason"],
+        "end_turn"
+    );
+    assert_eq!(
+        std::fs::read_to_string(env.dir.path().join("provider-ran")).unwrap(),
+        "second"
+    );
+
+    std::fs::remove_file(env.dir.path().join("config/kage/init.lua")).unwrap();
+    rpc.request("_kage/providers/reload", json!({}));
+    let listed = rpc.request("_kage/models/list", json!({}));
+    assert!(
+        !listed["result"]["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == "user-provider")
+    );
+    let refused = rpc.request("session/new", json!({
+        "cwd": env.dir.path(), "mcpServers": [], "_meta": {"kage": {"model": "user-provider/small"}}
+    }));
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    rpc.close();
+    assert!(terminate(&mut host.0).success());
+}
+
+#[test]
+fn reload_replaces_the_configured_default_but_preserves_a_private_model_override() {
+    for explicit in [false, true] {
+        let env = Env::new();
+        env.write_config("[provider]\ndefault_model = \"user-provider/small\"\n");
+        write_lua_provider(&env, "hello");
+        let args: &[&str] = if explicit {
+            &["-m", "user-provider/small"]
+        } else {
+            &[]
+        };
+        let mut rpc = env.rpc_with_args(args, &[]);
+        rpc.request("initialize", json!({"protocolVersion": 1}));
+        let first = rpc.request(
+            "session/new",
+            json!({"cwd": env.dir.path(), "mcpServers": []}),
+        );
+        assert_eq!(model_option(&first)["currentValue"], "user-provider/small");
+        env.write_config("[provider]\ndefault_model = \"user-provider/big\"\n");
+        rpc.request("_kage/providers/reload", json!({}));
+        let created = rpc.request(
+            "session/new",
+            json!({"cwd": env.dir.path(), "mcpServers": []}),
+        );
+        let expected = if explicit {
+            "user-provider/small"
+        } else {
+            "user-provider/big"
+        };
+        assert_eq!(model_option(&created)["currentValue"], expected);
+        assert!(rpc.close().success());
+    }
+}
+
+#[test]
+fn automatic_config_reload_and_local_reload_never_fetch_when_refresh_is_disabled() {
+    let env = Env::new();
+    let endpoint = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    endpoint.set_nonblocking(true).unwrap();
+    let mut host = KillOnDrop(env.host(60));
+    env.ready(host.0.id());
+    let mut rpc = env.rpc(&[]);
+    rpc.request("initialize", json!({"protocolVersion": 1}));
+    env.write_config(&format!(
+        "[providers.custom.no-fetch]\nbase_url = \"http://{0}/v1\"\napi_key_env = \"\"\nmodels_url = \"http://{0}/models\"\n\n[[providers.custom.no-fetch.models]]\nid = \"small\"\n",
+        endpoint.local_addr().unwrap()
+    ));
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let listed = rpc.request("_kage/models/list", json!({}));
+        if listed["result"]["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == "no-fetch")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "provider config was never reloaded"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    rpc.request("_kage/providers/reload", json!({}));
+    thread::sleep(Duration::from_millis(1200));
+    assert!(matches!(endpoint.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    rpc.close();
+    assert!(terminate(&mut host.0).success());
+}
+
+#[test]
+fn a_rejected_web_rebind_keeps_the_active_endpoint_and_reports_it() {
+    let env = Env::new();
+    env.enable_web(0);
+    let mut host = KillOnDrop(env.host(60));
+    env.ready(host.0.id());
+    let active = format!("127.0.0.1:{}", env.web_port());
+    let connect = env.dir.path().join("data/kage/connect.txt");
+    let original = std::fs::read_to_string(&connect).unwrap();
+    let occupied = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    env.enable_web(occupied.local_addr().unwrap().port());
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let record = env.record().unwrap();
+        if record["web_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("cannot bind"))
+        {
+            assert_eq!(record["web_active"], active);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the rejected rebind was not reported"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(std::net::TcpStream::connect(&active).is_ok());
+    assert_eq!(std::fs::read_to_string(&connect).unwrap(), original);
+    let status = env.kage(&["host", "status"]);
+    assert!(status.status.success());
+    let shown = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        shown.contains(&format!("running at {active}; configuration not applied:")),
+        "{shown}"
+    );
+    assert!(terminate(&mut host.0).success());
+}
+
+fn seed_terminal_media(env: &Env) -> (kage_core::SessionId, PathBuf) {
+    let id = kage_core::SessionId::new();
+    let source = env
+        .dir
+        .path()
+        .join("data/kage/sessions")
+        .join(format!("{id}.jsonl"));
+    let mut writer = kage_session::SessionWriter::create(
+        &source,
+        kage_session::Header {
+            version: kage_session::FORMAT_VERSION,
+            session: id,
+            id: kage_session::EntryId::new(),
+            ts: chrono::Utc::now(),
+            cwd: env.dir.path().to_path_buf(),
+            model: "fake/small".into(),
+            backend: None,
+            system_prompt: String::new(),
+            parent_session: None,
+            parent_entry: None,
+        },
+    )
+    .unwrap();
+    for content in [
+        kage_core::Content::Image {
+            source: kage_core::MediaSource::Base64 {
+                data: "aW1hZ2UtYnl0ZXM=".into(),
+            },
+            mime: "image/png".into(),
+        },
+        kage_core::Content::Audio {
+            source: kage_core::MediaSource::Base64 {
+                data: "YXVkaW8tYnl0ZXM=".into(),
+            },
+            mime: "audio/wav".into(),
+        },
+    ] {
+        writer
+            .append(&kage_session::SessionEntry::Message(
+                kage_session::MessageEntry {
+                    id: kage_session::EntryId::new(),
+                    ts: chrono::Utc::now(),
+                    message: std::sync::Arc::new(kage_core::Message::new(
+                        kage_core::Role::Assistant,
+                        vec![content],
+                        None,
+                    )),
+                    usage: None,
+                },
+            ))
+            .unwrap();
+    }
+    drop(writer);
+    (id, source)
+}
+
+#[test]
+fn terminal_media_saves_and_clone_adoption_match_on_shared_and_private_hosts() {
+    for standalone in [false, true] {
+        let env = Env::new();
+        env.write_config(
+            "[provider]\ndefault_model = \"fake/small\"\n\n\
+             [providers.custom.fake]\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key_env = \"\"\n\n\
+             [[providers.custom.fake.models]]\nid = \"small\"\n",
+        );
+        let sessions = env.dir.path().join("data/kage/sessions");
+        let (id, source) = seed_terminal_media(&env);
+        let original = std::fs::read(&source).unwrap();
+        let mut host = (!standalone).then(|| KillOnDrop(env.host(60)));
+        if let Some(host) = &host {
+            env.ready(host.0.id());
+        }
+        let id_arg = id.to_string();
+        let args = if standalone {
+            vec!["--standalone", "resume", &id_arg]
+        } else {
+            vec!["resume", &id_arg]
+        };
+        let (tui, mut keys, mut screen) = env.tui_with_args(&args, &[]);
+        let mut tui = KillOnDrop(tui);
+        screen.wait_for(TUI_READY);
+        for (command, file, expected) in [
+            ("/image save out.png", "out.png", b"image-bytes".as_slice()),
+            ("/media save out.wav", "out.wav", b"audio-bytes".as_slice()),
+        ] {
+            write!(keys, "{command}\r").unwrap();
+            keys.flush().unwrap();
+            let path = env.dir.path().join(file);
+            let deadline = Instant::now() + WAIT;
+            while std::fs::read(&path).ok().as_deref() != Some(expected) {
+                assert!(
+                    Instant::now() < deadline,
+                    "{command} did not save expected bytes, standalone={standalone}"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+        keys.write_all(b"/clone\r").unwrap();
+        keys.flush().unwrap();
+        let deadline = Instant::now() + WAIT;
+        let cloned = loop {
+            if let Some(cloned) = kage_session::list(&sessions)
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.id != id)
+            {
+                break cloned;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "clone recording was not created, standalone={standalone}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(cloned.parent_session, Some(id));
+        keys.write_all(b"!printf clone-context-marker\r").unwrap();
+        keys.flush().unwrap();
+        let deadline = Instant::now() + WAIT;
+        while !kage_session::replay(&cloned.path)
+            .unwrap()
+            .history
+            .iter()
+            .any(|message| {
+                message.content.iter().any(|content| match content {
+                    kage_core::Content::Text { text } => kage_core::message::ShellRun::parse(text)
+                        .is_some_and(|run| {
+                            run.exit_code == Some(0) && run.output == "clone-context-marker"
+                        }),
+                    _ => false,
+                })
+            })
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the cloned session did not adopt shell context, standalone={standalone}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        keys.write_all(b"/quit\r").unwrap();
+        keys.flush().unwrap();
+        assert!(exit_within(&mut tui.0, WAIT).success());
+        if let Some(host) = &mut host {
+            assert!(terminate(&mut host.0).success());
+        }
+    }
 }

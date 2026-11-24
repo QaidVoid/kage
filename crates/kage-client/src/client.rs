@@ -189,6 +189,9 @@ enum Pending {
     Registry,
     RegistryInstall,
     ImageSave,
+    MediaRead {
+        session_id: String,
+    },
     UiAttach {
         /// The attachment's id, the request id this attach went out
         /// under, which its updates carry back.
@@ -974,6 +977,34 @@ impl Client {
         )
     }
 
+    /// Reads the newest produced image or audio clip from the full session
+    /// recording, restricting to images when `image_only` is true. The
+    /// answer arrives as [`Change::MediaRead`] without entering client state.
+    pub fn media_read(&mut self, session_id: &str, image_only: bool) -> u64 {
+        self.request_media(session_id, image_only, false)
+    }
+
+    /// Reads the newest produced media's MIME type and digest without
+    /// transferring its bytes. The answer arrives as [`Change::MediaRead`]
+    /// with empty data, suitable for a subsequent [`Self::image_save`].
+    pub fn media_metadata(&mut self, session_id: &str, image_only: bool) -> u64 {
+        self.request_media(session_id, image_only, true)
+    }
+
+    fn request_media(&mut self, session_id: &str, image_only: bool, metadata_only: bool) -> u64 {
+        self.request(
+            "_kage/media/read",
+            params(&kage_acp_wire::MediaReadRequest {
+                session_id: session_id.to_owned(),
+                image_only,
+                metadata_only,
+            }),
+            Pending::MediaRead {
+                session_id: session_id.to_owned(),
+            },
+        )
+    }
+
     /// Asks the engine to save the image or audio clip whose bytes hash
     /// to `sha256` into session `session_id`'s directory, at `path` or under
     /// `generated/`. The outcome arrives as a notice on the session.
@@ -1658,18 +1689,16 @@ impl Client {
                 session_id,
                 config_id,
                 previous,
-            } => {
-                match answer::<kage_acp_wire::SetSessionConfigOptionResponse>(
-                    id,
-                    result,
-                    "session/set_config_option result",
-                ) {
-                    Err(failed) => failed,
-                    Ok(response) => {
-                        self.apply_set_config_answer(&session_id, &config_id, previous, response)
-                    }
+            } => match answer::<kage_acp_wire::SetSessionConfigOptionResponse>(
+                id,
+                result,
+                "session/set_config_option result",
+            ) {
+                Err(failed) => failed,
+                Ok(response) => {
+                    self.apply_set_config_answer(&session_id, &config_id, previous, response)
                 }
-            }
+            },
             Pending::Close { session_id } => {
                 let mut gone = self.descendants(&session_id);
                 gone.push(session_id);
@@ -1710,7 +1739,8 @@ impl Client {
             | Pending::Prompts { .. }
             | Pending::Rewind { .. }
             | Pending::Fork { .. }
-            | Pending::Export { .. }) => session_op_answer(id, pending, result),
+            | Pending::Export { .. }
+            | Pending::MediaRead { .. }) => session_op_answer(id, pending, result),
             Pending::Fs { session_id } => {
                 match answer::<kage_acp_wire::FsResult>(id, result, "_kage/fs result") {
                     Err(failed) => failed,
@@ -2516,6 +2546,19 @@ fn params<T: serde::Serialize>(value: &T) -> Value {
 /// the failure of a malformed answer.
 fn session_op_answer(id: u64, pending: Pending, result: Value) -> Vec<Change> {
     match pending {
+        Pending::MediaRead { session_id } => {
+            match answer::<kage_acp_wire::MediaReadResponse>(id, result, "_kage/media/read result")
+            {
+                Err(failed) => failed,
+                Ok(media) => vec![Change::MediaRead {
+                    request: id,
+                    session: session_id,
+                    mime: media.mime,
+                    data: media.data,
+                    sha256: media.sha256,
+                }],
+            }
+        }
         Pending::Undo { session_id } => {
             match answer::<SessionUndoResponse>(id, result, "_kage/session/undo result") {
                 Err(failed) => failed,

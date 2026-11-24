@@ -108,7 +108,7 @@ pub(super) struct McpLease {
     /// Servers to restart first.
     pub restarts: Vec<String>,
     /// The configured servers to bring the manager in line with first.
-    pub specs: Option<std::collections::BTreeMap<String, kage_core::config::McpServer>>,
+    pub specs: Option<kage_core::config::McpConfig>,
 }
 
 impl McpLease {

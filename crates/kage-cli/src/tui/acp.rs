@@ -36,9 +36,8 @@
 //! `_meta.kage` a new one does, so its settings and the plugin
 //! hosting survive the switch.
 //!
-//! Some commands the engine path serves have no ACP counterpart yet:
-//! the pump refuses them with a notice instead of dropping them
-//! silently.
+//! Backend-specific actions are refused when the active session does not
+//! support them.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -61,8 +60,8 @@ use kage_client::{Change, DialogAsk, Frame, PermissionDecision, RequestId, RpcEr
 use kage_core::keymap::{Keymap, MappingData};
 use kage_core::options::OptionValue;
 use kage_core::protocol::{
-    Delivery, Envelope, HostEvent, NoticeLevel, Question, QuestionOption, RunOutcome, SessionId,
-    SessionState, SwarmMember,
+    Delivery, Envelope, HostEvent, ImageAction, NoticeLevel, Question, QuestionOption, RunOutcome,
+    SessionId, SessionState, SwarmMember,
 };
 use kage_core::{
     CancelFlag, LoopEvent, MediaSource, Message, MessageId, Modality, Role, ThinkingLevel,
@@ -285,24 +284,17 @@ type PrivatePair = (
     Option<Hangup>,
 );
 
-/// What rebuilds the providers and their model list on the pump.
+/// Rebuilds local providers for model metadata lookups on the pump.
 type ModelRebuild = Box<dyn Fn() -> Option<Arc<ProviderRegistry>> + Send>;
+type MediaOpener = fn(&str, &[u8]) -> Result<PathBuf, String>;
 
-/// The providers from the config and the credential store, with the
-/// plugins' own, and the model list the picker offers from them. The
-/// picker marks the session's model as it opens. `None` when the
-/// providers cannot be built.
-fn rebuilt_models(
-    config: &kage_core::config::Config,
-    plugins: Option<&PluginRuntime>,
-) -> Option<(ProviderRegistry, Vec<kage_tui::PickItem>)> {
+/// The local providers used for model metadata, including plugin registrations.
+fn rebuilt_registry(plugins: Option<&PluginRuntime>) -> Option<ProviderRegistry> {
     let mut registry = crate::build_provider_registry().ok()?;
-    if let Some(rt) = plugins {
-        crate::plugins::merge_plugin_providers(rt, &mut registry);
+    if let Some(runtime) = plugins {
+        crate::plugins::merge_plugin_providers(runtime, &mut registry);
     }
-    let mut choices = available_model_items(&registry, "");
-    choices.extend(external_agent_items(config, ""));
-    Some((registry, choices))
+    Some(registry)
 }
 
 /// An event for the App's engine channel.
@@ -769,6 +761,9 @@ fn needs_session(request: &RunRequest) -> bool {
                 | RunRequest::Rewind { .. }
                 | RunRequest::ForkSession { .. }
                 | RunRequest::RestartMcp(_)
+                | RunRequest::CloneSession
+                | RunRequest::Image { .. }
+                | RunRequest::Media { .. }
         ),
     }
 }
@@ -1380,6 +1375,7 @@ struct ModeSwitch {
 enum Answer {
     NewSession,
     Open,
+    Clone,
 }
 
 /// How much of a child tool call the App has already heard of.
@@ -1481,6 +1477,7 @@ struct Pump {
     /// The request id of the `session/new` in flight, whose answer's
     /// session adopts.
     pending_new: Option<u64>,
+    pending_clone: Option<u64>,
     cwd: String,
     /// The model the session runs, as the config option carries it.
     model: String,
@@ -1551,9 +1548,10 @@ struct Pump {
     /// The model a session opening for a model pick takes once it is
     /// adopted; until then the session on screen keeps its own.
     pending_model: Option<String>,
-    /// Rebuilds the providers here after a login, hands the App the
-    /// model list they offer, and returns them for this side's lookups.
+    /// Rebuilds local providers for output-token-cap lookups after reload.
     rebuild_models: ModelRebuild,
+    model_updates: mpsc::Sender<Vec<kage_tui::PickItem>>,
+    external_choices: Vec<kage_tui::PickItem>,
     /// What startup wrote before any session existed: config, plugin
     /// and state errors. Carried into the first adopted session.
     startup_notes: Option<SharedBuffer>,
@@ -1583,6 +1581,8 @@ struct Pump {
     child_files: Arc<Mutex<HashMap<SessionId, String>>>,
     /// Where an export writes once the agent answers.
     pending_export: Option<PathBuf>,
+    pending_media: HashMap<u64, (ImageAction, Option<String>)>,
+    media_opener: MediaOpener,
     /// Update kinds this build cannot show, warned of once each.
     unknown: HashSet<String>,
     /// Dropped MCP server settings, warned of once each.
@@ -1699,6 +1699,7 @@ impl Pump {
     /// next run uses their tools. An external agent's session hosts no
     /// plugins of this TUI.
     fn plugins_reloaded(&mut self) {
+        self.refresh_providers();
         if self.wire.is_empty() || self.external.contains_key(&self.wire) {
             return;
         }
@@ -1953,6 +1954,9 @@ impl Pump {
         let RequestId::Number(request) = id else {
             return None;
         };
+        if self.pending_clone == Some(*request) {
+            return Some(Answer::Clone);
+        }
         if self.pending_new == Some(*request) {
             return Some(Answer::NewSession);
         }
@@ -1973,6 +1977,18 @@ impl Pump {
             .iter()
             .any(|change| matches!(change, Change::Failed { .. }));
         let adopted = match answer {
+            Answer::Clone => {
+                self.pending_clone = None;
+                if !failed
+                    && let Some(to) = changes.iter().find_map(|change| match change {
+                        Change::Forked { from, to } if from == &self.wire => Some(to),
+                        _ => None,
+                    })
+                {
+                    self.open_recorded(Path::new(&format!("{to}.jsonl")));
+                }
+                None
+            }
             Answer::NewSession => {
                 self.pending_new = None;
                 changes.iter().find_map(|change| match change {
@@ -2084,6 +2100,7 @@ impl Pump {
             version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         };
         self.store.client().initialize(capabilities, Some(info));
+        self.store.client().models_list();
         if let Some(id) = resume.and_then(|path| path.file_stem()?.to_str().map(str::to_owned)) {
             self.wire.clone_from(&id);
             let fresh = self.store.reset_session(&id);
@@ -2092,7 +2109,7 @@ impl Pump {
             self.feed.send_buffer(fresh);
             self.note_session_file();
             let meta = self.load_meta();
-            let servers = self.mcp_servers();
+            let servers = self.recorded_servers(&id, resume.expect("a recorded session"));
             let (request, _) =
                 self.store
                     .client()
@@ -2255,6 +2272,9 @@ impl Pump {
             | RunRequest::ListPrompts
             | RunRequest::Rewind { .. }
             | RunRequest::ForkSession { .. }
+            | RunRequest::CloneSession
+            | RunRequest::Image { .. }
+            | RunRequest::Media { .. }
             | RunRequest::RestartMcp(_) => self.refuse_external(),
             _ => false,
         }
@@ -2343,7 +2363,9 @@ impl Pump {
         }
         // With another session opening, the prompts would run there, a
         // session the mode was never asked of.
-        let opening = self.pending_new.is_some() || self.pending_open.is_some();
+        let opening = self.pending_new.is_some()
+            || self.pending_open.is_some()
+            || self.pending_clone.is_some();
         if mode.as_deref() == Some(switch.value.as_str()) && !opening {
             for request in switch.held {
                 self.handle(request);
@@ -2655,10 +2677,21 @@ impl Pump {
                 self.notice(level, output.text);
             }
             Change::Dialog => self.dialogs_moved(),
-            Change::Failed { error, .. } => {
+            Change::Failed { request, error } => {
+                self.pending_media.remove(&request);
                 self.notice(NoticeLevel::Error, format!("kage agent: {}", error.message));
             }
+            Change::MediaRead {
+                request,
+                session,
+                mime,
+                data,
+                sha256,
+            } => {
+                self.media_read(request, &session, &mime, &data, &sha256);
+            }
             Change::Exported { markdown, .. } => self.export(markdown),
+            Change::Models { providers } => self.models_changed(providers),
             change @ (Change::Undone { .. }
             | Change::Rewound { .. }
             | Change::Prompts { .. }
@@ -2671,7 +2704,6 @@ impl Pump {
             | Change::Folders { .. }
             | Change::Fs { .. }
             | Change::KeySaved { .. }
-            | Change::Models { .. }
             | Change::Options { .. }
             | Change::Plugins { .. }
             | Change::ProviderDirectory { .. }
@@ -3658,7 +3690,9 @@ impl Pump {
         // session on its way, as after the first failed, requests run as
         // they come, so `/new` or a resume can open one, and those for
         // the session are answered here.
-        let opening = self.pending_new.is_some() || self.pending_open.is_some();
+        let opening = self.pending_new.is_some()
+            || self.pending_open.is_some()
+            || self.pending_clone.is_some();
         let leaving_run = matches!(request, RunRequest::Cancel { .. })
             && !self.wire.is_empty()
             && !self.unadopted.iter().any(cancellable);
@@ -3788,6 +3822,22 @@ impl Pump {
             RunRequest::Rewind { at } => {
                 self.store.client().rewind_session(&self.wire, &at);
             }
+            RunRequest::Image { action, path, .. } => self.request_media(true, action, path),
+            RunRequest::Media { action, path, .. } => self.request_media(false, action, path),
+            RunRequest::CloneSession => {
+                if self.running
+                    || self.state_snapshot().working
+                    || self.children.values().any(|child| child.running)
+                {
+                    self.notice(
+                        NoticeLevel::Warning,
+                        "clone: the session is busy".to_owned(),
+                    );
+                } else if self.pending_clone.is_none() {
+                    self.pending_clone =
+                        Some(self.store.client().fork_session(&self.wire, None, None));
+                }
+            }
             RunRequest::ForkSession { at } => {
                 let at = (!at.is_empty()).then_some(at);
                 self.store.client().fork_session(&self.wire, None, at);
@@ -3818,12 +3868,7 @@ impl Pump {
                     Err(error) => self.notice(NoticeLevel::Error, error),
                 }
             }
-            RunRequest::RefreshProviders => {
-                self.store.client().providers_reload();
-                if let Some(registry) = (self.rebuild_models)() {
-                    self.registry = registry;
-                }
-            }
+            RunRequest::RefreshProviders => self.refresh_providers(),
             RunRequest::ReloadPlugins => {
                 if self.plugins.is_some() {
                     self.run_command(CommandJob::Reload);
@@ -4042,6 +4087,7 @@ impl Pump {
             && !self.wire.is_empty()
             && self.pending_new.is_none()
             && self.pending_open.is_none()
+            && self.pending_clone.is_none()
             && self.mode_switch.is_none()
             && self
                 .store
@@ -4272,16 +4318,10 @@ impl Pump {
             return;
         }
         self.stop_for_switch();
-        // The wire list never describes this connection's sessions,
-        // so a recorded external session is recognized by its file's
-        // header before the load answers.
-        if let Some(agent) = recorded_external_agent(path) {
-            self.external.insert(id.clone(), agent);
-        }
+        let servers = self.recorded_servers(&id, path);
         self.store.reset_session(&id);
         self.shells.remove(&id);
         let meta = self.load_meta();
-        let servers = self.mcp_servers();
         let (request, _) = self
             .store
             .client()
@@ -4293,11 +4333,89 @@ impl Pump {
         });
     }
 
+    fn models_changed(&self, providers: Vec<kage_client::wire::ModelProvider>) {
+        let mut choices = Vec::new();
+        for provider in providers {
+            for model in provider.models {
+                let badge = if model.id == self.model { '*' } else { ' ' };
+                choices.push(
+                    kage_tui::PickItem::simple(model.id)
+                        .with_label(model.name)
+                        .with_group(&provider.name)
+                        .with_badge(badge),
+                );
+            }
+        }
+        choices.extend(self.external_choices.iter().cloned());
+        let _ = self.model_updates.send(choices);
+    }
+
+    fn media_read(&mut self, request: u64, session: &str, mime: &str, data: &str, sha256: &str) {
+        let Some((action, path)) = self.pending_media.remove(&request) else {
+            return;
+        };
+        match action {
+            ImageAction::Save => {
+                self.store
+                    .client()
+                    .image_save(session, sha256, path.as_deref());
+            }
+            ImageAction::Open => {
+                use base64::Engine as _;
+                let result = base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .map_err(|error| format!("cannot decode media: {error}"))
+                    .and_then(|bytes| (self.media_opener)(mime, &bytes));
+                match result {
+                    Ok(path) => {
+                        self.notice(NoticeLevel::Info, format!("opened {}", path.display()));
+                    }
+                    Err(error) => self.notice(NoticeLevel::Error, error),
+                }
+            }
+        }
+    }
+
+    fn request_media(&mut self, image_only: bool, action: ImageAction, path: Option<PathBuf>) {
+        let Ok(path) = path
+            .map(PathBuf::into_os_string)
+            .map(std::ffi::OsString::into_string)
+            .transpose()
+        else {
+            self.notice(
+                NoticeLevel::Error,
+                "the media save path is not UTF-8".to_owned(),
+            );
+            return;
+        };
+        let request = match action {
+            ImageAction::Save => self.store.client().media_metadata(&self.wire, image_only),
+            ImageAction::Open => self.store.client().media_read(&self.wire, image_only),
+        };
+        self.pending_media.insert(request, (action, path));
+    }
+
+    fn refresh_providers(&mut self) {
+        self.store.client().providers_reload();
+        self.store.client().models_list();
+        if let Some(registry) = (self.rebuild_models)() {
+            self.registry = registry;
+        }
+    }
+
+    fn recorded_servers(&mut self, id: &str, path: &Path) -> Vec<McpServer> {
+        if let Some(agent) = recorded_external_agent(path) {
+            self.external.insert(id.to_owned(), agent);
+        }
+        if self.external_agent_of(id).is_some() {
+            Vec::new()
+        } else {
+            self.mcp_servers()
+        }
+    }
+
     fn refuse(&mut self, request: &RunRequest) {
         let what = match request {
-            RunRequest::CloneSession => "cloning the session",
-            RunRequest::Image { .. } => "opening or saving images",
-            RunRequest::Media { .. } => "opening or saving media",
             RunRequest::SwitchSession(SwitchTarget::PendingFork(_)) => "that switch",
             _ => "that command",
         };
@@ -5083,9 +5201,6 @@ pub(crate) fn run(
         eprintln!("{}", crate::NO_MODEL_MESSAGE);
         return ExitCode::from(1);
     }
-    if let Err(err) = crate::state::record_last_model(&shown_model) {
-        lock(&buffer).push_custom("kage:error", format!("state: {err}"), false);
-    }
     let notices = start_notices(
         &registry,
         model.is_none().then_some(shown_model.as_str()),
@@ -5148,14 +5263,8 @@ pub(crate) fn run(
     let child_files = Arc::new(Mutex::new(HashMap::new()));
     let (model_updates_tx, model_updates) = mpsc::channel();
     let rebuild_models: ModelRebuild = {
-        let config = config.clone();
         let plugins = plugins.clone();
-        let updates = model_updates_tx.clone();
-        Box::new(move || {
-            let (registry, choices) = rebuilt_models(&config, plugins.as_deref())?;
-            let _ = updates.send(choices);
-            Some(Arc::new(registry))
-        })
+        Box::new(move || rebuilt_registry(plugins.as_deref()).map(Arc::new))
     };
     let mut pump = Pump {
         store,
@@ -5173,6 +5282,7 @@ pub(crate) fn run(
         unadopted: Vec::new(),
         pending_open: None,
         pending_new: None,
+        pending_clone: None,
         cwd: workdir.display().to_string(),
         model: shown_model.clone(),
         warned_model: None,
@@ -5202,6 +5312,8 @@ pub(crate) fn run(
         handed: None,
         pending_model: None,
         rebuild_models,
+        model_updates: model_updates_tx,
+        external_choices: external_agent_items(&config, &shown_model),
         startup_notes: Some(buffer.clone()),
         last_keymap: None,
         forwarded: HashSet::new(),
@@ -5211,6 +5323,8 @@ pub(crate) fn run(
         child_files: Arc::clone(&child_files),
         next_ask: 0,
         pending_export: None,
+        pending_media: HashMap::new(),
+        media_opener: crate::engine::images::open,
         unknown: HashSet::new(),
         mcp_warnings: HashSet::new(),
         pre_plan_mode: None,
@@ -5261,21 +5375,16 @@ pub(crate) fn run(
         eprintln!("kage: cannot start the pump thread: {error}");
         return ExitCode::from(1);
     }
-    let mut model_choices = available_model_items(&registry, &shown_model);
-    model_choices.extend(external_agent_items(&config, &shown_model));
+    let model_choices = external_agent_items(&config, &shown_model);
     {
-        let config = config.clone();
         let plugins = plugins.clone();
         let requests = requests_tx.clone();
         crate::model_refresh::spawn_watcher(applied, move || {
             // A config that does not build cannot say what the lists now
             // hold; the next wake tries again.
-            if rebuilt_models(&config, plugins.as_deref()).is_none() {
+            if rebuilt_registry(plugins.as_deref()).is_none() {
                 return crate::model_refresh::Rebuilt::Failed;
             }
-            // The pump's refresh reloads the agent's providers over the
-            // wire and rebuilds this side's picker, so a list another
-            // process wrote reaches both in the same beat.
             if requests.send(RunRequest::RefreshProviders).is_ok() {
                 crate::model_refresh::Rebuilt::Done
             } else {
@@ -5742,6 +5851,7 @@ mod tests {
             unadopted: Vec::new(),
             pending_open: None,
             pending_new: None,
+            pending_clone: None,
             cwd: "/w".to_owned(),
             model: "test:model".to_owned(),
             warned_model: None,
@@ -5770,6 +5880,8 @@ mod tests {
             handed: None,
             pending_model: None,
             rebuild_models: Box::new(|| None),
+            model_updates: mpsc::channel().0,
+            external_choices: Vec::new(),
             startup_notes: None,
             last_keymap: None,
             forwarded: HashSet::new(),
@@ -5780,6 +5892,8 @@ mod tests {
             child_files: Arc::new(Mutex::new(HashMap::new())),
             next_ask: 0,
             pending_export: None,
+            pending_media: HashMap::new(),
+            media_opener: crate::engine::images::open,
             unknown: HashSet::new(),
             mcp_warnings: HashSet::new(),
             pre_plan_mode: None,
@@ -10680,5 +10794,326 @@ kage.on('resources_discover', function() return { skills = { '/fixture/skills' }
         );
         assert_eq!(notices(&app).len(), 6);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cloning_opens_the_copy_only_after_success() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::CloneSession);
+        let frames = pump.store.take_outgoing();
+        assert_eq!(
+            request_params(&frames, "_kage/session/fork"),
+            serde_json::json!({"sessionId": "s1"})
+        );
+        let fork = request_id(&frames, "_kage/session/fork");
+        pump.absorb(Frame::Success {
+            id: fork,
+            result: serde_json::json!({"sessionId": "copy"}),
+        });
+        assert_eq!(pump.wire, "s1");
+        let frames = pump.store.take_outgoing();
+        assert_eq!(request_params(&frames, "session/load")["sessionId"], "copy");
+        pump.absorb(Frame::Success {
+            id: request_id(&frames, "session/load"),
+            result: serde_json::json!({"configOptions": model_options("mock/m")}),
+        });
+        assert_eq!(pump.wire, "copy");
+        assert!(has_request(&pump.store.take_outgoing(), "session/close"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_clone_keeps_the_active_session() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::CloneSession);
+        let fork = request_id(&pump.store.take_outgoing(), "_kage/session/fork");
+        pump.absorb(Frame::Failure {
+            id: fork,
+            error: RpcError::invalid_params("cannot clone"),
+        });
+        assert_eq!(pump.wire, "s1");
+        assert!(pump.pending_clone.is_none());
+        assert!(pump.store.take_outgoing().is_empty());
+        assert!(
+            notices(&app)
+                .iter()
+                .any(|(_, text)| text.contains("cannot clone"))
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_new_session_asked_while_cloning_waits_for_the_copy() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::CloneSession);
+        let fork = request_id(&pump.store.take_outgoing(), "_kage/session/fork");
+        pump.handle(RunRequest::NewSession);
+        assert!(pump.store.take_outgoing().is_empty());
+        pump.absorb(Frame::Success {
+            id: fork,
+            result: serde_json::json!({"sessionId": "copy"}),
+        });
+        let frames = pump.store.take_outgoing();
+        let load = request_id(&frames, "session/load");
+        pump.absorb(Frame::Success {
+            id: load,
+            result: serde_json::json!({"configOptions": []}),
+        });
+        assert!(has_request(&pump.store.take_outgoing(), "session/new"));
+        assert!(pump.pending_new.is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_model_picker_uses_only_the_hosts_catalog_and_external_agents() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        let (send, receive) = mpsc::channel();
+        pump.model_updates = send;
+        pump.external_choices = vec![kage_tui::PickItem::simple("acp:reviewer")];
+        pump.store.client().models_list();
+        let request = request_id(&pump.store.take_outgoing(), "_kage/models/list");
+        pump.absorb(Frame::Success {
+            id: request,
+            result: serde_json::json!({"providers": [{
+                "id": "host", "name": "Host provider", "models": [{"id": "host/small", "name": "Small"}]
+            }]}),
+        });
+        let choices = receive.try_recv().unwrap();
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| choice.value.as_str())
+                .collect::<Vec<_>>(),
+            ["host/small", "acp:reviewer"]
+        );
+        assert_eq!(choices[0].group.as_deref(), Some("Host provider"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn plugin_mcp_servers_only_accompany_native_reopens() {
+        let (mut pump, _app, dir) = hosted_pump();
+        pump.plugins
+            .as_ref()
+            .unwrap()
+            .runtime
+            .eval_plugin(
+                "fixture",
+                "kage.mcp.add_server({name='fixture', command='fixture'})",
+            )
+            .unwrap();
+        pump.open_recorded(&dir.join("native.jsonl"));
+        assert_eq!(
+            request_params(&pump.store.take_outgoing(), "session/load")["mcpServers"][0]["name"],
+            "fixture"
+        );
+        pump.external
+            .insert("live".to_owned(), "reviewer".to_owned());
+        pump.open_recorded(&dir.join("live.jsonl"));
+        assert_eq!(
+            request_params(&pump.store.take_outgoing(), "session/load")["mcpServers"],
+            serde_json::json!([])
+        );
+        let path = dir.join("recorded.jsonl");
+        let mut header = kage_session::entry::Header {
+            version: kage_session::FORMAT_VERSION,
+            session: SessionId::new(),
+            id: kage_session::EntryId::new(),
+            ts: chrono::Utc::now(),
+            cwd: dir.clone(),
+            model: "external".to_owned(),
+            system_prompt: String::new(),
+            backend: None,
+            parent_session: None,
+            parent_entry: None,
+        };
+        header.backend = Some(kage_session::SessionBackend::ExternalAcp(
+            kage_session::entry::ExternalAcpSession {
+                agent_name: "reviewer".to_owned(),
+                protocol_version: 1,
+                upstream_session_id: "up".to_owned(),
+            },
+        ));
+        drop(kage_session::SessionWriter::create(&path, header).unwrap());
+        pump.open_recorded(&path);
+        assert_eq!(
+            request_params(&pump.store.take_outgoing(), "session/load")["mcpServers"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            pump.external.get("recorded").map(String::as_str),
+            Some("reviewer")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn image_save_looks_up_the_full_recording_then_uses_the_save_route() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::Image {
+            action: ImageAction::Save,
+            path: Some(PathBuf::from("out.png")),
+        });
+        let frames = pump.store.take_outgoing();
+        assert_eq!(
+            request_params(&frames, "_kage/media/read"),
+            serde_json::json!({"sessionId": "s1", "imageOnly": true, "metadataOnly": true})
+        );
+        pump.absorb(Frame::Success {
+            id: request_id(&frames, "_kage/media/read"),
+            result: serde_json::json!({"mime": "image/png", "data": "aW1hZ2U=", "sha256": "digest"}),
+        });
+        assert_eq!(
+            request_params(&pump.store.take_outgoing(), "_kage/image/save"),
+            serde_json::json!({"sessionId": "s1", "sha256": "digest", "path": "out.png"})
+        );
+        assert!(pump.pending_media.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn media_open_launches_the_viewer_on_the_client() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.media_opener = |mime, bytes| {
+            assert_eq!(mime, "audio/wav");
+            assert_eq!(bytes, b"clip");
+            Ok(PathBuf::from("local/clip.wav"))
+        };
+        pump.handle(RunRequest::Media {
+            action: ImageAction::Open,
+            path: None,
+        });
+        let frames = pump.store.take_outgoing();
+        assert_eq!(
+            request_params(&frames, "_kage/media/read"),
+            serde_json::json!({"sessionId": "s1", "imageOnly": false, "metadataOnly": false})
+        );
+        pump.absorb(Frame::Success {
+            id: request_id(&frames, "_kage/media/read"),
+            result: serde_json::json!({"mime": "audio/wav", "data": "Y2xpcA==", "sha256": "digest"}),
+        });
+        assert!(pump.store.take_outgoing().is_empty());
+        assert!(
+            notices(&app)
+                .iter()
+                .any(|(_, text)| text == "opened local/clip.wav")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_media_lookup_does_not_leave_a_pending_action() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::Media {
+            action: ImageAction::Save,
+            path: None,
+        });
+        let request = request_id(&pump.store.take_outgoing(), "_kage/media/read");
+        pump.absorb(Frame::Failure {
+            id: request,
+            error: RpcError::invalid_params("no produced media"),
+        });
+        assert!(pump.pending_media.is_empty());
+        assert!(pump.store.take_outgoing().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    #[test]
+    fn a_prompt_typed_while_cloning_runs_in_the_copy() {
+        let (mut pump, _app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::CloneSession);
+        let fork = request_id(&pump.store.take_outgoing(), "_kage/session/fork");
+        pump.handle(RunRequest::Submit {
+            text: "continue".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        assert!(pump.store.take_outgoing().is_empty());
+        pump.absorb(Frame::Success {
+            id: fork,
+            result: serde_json::json!({"sessionId": "copy"}),
+        });
+        let frames = pump.store.take_outgoing();
+        assert!(!has_request(&frames, "session/prompt"));
+        pump.absorb(Frame::Success {
+            id: request_id(&frames, "session/load"),
+            result: serde_json::json!({"configOptions": []}),
+        });
+        assert_eq!(
+            request_params(&pump.store.take_outgoing(), "session/prompt")["sessionId"],
+            "copy"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_clone_returns_the_prompt_held_for_it() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::CloneSession);
+        let fork = request_id(&pump.store.take_outgoing(), "_kage/session/fork");
+        pump.handle(RunRequest::Submit {
+            text: "continue".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        pump.absorb(Frame::Failure {
+            id: fork,
+            error: RpcError::invalid_params("cannot clone"),
+        });
+        assert_eq!(pump.wire, "s1");
+        assert!(pump.unadopted.is_empty());
+        assert!(!has_request(&pump.store.take_outgoing(), "session/prompt"));
+        assert!(host_events(&app).iter().any(|event| matches!(
+            event,
+            HostEvent::PromptWithdrawn {
+                content: Some(_),
+                ..
+            }
+        )));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    #[test]
+    fn cloning_waits_for_active_runs_shells_and_agents() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.running = true;
+        pump.handle(RunRequest::CloneSession);
+        pump.running = false;
+        pump.shells
+            .insert("s1".to_owned(), vec!["sleep 30".to_owned()]);
+        pump.store.client().load_session("s1", "/w", &[], None);
+        let request = request_id(&pump.store.take_outgoing(), "session/load");
+        pump.absorb(Frame::Success {
+            id: request,
+            result: serde_json::json!({"configOptions": []}),
+        });
+        pump.handle(RunRequest::CloneSession);
+        pump.shells.clear();
+        pump.children.insert(
+            "child".to_owned(),
+            ChildTrack {
+                app: SessionId::new(),
+                parent: "s1".to_owned(),
+                committed: 0,
+                tools: BTreeMap::new(),
+                tail: None,
+                running: true,
+                ended: false,
+                pruned: false,
+            },
+        );
+        pump.handle(RunRequest::CloneSession);
+        assert!(!has_request(
+            &pump.store.take_outgoing(),
+            "_kage/session/fork"
+        ));
+        assert_eq!(
+            notices(&app)
+                .iter()
+                .filter(|(_, text)| text.contains("session is busy"))
+                .count(),
+            3
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

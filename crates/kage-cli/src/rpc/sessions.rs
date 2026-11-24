@@ -142,16 +142,18 @@ impl super::CliAcpAgent {
                 }));
             }
         }
-        let model = if self.host.registry().resolve(&replay.model).is_ok() {
+        let providers = self.host.providers();
+        let model = if providers.registry.resolve(&replay.model).is_ok() {
             replay.model
         } else {
             eprintln!(
                 "kage: rpc: session model {} unavailable; using {} instead",
-                replay.model, self.host.default_model
+                replay.model, providers.default_model
             );
-            self.host.default_model.clone()
+            providers.default_model.clone()
         };
         let (mut spec, runtime) = self.session_spec(
+            &providers,
             id,
             cwd,
             &model,
@@ -176,7 +178,7 @@ impl super::CliAcpAgent {
                 .and_then(kage_core::ThinkingLevel::parse);
         }
         spec.recorder = Some(Recorder::new(writer, spec.plugins.clone()));
-        Ok(self.open(client_id.to_owned(), spec, runtime))
+        Ok(self.open(&providers, client_id.to_owned(), spec, runtime))
     }
 
     /// Opens a recorded session for hosting, waiting out the window

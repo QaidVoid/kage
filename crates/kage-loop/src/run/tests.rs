@@ -1701,9 +1701,9 @@ fn good_turn() -> Vec<Result<ProviderEvent, kage_provider::ProviderError>> {
     ]
 }
 
-fn overflow_turn() -> Vec<Result<ProviderEvent, kage_provider::ProviderError>> {
+fn overflow_turn(status: u16) -> Vec<Result<ProviderEvent, kage_provider::ProviderError>> {
     vec![Err(kage_provider::ProviderError::Http {
-        status: 400,
+        status,
         body: "prompt is too long: 300000 tokens > 200000 maximum".into(),
     })]
 }
@@ -1734,44 +1734,51 @@ fn summary_call() -> Vec<Result<ProviderEvent, kage_provider::ProviderError>> {
 /// harder and re-issuing a rebuilt request, not by failing the run.
 #[test]
 fn context_overflow_compacts_harder_and_the_turn_succeeds() {
-    let mock = MockProvider::sequence(vec![overflow_turn(), summary_call(), good_turn()]);
-    let mut cx = AgentContext::new("mock:m", "");
-    for i in 0..12 {
-        cx.history.push(Arc::new(user_msg(&format!("turn {i}"))));
-        cx.history
-            .push(Arc::new(plain_assistant(&format!("reply {i}"))));
-    }
-    let cfg = LoopConfig::default();
-    let log = EventLog::default();
-    let cancel = CancelFlag::new();
-    let registry = ToolRegistry::new();
-
-    let res = run(
-        &mock,
-        &registry,
-        &mut cx,
-        cfg,
-        &mut NoopHooks,
-        &cancel,
-        |e| log.record(e),
-    );
-    assert!(
-        res.is_ok(),
-        "run should recover via compaction, got {res:?}"
-    );
-    assert_eq!(mock.call_count(), 3, "overflow, summarizer, retried turn");
-    assert!(
-        cx.history
-            .iter()
-            .any(|m| matches!(&m.content[0], kage_core::Content::Text { text } if text.contains("<summary>"))),
-        "history must carry the synthetic summary"
-    );
-    assert!(!log.events.borrow().iter().any(|e| matches!(
-        e,
-        LoopEvent::Error {
-            kind: LoopError::ContextOverflow
+    for status in [400, 503] {
+        let mock = MockProvider::sequence(vec![overflow_turn(status), summary_call(), good_turn()]);
+        let mut cx = AgentContext::new("mock:m", "");
+        for i in 0..12 {
+            cx.history.push(Arc::new(user_msg(&format!("turn {i}"))));
+            cx.history
+                .push(Arc::new(plain_assistant(&format!("reply {i}"))));
         }
-    )));
+        let cfg = LoopConfig {
+            max_provider_retries: 0,
+            ..LoopConfig::default()
+        };
+        let log = EventLog::default();
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new();
+
+        let res = run(
+            &mock,
+            &registry,
+            &mut cx,
+            cfg,
+            &mut NoopHooks,
+            &cancel,
+            |e| log.record(e),
+        );
+        assert!(
+            res.is_ok(),
+            "run should recover via compaction, got {res:?}"
+        );
+        assert_eq!(mock.call_count(), 3, "overflow, summarizer, retried turn");
+        assert!(
+            cx.history
+                .iter()
+                .any(|m| matches!(&m.content[0], kage_core::Content::Text { text } if text.contains("<summary>"))),
+            "history must carry the synthetic summary"
+        );
+        assert!(!log.events.borrow().iter().any(|e| matches!(
+            e,
+            LoopEvent::Error {
+                kind: LoopError::ContextOverflow
+            }
+        )));
+        let requests = mock.requests();
+        assert!(requests[2].messages.len() < requests[0].messages.len());
+    }
 }
 
 /// With compaction off (`compaction_threshold: 0`), an overflowing
@@ -1779,33 +1786,41 @@ fn context_overflow_compacts_harder_and_the_turn_succeeds() {
 /// against the user's setting.
 #[test]
 fn overflow_with_compaction_off_ends_with_context_overflow() {
-    let mock = MockProvider::sequence(vec![overflow_turn()]);
-    let mut cx = AgentContext::new("mock:m", "");
-    for i in 0..12 {
-        cx.history.push(Arc::new(user_msg(&format!("turn {i}"))));
-        cx.history
-            .push(Arc::new(plain_assistant(&format!("reply {i}"))));
-    }
-    let cfg = LoopConfig {
-        compaction_threshold: 0.0,
-        ..LoopConfig::default()
-    };
-    let log = EventLog::default();
-    let cancel = CancelFlag::new();
-    let registry = ToolRegistry::new();
+    for status in [400, 503] {
+        let mock = MockProvider::sequence(vec![overflow_turn(status)]);
+        let mut cx = AgentContext::new("mock:m", "");
+        for i in 0..12 {
+            cx.history.push(Arc::new(user_msg(&format!("turn {i}"))));
+            cx.history
+                .push(Arc::new(plain_assistant(&format!("reply {i}"))));
+        }
+        let cfg = LoopConfig {
+            compaction_threshold: 0.0,
+            ..LoopConfig::default()
+        };
+        let log = EventLog::default();
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new();
 
-    let res = run(
-        &mock,
-        &registry,
-        &mut cx,
-        cfg,
-        &mut NoopHooks,
-        &cancel,
-        |e| log.record(e),
-    );
-    assert_eq!(res, Err(LoopError::ContextOverflow));
-    assert_eq!(mock.call_count(), 1, "no summarizer call");
-    assert_eq!(cx.history.len(), 24, "history untouched");
+        let res = run(
+            &mock,
+            &registry,
+            &mut cx,
+            cfg,
+            &mut NoopHooks,
+            &cancel,
+            |e| {
+                assert!(
+                    !matches!(e, LoopEvent::ProviderRetry { .. }),
+                    "overflow must not trigger an ordinary retry: {e:?}"
+                );
+                log.record(e);
+            },
+        );
+        assert_eq!(res, Err(LoopError::ContextOverflow));
+        assert_eq!(mock.call_count(), 1, "no summarizer call");
+        assert_eq!(cx.history.len(), 24, "history untouched");
+    }
 }
 
 /// An automatic compaction whose summarizer fails does not end the
@@ -1872,46 +1887,54 @@ fn a_failed_auto_compaction_warns_and_the_run_continues() {
 /// run with `ContextOverflow`, the variant that names the real cause.
 #[test]
 fn exhausted_overflow_compactions_end_with_context_overflow() {
-    let mock = MockProvider::sequence(vec![
-        overflow_turn(),
-        summary_call(),
-        overflow_turn(),
-        summary_call(),
-        overflow_turn(),
-        summary_call(),
-        overflow_turn(),
-    ]);
-    let mut cx = AgentContext::new("mock:m", "");
-    for i in 0..12 {
-        cx.history.push(Arc::new(user_msg(&format!("turn {i}"))));
-        cx.history
-            .push(Arc::new(plain_assistant(&format!("reply {i}"))));
-    }
-    let cfg = LoopConfig::default();
-    let log = EventLog::default();
-    let cancel = CancelFlag::new();
-    let registry = ToolRegistry::new();
+    for status in [400, 503] {
+        let mock = MockProvider::sequence(vec![
+            overflow_turn(status),
+            summary_call(),
+            overflow_turn(status),
+            summary_call(),
+            overflow_turn(status),
+            summary_call(),
+            overflow_turn(status),
+        ]);
+        let mut cx = AgentContext::new("mock:m", "");
+        for i in 0..12 {
+            cx.history.push(Arc::new(user_msg(&format!("turn {i}"))));
+            cx.history
+                .push(Arc::new(plain_assistant(&format!("reply {i}"))));
+        }
+        let cfg = LoopConfig::default();
+        let log = EventLog::default();
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new();
 
-    let res = run(
-        &mock,
-        &registry,
-        &mut cx,
-        cfg,
-        &mut NoopHooks,
-        &cancel,
-        |e| log.record(e),
-    );
-    assert_eq!(res, Err(LoopError::ContextOverflow));
-    assert_eq!(
-        mock.call_count(),
-        7,
-        "3 overflow rounds (turn + summarizer each), then the fatal turn"
-    );
-    assert_eq!(
-        cx.history.len(),
-        1,
-        "the last round summarizes the whole history"
-    );
+        let res = run(
+            &mock,
+            &registry,
+            &mut cx,
+            cfg,
+            &mut NoopHooks,
+            &cancel,
+            |e| {
+                assert!(
+                    !matches!(e, LoopEvent::ProviderRetry { .. }),
+                    "overflow must not trigger an ordinary retry: {e:?}"
+                );
+                log.record(e);
+            },
+        );
+        assert_eq!(res, Err(LoopError::ContextOverflow));
+        assert_eq!(
+            mock.call_count(),
+            7,
+            "3 overflow rounds (turn + summarizer each), then the fatal turn"
+        );
+        assert_eq!(
+            cx.history.len(),
+            1,
+            "the last round summarizes the whole history"
+        );
+    }
 }
 
 #[test]

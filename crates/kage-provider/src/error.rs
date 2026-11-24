@@ -72,9 +72,13 @@ impl ProviderError {
     /// the gate the loop's auto-retry consults. Auth, decode,
     /// unknown-model, an internal failure, an explicit cancel, and
     /// other 4xx are the request's fault and never retried - resending
-    /// only repeats the failure.
+    /// only repeats the failure. Context-window refusals are not transient,
+    /// even when the provider sends them with a 5xx status.
     #[must_use]
     pub fn is_transient(&self) -> bool {
+        if self.is_context_overflow() {
+            return false;
+        }
         match self {
             Self::Transport(_) | Self::RateLimited { .. } => true,
             Self::Http { status, .. } => {
@@ -103,13 +107,13 @@ impl ProviderError {
     /// model's context window. Best-effort: providers phrase the refusal
     /// differently and none of them tag it with a stable code, so this
     /// matches the phrases they actually send, on the statuses a size
-    /// rejection arrives with. A false positive costs one bounded
-    /// compaction retry before the error surfaces; a false negative
-    /// costs the retry the loop would have attempted anyway.
+    /// rejection arrives with, including gateways that return 5xx. A false
+    /// positive costs one bounded compaction retry before the error surfaces;
+    /// a false negative costs the retry the loop would have attempted anyway.
     #[must_use]
     pub fn is_context_overflow(&self) -> bool {
         let (Self::Http {
-            status: 400 | 413 | 422,
+            status: 400 | 413 | 422 | 500..=599,
             body: text,
         }
         | Self::Decode(text)) = self
@@ -280,7 +284,7 @@ mod tests {
             );
         }
         for (status, body) in [
-            (500, "prompt is too long"),
+            (500, "internal server error"),
             (400, "invalid role in messages"),
             (401, "context length"),
         ] {
@@ -295,6 +299,28 @@ mod tests {
         }
         assert!(!ProviderError::Transport("context length".into()).is_context_overflow());
         assert!(!error::is_context_overflow_text("all quiet"));
+    }
+
+    #[test]
+    fn context_overflow_on_server_errors_is_not_transient() {
+        for status in 500..=599 {
+            let overflow = ProviderError::Http {
+                status,
+                body: "prompt is too long: 1113807 tokens > 1000000 maximum".into(),
+            };
+            assert!(overflow.is_context_overflow(), "{status}: {overflow}");
+            assert!(!overflow.is_transient(), "{status}: {overflow}");
+
+            let unavailable = ProviderError::Http {
+                status,
+                body: "service unavailable".into(),
+            };
+            assert!(
+                !unavailable.is_context_overflow(),
+                "{status}: {unavailable}"
+            );
+            assert!(unavailable.is_transient(), "{status}: {unavailable}");
+        }
     }
 
     #[test]

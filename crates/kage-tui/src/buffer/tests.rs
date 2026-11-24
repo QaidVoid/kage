@@ -1261,3 +1261,114 @@ fn settle_run_tools_finishes_unconfirmed_calls_but_leaves_asks() {
     assert_eq!(phase(&buf, "c3"), ToolPhase::Interrupted);
     assert_eq!(phase(&buf, "c4"), ToolPhase::Done);
 }
+
+#[test]
+fn attempt_rollback_reindexes_trimmed_blocks_and_invalidates_render_state() {
+    let mut buf = Buffer::new();
+    buf.push_user("old prompt");
+    buf.append_assistant_delta("complete");
+    buf.finish_streaming();
+    buf.start_attempt("failed");
+    buf.append_thinking_delta("provisional thinking");
+    buf.push_custom("kage:notify", "keep notice", false);
+    buf.append_assistant_delta("provisional answer");
+    buf.push_provider_media("provisional image");
+    buf.upsert_tool_call("reused", "read", json!({"path": "bad"}));
+    assert_eq!(buf.compact_to(5), 2);
+    for index in 0..buf.blocks.len() {
+        buf.set_cached_height(index, 80, 2);
+    }
+    buf.set_focus(Some(4));
+    buf.set_scroll(3);
+    buf.set_last_block_screen_rows(vec![(4, 1, 3)]);
+    let stale = buf.clone();
+    let epoch = buf.epoch;
+    let version = buf.version();
+    buf.discard_attempt(Some("failed"));
+    assert!(buf.epoch > epoch);
+    assert!(buf.version() > version);
+    assert_eq!(buf.blocks.len(), 1);
+    assert!(matches!(buf.blocks[0].as_ref(), Block::Custom { text, .. } if text == "keep notice"));
+    assert_eq!(buf.total_text_bytes, "keep notice".len());
+    assert_eq!(buf.scroll(), Some(0));
+    assert_eq!(buf.focus(), None);
+    assert_eq!(buf.block_at_screen_row(1), None);
+    assert_eq!(buf.block_heights.len(), 1);
+    assert_eq!(buf.block_render_lines.len(), 1);
+    buf.merge_render_state(&stale);
+    assert_eq!(buf.cached_height(0, 80), None);
+    buf.start_attempt("next");
+    buf.upsert_tool_call("reused", "read", json!({"path": "good"}));
+    assert_eq!(buf.tool_phase("reused"), Some(ToolPhase::Streaming));
+    assert_eq!(
+        buf.total_text_bytes,
+        buf.blocks
+            .iter()
+            .map(|block| block.text_bytes())
+            .sum::<usize>()
+    );
+}
+
+#[test]
+fn attempt_boundaries_keep_reused_ids_and_display_endings_provisional() {
+    let mut buf = Buffer::new();
+    buf.start_attempt("same");
+    buf.append_assistant_delta("complete");
+    buf.upsert_tool_call("call", "read", json!({"path": "old"}));
+    buf.end_attempt("same");
+    buf.start_attempt("same");
+    buf.append_assistant_delta("discard");
+    buf.upsert_tool_call("call", "read", json!({"path": "new"}));
+    buf.end_attempt("display-only");
+    buf.discard_attempt(Some("unrelated"));
+    assert_eq!(buf.blocks.len(), 4);
+    buf.discard_attempt(Some("same"));
+    assert_eq!(buf.blocks.len(), 2);
+    assert!(matches!(buf.blocks[0].as_ref(), Block::Assistant { text, .. } if text == "complete"));
+    assert!(
+        matches!(buf.blocks[1].as_ref(), Block::ToolCall { input, .. } if input["path"] == "old")
+    );
+    buf.start_attempt("third");
+    buf.append_assistant_delta("third");
+    buf.start_attempt("fourth");
+    buf.append_assistant_delta("fourth");
+    buf.discard_attempt(None);
+    assert_eq!(buf.blocks.len(), 3);
+    assert!(matches!(buf.blocks[2].as_ref(), Block::Assistant { text, .. } if text == "third"));
+}
+
+#[test]
+fn attempt_rollback_preserves_executed_tools_and_user_media() {
+    let mut buf = Buffer::new();
+    buf.start_attempt("attempt");
+    buf.push_tool_call("running", "shell", json!({}));
+    buf.set_tool_phase("running", ToolPhase::Running);
+    buf.push_tool_call("finished", "shell", json!({}));
+    buf.push_tool_result("finished", "result", false);
+    buf.push_user("steered prompt");
+    buf.push_custom("kage:image", "user image", false);
+    buf.push_provider_media("provider image");
+    buf.discard_attempt(None);
+    assert_eq!(buf.blocks.len(), 5);
+    assert_eq!(buf.tool_phase("running"), Some(ToolPhase::Running));
+    assert!(matches!(buf.blocks[4].as_ref(), Block::Custom { text, .. } if text == "user image"));
+}
+
+#[test]
+fn attempt_rollback_preserves_surviving_focus_without_requesting_a_scroll() {
+    let mut buf = Buffer::new();
+    buf.start_attempt("failed");
+    buf.append_assistant_delta("discard");
+    buf.push_custom("kage:notify", "keep", false);
+    buf.set_focus(Some(1));
+    buf.last_user_focus = Some(1);
+    buf.last_drawn_focus = Some(1);
+    buf.set_cached_height(0, 80, 2);
+    buf.set_cached_height(1, 80, 2);
+    buf.set_scroll(3);
+    buf.discard_attempt(None);
+    assert_eq!(buf.focus(), Some(0));
+    assert_eq!(buf.last_user_focus, Some(0));
+    assert_eq!(buf.last_drawn_focus, Some(0));
+    assert_eq!(buf.scroll(), Some(0));
+}

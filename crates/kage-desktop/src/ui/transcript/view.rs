@@ -926,7 +926,7 @@ fn render_row(
                         call,
                         false,
                         false,
-                        times.and_then(|t| t.tool(&call.tool_call_id)),
+                        times.and_then(|t| t.tool(*ix)),
                         ui_state,
                     );
                     events.extend(actions);

@@ -12,9 +12,130 @@ impl Buffer {
         if self.last_is_live_assistant() || self.last_is_live_thinking() {
             self.finish_streaming();
         }
+        if matches!(
+            block,
+            Block::Assistant { .. } | Block::Thinking { .. } | Block::ToolCall { .. }
+        ) && let Some(attempt) = &mut self.attempt
+        {
+            attempt.blocks.push(self.blocks.len());
+        }
         self.total_text_bytes += block.text_bytes();
         self.blocks.push(Arc::new(block));
         self.push_block_caches();
+    }
+
+    /// Begin a provisional provider message, separating it from earlier streams.
+    pub fn start_attempt(&mut self, id: impl Into<String>) {
+        self.finish_streaming();
+        self.attempt = Some(Attempt {
+            id: id.into(),
+            blocks: Vec::new(),
+        });
+    }
+
+    /// Finish the displayed stream and commit output only for the matching message.
+    /// Display-only endings with another id leave the provider attempt provisional.
+    pub fn end_attempt(&mut self, id: &str) {
+        self.finish_streaming();
+        if self
+            .attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.id == id)
+        {
+            self.attempt = None;
+        }
+    }
+
+    /// Finish the active attempt without removing output, including an incomplete
+    /// reply retained after a terminal error or run ending.
+    pub fn finish_attempt(&mut self) {
+        self.finish_streaming();
+        self.attempt = None;
+    }
+
+    /// Remove the active attempt's provisional output, preserving notices and
+    /// tool calls that have begun execution. An absent id names the active attempt.
+    /// An unknown or completed message id leaves the buffer unchanged.
+    pub fn discard_attempt(&mut self, id: Option<&str>) {
+        let Some(attempt) = self.attempt.as_ref() else {
+            return;
+        };
+        if id.is_some_and(|id| attempt.id != id) {
+            return;
+        }
+        let attempt = self.attempt.take().expect("active attempt");
+        let mut removed = vec![false; self.blocks.len()];
+        for index in attempt.blocks {
+            removed[index] = !matches!(self.blocks[index].as_ref(), Block::ToolCall { phase, .. }
+                if !matches!(phase, ToolPhase::Streaming | ToolPhase::Queued));
+        }
+        if !removed.iter().any(|removed| *removed) {
+            return;
+        }
+        let topology = self.tool_topology();
+        if let Some(top) = self.scroll {
+            let mut old_row = 0usize;
+            let mut new_row = 0usize;
+            let mut old_above: Option<usize> = None;
+            let mut new_above: Option<usize> = None;
+            let mut mapped = None;
+            for index in (0..self.blocks.len()).filter(|&i| !topology.is_hidden(i)) {
+                if let Some(above) = old_above {
+                    old_row += gap_between(&self.blocks[above], &self.blocks[index]);
+                }
+                let height = self.block_heights[index].map_or(1, |(_, h)| usize::from(h));
+                if !removed[index] {
+                    if let Some(above) = new_above {
+                        new_row += gap_between(&self.blocks[above], &self.blocks[index]);
+                    }
+                    if mapped.is_none() && top < old_row + height {
+                        mapped = Some(new_row + top.saturating_sub(old_row));
+                    }
+                    new_above = Some(index);
+                    new_row += height;
+                } else if mapped.is_none() && top < old_row + height {
+                    mapped = Some(new_row);
+                }
+                old_above = Some(index);
+                old_row += height;
+            }
+            self.scroll = Some(mapped.unwrap_or(new_row));
+        }
+        let mut indices = vec![None; self.blocks.len()];
+        let mut kept = 0;
+        for (index, removed) in removed.iter().enumerate() {
+            if !removed {
+                indices[index] = Some(kept);
+                kept += 1;
+            }
+        }
+        let mut index = 0;
+        self.blocks.retain(|_| {
+            let keep = !removed[index];
+            index += 1;
+            keep
+        });
+        self.total_text_bytes = self.blocks.iter().map(|block| block.text_bytes()).sum();
+        self.focus = self.focus.and_then(|index| indices[index]);
+        self.last_drawn_focus = self.last_drawn_focus.and_then(|index| indices[index]);
+        self.last_user_focus = self.last_user_focus.and_then(|index| indices[index]);
+        self.last_block_screen_rows.clear();
+        self.last_block_virtual_rows.clear();
+        self.last_mark_hit = None;
+        self.stream_dirty_since = None;
+        self.clear_block_caches();
+        self.block_heights.resize(self.blocks.len(), None);
+        self.block_render_lines.resize(self.blocks.len(), None);
+        self.cache_clears = self.cache_clears.wrapping_add(1);
+    }
+
+    /// Add media emitted by the provider, subject to the active attempt's rollback.
+    pub fn push_provider_media(&mut self, text: impl Into<String>) {
+        let index = self.blocks.len();
+        self.push_custom("kage:image", text, false);
+        if let Some(attempt) = &mut self.attempt {
+            attempt.blocks.push(index);
+        }
     }
 
     /// Push a fully-formed user prompt.
@@ -165,6 +286,14 @@ impl Buffer {
     ) {
         let call_id = call_id.into();
         let name = name.into();
+        if self.attempt.as_ref().is_some_and(|attempt| {
+            !self.blocks.iter().enumerate().rev().find(|(_, block)| {
+                matches!(block.as_ref(), Block::ToolCall { call_id: id, .. } | Block::ToolResult { call_id: id, .. } if id == &call_id)
+            }).is_some_and(|(index, _)| attempt.blocks.contains(&index))
+        }) {
+            self.push_tool_call(call_id, name, input);
+            return;
+        }
         let before = self.tool_call_text_bytes(&call_id);
         let Some(Block::ToolCall {
             name: n,
@@ -653,6 +782,7 @@ impl Buffer {
     /// render, and `set_focus`'s range check never sees this path.
     pub fn clear(&mut self) {
         self.blocks.clear();
+        self.attempt = None;
         self.total_text_bytes = 0;
         self.clear_block_caches();
         self.scroll = None;
@@ -665,6 +795,7 @@ impl Buffer {
     /// Take ownership of the blocks, leaving the buffer empty. Focus
     /// and scroll reset for the same reason as [`Self::clear`].
     pub fn take(&mut self) -> Vec<Arc<Block>> {
+        self.attempt = None;
         self.scroll = None;
         self.focus = None;
         self.last_drawn_focus = None;
@@ -782,6 +913,13 @@ impl Buffer {
             self.scroll = Some(top.saturating_sub(dropped_rows));
         }
 
+        if let Some(attempt) = &mut self.attempt {
+            attempt.blocks = attempt
+                .blocks
+                .iter()
+                .filter_map(|index| index.checked_sub(k))
+                .collect();
+        }
         self.blocks.drain(0..k);
         self.block_heights.drain(0..k);
         self.block_render_lines.drain(0..k);

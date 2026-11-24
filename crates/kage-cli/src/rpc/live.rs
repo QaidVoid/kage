@@ -17,9 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use kage_acp::acp::{
-    SessionConfigOption, SessionInfoUpdate, SessionUpdate, ShellUpdate,
-    SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate, SubagentUsage,
-    ToolCallUpdate,
+    MessagePhase, MessageUpdate, SessionConfigOption, SessionInfoUpdate, SessionUpdate,
+    ShellUpdate, SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate,
+    SubagentUsage, ToolCallUpdate,
 };
 use kage_acp::agent::{PromptContext, send_update};
 use kage_core::protocol::{
@@ -32,8 +32,8 @@ use kage_jsonrpc::RpcError;
 
 use super::CliAcpAgent;
 use super::bridge::{
-    HeldUpdates, ask_kind, permission_call, question_input, spawn_ask, to_update, tool_kind,
-    tool_title, top_agent,
+    Attempt, HeldUpdates, ask_kind, permission_call, question_input, spawn_ask, to_update,
+    tool_kind, tool_title, top_agent,
 };
 use super::options::{Settings, Shown, config_options};
 use crate::engine::Commander;
@@ -83,6 +83,8 @@ pub(super) struct SubagentSeed {
     pub(super) model: Option<String>,
     /// Whether it runs in the background.
     pub(super) background: bool,
+    /// The message in flight on the child's own session.
+    pub(super) flight: Vec<LoopEvent>,
 }
 
 impl SubagentSeed {
@@ -124,19 +126,27 @@ pub(super) struct OpenAsk {
 
 /// What a bridge seeded at attach applies before its next envelope.
 pub(super) struct Seed {
-    /// The attached session.
-    pub(super) session: SessionId,
-    /// The `agent` calls the session's tree was built from, in spawn
-    /// order. An agent tree is not cloneable, so the bridge folds a
-    /// fresh one from these.
+    /// The `agent` calls the session's tree was built from, in spawn order.
     pub(super) spawns: Vec<Spawn>,
-    /// Tool inputs the attach replay already showed, by call id.
-    pub(super) seen: HashMap<String, super::bridge::SeenCall>,
+    /// Replayed stream state of the attached session and its live children.
+    pub(super) flights: Vec<FlightSeed>,
     /// Running subagents the bridge streams and settles.
     pub(super) running: HashSet<SessionId>,
     /// The running ones paused for a rate limit, which report running
     /// again when their next run starts.
     pub(super) paused: HashSet<SessionId>,
+}
+
+/// One replayed session's tool inputs and provisional attempt ownership.
+pub(super) struct FlightSeed {
+    /// Session whose stream was replayed.
+    pub(super) session: SessionId,
+    /// Tool inputs the attach replay already showed, by call id.
+    pub(super) seen: HashMap<String, super::bridge::SeenCall>,
+    /// Tool names replayed by the attach, used when their execution ends.
+    pub(super) names: HashMap<String, String>,
+    /// Provisional output the attaching connection must discard on retry.
+    pub(super) attempt: Option<Attempt>,
 }
 
 /// One `agent` call Live recorded, enough to rebuild its tree node.
@@ -181,6 +191,7 @@ impl Spawn {
 #[derive(Default)]
 struct Flight {
     message: Option<MessageId>,
+    end: Option<LoopEvent>,
     text: String,
     thinking: String,
     tools: Vec<LiveTool>,
@@ -382,6 +393,21 @@ impl Live {
                     tool.running = true;
                 }
             }
+            LoopEvent::MessageEnd { id, .. } => {
+                if let Some(flight) = self.flight.get_mut(&session)
+                    && flight.message == Some(*id)
+                {
+                    flight.end = Some(event.clone());
+                }
+            }
+            LoopEvent::ProviderRetry { .. }
+                if self
+                    .flight
+                    .get(&session)
+                    .is_some_and(|flight| flight.end.is_none()) =>
+            {
+                self.flight.remove(&session);
+            }
             LoopEvent::MessageAppended { .. } => {
                 self.flight.remove(&session);
             }
@@ -479,36 +505,7 @@ impl Live {
             HostEvent::RunStarted => {
                 self.paused.remove(&session);
             }
-            HostEvent::RunEnded { outcome } => {
-                let requeued = matches!(
-                    outcome,
-                    RunOutcome::Failed {
-                        error: LoopError::RateLimited { .. }
-                    }
-                );
-                if !requeued {
-                    self.paused.remove(&session);
-                }
-                self.flight.remove(&session);
-                if !(is_agent && requeued && self.paused.contains_key(&session)) {
-                    self.owners.remove(&session);
-                    if let Some(expired) = self.steering_lifetimes.remove(&session) {
-                        expired.store(true, Ordering::SeqCst);
-                    }
-                }
-                self.running.remove(&session);
-                if !is_agent {
-                    self.prune_ended_agents(session);
-                    self.maybe_close(session);
-                } else if !requeued && self.ended_agent_leaves(session) {
-                    let root = self.tree.root_of(session);
-                    self.tree.remove_subtree(session);
-                    self.retain_spawns(root);
-                    if root != session {
-                        self.maybe_close(root);
-                    }
-                }
-            }
+            HostEvent::RunEnded { outcome } => self.run_ended(session, outcome, is_agent),
             HostEvent::AgentSpawned { .. } => {
                 if let Some(expired) = self
                     .steering_lifetimes
@@ -544,6 +541,9 @@ impl Live {
                     }
                 }
             }
+            HostEvent::SessionChanged { .. } => {
+                self.flight.remove(&session);
+            }
             HostEvent::TitleChanged { title } => {
                 self.titles.insert(session, title.clone());
             }
@@ -555,6 +555,38 @@ impl Live {
                 self.closing.remove(&session);
             }
             _ => {}
+        }
+    }
+
+    /// Releases a finished run while preserving a rate-limited child's ownership.
+    fn run_ended(&mut self, session: SessionId, outcome: &RunOutcome, is_agent: bool) {
+        let requeued = matches!(
+            outcome,
+            RunOutcome::Failed {
+                error: LoopError::RateLimited { .. }
+            }
+        );
+        if !requeued {
+            self.paused.remove(&session);
+        }
+        self.flight.remove(&session);
+        if !(is_agent && requeued && self.paused.contains_key(&session)) {
+            self.owners.remove(&session);
+            if let Some(expired) = self.steering_lifetimes.remove(&session) {
+                expired.store(true, Ordering::SeqCst);
+            }
+        }
+        self.running.remove(&session);
+        if !is_agent {
+            self.prune_ended_agents(session);
+            self.maybe_close(session);
+        } else if !requeued && self.ended_agent_leaves(session) {
+            let root = self.tree.root_of(session);
+            self.tree.remove_subtree(session);
+            self.retain_spawns(root);
+            if root != session {
+                self.maybe_close(root);
+            }
         }
     }
 
@@ -672,6 +704,9 @@ impl Live {
         let mut events = Vec::new();
         if let Some(flight) = flight {
             let id = message.unwrap_or_default();
+            if let Some(id) = message {
+                events.push(LoopEvent::MessageStart { id });
+            }
             if !flight.thinking.is_empty() {
                 events.push(LoopEvent::ThinkingDelta {
                     id,
@@ -696,6 +731,9 @@ impl Live {
                     });
                 }
             }
+        }
+        if let Some(end) = flight.and_then(|flight| flight.end.as_ref()) {
+            events.push(end.clone());
         }
         (message, events)
     }
@@ -746,6 +784,7 @@ impl Live {
                     usage: super::bridge::agent_usage(node),
                     model: super::bridge::agent_model(node),
                     background: node.background,
+                    flight: self.flight_events(node.session).1,
                 }
             })
             .collect();
@@ -948,19 +987,15 @@ impl CliAcpAgent {
             }
             self.announce_restored(path, id, &replay, ctx);
         }
-        // The turn in flight, unless the file already holds its message.
-        let mut seen = HashMap::new();
-        if let Some(ctx) = ctx
-            && !snap
-                .flight_message
-                .is_some_and(|message| file_ids.contains(&message))
+        let flight = if snap
+            .flight_message
+            .is_some_and(|message| file_ids.contains(&message))
         {
-            for event in &snap.flight {
-                if let Some(update) = to_update(&mut seen, event) {
-                    let _ = ctx.update(update);
-                }
-            }
-        }
+            &[][..]
+        } else {
+            &snap.flight
+        };
+        let mut flights = vec![self.replay_flight(id, client, flight, ctx)];
         if let Some(ctx) = ctx {
             for (command, tail) in &snap.shells {
                 let _ = ctx.update(SessionUpdate::Shell(ShellUpdate {
@@ -990,6 +1025,18 @@ impl CliAcpAgent {
         } else {
             HashSet::new()
         };
+        for child in snap
+            .subagents
+            .iter()
+            .filter(|child| running.contains(&child.session))
+        {
+            flights.push(self.replay_flight(
+                child.session,
+                &child.session.to_string(),
+                &child.flight,
+                ctx,
+            ));
+        }
         self.re_ask(client, &snap.asks, subagents);
         let paused = snap
             .subagents
@@ -998,14 +1045,71 @@ impl CliAcpAgent {
             .map(|seed| seed.session)
             .collect();
         lock(&self.seeds).push(Seed {
-            session: id,
             spawns: snap.spawns,
-            seen,
+            flights,
             running,
             paused,
         });
         self.host.attach(id, false);
         Ok(())
+    }
+
+    /// Replays a live stream and retains its tool and attempt ownership.
+    fn replay_flight(
+        &self,
+        session: SessionId,
+        client: &str,
+        events: &[LoopEvent],
+        ctx: Option<&PromptContext>,
+    ) -> FlightSeed {
+        let mut seed = FlightSeed {
+            session,
+            seen: HashMap::new(),
+            names: HashMap::new(),
+            attempt: None,
+        };
+        let Some(ctx) = ctx else {
+            return seed;
+        };
+        let attempt_output = self.attempt_output.load(Ordering::SeqCst);
+        for event in events {
+            let update = match event {
+                LoopEvent::MessageStart { id } => {
+                    seed.attempt = Some(Attempt {
+                        id: *id,
+                        tools: HashSet::new(),
+                    });
+                    attempt_output.then(|| {
+                        SessionUpdate::Message(MessageUpdate {
+                            message_id: id.to_string(),
+                            phase: MessagePhase::Start,
+                        })
+                    })
+                }
+                LoopEvent::MessageEnd { id, .. } => {
+                    seed.attempt = None;
+                    attempt_output.then(|| {
+                        SessionUpdate::Message(MessageUpdate {
+                            message_id: id.to_string(),
+                            phase: MessagePhase::End,
+                        })
+                    })
+                }
+                _ => {
+                    if let LoopEvent::ToolCallStart { id, name, .. } = event {
+                        seed.names.insert(id.to_string(), name.clone());
+                        if let Some(attempt) = &mut seed.attempt {
+                            attempt.tools.insert(id.to_string());
+                        }
+                    }
+                    to_update(&mut seed.seen, event)
+                }
+            };
+            if let Some(update) = update {
+                let _ = send_update(ctx.peer(), client, update);
+            }
+        }
+        seed
     }
 
     /// Asks the client again what is open under the session it

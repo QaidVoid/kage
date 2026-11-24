@@ -880,7 +880,7 @@ impl App {
         }
         let buffer = self.buffer_of(session);
         let mut buf = lock(&buffer);
-        buf.finish_streaming();
+        buf.finish_attempt();
         if matches!(outcome, RunOutcome::Completed) {
             buf.settle_run_tools();
         }

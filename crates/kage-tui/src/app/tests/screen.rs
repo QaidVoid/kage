@@ -716,3 +716,35 @@ fn a_toast_overlays_the_conversation_without_shifting_it() {
     assert_eq!(changed.len(), 1, "{rows:#?}");
     assert!(rows[changed[0]].contains("switched to fake:m"), "{rows:#?}");
 }
+
+#[test]
+fn ending_a_run_retires_provisional_ownership_without_removing_output() {
+    for outcome in [
+        kage_core::protocol::RunOutcome::Completed,
+        kage_core::protocol::RunOutcome::Cancelled,
+        kage_core::protocol::RunOutcome::Failed {
+            error: kage_core::LoopError::Provider {
+                message: "terminal failure".into(),
+            },
+        },
+    ] {
+        let buffer = shared_buffer();
+        {
+            let mut buf = lock(&buffer);
+            buf.start_attempt("incomplete");
+            buf.append_assistant_delta("retained partial");
+        }
+        let (tx, _rx) = mpsc::channel();
+        let mut app = app_with_defaults(buffer.clone(), tx);
+        app.apply_envelope(envelope(
+            kage_core::SessionId::new(),
+            1,
+            kage_core::protocol::HostEvent::RunEnded { outcome },
+        ));
+        let mut buf = lock(&buffer);
+        buf.discard_attempt(None);
+        assert!(
+            matches!(buf.blocks()[0].as_ref(), crate::Block::Assistant { text, live: false } if text == "retained partial")
+        );
+    }
+}

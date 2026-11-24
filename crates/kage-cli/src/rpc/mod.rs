@@ -558,6 +558,8 @@ struct CliAcpAgent {
     /// Whether the client is a kage client, which shows runs it did not
     /// prompt, so an idle session wakes for a background agent's result.
     kage_client: Arc<AtomicBool>,
+    /// Whether the client can roll back provisional message attempts.
+    attempt_output: Arc<AtomicBool>,
     /// The most transcript items the client shows, `0` for all of them:
     /// see [`sessions::window`].
     history_window: Arc<AtomicU32>,
@@ -599,6 +601,7 @@ impl CliAcpAgent {
         let shown = ShownBySession::default();
         let subagents = Arc::new(AtomicBool::new(false));
         let kage_client = Arc::new(AtomicBool::new(false));
+        let attempt_output = Arc::new(AtomicBool::new(false));
         let history_window = Arc::new(AtomicU32::new(0));
         let held = Held::default();
         let asks = AskSet::default();
@@ -616,6 +619,8 @@ impl CliAcpAgent {
             shown: Arc::clone(&shown),
             aliases: Arc::clone(&host.aliases),
             seen: HashMap::new(),
+            attempts: HashMap::new(),
+            attempt_output: Arc::clone(&attempt_output),
             stops: HashMap::new(),
             asks: Arc::clone(&asks),
             tree: AgentTree::default(),
@@ -654,6 +659,7 @@ impl CliAcpAgent {
             plugin_host: AtomicBool::new(false),
             client_plugins: Mutex::default(),
             kage_client,
+            attempt_output,
             history_window,
             env: Mutex::new(Environment::inherit()),
             takes_env: AtomicBool::new(false),
@@ -1091,6 +1097,10 @@ impl Agent for CliAcpAgent {
                 .meta
                 .as_ref()
                 .is_some_and(|meta| meta.kage.is_some()),
+            Ordering::SeqCst,
+        );
+        self.attempt_output.store(
+            req.client_capabilities.supports_attempt_output(),
             Ordering::SeqCst,
         );
         self.plugin_host

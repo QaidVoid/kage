@@ -35,19 +35,16 @@ pub fn apply_loop_event(buf: &mut Buffer, event: &LoopEvent) {
         LoopEvent::MessageAppended { message } if message.role == Role::User => {
             push_user_message(buf, message);
         }
-        LoopEvent::MessageStart { .. }
-        | LoopEvent::MessageAppended { .. }
+        LoopEvent::MessageStart { id } => buf.start_attempt(id.to_string()),
+        LoopEvent::MessageAppended { .. }
         | LoopEvent::TurnStarted { .. }
-        | LoopEvent::TurnEnded { .. }
-        | LoopEvent::CompactionStarted { .. } => {
-            // The buffer lazily begins an Assistant block on the first
-            // text/thinking delta, so MessageStart is a no-op here.
-        }
+        | LoopEvent::CompactionStarted { .. } => {}
+        LoopEvent::TurnEnded { .. } => buf.finish_attempt(),
         LoopEvent::TextDelta { delta, .. } => buf.append_assistant_delta(delta),
         LoopEvent::ThinkingDelta { delta, .. } => buf.append_thinking_delta(delta),
         LoopEvent::Media { mime, data, .. } => {
             let label = produced_media_label(mime, data.len() / 4 * 3);
-            buf.push_custom("kage:image", label, false);
+            buf.push_provider_media(label);
         }
         LoopEvent::ToolCallArgsDelta {
             id,
@@ -77,19 +74,20 @@ pub fn apply_loop_event(buf: &mut Buffer, event: &LoopEvent) {
             }
         }
         LoopEvent::MessageEnd {
+            id,
             stop_reason: StopReason::MaxTokens,
             ..
         } => {
             // Finalize the live assistant bubble first: finish_streaming
             // targets the last block, so the notice must land after it.
-            buf.finish_streaming();
+            buf.end_attempt(&id.to_string());
             buf.push_custom(
                 "kage:truncated",
                 "reply hit the max output token limit",
                 false,
             );
         }
-        LoopEvent::MessageEnd { .. } => buf.finish_streaming(),
+        LoopEvent::MessageEnd { id, .. } => buf.end_attempt(&id.to_string()),
         LoopEvent::Compaction {
             kept,
             summarized,
@@ -114,30 +112,52 @@ pub fn apply_loop_event(buf: &mut Buffer, event: &LoopEvent) {
             requested_secs,
             error,
         } => {
-            let wait_text = if *wait_ms < 1000 {
-                format!("{wait_ms}ms")
-            } else {
-                format!("{wait_secs}s")
-            };
-            let mut msg = format!(
-                "provider error ({error}); retrying {attempt}/{max_attempts} in {wait_text}"
+            buf.discard_attempt(None);
+            buf.replace_or_push_custom(
+                "kage:retry",
+                provider_retry_text(
+                    *attempt,
+                    *max_attempts,
+                    *wait_secs,
+                    *wait_ms,
+                    *requested_secs,
+                    error,
+                ),
             );
-            if let Some(req) = requested_secs
-                && *req > *wait_secs
-            {
-                use std::fmt::Write as _;
-                let _ = write!(msg, " (server asked for {req}s)");
-            }
-            buf.replace_or_push_custom("kage:retry", msg);
         }
         LoopEvent::Error { kind } => push_error(buf, kind),
     }
 }
 
+/// The retry status shared by direct engine and ACP provider updates.
+pub(crate) fn provider_retry_text(
+    attempt: u32,
+    max_attempts: u32,
+    wait_secs: u64,
+    wait_ms: u64,
+    requested_secs: Option<u64>,
+    error: &str,
+) -> String {
+    let wait_text = if wait_ms < 1000 {
+        format!("{wait_ms}ms")
+    } else {
+        format!("{wait_secs}s")
+    };
+    let mut msg =
+        format!("provider error ({error}); retrying {attempt}/{max_attempts} in {wait_text}");
+    if let Some(req) = requested_secs
+        && req > wait_secs
+    {
+        use std::fmt::Write as _;
+        let _ = write!(msg, " (server asked for {req}s)");
+    }
+    msg
+}
+
 /// Surface a loop error in `buf`: finalize the live assistant bubble,
 /// then add one notice naming the failure.
 fn push_error(buf: &mut Buffer, kind: &LoopError) {
-    buf.finish_streaming();
+    buf.finish_attempt();
     match kind {
         LoopError::Cancelled => buf.push_custom("kage:notify", "Interrupted", false),
         LoopError::Auth { message } => buf.push_custom(
@@ -958,6 +978,142 @@ mod tests {
         let out = summarize_input("read", &json!({"path": path}));
         assert!(out.ends_with("..."));
         assert!(out.chars().count() <= 60);
+    }
+
+    #[test]
+    fn terminal_events_keep_partial_output_across_a_later_prestart_retry() {
+        for terminal in [
+            LoopEvent::Error {
+                kind: LoopError::Cancelled,
+            },
+            LoopEvent::Error {
+                kind: LoopError::Provider {
+                    message: "terminal failure".into(),
+                },
+            },
+            LoopEvent::TurnEnded {
+                index: 0,
+                had_tool_calls: false,
+            },
+        ] {
+            let mut buf = Buffer::new();
+            let message = id();
+            apply_loop_event(&mut buf, &LoopEvent::MessageStart { id: message });
+            apply_loop_event(
+                &mut buf,
+                &LoopEvent::TextDelta {
+                    id: message,
+                    delta: "retained partial".into(),
+                },
+            );
+            apply_loop_event(&mut buf, &terminal);
+            apply_loop_event(
+                &mut buf,
+                &LoopEvent::ProviderRetry {
+                    attempt: 1,
+                    max_attempts: 3,
+                    wait_secs: 0,
+                    wait_ms: 25,
+                    requested_secs: None,
+                    error: "prestart failure".into(),
+                },
+            );
+            assert!(
+                matches!(buf.blocks()[0].as_ref(), Block::Assistant { text, live: false } if text == "retained partial")
+            );
+            assert!(
+                matches!(buf.blocks().last().unwrap().as_ref(), Block::Custom { kind, .. } if kind == "kage:retry")
+            );
+        }
+    }
+
+    #[test]
+    fn retry_discards_mixed_provider_output_and_pending_tool_only() {
+        let mut buf = Buffer::new();
+        buf.push_user("prompt");
+        let complete = id();
+        apply_loop_event(&mut buf, &LoopEvent::MessageStart { id: complete });
+        apply_loop_event(
+            &mut buf,
+            &LoopEvent::TextDelta {
+                id: complete,
+                delta: "complete".into(),
+            },
+        );
+        apply_loop_event(
+            &mut buf,
+            &LoopEvent::MessageEnd {
+                id: complete,
+                usage: TokenUsage::default(),
+                stop_reason: StopReason::EndTurn,
+            },
+        );
+        let failed = id();
+        apply_loop_event(&mut buf, &LoopEvent::MessageStart { id: failed });
+        apply_loop_event(
+            &mut buf,
+            &LoopEvent::ThinkingDelta {
+                id: failed,
+                delta: "thinking".into(),
+            },
+        );
+        apply_loop_event(
+            &mut buf,
+            &LoopEvent::TextDelta {
+                id: failed,
+                delta: "partial".into(),
+            },
+        );
+        apply_loop_event(
+            &mut buf,
+            &LoopEvent::Media {
+                id: failed,
+                kind: kage_core::Modality::Image,
+                mime: "image/png".into(),
+                data: "YWJj".into(),
+            },
+        );
+        apply_loop_event(
+            &mut buf,
+            &LoopEvent::ToolCallArgsDelta {
+                id: kage_core::ToolCallId::new("reused"),
+                name: "read".into(),
+                input_partial: json!({"path": "bad"}),
+            },
+        );
+        buf.push_custom("kage:notify", "preserved", false);
+        apply_loop_event(
+            &mut buf,
+            &LoopEvent::ProviderRetry {
+                attempt: 1,
+                max_attempts: 3,
+                wait_secs: 0,
+                wait_ms: 25,
+                requested_secs: None,
+                error: "busy".into(),
+            },
+        );
+        assert_eq!(buf.blocks().len(), 4);
+        assert!(matches!(buf.blocks()[0].as_ref(), Block::User { .. }));
+        assert!(
+            matches!(buf.blocks()[1].as_ref(), Block::Assistant { text, .. } if text == "complete")
+        );
+        assert!(
+            matches!(buf.blocks()[2].as_ref(), Block::Custom { text, .. } if text == "preserved")
+        );
+        assert!(
+            matches!(buf.blocks()[3].as_ref(), Block::Custom { kind, text, .. } if kind == "kage:retry" && text.contains("25ms"))
+        );
+        apply_loop_event(&mut buf, &LoopEvent::MessageStart { id: failed });
+        apply_loop_event(
+            &mut buf,
+            &LoopEvent::ToolCallStart {
+                id: kage_core::ToolCallId::new("reused"),
+                name: "read".into(),
+                input_partial: json!({"path": "good"}),
+            },
+        );
+        assert_eq!(buf.tool_phase("reused"), Some(ToolPhase::Queued));
     }
 
     #[test]

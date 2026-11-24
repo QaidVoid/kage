@@ -36,31 +36,32 @@ pub use kage_acp_wire::schema::{
     HttpHeader, ImageSaveRequest, Implementation, InitializeRequest, InitializeResponse,
     KageAgentInfo, KageMeta, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, McpCapabilities, McpProbe, McpRestartRequest, McpServer, McpServerHttp,
-    McpServerStdio, McpServersUpdate, MessageChunk, ModelEntry, ModelProvider, ModelsResponse,
-    NewSessionKage, NewSessionMeta, NewSessionRequest, NewSessionResponse, NoticeTone,
-    NoticeUpdate, OptionEntry, OptionSetRequest, OptionsResponse, PROTOCOL_VERSION, PastPrompt,
-    PermissionOption, PermissionOptionKind, PermissionOutcome, Plan, PlanReview, PluginCallRequest,
-    PluginCallResult, PluginDrainQueue, PluginDrainRequest, PluginDrainResult, PluginEventRequest,
-    PluginHookKind, PluginHookRequest, PluginInstallRequest, PluginPendingMessage,
-    PluginPendingRole, PluginRemoveRequest, PluginSessionOp, PluginToolRename, PluginToolSpec,
-    PluginToolsRequest, PluginToolsResult, PluginsSource, ProbeModel, ProbeTool,
-    PromptCapabilities, PromptDelivery, PromptRef, PromptRequest, PromptResponse, PromptWithdrawn,
-    ProviderProbe, QuestionChoice, QuestionMeta, QuestionPrompt, RegistryCapability,
-    RegistryInstallRequest, RegistryInstallResult, RegistryPackage, RegistrySearchRequest,
-    RegistrySearchResult, RequestMeta, RequestPermissionRequest, RequestPermissionResponse,
-    RequestPermissionResult, ResourceLink, ResumeSessionRequest, ResumeSessionResponse,
-    SelectedOption, SessionBackground, SessionCapabilities, SessionConfigCategory,
-    SessionConfigKind, SessionConfigOption, SessionConfigSelectOption, SessionExportResponse,
-    SessionForkRequest, SessionForkResponse, SessionInfo, SessionInfoKage, SessionInfoMeta,
-    SessionInfoUpdate, SessionMode, SessionModes, SessionNotification, SessionOpt,
-    SessionPromptsResponse, SessionRenameRequest, SessionReplacedUpdate, SessionRequest,
-    SessionRewindRequest, SessionUndoResponse, SetModeRequest, SetModeResponse,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, ShellRequest, ShellUpdate,
-    StopReason, SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate,
-    SubagentUsage, Supported, SwarmMeta, SwarmResumeRequest, SwarmResumeResponse, TerminalRef,
-    TextContent, ThemesRequest, ThemesResult, ToolCall, ToolCallContent, ToolCallMeta,
-    ToolCallStatus, ToolCallUpdate, ToolKind, TurnPhase, TurnReason, TurnUpdate, UsageMeta,
-    UsageTokens, UsageUpdate, UserTheme, WithdrawRequest, parse_session_config_options,
+    McpServerStdio, McpServersUpdate, MessageChunk, MessagePhase, MessageUpdate, ModelEntry,
+    ModelProvider, ModelsResponse, NewSessionKage, NewSessionMeta, NewSessionRequest,
+    NewSessionResponse, NoticeTone, NoticeUpdate, OptionEntry, OptionSetRequest, OptionsResponse,
+    PROTOCOL_VERSION, PastPrompt, PermissionOption, PermissionOptionKind, PermissionOutcome, Plan,
+    PlanReview, PluginCallRequest, PluginCallResult, PluginDrainQueue, PluginDrainRequest,
+    PluginDrainResult, PluginEventRequest, PluginHookKind, PluginHookRequest, PluginInstallRequest,
+    PluginPendingMessage, PluginPendingRole, PluginRemoveRequest, PluginSessionOp,
+    PluginToolRename, PluginToolSpec, PluginToolsRequest, PluginToolsResult, PluginsSource,
+    ProbeModel, ProbeTool, PromptCapabilities, PromptDelivery, PromptRef, PromptRequest,
+    PromptResponse, PromptWithdrawn, ProviderProbe, ProviderRetryUpdate, QuestionChoice,
+    QuestionMeta, QuestionPrompt, RegistryCapability, RegistryInstallRequest,
+    RegistryInstallResult, RegistryPackage, RegistrySearchRequest, RegistrySearchResult,
+    RequestMeta, RequestPermissionRequest, RequestPermissionResponse, RequestPermissionResult,
+    ResourceLink, ResumeSessionRequest, ResumeSessionResponse, SelectedOption, SessionBackground,
+    SessionCapabilities, SessionConfigCategory, SessionConfigKind, SessionConfigOption,
+    SessionConfigSelectOption, SessionExportResponse, SessionForkRequest, SessionForkResponse,
+    SessionInfo, SessionInfoKage, SessionInfoMeta, SessionInfoUpdate, SessionMode, SessionModes,
+    SessionNotification, SessionOpt, SessionPromptsResponse, SessionRenameRequest,
+    SessionReplacedUpdate, SessionRequest, SessionRewindRequest, SessionUndoResponse,
+    SetModeRequest, SetModeResponse, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+    ShellRequest, ShellUpdate, StopReason, SubagentSessionCapabilities, SubagentState,
+    SubagentSwarm, SubagentUpdate, SubagentUsage, Supported, SwarmMeta, SwarmResumeRequest,
+    SwarmResumeResponse, TerminalRef, TextContent, ThemesRequest, ThemesResult, ToolCall,
+    ToolCallContent, ToolCallMeta, ToolCallStatus, ToolCallUpdate, ToolKind, TurnPhase, TurnReason,
+    TurnUpdate, UsageMeta, UsageTokens, UsageUpdate, UserTheme, WithdrawRequest,
+    parse_session_config_options,
 };
 
 /// `_kage/config/get` result: the read-only sections a settings page
@@ -182,6 +183,10 @@ pub enum SessionUpdate {
     SubagentUpdate(SubagentUpdate),
     /// A turn of the running prompt began or ended.
     Turn(TurnUpdate),
+    /// A provider message attempt began or committed.
+    Message(MessageUpdate),
+    /// A failed provider attempt is about to be retried.
+    ProviderRetry(ProviderRetryUpdate),
     /// A message for the user outside the conversation.
     Notice(NoticeUpdate),
     /// Older context turns were summarized.
@@ -216,6 +221,8 @@ impl From<SessionUpdate> for wire::SessionUpdate {
             SessionUpdate::ConfigOptionUpdate(update) => Self::ConfigOptionUpdate(update),
             SessionUpdate::SubagentUpdate(update) => Self::SubagentUpdate(update),
             SessionUpdate::Turn(update) => Self::Turn(update),
+            SessionUpdate::Message(update) => Self::Message(update),
+            SessionUpdate::ProviderRetry(update) => Self::ProviderRetry(update),
             SessionUpdate::Notice(update) => Self::Notice(update),
             SessionUpdate::Compaction(update) => Self::Compaction(update),
             SessionUpdate::McpStatus(update) => Self::McpStatus(update.into()),
@@ -299,5 +306,36 @@ mod tests {
             let wire_update: wire::SessionUpdate = update.into();
             assert_eq!(serde_json::to_value(wire_update).unwrap(), json);
         }
+    }
+    #[test]
+    fn attempt_updates_convert_to_the_wire_shape() {
+        let message: wire::SessionUpdate = SessionUpdate::Message(MessageUpdate {
+            message_id: "m1".into(),
+            phase: MessagePhase::Start,
+        })
+        .into();
+        assert_eq!(
+            serde_json::to_value(message).unwrap(),
+            serde_json::json!({
+                "sessionUpdate": "_kage/message", "messageId": "m1", "phase": "start"
+            })
+        );
+        let retry: wire::SessionUpdate = SessionUpdate::ProviderRetry(ProviderRetryUpdate {
+            message_id: Some("m1".into()),
+            attempt: 1,
+            max_attempts: 4,
+            wait_secs: 0,
+            wait_ms: 250,
+            requested_secs: None,
+            error: "busy".into(),
+        })
+        .into();
+        assert_eq!(
+            serde_json::to_value(retry).unwrap(),
+            serde_json::json!({
+                "sessionUpdate": "_kage/provider_retry", "messageId": "m1", "attempt": 1,
+                "maxAttempts": 4, "waitSecs": 0, "waitMs": 250, "error": "busy"
+            })
+        );
     }
 }

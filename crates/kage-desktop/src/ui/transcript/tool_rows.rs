@@ -1091,7 +1091,7 @@ pub fn render_group(
                 ui.set_min_width(ui.available_width());
                 for (n, member) in members.iter().enumerate() {
                     if let Some(TranscriptItem::ToolCall(call)) = session.items.get(*member) {
-                        let took = times.and_then(|t| t.tool(&call.tool_call_id));
+                        let took = times.and_then(|t| t.tool(*member));
                         let (_, member_actions) =
                             render_tool(ui, *member, call, true, n == 0, took, ui_state);
                         actions.extend(member_actions);
@@ -1795,9 +1795,7 @@ pub fn render_agents(
     let counts = SwarmCounts::of(&members);
     let live = counts.live();
     let open = live != ui_state.expanded.contains(&RowKey::Item(ix));
-    let took = store
-        .timings(&session.id)
-        .and_then(|times| times.tool(&call.tool_call_id));
+    let took = store.timings(&session.id).and_then(|times| times.tool(ix));
     let template = call
         .swarm
         .as_ref()

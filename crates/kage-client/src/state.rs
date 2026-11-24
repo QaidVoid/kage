@@ -285,8 +285,8 @@ impl Session {
     }
 
     /// Appends a streamed message or thought chunk, merging it into
-    /// the trailing item when that item is of the same kind.
-    pub(crate) fn append_chunk(&mut self, chunk: &ContentBlock, assistant: bool) {
+    /// the trailing item when `merge` permits it and the kind matches.
+    pub(crate) fn append_chunk(&mut self, chunk: &ContentBlock, assistant: bool, merge: bool) {
         if let (ContentBlock::Image(blob) | ContentBlock::Audio(blob), true) = (chunk, assistant) {
             self.items.push(TranscriptItem::Media {
                 mime: blob.mime_type.clone(),
@@ -302,7 +302,7 @@ impl Session {
             Some(TranscriptItem::Thinking { .. }) => !assistant,
             _ => false,
         };
-        if extends {
+        if merge && extends {
             if let Some(
                 TranscriptItem::Assistant { text: held }
                 | TranscriptItem::Thinking { text: held, .. },
@@ -737,11 +737,11 @@ mod tests {
     #[test]
     fn chunks_merge_only_into_a_trailing_item_of_their_kind() {
         let mut session = Session::new("s1");
-        session.append_chunk(&ContentBlock::text("Hel"), true);
-        session.append_chunk(&ContentBlock::text("lo"), true);
-        session.append_chunk(&ContentBlock::text("thinking"), false);
-        session.append_chunk(&ContentBlock::text(" more"), false);
-        session.append_chunk(&ContentBlock::text("again"), true);
+        session.append_chunk(&ContentBlock::text("Hel"), true, true);
+        session.append_chunk(&ContentBlock::text("lo"), true, true);
+        session.append_chunk(&ContentBlock::text("thinking"), false, true);
+        session.append_chunk(&ContentBlock::text(" more"), false, true);
+        session.append_chunk(&ContentBlock::text("again"), true, true);
         assert_eq!(
             session.items,
             vec![
@@ -767,10 +767,10 @@ mod tests {
             mime_type: "image/png".into(),
             uri: None,
         });
-        session.append_chunk(&ContentBlock::text("here"), true);
-        session.append_chunk(&image, true);
-        session.append_chunk(&ContentBlock::text("done"), true);
-        session.append_chunk(&image, false);
+        session.append_chunk(&ContentBlock::text("here"), true, true);
+        session.append_chunk(&image, true, true);
+        session.append_chunk(&ContentBlock::text("done"), true, true);
+        session.append_chunk(&image, false, true);
         assert_eq!(
             session.items,
             vec![

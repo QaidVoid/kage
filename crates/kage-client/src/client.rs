@@ -15,15 +15,15 @@ use serde_json::Value;
 use kage_acp_wire::{
     CancelNotification, ClientCapabilities, CloseSessionRequest, CompactionPhase, ConfigGetRequest,
     ContentBlock, FsOp, FsRequest, Implementation, InitializeRequest, KageMeta,
-    ListSessionsRequest, LoadSessionRequest, McpRestartRequest, McpServer, ModelsResponse,
-    NewSessionKage, NewSessionMeta, NewSessionRequest, OptionSetRequest, OptionsResponse,
-    PROTOCOL_VERSION, PermissionOptionKind, PermissionOutcome, PlanReview, PromptDelivery,
-    PromptRef, PromptRequest, PromptResponse, QuestionMeta, RequestMeta, RequestPermissionRequest,
-    RequestPermissionResult, ResumeSessionRequest, SelectedOption, SessionExportResponse,
-    SessionForkRequest, SessionForkResponse, SessionNotification, SessionPromptsResponse,
-    SessionRenameRequest, SessionRequest, SessionRewindRequest, SessionUndoResponse, SessionUpdate,
-    SetSessionConfigOptionRequest, ShellRequest, SubagentState, SwarmResumeRequest,
-    UiCommandRequest, UiDialogRequest, UiKeymapRequest, UiSnapshot, UiUpdate,
+    ListSessionsRequest, LoadSessionRequest, McpRestartRequest, McpServer, MessagePhase,
+    ModelsResponse, NewSessionKage, NewSessionMeta, NewSessionRequest, OptionSetRequest,
+    OptionsResponse, PROTOCOL_VERSION, PermissionOptionKind, PermissionOutcome, PlanReview,
+    PromptDelivery, PromptRef, PromptRequest, PromptResponse, QuestionMeta, RequestMeta,
+    RequestPermissionRequest, RequestPermissionResult, ResumeSessionRequest, SelectedOption,
+    SessionExportResponse, SessionForkRequest, SessionForkResponse, SessionNotification,
+    SessionPromptsResponse, SessionRenameRequest, SessionRequest, SessionRewindRequest,
+    SessionUndoResponse, SessionUpdate, SetSessionConfigOptionRequest, ShellRequest, SubagentState,
+    SwarmResumeRequest, UiCommandRequest, UiDialogRequest, UiKeymapRequest, UiSnapshot, UiUpdate,
 };
 
 use crate::change::Change;
@@ -206,10 +206,18 @@ enum Pending {
     },
 }
 
+/// Output indices created by one uncommitted provider message.
+#[derive(Debug)]
+struct Attempt {
+    message_id: String,
+    items: BTreeSet<usize>,
+}
+
 /// The client side of an ACP connection.
 #[derive(Debug, Default)]
 pub struct Client {
     state: State,
+    attempts: BTreeMap<String, Attempt>,
     next_id: u64,
     pending: BTreeMap<RequestId, Pending>,
     outgoing: Vec<Frame>,
@@ -1031,6 +1039,7 @@ impl Client {
     /// already handed on, so it is not held for the whole session.
     /// Items that arrive later collect from empty.
     pub fn drop_items(&mut self, session_id: &str) {
+        self.attempts.remove(session_id);
         if let Some(session) = self.state.sessions.get_mut(session_id) {
             session.items = Vec::new();
         }
@@ -1335,6 +1344,7 @@ impl Client {
         // gone, so the session reads idle until the replay says
         // otherwise. A failed open puts the replaced session back,
         // reading idle with it.
+        self.attempts.remove(session_id);
         let session = self.session_mut(session_id);
         let snapshot = Box::new(session.clone());
         let kept = Session {
@@ -1666,6 +1676,7 @@ impl Client {
                 gone.into_iter()
                     .map(|id| {
                         self.state.sessions.remove(&id);
+                        self.attempts.remove(&id);
                         self.closed.insert(id.clone());
                         Change::Session { id }
                     })
@@ -1861,6 +1872,7 @@ impl Client {
                 session.replace_config_options(response.config_options);
                 session.external_agent = external_agent;
                 let session_id = session.id.clone();
+                self.attempts.remove(&session_id);
                 self.state.sessions.insert(session_id.clone(), session);
                 vec![Change::Session { id: session_id }]
             }
@@ -1929,6 +1941,7 @@ impl Client {
                 snapshot,
             } if self.latest_open.get(&session_id) == Some(&id) => {
                 self.latest_open.remove(&session_id);
+                self.attempts.remove(&session_id);
                 let session = self.session_mut(&session_id);
                 let draft = session.draft.take();
                 let queue = std::mem::take(&mut session.queue);
@@ -1948,6 +1961,9 @@ impl Client {
 
     /// Marks a turn of `session_id` begun, or records its end.
     fn apply_turn(&mut self, session_id: &str, turn: kage_acp_wire::TurnUpdate) -> Vec<Change> {
+        if turn.phase == kage_acp_wire::TurnPhase::End {
+            self.attempts.remove(session_id);
+        }
         let session = self.session_mut(session_id);
         session.in_turn = turn.phase == kage_acp_wire::TurnPhase::Start;
         let mut changes = vec![Change::Session {
@@ -1977,8 +1993,23 @@ impl Client {
             }
             _ => (false, true),
         };
-        if !apply_item(self.session_mut(session_id), update) {
+        let before = self.session_mut(session_id).items.len();
+        let merge = self.attempts.get(session_id).is_none_or(|attempt| {
+            before
+                .checked_sub(1)
+                .is_some_and(|ix| attempt.items.contains(&ix))
+        });
+        if !apply_item(self.session_mut(session_id), update, merge) {
             return Vec::new();
+        }
+        if let Some(attempt) = self.attempts.get_mut(session_id) {
+            let items = &self.state.sessions[session_id].items;
+            attempt
+                .items
+                .extend((before..items.len()).filter(|&ix| provisional(&items[ix])));
+            attempt
+                .items
+                .retain(|&ix| items.get(ix).is_some_and(provisional));
         }
         let id = || session_id.to_owned();
         let mut changes = Vec::new();
@@ -2062,6 +2093,11 @@ impl Client {
                 }]
             }
             SessionUpdate::Turn(turn) => self.apply_turn(session_id, turn),
+            SessionUpdate::Message(message) => {
+                self.apply_message(session_id, &message);
+                Vec::new()
+            }
+            SessionUpdate::ProviderRetry(retry) => self.apply_retry(session_id, &retry),
             SessionUpdate::McpStatus(status) => {
                 self.session_mut(session_id)
                     .mcp
@@ -2088,6 +2124,80 @@ impl Client {
 }
 
 impl Client {
+    fn apply_message(&mut self, session_id: &str, message: &kage_acp_wire::MessageUpdate) {
+        match message.phase {
+            MessagePhase::Start => {
+                self.session_mut(session_id);
+                self.attempts.insert(
+                    session_id.to_owned(),
+                    Attempt {
+                        message_id: message.message_id.clone(),
+                        items: BTreeSet::new(),
+                    },
+                );
+            }
+            MessagePhase::End => {
+                if self
+                    .attempts
+                    .get(session_id)
+                    .is_some_and(|attempt| attempt.message_id == message.message_id)
+                {
+                    self.attempts.remove(session_id);
+                }
+            }
+        }
+    }
+
+    fn apply_retry(
+        &mut self,
+        session_id: &str,
+        retry: &kage_acp_wire::ProviderRetryUpdate,
+    ) -> Vec<Change> {
+        let mut changes = Vec::new();
+        if self
+            .attempts
+            .get(session_id)
+            .is_some_and(|attempt| retry.message_id.as_ref() == Some(&attempt.message_id))
+        {
+            let attempt = self.attempts.remove(session_id).expect("matched attempt");
+            let items = &mut self.session_mut(session_id).items;
+            let mut removed = Vec::new();
+            let mut ix = 0;
+            items.retain(|_| {
+                let keep = !attempt.items.contains(&ix);
+                if !keep {
+                    removed.push(ix);
+                }
+                ix += 1;
+                keep
+            });
+            if !removed.is_empty() {
+                changes.push(Change::AttemptDiscarded {
+                    id: session_id.into(),
+                    removed,
+                });
+            }
+        }
+        let wait = if retry.wait_ms < 1000 {
+            format!("{}ms", retry.wait_ms)
+        } else {
+            format!("{}s", retry.wait_secs)
+        };
+        self.session_mut(session_id)
+            .items
+            .push(TranscriptItem::Notice {
+                tone: kage_acp_wire::NoticeTone::Info,
+                text: format!(
+                    "provider error ({}); retrying {}/{} in {wait}",
+                    retry.error, retry.attempt, retry.max_attempts
+                ),
+            });
+        changes.push(Change::Transcript {
+            id: session_id.into(),
+        });
+        changes
+    }
+
     /// An undo or rewind replaced the session's conversation: drop the
     /// transcript and agents, which the replay that follows rebuilds.
     /// The subagent sessions under `session_id`, at any depth.
@@ -2127,7 +2237,9 @@ impl Client {
     ) -> Vec<Change> {
         for child in self.descendants(session_id) {
             self.state.sessions.remove(&child);
+            self.attempts.remove(&child);
         }
+        self.attempts.remove(session_id);
         let session = self.session_mut(session_id);
         session.items.clear();
         session.agents.clear();
@@ -2151,10 +2263,19 @@ impl Client {
     }
 }
 
-/// Applies the updates that land in the transcript, reporting whether
-/// anything changed. An update for a tool call the transcript never
-/// announced changes nothing.
-fn apply_item(session: &mut Session, update: SessionUpdate) -> bool {
+/// Whether an item can still be withdrawn with a failed provider message.
+fn provisional(item: &TranscriptItem) -> bool {
+    matches!(
+        item,
+        TranscriptItem::Assistant { .. }
+            | TranscriptItem::Thinking { .. }
+            | TranscriptItem::Media { .. }
+    ) || matches!(item, TranscriptItem::ToolCall(call) if call.status == kage_acp_wire::ToolCallStatus::Pending)
+}
+
+/// Applies transcript updates, allowing chunks to extend the trailing item
+/// only when it belongs to the same provider attempt.
+fn apply_item(session: &mut Session, update: SessionUpdate, merge: bool) -> bool {
     match update {
         SessionUpdate::UserMessageChunk(chunk) => {
             // A prompt arrives as one chunk per block, text first, and
@@ -2173,11 +2294,11 @@ fn apply_item(session: &mut Session, update: SessionUpdate) -> bool {
             true
         }
         SessionUpdate::AgentMessageChunk(chunk) => {
-            session.append_chunk(&chunk.content, true);
+            session.append_chunk(&chunk.content, true, merge);
             true
         }
         SessionUpdate::AgentThoughtChunk(chunk) => {
-            session.append_chunk(&chunk.content, false);
+            session.append_chunk(&chunk.content, false, merge);
             if let Some(ms) = chunk.meta.and_then(|meta| meta.kage.duration_ms)
                 && let Some(TranscriptItem::Thinking { took_ms, .. }) = session.items.last_mut()
             {
@@ -2553,7 +2674,7 @@ mod tests {
         assert_eq!(encoded["rawOutput"], initial["rawOutput"]);
         assert_eq!(encoded["locations"][0], initial["locations"][0]);
         assert_eq!(encoded["locations"][1], json!({"path": "/b"}));
-        assert!(apply_item(&mut session, update));
+        assert!(apply_item(&mut session, update, true));
 
         let call = get_call(&session);
         assert_eq!(call.name.as_deref(), Some("read_file"));
@@ -2567,7 +2688,8 @@ mod tests {
         ] {
             assert!(apply_item(
                 &mut session,
-                serde_json::from_value(update).unwrap()
+                serde_json::from_value(update).unwrap(),
+                true,
             ));
         }
         let call = get_call(&session);
@@ -2580,7 +2702,8 @@ mod tests {
             "name":"read", "locations":[], "rawOutput":[1, 2]});
         assert!(apply_item(
             &mut session,
-            serde_json::from_value(update).unwrap()
+            serde_json::from_value(update).unwrap(),
+            true,
         ));
         let call = get_call(&session);
         assert_eq!(call.name.as_deref(), Some("read"));

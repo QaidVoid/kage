@@ -7,12 +7,12 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use kage_acp::acp::{
     AvailableCommandsUpdate, BlobContent, CompactionPhase, CompactionUpdate, ConfigOptionUpdate,
     ContentBlock, Cost, CurrentModeUpdate, DiffContent, KageMeta, McpServersUpdate,
-    McpStatusUpdate, MessageChunk, NoticeTone, NoticeUpdate, Plan, PromptDelivery, PromptWithdrawn,
-    QuestionChoice, QuestionPrompt, SessionConfigSelectOption, SessionInfoUpdate, SessionUpdate,
-    ShellUpdate, SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate,
-    SubagentUsage, SwarmMeta, ToolCall, ToolCallContent, ToolCallMeta, ToolCallStatus,
-    ToolCallUpdate, ToolKind, TurnPhase, TurnReason, TurnUpdate, UsageMeta, UsageTokens,
-    UsageUpdate,
+    McpStatusUpdate, MessageChunk, MessagePhase, MessageUpdate, NoticeTone, NoticeUpdate, Plan,
+    PromptDelivery, PromptWithdrawn, ProviderRetryUpdate, QuestionChoice, QuestionPrompt,
+    SessionConfigSelectOption, SessionInfoUpdate, SessionUpdate, ShellUpdate,
+    SubagentSessionCapabilities, SubagentState, SubagentSwarm, SubagentUpdate, SubagentUsage,
+    SwarmMeta, ToolCall, ToolCallContent, ToolCallMeta, ToolCallStatus, ToolCallUpdate, ToolKind,
+    TurnPhase, TurnReason, TurnUpdate, UsageMeta, UsageTokens, UsageUpdate,
 };
 use kage_acp::agent::{
     AgentPeer, PermissionDecision, PlanReviewDecision, QuestionsAnswer, request_plan_review,
@@ -26,7 +26,7 @@ use kage_core::protocol::{
 };
 use kage_core::sync::lock;
 use kage_core::{
-    CancelFlag, Content, LoopError, LoopEvent, Message, Role, SessionId,
+    CancelFlag, Content, LoopError, LoopEvent, Message, MessageId, Role, SessionId,
     StopReason as CoreStopReason, TokenUsage, ToolCallId, ToolOutput,
 };
 
@@ -78,6 +78,10 @@ pub(super) struct Bridge {
     /// with the real tool's title, kind, and read-only grouping.
     pub(super) aliases: super::host::SessionAliases,
     pub(super) seen: HashMap<SessionId, HashMap<String, SeenCall>>,
+    /// The message attempt and tool inputs still provisional per session.
+    pub(super) attempts: HashMap<SessionId, Attempt>,
+    /// Whether the client can roll back provisional attempt output.
+    pub(super) attempt_output: Arc<AtomicBool>,
     pub(super) stops: HashMap<SessionId, CoreStopReason>,
     pub(super) tree: AgentTree,
     /// Whether the client advertised the subagents capability.
@@ -134,6 +138,14 @@ pub(super) struct Bridge {
     /// Sessions the connection closed, whose bookkeeping goes before
     /// the next envelope, so reopening one starts clean.
     pub(super) closed: Arc<Mutex<Vec<SessionId>>>,
+}
+
+/// A message attempt whose tool inputs have not committed yet.
+pub(super) struct Attempt {
+    /// Identity emitted by the provider loop for this attempt.
+    pub(super) id: MessageId,
+    /// Tool ids introduced by the provisional message.
+    pub(super) tools: HashSet<String>,
 }
 
 /// A permission question in flight on its own thread.
@@ -376,6 +388,7 @@ impl Bridge {
         self.end_asks(session);
         self.seen.remove(&session);
         self.names.remove(&session);
+        self.attempts.remove(&session);
         self.compacting.remove(&session);
         self.compacting_started.remove(&session);
         let stop = self.stops.remove(&session);
@@ -483,6 +496,12 @@ impl Bridge {
     /// usage pairing, compaction phase updates, message echo, tool-name
     /// learning, the translated update stream, and the todo plan card.
     fn handle_loop_event(&mut self, session: SessionId, client_id: &str, event: &LoopEvent) {
+        if let Some(update) = self.attempt_update(session, event) {
+            self.send(session, client_id, update);
+        }
+        if matches!(event, LoopEvent::ProviderRetry { .. }) {
+            return;
+        }
         if let LoopEvent::MessageEnd {
             stop_reason, usage, ..
         } = event
@@ -542,6 +561,84 @@ impl Bridge {
             && let Some(plan) = todo_plan(output)
         {
             self.send(session, client_id, plan);
+        }
+    }
+
+    /// Tracks provisional ownership and translates attempt lifecycle events.
+    fn attempt_update(&mut self, session: SessionId, event: &LoopEvent) -> Option<SessionUpdate> {
+        match event {
+            LoopEvent::MessageStart { id } => {
+                self.attempts.insert(
+                    session,
+                    Attempt {
+                        id: *id,
+                        tools: HashSet::new(),
+                    },
+                );
+                self.attempt_output.load(Ordering::SeqCst).then(|| {
+                    SessionUpdate::Message(MessageUpdate {
+                        message_id: id.to_string(),
+                        phase: MessagePhase::Start,
+                    })
+                })
+            }
+            LoopEvent::MessageEnd { id, .. }
+                if self
+                    .attempts
+                    .get(&session)
+                    .is_some_and(|attempt| attempt.id == *id) =>
+            {
+                self.attempts.remove(&session);
+                self.attempt_output.load(Ordering::SeqCst).then(|| {
+                    SessionUpdate::Message(MessageUpdate {
+                        message_id: id.to_string(),
+                        phase: MessagePhase::End,
+                    })
+                })
+            }
+            LoopEvent::ProviderRetry {
+                attempt,
+                max_attempts,
+                wait_secs,
+                wait_ms,
+                requested_secs,
+                error,
+            } => {
+                let failed = self.attempts.remove(&session);
+                if let Some(failed) = &failed {
+                    for id in &failed.tools {
+                        if let Some(seen) = self.seen.get_mut(&session) {
+                            seen.remove(id);
+                        }
+                        if let Some(names) = self.names.get_mut(&session) {
+                            names.remove(id);
+                        }
+                    }
+                }
+                if self.attempt_output.load(Ordering::SeqCst) {
+                    Some(SessionUpdate::ProviderRetry(ProviderRetryUpdate {
+                        message_id: failed.map(|failed| failed.id.to_string()),
+                        attempt: *attempt,
+                        max_attempts: *max_attempts,
+                        wait_secs: *wait_secs,
+                        wait_ms: *wait_ms,
+                        requested_secs: *requested_secs,
+                        error: error.clone(),
+                    }))
+                } else {
+                    to_update(&mut HashMap::new(), event)
+                }
+            }
+            LoopEvent::ToolCallStart { id, .. } | LoopEvent::ToolCallArgsDelta { id, .. } => {
+                if let Some(attempt) = self.attempts.get_mut(&session)
+                    && attempt.tools.insert(id.to_string())
+                    && let Some(seen) = self.seen.get_mut(&session)
+                {
+                    seen.remove(&id.to_string());
+                }
+                None
+            }
+            _ => None,
         }
     }
 
@@ -690,6 +787,7 @@ impl Bridge {
         let closed = std::mem::take(&mut *lock(&self.closed));
         for session in closed {
             self.seen.remove(&session);
+            self.attempts.remove(&session);
             self.stops.remove(&session);
             self.ended.remove(&session);
             self.commands.remove(&session);
@@ -714,7 +812,15 @@ impl Bridge {
             for spawn in &seed.spawns {
                 self.tree.apply(&spawn.envelope());
             }
-            self.seen.insert(seed.session, seed.seen);
+            for flight in seed.flights {
+                self.seen.insert(flight.session, flight.seen);
+                self.names.insert(flight.session, flight.names);
+                if let Some(attempt) = flight.attempt {
+                    self.attempts.insert(flight.session, attempt);
+                } else {
+                    self.attempts.remove(&flight.session);
+                }
+            }
             self.streaming.extend(seed.running);
             self.paused.extend(seed.paused);
         }
@@ -745,6 +851,8 @@ impl Bridge {
         timeline: &[kage_core::protocol::TimelineItem],
     ) {
         self.seen.remove(&session);
+        self.names.remove(&session);
+        self.attempts.remove(&session);
         if !self.kage_client.load(Ordering::SeqCst) {
             return;
         }

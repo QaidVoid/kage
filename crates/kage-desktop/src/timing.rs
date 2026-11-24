@@ -45,8 +45,8 @@ pub struct SessionTimes {
     run_started: Option<Instant>,
     /// Per thinking item index.
     thinking: HashMap<usize, Span>,
-    /// Per tool call id.
-    tools: HashMap<String, Span>,
+    /// Per tool call item index.
+    tools: HashMap<usize, Span>,
     /// Per turn-end item index that closed a run.
     run_ends: HashMap<usize, RunEnd>,
     /// Per subagent session id.
@@ -68,10 +68,10 @@ impl SessionTimes {
         self.thinking.get(&ix).and_then(Span::took)
     }
 
-    /// How long the tool call `id` ran, once it ended.
+    /// How long the tool call at `ix` ran, once it ended.
     #[must_use]
-    pub fn tool(&self, id: &str) -> Option<Duration> {
-        self.tools.get(id).and_then(Span::took)
+    pub fn tool(&self, ix: usize) -> Option<Duration> {
+        self.tools.get(&ix).and_then(Span::took)
     }
 
     /// How long subagent `id` has run, or ran once it ended.
@@ -87,6 +87,14 @@ impl SessionTimes {
         self.run_ends.get(&ix).copied()
     }
 
+    /// Drops removed spans and moves retained spans to their new indices.
+    fn discard_attempt(&mut self, removed: &[usize]) {
+        remap(&mut self.thinking, removed);
+        remap(&mut self.run_ends, removed);
+        remap(&mut self.tools, removed);
+        self.seen -= removed.partition_point(|&ix| ix < self.seen);
+    }
+
     /// Stamps what moved in `session` since the last observation, at
     /// `now` on the monotonic clock and `unix` on the wall clock.
     fn observe(&mut self, session: &Session, now: Instant, unix: i64) {
@@ -96,6 +104,7 @@ impl SessionTimes {
             // name other items now.
             self.thinking.clear();
             self.run_ends.clear();
+            self.tools.clear();
         }
         if (session.running || session.compacting) && self.run_started.is_none() {
             self.run_started = Some(now);
@@ -121,7 +130,7 @@ impl SessionTimes {
                 TranscriptItem::ToolCall(call) => match call.status {
                     ToolCallStatus::Pending | ToolCallStatus::InProgress => {
                         if session.running {
-                            self.tools.entry(call.tool_call_id.clone()).or_insert(Span {
+                            self.tools.entry(ix).or_insert(Span {
                                 start: now,
                                 took: None,
                             });
@@ -129,11 +138,9 @@ impl SessionTimes {
                     }
                     _ => match call.took_ms {
                         Some(ms) => {
-                            self.tools
-                                .entry(call.tool_call_id.clone())
-                                .or_insert(recorded(now, ms));
+                            self.tools.entry(ix).or_insert(recorded(now, ms));
                         }
-                        None => close(self.tools.get_mut(&call.tool_call_id), now),
+                        None => close(self.tools.get_mut(&ix), now),
                     },
                 },
                 TranscriptItem::TurnEnd {
@@ -185,6 +192,19 @@ impl SessionTimes {
     }
 }
 
+/// Removes entries and shifts retained indices by the number removed before them.
+fn remap<T>(values: &mut HashMap<usize, T>, removed: &[usize]) {
+    *values = values
+        .drain()
+        .filter_map(|(ix, value)| {
+            removed
+                .binary_search(&ix)
+                .err()
+                .map(|before| (ix - before, value))
+        })
+        .collect();
+}
+
 /// A span that took `ms` milliseconds, as recorded, seen at `now`.
 fn recorded(now: Instant, ms: u64) -> Span {
     Span {
@@ -215,6 +235,14 @@ impl Timings {
             .entry(session.id.clone())
             .or_default()
             .observe(session, Instant::now(), crate::clock::unix_seconds());
+    }
+
+    /// Removes spans at the sorted original transcript indices in `removed`
+    /// and remaps retained spans, preserving the active run clock.
+    pub fn discard_attempt(&mut self, session_id: &str, removed: &[usize]) {
+        if let Some(times) = self.sessions.get_mut(session_id) {
+            times.discard_attempt(removed);
+        }
     }
 
     /// Forgets session `id`: the session was closed, so its measured
@@ -291,7 +319,7 @@ mod tests {
         times.observe(&session, at(4_100), 104);
 
         assert_eq!(times.thinking(0), Some(Duration::from_millis(1_500)));
-        assert_eq!(times.tool("c1"), Some(Duration::from_millis(2_500)));
+        assert_eq!(times.tool(1), Some(Duration::from_millis(2_500)));
         assert_eq!(times.run_end(2), None, "tools followed that turn");
         let end = times.run_end(4).expect("the run end was watched");
         assert_eq!(end.at, 104);
@@ -316,7 +344,7 @@ mod tests {
         let mut times = SessionTimes::default();
         times.observe(&session, Instant::now(), 100);
         assert_eq!(times.thinking(0), None);
-        assert_eq!(times.tool("c1"), None);
+        assert_eq!(times.tool(1), None);
         assert_eq!(times.run_end(2), None);
     }
 
@@ -342,10 +370,131 @@ mod tests {
         let mut times = SessionTimes::default();
         times.observe(&session, Instant::now(), 100);
         assert_eq!(times.thinking(0), Some(Duration::from_millis(2_400)));
-        assert_eq!(times.tool("c1"), Some(Duration::from_millis(2_000)));
+        assert_eq!(times.tool(1), Some(Duration::from_millis(2_000)));
         let end = times.run_end(2).expect("recorded");
         assert_eq!(end.at, 90);
         assert_eq!(end.took, Duration::from_millis(6_000));
+    }
+
+    #[test]
+    fn discarding_later_output_preserves_live_measured_thinking_and_run_ends() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut session = Session::new("s1");
+        session.running = true;
+        let mut times = SessionTimes::default();
+        times.observe(&session, at(0), 100);
+        session.items.push(TranscriptItem::Thinking {
+            text: "kept".into(),
+            took_ms: None,
+        });
+        times.observe(&session, at(10), 100);
+        session.items.push(TranscriptItem::Assistant {
+            text: "done".into(),
+        });
+        times.observe(&session, at(30), 100);
+        session.items.push(TranscriptItem::TurnEnd {
+            reason: None,
+            at: None,
+            took_ms: None,
+        });
+        times.observe(&session, at(60), 101);
+        session.running = false;
+        times.observe(&session, at(60), 101);
+        let end = times.run_end(2).expect("measured run end");
+        assert_eq!(end.took, Duration::from_millis(60));
+        session.running = true;
+        session.items.push(TranscriptItem::Thinking {
+            text: "failed".into(),
+            took_ms: None,
+        });
+        times.observe(&session, at(100), 102);
+        session.items[3] = TranscriptItem::Notice {
+            tone: kage_client::wire::NoticeTone::Info,
+            text: "retry".into(),
+        };
+        times.discard_attempt(&[3]);
+        times.observe(&session, at(150), 102);
+        assert_eq!(times.thinking(0), Some(Duration::from_millis(20)));
+        assert_eq!(times.run_end(2), Some(end));
+        assert_eq!(times.thinking(3), None);
+        assert_eq!(
+            times.run_started,
+            Some(at(100)),
+            "retry preserves the run clock"
+        );
+        assert_eq!(times.seen, session.items.len());
+    }
+
+    #[test]
+    fn same_id_tools_have_independent_spans_across_discard_and_replacement() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut session = Session::new("s1");
+        session.running = true;
+        session.items.push(call("same", ToolCallStatus::Pending));
+        let mut times = SessionTimes::default();
+        times.observe(&session, at(0), 100);
+        session.items[0] = call("same", ToolCallStatus::Completed);
+        times.observe(&session, at(10), 100);
+        session.items.push(call("same", ToolCallStatus::Pending));
+        times.observe(&session, at(20), 100);
+        session.items.push(TranscriptItem::Notice {
+            tone: kage_client::wire::NoticeTone::Info,
+            text: "retained".into(),
+        });
+        session
+            .items
+            .push(call("retained", ToolCallStatus::InProgress));
+        times.observe(&session, at(30), 100);
+        session.items.remove(1);
+        session.items.push(TranscriptItem::Notice {
+            tone: kage_client::wire::NoticeTone::Info,
+            text: "retry".into(),
+        });
+        times.discard_attempt(&[1]);
+        times.observe(&session, at(40), 100);
+        assert_eq!(times.tool(0), Some(Duration::from_millis(10)));
+        assert!(!times.tools.contains_key(&1));
+        assert_eq!(times.tools[&2].start, at(30));
+        assert!(!times.tools.contains_key(&3));
+        session.items.push(call("same", ToolCallStatus::Pending));
+        times.observe(&session, at(50), 100);
+        session.items[2] = call("retained", ToolCallStatus::Completed);
+        session.items[4] = call("same", ToolCallStatus::Completed);
+        times.observe(&session, at(80), 100);
+        assert_eq!(times.tool(0), Some(Duration::from_millis(10)));
+        assert_eq!(times.tool(2), Some(Duration::from_millis(50)));
+        assert_eq!(times.tool(4), Some(Duration::from_millis(30)));
+        assert_eq!(times.run_started, Some(at(0)));
+    }
+
+    #[test]
+    fn remapping_preserves_thinking_and_run_end_spans_after_removed_indices() {
+        let start = Instant::now();
+        let mut session = Session::new("s1");
+        session.items = vec![
+            call("removed", ToolCallStatus::Pending),
+            TranscriptItem::Thinking {
+                text: "retained".into(),
+                took_ms: Some(25),
+            },
+            call("also removed", ToolCallStatus::Pending),
+            TranscriptItem::TurnEnd {
+                reason: None,
+                at: Some(100),
+                took_ms: Some(50),
+            },
+        ];
+        let mut times = SessionTimes::default();
+        times.observe(&session, start, 100);
+        let end = times.run_end(3);
+        times.discard_attempt(&[0, 2]);
+        assert_eq!(times.thinking(0), Some(Duration::from_millis(25)));
+        assert_eq!(times.thinking(1), None);
+        assert_eq!(times.run_end(1), end);
+        assert_eq!(times.run_end(3), None);
+        assert_eq!(times.seen, 2);
     }
 
     #[test]

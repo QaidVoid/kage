@@ -17,8 +17,8 @@
 use std::collections::BTreeMap;
 
 use kage_client::wire::{
-    CompactionPhase, ContentBlock, NoticeTone, SessionNotification, SessionUpdate, ToolCallContent,
-    ToolCallMeta, ToolCallStatus, TurnPhase, UiCommand, UiCommandArg,
+    CompactionPhase, ContentBlock, MessagePhase, NoticeTone, SessionNotification, SessionUpdate,
+    ToolCallContent, ToolCallMeta, ToolCallStatus, TurnPhase, UiCommand, UiCommandArg,
 };
 use kage_client::{Change, Client, Frame, State, ToolCallItem};
 use kage_core::keymap::{Keymap, MappingData};
@@ -30,7 +30,8 @@ use serde_json::Value;
 use crate::buffer::Buffer;
 use crate::command::{OwnedArgSpec, PluginCommand};
 use crate::events::{
-    SharedBuffer, compaction_text, produced_media_label, push_user_text, shared_buffer,
+    SharedBuffer, compaction_text, produced_media_label, provider_retry_text, push_user_text,
+    shared_buffer,
 };
 use crate::view::tool_view::ToolPhase;
 
@@ -126,7 +127,9 @@ impl Store {
     /// connection closed, so no update will finish them.
     pub fn interrupt_running(&mut self) {
         for buffer in self.buffers.values() {
-            lock(buffer).interrupt_running_tools();
+            let mut buffer = lock(buffer);
+            buffer.finish_attempt();
+            buffer.interrupt_running_tools();
         }
     }
 
@@ -168,10 +171,37 @@ impl Store {
 /// `raw_input` keeps the input it showed.
 fn apply_update(buf: &mut Buffer, update: &SessionUpdate) {
     match update {
+        SessionUpdate::Message(message) => match message.phase {
+            MessagePhase::Start => buf.start_attempt(&message.message_id),
+            MessagePhase::End => buf.end_attempt(&message.message_id),
+        },
+        SessionUpdate::ProviderRetry(retry) => {
+            if let Some(id) = retry.message_id.as_deref() {
+                buf.discard_attempt(Some(id));
+            }
+            buf.replace_or_push_custom(
+                "kage:retry",
+                provider_retry_text(
+                    retry.attempt,
+                    retry.max_attempts,
+                    retry.wait_secs,
+                    retry.wait_ms,
+                    retry.requested_secs,
+                    &retry.error,
+                ),
+            );
+        }
         SessionUpdate::UserMessageChunk(chunk) => push_chunk(buf, &chunk.content),
         SessionUpdate::AgentMessageChunk(chunk) => match chunk.content.as_text() {
             Some(text) => buf.append_assistant_delta(text),
-            None => push_media(buf, &chunk.content),
+            None => {
+                if let ContentBlock::Image(blob) | ContentBlock::Audio(blob) = &chunk.content {
+                    buf.push_provider_media(produced_media_label(
+                        &blob.mime_type,
+                        blob.data.len() / 4 * 3,
+                    ));
+                }
+            }
         },
         SessionUpdate::AgentThoughtChunk(chunk) => {
             if let Some(text) = chunk.content.as_text() {
@@ -195,34 +225,7 @@ fn apply_update(buf: &mut Buffer, update: &SessionUpdate) {
                 meta_duration(call.meta.as_ref()),
             );
         }
-        SessionUpdate::ToolCallUpdate(update) => {
-            if let Some(input) = &update.raw_input {
-                match &update.title {
-                    Some(title) => buf.upsert_tool_call(
-                        update.tool_call_id.clone(),
-                        title.clone(),
-                        input.clone(),
-                    ),
-                    None => {
-                        buf.refresh_tool_input(update.tool_call_id.clone(), input.clone());
-                    }
-                }
-            }
-            if !is_terminal(update.status) {
-                set_status(buf, &update.tool_call_id, update.status);
-                let output = content_text(&update.content);
-                if !output.is_empty() {
-                    buf.set_tool_progress(&update.tool_call_id, output);
-                }
-            }
-            land_result(
-                buf,
-                &update.tool_call_id,
-                update.status,
-                &update.content,
-                meta_duration(update.meta.as_ref()),
-            );
-        }
+        SessionUpdate::ToolCallUpdate(update) => apply_tool_update(buf, update),
         SessionUpdate::Plan(plan) => push_plan(buf, &plan.entries),
         SessionUpdate::Shell(shell) if shell.finished => crate::events::finish_shell(
             buf,
@@ -236,7 +239,7 @@ fn apply_update(buf: &mut Buffer, update: &SessionUpdate) {
             shell.tail.as_deref().unwrap_or_default(),
         ),
         SessionUpdate::Turn(turn) if turn.phase == TurnPhase::End => {
-            buf.finish_streaming();
+            buf.finish_attempt();
         }
         SessionUpdate::Notice(notice) => {
             if notice.tone == NoticeTone::Error {
@@ -265,6 +268,34 @@ fn apply_update(buf: &mut Buffer, update: &SessionUpdate) {
         }
         _ => {}
     }
+}
+
+/// Refresh a tool call's arguments, progress and terminal result.
+fn apply_tool_update(buf: &mut Buffer, update: &kage_client::wire::ToolCallUpdate) {
+    if let Some(input) = &update.raw_input {
+        match &update.title {
+            Some(title) => {
+                buf.upsert_tool_call(update.tool_call_id.clone(), title.clone(), input.clone());
+            }
+            None => {
+                buf.refresh_tool_input(update.tool_call_id.clone(), input.clone());
+            }
+        }
+    }
+    if !is_terminal(update.status) {
+        set_status(buf, &update.tool_call_id, update.status);
+        let output = content_text(&update.content);
+        if !output.is_empty() {
+            buf.set_tool_progress(&update.tool_call_id, output);
+        }
+    }
+    land_result(
+        buf,
+        &update.tool_call_id,
+        update.status,
+        &update.content,
+        meta_duration(update.meta.as_ref()),
+    );
 }
 
 /// The call id prefix of the `todo_list` rows [`push_plan`] adds.
@@ -509,6 +540,181 @@ mod tests {
                 Block::Custom { kind, .. } => kind.clone(),
             })
             .collect()
+    }
+
+    #[test]
+    fn retry_without_message_id_preserves_the_active_attempt() {
+        let mut store = shown("s1");
+        store.absorb(update(
+            "s1",
+            "_kage/message",
+            &json!({"messageId": "active", "phase": "start"}),
+        ));
+        store.absorb(update(
+            "s1",
+            "agent_message_chunk",
+            &json!({"content": {"type": "text", "text": "keep output"}}),
+        ));
+        store.absorb(update(
+            "s1",
+            "_kage/provider_retry",
+            &json!({
+                "attempt": 1, "maxAttempts": 3, "waitSecs": 0, "waitMs": 25, "error": "busy",
+            }),
+        ));
+        let handle = store.shared_buffer("s1");
+        assert_eq!(kinds(&lock(&handle)), ["assistant", "kage:retry"]);
+        assert!(
+            matches!(lock(&handle).blocks()[0].as_ref(), Block::Assistant { text, .. } if text == "keep output")
+        );
+        store.absorb(update(
+            "s1",
+            "_kage/provider_retry",
+            &json!({
+                "messageId": "active", "attempt": 2, "maxAttempts": 3,
+                "waitSecs": 0, "waitMs": 25, "error": "busy",
+            }),
+        ));
+        assert_eq!(kinds(&lock(&handle)), ["kage:retry"]);
+    }
+
+    #[test]
+    fn terminal_turn_and_disconnect_retain_output_without_stale_ownership() {
+        for disconnect in [false, true] {
+            let mut store = shown("s1");
+            store.absorb(update(
+                "s1",
+                "_kage/message",
+                &json!({"messageId": "old", "phase": "start"}),
+            ));
+            store.absorb(update(
+                "s1",
+                "agent_message_chunk",
+                &json!({"content": {"type": "text", "text": "retained partial"}}),
+            ));
+            if disconnect {
+                store.interrupt_running();
+            } else {
+                store.absorb(update("s1", "_kage/turn", &json!({"phase": "end"})));
+            }
+            let handle = store.shared_buffer("s1");
+            lock(&handle).discard_attempt(None);
+            assert!(
+                matches!(lock(&handle).blocks()[0].as_ref(), Block::Assistant { text, live: false } if text == "retained partial")
+            );
+            store.absorb(update(
+                "s1",
+                "_kage/provider_retry",
+                &json!({
+                    "messageId": "old", "attempt": 1, "maxAttempts": 3,
+                    "waitSecs": 0, "waitMs": 25, "error": "busy",
+                }),
+            ));
+            assert_eq!(kinds(&lock(&handle)), ["assistant", "kage:retry"]);
+        }
+    }
+
+    #[test]
+    fn provider_retry_rolls_back_mixed_attempt_without_losing_completed_output() {
+        let mut store = shown("s1");
+        for (kind, fields) in [
+            (
+                "user_message_chunk",
+                json!({"content": {"type": "text", "text": "prompt"}}),
+            ),
+            (
+                "_kage/message",
+                json!({"messageId": "same", "phase": "start"}),
+            ),
+            (
+                "agent_message_chunk",
+                json!({"content": {"type": "text", "text": "complete"}}),
+            ),
+            (
+                "tool_call",
+                json!({"toolCallId": "call", "title": "read", "status": "pending", "rawInput": {"path": "old"}}),
+            ),
+            (
+                "_kage/message",
+                json!({"messageId": "same", "phase": "end"}),
+            ),
+            (
+                "_kage/message",
+                json!({"messageId": "same", "phase": "start"}),
+            ),
+            (
+                "agent_thought_chunk",
+                json!({"content": {"type": "text", "text": "thinking"}}),
+            ),
+            (
+                "agent_message_chunk",
+                json!({"content": {"type": "text", "text": "discard"}}),
+            ),
+            (
+                "agent_message_chunk",
+                json!({"content": {"type": "image", "mimeType": "image/png", "data": "YWJj"}}),
+            ),
+            (
+                "tool_call",
+                json!({"toolCallId": "call", "title": "read", "status": "pending", "rawInput": {"path": "bad"}}),
+            ),
+            (
+                "_kage/notice",
+                json!({"tone": "info", "text": "keep notice"}),
+            ),
+        ] {
+            store.absorb(update("s1", kind, &fields));
+        }
+        store.absorb(update(
+            "s1",
+            "_kage/provider_retry",
+            &json!({
+                "messageId": "same", "attempt": 1, "maxAttempts": 3,
+                "waitSecs": 0, "waitMs": 25, "error": "busy",
+            }),
+        ));
+        let handle = store.shared_buffer("s1");
+        {
+            let buffer = lock(&handle);
+            assert_eq!(
+                kinds(&buffer),
+                [
+                    "user",
+                    "assistant",
+                    "call:read",
+                    "kage:notify",
+                    "kage:retry"
+                ]
+            );
+            assert!(
+                matches!(buffer.blocks()[1].as_ref(), Block::Assistant { text, live: false } if text == "complete")
+            );
+            assert!(
+                matches!(buffer.blocks()[2].as_ref(), Block::ToolCall { input, .. } if input["path"] == "old")
+            );
+        }
+        store.absorb(update(
+            "s1",
+            "_kage/message",
+            &json!({"messageId": "same", "phase": "start"}),
+        ));
+        store.absorb(update("s1", "tool_call", &json!({
+            "toolCallId": "call", "title": "read", "status": "pending", "rawInput": {"path": "good"},
+        })));
+        store.absorb(update(
+            "s1",
+            "_kage/message",
+            &json!({"messageId": "same", "phase": "end"}),
+        ));
+        store.absorb(update(
+            "s1",
+            "_kage/provider_retry",
+            &json!({
+                "messageId": "same", "attempt": 2, "maxAttempts": 3,
+                "waitSecs": 1, "waitMs": 1000, "error": "busy",
+            }),
+        ));
+        assert!(lock(&handle).blocks().iter().any(|block| matches!(block.as_ref(), Block::ToolCall { input, .. } if input["path"] == "good")));
     }
 
     #[test]

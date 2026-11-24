@@ -1,6 +1,6 @@
 //! Conversation buffer model.
 //!
-//! [`Buffer`] is an append-only list of [`Block`]s plus a scroll offset.
+//! [`Buffer`] holds conversation [`Block`]s plus a scroll offset.
 //! It is the source of truth the TUI's render loop walks each frame: the
 //! buffer maps a streamed [`kage_core::LoopEvent`] timeline (assembled
 //! by the host's `Hooks` impl) into discrete blocks the renderer can
@@ -427,7 +427,7 @@ impl ToolTopology {
     }
 }
 
-/// Append-only conversation history with a viewport anchor in
+/// Conversation history with a viewport anchor in
 /// absolute virtual-row space. `scroll == None` means the viewport is
 /// pinned to the latest content (auto-follow on streaming);
 /// `Some(top)` means the viewport's first row is virtual row `top`,
@@ -443,6 +443,8 @@ pub struct Buffer {
     /// block's text. Mutators go through [`Arc::make_mut`], which
     /// clones a block's payload only while a snapshot still shares it.
     blocks: Vec<Arc<Block>>,
+    /// Provider output that remains provisional until its message ends.
+    attempt: Option<Attempt>,
     /// Running sum of every block's [`Block::text_bytes`], maintained
     /// by block adds, text growth and in-place text replacement, and
     /// reduced by [`Self::compact_to`] when blocks are dropped. Keeps
@@ -563,6 +565,13 @@ pub struct Buffer {
     /// The renderer rewrites it each frame; mouse handlers hit-test
     /// clicks against it. `None` when no mark was painted.
     last_mark_hit: Option<(u16, u16, u16)>,
+}
+
+/// Blocks produced by the active provider attempt, excluding local notices.
+#[derive(Clone, Debug)]
+struct Attempt {
+    id: String,
+    blocks: Vec<usize>,
 }
 
 /// What a [`ToolTopology`] was built from: `(epoch, block count, fold

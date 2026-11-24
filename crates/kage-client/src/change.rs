@@ -21,6 +21,14 @@ pub enum Change {
         /// The session that moved.
         id: String,
     },
+    /// Provisional provider output was removed. Hosts must remap
+    /// transcript-indexed state before handling the following transcript change.
+    AttemptDiscarded {
+        /// The session whose provisional output was removed.
+        id: String,
+        /// Removed indices in the original transcript, sorted ascending.
+        removed: Vec<usize>,
+    },
     /// A session's transcript items changed.
     Transcript {
         /// The session whose transcript moved.
@@ -224,6 +232,7 @@ impl Change {
         match self {
             Self::Session { id }
             | Self::Transcript { id }
+            | Self::AttemptDiscarded { id, .. }
             | Self::Permission { id }
             | Self::AnsweredElsewhere { id, .. }
             | Self::Agents { id } => Some(id),

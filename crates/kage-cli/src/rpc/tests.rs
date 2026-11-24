@@ -14,7 +14,7 @@ use kage_core::agents::AgentDefs;
 use kage_core::config::{McpServer as McpSpec, PluginsConfig};
 use kage_core::environment::Environment;
 use kage_core::permissions::{PermissionAction, PermissionsConfig, ToolPermissionRules};
-use kage_core::protocol::{McpServerInfo, McpServerStatus, Usage};
+use kage_core::protocol::{HostEvent, McpServerInfo, McpServerStatus, Usage};
 use kage_core::{
     Content, LoopEvent, MediaSource, Message, MessageId, Modalities, Modality, Role, ThinkingLevel,
     TokenUsage, ToolCallId, ToolOutput, ToolUpdate,
@@ -1055,6 +1055,46 @@ fn a_live_background_child_accepts_explicit_steering_after_its_parent_ends() {
     );
 }
 
+/// A bridge whose notifications can be inspected through its held updates.
+fn test_bridge(h: &Harness) -> Bridge {
+    Bridge {
+        peer: h.client.clone().into(),
+        commander: h.commander.clone(),
+        connection: 0,
+        live: Arc::clone(&h.host.live),
+        ids: Arc::default(),
+        waiters: Waiters::default(),
+        deferred: Deferred::default(),
+        models: h.host.shared_models(),
+        shown: ShownBySession::default(),
+        aliases: Arc::default(),
+        seen: HashMap::new(),
+        attempts: HashMap::new(),
+        attempt_output: Arc::new(AtomicBool::new(false)),
+        stops: HashMap::new(),
+        tree: AgentTree::default(),
+        subagents: Arc::new(AtomicBool::new(false)),
+        kage_client: Arc::new(AtomicBool::new(false)),
+        history_window: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        streaming: HashSet::new(),
+        ended: HashMap::new(),
+        commands: HashMap::new(),
+        modes: HashMap::new(),
+        names: HashMap::new(),
+        statuses: HashMap::new(),
+        fills: HashMap::new(),
+        pruned_cost: HashMap::new(),
+        compacting: HashMap::new(),
+        compacting_started: HashSet::new(),
+        paused: HashSet::new(),
+        held: Held::default(),
+        approving: HashMap::new(),
+        asks: AskSet::default(),
+        seeds: Arc::default(),
+        closed: Arc::default(),
+    }
+}
+
 #[test]
 fn child_waiters_survive_a_rate_limit_and_settle_without_a_tree_node() {
     let dir = tempfile::tempdir().unwrap();
@@ -1065,40 +1105,12 @@ fn child_waiters_survive_a_rate_limit_and_settle_without_a_tree_node() {
     let waiters = Waiters::default();
     let (done, end) = crossbeam_channel::unbounded();
     lock(&waiters).insert(child, vec![done]);
-    let mut bridge = Bridge {
-        peer: h.client.clone().into(),
-        commander: h.commander.clone(),
-        connection: 0,
-        live: Arc::clone(&h.host.live),
-        ids: Arc::clone(&ids),
-        waiters: Arc::clone(&waiters),
-        deferred: Deferred::default(),
-        models: h.host.shared_models(),
-        shown: ShownBySession::default(),
-        aliases: Arc::default(),
-        seen: HashMap::new(),
-        stops: HashMap::new(),
-        tree: AgentTree::default(),
-        subagents: Arc::new(AtomicBool::new(true)),
-        kage_client: Arc::new(AtomicBool::new(false)),
-        history_window: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-        streaming: HashSet::from([child]),
-        ended: HashMap::new(),
-        commands: HashMap::new(),
-        modes: HashMap::new(),
-        names: HashMap::new(),
-        statuses: HashMap::new(),
-        fills: HashMap::new(),
-        pruned_cost: HashMap::new(),
-        compacting: HashMap::new(),
-        compacting_started: HashSet::new(),
-        paused: HashSet::from([child]),
-        held: Held::default(),
-        approving: HashMap::new(),
-        asks: AskSet::default(),
-        seeds: Arc::default(),
-        closed: Arc::default(),
-    };
+    let mut bridge = test_bridge(&h);
+    bridge.ids = Arc::clone(&ids);
+    bridge.waiters = Arc::clone(&waiters);
+    bridge.subagents.store(true, Ordering::SeqCst);
+    bridge.streaming.insert(child);
+    bridge.paused.insert(child);
     let event = |outcome| kage_core::protocol::Envelope {
         session: child,
         seq: 0,
@@ -10298,4 +10310,620 @@ fn desktop_client_creates_lists_and_reopens_an_external_session() {
             .is_some_and(|session| !session.running && session.items.len() >= 4)
     });
     assert_eq!(reopened.replies(&id), ["one", "one|two"]);
+}
+
+fn retry_event() -> LoopEvent {
+    LoopEvent::ProviderRetry {
+        attempt: 1,
+        max_attempts: 4,
+        wait_secs: 0,
+        wait_ms: 250,
+        requested_secs: Some(300),
+        error: "busy".into(),
+    }
+}
+
+fn bridge_event(
+    bridge: &mut Bridge,
+    session: SessionId,
+    event: impl Into<kage_core::protocol::Event>,
+) {
+    bridge.handle(&kage_core::protocol::Envelope {
+        session,
+        seq: 0,
+        event: event.into(),
+    });
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one retry sequence verifies both negotiated capability paths and retained tools"
+)]
+fn provider_retry_rolls_back_only_provisional_tool_ids() {
+    for capable in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let h = serve(Vec::new(), dir.path(), dir.path());
+        let mut bridge = test_bridge(&h);
+        bridge.attempt_output.store(capable, Ordering::SeqCst);
+        lock(&bridge.ids).insert(h.session.clone(), h.id);
+        lock(&bridge.held).insert(h.id, HeldUpdates::default());
+        let completed = MessageId::new();
+        let failed = MessageId::new();
+        let success = MessageId::new();
+        let tool = |id: &str| LoopEvent::ToolCallStart {
+            id: ToolCallId::new(id),
+            name: "ls".into(),
+            input_partial: serde_json::json!({"path": "."}),
+        };
+        let end = |id| LoopEvent::MessageEnd {
+            id,
+            usage: TokenUsage::default(),
+            stop_reason: CoreStopReason::ToolUse,
+        };
+        bridge_event(&mut bridge, h.id, retry_event());
+        bridge_event(&mut bridge, h.id, LoopEvent::MessageStart { id: completed });
+        bridge_event(&mut bridge, h.id, tool("completed"));
+        bridge_event(&mut bridge, h.id, end(completed));
+        bridge_event(&mut bridge, h.id, LoopEvent::MessageStart { id: failed });
+        bridge_event(
+            &mut bridge,
+            h.id,
+            LoopEvent::TextDelta {
+                id: failed,
+                delta: "discard this".into(),
+            },
+        );
+        bridge_event(&mut bridge, h.id, tool("reused"));
+        bridge_event(&mut bridge, h.id, end(MessageId::new()));
+        assert_eq!(bridge.attempts[&h.id].id, failed);
+        bridge_event(&mut bridge, h.id, retry_event());
+        assert!(!bridge.attempts.contains_key(&h.id));
+        assert!(bridge.seen[&h.id].contains_key("completed"));
+        assert!(!bridge.seen[&h.id].contains_key("reused"));
+        assert!(bridge.names[&h.id].contains_key("completed"));
+        assert!(!bridge.names[&h.id].contains_key("reused"));
+        bridge_event(&mut bridge, h.id, LoopEvent::MessageStart { id: success });
+        bridge_event(&mut bridge, h.id, tool("reused"));
+        bridge_event(&mut bridge, h.id, end(success));
+        assert!(!bridge.attempts.contains_key(&h.id));
+        let held = lock(&bridge.held);
+        let updates = &held[&h.id].updates;
+        assert_eq!(
+            updates
+                .iter()
+                .filter(|update| matches!(update,
+                    SessionUpdate::ToolCall(call) if call.tool_call_id == "reused"
+                ))
+                .count(),
+            2
+        );
+        let retries = updates
+            .iter()
+            .filter_map(|update| match update {
+                SessionUpdate::ProviderRetry(retry) => Some(retry),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if capable {
+            assert_eq!(retries.len(), 2);
+            assert_eq!(retries[0].message_id, None);
+            assert_eq!(
+                retries[1].message_id.as_deref(),
+                Some(failed.to_string().as_str())
+            );
+            assert_eq!(retries[1].wait_ms, 250);
+            assert_eq!(retries[1].requested_secs, Some(300));
+            let retry = updates
+                .iter()
+                .position(|update| {
+                    matches!(update,
+                        SessionUpdate::ProviderRetry(retry) if retry.message_id.is_some()
+                    )
+                })
+                .unwrap();
+            assert!(
+                matches!(&updates[retry + 1], SessionUpdate::Message(message)
+                if message.phase == kage_acp::acp::MessagePhase::Start
+                && message.message_id == success.to_string())
+            );
+            assert_eq!(updates.iter().filter(|update| matches!(update,
+                SessionUpdate::Message(message) if message.phase == kage_acp::acp::MessagePhase::End
+            )).count(), 2);
+            assert!(
+                !updates
+                    .iter()
+                    .any(|update| matches!(update, SessionUpdate::Notice(_)))
+            );
+        } else {
+            assert!(retries.is_empty());
+            assert!(
+                !updates
+                    .iter()
+                    .any(|update| matches!(update, SessionUpdate::Message(_)))
+            );
+            let notices = updates
+                .iter()
+                .filter_map(|update| match update {
+                    SessionUpdate::Notice(notice) => Some(notice),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(notices.len(), 2);
+            assert_eq!(
+                notices[1].text,
+                "provider error (busy); retrying 1/4 in 250ms"
+            );
+        }
+    }
+}
+
+#[test]
+fn retry_clears_the_live_flight_before_an_attach_during_backoff() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(Vec::new(), dir.path(), dir.path());
+    let message = MessageId::new();
+    let mut live = lock(&h.host.live);
+    for event in [
+        LoopEvent::MessageStart { id: message },
+        LoopEvent::TextDelta {
+            id: message,
+            delta: "failed".into(),
+        },
+        LoopEvent::ThinkingDelta {
+            id: message,
+            delta: "failed thought".into(),
+        },
+        LoopEvent::ToolCallStart {
+            id: ToolCallId::new("failed"),
+            name: "ls".into(),
+            input_partial: serde_json::json!({}),
+        },
+    ] {
+        live.observe(&kage_core::protocol::Envelope {
+            session: h.id,
+            seq: 0,
+            event: event.into(),
+        });
+    }
+    assert_eq!(live.snapshot(h.id).flight.len(), 4);
+    live.observe(&kage_core::protocol::Envelope {
+        session: h.id,
+        seq: 0,
+        event: retry_event().into(),
+    });
+    let snapshot = live.snapshot(h.id);
+    assert!(snapshot.flight.is_empty());
+    assert!(snapshot.flight_message.is_none());
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one paused-provider scenario verifies replay, retry, and backoff attach together"
+)]
+fn live_attach_replays_and_rolls_back_a_failed_attempt_with_a_reused_tool_id() {
+    for capable in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().display().to_string();
+        let h = serve_paused(
+            vec![
+                Ok(ProviderEvent::MessageStart),
+                Ok(ProviderEvent::TextDelta {
+                    delta: "failed text".into(),
+                }),
+                Ok(ProviderEvent::ToolCallStart {
+                    id: ToolCallId::new("reused"),
+                    name: "ls".into(),
+                }),
+            ],
+            vec![Err(ProviderError::Transport("reset".into()))],
+            vec![
+                tool_turn("reused", "ls", serde_json::json!({"path": cwd})),
+                text_turn("recovered"),
+                text_turn("title"),
+            ],
+            dir.path(),
+            dir.path(),
+        );
+        let prompt = prompt_async(&h.client, &h.session, "go");
+        until(|| h.paused.is_parked());
+        let c2 = connect(&h.host);
+        c2.client
+            .request(
+                "initialize",
+                serde_json::json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "clientCapabilities": {"_meta": {"kage": {"attemptOutput": capable}}}
+                }),
+            )
+            .unwrap();
+        c2.client.request("session/load", h.resume.clone()).unwrap();
+        let mut updates = updates_until(&c2.inbox, &h.session, "tool_call");
+        assert_eq!(chunk_texts(&updates), ["failed text"]);
+        let message = updates
+            .iter()
+            .find(|p| p["update"]["sessionUpdate"] == "_kage/message");
+        let failed_id = if capable {
+            let message = message.unwrap();
+            assert_eq!(message["update"]["phase"], "start");
+            Some(message["update"]["messageId"].clone())
+        } else {
+            assert!(message.is_none());
+            None
+        };
+        h.release.send(()).unwrap();
+        let retry_kind = if capable {
+            "_kage/provider_retry"
+        } else {
+            "_kage/notice"
+        };
+        updates.extend(updates_until(&c2.inbox, &h.session, retry_kind));
+        let retry = &updates.last().unwrap()["update"];
+        if capable {
+            assert_eq!(retry["messageId"], failed_id.unwrap());
+            assert_eq!(retry["waitMs"], 1000);
+        } else {
+            assert_eq!(
+                retry["text"],
+                "provider error (transport: reset); retrying 1/4 in 1s"
+            );
+        }
+        let backoff = connect(&h.host);
+        backoff
+            .client
+            .request("session/load", h.resume.clone())
+            .unwrap();
+        let mut backoff_updates = drain(&backoff.inbox);
+        assert!(
+            !chunk_texts(&backoff_updates)
+                .iter()
+                .any(|text| text == "failed text")
+        );
+        let (ask, _) = until_ask(&h.inbox, &mut Vec::new());
+        allow(&h.client, &ask);
+        assert_eq!(
+            prompt.recv_timeout(WAIT).unwrap().unwrap()["stopReason"],
+            "end_turn"
+        );
+        updates.extend(drain(&c2.inbox));
+        backoff_updates.extend(drain(&backoff.inbox));
+        assert!(
+            !chunk_texts(&backoff_updates)
+                .iter()
+                .any(|text| text == "failed text")
+        );
+        assert_eq!(
+            updates
+                .iter()
+                .filter(|p| p["update"]["sessionUpdate"] == "tool_call"
+                    && p["update"]["toolCallId"] == "reused")
+                .count(),
+            2
+        );
+        if capable {
+            let retry = updates
+                .iter()
+                .position(|p| p["update"]["sessionUpdate"] == "_kage/provider_retry")
+                .unwrap();
+            let next = updates[retry + 1..]
+                .iter()
+                .position(|p| p["update"]["sessionUpdate"] == "_kage/message")
+                .unwrap()
+                + retry
+                + 1;
+            assert_eq!(updates[next]["update"]["phase"], "start");
+            assert_ne!(
+                updates[next]["update"]["messageId"],
+                updates[retry]["update"]["messageId"]
+            );
+        } else {
+            assert!(
+                !updates
+                    .iter()
+                    .any(|p| p["update"]["sessionUpdate"] == "_kage/message")
+            );
+        }
+    }
+}
+
+#[test]
+fn provisional_attempt_state_is_forgotten_on_close_replacement_and_run_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(Vec::new(), dir.path(), dir.path());
+    let mut bridge = test_bridge(&h);
+    lock(&bridge.ids).insert(h.session.clone(), h.id);
+    lock(&bridge.held).insert(h.id, HeldUpdates::default());
+    for cleanup in 0..3 {
+        for event in [
+            LoopEvent::MessageStart {
+                id: MessageId::new(),
+            },
+            LoopEvent::ToolCallStart {
+                id: ToolCallId::new("provisional"),
+                name: "ls".into(),
+                input_partial: serde_json::json!({}),
+            },
+        ] {
+            lock(&h.host.live).observe(&kage_core::protocol::Envelope {
+                session: h.id,
+                seq: 0,
+                event: event.clone().into(),
+            });
+            bridge_event(&mut bridge, h.id, event);
+        }
+        assert!(bridge.attempts.contains_key(&h.id));
+        let event = match cleanup {
+            0 => {
+                lock(&bridge.closed).push(h.id);
+                HostEvent::TitleChanged {
+                    title: "closed".into(),
+                }
+            }
+            1 => HostEvent::SessionChanged {
+                path: dir.path().join("replaced.jsonl"),
+                title: None,
+                timeline: Vec::new(),
+                compacted_agents: Vec::new(),
+            },
+            _ => HostEvent::RunEnded {
+                outcome: RunOutcome::Completed,
+            },
+        };
+        if cleanup > 0 {
+            lock(&h.host.live).observe(&kage_core::protocol::Envelope {
+                session: h.id,
+                seq: 0,
+                event: event.clone().into(),
+            });
+            assert!(lock(&h.host.live).snapshot(h.id).flight.is_empty());
+        }
+        bridge_event(&mut bridge, h.id, event);
+        assert!(!bridge.attempts.contains_key(&h.id));
+        assert!(!bridge.seen.contains_key(&h.id));
+        assert!(!bridge.names.contains_key(&h.id));
+    }
+}
+
+#[test]
+fn a_reused_tool_id_in_a_new_attempt_announces_a_fresh_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = serve(Vec::new(), dir.path(), dir.path());
+    let mut bridge = test_bridge(&h);
+    bridge.attempt_output.store(true, Ordering::SeqCst);
+    lock(&bridge.ids).insert(h.session.clone(), h.id);
+    lock(&bridge.held).insert(h.id, HeldUpdates::default());
+    for (input, committed) in [("A", true), ("B", false), ("C", true)] {
+        let id = MessageId::new();
+        bridge_event(&mut bridge, h.id, LoopEvent::MessageStart { id });
+        bridge_event(
+            &mut bridge,
+            h.id,
+            LoopEvent::ToolCallStart {
+                id: ToolCallId::new("reused"),
+                name: "ls".into(),
+                input_partial: serde_json::json!({"path": input}),
+            },
+        );
+        bridge_event(
+            &mut bridge,
+            h.id,
+            LoopEvent::ToolCallArgsDelta {
+                id: ToolCallId::new("reused"),
+                name: "ls".into(),
+                input_partial: serde_json::json!({"path": input, "limit": 1}),
+            },
+        );
+        if committed {
+            bridge_event(
+                &mut bridge,
+                h.id,
+                LoopEvent::MessageEnd {
+                    id,
+                    usage: TokenUsage::default(),
+                    stop_reason: CoreStopReason::ToolUse,
+                },
+            );
+            bridge_event(
+                &mut bridge,
+                h.id,
+                LoopEvent::ToolCallEnd {
+                    id: ToolCallId::new("reused"),
+                    output: ToolOutput {
+                        text: input.into(),
+                        is_error: false,
+                        structured: None,
+                        terminate: false,
+                        media: Vec::new(),
+                    },
+                },
+            );
+        } else {
+            bridge_event(&mut bridge, h.id, retry_event());
+        }
+    }
+    let held = lock(&bridge.held);
+    let updates = &held[&h.id].updates;
+    let calls = updates
+        .iter()
+        .filter_map(|update| match update {
+            SessionUpdate::ToolCall(call) => Some(call.raw_input.as_ref().unwrap()["path"].clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(calls, ["A", "B", "C"]);
+    let fragments = updates
+        .iter()
+        .filter_map(|update| match update {
+            SessionUpdate::ToolCallUpdate(call) if call.raw_input.is_some() => {
+                Some(call.raw_input.as_ref().unwrap()["limit"].clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fragments, [1, 1, 1]);
+    let outputs = updates
+        .iter()
+        .filter_map(|update| match update {
+            SessionUpdate::ToolCallUpdate(call)
+                if call.status == Some(ToolCallStatus::Completed) =>
+            {
+                let kage_acp::acp::ToolCallContent::Content(chunk) = &call.content[0] else {
+                    panic!("text output");
+                };
+                let ContentBlock::Text(text) = &chunk.content else {
+                    panic!("text output");
+                };
+                Some(text.text.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(outputs, ["A", "C"]);
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one paused child exercises attach, replay, retry, and settlement for both capabilities"
+)]
+fn attaching_mid_child_attempt_replays_and_seeds_its_rollback_identity() {
+    for capable in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().display().to_string();
+        let main = MockProvider::sequence(vec![
+            tool_turn(
+                "parent-call",
+                "agent",
+                serde_json::json!({
+                    "description": "list files", "prompt": "list", "background": true,
+                }),
+            ),
+            text_turn("child is working"),
+        ]);
+        let (release, gate) = mpsc::channel();
+        let child_provider = Arc::new(Paused::new(
+            vec![
+                Ok(ProviderEvent::MessageStart),
+                Ok(ProviderEvent::TextDelta {
+                    delta: "failed child text".into(),
+                }),
+                Ok(ProviderEvent::ToolCallStart {
+                    id: ToolCallId::new("reused"),
+                    name: "ls".into(),
+                }),
+            ],
+            vec![
+                Ok(ProviderEvent::TextDelta {
+                    delta: " after attach".into(),
+                }),
+                Err(ProviderError::Transport("child reset".into())),
+            ],
+            vec![
+                tool_turn("reused", "ls", serde_json::json!({"path": cwd})),
+                text_turn("child recovered"),
+            ],
+            gate,
+        ));
+        let h = serve_on(
+            Arc::new(Routed {
+                main: Listed::of(main.clone()),
+                agents: child_provider.clone(),
+            }),
+            main,
+            dir.path(),
+            dir.path(),
+            false,
+            default_agents(),
+            true,
+        );
+        initialize(&h.client);
+        assert_eq!(
+            prompt_async(&h.client, &h.session, "go")
+                .recv_timeout(WAIT)
+                .unwrap()
+                .unwrap()["stopReason"],
+            "end_turn"
+        );
+        until(|| child_provider.is_parked());
+        let announcement = updates_until(&h.inbox, &h.session, "subagent_update");
+        let child = announcement.last().unwrap()["update"]["subagentSessionId"]
+            .as_str()
+            .unwrap();
+        let c2 = h.connect();
+        c2.client.request("initialize", serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "clientCapabilities": {"subagents": {}, "_meta": {"kage": {"attemptOutput": capable}}}
+        })).unwrap();
+        c2.client
+            .request(
+                "session/load",
+                serde_json::json!({
+                    "sessionId": h.session, "cwd": cwd, "mcpServers": []
+                }),
+            )
+            .unwrap();
+        let replay = drain(&c2.inbox);
+        let child_replay = replay
+            .iter()
+            .filter(|p| p["sessionId"] == child)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(chunk_texts(&child_replay), ["failed child text"]);
+        assert!(
+            replay.iter().any(|p| p["sessionId"] == h.session
+                && p["update"]["sessionUpdate"] == "subagent_update")
+        );
+        let lifecycle = child_replay
+            .iter()
+            .find(|p| p["update"]["sessionUpdate"] == "_kage/message");
+        let failed = if capable {
+            let update = &lifecycle.unwrap()["update"];
+            assert_eq!(update["phase"], "start");
+            Some(update["messageId"].clone())
+        } else {
+            assert!(lifecycle.is_none());
+            None
+        };
+        release.send(()).unwrap();
+        let retry_kind = if capable {
+            "_kage/provider_retry"
+        } else {
+            "_kage/notice"
+        };
+        let retries = updates_until(&c2.inbox, child, retry_kind);
+        assert_eq!(chunk_texts(&retries), [" after attach"]);
+        let retry = &retries.last().unwrap()["update"];
+        if capable {
+            assert_eq!(retry["messageId"], failed.unwrap());
+        } else {
+            assert_eq!(
+                retry["text"],
+                "provider error (transport: child reset); retrying 1/4 in 1s"
+            );
+        }
+        let (ask, params) = until_ask(&h.inbox, &mut Vec::new());
+        assert_eq!(params["sessionId"], child);
+        allow(&h.client, &ask);
+        let finished = until_terminal(&c2.inbox);
+        assert_eq!(
+            finished
+                .iter()
+                .filter(|(_, p)| p["sessionId"] == child
+                    && p["update"]["sessionUpdate"] == "tool_call"
+                    && p["update"]["toolCallId"] == "reused")
+                .count(),
+            1
+        );
+        assert!(finished.iter().any(|(_, p)| p["sessionId"] == child
+            && p["update"]["sessionUpdate"] == "agent_message_chunk"
+            && p["update"]["content"]["text"] == "child recovered"));
+        if !capable {
+            assert!(
+                !finished
+                    .iter()
+                    .any(|(_, p)| p["update"]["sessionUpdate"] == "_kage/message")
+            );
+        }
+    }
 }

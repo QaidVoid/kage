@@ -2066,6 +2066,7 @@ impl Pump {
                     // engine path of a default configuration.
                     unconfigured_tools: Some(UnconfiguredTools::Allow),
                     plugin_host: self.plugins.is_some(),
+                    attempt_output: true,
                     // Opening a long session replays its latest items
                     // only, about what the buffer keeps.
                     history_window: Some(HISTORY_WINDOW),
@@ -2604,6 +2605,15 @@ impl Pump {
                     self.session_moved(&id);
                 } else {
                     self.child_moved(&id);
+                }
+            }
+            Change::AttemptDiscarded { id, .. } => {
+                if id == self.wire {
+                    self.feed.wake();
+                    self.hand_buffer();
+                } else {
+                    self.reset_child_transcript(&id, Vec::new());
+                    self.child_transcript(&id);
                 }
             }
             Change::Transcript { id } => {
@@ -6386,6 +6396,126 @@ mod tests {
     }
 
     #[test]
+    fn child_retry_resets_and_replays_even_when_item_count_is_unchanged() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let child = announced_child(&mut pump, &app, &Value::Null);
+        let _ = app.try_iter().count();
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "_kage/message", "messageId": "same", "phase": "start",
+            }),
+        );
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "complete"},
+            }),
+        );
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "_kage/message", "messageId": "same", "phase": "end",
+            }),
+        );
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "_kage/message", "messageId": "same", "phase": "start",
+            }),
+        );
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "discard"},
+            }),
+        );
+        let before = pump.store.state().session("child").unwrap().items.len();
+        let _ = app.try_iter().count();
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "_kage/provider_retry", "messageId": "same", "attempt": 1,
+                "maxAttempts": 3, "waitSecs": 0, "waitMs": 25, "error": "busy",
+            }),
+        );
+        assert_eq!(
+            pump.store.state().session("child").unwrap().items.len(),
+            before
+        );
+        let events: Vec<_> = app
+            .try_iter()
+            .filter(|event| event.session == child)
+            .collect();
+        assert!(matches!(events.first().map(|event| &event.event), Some(
+            kage_core::protocol::Event::Host(HostEvent::SessionChanged { timeline, .. })
+        ) if timeline.is_empty()));
+        let mut displayed = kage_tui::Buffer::new();
+        for event in events {
+            match event.event {
+                kage_core::protocol::Event::Loop(event) => {
+                    kage_tui::events::apply_loop_event(&mut displayed, &event);
+                }
+                kage_core::protocol::Event::Host(HostEvent::Notice { text, .. }) => {
+                    displayed.push_custom("notice", text, false);
+                }
+                kage_core::protocol::Event::Host(_) => {}
+            }
+        }
+        assert_eq!(displayed.blocks().len(), 2);
+        assert!(
+            matches!(displayed.blocks()[0].as_ref(), kage_tui::Block::Assistant { text, .. } if text == "complete")
+        );
+        assert!(
+            matches!(displayed.blocks()[1].as_ref(), kage_tui::Block::Custom { text, .. } if text.contains("retrying"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn child_retry_drops_mixed_output_and_allows_reused_tool_id() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        let child = announced_child(&mut pump, &app, &Value::Null);
+        let _ = app.try_iter().count();
+        for update in [
+            serde_json::json!({"sessionUpdate": "_kage/message", "messageId": "attempt", "phase": "start"}),
+            serde_json::json!({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "thinking"}}),
+            serde_json::json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "partial"}}),
+            serde_json::json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "image", "mimeType": "image/png", "data": "YWJj"}}),
+            serde_json::json!({"sessionUpdate": "tool_call", "toolCallId": "reused", "title": "read", "status": "pending", "rawInput": {"path": "bad"}}),
+        ] {
+            child_update(&mut pump, &update);
+        }
+        assert!(pump.children["child"].tools.contains_key("reused"));
+        let _ = app.try_iter().count();
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "_kage/provider_retry", "messageId": "attempt", "attempt": 1,
+                "maxAttempts": 3, "waitSecs": 1, "waitMs": 1000, "error": "busy",
+            }),
+        );
+        assert_eq!(agent_events(&app, child), ["reset"]);
+        assert!(pump.children["child"].tools.is_empty());
+        assert!(pump.children["child"].tail.is_none());
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "_kage/message", "messageId": "attempt", "phase": "start",
+            }),
+        );
+        child_update(
+            &mut pump,
+            &serde_json::json!({
+                "sessionUpdate": "tool_call", "toolCallId": "reused", "title": "read", "status": "pending", "rawInput": {"path": "good"},
+            }),
+        );
+        assert_eq!(agent_events(&app, child), ["start:read"]);
+        assert_eq!(pump.children["child"].tools["reused"].input["path"], "good");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn replacing_a_childs_first_streaming_message_resets_before_replay() {
         let (mut pump, app, _dialogs, _feed, dir) = test_pump();
         let child = announced_child(&mut pump, &app, &Value::Null);
@@ -7462,6 +7592,10 @@ mod tests {
         assert_eq!(
             initialize["params"]["clientCapabilities"]["subagents"],
             serde_json::json!({})
+        );
+        assert_eq!(
+            initialize["params"]["clientCapabilities"]["_meta"]["kage"]["attemptOutput"],
+            true
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

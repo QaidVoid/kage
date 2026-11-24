@@ -23,6 +23,12 @@ permission request starts `kage rpc --yolo` instead, which opens every
 session in allow mode. Advertising `subagents` (any
 value but `false`) turns on `subagent_update` and child sessions.
 
+A client that can retract interrupted provider output advertises
+`clientCapabilities._meta.kage.attemptOutput: true`. It then receives
+`_kage/message` boundaries and structured `_kage/provider_retry` updates.
+Without this capability, retries arrive as plain `_kage/notice` updates
+and the client is not asked to retract output.
+
 ## requests
 
 | Method | Params | Result |
@@ -79,6 +85,8 @@ value but `false`) turns on `subagent_update` and child sessions.
 | `sessionUpdate` | Fields | Meaning |
 | --- | --- | --- |
 | `_kage/turn` | `phase` (`start`, `end`), `reason?` (`tool_calls`, `no_tool_calls`), `at?`, `tookMs?` | One provider round trip of the running prompt. A loaded session's history closes each run that ended with an `end` carrying when it ended (`at`, Unix seconds) and how long it took. |
+| `_kage/message` | `messageId`, `phase` (`start`, `end`) | One provider attempt. Output after `start` is provisional; a matching `end` commits it. Sent only with `attemptOutput`. |
+| `_kage/provider_retry` | `messageId?`, `attempt`, `maxAttempts`, `waitSecs`, `waitMs`, `requestedSecs?`, `error` | Discard the named attempt's provisional output, then show a retry notice. `attempt` is the one-based retry count, `waitMs` the actual backoff, and `requestedSecs` the provider's requested delay when supplied. Without `messageId`, no output is discarded. Sent only with `attemptOutput`, instead of a plain retry notice. |
 | `_kage/notice` | `tone` (`info`, `warn`, `error`, `success`), `text` | A message for the user that is not part of the conversation, such as `goal met: ...`. |
 | `_kage/compaction` | `phase` (`started`, `complete`, `aborted`), `kept?`, `before?`, `after?`, `summarized?`, `summary?` | The compaction lifecycle in one update. `started`: the agent began summarizing, naming the turns the summarizer will read (`summarized`) and how many stay verbatim (`kept`). `complete`: older turns were summarized, with context tokens `before` and `after`, the turns the summary replaced and the framed `summary` text; `after` is absent when no turn reported usage after the compaction. `aborted`: the summarizer failed; history is intact and the run continues, with the reason as an error notice. An update without a `phase` is an older engine's `complete`. |
 | `_kage/mcp_status` | `name`, `status` (`connected`, `starting`, `needs_auth`, or `{ failed: { error } }`) | One MCP server's reachability changed. |
@@ -86,6 +94,14 @@ value but `false`) turns on `subagent_update` and child sessions.
 | `_kage/prompt_withdrawn` | `delivery`, `content` | A cancel handed back a steer that was still waiting, for a client to put back into its editor. A prompt `_kage/prompt/withdraw` takes back is in that request's answer only. |
 | `_kage/mcp_servers` | `servers` | Every MCP server of the session, each `{ name, status, error?, tools, resources, templates, prompts }`, sent whole when the session opens, after a restart and whenever a server's catalog changes. |
 | `_kage/session_replaced` | `title?` | An undo or rewind replaced the conversation in place. Every kage client showing the session gets it (a client that sent `_meta.kage` at `initialize`): drop what is shown, then the conversation as it now stands and its finished agents follow as ordinary updates, as after `session/load`. Other clients keep what they show. |
+
+A retry retracts only the failed attempt's assistant text, thinking,
+media, and pending tool calls. Keep earlier completed messages, user
+messages, and notices, even if they arrived during the failed attempt.
+Do not merge provisional chunks into an earlier completed message.
+Ignore a discard for an unknown or already committed message, but still
+show its retry notice. Each retry starts a fresh message; providers may
+reuse tool-call IDs, so forget the discarded calls' tracking too.
 
 A loaded session's history also carries the durations the engine
 recorded: `_meta.kage.durationMs` on each `agent_thought_chunk` and on

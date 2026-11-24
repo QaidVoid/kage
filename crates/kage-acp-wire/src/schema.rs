@@ -86,6 +86,9 @@ pub struct KageClientCapabilities {
     /// `_meta.kage.plugins = "client"`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub plugin_host: bool,
+    /// The client can discard provisional message output after a provider retry.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attempt_output: bool,
     /// The most transcript items the client shows. Opening a recorded
     /// session then replays only its latest items, at most this many and
     /// never starting on a tool result, after a `_kage/notice` saying how
@@ -135,6 +138,15 @@ impl ClientCapabilities {
             .as_ref()
             .and_then(|meta| meta.kage.as_ref())
             .is_some_and(|kage| kage.plugin_host)
+    }
+
+    /// Whether the client understands message attempts and structured provider retries.
+    #[must_use]
+    pub fn supports_attempt_output(&self) -> bool {
+        self.meta
+            .as_ref()
+            .and_then(|meta| meta.kage.as_ref())
+            .is_some_and(|kage| kage.attempt_output)
     }
 
     /// The most transcript items the client shows, when it says.
@@ -2353,6 +2365,12 @@ pub enum SessionUpdate {
     /// A turn of the running prompt began or ended.
     #[serde(rename = "_kage/turn")]
     Turn(TurnUpdate),
+    /// A provider message attempt began or committed.
+    #[serde(rename = "_kage/message")]
+    Message(MessageUpdate),
+    /// A failed provider attempt is about to be retried.
+    #[serde(rename = "_kage/provider_retry")]
+    ProviderRetry(ProviderRetryUpdate),
     /// A message for the user outside the conversation.
     #[serde(rename = "_kage/notice")]
     Notice(NoticeUpdate),
@@ -2377,6 +2395,48 @@ pub enum SessionUpdate {
     /// Any update kind kage does not know. Never sent.
     #[serde(other)]
     Unknown,
+}
+
+/// The lifecycle of one provider message attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageUpdate {
+    /// Attempt identity, shared by all chunks until it commits or retries.
+    pub message_id: String,
+    /// Whether provisional output begins or becomes committed.
+    pub phase: MessagePhase,
+}
+
+/// A provider message attempt's lifecycle phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessagePhase {
+    /// Output that follows is provisional until this attempt commits.
+    Start,
+    /// The matching attempt's output is committed.
+    End,
+}
+
+/// A transient provider failure whose provisional output must be discarded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderRetryUpdate {
+    /// Failed attempt, absent when the provider failed before starting a message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    /// One-based counter for the next retry.
+    pub attempt: u32,
+    /// Configured retry ceiling.
+    pub max_attempts: u32,
+    /// Actual backoff in whole seconds.
+    pub wait_secs: u64,
+    /// Precise backoff in milliseconds, including sub-second waits.
+    pub wait_ms: u64,
+    /// The server's requested delay, when it supplied one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_secs: Option<u64>,
+    /// Human-readable underlying provider error.
+    pub error: String,
 }
 
 /// A message/thought chunk payload.
@@ -3455,6 +3515,7 @@ mod tests {
                 kage: Some(KageClientCapabilities {
                     unconfigured_tools: Some(UnconfiguredTools::Allow),
                     plugin_host: false,
+                    attempt_output: false,
                     history_window: None,
                 }),
             }),
@@ -4514,6 +4575,68 @@ mod tests {
             PermissionOutcome::Selected(SelectedOption {
                 option_id: "approve".into()
             })
+        );
+    }
+    #[test]
+    fn attempt_output_capability_is_opt_in() {
+        let absent: KageClientCapabilities = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!absent.attempt_output);
+        assert_eq!(serde_json::to_value(absent).unwrap(), serde_json::json!({}));
+        assert!(!ClientCapabilities::default().supports_attempt_output());
+        let caps: ClientCapabilities = serde_json::from_value(serde_json::json!({
+            "_meta": {"kage": {"attemptOutput": true}}
+        }))
+        .unwrap();
+        assert!(caps.supports_attempt_output());
+        assert_eq!(
+            serde_json::to_value(caps).unwrap()["_meta"]["kage"],
+            serde_json::json!({"attemptOutput": true})
+        );
+    }
+
+    #[test]
+    fn message_attempt_updates_round_trip() {
+        for (phase, value) in [(MessagePhase::Start, "start"), (MessagePhase::End, "end")] {
+            roundtrip(
+                &SessionUpdate::Message(MessageUpdate {
+                    message_id: "m1".into(),
+                    phase,
+                }),
+                serde_json::json!({
+                    "sessionUpdate": "_kage/message", "messageId": "m1", "phase": value
+                }),
+            );
+        }
+        roundtrip(
+            &SessionUpdate::ProviderRetry(ProviderRetryUpdate {
+                message_id: Some("m1".into()),
+                attempt: 2,
+                max_attempts: 4,
+                wait_secs: 1,
+                wait_ms: 1250,
+                requested_secs: Some(300),
+                error: "busy".into(),
+            }),
+            serde_json::json!({
+                "sessionUpdate": "_kage/provider_retry", "messageId": "m1", "attempt": 2,
+                "maxAttempts": 4, "waitSecs": 1, "waitMs": 1250,
+                "requestedSecs": 300, "error": "busy"
+            }),
+        );
+        roundtrip(
+            &SessionUpdate::ProviderRetry(ProviderRetryUpdate {
+                message_id: None,
+                attempt: 1,
+                max_attempts: 4,
+                wait_secs: 0,
+                wait_ms: 250,
+                requested_secs: None,
+                error: "busy".into(),
+            }),
+            serde_json::json!({
+                "sessionUpdate": "_kage/provider_retry", "attempt": 1,
+                "maxAttempts": 4, "waitSecs": 0, "waitMs": 250, "error": "busy"
+            }),
         );
     }
 }

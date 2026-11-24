@@ -643,6 +643,9 @@ impl Store {
         touched.sort_unstable();
         touched.dedup();
         for change in &changes {
+            if let Change::AttemptDiscarded { id, removed } = change {
+                self.timings.discard_attempt(id, removed);
+            }
             if let Change::Transcript { id } = change
                 && self.active.as_deref() != Some(id.as_str())
                 && self
@@ -894,6 +897,7 @@ impl Store {
                     kage: Some(kage_client::wire::KageClientCapabilities {
                         unconfigured_tools: Some(kage_client::wire::UnconfiguredTools::Allow),
                         plugin_host: false,
+                        attempt_output: true,
                         history_window: None,
                     }),
                 }),
@@ -2566,6 +2570,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn handshake_advertises_provisional_attempt_output() {
+        let mut store = Store::new("/w", false);
+        store.handshake(false);
+        let frames = store.take_outgoing();
+        let params = frames
+            .iter()
+            .find_map(|frame| match frame {
+                Frame::Request { method, params, .. } if method == "initialize" => Some(params),
+                _ => None,
+            })
+            .expect("initialize was sent");
+        assert_eq!(
+            params["clientCapabilities"]["_meta"]["kage"]["attemptOutput"],
+            true
+        );
+    }
+
     /// Every store method that queues a frame leaves exactly its
     /// frames on the store for the shell's per-frame drain: one
     /// mutation, one batch, with no unrelated redraw needed.
@@ -3061,6 +3083,52 @@ mod tests {
 
         store.set_connect(State::Closed);
         assert!(store.take_notes().is_empty(), "the loss is reported once");
+    }
+
+    #[test]
+    fn retry_discards_tool_timing_even_when_the_notice_keeps_the_length() {
+        let mut store = welcome_store();
+        open_session(&mut store, 3, "s1");
+        store.prompt("busy");
+        let send = |store: &mut Store, update| {
+            store.absorb(Frame::Notification {
+                method: "session/update".into(),
+                params: serde_json::json!({"sessionId": "s1", "update": update}),
+            });
+        };
+        send(
+            &mut store,
+            serde_json::json!({"sessionUpdate": "_kage/message", "messageId": "m", "phase": "start"}),
+        );
+        send(
+            &mut store,
+            serde_json::json!({"sessionUpdate": "tool_call", "toolCallId": "reused", "title": "read", "kind": "read", "status": "pending"}),
+        );
+        send(
+            &mut store,
+            serde_json::json!({"sessionUpdate": "tool_call_update", "toolCallId": "reused", "status": "completed"}),
+        );
+        assert!(store.timings("s1").unwrap().tool(1).is_some());
+        send(
+            &mut store,
+            serde_json::json!({"sessionUpdate": "tool_call", "toolCallId": "reused", "title": "read", "kind": "read", "status": "pending"}),
+        );
+        let before = store.state().session("s1").unwrap().items.len();
+        send(
+            &mut store,
+            serde_json::json!({"sessionUpdate": "_kage/provider_retry", "messageId": "m", "attempt": 1, "maxAttempts": 3, "waitSecs": 0, "waitMs": 250, "error": "busy"}),
+        );
+        assert_eq!(store.state().session("s1").unwrap().items.len(), before);
+        assert!(store.timings("s1").unwrap().tool(1).is_some());
+        send(
+            &mut store,
+            serde_json::json!({"sessionUpdate": "_kage/message", "messageId": "next", "phase": "start"}),
+        );
+        send(
+            &mut store,
+            serde_json::json!({"sessionUpdate": "tool_call", "toolCallId": "reused", "title": "read", "kind": "read", "status": "completed"}),
+        );
+        assert_eq!(store.timings("s1").unwrap().tool(3), None);
     }
 
     #[test]

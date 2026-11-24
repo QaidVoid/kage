@@ -645,6 +645,34 @@ mod tests {
         assert_eq!(pipe_rx.read(&mut eof).unwrap(), 0);
     }
 
+    #[test]
+    fn pump_sse_forwards_valid_eof_json() {
+        for ending in ["", "\n", "\r\n"] {
+            let (mut pipe_rx, pipe_tx) = io::pipe().unwrap();
+            let out: OutSlot = Arc::new(Mutex::new(Some(pipe_tx)));
+            let stream = format!("data: {{\"jsonrpc\":\"2.0\",\"id\":7}}{ending}");
+            pump_sse(stream.as_bytes(), &SharedState::default(), &out).unwrap();
+            *kage_core::sync::lock(&out) = None;
+            let mut got = String::new();
+            pipe_rx.read_to_string(&mut got).unwrap();
+            assert_eq!(got, "{\"jsonrpc\":\"2.0\",\"id\":7}\n");
+        }
+    }
+
+    #[test]
+    fn pump_sse_drops_invalid_eof_json() {
+        for tail in ["{\"jsonrpc\":", "{not json"] {
+            let (mut pipe_rx, pipe_tx) = io::pipe().unwrap();
+            let out: OutSlot = Arc::new(Mutex::new(Some(pipe_tx)));
+            let stream = format!("data: {{\"jsonrpc\":\"2.0\",\"id\":7}}\n\ndata: {tail}");
+            pump_sse(stream.as_bytes(), &SharedState::default(), &out).unwrap();
+            *kage_core::sync::lock(&out) = None;
+            let mut got = String::new();
+            pipe_rx.read_to_string(&mut got).unwrap();
+            assert_eq!(got, "{\"jsonrpc\":\"2.0\",\"id\":7}\n");
+        }
+    }
+
     /// The fake-server harness below runs the transport over a
     /// `UnixStream::pair`, which does not exist on Windows.
     #[cfg(unix)]

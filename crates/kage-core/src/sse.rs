@@ -20,6 +20,15 @@ pub struct SseFrame {
     pub data: String,
 }
 
+/// How an SSE frame ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameEnd {
+    /// A blank line terminated the frame.
+    BlankLine,
+    /// The stream ended with the frame still buffered.
+    Eof,
+}
+
 /// Read one SSE frame from `reader`, or `None` at end of stream.
 ///
 /// Blank lines terminate a frame, `:` lines are comments, `event:`
@@ -37,6 +46,23 @@ pub fn read_frame<R: BufRead>(
     reader: &mut R,
     max_bytes: Option<u64>,
 ) -> io::Result<Option<SseFrame>> {
+    Ok(read_frame_with_end(reader, max_bytes)?.map(|(frame, _)| frame))
+}
+
+/// Read one SSE frame and its ending, or `None` at end of stream.
+///
+/// Uses the same framing, keepalive handling, and optional byte cap as
+/// [`read_frame`]. A buffered frame flushed at EOF has [`FrameEnd::Eof`],
+/// even when its final data line ends with a newline. Only a blank line
+/// produces [`FrameEnd::BlankLine`].
+///
+/// # Errors
+///
+/// A line read fails, or `max_bytes` is set and the frame exceeds it.
+pub fn read_frame_with_end<R: BufRead>(
+    reader: &mut R,
+    max_bytes: Option<u64>,
+) -> io::Result<Option<(SseFrame, FrameEnd)>> {
     let mut name = String::new();
     let mut data = String::new();
     let mut have_content = false;
@@ -63,7 +89,10 @@ pub fn read_frame<R: BufRead>(
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
             if have_content && !(name.is_empty() && data.is_empty()) {
-                return Ok(Some(take_frame(&mut name, &mut data)));
+                return Ok(Some((
+                    take_frame(&mut name, &mut data),
+                    FrameEnd::BlankLine,
+                )));
             }
             // An unnamed empty-data frame is a keepalive, not an
             // event: reset and keep reading instead of surfacing a
@@ -85,7 +114,7 @@ pub fn read_frame<R: BufRead>(
         // Comment lines (`:` prefix) match no field and are ignored.
     }
     if have_content && !(name.is_empty() && data.is_empty()) {
-        return Ok(Some(take_frame(&mut name, &mut data)));
+        return Ok(Some((take_frame(&mut name, &mut data), FrameEnd::Eof)));
     }
     Ok(None)
 }
@@ -106,6 +135,34 @@ mod tests {
     fn frame(bytes: &[u8]) -> Option<SseFrame> {
         let mut reader = BufReader::new(bytes);
         read_frame(&mut reader, None).unwrap()
+    }
+
+    #[test]
+    fn frame_end_distinguishes_blank_lines_from_eof() {
+        for (bytes, expected) in [
+            (&b"data: tail\n\n"[..], FrameEnd::BlankLine),
+            (&b"data: tail\r\n\r\n"[..], FrameEnd::BlankLine),
+            (&b"data: tail"[..], FrameEnd::Eof),
+            (&b"data: tail\n"[..], FrameEnd::Eof),
+            (&b"data: tail\r\n"[..], FrameEnd::Eof),
+        ] {
+            let mut reader = BufReader::new(bytes);
+            let (frame, end) = read_frame_with_end(&mut reader, None).unwrap().unwrap();
+            assert_eq!(frame.data, "tail");
+            assert_eq!(end, expected);
+            assert!(read_frame_with_end(&mut reader, None).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn frame_end_is_preserved_after_skipping_keepalives() {
+        let mut reader = BufReader::new(&b": comment\n\ndata:\n\ndata: first\n\ndata: tail"[..]);
+        let (frame, end) = read_frame_with_end(&mut reader, None).unwrap().unwrap();
+        assert_eq!(frame.data, "first");
+        assert_eq!(end, FrameEnd::BlankLine);
+        let (frame, end) = read_frame_with_end(&mut reader, None).unwrap().unwrap();
+        assert_eq!(frame.data, "tail");
+        assert_eq!(end, FrameEnd::Eof);
     }
 
     #[test]

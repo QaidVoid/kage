@@ -31,20 +31,33 @@ pub(crate) struct SseEvent {
 /// Read the next SSE frame, or `Ok(None)` at end of stream.
 ///
 /// Framing is shared with the MCP transport
-/// ([`kage_core::sse::read_frame`]), uncapped: blank lines terminate
+/// ([`kage_core::sse::read_frame_with_end`]), uncapped: blank lines terminate
 /// a frame, `:` lines are comments, `event:` sets the name, and
 /// successive `data:` lines join with `\n`. A frame with content
 /// still buffered at EOF is flushed before the terminating `Ok(None)`.
 /// A frame whose name and data are both empty (a bare `data:`
-/// keepalive line) is skipped rather than surfaced.
+/// keepalive line) is skipped rather than surfaced. An EOF-flushed frame
+/// with incomplete outer JSON is a transport failure. Other JSON errors
+/// are left to the provider's decoder, as are all blank-line-ended frames.
 pub(crate) fn read_sse_event<R: BufRead>(
     reader: &mut R,
 ) -> Result<Option<SseEvent>, ProviderError> {
-    match kage_core::sse::read_frame(reader, None) {
-        Ok(Some(frame)) => Ok(Some(SseEvent {
-            name: frame.name.unwrap_or_default(),
-            data: frame.data,
-        })),
+    match kage_core::sse::read_frame_with_end(reader, None) {
+        Ok(Some((frame, end))) => {
+            if end == kage_core::sse::FrameEnd::Eof
+                && frame.data.trim() != "[DONE]"
+                && let Err(error) = serde_json::from_str::<serde_json::Value>(&frame.data)
+                && error.is_eof()
+            {
+                return Err(ProviderError::Transport(format!(
+                    "SSE stream ended with incomplete JSON: {error}"
+                )));
+            }
+            Ok(Some(SseEvent {
+                name: frame.name.unwrap_or_default(),
+                data: frame.data,
+            }))
+        }
         Ok(None) => Ok(None),
         Err(e) => Err(ProviderError::Transport(e.to_string())),
     }
@@ -120,6 +133,153 @@ mod tests {
             out.push(frame);
         }
         out
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Provider {
+        Anthropic,
+        OpenAi,
+        Responses,
+        Gemini,
+    }
+
+    const PROVIDERS: [Provider; 4] = [
+        Provider::Anthropic,
+        Provider::OpenAi,
+        Provider::Responses,
+        Provider::Gemini,
+    ];
+
+    impl Provider {
+        fn stream(self, bytes: String) -> crate::EventStream {
+            let reader = Box::new(std::io::Cursor::new(bytes.into_bytes()));
+            let cancel = CancelFlag::new();
+            match self {
+                Self::Anthropic => Box::new(crate::anthropic::AnthropicStream::new(reader, cancel)),
+                Self::OpenAi => Box::new(crate::openai::OpenAiStream::new(reader, cancel)),
+                Self::Responses => Box::new(crate::openai_responses::ResponsesStream::new(
+                    reader, cancel,
+                )),
+                Self::Gemini => Box::new(crate::gemini::GeminiStream::new(reader, cancel)),
+            }
+        }
+
+        fn start(self) -> &'static str {
+            match self {
+                Self::Anthropic => "event: message_start\ndata: {}\n\n",
+                Self::OpenAi => "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+                Self::Responses => "data: {\"type\":\"response.created\"}\n\n",
+                Self::Gemini => {
+                    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\n"
+                }
+            }
+        }
+
+        fn terminal(self) -> &'static str {
+            match self {
+                Self::Anthropic => "event: message_stop\ndata: {}",
+                Self::OpenAi => "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}",
+                Self::Responses => "data: {\"type\":\"response.completed\",\"response\":{}}",
+                Self::Gemini => "data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}",
+            }
+        }
+    }
+
+    #[test]
+    fn eof_partial_outer_json_is_transport_and_never_completes_the_turn() {
+        for provider in PROVIDERS {
+            for tail in ["{", "{\"delta\":\"cut", "{\"delta\":", "{\"items\":[1"] {
+                for ending in ["", "\n", "\r\n"] {
+                    let bytes = format!("{}data: {tail}{ending}", provider.start());
+                    let mut stream = provider.stream(bytes);
+                    let events: Vec<_> = stream.by_ref().collect();
+                    assert!(
+                        matches!(events.first(), Some(Ok(ProviderEvent::MessageStart))),
+                        "{provider:?}: {events:?}"
+                    );
+                    assert!(
+                        matches!(events.last(), Some(Err(ProviderError::Transport(_)))),
+                        "{provider:?}: {events:?}"
+                    );
+                    assert_eq!(events.iter().filter(|event| event.is_err()).count(), 1);
+                    assert!(
+                        !events
+                            .iter()
+                            .any(|event| matches!(event, Ok(ProviderEvent::MessageEnd { .. })))
+                    );
+                    assert!(stream.next().is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fully_framed_partial_json_remains_decode() {
+        for provider in PROVIDERS {
+            let events: Vec<_> = provider
+                .stream(format!("{}data: {{\n\n", provider.start()))
+                .collect();
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, Err(ProviderError::Decode(_)))),
+                "{provider:?}: {events:?}"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Err(ProviderError::Transport(_))))
+            );
+        }
+    }
+
+    #[test]
+    fn eof_invalid_json_that_is_not_partial_remains_decode() {
+        for provider in PROVIDERS {
+            let events: Vec<_> = provider.stream("data: {not json".to_owned()).collect();
+            assert!(
+                matches!(events.first(), Some(Err(ProviderError::Decode(_)))),
+                "{provider:?}: {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_terminal_json_without_blank_line_completes_the_turn() {
+        for provider in PROVIDERS {
+            for ending in ["", "\n", "\r\n"] {
+                let events: Vec<_> = provider
+                    .stream(format!(
+                        "{}{}{ending}",
+                        provider.start(),
+                        provider.terminal()
+                    ))
+                    .collect();
+                assert!(events.iter().all(Result::is_ok), "{provider:?}: {events:?}");
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(event, Ok(ProviderEvent::MessageEnd { .. })))
+                        .count(),
+                    1,
+                    "{provider:?}: {events:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn done_without_blank_line_keeps_its_terminal_behavior() {
+        for provider in [Provider::OpenAi, Provider::Responses] {
+            let events: Vec<_> = provider
+                .stream(format!("{}data: [DONE]", provider.start()))
+                .collect();
+            assert!(events.iter().all(Result::is_ok), "{provider:?}: {events:?}");
+            assert!(matches!(
+                events.last(),
+                Some(Ok(ProviderEvent::MessageEnd { .. }))
+            ));
+        }
     }
 
     #[test]

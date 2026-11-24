@@ -11,7 +11,10 @@
 //! the lock, and checks the path still names that file. On Windows it opens
 //! the file sharing only reads: a second writer, a rename or a delete is
 //! refused by the system, while readers still open it. Both belong to the
-//! open file. Other platforms fail closed.
+//! open file. Legacy paths also hold the `.jsonl.lock` sidecar used by
+//! older builds for the entire operation. Sidecars are never unlinked, so
+//! waiting processes cannot acquire different lock files for one path.
+//! Other platforms fail closed.
 //!
 //! Entries written by this writer end with `\n`. On reopening, a valid
 //! unterminated final entry is preserved and terminated, while an invalid
@@ -255,6 +258,7 @@ fn claim(opts: &mut OpenOptions, path: &Path, use_: Use) -> Result<(File, Claim)
         path: path.to_path_buf(),
         source,
     };
+    let legacy = claim_legacy(path)?;
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
@@ -275,7 +279,7 @@ fn claim(opts: &mut OpenOptions, path: &Path, use_: Use) -> Result<(File, Claim)
                 io(source)
             }
         })?;
-        Ok((file, ()))
+        Ok((file, legacy))
     }
     #[cfg(unix)]
     {
@@ -308,7 +312,7 @@ fn claim(opts: &mut OpenOptions, path: &Path, use_: Use) -> Result<(File, Claim)
                 path: path.to_path_buf(),
             });
         }
-        Ok((file, lock))
+        Ok((file, (lock, legacy)))
     }
 }
 
@@ -322,12 +326,55 @@ fn open_locked(path: &Path, writable: bool, use_: Use) -> Result<(File, Claim), 
     claim(&mut opts, path, use_)
 }
 
+/// Claims the sidecar used by older builds for sessions outside project directories.
+#[cfg(any(unix, windows))]
+fn claim_legacy(path: &Path) -> Result<Option<LegacyClaim>, SessionError> {
+    if crate::layout::is_project_dir(&crate::layout::project_of(path)) {
+        return Ok(None);
+    }
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(".lock");
+    let mut opts = OpenOptions::new();
+    opts.create(true).truncate(false).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let file = opts.open(sidecar).map_err(|source| SessionError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    file.try_lock().map_err(|err| match err {
+        std::fs::TryLockError::WouldBlock => SessionError::Locked {
+            path: path.to_path_buf(),
+        },
+        std::fs::TryLockError::Error(source) => SessionError::Io {
+            path: path.to_path_buf(),
+            source,
+        },
+    })?;
+    Ok(Some(LegacyClaim(file)))
+}
+
+/// Explicit unlocking prevents a concurrently forked child from prolonging a claim.
+#[cfg(any(unix, windows))]
+#[derive(Debug)]
+struct LegacyClaim(File);
+
+#[cfg(any(unix, windows))]
+impl Drop for LegacyClaim {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 /// What a writer holds while it writes: the `flock` on Unix; on Windows
 /// the share mode of the file handle itself.
 #[cfg(unix)]
-type Claim = nix::fcntl::Flock<File>;
+type Claim = (nix::fcntl::Flock<File>, Option<LegacyClaim>);
 #[cfg(windows)]
-type Claim = ();
+type Claim = Option<LegacyClaim>;
 
 #[cfg(not(any(unix, windows)))]
 fn claim(_opts: &mut OpenOptions, path: &Path, _use: Use) -> Result<(File, ()), SessionError> {
@@ -449,25 +496,26 @@ fn repair_torn_tail(file: &mut File, path: &Path) -> Result<(), SessionError> {
 /// writer appends to it mid-move or opens it at `dst` before it lands. A
 /// session
 /// another process holds fails with [`SessionError::Locked`], and an
-/// existing `dst` is never replaced. A directory made for `dst` goes again
-/// when the move fails.
+/// existing distinct `dst` is never replaced. If an interrupted hard-link
+/// move left both names for one file, the source name is removed under the
+/// same locks. Filesystems without a safe rename or hard links fail closed.
+/// Empty directories made for `dst` are removed when the move fails.
 pub fn move_locked(path: &Path, dst: &Path) -> Result<(), SessionError> {
     let io = |path: &Path| {
         let path = path.to_path_buf();
         move |source| SessionError::Io { path, source }
     };
-    if dst.exists() {
-        return Err(SessionError::Io {
-            path: dst.to_path_buf(),
-            source: std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "a session file is already there",
-            ),
-        });
-    }
     // The writer's lock is on the file, so it moves with it: a writer at
     // either path is refused until the move is done.
     let (_file, _lock) = open_locked(path, false, Use::Remove)?;
+    if path == dst {
+        return Ok(());
+    }
+    if same_file(path, dst) {
+        #[cfg(any(unix, windows))]
+        let _destination_lock = claim_legacy(dst)?;
+        return std::fs::remove_file(path).map_err(io(path));
+    }
     // The directories this move makes, deepest first, to remove again if
     // it fails.
     let made: Vec<&Path> = dst
@@ -478,61 +526,53 @@ pub fn move_locked(path: &Path, dst: &Path) -> Result<(), SessionError> {
     if let Some(dir) = dst.parent() {
         std::fs::create_dir_all(dir).map_err(io(dir))?;
     }
+    #[cfg(any(unix, windows))]
+    let _destination_lock = claim_legacy(dst)?;
     if let Err(source) = place(path, dst) {
         for dir in made {
             let _ = std::fs::remove_dir(dir);
         }
         return Err(io(path)(source));
     }
-    // The lock sidecar older builds kept beside the file is not needed.
-    remove_sidecar(path);
     Ok(())
 }
 
-/// Gives the file at `path` the name `dst` instead, never replacing an
-/// existing `dst`. Unix links the new name, which fails if it is taken,
-/// then drops the old one; a filesystem without hard links, and Windows,
-/// rename after a check.
+/// Whether both paths name the same file, including an interrupted hard-link move.
+pub(crate) fn same_file(path: &Path, dst: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
+        && std::fs::symlink_metadata(dst).is_ok_and(|metadata| metadata.is_file())
+        && same_file::is_same_file(path, dst).unwrap_or(false)
+}
+
+/// Moves without replacing a destination. A hard-link fallback may leave
+/// both names after interruption; the next locked move recovers that state.
 fn place(path: &Path, dst: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    match std::fs::hard_link(path, dst) {
-        Ok(()) => return std::fs::remove_file(path),
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Err(err),
-        Err(_) => {}
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        use nix::fcntl::{AT_FDCWD, RenameFlags, renameat2};
+        match renameat2(AT_FDCWD, path, AT_FDCWD, dst, RenameFlags::RENAME_NOREPLACE) {
+            Ok(()) => return Ok(()),
+            Err(
+                nix::errno::Errno::ENOSYS
+                | nix::errno::Errno::EINVAL
+                | nix::errno::Errno::EOPNOTSUPP,
+            ) => {}
+            Err(err) => return Err(std::io::Error::from_raw_os_error(err as i32)),
+        }
     }
-    if dst.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "a session file is already there",
-        ));
+    #[cfg(any(unix, windows))]
+    {
+        std::fs::hard_link(path, dst)?;
+        std::fs::remove_file(path)
     }
-    std::fs::rename(path, dst)
-}
-
-/// Removes the `.lock` sidecar older builds kept beside the session file
-/// `path`, when no older writer holds it.
-pub(crate) fn remove_sidecar(path: &Path) {
-    let mut sidecar = path.as_os_str().to_os_string();
-    sidecar.push(".lock");
-    remove_stray_sidecar(Path::new(&sidecar));
-}
-
-/// Removes the lock sidecar `sidecar` an older build left, when no older
-/// writer holds it. Whether it was removed.
-pub(crate) fn remove_stray_sidecar(sidecar: &Path) -> bool {
-    let Ok(file) = OpenOptions::new().read(true).write(true).open(sidecar) else {
-        return false;
-    };
-    #[cfg(unix)]
-    let held = {
-        use nix::fcntl::{Flock, FlockArg};
-        Flock::lock(file, FlockArg::LockExclusiveNonblock).ok()
-    };
-    #[cfg(windows)]
-    let held = file.try_lock().is_ok().then_some(file);
     #[cfg(not(any(unix, windows)))]
-    let held = Some(file);
-    held.is_some() && std::fs::remove_file(sidecar).is_ok()
+    {
+        let _ = (path, dst);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "safe session moves are unsupported",
+        ))
+    }
 }
 
 /// [`delete_locked`], then the session's own directory, which holds its
@@ -580,14 +620,14 @@ pub fn delete_with_agents(path: &Path) -> Result<(), SessionError> {
         let _ = std::fs::remove_file(file);
     }
     drop(claims);
-    if agents_dir.is_dir() {
-        std::fs::remove_dir_all(&home).map_err(|source| SessionError::Io { path: home, source })?;
+    if std::fs::remove_dir(&agents_dir).is_ok() {
+        let _ = std::fs::remove_dir(&home);
     }
     Ok(())
 }
 
-/// Delete a session while holding its writer's lock, and any lock sidecar
-/// an older build left beside it.
+/// Delete a session while holding its writer's lock and its legacy
+/// sidecar lock, if applicable. Lock sidecars remain in place.
 ///
 /// The file is opened but not repaired. A session another writer holds is
 /// not deleted.
@@ -609,7 +649,6 @@ pub fn delete_locked(path: &Path) -> Result<(), SessionError> {
         path: path.to_path_buf(),
         source,
     })?;
-    remove_sidecar(path);
     Ok(())
 }
 
@@ -664,6 +703,162 @@ mod tests {
 
     #[test]
     #[cfg(any(unix, windows))]
+    fn interrupted_move_recovers_the_same_inode() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        drop(SessionWriter::create(&path, fresh_header()).unwrap());
+        let dst = dir.path().join("project-0123456789/s.jsonl");
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::fs::hard_link(&path, &dst).unwrap();
+        let before = std::fs::read(&dst).unwrap();
+        move_locked(&path, &dst).unwrap();
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(&dst).unwrap(), before);
+    }
+
+    #[test]
+    fn legacy_process_lock_helper() {
+        let Some(path) = std::env::var_os("KAGE_TEST_LEGACY_LOCK") else {
+            return;
+        };
+        let path = PathBuf::from(path);
+        let probe = std::env::var_os("KAGE_TEST_LEGACY_PROBE").is_some();
+        let _transcript = (!probe).then(|| OpenOptions::new().append(true).open(&path).unwrap());
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(".lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(sidecar)
+            .unwrap();
+        if probe {
+            assert!(matches!(
+                lock.try_lock(),
+                Err(std::fs::TryLockError::WouldBlock)
+            ));
+            return;
+        }
+        lock.try_lock().unwrap();
+        std::fs::write(path.with_extension("ready"), b"").unwrap();
+        let mut release = String::new();
+        std::io::stdin().read_line(&mut release).unwrap();
+    }
+
+    #[test]
+    fn legacy_writer_holds_its_sidecar_until_drop() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let header = Header {
+            version: 3,
+            ..fresh_header()
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&SessionEntry::Header(header)).unwrap()
+            ),
+        )
+        .unwrap();
+        let writer = SessionWriter::open(&path).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "writer::tests::legacy_process_lock_helper"])
+            .env("KAGE_TEST_LEGACY_LOCK", &path)
+            .env("KAGE_TEST_LEGACY_PROBE", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        drop(writer);
+        let sidecar = OpenOptions::new()
+            .write(true)
+            .open(dir.path().join("s.jsonl.lock"))
+            .unwrap();
+        sidecar.try_lock().unwrap();
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn interrupted_move_waits_for_a_writer_at_the_destination() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("s.jsonl");
+        drop(SessionWriter::create(&source, fresh_header()).unwrap());
+        let dst = dir.path().join("project-0123456789/s.jsonl");
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::fs::hard_link(&source, &dst).unwrap();
+        let writer = SessionWriter::open(&dst).unwrap();
+        assert!(matches!(
+            move_locked(&source, &dst),
+            Err(SessionError::Locked { .. })
+        ));
+        assert!(source.exists() && dst.exists());
+        drop(writer);
+        move_locked(&source, &dst).unwrap();
+        assert!(!source.exists());
+        assert!(dst.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_symlink_destination_is_not_interrupted_move_recovery() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("s.jsonl");
+        drop(SessionWriter::create(&source, fresh_header()).unwrap());
+        let dst = dir.path().join("alias.jsonl");
+        std::os::unix::fs::symlink(&source, &dst).unwrap();
+        assert!(
+            matches!(move_locked(&source, &dst), Err(SessionError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::AlreadyExists)
+        );
+        assert!(source.exists() && dst.exists());
+    }
+
+    #[test]
+    fn legacy_process_lock_blocks_writes_moves_and_deletes() {
+        use std::process::{Command, Stdio};
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let header = Header {
+            version: 3,
+            ..fresh_header()
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&SessionEntry::Header(header)).unwrap()
+            ),
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "writer::tests::legacy_process_lock_helper"])
+            .env("KAGE_TEST_LEGACY_LOCK", &path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let ready = path.with_extension("ready");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !ready.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let observed = ready.exists();
+        let write = SessionWriter::open(&path);
+        let replay = SessionWriter::open_native_replay(&path);
+        let moved = move_locked(&path, &dir.path().join("project-0123456789/s.jsonl"));
+        let deleted = delete_locked(&path);
+        writeln!(child.stdin.take().unwrap()).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(observed, "legacy process acquired its sidecar");
+        assert!(matches!(write, Err(SessionError::Locked { .. })));
+        assert!(matches!(replay, Err(SessionError::Locked { .. })));
+        assert!(matches!(moved, Err(SessionError::Locked { .. })));
+        assert!(matches!(deleted, Err(SessionError::Locked { .. })));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
     fn locked_delete_refuses_active_writer_and_preserves_file() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
@@ -711,8 +906,8 @@ mod tests {
         let writer = SessionWriter::create(&path, fresh_header()).unwrap();
         let before = std::fs::read(&path).unwrap();
         assert!(
-            !dir.path().join("session.jsonl.lock").exists(),
-            "the lock is on the file, with no sidecar"
+            dir.path().join("session.jsonl.lock").exists(),
+            "legacy paths also hold the stable-compatible sidecar"
         );
         for alias in [
             dir.path().join("symlink.jsonl"),
@@ -743,7 +938,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_and_moving_clear_an_older_builds_sidecar() {
+    fn deleting_and_moving_preserve_legacy_lock_identity() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         drop(SessionWriter::create(&path, fresh_header()).unwrap());
@@ -751,11 +946,14 @@ mod tests {
         std::fs::write(&sidecar, b"").unwrap();
         let moved = dir.path().join("moved/s.jsonl");
         move_locked(&path, &moved).unwrap();
-        assert!(!sidecar.exists(), "a move leaves no sidecar behind");
+        assert!(sidecar.exists(), "a move preserves the sidecar identity");
         let moved_sidecar = dir.path().join("moved/s.jsonl.lock");
         std::fs::write(&moved_sidecar, b"").unwrap();
         delete_locked(&moved).unwrap();
-        assert!(!moved_sidecar.exists(), "nor does a delete");
+        assert!(
+            moved_sidecar.exists(),
+            "a delete preserves the sidecar identity"
+        );
     }
 
     #[test]
@@ -801,7 +999,8 @@ mod tests {
         assert!(path.exists() && agent.exists(), "nothing went");
         drop(held);
         delete_with_agents(&path).unwrap();
-        assert!(!path.exists() && !dir.path().join("root").exists());
+        assert!(!path.exists());
+        assert!(dir.path().join("root/agents/kid.jsonl.lock").exists());
     }
 
     /// An older build deletes or renames by path, with no lock of ours:

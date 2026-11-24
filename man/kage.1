@@ -42,6 +42,12 @@ Print version
 \fBkage list\fR
 List recorded sessions in `$XDG_DATA_HOME/kage/sessions/`
 .TP
+\fBkage migrate\-sessions\fR
+Move flat session history into project directories. Stop every Kage process first, including shared hosts and older versions. Back up the sessions directory before migrating. Normal commands continue to discover flat history without moving it
+.TP
+\fB\-\-offline\fR
+Confirm that every Kage process is stopped. Locks cannot make relocation safe while older versions are running
+.TP
 \fBkage resume\fR
 Resume a recorded session, appending new entries to the same file
 .TP

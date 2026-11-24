@@ -210,10 +210,7 @@ fn fork_tree(
         // An agent's parent is the session it was copied with.
         renames.insert(source_session.to_string(), new_session.to_string());
         if let Err(err) = copy_agents(&agents, &crate::layout::agents_dir(dst), &renames, until) {
-            let _ = std::fs::remove_file(dst);
-            if let (Some(dir), Some(stem)) = (dst.parent(), dst.file_stem()) {
-                let _ = std::fs::remove_dir_all(dir.join(stem));
-            }
+            let _ = crate::writer::delete_with_agents(dst);
             return Err(err);
         }
     }

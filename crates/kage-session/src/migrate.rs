@@ -5,13 +5,13 @@
 //! `<root>/<id>/agents/`. [`migrate`] files each into the layout
 //! ([`crate::layout`]): a session a person started into its project
 //! directory, an agent into the `agents` directory of the session its
-//! `parent_session` chain starts at. Every move is a rename under the
-//! session's own lock, so a crash leaves a file either moved or not, and
-//! a session another process holds stays put until a later run. The
-//! `.lock` sidecars older builds kept beside each session go too, unless
-//! an older build still holds one.
+//! `parent_session` chain starts at. Run this only after stopping every
+//! Kage process, including older builds, and backing up the sessions directory.
+//! Older builds can open a transcript before claiming its sidecar, so locks
+//! alone cannot make relocation safe while those builds run. Lock sidecars
+//! remain in place to preserve their identity for waiting processes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
@@ -22,9 +22,10 @@ use crate::layout::{AGENTS_DIR, Grouping};
 const LOCK_FILE: &str = ".layout.lock";
 
 /// The files a migration could not move for good, one path per line,
-/// which later runs leave alone: a destination already taken, or a file
-/// with no session header that no writer holds. Remove a line to have
-/// the next run try that file again.
+/// which later runs leave alone: a distinct destination already taken,
+/// or a file with no session header that no writer holds. An interrupted
+/// hard-link move is still recovered when both names refer to one file.
+/// Remove a line to have the next run retry any other file.
 pub const SKIP_FILE: &str = ".layout-skipped";
 
 /// How many agents deep [`migrate`] follows a `parent_session` chain.
@@ -61,18 +62,17 @@ struct Legacy {
 /// into it, grouping by `grouping`. Another process migrating at the same
 /// time makes this one do nothing.
 ///
+/// Stop every Kage process before calling, including older builds that
+/// cannot safely coordinate relocation. Back up the sessions directory first.
+///
 /// # Errors
 ///
 /// When the sessions directory cannot be read.
 pub fn migrate(root: &Path, grouping: Grouping) -> std::io::Result<Migration> {
     let mut report = Migration::default();
     let skipped = skipped(root);
-    let (legacy, sidecars) = legacy_files(root)?;
-    let legacy: Vec<PathBuf> = legacy
-        .into_iter()
-        .filter(|path| !skipped.contains(path))
-        .collect();
-    if legacy.is_empty() && sidecars.is_empty() {
+    let legacy = legacy_files(root)?;
+    if legacy.is_empty() {
         return Ok(report);
     }
     let Ok(lock) = std::fs::OpenOptions::new()
@@ -89,7 +89,7 @@ pub fn migrate(root: &Path, grouping: Grouping) -> std::io::Result<Migration> {
 
     let sessions: Vec<Legacy> = legacy
         .into_iter()
-        .filter_map(|path| read_legacy(root, path, &mut report))
+        .filter_map(|path| read_legacy(root, path, &skipped, &mut report))
         .collect();
     let by_id: HashMap<SessionId, &Legacy> = sessions.iter().map(|s| (s.id, s)).collect();
     let mut placed: HashMap<SessionId, PathBuf> = HashMap::new();
@@ -98,7 +98,7 @@ pub fn migrate(root: &Path, grouping: Grouping) -> std::io::Result<Migration> {
     for session in sessions.iter().filter(|s| !s.agent) {
         let dst = crate::layout::project_dir(root, &session.cwd, grouping)
             .join(format!("{}.jsonl", session.id));
-        if move_one(&session.path, &dst, &mut report) {
+        if move_one(&session.path, &dst, &skipped, &mut report) {
             placed.insert(session.id, dst);
         }
     }
@@ -115,23 +115,16 @@ pub fn migrate(root: &Path, grouping: Grouping) -> std::io::Result<Migration> {
             Home::Gone => crate::layout::project_dir(root, &session.cwd, grouping)
                 .join(format!("{}.jsonl", session.id)),
         };
-        move_one(&session.path, &dst, &mut report);
-    }
-    // A sidecar whose session is still here may be about to be locked by
-    // an older build, which on Windows has no other lock: it stays.
-    for sidecar in sidecars {
-        if !sidecar.with_extension("").exists() {
-            crate::writer::remove_stray_sidecar(&sidecar);
-        }
+        move_one(&session.path, &dst, &skipped, &mut report);
     }
     remove_empty_agent_dirs(root);
     crate::list::relocate_index(root, &report.moved);
-    remember_refused(root, &report.refused);
+    remember_refused(root, skipped, &report);
     Ok(report)
 }
 
 /// The files earlier runs could not move for good.
-fn skipped(root: &Path) -> std::collections::HashSet<PathBuf> {
+fn skipped(root: &Path) -> HashSet<PathBuf> {
     std::fs::read_to_string(root.join(SKIP_FILE))
         .unwrap_or_default()
         .lines()
@@ -140,23 +133,26 @@ fn skipped(root: &Path) -> std::collections::HashSet<PathBuf> {
         .collect()
 }
 
-/// Adds the files this run refused for good to [`SKIP_FILE`].
-fn remember_refused(root: &Path, refused: &[(PathBuf, String)]) {
-    if refused.is_empty() {
+/// Records refused paths and clears recovered moves from the skip list.
+fn remember_refused(root: &Path, mut skipped: HashSet<PathBuf>, report: &Migration) {
+    let mut changed = false;
+    for (path, _) in &report.moved {
+        changed |= skipped.remove(path);
+    }
+    for (path, _) in &report.refused {
+        changed |= skipped.insert(path.clone());
+    }
+    if !changed {
         return;
     }
-    let mut lines = String::new();
-    for (path, _) in refused {
-        if let Some(path) = path.to_str() {
-            lines.push_str(path);
-            lines.push('\n');
-        }
+    if skipped.is_empty() {
+        let _ = std::fs::remove_file(root.join(SKIP_FILE));
+        return;
     }
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(root.join(SKIP_FILE))
-        .and_then(|mut file| std::io::Write::write_all(&mut file, lines.as_bytes()));
+    let mut paths: Vec<_> = skipped.iter().filter_map(|path| path.to_str()).collect();
+    paths.sort_unstable();
+    let lines = format!("{}\n", paths.join("\n"));
+    let _ = std::fs::write(root.join(SKIP_FILE), lines);
 }
 
 /// Where an agent's root session is, as far as a migration run knows.
@@ -170,21 +166,17 @@ enum Home {
 }
 
 /// The session files under `root` in places older builds used, flat in the
-/// root and in the `agents` directory of a flat session, and the `.lock`
-/// sidecars older builds kept there.
-fn legacy_files(root: &Path) -> std::io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+/// root and in the `agents` directory of a flat session.
+fn legacy_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    let mut sidecars = Vec::new();
     let mut sort = |path: PathBuf| {
         if is_jsonl(&path) {
             files.push(path);
-        } else if is_sidecar(&path) {
-            sidecars.push(path);
         }
     };
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok((files, sidecars)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(files),
         Err(err) => return Err(err),
     };
     for entry in entries.flatten() {
@@ -203,20 +195,17 @@ fn legacy_files(root: &Path) -> std::io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
             }
         }
     }
-    Ok((files, sidecars))
-}
-
-/// Whether `path` is a lock sidecar older builds kept: `<id>.jsonl.lock`.
-fn is_sidecar(path: &Path) -> bool {
-    path.extension().is_some_and(|ext| ext == "lock")
-        && path
-            .file_stem()
-            .is_some_and(|stem| is_jsonl(Path::new(stem)))
+    Ok(files)
 }
 
 /// The header facts of the session at `path`, or `None` (recorded as a
 /// failure) when its header cannot be read.
-fn read_legacy(root: &Path, path: PathBuf, report: &mut Migration) -> Option<Legacy> {
+fn read_legacy(
+    root: &Path,
+    path: PathBuf,
+    skipped: &HashSet<PathBuf>,
+    report: &mut Migration,
+) -> Option<Legacy> {
     let header = std::fs::File::open(&path).ok().and_then(|file| {
         let mut line = String::new();
         std::io::BufReader::new(file.take(HEADER_MAX))
@@ -228,6 +217,9 @@ fn read_legacy(root: &Path, path: PathBuf, report: &mut Migration) -> Option<Leg
         }
     });
     let Some(header) = header else {
+        if skipped.contains(&path) {
+            return None;
+        }
         // A writer creating the file holds it before the header lands.
         if crate::writer::is_locked(&path) {
             report.held.push(path);
@@ -301,7 +293,10 @@ fn root_session(
 }
 
 /// Moves `path` to `dst`, reporting how it went. Whether it moved.
-fn move_one(path: &Path, dst: &Path, report: &mut Migration) -> bool {
+fn move_one(path: &Path, dst: &Path, skipped: &HashSet<PathBuf>, report: &mut Migration) -> bool {
+    if skipped.contains(path) && !crate::writer::same_file(path, dst) {
+        return false;
+    }
     match crate::writer::move_locked(path, dst) {
         Ok(()) => {
             report.moved.push((path.to_path_buf(), dst.to_path_buf()));
@@ -445,9 +440,9 @@ mod tests {
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|name| !name.starts_with('.') && !name.contains('-'))
+            .filter(|name| is_jsonl(Path::new(name)))
             .collect();
-        assert!(left.is_empty(), "nothing is left flat: {left:?}");
+        assert!(left.is_empty(), "no transcript is left flat: {left:?}");
 
         let rows = crate::catalog::Catalog::open_existing(&root)
             .unwrap()
@@ -547,13 +542,52 @@ mod tests {
     }
 
     #[test]
-    fn stray_sidecars_of_older_builds_are_swept() {
+    #[cfg(any(unix, windows))]
+    fn interrupted_move_recovers_even_when_previously_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let id = session(root, root, None, false);
+        let source = root.join(format!("{id}.jsonl"));
+        let dst = crate::layout::project_dir(root, root, Grouping::Cwd).join(format!("{id}.jsonl"));
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::fs::hard_link(&source, &dst).unwrap();
+        std::fs::write(root.join(SKIP_FILE), format!("{}\n", source.display())).unwrap();
+        let report = migrate(root, Grouping::Cwd).unwrap();
+        assert_eq!(report.moved.len(), 1);
+        assert!(!source.exists());
+        assert!(dst.exists());
+        assert!(!skipped(root).contains(&source));
+        assert!(!root.join(SKIP_FILE).exists());
+    }
+
+    #[test]
+    fn distinct_destination_collisions_remain_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let id = session(root, root, None, false);
+        let source = root.join(format!("{id}.jsonl"));
+        let before = std::fs::read(&source).unwrap();
+        let dst = crate::layout::project_dir(root, root, Grouping::Cwd).join(format!("{id}.jsonl"));
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::fs::write(&dst, &before).unwrap();
+        let report = migrate(root, Grouping::Cwd).unwrap();
+        assert_eq!(report.refused.len(), 1);
+        assert!(report.moved.is_empty());
+        let repeated = migrate(root, Grouping::Cwd).unwrap();
+        assert!(repeated.moved.is_empty());
+        assert!(repeated.refused.is_empty());
+        assert_eq!(std::fs::read(source).unwrap(), before);
+        assert_eq!(std::fs::read(dst).unwrap(), before);
+    }
+
+    #[test]
+    fn stray_sidecars_keep_their_lock_identity() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let gone = root.join("01GONE.jsonl.lock");
         std::fs::write(&gone, b"").unwrap();
         migrate(&root, Grouping::Cwd).unwrap();
-        assert!(!gone.exists());
+        assert!(gone.exists());
     }
 
     #[test]

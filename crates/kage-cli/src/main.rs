@@ -155,6 +155,16 @@ struct Cli {
 pub(crate) enum Command {
     /// List recorded sessions in `$XDG_DATA_HOME/kage/sessions/`.
     List,
+    /// Move flat session history into project directories. Stop every Kage
+    /// process first, including shared hosts and older versions. Back up
+    /// the sessions directory before migrating. Normal commands continue
+    /// to discover flat history without moving it.
+    MigrateSessions {
+        /// Confirm that every Kage process is stopped. Locks cannot make
+        /// relocation safe while older versions are running.
+        #[arg(long, required = true)]
+        offline: bool,
+    },
     /// Resume a recorded session, appending new entries to the same file.
     Resume {
         /// Session id or unique prefix. Mutually exclusive with --last.
@@ -593,6 +603,7 @@ pub(crate) enum AuthAction {
 pub(crate) fn run_subcommand(command: Command, standalone: bool) -> ExitCode {
     match command {
         Command::List => run_list(),
+        Command::MigrateSessions { offline: _ } => migrate_sessions(),
         Command::Resume {
             id,
             last,
@@ -1188,23 +1199,6 @@ fn main() -> ExitCode {
         load_model_cache();
     }
 
-    let touches_sessions = matches!(
-        cli.command,
-        None | Some(
-            Command::List
-                | Command::Resume { .. }
-                | Command::Fork { .. }
-                | Command::Search { .. }
-                | Command::Rpc(_)
-                | Command::Serve { .. }
-                | Command::Host {
-                    action: HostAction::Run { .. }
-                }
-        )
-    );
-    if touches_sessions {
-        file_older_sessions();
-    }
     if let Some(command) = cli.command {
         return run_subcommand(command, cli.standalone);
     }
@@ -1626,50 +1620,61 @@ pub(crate) fn truncate_one_line(text: &str, max: usize) -> String {
     format!("{head}...")
 }
 
-/// Moves sessions recorded before the project layout into it, saying so
-/// on stderr when it moved any. Once they are all moved this only reads
-/// the sessions directory.
-fn file_older_sessions() {
-    let Ok(root) = sessions_dir() else {
-        return;
+/// Relocate legacy history after the user has confirmed an offline migration.
+fn migrate_sessions() -> ExitCode {
+    let root = match sessions_dir() {
+        Ok(root) => root,
+        Err(err) => {
+            eprintln!("kage: {err}");
+            return ExitCode::from(1);
+        }
     };
-    // A config that does not load could hide `[sessions] group`, and the
-    // moves cannot be undone, so they wait for a config that loads.
-    let Ok(config) = kage_core::config::Config::load_default() else {
-        return;
+    let config = match kage_core::config::Config::load_default() {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("kage: config: {err}");
+            return ExitCode::from(1);
+        }
     };
+    eprintln!(
+        "kage: offline session migration. Keep all Kage processes stopped until it finishes."
+    );
+    eprintln!(
+        "kage: a backup of {} is recommended before migrating",
+        root.display()
+    );
     let report = match kage_session::migrate::migrate(&root, config.sessions.group) {
         Ok(report) => report,
         Err(err) => {
-            eprintln!("kage: could not file older sessions: {err}");
-            return;
+            eprintln!("kage: could not migrate sessions: {err}");
+            return ExitCode::from(1);
         }
     };
-    if !report.moved.is_empty() {
-        eprintln!(
-            "kage: filed {} older session files into project directories under {}",
-            report.moved.len(),
-            root.display()
-        );
-    }
+    eprintln!(
+        "kage: migrated {} older session files into project directories under {}",
+        report.moved.len(),
+        root.display()
+    );
     if !report.held.is_empty() {
         eprintln!(
-            "kage: {} sessions are open in another kage and will be filed later",
+            "kage: {} sessions are locked. Stop every Kage process before retrying",
             report.held.len()
         );
     }
     for (path, why) in &report.failed {
-        eprintln!(
-            "kage: could not file {} yet, will try again: {why}",
-            path.display()
-        );
+        eprintln!("kage: could not migrate {}: {why}", path.display());
     }
     for (path, why) in &report.refused {
         eprintln!(
-            "kage: left {} in place for good ({} lists it): {why}",
+            "kage: left {} in place ({} lists it): {why}",
             path.display(),
             root.join(kage_session::migrate::SKIP_FILE).display()
         );
+    }
+    if report.held.is_empty() && report.failed.is_empty() && report.refused.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
 }
 

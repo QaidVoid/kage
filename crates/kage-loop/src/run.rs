@@ -153,10 +153,10 @@ where
             // Hosts surface the event as a notice-like block (the
             // TUI's `kage:retry`, the RPC notice update), and only the
             // successful attempt is persisted because a failed attempt
-            // appends nothing. The retrying turn reuses no message or
-            // tool-call ids, so id-keyed clients cannot concatenate
-            // the attempts either. The retry streams the full turn
-            // from scratch; no deltas are replayed.
+            // appends nothing. Each attempt gets a fresh message id,
+            // but providers may reuse tool-call ids. Receivers must
+            // clear the failed attempt's tool tracking too. The retry
+            // streams the full turn from scratch; no deltas are replayed.
             let turn = {
                 let mut attempt: u32 = 0;
                 let mut overflow_round: u32 = 0;

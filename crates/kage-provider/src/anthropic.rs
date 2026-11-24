@@ -542,10 +542,8 @@ struct StreamState {
     /// delta and stop frames reuse the slot their start allocated.
     open_synthetic: Option<usize>,
     usage: TokenUsage,
-    stop_reason: StopReason,
-    /// Set once `message_start` arrived, so an EOF before it is a dead
-    /// stream (nothing synthesized) and an EOF after it is a stream
-    /// whose `message_stop` never made it (turn completed at EOF).
+    stop_reason: Option<StopReason>,
+    /// Whether the provider acknowledged the message.
     started: bool,
 }
 
@@ -554,13 +552,11 @@ impl StreamState {
     /// omits it, so index-less blocks cannot share a slot with an
     /// indexed one. Index-less delta and stop frames continue the
     /// index-less block in flight.
-    fn block_index(&mut self, value: &Value) -> usize {
+    fn block_index(&mut self, value: &Value, start: bool) -> usize {
         if let Some(v) = value.get("index").and_then(Value::as_u64) {
             return usize::try_from(v).unwrap_or(0);
         }
-        if let Some(slot) = self.open_synthetic
-            && self.blocks.contains_key(&slot)
-        {
+        if !start && let Some(slot) = self.open_synthetic {
             return slot;
         }
         let slot = SYNTHETIC_INDEX_BASE.wrapping_add(self.synthetic);
@@ -571,6 +567,7 @@ impl StreamState {
 }
 
 enum BlockBuilder {
+    Ignored,
     Text,
     Thinking,
     ToolUse {
@@ -613,8 +610,12 @@ impl AnthropicStream {
             "content_block_delta" => self.on_block_delta(&value),
             "content_block_stop" => self.on_block_stop(&value),
             "message_delta" => {
-                if let Some(stop) = value.pointer("/delta/stop_reason").and_then(Value::as_str) {
-                    self.state.stop_reason = parse_stop_reason(stop);
+                if let Some(stop) = value
+                    .pointer("/delta/stop_reason")
+                    .and_then(Value::as_str)
+                    .filter(|stop| !stop.trim().is_empty())
+                {
+                    self.state.stop_reason = Some(parse_stop_reason(stop));
                 }
                 if let Some(usage) = value.pointer("/usage") {
                     self.absorb_usage(usage);
@@ -622,7 +623,7 @@ impl AnthropicStream {
             }
             "message_stop" => {
                 self.pending.push_back(Ok(ProviderEvent::MessageEnd {
-                    stop_reason: self.state.stop_reason,
+                    stop_reason: self.state.stop_reason.unwrap_or_default(),
                     usage: self.state.usage,
                 }));
                 self.done = true;
@@ -660,7 +661,8 @@ impl AnthropicStream {
     }
 
     fn on_block_start(&mut self, value: &Value) {
-        let index = self.state.block_index(value);
+        let index = self.state.block_index(value, true);
+        self.state.blocks.insert(index, BlockBuilder::Ignored);
         let Some(block) = value.get("content_block") else {
             return;
         };
@@ -708,7 +710,7 @@ impl AnthropicStream {
     }
 
     fn on_block_delta(&mut self, value: &Value) {
-        let index = self.state.block_index(value);
+        let index = self.state.block_index(value, false);
         let Some(delta) = value.get("delta") else {
             return;
         };
@@ -762,7 +764,10 @@ impl AnthropicStream {
     }
 
     fn on_block_stop(&mut self, value: &Value) {
-        let index = self.state.block_index(value);
+        let index = self.state.block_index(value, false);
+        if self.state.open_synthetic == Some(index) {
+            self.state.open_synthetic = None;
+        }
         if let Some(BlockBuilder::ToolUse { id, partial_input }) = self.state.blocks.remove(&index)
         {
             let input = if partial_input.is_empty() {
@@ -805,12 +810,12 @@ impl crate::sse::SseStreamCore for AnthropicStream {
         self.process_event(name, data);
     }
     fn on_eof(&mut self) {
-        // The protocol ends with `message_stop`; a compatible upstream
-        // that drops the connection first still gets its turn completed
-        // with whatever arrived, instead of a full re-request.
-        if self.state.started {
+        if self.state.started
+            && self.state.blocks.is_empty()
+            && let Some(stop_reason) = self.state.stop_reason
+        {
             self.pending.push_back(Ok(ProviderEvent::MessageEnd {
-                stop_reason: self.state.stop_reason,
+                stop_reason,
                 usage: self.state.usage,
             }));
         }

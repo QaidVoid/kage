@@ -574,7 +574,7 @@ pub struct OpenAiStream {
     /// Buffered tool-call assembly state, keyed by index.
     tool_calls: BTreeMap<usize, ToolCallBuilder>,
     /// Most recent finish reason observed.
-    finish_reason: StopReason,
+    finish_reason: Option<StopReason>,
     /// Token accounting from the final usage chunk.
     usage: kage_core::TokenUsage,
     /// `OpenRouter` `reasoning_details` of the reasoning in flight;
@@ -606,7 +606,7 @@ impl OpenAiStream {
             done: false,
             started: false,
             tool_calls: BTreeMap::new(),
-            finish_reason: StopReason::Other,
+            finish_reason: None,
             usage: kage_core::TokenUsage::default(),
             details: None,
             reasoning_field: None,
@@ -682,8 +682,12 @@ impl OpenAiStream {
             if let Some(delta) = choice.get("delta") {
                 self.process_delta(delta);
             }
-            if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
-                self.finish_reason = parse_finish_reason(reason);
+            if let Some(reason) = choice
+                .get("finish_reason")
+                .and_then(Value::as_str)
+                .filter(|reason| !reason.trim().is_empty())
+            {
+                self.finish_reason = Some(parse_finish_reason(reason));
             }
         }
     }
@@ -852,7 +856,7 @@ impl OpenAiStream {
             }
         }
         self.pending.push_back(Ok(ProviderEvent::MessageEnd {
-            stop_reason: self.finish_reason,
+            stop_reason: self.finish_reason.unwrap_or(StopReason::Other),
             usage: crate::event::without_cached_input(self.usage),
         }));
     }
@@ -933,12 +937,7 @@ impl crate::sse::SseStreamCore for OpenAiStream {
         self.process_chunk(data);
     }
     fn on_eof(&mut self) {
-        // A compatible upstream can end without `[DONE]`. The turn must
-        // still complete with what arrived - final usage included -
-        // instead of being thrown away and retried from scratch. The
-        // `started` guard keeps a stream that died before any output
-        // from inventing a turn.
-        if self.started {
+        if self.started && self.finish_reason.is_some() {
             self.finish();
         }
     }
@@ -1486,13 +1485,85 @@ mod tests {
         OpenAiStream::new(Box::new(std::io::Cursor::new(bytes)), CancelFlag::new())
     }
 
-    /// A compatible upstream that ends without `[DONE]` must complete
-    /// the turn at EOF, delivering the usage the final chunk carried,
-    /// instead of leaving the loop to discard and re-request it.
+    #[test]
+    fn eof_completion_requires_choice_finish_reason() {
+        let cases = [
+            (
+                "start only",
+                serde_json::json!({"choices":[{"delta":{"role":"assistant"}}]}),
+            ),
+            (
+                "text only",
+                serde_json::json!({"choices":[{"delta":{"content":"hi"}}]}),
+            ),
+            (
+                "unfinished tool",
+                serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{"}}]}}]}),
+            ),
+            (
+                "finished tool without reason",
+                serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{}"}}]}}]}),
+            ),
+            (
+                "empty reason",
+                serde_json::json!({"choices":[{"delta":{"content":"hi"},"finish_reason":""}]}),
+            ),
+            (
+                "reason inside usage",
+                serde_json::json!({"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":5,"finish_reason":"stop"}}),
+            ),
+        ];
+        let mut completed = Vec::new();
+        for (name, chunk) in cases {
+            let bytes = format!("data: {chunk}\n\n");
+            let mut stream =
+                OpenAiStream::new(Box::new(std::io::Cursor::new(bytes)), CancelFlag::new());
+            let events: Vec<_> = stream.by_ref().collect();
+            if events.iter().any(|event| {
+                matches!(
+                    event,
+                    Ok(ProviderEvent::MessageEnd { .. } | ProviderEvent::ToolCallEnd { .. })
+                        | Err(_)
+                )
+            }) {
+                completed.push(name);
+            }
+            assert!(stream.next().is_none());
+        }
+        assert!(
+            completed.is_empty(),
+            "incomplete streams completed: {completed:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_finish_reason_completes_tools_with_trailing_usage() {
+        let bytes: &[u8] = b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}\n\n\
+            data: {\"choices\":[{\"finish_reason\":\"future_reason\"}]}\n\n\
+            data: {\"choices\":[{\"finish_reason\":\"\"}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":4}}\n\n";
+        let mut stream = stream_from_bytes(bytes);
+        let events = collect_ok(&mut stream);
+        assert!(events.iter().any(|event| matches!(event, ProviderEvent::ToolCallEnd { id, input } if id.0 == "call_1" && *input == serde_json::json!({}))));
+        assert!(
+            matches!(events.last(), Some(ProviderEvent::MessageEnd { stop_reason: StopReason::Other, usage }) if usage.input == 9 && usage.output == 4)
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ProviderEvent::MessageEnd { .. }))
+                .count(),
+            1
+        );
+        assert!(stream.next().is_none());
+    }
+
+    /// A choice's finish reason permits completion without `[DONE]`,
+    /// including usage delivered in a later chunk.
     #[test]
     fn eof_without_done_completes_the_turn() {
         let bytes: &[u8] = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
-             data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5,\"finish_reason\":\"stop\"}}\n\n";
+             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+             data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5}}\n\n";
         let mut events = stream_from_bytes(bytes);
         let mut saw_text = false;
         let (usage, reason) = loop {
@@ -1508,7 +1579,7 @@ mod tests {
         };
         assert_eq!(usage.input, 3);
         assert_eq!(usage.output, 5);
-        assert_eq!(reason, StopReason::Other);
+        assert_eq!(reason, StopReason::EndTurn);
         assert!(events.next().is_none());
     }
 

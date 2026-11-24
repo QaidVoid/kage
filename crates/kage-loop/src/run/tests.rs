@@ -2696,6 +2696,181 @@ fn provider_retry_uses_a_fresh_message_id_and_replays_no_deltas() {
     );
 }
 
+fn truncated_tool_turns() -> Vec<(&'static str, Vec<Result<ProviderEvent, ProviderError>>)> {
+    use std::io::Cursor;
+
+    let cancel = CancelFlag::new();
+    let anthropic = concat!(
+        "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":9}}}\n\n",
+        "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n",
+        "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"abandoned\"}}\n\n",
+        "event: content_block_stop\ndata: {\"index\":0}\n\n",
+        "event: content_block_start\ndata: {\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call\",\"name\":\"counting\"}}\n\n",
+        "event: content_block_stop\ndata: {\"index\":1}\n\n",
+    );
+    let openai = "data: {\"choices\":[{\"delta\":{\"content\":\"abandoned\",\"tool_calls\":[{\"index\":0,\"id\":\"call\",\"function\":{\"name\":\"counting\",\"arguments\":\"{}\"}}]}}],\"usage\":{\"prompt_tokens\":9}}\n\n";
+    let gemini = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"abandoned\"},{\"functionCall\":{\"name\":\"counting\",\"args\":{}}}]}}],\"usageMetadata\":{\"promptTokenCount\":9}}\n\n";
+    vec![
+        (
+            "anthropic",
+            kage_provider::anthropic::AnthropicStream::new(
+                Box::new(Cursor::new(anthropic.as_bytes())),
+                cancel.clone(),
+            )
+            .collect(),
+        ),
+        (
+            "openai",
+            kage_provider::openai::OpenAiStream::new(
+                Box::new(Cursor::new(openai.as_bytes())),
+                cancel.clone(),
+            )
+            .collect(),
+        ),
+        (
+            "gemini",
+            kage_provider::gemini::GeminiStream::new(
+                Box::new(Cursor::new(gemini.as_bytes())),
+                cancel,
+            )
+            .collect(),
+        ),
+    ]
+}
+
+#[test]
+fn truncated_provider_turn_retries_without_dispatching_or_changing_history() {
+    for (provider, truncated) in truncated_tool_turns() {
+        let mock = MockProvider::sequence(vec![truncated, good_turn()]);
+        let tool = Arc::new(CountingTool::default());
+        let tools = ToolRegistry::new().with(tool.clone());
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(Arc::new(user_msg("hello")));
+        let original = cx.history.clone();
+        let mut events = Vec::new();
+
+        run(
+            &mock,
+            &tools,
+            &mut cx,
+            LoopConfig {
+                max_provider_retries: 1,
+                ..LoopConfig::default()
+            },
+            &mut NoopHooks,
+            &CancelFlag::new(),
+            |event| events.push(event),
+        )
+        .unwrap_or_else(|error| panic!("{provider}: {error:?}"));
+
+        assert!(
+            tool.calls.lock().unwrap().is_empty(),
+            "{provider}: failed tools never execute"
+        );
+        let requests = mock.requests();
+        assert_eq!(requests.len(), 2, "{provider}");
+        assert_eq!(
+            requests[0].messages, requests[1].messages,
+            "{provider}: retry the same conversation"
+        );
+        assert_eq!(requests[0].messages, original, "{provider}");
+        assert_eq!(cx.history.len(), original.len() + 1, "{provider}");
+        assert_eq!(&cx.history[..original.len()], &original, "{provider}");
+        assert_eq!(
+            cx.history.last().unwrap().content,
+            vec![Content::Text { text: "hi".into() }],
+            "{provider}"
+        );
+        assert_eq!(
+            cx.budget,
+            crate::context::TokenBudget::default(),
+            "{provider}: no failed usage"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, LoopEvent::ProviderRetry { .. }))
+                .count(),
+            1,
+            "{provider}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, LoopEvent::MessageEnd { .. }))
+                .count(),
+            1,
+            "{provider}"
+        );
+        let starts: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                LoopEvent::MessageStart { id } => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts.len(), 2, "{provider}");
+        assert_ne!(starts[0], starts[1], "{provider}");
+    }
+}
+
+#[test]
+fn exhausted_truncated_provider_turn_surfaces_an_error_without_dispatch() {
+    for (provider, truncated) in truncated_tool_turns() {
+        let mock = MockProvider::replaying(truncated);
+        let tool = Arc::new(CountingTool::default());
+        let tools = ToolRegistry::new().with(tool.clone());
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(Arc::new(user_msg("hello")));
+        let original = cx.history.clone();
+        let mut events = Vec::new();
+
+        let result = run(
+            &mock,
+            &tools,
+            &mut cx,
+            LoopConfig {
+                max_provider_retries: 1,
+                ..LoopConfig::default()
+            },
+            &mut NoopHooks,
+            &CancelFlag::new(),
+            |event| events.push(event),
+        );
+
+        assert!(
+            matches!(result, Err(LoopError::Provider { ref message }) if message.contains("stream ended before completion")),
+            "{provider}: {result:?}"
+        );
+        assert!(
+            matches!(
+                events.last(),
+                Some(LoopEvent::Error {
+                    kind: LoopError::Provider { .. }
+                })
+            ),
+            "{provider}: visible failure"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, LoopEvent::ProviderRetry { .. }))
+                .count(),
+            1,
+            "{provider}"
+        );
+        assert_eq!(mock.call_count(), 2, "{provider}");
+        assert_eq!(cx.history, original, "{provider}");
+        assert!(tool.calls.lock().unwrap().is_empty(), "{provider}");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, LoopEvent::MessageEnd { .. })),
+            "{provider}"
+        );
+    }
+}
+
 /// A provider that runs a process for the turn gets the session's
 /// directory and environment with the request.
 #[test]

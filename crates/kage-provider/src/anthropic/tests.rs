@@ -1,5 +1,6 @@
 //! Tests for the Anthropic provider and SSE stream.
 
+use std::fmt::Write;
 use std::sync::Arc;
 
 use super::*;
@@ -519,8 +520,143 @@ fn stream_from_bytes(bytes: &'static [u8]) -> AnthropicStream {
     AnthropicStream::new(Box::new(std::io::Cursor::new(bytes)), CancelFlag::new())
 }
 
-/// The protocol ends with `message_stop`; a stream cut before it must
-/// still complete the turn with the stop reason and usage it absorbed.
+#[test]
+fn eof_completion_requires_stop_reason_and_closed_blocks() {
+    let start = "event: message_start\ndata: {}\n\n";
+    let reason = "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n";
+    let block = |kind: &str, indexed: bool| {
+        let index = if indexed { "\"index\":0," } else { "" };
+        format!(
+            "event: content_block_start\ndata: {{{index}\"content_block\":{{\"type\":\"{kind}\",\"id\":\"call_1\",\"name\":\"read\"}}}}\n\n"
+        )
+    };
+    let stop = "event: content_block_stop\ndata: {\"index\":0}\n\n";
+    let cases = [
+        ("start only", start.to_owned()),
+        ("open text", format!("{start}{}", block("text", true))),
+        (
+            "open text with reason",
+            format!("{start}{}{reason}", block("text", true)),
+        ),
+        (
+            "open thinking with reason",
+            format!("{start}{}{reason}", block("thinking", true)),
+        ),
+        (
+            "closed text without reason",
+            format!("{start}{}{stop}", block("text", true)),
+        ),
+        (
+            "unfinished tool with reason",
+            format!("{start}{}{reason}", block("tool_use", true)),
+        ),
+        (
+            "finished tool without reason",
+            format!("{start}{}{stop}", block("tool_use", true)),
+        ),
+        (
+            "redacted block with reason",
+            format!("{start}{}{reason}", block("redacted_thinking", true)),
+        ),
+        (
+            "ignored block with reason",
+            format!("{start}{}{reason}", block("future_block", true)),
+        ),
+        (
+            "synthetic ignored block with reason",
+            format!("{start}{}{reason}", block("future_block", false)),
+        ),
+        (
+            "older synthetic block still open",
+            format!(
+                "{start}{}{}event: content_block_stop\ndata: {{}}\n\n{reason}",
+                block("future_block", false),
+                block("text", false)
+            ),
+        ),
+        (
+            "empty reason",
+            format!(
+                "{start}event: message_delta\ndata: {{\"delta\":{{\"stop_reason\":\"\"}}}}\n\n"
+            ),
+        ),
+    ];
+    let mut completed = Vec::new();
+    for (name, bytes) in cases {
+        let mut stream =
+            AnthropicStream::new(Box::new(std::io::Cursor::new(bytes)), CancelFlag::new());
+        let events = collect_ok(&mut stream);
+        if events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::MessageEnd { .. }))
+        {
+            completed.push(name);
+        }
+        assert!(stream.next().is_none());
+    }
+    assert!(
+        completed.is_empty(),
+        "incomplete streams completed: {completed:?}"
+    );
+}
+
+#[test]
+fn eof_fallback_tracks_ignored_synthetic_blocks_and_unknown_reasons() {
+    let frames = [
+        (
+            "message_start",
+            serde_json::json!({"message":{"usage":{"input_tokens":3}}}),
+        ),
+        (
+            "content_block_start",
+            serde_json::json!({"index":0,"content_block":{"type":"tool_use","id":"call_1","name":"read"}}),
+        ),
+        (
+            "content_block_start",
+            serde_json::json!({"content_block":{"type":"redacted_thinking","data":"hidden"}}),
+        ),
+        ("content_block_stop", serde_json::json!({})),
+        (
+            "content_block_start",
+            serde_json::json!({"content_block":{"type":"future_block"}}),
+        ),
+        ("content_block_stop", serde_json::json!({})),
+        ("content_block_stop", serde_json::json!({"index":0})),
+        (
+            "message_delta",
+            serde_json::json!({"delta":{"stop_reason":"future_reason"},"usage":{"output_tokens":7}}),
+        ),
+        (
+            "message_delta",
+            serde_json::json!({"delta":{"stop_reason":""}}),
+        ),
+    ];
+    let mut bytes = String::new();
+    for (name, value) in frames {
+        write!(bytes, "event: {name}\ndata: {value}\n\n").unwrap();
+    }
+    let mut stream = AnthropicStream::new(Box::new(std::io::Cursor::new(bytes)), CancelFlag::new());
+    let events = collect_ok(&mut stream);
+    assert!(
+        events.iter().any(
+            |event| matches!(event, ProviderEvent::ToolCallEnd { id, .. } if id.0 == "call_1")
+        )
+    );
+    assert!(
+        matches!(events.last(), Some(ProviderEvent::MessageEnd { stop_reason: StopReason::Other, usage }) if usage.input == 3 && usage.output == 7)
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ProviderEvent::MessageEnd { .. }))
+            .count(),
+        1
+    );
+    assert!(stream.next().is_none());
+}
+
+/// Closed blocks and a stop reason permit completion without
+/// `message_stop`, preserving the final usage.
 #[test]
 fn eof_without_message_stop_completes_the_turn() {
     let bytes: &[u8] = b"event: message_start\n\

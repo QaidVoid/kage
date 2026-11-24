@@ -650,7 +650,7 @@ pub struct GeminiStream {
     /// name-keyed reuse would collide when one turn makes parallel
     /// same-name calls.
     tool_call_count: usize,
-    finish_reason: StopReason,
+    finish_reason: Option<StopReason>,
     usage: kage_core::TokenUsage,
     /// Cumulative `candidatesTokenCount`, overwrite-only per chunk.
     output_candidates: u64,
@@ -671,7 +671,7 @@ impl GeminiStream {
             done: false,
             started: false,
             tool_call_count: 0,
-            finish_reason: StopReason::Other,
+            finish_reason: None,
             usage: kage_core::TokenUsage::default(),
             output_candidates: 0,
             output_thoughts: 0,
@@ -703,6 +703,24 @@ impl GeminiStream {
             self.done = true;
             return;
         }
+        if let Some(reason) = value
+            .pointer("/promptFeedback/blockReason")
+            .and_then(Value::as_str)
+            .filter(|reason| !reason.trim().is_empty() && *reason != "BLOCK_REASON_UNSPECIFIED")
+        {
+            let message = value
+                .pointer("/promptFeedback/blockReasonMessage")
+                .and_then(Value::as_str)
+                .filter(|message| !message.trim().is_empty());
+            let body = match message {
+                Some(message) => format!("prompt blocked ({reason}): {message}"),
+                None => format!("prompt blocked ({reason})"),
+            };
+            self.pending
+                .push_back(Err(ProviderError::Http { status: 400, body }));
+            self.done = true;
+            return;
+        }
         if !self.started {
             self.pending.push_back(Ok(ProviderEvent::MessageStart));
             self.started = true;
@@ -722,8 +740,14 @@ impl GeminiStream {
                     self.process_part(part);
                 }
             }
-            if let Some(reason) = candidate.get("finishReason").and_then(Value::as_str) {
-                self.finish_reason = parse_finish_reason(reason);
+            if let Some(reason) = candidate
+                .get("finishReason")
+                .and_then(Value::as_str)
+                .filter(|reason| {
+                    !reason.trim().is_empty() && *reason != "FINISH_REASON_UNSPECIFIED"
+                })
+            {
+                self.finish_reason = Some(parse_finish_reason(reason));
             }
         }
     }
@@ -805,15 +829,13 @@ impl GeminiStream {
         }
     }
 
-    fn emit_message_end(&mut self) {
+    fn emit_message_end(&mut self, stop_reason: StopReason) {
         let usage = kage_core::TokenUsage {
             output: self.output_candidates.saturating_add(self.output_thoughts),
             ..self.usage
         };
-        self.pending.push_back(Ok(ProviderEvent::MessageEnd {
-            stop_reason: self.finish_reason,
-            usage,
-        }));
+        self.pending
+            .push_back(Ok(ProviderEvent::MessageEnd { stop_reason, usage }));
         self.done = true;
     }
 }
@@ -838,11 +860,10 @@ impl crate::sse::SseStreamCore for GeminiStream {
         self.process_chunk(data);
     }
     fn on_eof(&mut self) {
-        // Gemini's SSE ends without an explicit terminal frame, so a
-        // turn that produced any output gets a synthesized MessageEnd
-        // (the `started` guard mirrors the original EOF branch).
-        if self.started {
-            self.emit_message_end();
+        if self.started
+            && let Some(stop_reason) = self.finish_reason
+        {
+            self.emit_message_end(stop_reason);
         }
     }
 }
@@ -1398,6 +1419,100 @@ mod tests {
             ),
             other => panic!("expected Err, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn eof_completion_requires_candidate_finish_reason() {
+        let cases = [
+            ("start only", serde_json::json!({"candidates":[]})),
+            (
+                "text only",
+                serde_json::json!({"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}),
+            ),
+            (
+                "tool without reason",
+                serde_json::json!({"candidates":[{"content":{"parts":[{"functionCall":{"name":"read","args":{}}}]}}]}),
+            ),
+            (
+                "empty reason",
+                serde_json::json!({"candidates":[{"finishReason":""}]}),
+            ),
+            (
+                "unspecified reason",
+                serde_json::json!({"candidates":[{"finishReason":"FINISH_REASON_UNSPECIFIED"}]}),
+            ),
+            (
+                "empty prompt feedback",
+                serde_json::json!({"promptFeedback":{"blockReason":""}}),
+            ),
+            (
+                "unspecified prompt feedback",
+                serde_json::json!({"promptFeedback":{"blockReason":"BLOCK_REASON_UNSPECIFIED"}}),
+            ),
+        ];
+        let mut completed = Vec::new();
+        for (name, chunk) in cases {
+            let bytes = format!("data: {chunk}\n\n");
+            let mut stream =
+                GeminiStream::new(Box::new(std::io::Cursor::new(bytes)), CancelFlag::new());
+            let events = collect_ok(&mut stream);
+            if events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::MessageEnd { .. }))
+            {
+                completed.push(name);
+            }
+            assert!(stream.next().is_none());
+        }
+        assert!(
+            completed.is_empty(),
+            "incomplete streams completed: {completed:?}"
+        );
+    }
+
+    #[test]
+    fn blocked_prompt_is_a_nontransient_rejection() {
+        let bytes: &[u8] = b"data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\",\"blockReasonMessage\":\"Prompt rejected\"}}\n\n";
+        let mut stream = stream_from_bytes(bytes);
+        let Some(Err(error)) = stream.next() else {
+            panic!("blocked prompt must yield an error");
+        };
+        assert!(!error.is_transient(), "blocked prompts must not retry");
+        assert!(error.to_string().contains("SAFETY"));
+        assert!(error.to_string().contains("Prompt rejected"));
+        assert!(stream.next().is_none());
+    }
+
+    #[test]
+    fn unknown_finish_reason_completes_with_trailing_usage() {
+        let bytes: &[u8] = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]},\"finishReason\":\"FUTURE_REASON\"}]}\n\n\
+            data: {\"candidates\":[{\"finishReason\":\"\"},{\"finishReason\":\"FINISH_REASON_UNSPECIFIED\"}],\"usageMetadata\":{\"promptTokenCount\":9,\"candidatesTokenCount\":4,\"thoughtsTokenCount\":2}}\n\n";
+        let mut stream = stream_from_bytes(bytes);
+        let events = collect_ok(&mut stream);
+        assert!(
+            matches!(events.last(), Some(ProviderEvent::MessageEnd { stop_reason: StopReason::Other, usage }) if usage.input == 9 && usage.output == 6)
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ProviderEvent::MessageEnd { .. }))
+                .count(),
+            1
+        );
+        assert!(stream.next().is_none());
+    }
+
+    #[test]
+    fn unknown_prompt_block_reason_is_also_a_rejection() {
+        let bytes: &[u8] =
+            b"data: {\"promptFeedback\":{\"blockReason\":\"FUTURE_BLOCK_REASON\"}}\n\n";
+        let mut stream = stream_from_bytes(bytes);
+        let Some(Err(error)) = stream.next() else {
+            panic!("blocked prompt must yield an error");
+        };
+        assert!(!error.is_transient());
+        assert!(error.to_string().contains("FUTURE_BLOCK_REASON"));
+        assert!(stream.next().is_none());
     }
 
     #[test]

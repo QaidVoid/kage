@@ -149,19 +149,36 @@ impl Settings {
 
     /// Sets option `id` to `value` and returns the engine commands that
     /// make the same change, in order. `models` are the models the
-    /// client may pick. Leaving plan mode for a regular mode needs two
+    /// client may pick and `registry` the providers in effect: a model
+    /// the list does not name yet is still accepted when `registry`
+    /// can run it, so a list that lags the providers never refuses a
+    /// working pick. Leaving plan mode for a regular mode needs two
     /// commands, so a change can be more than one.
     pub(super) fn apply(
         &mut self,
         models: &[SessionConfigSelectOption],
+        registry: &ProviderRegistry,
         id: &str,
         value: &str,
     ) -> Result<Vec<CommandKind>, RpcError> {
         let invalid = || RpcError::new(-32602, format!("invalid value {value} for option {id}"));
         match id {
             "model" => {
-                if value != self.model && !models.iter().any(|m| m.value == value) {
-                    return Err(invalid());
+                if value != self.model
+                    && !models.iter().any(|m| m.value == value)
+                    && registry.resolve(value).is_err()
+                {
+                    let provider =
+                        kage_core::split_model(value).map_or(value, |(prefix, _)| prefix);
+                    return Err(RpcError::new(
+                        -32602,
+                        format!(
+                            "invalid value {value} for option model: \
+                             no provider {provider} on this host; its key may be \
+                             unavailable to the shared host or the provider is not \
+                             in the config it loaded"
+                        ),
+                    ));
                 }
                 value.clone_into(&mut self.model);
                 Ok(vec![CommandKind::SetModel {

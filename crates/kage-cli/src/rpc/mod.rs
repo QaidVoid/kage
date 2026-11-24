@@ -1394,9 +1394,12 @@ impl Agent for CliAcpAgent {
             let shown = shown.get_mut(&id).ok_or_else(|| {
                 RpcError::new(-32602, format!("unknown session {}", req.session_id))
             })?;
-            let commands = shown
-                .settings
-                .apply(&self.host.models(), &req.config_id, &req.value)?;
+            let commands = shown.settings.apply(
+                &self.host.models(),
+                &self.host.registry(),
+                &req.config_id,
+                &req.value,
+            )?;
             shown.catching_up = true;
             shown.changed.absorb(&commands);
             shown.swallowed = 0;

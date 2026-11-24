@@ -5266,11 +5266,17 @@ pub(crate) fn run(
     {
         let config = config.clone();
         let plugins = plugins.clone();
+        let requests = requests_tx.clone();
         crate::model_refresh::spawn_watcher(applied, move || {
-            let Some((_, choices)) = rebuilt_models(&config, plugins.as_deref()) else {
+            // A config that does not build cannot say what the lists now
+            // hold; the next wake tries again.
+            if rebuilt_models(&config, plugins.as_deref()).is_none() {
                 return crate::model_refresh::Rebuilt::Failed;
-            };
-            if model_updates_tx.send(choices).is_ok() {
+            }
+            // The pump's refresh reloads the agent's providers over the
+            // wire and rebuilds this side's picker, so a list another
+            // process wrote reaches both in the same beat.
+            if requests.send(RunRequest::RefreshProviders).is_ok() {
                 crate::model_refresh::Rebuilt::Done
             } else {
                 crate::model_refresh::Rebuilt::Gone

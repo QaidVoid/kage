@@ -1850,6 +1850,157 @@ fn a_running_host_follows_provider_config_edits() {
     }
 }
 
+/// A provider whose models live in the `models_url` cache registers on
+/// the host before the cache exists, so the host's model list lacks the
+/// model a client already picks. The pick is accepted because the host
+/// can run it, and the list catches up once the cache is written and
+/// the providers reload, the way a `kage models refresh` and the TUI's
+/// refresh leave things.
+#[test]
+fn a_model_pick_ahead_of_the_models_url_cache_is_accepted_then_listed() {
+    let env = Env::new();
+    let provider = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let config = format!(
+        "[provider]\ndefault_model = \"fake/small\"\n\n\
+         [providers.custom.fake]\nbase_url = \"http://{}/v1\"\napi_key_env = \"\"\n\n\
+         [[providers.custom.fake.models]]\nid = \"small\"\nname = \"Small\"\n\n\
+         [providers.custom.pg-google]\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key_env = \"\"\n\
+         models_url = \"http://127.0.0.1:9/v1/models?type=kimi\"\n",
+        provider.local_addr().unwrap()
+    );
+    env.write_config(&config);
+    let mut host = env.host(60);
+    env.ready(host.id());
+    let mut rpc = env.rpc(&[]);
+    rpc.request("initialize", json!({"protocolVersion": 1}));
+    let created = rpc.request(
+        "session/new",
+        json!({"cwd": env.dir.path(), "mcpServers": []}),
+    );
+    let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
+
+    // No cache yet: the provider is registered but lists nothing.
+    let listed = rpc.request("_kage/models/list", json!({}))["result"]["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["models"].as_array().unwrap().clone())
+        .map(|m| m["id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        !listed.contains(&"pg-google/gemini-4-neon-high".to_owned()),
+        "{listed:?}"
+    );
+    let _ = rpc.request("_kage/providers/reload", json!({}));
+
+    // The pick still lands: the host resolves the provider.
+    let set = rpc.request(
+        "session/set_config_option",
+        json!({"sessionId": session, "configId": "model", "value": "pg-google/gemini-4-neon-high"}),
+    );
+    assert!(
+        set.get("result").is_some(),
+        "a runnable model was refused: {set}"
+    );
+
+    // The cache a `kage models refresh` writes, then a reload: the
+    // model is listed too.
+    let cache = env.dir.path().join(".cache/kage/providers/pg-google.json");
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    std::fs::write(
+        &cache,
+        json!({
+            "url": "http://127.0.0.1:9/v1/models?type=kimi",
+            "models": [{"id": "gemini-4-neon-high", "name": "Gemini 4 Neon High"}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let _ = rpc.request("_kage/providers/reload", json!({}));
+    let listed = rpc.request("_kage/models/list", json!({}))["result"]["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["models"].as_array().unwrap().clone())
+        .map(|m| m["id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        listed.contains(&"pg-google/gemini-4-neon-high".to_owned()),
+        "{listed:?}"
+    );
+
+    // A model whose provider the host lacks is refused with why.
+    let set = rpc.request(
+        "session/set_config_option",
+        json!({"sessionId": session, "configId": "model", "value": "unknown-x/foo"}),
+    );
+    let error = set["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("no provider unknown-x on this host"),
+        "{set}"
+    );
+    rpc.close();
+    assert!(terminate(&mut host).success());
+}
+
+/// A provider whose key only the client process has: the daemon's
+/// rebuild skips it, the client's picker lists it, and the pick is
+/// refused with the invalid-value error that names the provider.
+#[test]
+fn a_provider_key_the_host_lacks_is_refused_on_a_model_pick() {
+    let env = Env::new();
+    let provider = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let config = |extra: &str| {
+        format!(
+            "[provider]\ndefault_model = \"fake/small\"\n\n\
+             [providers.custom.fake]\nbase_url = \"http://{}/v1\"\napi_key_env = \"\"\n\n\
+             [[providers.custom.fake.models]]\nid = \"small\"\nname = \"Small\"\n\n{extra}",
+            provider.local_addr().unwrap()
+        )
+    };
+    let pg = "[providers.custom.pg-google]\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key_env = \"PG_GOOGLE_KEY\"\n\n\
+              [[providers.custom.pg-google.models]]\nid = \"gemini-4-neon-high\"\nname = \"Gemini 4 Neon High\"\n";
+    env.write_config(&config(""));
+    let mut host = env.host(60);
+    env.ready(host.id());
+    let mut rpc = env.rpc(&[("PG_GOOGLE_KEY", "secret")]);
+    rpc.request("initialize", json!({"protocolVersion": 1}));
+    let created = rpc.request(
+        "session/new",
+        json!({"cwd": env.dir.path(), "mcpServers": []}),
+    );
+    let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
+
+    env.write_config(&config(pg));
+    let reloaded = rpc.request("_kage/providers/reload", json!({}));
+    assert!(
+        reloaded.get("result").is_some(),
+        "reload failed: {reloaded}"
+    );
+    let listed = rpc.request("_kage/models/list", json!({}))["result"]["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["models"].as_array().unwrap().clone())
+        .map(|m| m["id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        !listed.contains(&"pg-google/gemini-4-neon-high".to_owned()),
+        "the host lists a model whose key it lacks: {listed:?}"
+    );
+    let set = rpc.request(
+        "session/set_config_option",
+        json!({"sessionId": session, "configId": "model", "value": "pg-google/gemini-4-neon-high"}),
+    );
+    let error = set["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("invalid value pg-google/gemini-4-neon-high for option model"),
+        "{set}"
+    );
+    rpc.close();
+    assert!(terminate(&mut host).success());
+}
+
 /// Turning `[host] web` on in the user configuration opens the port of
 /// a running host, and turning it off closes it, with no restart.
 #[test]

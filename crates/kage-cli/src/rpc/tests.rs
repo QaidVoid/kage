@@ -3059,13 +3059,14 @@ fn the_thinking_option_offers_default_and_the_model_levels() {
     assert_eq!(values, ["default", "low", "high"]);
     assert_eq!(options[1].options[0].name, "auto");
     assert_eq!(options[1].current_value, "default");
-    assert!(settings.apply(&[], "thinking", "medium").is_err());
+    let empty = ProviderRegistry::new();
+    assert!(settings.apply(&[], &empty, "thinking", "medium").is_err());
     assert_eq!(
-        settings.apply(&[], "thinking", "high").unwrap(),
+        settings.apply(&[], &empty, "thinking", "high").unwrap(),
         [CommandKind::SetThinking { level: Some(High) }]
     );
     assert_eq!(
-        settings.apply(&[], "thinking", "default").unwrap(),
+        settings.apply(&[], &empty, "thinking", "default").unwrap(),
         [CommandKind::SetThinking { level: None }]
     );
     assert_eq!(settings.thinking, None);
@@ -3084,13 +3085,14 @@ fn the_mode_option_selects_and_leaves_plan_mode() {
         goal: None,
     };
     assert_eq!(settings.mode_id(), "default");
+    let empty = ProviderRegistry::new();
     assert_eq!(
-        settings.apply(&[], "mode", "plan").unwrap(),
+        settings.apply(&[], &empty, "mode", "plan").unwrap(),
         [CommandKind::PlanMode { on: true }]
     );
     assert_eq!(settings.mode_id(), "plan");
     assert_eq!(
-        settings.apply(&[], "mode", "allow").unwrap(),
+        settings.apply(&[], &empty, "mode", "allow").unwrap(),
         [
             CommandKind::PlanMode { on: false },
             CommandKind::SetPermissionMode { mode: Some(Allow) },
@@ -3098,11 +3100,11 @@ fn the_mode_option_selects_and_leaves_plan_mode() {
     );
     assert_eq!(settings.mode_id(), "allow");
     assert_eq!(
-        settings.apply(&[], "mode", "default").unwrap(),
+        settings.apply(&[], &empty, "mode", "default").unwrap(),
         [CommandKind::SetPermissionMode { mode: None }]
     );
     assert_eq!(settings.mode_id(), "default");
-    assert!(settings.apply(&[], "mode", "yolo").is_err());
+    assert!(settings.apply(&[], &empty, "mode", "yolo").is_err());
 }
 
 #[test]
@@ -3140,7 +3142,7 @@ fn unknown_options_and_values_are_invalid_params() {
 
     for (id, value) in [
         ("colour", "red"),
-        ("model", "mock/missing"),
+        ("model", "nonsense/missing"),
         ("thinking", "extreme"),
         ("mode", "yolo"),
         ("swarm", "maybe"),
@@ -3148,6 +3150,10 @@ fn unknown_options_and_values_are_invalid_params() {
         let err = set_option(&h, id, value).unwrap_err();
         assert_eq!(err.code, -32602, "{id}={value}");
     }
+    // A model the option does not list is accepted when the host can
+    // run it, as one a model list that lags the providers has not
+    // caught up with yet.
+    set_option(&h, "model", "mock/missing").unwrap();
     let params = serde_json::json!({"sessionId": "nope", "configId": "mode", "value": "ask"});
     let err = h
         .client

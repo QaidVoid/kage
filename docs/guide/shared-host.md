@@ -34,7 +34,7 @@ Its files live in the runtime directory (`$XDG_RUNTIME_DIR/kage`, else
 | File | What it is |
 | --- | --- |
 | `host.sock` | The socket clients connect to, mode 0600. Only processes of the same user are served. |
-| `host.json` | The running host's `pid`, `version`, `protocol`, `socket` and `started` time, and `web_error` when the web endpoint could not start. Written once it accepts clients and removed when it exits. |
+| `host.json` | The running host's `pid`, `version`, `protocol`, `socket` and `started` time, `web_active` when a web listener is running, and `web_error` when requested web settings could not be applied. Written once it accepts clients and removed when it exits. |
 | `host.lock` | Held for the host's whole life, so only one runs at a time. `kage serve` holds it too, so a serve and a host cannot run alongside each other. |
 
 A background host has no terminal, so it writes to
@@ -99,9 +99,28 @@ is all that guards it.
 If the endpoint cannot start, because the port is taken or the bind
 address is not usable, the host logs the reason and runs on without it,
 so local clients are not affected. `kage host status` shows
-`web      not running: <reason>`, and so does `web_error` in `host.json`.
-Set `[host] port` to a free port and restart the host to get the
-endpoint.
+`web      not running: <reason>`, and `web_error` in `host.json` records
+the reason. Set `[host] port` to a free port and save the user config to
+try again. If the original port becomes free, saving the same settings
+also retries. The host does not keep retrying an unchanged file.
+
+When changing a running endpoint, the host keeps the old listener and
+`connect.txt` until its replacement is ready. If the new bind is rejected,
+the old endpoint stays available. `kage host status` then reports
+`web      running at <address>; configuration not applied: <reason>`.
+The record keeps the actual bound address in `web_active` and the rejection
+in `web_error`, so the requested settings need not match the active
+listener. Freeing the requested port and saving the same settings retries
+the replacement without restarting the host.
+
+Some address changes cannot bind alongside the old listener, such as
+moving from loopback to all interfaces on the same port. The host briefly
+stops accepting clients to try the replacement, and restores the previous
+listener if that fails. If restoring it also fails, the status reports no
+running web endpoint and includes the restoration error. Connections
+already accepted survive listener changes, restoration and `web = false`.
+The connect URL changes only after a replacement is ready; a failed startup
+with no working listener removes a stale `connect.txt`.
 
 The endpoint lives only while the host does. Nothing starts a host for
 a web client, and the host still exits after `idle_timeout_secs` with
@@ -113,11 +132,12 @@ start `kage host run` yourself with a long `--idle-secs`, or raise
 
 A web client connects like a serve client: the token lives in
 `$XDG_DATA_HOME/kage/remote-token`, and the ready-to-open URL beside
-it in `connect.txt`. A web client holds the host like a local one, and
-every client, local and web, shares the host's budget of 64
-connections. That is not the 16 of `kage serve`, which serves web
-clients only. Past the budget the host refuses the next local client,
-and the web endpoint answers `503`.
+it in `connect.txt`. A web client holds the host like a local one.
+The local socket and web endpoint each have a separate budget of 64
+connections, so filling one does not spend the other's slots. Past its
+budget the host refuses the next local client, or the web endpoint
+answers `503`. `kage serve`, which serves web clients only, has a budget
+of 16 connections.
 
 The web client bundle is not installed by default. The host serves
 whatever lies under `$XDG_DATA_HOME/kage/web`; to fill it, run

@@ -10,7 +10,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, ErrorKind, Write};
-use std::net::{Shutdown, TcpListener};
+use std::net::{Shutdown, SocketAddr, TcpListener, ToSocketAddrs as _};
 use std::os::fd::AsFd as _;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -66,8 +66,10 @@ pub(crate) struct Record {
     pub(crate) socket: PathBuf,
     /// When the host started accepting clients.
     pub(crate) started: DateTime<Utc>,
-    /// Why the web endpoint `[host] web` asks for is not running, when
-    /// it could not start.
+    /// The address currently accepting web clients, when enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) web_active: Option<SocketAddr>,
+    /// Why the requested web settings could not be applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) web_error: Option<String>,
 }
@@ -114,7 +116,7 @@ fn serve(
     let budget = Budget::new(MAX_CONNECTIONS);
     let web_budget = Budget::new(MAX_CONNECTIONS);
     let mut web = WebEndpoint::start(host_cfg, &host, &web_budget, log);
-    published.record(&dir, web.error.clone())?;
+    published.record(&dir, web.error.clone(), web.address())?;
     log(&format!(
         "accepting clients on {}",
         dir.join(SOCKET).display()
@@ -124,7 +126,7 @@ fn serve(
     loop {
         let mut tend = || {
             if web.follow_config(&host, &web_budget, log) {
-                let _ = published.record(&dir, web.error.clone());
+                let _ = published.record(&dir, web.error.clone(), web.address());
             }
         };
         serve_until_idle(&listener, &host, &budgets, &stop, idle, &mut tend, log);
@@ -196,7 +198,11 @@ pub(crate) fn status() -> ExitCode {
     );
     println!("socket   {}", record.socket.display());
     if let Some(error) = &record.web_error {
-        println!("web      not running: {error}");
+        if let Some(addr) = record.web_active {
+            println!("web      running at {addr}; configuration not applied: {error}");
+        } else {
+            println!("web      not running: {error}");
+        }
     }
     if let Ok(log) = crate::host_client::log_path() {
         println!("log      {} (a host clients started)", log.display());
@@ -451,7 +457,12 @@ struct Published {
 
 impl Published {
     // The record tells clients the host is ready.
-    fn record(&mut self, dir: &Path, web_error: Option<String>) -> Result<(), String> {
+    fn record(
+        &mut self,
+        dir: &Path,
+        web_error: Option<String>,
+        web_active: Option<SocketAddr>,
+    ) -> Result<(), String> {
         let path = dir.join(RECORD);
         let entry = Record {
             pid: std::process::id(),
@@ -460,6 +471,7 @@ impl Published {
             socket: self.socket.clone(),
             started: *self.started.get_or_insert_with(Utc::now),
             web_error,
+            web_active,
         };
         let bytes = serde_json::to_vec(&entry).map_err(|e| e.to_string())?;
         self.record = Some(path.clone());
@@ -641,16 +653,14 @@ fn peer_uid(_stream: &UnixStream) -> Option<u32> {
     None
 }
 
-/// The host's web endpoint, served on its own thread.
-/// The web endpoint `[host]` asks for, following edits to the user
-/// configuration: turning `web` on or off, or moving `bind` or `port`,
-/// stops the old listener and starts the new one. Connections the old
-/// one accepted stay until they end.
+/// The host's web endpoint, following user configuration edits. A rejected
+/// replacement leaves the previous endpoint running when possible. Accepted
+/// connections survive listener changes.
 struct WebEndpoint {
-    /// `web`, `bind` and `port` as the listener runs them.
+    /// The last successfully applied `web`, `bind` and `port`.
     settings: (bool, String, u16),
     listener: Option<WebListener>,
-    /// Why the endpoint the settings ask for is not running.
+    /// Why the requested settings could not be applied.
     error: Option<String>,
     stamps: crate::config_watch::Stamps,
     polled: Instant,
@@ -704,8 +714,8 @@ impl WebEndpoint {
         self.apply(&host_cfg, host, budget, log)
     }
 
-    /// Runs the endpoint `host_cfg` asks for. Returns whether that moved
-    /// it.
+    /// Applies the requested settings once. Returns whether the endpoint or
+    /// its error changed. Reapplying rejected settings tries them again.
     fn apply(
         &mut self,
         host_cfg: &kage_core::config::HostConfig,
@@ -714,25 +724,81 @@ impl WebEndpoint {
         log: &Log,
     ) -> bool {
         let settings = (host_cfg.web, host_cfg.bind.clone(), host_cfg.port);
-        if settings == self.settings {
-            return false;
+        if settings == self.settings && (!host_cfg.web || self.listener.is_some()) {
+            return self.error.take().is_some();
         }
-        let was_running = self.listener.is_some();
-        self.stop();
-        self.error = None;
-        self.settings = settings;
-        if host_cfg.web {
-            match start_web(host_cfg, host, budget.clone(), log) {
-                Ok(listener) => self.listener = Some(listener),
-                Err(e) => {
-                    log(&format!("web endpoint not started: {e}"));
-                    self.error = Some(e);
-                }
+        if !host_cfg.web {
+            if self.listener.is_some() {
+                self.stop();
+                log("web endpoint off");
             }
-        } else if was_running {
-            log("web endpoint off");
+            self.settings = settings;
+            self.error = None;
+            return true;
+        }
+        let previous = self.address();
+        let mut stopped = false;
+        let bound = TcpListener::bind((host_cfg.bind.as_str(), host_cfg.port)).or_else(|error| {
+            if error.kind() == ErrorKind::AddrInUse
+                && self
+                    .listener
+                    .as_ref()
+                    .is_some_and(|old| old.overlaps(host_cfg))
+            {
+                self.stop();
+                stopped = true;
+                TcpListener::bind((host_cfg.bind.as_str(), host_cfg.port))
+            } else {
+                Err(error)
+            }
+        });
+        let replacement = bound
+            .map_err(|e| {
+                format!(
+                    "cannot bind {}:{}: {e}; set [host] port to a free port",
+                    host_cfg.bind, host_cfg.port
+                )
+            })
+            .and_then(|listener| start_web(listener, host_cfg, host, budget.clone(), log));
+        match replacement {
+            Ok(listener) => {
+                self.stop();
+                self.listener = Some(listener);
+                self.settings = settings;
+                self.error = None;
+            }
+            Err(mut error) => {
+                if stopped {
+                    let addr = previous.expect("a stopped listener had an address");
+                    let old_cfg = kage_core::config::HostConfig {
+                        web: true,
+                        bind: addr.ip().to_string(),
+                        port: addr.port(),
+                        ..Default::default()
+                    };
+                    match TcpListener::bind(addr)
+                        .map_err(|e| format!("cannot restore {addr}: {e}"))
+                        .and_then(|listener| {
+                            start_web(listener, &old_cfg, host, budget.clone(), log)
+                        }) {
+                        Ok(listener) => self.listener = Some(listener),
+                        Err(rollback) => error = format!("{error}; {rollback}"),
+                    }
+                }
+                if self.listener.is_none()
+                    && let Ok(root) = crate::data_root()
+                {
+                    let _ = fs::remove_file(root.join("connect.txt"));
+                }
+                log(&format!("web configuration not applied: {error}"));
+                self.error = Some(error);
+            }
         }
         true
+    }
+
+    fn address(&self) -> Option<SocketAddr> {
+        self.listener.as_ref().map(|listener| listener.addr)
     }
 
     fn stop(&mut self) {
@@ -743,11 +809,25 @@ impl WebEndpoint {
 }
 
 struct WebListener {
+    addr: SocketAddr,
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
 impl WebListener {
+    fn overlaps(&self, cfg: &kage_core::config::HostConfig) -> bool {
+        (cfg.bind.as_str(), cfg.port)
+            .to_socket_addrs()
+            .is_ok_and(|mut addresses| {
+                addresses.any(|addr| {
+                    addr.port() == self.addr.port()
+                        && (addr.ip() == self.addr.ip()
+                            || addr.ip().is_unspecified()
+                            || self.addr.ip().is_unspecified())
+                })
+            })
+    }
+
     /// Stops accepting web clients and waits for the accept loop to
     /// finish. Live connections end with the process, as the local
     /// clients' do during the drain.
@@ -759,12 +839,13 @@ impl WebListener {
     }
 }
 
-/// Binds the web endpoint `[host] web` asks for, the same listener `kage
-/// serve` runs with the same token and assets, and serves it on its own
+/// Starts the bound endpoint with the token and assets `kage serve` uses
+/// and serves it on its own
 /// thread until stopped, against the same host and the same connection
 /// budget as the local socket, so a web client holds the host exactly
 /// like a local one.
 fn start_web(
+    listener: TcpListener,
     host_cfg: &kage_core::config::HostConfig,
     host: &Arc<Host>,
     budget: Budget,
@@ -778,35 +859,22 @@ fn start_web(
         "run kage serve --fetch-web while no host or serve runs, to update it",
         log,
     );
-    let listener = TcpListener::bind((host_cfg.bind.as_str(), host_cfg.port)).map_err(|e| {
-        // A connect.txt a previous run wrote still points at its old
-        // port; leave the failure, not a working address, on file.
-        let _ = std::fs::remove_file(token_path.with_file_name("connect.txt"));
-        format!(
-            "cannot bind {}:{}: {e}; set [host] port to a free port",
-            host_cfg.bind, host_cfg.port
-        )
-    })?;
     let addr = listener
         .local_addr()
         .map_err(|e| format!("web endpoint: {e}"))?;
-    log(&format!("token file {}", token_path.display()));
-    crate::serve::log_connect(addr, &token, &token_path, log);
-    if web.available() {
-        log(&format!("web UI: http://{addr}/"));
-    }
-    crate::serve::warn_non_loopback(&host_cfg.bind, log);
+    let available = web.available();
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     let thread_host = Arc::clone(host);
     let thread_log = Arc::clone(log);
+    let thread_token = Arc::clone(&token);
     let handle = thread::Builder::new()
         .name("kage-host-web".to_owned())
         .spawn(move || {
             crate::serve::accept_until(
                 &listener,
                 &thread_host,
-                &token,
+                &thread_token,
                 &web,
                 &budget,
                 &thread_stop,
@@ -814,7 +882,14 @@ fn start_web(
             );
         })
         .map_err(|e| format!("cannot start the web listener: {e}"))?;
+    log(&format!("token file {}", token_path.display()));
+    crate::serve::log_connect(addr, &token, &token_path, log);
+    if available {
+        log(&format!("web UI: http://{addr}/"));
+    }
+    crate::serve::warn_non_loopback(&host_cfg.bind, log);
     Ok(WebListener {
+        addr,
         stop,
         handle: Some(handle),
     })
@@ -903,6 +978,181 @@ mod tests {
     use std::io::Read as _;
     use std::process::{Child, Command, Stdio};
 
+    fn isolate_web_test(jail: &mut figment::Jail) {
+        let root = jail.directory().to_path_buf();
+        for (key, dir) in [
+            ("HOME", "home"),
+            ("XDG_CONFIG_HOME", "config"),
+            ("XDG_DATA_HOME", "data"),
+            ("XDG_STATE_HOME", "state"),
+        ] {
+            jail.set_env(key, root.join(dir).to_string_lossy().as_ref());
+        }
+    }
+
+    fn ping_web_client(
+        client: &mut tungstenite::WebSocket<
+            tungstenite::stream::MaybeTlsStream<std::net::TcpStream>,
+        >,
+    ) {
+        let tungstenite::stream::MaybeTlsStream::Plain(stream) = client.get_mut() else {
+            panic!("expected a plain WebSocket");
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let payload = b"still connected".to_vec();
+        client
+            .send(tungstenite::Message::Ping(payload.clone().into()))
+            .unwrap();
+        assert_eq!(
+            client.read().unwrap(),
+            tungstenite::Message::Pong(payload.into())
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::result_large_err,
+        reason = "figment requires its callback error type"
+    )]
+    fn rejected_web_replacement_keeps_the_endpoint_and_can_be_reapplied() {
+        figment::Jail::expect_with(|jail| {
+            isolate_web_test(jail);
+            let host = Host::start(None, "", false).unwrap();
+            let budget = Budget::new(MAX_CONNECTIONS);
+            let log: Log = Arc::new(|_| {});
+            let mut cfg = kage_core::config::HostConfig {
+                web: true,
+                port: 0,
+                ..Default::default()
+            };
+            let mut endpoint = WebEndpoint::start(&cfg, &host, &budget, &log);
+            let original_addr = endpoint.address().unwrap();
+            let (token_path, _) = crate::serve::load_token(false).unwrap();
+            let connect = token_path.with_file_name("connect.txt");
+            let original = fs::read_to_string(&connect).unwrap();
+            let (mut client, _) = tungstenite::connect(original.as_str()).unwrap();
+            let occupied = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            cfg.port = occupied.local_addr().unwrap().port();
+            assert!(endpoint.apply(&cfg, &host, &budget, &log));
+            assert!(endpoint.error.as_ref().unwrap().contains("cannot bind"));
+            assert_eq!(endpoint.address(), Some(original_addr));
+            assert_eq!(fs::read_to_string(&connect).unwrap(), original);
+            let (mut newcomer, _) = tungstenite::connect(original.as_str()).unwrap();
+            ping_web_client(&mut newcomer);
+            ping_web_client(&mut client);
+            drop(occupied);
+            assert!(endpoint.apply(&cfg, &host, &budget, &log));
+            assert!(endpoint.error.is_none());
+            assert_eq!(endpoint.address().unwrap().port(), cfg.port);
+            let replacement = fs::read_to_string(&connect).unwrap();
+            assert_ne!(replacement, original);
+            let (mut replacement_client, _) = tungstenite::connect(replacement.as_str()).unwrap();
+            ping_web_client(&mut replacement_client);
+            ping_web_client(&mut client);
+            assert!(!endpoint.apply(&cfg, &host, &budget, &log));
+            endpoint.stop();
+            client.close(None).unwrap();
+            newcomer.close(None).unwrap();
+            replacement_client.close(None).unwrap();
+            host.shutdown();
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[expect(
+        clippy::result_large_err,
+        reason = "figment requires its callback error type"
+    )]
+    fn web_startup_failure_clears_stale_url_and_waits_for_reapplication() {
+        figment::Jail::expect_with(|jail| {
+            isolate_web_test(jail);
+            let host = Host::start(None, "", false).unwrap();
+            let budget = Budget::new(MAX_CONNECTIONS);
+            let log: Log = Arc::new(|_| {});
+            let occupied = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let cfg = kage_core::config::HostConfig {
+                web: true,
+                port: occupied.local_addr().unwrap().port(),
+                ..Default::default()
+            };
+            let root = crate::data_root().unwrap();
+            fs::create_dir_all(&root).unwrap();
+            let connect = root.join("connect.txt");
+            fs::write(&connect, "stale URL").unwrap();
+            let mut endpoint = WebEndpoint::start(&cfg, &host, &budget, &log);
+            assert!(endpoint.address().is_none());
+            assert!(endpoint.error.as_ref().unwrap().contains("cannot bind"));
+            assert!(!connect.exists());
+            drop(occupied);
+            endpoint.polled = Instant::now()
+                .checked_sub(crate::config_watch::POLL)
+                .unwrap();
+            assert!(!endpoint.follow_config(&host, &budget, &log));
+            assert!(endpoint.address().is_none());
+            assert!(endpoint.error.is_some());
+            assert!(endpoint.apply(&cfg, &host, &budget, &log));
+            assert!(endpoint.error.is_none());
+            assert_eq!(endpoint.address().unwrap().port(), cfg.port);
+            endpoint.stop();
+            host.shutdown();
+            Ok(())
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[expect(
+        clippy::result_large_err,
+        reason = "figment requires its callback error type"
+    )]
+    fn overlapping_web_replacement_rolls_back_and_preserves_clients() {
+        figment::Jail::expect_with(|jail| {
+            isolate_web_test(jail);
+            let host = Host::start(None, "", false).unwrap();
+            let budget = Budget::new(MAX_CONNECTIONS);
+            let log: Log = Arc::new(|_| {});
+            let mut cfg = kage_core::config::HostConfig {
+                web: true,
+                port: 0,
+                ..Default::default()
+            };
+            let mut endpoint = WebEndpoint::start(&cfg, &host, &budget, &log);
+            let original_addr = endpoint.address().unwrap();
+            let (token_path, _) = crate::serve::load_token(false).unwrap();
+            let connect = token_path.with_file_name("connect.txt");
+            let original = fs::read_to_string(&connect).unwrap();
+            let (mut client, _) = tungstenite::connect(original.as_str()).unwrap();
+            let occupied = TcpListener::bind(("127.0.0.2", original_addr.port())).unwrap();
+            cfg.bind = "0.0.0.0".to_owned();
+            cfg.port = original_addr.port();
+            assert!(endpoint.apply(&cfg, &host, &budget, &log));
+            assert!(endpoint.error.as_ref().unwrap().contains("cannot bind"));
+            assert_eq!(endpoint.address(), Some(original_addr));
+            assert_eq!(fs::read_to_string(&connect).unwrap(), original);
+            let (mut newcomer, _) = tungstenite::connect(original.as_str()).unwrap();
+            ping_web_client(&mut newcomer);
+            ping_web_client(&mut client);
+            drop(occupied);
+            assert!(endpoint.apply(&cfg, &host, &budget, &log));
+            assert!(endpoint.error.is_none());
+            assert!(endpoint.address().unwrap().ip().is_unspecified());
+            assert_eq!(endpoint.address().unwrap().port(), original_addr.port());
+            ping_web_client(&mut client);
+            cfg.web = false;
+            assert!(endpoint.apply(&cfg, &host, &budget, &log));
+            assert!(endpoint.address().is_none());
+            assert!(endpoint.error.is_none());
+            ping_web_client(&mut client);
+            client.close(None).unwrap();
+            newcomer.close(None).unwrap();
+            host.shutdown();
+            Ok(())
+        });
+    }
+
     fn hold_lock(dir: &Path) -> Flock<File> {
         let file = OpenOptions::new()
             .create(true)
@@ -921,6 +1171,7 @@ mod tests {
             socket: dir.join(SOCKET),
             started: Utc::now(),
             web_error: None,
+            web_active: None,
         };
         fs::write(dir.join(RECORD), serde_json::to_vec(&record).unwrap()).unwrap();
     }
@@ -945,7 +1196,7 @@ mod tests {
             started: None,
         };
         drop(UnixListener::bind(&socket).unwrap());
-        published.record(dir.path(), None).unwrap();
+        published.record(dir.path(), None, None).unwrap();
         published.retire();
         assert!(!socket.exists(), "retire left the socket");
         assert!(!record.exists(), "retire left the record");
@@ -968,7 +1219,7 @@ mod tests {
             started: None,
         };
         drop(UnixListener::bind(&socket).unwrap());
-        published.record(dir.path(), None).unwrap();
+        published.record(dir.path(), None, None).unwrap();
         drop(published);
         assert!(!socket.exists());
         assert!(!dir.path().join(RECORD).exists());

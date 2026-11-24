@@ -221,6 +221,18 @@ impl Provider for OpenAiResponsesProvider {
         self.models.clone()
     }
 
+    fn cost(&self, model: &str) -> Option<kage_core::ModelCost> {
+        if self.chatgpt {
+            return Some(kage_core::ModelCost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: Some(0.0),
+                cache_write: Some(0.0),
+            });
+        }
+        crate::default_model_cost(self, model)
+    }
+
     fn stream(
         &self,
         req: StreamRequest,
@@ -1598,6 +1610,26 @@ mod tests {
             "Bearer oauth"
         );
         assert_eq!(find(&provider.request_headers(None)), "Bearer static");
+    }
+
+    #[test]
+    fn chatgpt_pricing_never_falls_back_to_api_rates() {
+        let model = crate::catalog::provider("openai")
+            .unwrap()
+            .models
+            .iter()
+            .find(|model| model.cost.is_some_and(|price| price.input > 0.0))
+            .unwrap();
+        let api = OpenAiResponsesProvider::new("test-key");
+        assert!(crate::model_cost(&api, model.id).unwrap().input > 0.0);
+        let plan = api.for_chatgpt_backend();
+        for id in [model.id, "a-plan-model-not-in-the-cache"] {
+            let cost = crate::model_cost(&plan, id).unwrap();
+            assert!(cost.input.abs() < f64::EPSILON);
+            assert!(cost.output.abs() < f64::EPSILON);
+            assert_eq!(cost.cache_read, Some(0.0));
+            assert_eq!(cost.cache_write, Some(0.0));
+        }
     }
 
     #[test]

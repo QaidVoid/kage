@@ -49,9 +49,14 @@ use kage_core::{CancelFlag, ModelCost};
 /// provider that declares its own models (custom and plugin providers)
 /// is priced from those entries alone, even when its id matches a
 /// catalog provider. One that declares none is priced from the catalog
-/// entry under its id. `None` when the price is unknown.
+/// entry under its id. A backend can override this for its billing policy,
+/// such as a subscription with no per-token charge. `None` when the price is unknown.
 #[must_use]
 pub fn model_cost(provider: &dyn Provider, model: &str) -> Option<ModelCost> {
+    provider.cost(model)
+}
+
+fn default_model_cost<P: Provider + ?Sized>(provider: &P, model: &str) -> Option<ModelCost> {
     let declared = provider.models();
     if declared.is_empty() {
         return catalog::model(&provider.metadata().id, model)?.cost;
@@ -92,6 +97,14 @@ pub trait Provider: Send + Sync + std::fmt::Debug {
     /// which takes the place of any catalog entry under the same id.
     fn models(&self) -> Vec<ProviderModel> {
         Vec::new()
+    }
+
+    /// Per-million-token prices for a provider-scoped model ID.
+    ///
+    /// The default uses declared models or the catalog. Backends with a
+    /// different billing policy can override it independently of their model list.
+    fn cost(&self, model: &str) -> Option<ModelCost> {
+        default_model_cost(self, model)
     }
 
     /// Whether this provider sends `Content::Thinking` blocks back to

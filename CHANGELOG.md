@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.6.1](https://github.com/QaidVoid/kage/compare/v0.6.0...v0.6.1) - 2026-11-24
+## [0.7.0](https://github.com/QaidVoid/kage/compare/v0.6.0...v0.7.0) - 2026-11-24
 
 ### Features
 

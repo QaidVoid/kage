@@ -8304,46 +8304,48 @@ fn the_mcp_catalog_arrives_whole() {
 }
 
 #[test]
-fn withdrawing_a_queued_prompt_answers_the_requester_alone() {
-    let dir = tempfile::tempdir().unwrap();
-    let h = serve_paused(
-        vec![Ok(ProviderEvent::MessageStart)],
-        vec![Ok(ProviderEvent::MessageEnd {
-            stop_reason: CoreStopReason::EndTurn,
-            usage: TokenUsage::default(),
-        })],
-        vec![text_turn("titled")],
-        dir.path(),
-        dir.path(),
-    );
-    let first = prompt_async(&h.client, &h.session, "now");
-    until(|| h.host.busy());
-    let queued = prompt_async_with(&h.client, &h.session, "later", Some("queue"));
-    let withdraw = || {
-        h.client.request(
-            "_kage/prompt/withdraw",
-            serde_json::json!({"sessionId": h.session, "delivery": "queue"}),
-        )
-    };
-    let deadline = Instant::now() + WAIT;
-    let withdrawn = loop {
-        let withdrawn = withdraw().unwrap();
-        if withdrawn.get("content").is_some() || Instant::now() > deadline {
-            break withdrawn;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
-    assert_eq!(withdrawn["content"][0]["text"], "later");
-    let seen = drain_quiet(&h.inbox, &h.session);
-    assert!(
-        !seen
-            .iter()
-            .any(|u| u["update"]["sessionUpdate"] == "_kage/prompt_withdrawn"),
-        "an answered withdraw is not broadcast"
-    );
-    h.release.send(()).unwrap();
-    first.recv_timeout(WAIT).unwrap().unwrap();
-    drop(queued);
+fn withdrawing_a_pending_prompt_answers_the_requester_alone() {
+    for delivery in ["queue", "steer"] {
+        let dir = tempfile::tempdir().unwrap();
+        let h = serve_paused(
+            vec![Ok(ProviderEvent::MessageStart)],
+            vec![Ok(ProviderEvent::MessageEnd {
+                stop_reason: CoreStopReason::EndTurn,
+                usage: TokenUsage::default(),
+            })],
+            vec![text_turn("titled")],
+            dir.path(),
+            dir.path(),
+        );
+        let first = prompt_async(&h.client, &h.session, "now");
+        until(|| h.host.busy());
+        let queued = prompt_async_with(&h.client, &h.session, "later", Some(delivery));
+        let withdraw = || {
+            h.client.request(
+                "_kage/prompt/withdraw",
+                serde_json::json!({"sessionId": h.session, "delivery": delivery}),
+            )
+        };
+        let deadline = Instant::now() + WAIT;
+        let withdrawn = loop {
+            let withdrawn = withdraw().unwrap();
+            if withdrawn.get("content").is_some() || Instant::now() > deadline {
+                break withdrawn;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(withdrawn["content"][0]["text"], "later");
+        let seen = drain_quiet(&h.inbox, &h.session);
+        assert!(
+            !seen
+                .iter()
+                .any(|u| u["update"]["sessionUpdate"] == "_kage/prompt_withdrawn"),
+            "an answered withdraw is not broadcast"
+        );
+        h.release.send(()).unwrap();
+        first.recv_timeout(WAIT).unwrap().unwrap();
+        drop(queued);
+    }
 }
 
 /// What a scripted plugin-host client answers to `_kage/plugin/tools`:

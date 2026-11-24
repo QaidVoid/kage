@@ -88,6 +88,17 @@ pub enum Change {
         /// The listing or file read.
         result: FsResult,
     },
+    /// A host withdrawal answered. Empty content means the prompt was consumed.
+    PromptWithdrawn {
+        /// The withdrawal request answered.
+        request: u64,
+        /// The session whose pending prompt was recalled.
+        session_id: String,
+        /// The queue the host checked.
+        delivery: kage_acp_wire::PromptDelivery,
+        /// The original prompt, including its attachments.
+        content: Vec<ContentBlock>,
+    },
     /// A `_kage/session/fork` answer arrived: `to` is a new recorded
     /// session copied from `from`, ready to open.
     Forked {
@@ -253,6 +264,7 @@ impl Change {
             Self::Unknown { session_id, .. } => session_id.as_deref(),
             Self::Fs { session_id, .. }
             | Self::Exported { session_id, .. }
+            | Self::PromptWithdrawn { session_id, .. }
             | Self::Undone { session_id, .. }
             | Self::Prompts { session_id, .. }
             | Self::Rewound { session_id }

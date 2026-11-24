@@ -125,9 +125,6 @@ impl App {
             }
             .to_owned();
         }
-        if !draft && let Some(hint) = self.agent_hint(working) {
-            return hint;
-        }
         let label =
             |app: &mut Self, action, what| app.key_label(action).map(|key| format!("{key} {what}"));
         let queue = label(self, "QueuePrompt", "for after the run").filter(|_| working);
@@ -137,34 +134,40 @@ impl App {
             .iter()
             .any(|(s, _)| *s == self.focus)
             .then(|| "up to edit pending".to_owned());
+        if !draft
+            && recall.is_none()
+            && let Some(hint) = self.agent_hint(working)
+        {
+            return hint;
+        }
         let agents = label(self, "OpenAgents", "for agents").filter(|_| live > 0);
         let (queue, agents, now) = (queue.as_deref(), agents.as_deref(), now.as_deref());
         let mut parts: Vec<&str> = Vec::new();
+        if working && (self.input.is_modeless() || self.input.mode() == Mode::Insert) {
+            if draft {
+                parts.extend(recall.as_deref());
+                parts.push("enter queues");
+                parts.extend(now);
+            } else {
+                parts.extend(recall.as_deref().or(agents.or(queue)));
+            }
+            parts.push(if self.input.is_modeless() {
+                "esc to interrupt"
+            } else {
+                "ctrl+c to interrupt"
+            });
+            return parts.join(HINT_SEP);
+        }
         if self.input.is_modeless() {
-            match (working, draft) {
-                (true, false) => {
-                    parts.extend(agents.or(queue).into_iter().chain(["esc to interrupt"]));
-                }
-                (true, true) => {
-                    if let Some(key) = recall.as_deref() {
-                        parts.push(key);
-                    }
-                    parts.push("enter queues");
-                    // With the recall hint the row would not fit at 80
-                    // columns; the stop-and-send key then waits a turn.
-                    parts.extend(now.filter(|_| recall.is_none()));
-                    parts.push("esc to interrupt");
-                }
-                (false, true) => parts.extend(["enter to send", "shift+enter for a newline"]),
-                (false, false) if self.search_pattern.is_some() => {
-                    parts.extend(["esc to clear the search", "? for shortcuts"]);
-                }
-                (false, false) => {
-                    parts.extend(agents);
-                    parts.push("? for shortcuts");
-                    if agents.is_none() {
-                        parts.push("/ for commands");
-                    }
+            if draft {
+                parts.extend(["enter to send", "shift+enter for a newline"]);
+            } else if self.search_pattern.is_some() {
+                parts.extend(["esc to clear the search", "? for shortcuts"]);
+            } else {
+                parts.extend(agents);
+                parts.push("? for shortcuts");
+                if agents.is_none() {
+                    parts.push("/ for commands");
                 }
             }
             return parts.join(HINT_SEP);
@@ -182,26 +185,14 @@ impl App {
                     parts.extend(commands.as_deref());
                 }
             }
-            Mode::Insert => match (working, draft) {
-                (true, false) => {
-                    parts.extend(agents.or(queue).into_iter().chain(["ctrl+c to interrupt"]));
-                }
-                (true, true) => {
-                    if let Some(key) = recall.as_deref() {
-                        parts.push(key);
-                    }
-                    parts.push("enter queues");
-                    // With the recall hint the row would not fit at 80
-                    // columns; the stop-and-send key then waits a turn.
-                    parts.extend(now.filter(|_| recall.is_none()));
-                    parts.push("ctrl+c to interrupt");
-                }
-                (false, true) => parts.extend(["enter to send", "esc for normal mode"]),
-                (false, false) => {
+            Mode::Insert => {
+                if draft {
+                    parts.extend(["enter to send", "esc for normal mode"]);
+                } else {
                     parts.extend(agents);
                     parts.push("esc for normal mode");
                 }
-            },
+            }
             Mode::Visual => parts.push("esc to leave visual mode"),
         }
         parts.join(HINT_SEP)

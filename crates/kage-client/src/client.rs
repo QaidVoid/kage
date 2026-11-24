@@ -126,6 +126,9 @@ enum Pending {
         /// The cursor that asked for this page.
         cursor: Option<String>,
     },
+    WithdrawPrompt {
+        session_id: String,
+    },
     Prompt {
         session_id: String,
         /// Whether the answer ends the run: false for a prompt that
@@ -491,14 +494,32 @@ impl Client {
         Ok(request_id)
     }
 
+    /// Takes back the newest prompt of `delivery` still waiting on the host.
+    /// The answer arrives as [`Change::PromptWithdrawn`]; empty content means
+    /// the host has already consumed it.
+    pub fn withdraw_prompt(
+        &mut self,
+        session_id: &str,
+        delivery: kage_acp_wire::PromptDelivery,
+    ) -> u64 {
+        self.request(
+            "_kage/prompt/withdraw",
+            params(&kage_acp_wire::WithdrawRequest {
+                session_id: session_id.to_owned(),
+                delivery,
+            }),
+            Pending::WithdrawPrompt {
+                session_id: session_id.to_owned(),
+            },
+        )
+    }
+
     /// Removes the queued prompt at `index` of `session_id` before it
     /// ever went on the wire, reporting the change the emptied queue
     /// made. An empty report names no such prompt.
     ///
-    /// The ACP surface has no withdraw method: the engine-side prompt
-    /// queue is only reachable through `session/prompt` deliveries, so
-    /// a client that holds the queue, as this one does, withdraws by
-    /// dropping the held prompt.
+    /// This removes a locally held prompt without contacting the host.
+    /// Prompts already sent use [`Self::withdraw_prompt`] instead.
     pub fn withdraw_queued(&mut self, session_id: &str, index: usize) -> Vec<Change> {
         let Some(session) = self.state.sessions.get_mut(session_id) else {
             return Vec::new();
@@ -1740,7 +1761,8 @@ impl Client {
             | Pending::Rewind { .. }
             | Pending::Fork { .. }
             | Pending::Export { .. }
-            | Pending::MediaRead { .. }) => session_op_answer(id, pending, result),
+            | Pending::MediaRead { .. }
+            | Pending::WithdrawPrompt { .. }) => session_op_answer(id, pending, result),
             Pending::Fs { session_id } => {
                 match answer::<kage_acp_wire::FsResult>(id, result, "_kage/fs result") {
                     Err(failed) => failed,
@@ -2546,6 +2568,21 @@ fn params<T: serde::Serialize>(value: &T) -> Value {
 /// the failure of a malformed answer.
 fn session_op_answer(id: u64, pending: Pending, result: Value) -> Vec<Change> {
     match pending {
+        Pending::WithdrawPrompt { session_id } => {
+            match answer::<kage_acp_wire::PromptWithdrawn>(
+                id,
+                result,
+                "_kage/prompt/withdraw result",
+            ) {
+                Err(failed) => failed,
+                Ok(withdrawn) => vec![Change::PromptWithdrawn {
+                    request: id,
+                    session_id,
+                    delivery: withdrawn.delivery,
+                    content: withdrawn.content,
+                }],
+            }
+        }
         Pending::MediaRead { session_id } => {
             match answer::<kage_acp_wire::MediaReadResponse>(id, result, "_kage/media/read result")
             {

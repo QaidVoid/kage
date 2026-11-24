@@ -594,3 +594,50 @@ fn undo_without_a_prompt_leaves_the_editor_alone() {
     assert_eq!(app.input().text(), "a draft");
     assert_eq!(app.input().attached().len(), 0);
 }
+
+#[test]
+fn a_recalled_followup_can_be_edited_and_force_steered() {
+    let (mut app, rx, events) = app_with_events();
+    lock(app.session_usage.as_ref().unwrap()).working = true;
+    for c in "followup".chars() {
+        app.handle_key(key(c));
+    }
+    app.handle_key(code(KeyCode::Enter));
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        RunRequest::Submit { queue: false, .. }
+    ));
+    app.handle_key(code(KeyCode::Up));
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        RunRequest::RecallPrompt {
+            delivery: kage_core::protocol::Delivery::Steer,
+            ..
+        }
+    ));
+    feed(
+        &mut app,
+        &events,
+        vec![
+            kage_core::protocol::HostEvent::PromptWithdrawn {
+                delivery: kage_core::protocol::Delivery::Steer,
+                content: Some(vec![kage_core::Content::Text {
+                    text: "followup".into(),
+                }]),
+            }
+            .into(),
+        ],
+    );
+    assert!(app.pending.is_empty());
+    assert_eq!(app.input.text(), "followup");
+    app.handle_key(key('!'));
+    assert!(app.footer_hint().contains("ctrl+x steers now"));
+    app.handle_key(ctrl('x'));
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        RunRequest::SteerNow {
+            text: "followup!".into(),
+            images: Vec::new(),
+        }
+    );
+}

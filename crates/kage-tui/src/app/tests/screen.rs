@@ -748,3 +748,22 @@ fn ending_a_run_retires_provisional_ownership_without_removing_output() {
         );
     }
 }
+
+#[test]
+fn pending_prompts_keep_edit_and_force_steer_hints_visible() {
+    for modeless in [true, false] {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = app_with_defaults(shared_buffer(), tx);
+        app.set_editor_modeless(modeless);
+        let usage = crate::usage::shared_session_usage();
+        lock(&usage).working = true;
+        app.set_session_usage(usage);
+        app.handle_submit("pending followup".into(), false);
+        assert!(app.footer_hint().contains("up to edit pending"));
+        app.handle_key(key('x'));
+        let hint = app.footer_hint();
+        assert!(hint.contains("up to edit pending"), "{hint}");
+        assert!(hint.contains("ctrl+x steers now"), "{hint}");
+        assert!(hint.contains("enter queues"), "{hint}");
+    }
+}

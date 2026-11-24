@@ -163,6 +163,10 @@ an MCP prompt command (`/server:prompt`) still waits for the run to
 end, because kage expands those only when a run starts (see
 [mcp](/guide/mcp#resources-and-mentions)).
 
+To force a pending follow-up while the run is still active, recall it
+with `up`, edit it if needed, then press `ctrl+x` to stop the current
+run and send the edited prompt next.
+
 While kage works, the working row above the input shows what it is
 doing and for how long, such as
 `Running cargo test (14s, esc to interrupt)`. While agents run it

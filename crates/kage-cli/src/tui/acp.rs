@@ -1522,6 +1522,7 @@ struct Pump {
     /// start, where steering joins, or the prompt's answer. A
     /// withdrawn or failed one never shows.
     held: Vec<RequestId>,
+    recalls: HashMap<u64, RequestId>,
     /// Whether the main session was in a turn when last seen, so a turn
     /// start is noticed once.
     in_turn: bool,
@@ -2679,6 +2680,7 @@ impl Pump {
             Change::Dialog => self.dialogs_moved(),
             Change::Failed { request, error } => {
                 self.pending_media.remove(&request);
+                self.recalls.remove(&request);
                 self.notice(NoticeLevel::Error, format!("kage agent: {}", error.message));
             }
             Change::MediaRead {
@@ -2690,6 +2692,12 @@ impl Pump {
             } => {
                 self.media_read(request, &session, &mime, &data, &sha256);
             }
+            Change::PromptWithdrawn {
+                request,
+                session_id,
+                delivery,
+                content,
+            } => self.prompt_withdrawn(request, &session_id, delivery, &content),
             Change::Exported { markdown, .. } => self.export(markdown),
             Change::Models { providers } => self.models_changed(providers),
             change @ (Change::Undone { .. }
@@ -4132,41 +4140,63 @@ impl Pump {
         }
     }
 
+    fn prompt_withdrawn(
+        &mut self,
+        request: u64,
+        session: &str,
+        delivery: PromptDelivery,
+        blocks: &[ContentBlock],
+    ) {
+        let recalled = self.recalls.remove(&request);
+        if session != self.wire {
+            return;
+        }
+        let content = (!blocks.is_empty()).then(|| content_of(blocks));
+        if content.is_some()
+            && let Some(id) = recalled
+        {
+            self.held.retain(|held| held != &id);
+            self.prompts.remove(&id);
+        }
+        self.publish(HostEvent::PromptWithdrawn {
+            delivery: match delivery {
+                PromptDelivery::Steer => Delivery::Steer,
+                PromptDelivery::Queue => Delivery::Queue,
+                PromptDelivery::Interrupt => Delivery::Interrupt,
+            },
+            content,
+        });
+    }
+
     fn recall(&mut self, delivery: Delivery) {
-        match delivery {
-            // A stop-and-send runs at once; what is left to take back
-            // waits in the queue.
-            Delivery::Queue | Delivery::Interrupt => {
-                let held = self
-                    .store
-                    .state()
-                    .session(&self.wire)
-                    .and_then(|session| session.queue.last())
-                    .map(|queued| queued.prompt.clone());
-                if let Some(blocks) = &held {
-                    let index = self
-                        .store
-                        .state()
-                        .session(&self.wire)
-                        .map_or(0, |session| session.queue.len().saturating_sub(1));
-                    self.store.client().withdraw_queued(&self.wire, index);
-                    self.publish(HostEvent::PromptWithdrawn {
-                        delivery,
-                        content: Some(content_of(blocks)),
-                    });
-                } else {
-                    self.publish(HostEvent::PromptWithdrawn {
-                        delivery,
-                        content: None,
-                    });
-                }
+        if !self.recalls.is_empty() {
+            return;
+        }
+        let queued = self.store.state().session(&self.wire).and_then(|session| {
+            session
+                .queue
+                .last()
+                .map(|prompt| (session.queue.len() - 1, prompt.prompt.clone()))
+        });
+        if let Some((index, blocks)) = queued {
+            self.store.client().withdraw_queued(&self.wire, index);
+            self.publish(HostEvent::PromptWithdrawn {
+                delivery,
+                content: Some(content_of(&blocks)),
+            });
+        } else if delivery == Delivery::Steer && self.external().is_none() {
+            let request = self
+                .store
+                .client()
+                .withdraw_prompt(&self.wire, PromptDelivery::Steer);
+            if let Some(id) = self.held.last() {
+                self.recalls.insert(request, id.clone());
             }
-            // A steered prompt is already on the wire: there is
-            // nothing to take back.
-            Delivery::Steer => self.publish(HostEvent::PromptWithdrawn {
+        } else {
+            self.publish(HostEvent::PromptWithdrawn {
                 delivery,
                 content: None,
-            }),
+            });
         }
     }
 
@@ -5301,6 +5331,7 @@ pub(crate) fn run(
         prompts: HashMap::new(),
         answered: Vec::new(),
         held: Vec::new(),
+        recalls: HashMap::new(),
         in_turn: false,
         run_error: None,
         external: HashMap::new(),
@@ -5870,6 +5901,7 @@ mod tests {
             prompts: HashMap::new(),
             answered: Vec::new(),
             held: Vec::new(),
+            recalls: HashMap::new(),
             in_turn: false,
             run_error: None,
             yolo: false,
@@ -11113,6 +11145,121 @@ kage.on('resources_discover', function() return { skills = { '/fixture/skills' }
                 .filter(|(_, text)| text.contains("session is busy"))
                 .count(),
             3
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    #[test]
+    fn a_followup_waiting_on_the_host_can_be_recalled() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        advertise_steering(&mut pump);
+        pump.handle(RunRequest::Submit {
+            text: "work".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        pump.flush();
+        pump.absorb(turn_start());
+        let _ = user_bubbles(&app);
+        pump.handle(RunRequest::Submit {
+            text: "edit this followup".to_owned(),
+            images: Vec::new(),
+            queue: false,
+            session: None,
+        });
+        let sent = pump.store.take_outgoing();
+        let followup = request_id(&sent, "session/prompt");
+        for frame in &sent {
+            pump.observe_outgoing(frame);
+        }
+        pump.handle(RunRequest::RecallPrompt {
+            session: None,
+            delivery: Delivery::Steer,
+        });
+        let frames = pump.store.take_outgoing();
+        assert_eq!(
+            request_params(&frames, "_kage/prompt/withdraw"),
+            serde_json::json!({"sessionId": "s1", "delivery": "steer"})
+        );
+        pump.handle(RunRequest::RecallPrompt {
+            session: None,
+            delivery: Delivery::Steer,
+        });
+        assert!(pump.store.take_outgoing().is_empty());
+        pump.absorb(Frame::Success {
+            id: request_id(&frames, "_kage/prompt/withdraw"),
+            result: serde_json::json!({"delivery": "steer", "content": [{"type": "text", "text": "rewritten followup"}]}),
+        });
+        let withdrawn = host_events(&app).into_iter().find_map(|event| match event {
+            HostEvent::PromptWithdrawn { content, .. } => content,
+            _ => None,
+        });
+        assert_eq!(
+            withdrawn,
+            Some(vec![Content::Text {
+                text: "rewritten followup".to_owned()
+            }])
+        );
+        pump.absorb(Frame::Success {
+            id: followup,
+            result: serde_json::json!({"stopReason": "end_turn"}),
+        });
+        pump.absorb(turn_start());
+        assert!(user_bubbles(&app).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    #[test]
+    fn locally_queued_followups_can_be_recalled_without_a_host_request() {
+        for queue in [false, true] {
+            let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+            pump.handle(RunRequest::Submit {
+                text: "work".into(),
+                images: Vec::new(),
+                queue: false,
+                session: None,
+            });
+            pump.flush();
+            pump.absorb(turn_start());
+            let _ = host_events(&app);
+            pump.handle(RunRequest::Submit {
+                text: "edit locally queued".into(),
+                images: Vec::new(),
+                queue,
+                session: None,
+            });
+            assert!(pump.store.take_outgoing().is_empty());
+            let delivery = if queue {
+                Delivery::Queue
+            } else {
+                Delivery::Steer
+            };
+            pump.handle(RunRequest::RecallPrompt {
+                session: None,
+                delivery,
+            });
+            assert!(pump.store.take_outgoing().is_empty());
+            assert!(pump.store.state().session("s1").unwrap().queue.is_empty());
+            assert!(host_events(&app).iter().any(|event| matches!(event, HostEvent::PromptWithdrawn { content: Some(content), .. } if content == &[Content::Text { text: "edit locally queued".into() }])));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn an_actually_delivered_followup_is_not_returned_by_recall() {
+        let (mut pump, app, _dialogs, _feed, dir) = test_pump();
+        pump.handle(RunRequest::RecallPrompt {
+            session: None,
+            delivery: Delivery::Steer,
+        });
+        let frames = pump.store.take_outgoing();
+        pump.absorb(Frame::Success {
+            id: request_id(&frames, "_kage/prompt/withdraw"),
+            result: serde_json::json!({"delivery": "steer"}),
+        });
+        assert!(
+            host_events(&app)
+                .iter()
+                .any(|event| matches!(event, HostEvent::PromptWithdrawn { content: None, .. }))
         );
         let _ = std::fs::remove_dir_all(dir);
     }
